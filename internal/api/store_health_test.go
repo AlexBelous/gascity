@@ -417,7 +417,7 @@ func TestComputeStoreHealthEmptyCityPath(t *testing.T) {
 }
 
 func TestCountBeadStoreRowsReturnsUnavailableForNilStore(t *testing.T) {
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), nil)
+	got, err := countBeadStoreRows(context.Background(), nil)
 	if got != 0 {
 		t.Errorf("countBeadStoreRows(nil) = %d, want zero value when unavailable", got)
 	}
@@ -430,7 +430,7 @@ func TestCountBeadStoreRowsReturnsScanError(t *testing.T) {
 	wantErr := errors.New("store health row scan failed")
 	store := &storeHealthListErrorStore{Store: beads.NewMemStore(), err: wantErr}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), store)
 	if got != 0 {
 		t.Errorf("countBeadStoreRows rows = %d, want zero value when unavailable", got)
 	}
@@ -452,7 +452,7 @@ func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
 	if err := store.Close(closed.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), store)
 	if err != nil {
 		t.Fatalf("countBeadStoreRows: %v", err)
 	}

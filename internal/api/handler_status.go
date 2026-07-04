@@ -661,10 +661,7 @@ func statusStoreWorkCountsFor(
 	}
 	ready := &readyResult{}
 	if includeReady {
-		// ContextReadyReader and ScopedStoreLike both guarantee cleanup before
-		// returning after cancellation. Invoke this branch synchronously so the
-		// coordinator cannot return while scoped resolution is still cleaning up.
-		rows, err := statusReadyStoreWithTimeout(ctx, state, store)
+		rows, err := statusReadyStoreWithTimeout(ctx, store)
 		ready = &readyResult{rows: rows, err: err}
 	}
 
@@ -797,47 +794,39 @@ func statusListStoreWithTimeout(ctx context.Context, store beads.Store, query be
 }
 
 // statusReadyStoreWithTimeout reads the same live canonical Ready projection
-// as GET /beads/ready. Policy-aware stores retain their tier behavior through
-// ScopedStoreLike; the scoped clone binds bd subprocesses to reqCtx so timeout
-// cancellation cannot leak a child beyond the status request.
-func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
+// as GET /beads/ready. Stores implementing beads.ContextReadyReader get a
+// real ctx-bound cancellation. Stores without it fall back to the legacy
+// abandon-goroutine pattern (bounded return, but the goroutine keeps its
+// connection until the read returns) — unchanged behavior for backends that
+// haven't adopted the capability, matching statusListStoreWithTimeout.
+func statusReadyStoreWithTimeout(ctx context.Context, store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
-	if err := reqCtx.Err(); err != nil {
-		return nil, err
-	}
-	var capabilityErr error
 	if reader, ok := store.(beads.ContextReadyReader); ok {
 		rows, err := reader.ReadyContext(reqCtx)
 		if !errors.Is(err, beads.ErrReadyContextUnsupported) {
 			return rows, statusReadyError(err)
 		}
-		capabilityErr = err
 	}
 
-	// ScopedStoreLike is part of the context-aware read contract: resolution
-	// must finish its own cleanup before returning after reqCtx cancellation.
-	// Keep it synchronous so the status deadline cannot abandon a resolver
-	// goroutine after the response has returned.
-	scoped, err := state.ScopedStoreLike(reqCtx, store)
-	if err != nil {
-		return nil, statusReadyError(fmt.Errorf("resolving scoped store: %w", err))
+	type readyResult struct {
+		rows []beads.Bead
+		err  error
 	}
-	if scoped == nil {
-		if capabilityErr == nil {
-			capabilityErr = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
-		}
-		return nil, capabilityErr
+	done := make(chan readyResult, 1)
+	go func() {
+		rows, err := beads.HandlesFor(store).Live.Ready()
+		done <- readyResult{rows: rows, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.rows, statusReadyError(result.err)
+	case <-reqCtx.Done():
+		return nil, fmt.Errorf("ready timed out after %s", statusStoreReadTimeout)
 	}
-
-	// ScopedStoreLike guarantees the clone and its legacy Ready operation are
-	// bound to reqCtx, including child-process cleanup, so no outer goroutine is
-	// needed to enforce the deadline.
-	rows, err := beads.HandlesFor(scoped).Live.Ready()
-	return rows, statusReadyError(err)
 }
 
 func statusReadyError(err error) error {

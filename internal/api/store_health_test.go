@@ -482,7 +482,7 @@ func (s *storeHealthCounterStore) List(query beads.ListQuery) ([]beads.Bead, err
 func TestCountBeadStoreRowsPrefersCounterWithoutHydration(t *testing.T) {
 	store := &storeHealthCounterStore{Store: beads.NewMemStore(), count: 41252}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), store)
 	if err != nil {
 		t.Fatalf("countBeadStoreRows: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestCountBeadStoreRowsFallsBackWhenCountUnsupported(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), store)
 	if err != nil {
 		t.Fatalf("countBeadStoreRows: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestCountBeadStoreRowsReturnsCounterError(t *testing.T) {
 	wantErr := errors.New("store health count failed")
 	store := &storeHealthCounterStore{Store: beads.NewMemStore(), countErr: wantErr}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), store)
 	if got != 0 {
 		t.Errorf("countBeadStoreRows = %d, want zero value on Counter error", got)
 	}

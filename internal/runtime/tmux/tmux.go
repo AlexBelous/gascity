@@ -901,6 +901,14 @@ func buildKillTargetsFromSnapshot(root string, snap map[string]procIdentity) (de
 	return descendants, reparented, identity
 }
 
+// killIdentityMatches is the pure pre-kill identity decision: signal only when
+// the target was discovered with a known start time (want) AND still reports
+// exactly that start time now. Empty want (PID absent from the discovery
+// snapshot) and empty current (process already gone) both refuse.
+func killIdentityMatches(current, want string) bool {
+	return want != "" && current == want
+}
+
 // killVerified signals pid with sig ONLY if pid still reports the start time it
 // had when discovered (want). A PID that has exited or been recycled onto a
 // different process reports a different (or empty) start time and is skipped.
@@ -908,10 +916,7 @@ func buildKillTargetsFromSnapshot(root string, snap map[string]procIdentity) (de
 // owns a reused PID — the core of the session-massacre fix. An empty want (PID
 // absent from the snapshot) is never signaled.
 func killVerified(pid, sig, want string) {
-	if want == "" {
-		return
-	}
-	if processStartTime(pid) != want {
+	if !killIdentityMatches(processStartTime(pid), want) {
 		return
 	}
 	_ = exec.Command("kill", sig, pid).Run()

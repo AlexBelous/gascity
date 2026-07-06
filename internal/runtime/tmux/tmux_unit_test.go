@@ -162,6 +162,33 @@ func TestComputeExcludingKillSet_ExcludedPaneLeaderSurvives(t *testing.T) {
 	}
 }
 
+// TestKillIdentityMatches_PIDReuseSkipsKill pins the pre-kill identity
+// decision that stops the session-massacre TOCTOU: a recycled PID (different
+// start time), an already-gone process (empty current), and a target that was
+// never in the discovery snapshot (empty want) must all refuse the signal;
+// only an exact start-time match may kill.
+func TestKillIdentityMatches_PIDReuseSkipsKill(t *testing.T) {
+	cases := []struct {
+		name    string
+		current string
+		want    string
+		signal  bool
+	}{
+		{"exact match kills", "Mon Jul 6 08:00:00 2026", "Mon Jul 6 08:00:00 2026", true},
+		{"recycled PID (different start) skips", "Mon Jul 6 08:34:37 2026", "Mon Jul 6 08:00:00 2026", false},
+		{"process gone (empty current) skips", "", "Mon Jul 6 08:00:00 2026", false},
+		{"not in snapshot (empty want) skips", "Mon Jul 6 08:00:00 2026", "", false},
+		{"both empty skips", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := killIdentityMatches(tc.current, tc.want); got != tc.signal {
+				t.Errorf("killIdentityMatches(%q, %q) = %v, want %v", tc.current, tc.want, got, tc.signal)
+			}
+		})
+	}
+}
+
 func TestTerminateProcessSetReturnsWhenTerminatedProcessesExit(t *testing.T) {
 	alive := map[string]bool{"101": true, "102": true}
 	var signals []string

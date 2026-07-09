@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -101,6 +102,32 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 	_, storage := s.policyForCreate(b)
 	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
+}
+
+// Get resolves a bead by id across the work and routed graph stores, giving
+// read/write symmetry with the routing Create (createTarget): a graph-class bead
+// (gcg-) created through the chokepoint lands on the routed graph store, so Get
+// must read it back from there too. Without this override Get promoted from the
+// embedded work store, so graph beads were write-only through the policy wrapper —
+// anything resolving a graph-resident bead by id through the store handle alone
+// (e.g. a cross-store convoy's ref-by-id, sling's live-tracking-convoy lookup)
+// silently missed. Byte-identical default: when graph is not routed the set is
+// just Store.
+func (s *beadPolicyStore) Get(id string) (beads.Bead, error) {
+	return s.getForPolicy(id)
+}
+
+// getForPolicy resolves a bead by id across the work and routed graph stores so a
+// graph-resident bead (e.g. a synthetic input convoy, or a wisp root used to derive
+// a child's storage tier) is found through the policy wrapper. Byte-identical
+// default: when graph is not routed the set is just Store.
+func (s *beadPolicyStore) getForPolicy(id string) (beads.Bead, error) {
+	if s.cityPath != "" {
+		if store, routed, err := routedGraphStoreFor(s.cityPath, s.cfg); err == nil && routed && store != s.Store {
+			return storeref.Resolve(id, []beads.Store{s.Store, store})
+		}
+	}
+	return s.Store.Get(id)
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {

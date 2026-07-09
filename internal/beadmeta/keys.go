@@ -194,7 +194,11 @@ const (
 	// TopologySourceMetadataKey stamps a work bead copied by the unify/remote
 	// work-topology migrations with the originating city's identity — the
 	// remote collision protocol's resume-vs-foreign discriminator.
-	TopologySourceMetadataKey      = "gc.topology_source"
+	TopologySourceMetadataKey = "gc.topology_source"
+	// TrackingConvoyIDMetadataKey is stamped on a tracked ITEM (in its own store),
+	// pointing at the convoy that tracks it — the cross-store-safe ref-by-id
+	// replacement for a cross-store `tracks` dependency edge.
+	TrackingConvoyIDMetadataKey    = "gc.tracking_convoy_id"
 	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
@@ -433,6 +437,7 @@ var KnownMetadataKeys = []string{
 	TemplateMetadataKey,
 	TerminalMetadataKey,
 	TopologySourceMetadataKey,
+	TrackingConvoyIDMetadataKey,
 	TriggerBeadIDMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,

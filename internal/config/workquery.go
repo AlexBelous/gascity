@@ -138,10 +138,6 @@ func bdQueryEphemeralStatusShell(status string) string {
 	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
 }
 
-func bdQueryEphemeralStatusQuietShell(status string) string { //nolint:unparam // transient: only "in_progress" callers remain post-ga-ac6t6q; ga-ooka7o removes this function entirely
-	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
-}
-
 func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
 	filter := `[.[] | ` + selector +
 		` | select(((.issue_type // .type // "") != "epic"))` +
@@ -636,27 +632,49 @@ func buildOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 		route = a.PoolName
 	}
 	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
+	tsvFields := `[.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv`
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
 	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
 	// If routed metadata is missing entirely, backfill the canonical
 	// gc.run_target route so reopened direct-assigned work does not stay
 	// invisible.
-	return `{ ` +
-		`bd list --assignee=` + a.QualifiedName() +
-		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
-		ephemeralRead +
-		`} | ` +
+	//
+	// Every bd read/write below hard-fails on schema skew (ga-ooka7o): a
+	// schema-skew failure here doesn't just make an agent look idle
+	// (visible) -- it makes fleet self-healing silently no-op (a dead
+	// agent's claimed work never released). Reads are bd_or_fatal-guarded
+	// and captured via command substitution first (so the `bd_rc -eq 2`
+	// check runs in a bare, non-piped context and a real `exit` actually
+	// terminates the script). Writes capture stderr directly instead
+	// (`if ! err=$(... 2>&1 >/dev/null); then ...`, ga-7xzmtd) so an
+	// ordinary write failure still surfaces a RecoveryHookMarker
+	// diagnostic and lets the loop continue (exit 0); only a schema-skew
+	// match escalates to a hard, non-zero exit. The update loop relays
+	// that fatal exit out of the while-subshell by exiting with status 2
+	// and checking $? immediately after the pipeline, mirroring
+	// poolDemandFirstRowFunctionScript's nested-subshell relay.
+	return bdFatalGuardFunctionScript() +
+		`assigned_raw=$(` + bdOrFatalGuarded(`bd list --assignee=`+a.QualifiedName()+` --status=in_progress --json`) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`assigned_rows=$(printf '%s' "$assigned_raw" | jq -r '.[] | ` + tsvFields + `' 2>/dev/null); ` +
+		`ephemeral_raw=$(` + bdOrFatalGuarded(bdQueryEphemeralStatusShell("in_progress")) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`ephemeral_rows=$(printf '%s' "$ephemeral_raw" | jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | ` + tsvFields + `' 2>/dev/null); ` +
+		`{ printf '%s\n' "$assigned_rows"; printf '%s\n' "$ephemeral_rows"; } | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
-		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then ` +
+		`case "$err" in ` + bdFatalSkewCaseClauses() + `) printf '%s\n' "$err" >&2; exit 2 ;; esac; ` +
+		`printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; ` +
 		`fi; ` +
-		`done`
+		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then ` +
+		`case "$err" in ` + bdFatalSkewCaseClauses() + `) printf '%s\n' "$err" >&2; exit 2 ;; esac; ` +
+		`printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; ` +
+		`fi; ` +
+		`fi; ` +
+		`done; death_rc=$?; if [ $death_rc -eq 2 ]; then exit 1; fi`
 }
 
 // EffectiveOnBoot returns the on_boot command for this agent.
@@ -678,15 +696,36 @@ func buildOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 		template = a.PoolName
 	}
 	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
+	// Every bd read below is bd_or_fatal-guarded (ga-ooka7o), mirroring
+	// buildOnDeath: reads are captured via command substitution first so
+	// the `bd_rc -eq 2` check runs in a bare context where a real `exit`
+	// terminates the script. The final update loop captures stderr
+	// directly instead (`if ! err=$(... 2>&1 >/dev/null); then ...`,
+	// ga-7xzmtd) so an ordinary write failure still surfaces a
+	// RecoveryHookMarker diagnostic and lets the loop continue (exit 0);
+	// only a schema-skew match escalates to a hard, non-zero exit, relayed
+	// out of the while-subshell the same way buildOnDeath's does. That
+	// loop is a `while read`, not xargs, because xargs execs a real binary
+	// per item and can't invoke the bd_or_fatal shell function the reads
+	// above depend on.
 	return `template=` + shellquote.Quote(template) + `; ` +
-		`{ ` +
-		`bd list --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$template" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
-		ephemeralRead +
-		`} | awk 'NF && !seen[$0]++' | ` +
-		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`
+		bdFatalGuardFunctionScript() +
+		`routed_raw=$(` + bdOrFatalGuarded(`bd list --metadata-field "`+beadmeta.RoutedToMetadataKey+`=$template" --status=in_progress --no-assignee --json`) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`routed_ids=$(printf '%s' "$routed_raw" | jq -r '.[].id' 2>/dev/null); ` +
+		`run_target_raw=$(` + bdOrFatalGuarded(`bd list --metadata-field "`+beadmeta.RunTargetMetadataKey+`=$template" --metadata-field "`+beadmeta.KindMetadataKey+`=`+beadmeta.KindWorkflow+`" --status=in_progress --no-assignee --json`) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`run_target_ids=$(printf '%s' "$run_target_raw" | jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null); ` +
+		`ephemeral_raw=$(` + bdOrFatalGuarded(bdQueryEphemeralStatusShell("in_progress")) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`ephemeral_ids=$(printf '%s' "$ephemeral_raw" | jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null); ` +
+		`{ printf '%s\n' "$routed_ids"; printf '%s\n' "$run_target_ids"; printf '%s\n' "$ephemeral_ids"; } | ` +
+		`awk 'NF && !seen[$0]++' | ` +
+		`while IFS= read -r id; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`if ! err=$(bd update "$id" --status open 2>&1 >/dev/null); then ` +
+		`case "$err" in ` + bdFatalSkewCaseClauses() + `) printf '%s\n' "$err" >&2; exit 2 ;; esac; ` +
+		`printf 'gc-recovery: on_boot reopen failed for %s: %s\n' "$id" "$err"; ` +
+		`fi; ` +
+		`done; boot_rc=$?; if [ $boot_rc -eq 2 ]; then exit 1; fi`
 }

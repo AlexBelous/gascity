@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -260,6 +261,245 @@ func TestLocalNudgeAuthorityRetryAuditCursorResumesReceiptPageAfterRestart(t *te
 	if token.receipts != localAuthorityRecoveryPageSize+1 || token.preparations != 0 {
 		t.Fatalf("completed retry audit token = %#v", token)
 	}
+	if token.receiptRevisionHighWater != state.Revision {
+		t.Fatalf("completed retry audit revision high-water = %d, want %d", token.receiptRevisionHighWater, state.Revision)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("Close after completed retry audit: %v", err)
+	}
+	reopened, err = OpenLocalNudgeAuthority(t.Context(), fixture.cityPath, state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority after completed retry audit: %v", err)
+	}
+	exhaustedCtx, exhaustedBudget := withCommandAuthorityRecoveryBudget(t.Context())
+	exhaustedBudget.work = commandAuthorityRecoveryMaxWork
+	reopenedToken, stable, err := reopened.repairCommandRetryTransitions(exhaustedCtx, fixture.repository, state)
+	if err != nil || !stable || reopenedToken != token {
+		t.Fatalf("completed retry audit reopen = token:%#v stable:%t err:%v, want unchanged token without historical work", reopenedToken, stable, err)
+	}
+
+	advancedState, advancedRepository := appendIncrementalRetryReceiptForTest(t, fixture, reopened, baseIntent, state)
+	deltaCtx, deltaBudget := withCommandAuthorityRecoveryBudget(t.Context())
+	deltaBudget.work = commandAuthorityRecoveryMaxWork - 1
+	deltaToken, stable, err := reopened.repairCommandRetryTransitions(deltaCtx, advancedRepository, advancedState)
+	if err != nil || !stable {
+		t.Fatalf("incremental retry receipt audit = stable:%t err:%v, want one-unit suffix audit", stable, err)
+	}
+	if deltaToken.receipts != token.receipts+1 || deltaToken.receiptRevisionHighWater != advancedState.Revision {
+		t.Fatalf("incremental retry audit token = %#v, want receipts=%d revision=%d", deltaToken, token.receipts+1, advancedState.Revision)
+	}
+}
+
+func TestLocalNudgeAuthorityRetryAuditAdvancesCompletedPrefixWithoutHistoricalWork(t *testing.T) {
+	fixture := newLocalAuthorityProviderAttemptFixture(t)
+	request := localAuthorityRetryRequest(fixture.command)
+	if _, err := fixture.repository.RetryProviderAttempt(t.Context(), request, fixture.partition, fixture.authority); err != nil {
+		t.Fatalf("RetryProviderAttempt: %v", err)
+	}
+	state, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State after retry: %v", err)
+	}
+	before, stable, err := fixture.authority.repairCommandRetryTransitions(t.Context(), fixture.repository, state)
+	if err != nil || !stable || before.receipts != 1 || before.receiptRevisionHighWater != state.Revision {
+		t.Fatalf("initial retry audit = token:%#v stable:%t err:%v", before, stable, err)
+	}
+
+	const requestID = "retry-audit-unrelated-repository-advance"
+	unrelated := repositoryCommandForRequest(t, state.Store, requestID, requestID)
+	if entry, created, err := fixture.repository.createForTest(t.Context(), requestID, unrelated); err != nil || !created || entry.Command == nil {
+		t.Fatalf("advance repository with unrelated command = %#v, created=%t err=%v", entry, created, err)
+	}
+	advanced, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State after unrelated repository advance: %v", err)
+	}
+	if advanced.Revision <= state.Revision {
+		t.Fatalf("advanced repository revision = %d, want above %d", advanced.Revision, state.Revision)
+	}
+
+	boundedCtx, budget := withCommandAuthorityRecoveryBudget(t.Context())
+	budget.work = commandAuthorityRecoveryMaxWork - 1
+	after, stable, err := fixture.authority.repairCommandRetryTransitions(boundedCtx, fixture.repository, advanced)
+	if err != nil || !stable {
+		t.Fatalf("retry audit after unrelated repository advance = token:%#v stable:%t err:%v", after, stable, err)
+	}
+	if budget.work != commandAuthorityRecoveryMaxWork-1 {
+		t.Fatalf("unrelated repository advance consumed %d historical work units, want zero", budget.work-(commandAuthorityRecoveryMaxWork-1))
+	}
+	if after.generation != before.generation || after.receipts != before.receipts || after.identity != before.identity ||
+		after.receiptRevisionHighWater != advanced.Revision {
+		t.Fatalf("advanced retry audit token = %#v, want immutable prefix %#v at revision %d", after, before, advanced.Revision)
+	}
+	cursor, err := fixture.authority.readLocalAuthorityRetryAuditCursor(t.Context(), fixture.authority.db)
+	if err != nil {
+		t.Fatalf("read retry audit cursor after unrelated repository advance: %v", err)
+	}
+	if cursor.phase != localAuthorityRetryAuditDone || cursor.afterRevision != advanced.Revision || cursor.repositoryRevision != advanced.Revision {
+		t.Fatalf("retry audit cursor after unrelated repository advance = %#v", cursor)
+	}
+}
+
+func TestLocalNudgeAuthorityRetryAuditRejectsPagePublicationAfterPreparationFinalizes(t *testing.T) {
+	fixture := interruptedLocalRetryAfterStoreCommit(t)
+	state, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State after interrupted retry: %v", err)
+	}
+	expected, err := fixture.authority.ensureRetryAuditCursor(t.Context(), state)
+	if err != nil {
+		t.Fatalf("ensureRetryAuditCursor with preparation: %v", err)
+	}
+	if expected.phase != localAuthorityRetryAuditPreparations {
+		t.Fatalf("retry audit cursor with preparation = %#v", expected)
+	}
+	intent, found, err := localAuthorityRetryPreparationByCommand(t.Context(), fixture.authority.db, fixture.authority.store, fixture.command.ID)
+	if err != nil || !found {
+		t.Fatalf("read prepared retry = %#v, found=%t err=%v", intent, found, err)
+	}
+	commit := CommandRetryTransitionCommit{
+		Store: intent.Store, RepositoryRevision: intent.RepositoryRevision, CommandID: intent.CommandID,
+		Sequence: intent.Sequence, Partition: intent.Partition, AfterCommandDigest: intent.AfterCommandDigest,
+		AttemptID: intent.Claim.AttemptID, ObservedAt: intent.ObservedAt,
+		ProviderStage: intent.ProviderStage, Completion: intent.Completion,
+		EffectRepositoryRevision: state.Revision, EffectSequenceHighWater: state.SequenceHighWater,
+	}
+	if disposition, err := fixture.authority.FinalizeCommandRetryTransition(t.Context(), commit); err != nil || disposition != CommandRetryReceiptFinalized {
+		t.Fatalf("FinalizeCommandRetryTransition between audit pages = %q, err=%v", disposition, err)
+	}
+
+	next, work, changed, deferred, err := fixture.authority.auditRetryPreparationPage(
+		t.Context(), fixture.repository, state, expected, localAuthorityRecoveryPageSize,
+	)
+	if err != nil || work != 0 || changed || deferred || next.phase != localAuthorityRetryAuditReceipts {
+		t.Fatalf("stale preparation page = next:%#v work:%d changed:%t deferred:%t err:%v", next, work, changed, deferred, err)
+	}
+	if err := fixture.authority.persistRetryAuditCursor(t.Context(), expected, next); !errors.Is(err, errLocalAuthorityRetryAuditMoved) {
+		t.Fatalf("persistRetryAuditCursor across retry finalization error = %v, want binding moved", err)
+	}
+	unchanged, err := fixture.authority.readLocalAuthorityRetryAuditCursor(t.Context(), fixture.authority.db)
+	if err != nil {
+		t.Fatalf("read retry audit cursor after rejected stale publication: %v", err)
+	}
+	if unchanged != expected {
+		t.Fatalf("retry audit cursor moved across rejected stale publication: before=%#v after=%#v", expected, unchanged)
+	}
+
+	token, stable, err := fixture.authority.repairCommandRetryTransitions(t.Context(), fixture.repository, state)
+	if err != nil || !stable || token.receipts != 1 || token.generation != expected.generation+1 {
+		t.Fatalf("retry audit after concurrent finalization = token:%#v stable:%t err:%v", token, stable, err)
+	}
+	exhaustedCtx, exhaustedBudget := withCommandAuthorityRecoveryBudget(t.Context())
+	exhaustedBudget.work = commandAuthorityRecoveryMaxWork
+	repeated, stable, err := fixture.authority.repairCommandRetryTransitions(exhaustedCtx, fixture.repository, state)
+	if err != nil || !stable || repeated != token {
+		t.Fatalf("completed retry audit after concurrent finalization = token:%#v stable:%t err:%v, want %#v", repeated, stable, err, token)
+	}
+}
+
+func TestLocalNudgeAuthorityRetryAuditRejectsRepositoryRewindBelowCertifiedRevision(t *testing.T) {
+	fixture := newLocalAuthorityProviderAttemptFixture(t)
+	request := localAuthorityRetryRequest(fixture.command)
+	if _, err := fixture.repository.RetryProviderAttempt(t.Context(), request, fixture.partition, fixture.authority); err != nil {
+		t.Fatalf("RetryProviderAttempt: %v", err)
+	}
+	state, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State after retry: %v", err)
+	}
+	token, stable, err := fixture.authority.repairCommandRetryTransitions(t.Context(), fixture.repository, state)
+	if err != nil || !stable || token.receiptRevisionHighWater == 0 {
+		t.Fatalf("completed retry audit = token:%#v stable:%t err:%v", token, stable, err)
+	}
+	before, err := fixture.authority.readLocalAuthorityRetryAuditCursor(t.Context(), fixture.authority.db)
+	if err != nil {
+		t.Fatalf("read completed retry audit cursor: %v", err)
+	}
+	rewound := state
+	rewound.Revision = token.receiptRevisionHighWater - 1
+	if _, stable, err := fixture.authority.repairCommandRetryTransitions(t.Context(), fixture.repository, rewound); !errors.Is(err, ErrLocalNudgeAuthorityConflict) || stable {
+		t.Fatalf("retry audit below certified revision = stable:%t err:%v, want fail-closed conflict", stable, err)
+	}
+	after, err := fixture.authority.readLocalAuthorityRetryAuditCursor(t.Context(), fixture.authority.db)
+	if err != nil {
+		t.Fatalf("read retry audit cursor after rejected rewind: %v", err)
+	}
+	if after != before {
+		t.Fatalf("retry audit cursor moved across rejected rewind: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestLocalNudgeAuthorityRetryReceiptAuditQueriesUseCoveringIndexWithoutScanOrTempSort(t *testing.T) {
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), localAuthorityRepositoryState(), localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	lower := encodeLocalAuthorityUint64(10)
+	upper := encodeLocalAuthorityUint64(20)
+	for _, test := range []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			name:  "revision suffix",
+			query: localAuthorityRetryReceiptAuditSuffixQuery,
+			args:  []any{lower, upper, localAuthorityRecoveryPageSize + 1},
+		},
+		{
+			name:  "within revision continuation",
+			query: localAuthorityRetryReceiptAuditContinuationQuery,
+			args:  []any{lower, "command-plan", "attempt-plan", upper, localAuthorityRecoveryPageSize + 1},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows, err := authority.db.QueryContext(t.Context(), `EXPLAIN QUERY PLAN `+test.query, test.args...)
+			if err != nil {
+				t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+			}
+			var details []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					_ = rows.Close()
+					t.Fatalf("scan query plan: %v", err)
+				}
+				details = append(details, detail)
+			}
+			rowsErr := rows.Err()
+			closeErr := rows.Close()
+			if rowsErr != nil || closeErr != nil {
+				t.Fatalf("read query plan: %v", errors.Join(rowsErr, closeErr))
+			}
+			plan := strings.Join(details, "\n")
+			if !strings.Contains(plan, "COVERING INDEX retry_receipts_audit") || strings.Contains(plan, "SCAN retry_receipts") || strings.Contains(plan, "TEMP B-TREE") {
+				t.Fatalf("query plan = %q, want covering retry_receipts_audit search without full scan or temp sort", plan)
+			}
+		})
+	}
+}
+
+func TestLocalNudgeAuthorityRetryAuditPositionIsCanonical(t *testing.T) {
+	cursor := localAuthorityRetryAuditCursor{
+		phase: localAuthorityRetryAuditReceipts, afterRevision: 0xabcdef,
+		afterCommandID: "command-canonical", afterAttemptID: "attempt-canonical",
+	}
+	revisionAndCommand, attemptID := encodeLocalAuthorityRetryAuditPosition(cursor)
+	revision, commandID, decodedAttemptID, err := decodeLocalAuthorityRetryAuditPosition(revisionAndCommand, attemptID)
+	if err != nil || revision != cursor.afterRevision || commandID != cursor.afterCommandID || decodedAttemptID != cursor.afterAttemptID {
+		t.Fatalf("retry audit position round trip = %d/%q/%q, err=%v", revision, commandID, decodedAttemptID, err)
+	}
+	for _, malformed := range []string{
+		"abcdef:command-canonical",
+		"0000000000ABCDEF:command-canonical",
+		"0000000000abcdeg:command-canonical",
+	} {
+		if _, _, _, err := decodeLocalAuthorityRetryAuditPosition(malformed, attemptID); !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
+			t.Fatalf("decodeLocalAuthorityRetryAuditPosition(%q) error = %v, want authority conflict", malformed, err)
+		}
+	}
 }
 
 func interruptedLocalRetryAfterStoreCommit(t *testing.T) *localAuthorityProviderAttemptFixture {
@@ -361,6 +601,64 @@ func insertLocalRetryReceiptPageForTest(t *testing.T, authority *LocalNudgeAutho
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit retry receipt page fixture: %v", err)
 	}
+}
+
+func appendIncrementalRetryReceiptForTest(
+	t *testing.T,
+	fixture *localAuthorityProviderAttemptFixture,
+	authority *LocalNudgeAuthority,
+	base CommandRetryTransitionIntent,
+	state CommandRepositoryState,
+) (CommandRepositoryState, *CommandRepository) {
+	t.Helper()
+	advanced := state
+	advanced.Revision++
+	intent := base
+	intent.RepositoryBeforeRevision = state.Revision
+	intent.RepositoryRevision = advanced.Revision
+	intent.RepositorySequenceHighWater = advanced.SequenceHighWater
+	intent.Claim.ID = "claim-incremental-receipt"
+	intent.Claim.AttemptID = "attempt-incremental-receipt"
+	intent.Retry.ClaimID = intent.Claim.ID
+	intent.Retry.AttemptID = intent.Claim.AttemptID
+	intent.Retry.AttemptCount = localAuthorityRecoveryPageSize + 2
+	commit := CommandRetryTransitionCommit{
+		Store: intent.Store, RepositoryRevision: intent.RepositoryRevision, CommandID: intent.CommandID,
+		Sequence: intent.Sequence, Partition: intent.Partition, AfterCommandDigest: intent.AfterCommandDigest,
+		AttemptID: intent.Claim.AttemptID, ObservedAt: intent.ObservedAt,
+		ProviderStage: intent.ProviderStage, Completion: intent.Completion,
+		EffectRepositoryRevision: advanced.Revision, EffectSequenceHighWater: advanced.SequenceHighWater,
+	}
+	receipt, err := commandRetryTransitionReceiptFor(intent, commit)
+	if err != nil {
+		t.Fatalf("commandRetryTransitionReceiptFor incremental row: %v", err)
+	}
+	tx, err := authority.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin incremental retry receipt fixture: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := insertLocalAuthorityRetryReceipt(t.Context(), tx, intent, receipt); err != nil {
+		t.Fatalf("insert incremental retry receipt: %v", err)
+	}
+	if err := advanceLocalAuthorityRetryTransitionGeneration(t.Context(), tx, 0, 1); err != nil {
+		t.Fatalf("advance incremental retry receipt generation: %v", err)
+	}
+	if err := advanceLocalAuthorityObservedRepositoryState(t.Context(), tx, advanced.SequenceHighWater, advanced.Revision); err != nil {
+		t.Fatalf("advance incremental retry receipt effect fence: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit incremental retry receipt fixture: %v", err)
+	}
+
+	fixture.store.mu.Lock()
+	fixture.store.metadata[commandRepositoryRevisionMetadataKey] = fmt.Sprint(advanced.Revision)
+	fixture.store.mu.Unlock()
+	repository, err := NewCommandRepository(fixture.store, &repositoryLineageTestVerifier{anchor: &advanced})
+	if err != nil {
+		t.Fatalf("NewCommandRepository for incremental retry receipt: %v", err)
+	}
+	return advanced, repository
 }
 
 type retryAuditReadHookStore struct {

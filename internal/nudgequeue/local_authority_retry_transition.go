@@ -41,20 +41,17 @@ func (a *LocalNudgeAuthority) validateRetryMetadata(ctx context.Context, state C
 	if cursor.generation > generation || cursor.repositoryRevision > state.Revision || cursor.sequenceHighWater > state.SequenceHighWater {
 		return fmt.Errorf("%w: local retry audit checkpoint exceeds current authority lineage", ErrLocalNudgeAuthorityConflict)
 	}
-	if cursor.phase == localAuthorityRetryAuditIdle || cursor.generation != generation {
-		return nil
-	}
 	if cursor.preparationCount > preparationCount || cursor.receiptCount > receiptCount {
 		return fmt.Errorf("%w: local retry audit checkpoint counts exceed authority metadata", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.phase == localAuthorityRetryAuditIdle || cursor.generation != generation {
+		return nil
 	}
 	if cursor.phase != localAuthorityRetryAuditPreparations && cursor.preparationCount != preparationCount {
 		return fmt.Errorf("%w: local retry audit checkpoint skipped preparation evidence", ErrLocalNudgeAuthorityConflict)
 	}
 	if cursor.phase == localAuthorityRetryAuditDone && cursor.receiptCount != receiptCount {
 		return fmt.Errorf("%w: local retry audit checkpoint skipped receipt evidence", ErrLocalNudgeAuthorityConflict)
-	}
-	if cursor.phase == localAuthorityRetryAuditDone && allowReset {
-		return a.resetRetryAuditCursor(ctx, state)
 	}
 	return nil
 }

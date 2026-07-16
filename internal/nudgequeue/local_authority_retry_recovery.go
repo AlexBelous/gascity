@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -25,10 +26,11 @@ var (
 )
 
 type localAuthorityRetryRecoveryToken struct {
-	generation   uint64
-	identity     [sha256.Size]byte
-	preparations uint64
-	receipts     uint64
+	generation               uint64
+	receiptRevisionHighWater uint64
+	identity                 [sha256.Size]byte
+	preparations             uint64
+	receipts                 uint64
 }
 
 type localAuthorityRetryAuditCursor struct {
@@ -36,6 +38,7 @@ type localAuthorityRetryAuditCursor struct {
 	repositoryRevision uint64
 	sequenceHighWater  uint64
 	phase              localAuthorityRetryAuditPhase
+	afterRevision      uint64
 	afterCommandID     string
 	afterAttemptID     string
 	identity           [sha256.Size]byte
@@ -45,7 +48,7 @@ type localAuthorityRetryAuditCursor struct {
 
 func (c localAuthorityRetryAuditCursor) token() localAuthorityRetryRecoveryToken {
 	return localAuthorityRetryRecoveryToken{
-		generation: c.generation, identity: c.identity,
+		generation: c.generation, receiptRevisionHighWater: c.afterRevision, identity: c.identity,
 		preparations: c.preparationCount, receipts: c.receiptCount,
 	}
 }
@@ -140,8 +143,6 @@ func (a *LocalNudgeAuthority) auditRetryPreparationPage(
 	}
 	if len(keys) == 0 {
 		next.phase = localAuthorityRetryAuditReceipts
-		next.afterCommandID = ""
-		next.afterAttemptID = ""
 		return next, 0, false, false, nil
 	}
 	key := keys[0]
@@ -188,12 +189,20 @@ func (a *LocalNudgeAuthority) auditRetryPreparationPage(
 
 func (a *LocalNudgeAuthority) auditRetryReceiptPage(ctx context.Context, cursor localAuthorityRetryAuditCursor, limit int) (localAuthorityRetryAuditCursor, int, error) {
 	next := cursor
-	keys, more, err := a.localAuthorityRetryReceiptPage(ctx, cursor.afterCommandID, cursor.afterAttemptID, limit)
+	keys, more, err := a.localAuthorityRetryReceiptPage(
+		ctx,
+		cursor.afterRevision,
+		cursor.afterCommandID,
+		cursor.afterAttemptID,
+		cursor.repositoryRevision,
+		limit,
+	)
 	if err != nil {
 		return cursor, 0, err
 	}
 	if len(keys) == 0 {
 		next.phase = localAuthorityRetryAuditDone
+		next.afterRevision = cursor.repositoryRevision
 		next.afterCommandID = ""
 		next.afterAttemptID = ""
 		return next, 0, nil
@@ -206,17 +215,22 @@ func (a *LocalNudgeAuthority) auditRetryReceiptPage(ctx context.Context, cursor 
 		if generation != cursor.generation {
 			return cursor, index, errLocalAuthorityRetryAuditMoved
 		}
+		if receipt.RepositoryRevision != key.revision {
+			return cursor, index + 1, fmt.Errorf("%w: retry receipt %q/%q moved across its audit page", ErrLocalNudgeAuthorityConflict, key.commandID, key.attemptID)
+		}
 		if receipt.RepositoryRevision > cursor.repositoryRevision || receipt.EffectRepositoryRevision > cursor.repositoryRevision ||
 			receipt.Sequence > cursor.sequenceHighWater || receipt.EffectSequenceHighWater > cursor.sequenceHighWater {
 			return cursor, index + 1, fmt.Errorf("%w: retry receipt %q/%q exceeds audited repository authority", ErrLocalNudgeAuthorityConflict, key.commandID, key.attemptID)
 		}
 		next.identity = advanceLocalAuthorityRetryAuditIdentity(next.identity, "receipt", localAuthorityRetryRecordIdentity(receipt))
 		next.receiptCount++
+		next.afterRevision = key.revision
 		next.afterCommandID = key.commandID
 		next.afterAttemptID = key.attemptID
 	}
 	if !more {
 		next.phase = localAuthorityRetryAuditDone
+		next.afterRevision = cursor.repositoryRevision
 		next.afterCommandID = ""
 		next.afterAttemptID = ""
 	}
@@ -227,6 +241,21 @@ type localAuthorityRetryPreparationKey struct {
 	commandID string
 	attemptID string
 }
+
+type localAuthorityRetryReceiptKey struct {
+	revision  uint64
+	commandID string
+	attemptID string
+}
+
+const (
+	localAuthorityRetryReceiptAuditSuffixQuery = `SELECT retry_revision, command_id, attempt_id FROM retry_receipts
+		WHERE retry_revision > ? AND retry_revision <= ?
+		ORDER BY retry_revision, command_id, attempt_id LIMIT ?`
+	localAuthorityRetryReceiptAuditContinuationQuery = `SELECT retry_revision, command_id, attempt_id FROM retry_receipts
+		WHERE (retry_revision, command_id, attempt_id) > (?, ?, ?) AND retry_revision <= ?
+		ORDER BY retry_revision, command_id, attempt_id LIMIT ?`
+)
 
 func (a *LocalNudgeAuthority) localAuthorityRetryPreparationPage(ctx context.Context, afterCommandID, afterAttemptID string, limit int) ([]localAuthorityRetryPreparationKey, bool, error) {
 	if limit <= 0 || limit > localAuthorityRecoveryPageSize {
@@ -262,26 +291,50 @@ func (a *LocalNudgeAuthority) localAuthorityRetryPreparationPage(ctx context.Con
 	return keys, more, nil
 }
 
-func (a *LocalNudgeAuthority) localAuthorityRetryReceiptPage(ctx context.Context, afterCommandID, afterAttemptID string, limit int) ([]localAuthorityRetryPreparationKey, bool, error) {
+func (a *LocalNudgeAuthority) localAuthorityRetryReceiptPage(
+	ctx context.Context,
+	afterRevision uint64,
+	afterCommandID string,
+	afterAttemptID string,
+	throughRevision uint64,
+	limit int,
+) ([]localAuthorityRetryReceiptKey, bool, error) {
 	if limit <= 0 || limit > localAuthorityRecoveryPageSize {
 		return nil, false, fmt.Errorf("%w: retry receipt page limit %d is outside 1..%d", ErrLocalNudgeAuthorityConflict, limit, localAuthorityRecoveryPageSize)
+	}
+	if afterRevision > throughRevision {
+		return nil, false, fmt.Errorf("%w: retry receipt cursor revision %d exceeds audit revision %d", ErrLocalNudgeAuthorityConflict, afterRevision, throughRevision)
+	}
+	if (afterCommandID == "") != (afterAttemptID == "") {
+		return nil, false, fmt.Errorf("%w: partial retry receipt audit cursor", ErrLocalNudgeAuthorityConflict)
 	}
 	release, err := a.begin(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 	defer release()
-	rows, err := a.db.QueryContext(ctx, `SELECT command_id, attempt_id FROM retry_receipts
-		WHERE command_id > ? OR (command_id = ? AND attempt_id > ?)
-		ORDER BY command_id, attempt_id LIMIT ?`, afterCommandID, afterCommandID, afterAttemptID, limit+1)
+	var rows *sql.Rows
+	if afterCommandID == "" {
+		rows, err = a.db.QueryContext(ctx, localAuthorityRetryReceiptAuditSuffixQuery,
+			encodeLocalAuthorityUint64(afterRevision), encodeLocalAuthorityUint64(throughRevision), limit+1)
+	} else {
+		rows, err = a.db.QueryContext(ctx, localAuthorityRetryReceiptAuditContinuationQuery,
+			encodeLocalAuthorityUint64(afterRevision), afterCommandID, afterAttemptID,
+			encodeLocalAuthorityUint64(throughRevision), limit+1)
+	}
 	if err != nil {
 		return nil, false, fmt.Errorf("reading retry receipt page: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	keys := make([]localAuthorityRetryPreparationKey, 0, limit+1)
+	keys := make([]localAuthorityRetryReceiptKey, 0, limit+1)
 	for rows.Next() {
-		var key localAuthorityRetryPreparationKey
-		if err := rows.Scan(&key.commandID, &key.attemptID); err != nil {
+		var key localAuthorityRetryReceiptKey
+		var revisionWire []byte
+		if err := rows.Scan(&revisionWire, &key.commandID, &key.attemptID); err != nil {
+			return nil, false, err
+		}
+		key.revision, err = decodeLocalAuthorityUint64(revisionWire)
+		if err != nil {
 			return nil, false, err
 		}
 		keys = append(keys, key)
@@ -569,16 +622,42 @@ func (a *LocalNudgeAuthority) ensureRetryAuditCursor(ctx context.Context, state 
 	if err != nil {
 		return localAuthorityRetryAuditCursor{}, err
 	}
-	if !checkpointInvalid && cursor.generation > generation {
-		return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: retry audit generation %d exceeds mutation generation %d", ErrLocalNudgeAuthorityConflict, cursor.generation, generation)
-	}
-	if checkpointInvalid || cursor.phase == localAuthorityRetryAuditIdle || cursor.generation != generation ||
-		cursor.repositoryRevision != state.Revision || cursor.sequenceHighWater != state.SequenceHighWater ||
-		(cursor.phase == localAuthorityRetryAuditDone && (cursor.preparationCount != preparations || cursor.receiptCount != receipts)) {
-		cursor = localAuthorityRetryAuditCursor{
-			generation: generation, repositoryRevision: state.Revision, sequenceHighWater: state.SequenceHighWater,
-			phase: localAuthorityRetryAuditPreparations, identity: initialLocalAuthorityRetryAuditIdentity(),
+	if !checkpointInvalid {
+		if cursor.generation > generation {
+			return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: retry audit generation %d exceeds mutation generation %d", ErrLocalNudgeAuthorityConflict, cursor.generation, generation)
 		}
+		if cursor.repositoryRevision > state.Revision || cursor.sequenceHighWater > state.SequenceHighWater {
+			return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: retry audit repository binding rewound", ErrLocalNudgeAuthorityConflict)
+		}
+		if cursor.preparationCount > preparations || cursor.receiptCount > receipts {
+			return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: retry audit counts exceed retained authority evidence", ErrLocalNudgeAuthorityConflict)
+		}
+		if cursor.generation == generation && cursor.phase != localAuthorityRetryAuditPreparations && cursor.preparationCount != preparations {
+			return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: retry audit skipped preparation evidence without generation movement", ErrLocalNudgeAuthorityConflict)
+		}
+		if cursor.generation == generation && cursor.phase == localAuthorityRetryAuditDone && cursor.receiptCount != receipts {
+			return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: completed retry audit differs from retained receipts without generation movement", ErrLocalNudgeAuthorityConflict)
+		}
+	}
+	sameBinding := !checkpointInvalid && cursor.phase != localAuthorityRetryAuditIdle &&
+		cursor.generation == generation && cursor.repositoryRevision == state.Revision &&
+		cursor.sequenceHighWater == state.SequenceHighWater
+	if !sameBinding {
+		if checkpointInvalid || cursor.phase == localAuthorityRetryAuditIdle {
+			cursor = localAuthorityRetryAuditCursor{identity: initialLocalAuthorityRetryAuditIdentity()}
+		}
+		// Retry receipts are immutable and every genuine new receipt owns a
+		// repository revision strictly above the prior audited repository
+		// high-water. Preserve that certified prefix across generation changes,
+		// repository advances, and process restarts; only preparations and the
+		// receipt suffix can require new work. Historical receipts cannot grant
+		// another effect: claim recovery and VerifyCommandRetryClaim separately
+		// re-read the latest receipt for every actionable pending retry.
+		cursor.generation = generation
+		cursor.repositoryRevision = state.Revision
+		cursor.sequenceHighWater = state.SequenceHighWater
+		cursor.phase = localAuthorityRetryAuditPreparations
+		cursor.preparationCount = 0
 		if err := a.updateLocalAuthorityRetryAuditCursor(ctx, tx, cursor); err != nil {
 			return localAuthorityRetryAuditCursor{}, err
 		}
@@ -627,6 +706,9 @@ func (a *LocalNudgeAuthority) persistRetryAuditCursor(ctx context.Context, expec
 	}
 	if current != expected || generation != expected.generation {
 		return errLocalAuthorityRetryAuditMoved
+	}
+	if next.preparationCount > preparations || next.receiptCount > receipts {
+		return fmt.Errorf("%w: retry audit progress exceeds retained authority evidence", ErrLocalNudgeAuthorityConflict)
 	}
 	if next.phase == localAuthorityRetryAuditDone && (next.preparationCount != preparations || next.receiptCount != receipts) {
 		return fmt.Errorf("%w: audited retry evidence counts %d/%d differ from authority metadata %d/%d",
@@ -702,19 +784,17 @@ func (a *LocalNudgeAuthority) retryAuditBindingMoved(ctx context.Context, reposi
 
 func (a *LocalNudgeAuthority) readLocalAuthorityRetryAuditCursor(ctx context.Context, queryer localAuthorityQueryer) (localAuthorityRetryAuditCursor, error) {
 	var generationWire, revisionWire, sequenceWire, identityWire, preparationsWire, receiptsWire, checkpointDigest []byte
-	var phase, afterCommandID, afterAttemptID string
+	var phase, afterRevisionWire, afterAttemptID string
 	if err := queryer.QueryRowContext(ctx, `SELECT audit_generation, audit_repository_revision, audit_sequence_high_water,
 		audit_phase, audit_after_command_id, audit_after_attempt_id, audit_identity,
 		audit_preparation_count, audit_receipt_count, audit_checkpoint_digest
 		FROM retry_meta WHERE singleton = 1`).Scan(
-		&generationWire, &revisionWire, &sequenceWire, &phase, &afterCommandID, &afterAttemptID,
+		&generationWire, &revisionWire, &sequenceWire, &phase, &afterRevisionWire, &afterAttemptID,
 		&identityWire, &preparationsWire, &receiptsWire, &checkpointDigest,
 	); err != nil {
 		return localAuthorityRetryAuditCursor{}, fmt.Errorf("reading local retry audit cursor: %w", err)
 	}
-	cursor := localAuthorityRetryAuditCursor{
-		phase: localAuthorityRetryAuditPhase(phase), afterCommandID: afterCommandID, afterAttemptID: afterAttemptID,
-	}
+	cursor := localAuthorityRetryAuditCursor{phase: localAuthorityRetryAuditPhase(phase)}
 	var err error
 	if cursor.generation, err = decodeLocalAuthorityUint64(generationWire); err != nil {
 		return localAuthorityRetryAuditCursor{}, err
@@ -730,6 +810,13 @@ func (a *LocalNudgeAuthority) readLocalAuthorityRetryAuditCursor(ctx context.Con
 	}
 	if cursor.receiptCount, err = decodeLocalAuthorityUint64(receiptsWire); err != nil {
 		return localAuthorityRetryAuditCursor{}, err
+	}
+	if cursor.phase == localAuthorityRetryAuditIdle {
+		if afterRevisionWire != "" || afterAttemptID != "" {
+			return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: %w: nonempty idle local retry audit position", errLocalAuthorityRetryAuditCheckpointInvalid, ErrLocalNudgeAuthorityConflict)
+		}
+	} else if cursor.afterRevision, cursor.afterCommandID, cursor.afterAttemptID, err = decodeLocalAuthorityRetryAuditPosition(afterRevisionWire, afterAttemptID); err != nil {
+		return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: %w", errLocalAuthorityRetryAuditCheckpointInvalid, err)
 	}
 	if len(identityWire) != sha256.Size {
 		return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: %w: malformed local retry audit identity", errLocalAuthorityRetryAuditCheckpointInvalid, ErrLocalNudgeAuthorityConflict)
@@ -752,13 +839,14 @@ func (a *LocalNudgeAuthority) updateLocalAuthorityRetryAuditCursor(ctx context.C
 	if err := validateLocalAuthorityRetryAuditCursor(cursor); err != nil {
 		return err
 	}
+	afterRevisionWire, afterAttemptID := encodeLocalAuthorityRetryAuditPosition(cursor)
 	checkpointDigest := localAuthorityRetryAuditCursorDigest(cursor, a.store, a.opts.AuthorityID)
 	result, err := tx.ExecContext(ctx, `UPDATE retry_meta SET
 		audit_generation = ?, audit_repository_revision = ?, audit_sequence_high_water = ?, audit_phase = ?,
 		audit_after_command_id = ?, audit_after_attempt_id = ?, audit_identity = ?,
 		audit_preparation_count = ?, audit_receipt_count = ?, audit_checkpoint_digest = ?
 		WHERE singleton = 1`, encodeLocalAuthorityUint64(cursor.generation), encodeLocalAuthorityUint64(cursor.repositoryRevision),
-		encodeLocalAuthorityUint64(cursor.sequenceHighWater), string(cursor.phase), cursor.afterCommandID, cursor.afterAttemptID,
+		encodeLocalAuthorityUint64(cursor.sequenceHighWater), string(cursor.phase), afterRevisionWire, afterAttemptID,
 		cursor.identity[:], encodeLocalAuthorityUint64(cursor.preparationCount), encodeLocalAuthorityUint64(cursor.receiptCount), checkpointDigest[:])
 	if err != nil {
 		return fmt.Errorf("updating local retry audit cursor: %w", err)
@@ -774,7 +862,7 @@ func localAuthorityRetryAuditCursorDigest(cursor localAuthorityRetryAuditCursor,
 		return localAuthorityRetryAuditCheckpointDigest(store, authorityID, cursor.identity)
 	}
 	var canonical bytes.Buffer
-	writeLocalClaimRecoveryString(&canonical, "gascity.local-retry-audit-checkpoint.v2")
+	writeLocalClaimRecoveryString(&canonical, "gascity.local-retry-audit-checkpoint.v3")
 	writeLocalClaimRecoveryString(&canonical, store.StoreUUID)
 	writeLocalClaimRecoveryUint64(&canonical, store.RestoreEpoch)
 	writeLocalClaimRecoveryString(&canonical, authorityID)
@@ -782,6 +870,7 @@ func localAuthorityRetryAuditCursorDigest(cursor localAuthorityRetryAuditCursor,
 	writeLocalClaimRecoveryUint64(&canonical, cursor.repositoryRevision)
 	writeLocalClaimRecoveryUint64(&canonical, cursor.sequenceHighWater)
 	writeLocalClaimRecoveryString(&canonical, string(cursor.phase))
+	writeLocalClaimRecoveryUint64(&canonical, cursor.afterRevision)
 	writeLocalClaimRecoveryString(&canonical, cursor.afterCommandID)
 	writeLocalClaimRecoveryString(&canonical, cursor.afterAttemptID)
 	_, _ = canonical.Write(cursor.identity[:])
@@ -791,7 +880,8 @@ func localAuthorityRetryAuditCursorDigest(cursor localAuthorityRetryAuditCursor,
 }
 
 func validateLocalAuthorityRetryAuditCursor(cursor localAuthorityRetryAuditCursor) error {
-	if cursor.sequenceHighWater > cursor.repositoryRevision || cursor.preparationCount > cursor.generation || cursor.receiptCount > cursor.generation {
+	if cursor.sequenceHighWater > cursor.repositoryRevision || cursor.afterRevision > cursor.repositoryRevision ||
+		cursor.preparationCount > cursor.generation || cursor.receiptCount > cursor.generation {
 		return fmt.Errorf("%w: inconsistent local retry audit checkpoint high-waters", ErrLocalNudgeAuthorityConflict)
 	}
 	if (cursor.afterCommandID == "") != (cursor.afterAttemptID == "") {
@@ -814,15 +904,15 @@ func validateLocalAuthorityRetryAuditCursor(cursor localAuthorityRetryAuditCurso
 		}
 		return nil
 	case localAuthorityRetryAuditPreparations:
-		if cursor.afterCommandID != "" || cursor.preparationCount != 0 || cursor.receiptCount != 0 || cursor.identity != initialIdentity {
+		if cursor.preparationCount != 0 {
 			return fmt.Errorf("%w: inconsistent preparation retry audit cursor", ErrLocalNudgeAuthorityConflict)
 		}
 	case localAuthorityRetryAuditReceipts:
-		if cursor.preparationCount != 0 || (cursor.afterCommandID == "") != (cursor.receiptCount == 0) {
+		if cursor.preparationCount != 0 {
 			return fmt.Errorf("%w: inconsistent receipt retry audit cursor", ErrLocalNudgeAuthorityConflict)
 		}
 	case localAuthorityRetryAuditDone:
-		if cursor.afterCommandID != "" || cursor.preparationCount != 0 {
+		if cursor.afterRevision != cursor.repositoryRevision || cursor.afterCommandID != "" || cursor.preparationCount != 0 {
 			return fmt.Errorf("%w: inconsistent completed retry audit cursor", ErrLocalNudgeAuthorityConflict)
 		}
 	default:
@@ -832,6 +922,27 @@ func validateLocalAuthorityRetryAuditCursor(cursor localAuthorityRetryAuditCurso
 		return fmt.Errorf("%w: empty local retry audit rolling identity", ErrLocalNudgeAuthorityConflict)
 	}
 	return nil
+}
+
+func encodeLocalAuthorityRetryAuditPosition(cursor localAuthorityRetryAuditCursor) (string, string) {
+	if cursor.phase == localAuthorityRetryAuditIdle {
+		return "", ""
+	}
+	return fmt.Sprintf("%016x:%s", cursor.afterRevision, cursor.afterCommandID), cursor.afterAttemptID
+}
+
+func decodeLocalAuthorityRetryAuditPosition(revisionAndCommand, attemptID string) (uint64, string, string, error) {
+	if len(revisionAndCommand) < 17 || revisionAndCommand[16] != ':' {
+		return 0, "", "", fmt.Errorf("%w: malformed local retry audit revision cursor", ErrLocalNudgeAuthorityConflict)
+	}
+	revision, err := strconv.ParseUint(revisionAndCommand[:16], 16, 64)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("%w: malformed local retry audit revision cursor: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	if fmt.Sprintf("%016x", revision) != revisionAndCommand[:16] {
+		return 0, "", "", fmt.Errorf("%w: noncanonical local retry audit revision cursor", ErrLocalNudgeAuthorityConflict)
+	}
+	return revision, revisionAndCommand[17:], attemptID, nil
 }
 
 func (a *LocalNudgeAuthority) resetRetryAuditCursor(ctx context.Context, state CommandRepositoryState) error {

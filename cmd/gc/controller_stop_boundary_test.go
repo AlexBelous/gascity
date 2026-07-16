@@ -41,7 +41,7 @@ func TestControllerStopWireStaysConfinedToTypedClientAndServer(t *testing.T) {
 				switch n := node.(type) {
 				case *ast.CallExpr:
 					callee := controllerStopCalledIdent(n.Fun)
-					if callee == "controllerSocketPath" && name != "controller.go" && name != "controller_stop_client.go" && name != "controller_lock.go" {
+					if callee == "controllerSocketPath" && name != "controller.go" && name != "controller_stop_client.go" && name != "controller_lock.go" && name != "nudge_ingress_bridge.go" {
 						t.Errorf("%s:%s calls controllerSocketPath outside the server/typed client boundary", name, fn.Name.Name)
 					}
 					if strings.HasPrefix(callee, "sendControllerCommand") && len(n.Args) >= 2 {

@@ -135,12 +135,6 @@ func runE2c1ProviderFailureHelper(t *testing.T, cityPath, markerPath string) {
 	providerBuilds := 0
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		providerBuilds++
-		// The fail-open start warm-up still uses the legacy doctor caller owned
-		// by E2c3. Let that distinct construction complete so this slice reaches
-		// and characterizes cmd_start.go's own provider boundary.
-		if providerBuilds == 1 {
-			return runtime.NewFake(), nil
-		}
 		return nil, errors.New("injected provider failure")
 	}
 	defer func() { buildSessionProviderByName = oldBuild }()
@@ -163,8 +157,8 @@ func runE2c1ProviderFailureHelper(t *testing.T, cityPath, markerPath string) {
 		Fatal:    "",
 	}) + "\n"
 	assertE2c1RunFailure(t, []string{"start", cityPath, "--foreground"}, "", startStderr)
-	if providerBuilds != 2 {
-		t.Fatalf("start provider builds = %d, want 2 (warm-up plus start)", providerBuilds)
+	if providerBuilds != 1 {
+		t.Fatalf("start provider builds = %d, want 1", providerBuilds)
 	}
 	if shutdownCalls != 0 {
 		t.Fatalf("start provider failure triggered %d stop cleanup calls, want 0", shutdownCalls)
@@ -172,8 +166,8 @@ func runE2c1ProviderFailureHelper(t *testing.T, cityPath, markerPath string) {
 	createE2c1StopOrderingBead(t, cityPath)
 
 	assertE2c1RunFailure(t, []string{"stop", cityPath}, "", "gc stop: "+e2c1ProviderConstructionFailure+"\n")
-	if providerBuilds != 3 {
-		t.Fatalf("stop provider builds = %d, want 3 cumulative", providerBuilds)
+	if providerBuilds != 2 {
+		t.Fatalf("stop provider builds = %d, want 2 cumulative", providerBuilds)
 	}
 	if shutdownCalls != 0 {
 		t.Fatalf("stop provider failure triggered %d bead shutdown calls, want 0", shutdownCalls)
@@ -182,23 +176,23 @@ func runE2c1ProviderFailureHelper(t *testing.T, cityPath, markerPath string) {
 
 	const genericJSONFailure = "{\"schema_version\":\"1\",\"ok\":false,\"error\":{\"code\":\"command_failed\",\"message\":\"command failed; see stderr for diagnostics\",\"exit_code\":1}}\n"
 	assertE2c1RunFailure(t, []string{"stop", cityPath, "--json"}, genericJSONFailure, "gc stop: "+e2c1ProviderConstructionFailure+"\n")
-	if providerBuilds != 4 || shutdownCalls != 0 {
-		t.Fatalf("JSON stop ordering: provider builds=%d shutdown calls=%d, want 4 and 0", providerBuilds, shutdownCalls)
+	if providerBuilds != 3 || shutdownCalls != 0 {
+		t.Fatalf("JSON stop ordering: provider builds=%d shutdown calls=%d, want 3 and 0", providerBuilds, shutdownCalls)
 	}
 
 	assertE2c1RunFailure(t, []string{"restart", cityPath}, "", "gc stop: "+e2c1ProviderConstructionFailure+"\n")
-	if providerBuilds != 5 || shutdownCalls != 0 {
-		t.Fatalf("restart stop-leg ordering: provider builds=%d shutdown calls=%d, want 5 and 0", providerBuilds, shutdownCalls)
+	if providerBuilds != 4 || shutdownCalls != 0 {
+		t.Fatalf("restart stop-leg ordering: provider builds=%d shutdown calls=%d, want 4 and 0", providerBuilds, shutdownCalls)
 	}
 
 	assertE2c1RunFailure(t, []string{"restart", cityPath, "--json"}, genericJSONFailure, "gc stop: "+e2c1ProviderConstructionFailure+"\n")
-	if providerBuilds != 6 || shutdownCalls != 0 {
-		t.Fatalf("JSON restart stop-leg ordering: provider builds=%d shutdown calls=%d, want 6 and 0", providerBuilds, shutdownCalls)
+	if providerBuilds != 5 || shutdownCalls != 0 {
+		t.Fatalf("JSON restart stop-leg ordering: provider builds=%d shutdown calls=%d, want 5 and 0", providerBuilds, shutdownCalls)
 	}
 
 	assertE2c1RunFailure(t, []string{"--city", cityPath, "rig", "restart", "frontend"}, "", "gc rig restart: "+e2c1ProviderConstructionFailure+"\n")
-	if providerBuilds != 7 || shutdownCalls != 0 {
-		t.Fatalf("rig restart ordering: provider builds=%d shutdown calls=%d, want 7 and 0", providerBuilds, shutdownCalls)
+	if providerBuilds != 6 || shutdownCalls != 0 {
+		t.Fatalf("rig restart ordering: provider builds=%d shutdown calls=%d, want 6 and 0", providerBuilds, shutdownCalls)
 	}
 }
 

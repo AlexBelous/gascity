@@ -108,14 +108,14 @@ func TestProductionNudgeAuthorityBindingStartupRequiresExactRetryAuthority(t *te
 	if binding.source.retry != binding.authority {
 		t.Fatalf("effect retry authority = %T, want exact retained %T", binding.source.retry, binding.authority)
 	}
-	if complete, _ := binding.startupEvidence(); !complete {
+	if complete, _, _, _ := binding.startupEvidence(); !complete {
 		t.Fatal("complete production binding did not publish startup evidence")
 	}
 
 	binding.mu.Lock()
 	binding.source.retry = binding.ingress
 	binding.mu.Unlock()
-	if complete, _ := binding.startupEvidence(); complete {
+	if complete, _, _, _ := binding.startupEvidence(); complete {
 		t.Fatal("startup accepted ingress wrapper type instead of the exact underlying retry authority")
 	}
 }

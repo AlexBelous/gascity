@@ -1,7 +1,6 @@
 package nudgequeue
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -11,52 +10,13 @@ import (
 	"time"
 )
 
-func (a *LocalNudgeAuthority) validateRetryMetadata(ctx context.Context, state CommandRepositoryState) error {
-	var generationWire, preparationCountWire, receiptCountWire []byte
-	var auditGenerationWire, auditRevisionWire, auditSequenceWire []byte
-	var phase, afterCommandID, afterAttemptID string
-	var identityWire, auditPreparationCountWire, auditReceiptCountWire, checkpointDigest []byte
-	if err := a.db.QueryRowContext(ctx, `SELECT
-		transition_generation, preparation_count, receipt_count,
-		audit_generation, audit_repository_revision, audit_sequence_high_water, audit_phase,
-		audit_after_command_id, audit_after_attempt_id, audit_identity,
-		audit_preparation_count, audit_receipt_count, audit_checkpoint_digest
-		FROM retry_meta WHERE singleton = 1`).Scan(
-		&generationWire, &preparationCountWire, &receiptCountWire,
-		&auditGenerationWire, &auditRevisionWire, &auditSequenceWire, &phase,
-		&afterCommandID, &afterAttemptID, &identityWire,
-		&auditPreparationCountWire, &auditReceiptCountWire, &checkpointDigest,
-	); err != nil {
-		return fmt.Errorf("%w: reading retry authority metadata: %w", ErrLocalNudgeAuthorityConflict, err)
+func (a *LocalNudgeAuthority) validateRetryMetadata(ctx context.Context, state CommandRepositoryState, allowReset bool) error {
+	generation, preparationCount, receiptCount, err := localAuthorityRetryMutationState(ctx, a.db)
+	if err != nil {
+		return err
 	}
-	values := make([]uint64, 0, 8)
-	for _, wire := range [][]byte{
-		generationWire, preparationCountWire, receiptCountWire,
-		auditGenerationWire, auditRevisionWire, auditSequenceWire,
-		auditPreparationCountWire, auditReceiptCountWire,
-	} {
-		value, err := decodeLocalAuthorityUint64(wire)
-		if err != nil {
-			return err
-		}
-		values = append(values, value)
-	}
-	generation, preparationCount, receiptCount := values[0], values[1], values[2]
-	auditGeneration, auditRevision, auditSequence := values[3], values[4], values[5]
-	auditPreparationCount, auditReceiptCount := values[6], values[7]
-	if preparationCount > generation || receiptCount > generation || auditGeneration > generation ||
-		auditRevision > state.Revision || auditSequence > state.SequenceHighWater || auditSequence > auditRevision ||
-		auditPreparationCount > preparationCount || auditReceiptCount > receiptCount {
+	if preparationCount > generation || receiptCount > generation {
 		return fmt.Errorf("%w: retry authority metadata high-waters are inconsistent", ErrLocalNudgeAuthorityConflict)
-	}
-	if phase != "idle" || auditGeneration != 0 || auditRevision != 0 || auditSequence != 0 ||
-		afterCommandID != "" || afterAttemptID != "" || auditPreparationCount != 0 || auditReceiptCount != 0 {
-		return fmt.Errorf("%w: unsupported non-idle retry audit checkpoint", ErrLocalNudgeAuthorityConflict)
-	}
-	initialIdentity := sha256.Sum256([]byte("gascity.local-retry-audit.v1"))
-	wantDigest := localAuthorityRetryAuditCheckpointDigest(a.store, a.opts.AuthorityID, initialIdentity)
-	if !bytes.Equal(identityWire, initialIdentity[:]) || !bytes.Equal(checkpointDigest, wantDigest[:]) {
-		return fmt.Errorf("%w: retry audit checkpoint identity or digest differs", ErrLocalNudgeAuthorityConflict)
 	}
 	var actualPreparations, actualReceipts uint64
 	if err := a.db.QueryRowContext(ctx, `SELECT
@@ -67,6 +27,34 @@ func (a *LocalNudgeAuthority) validateRetryMetadata(ctx context.Context, state C
 	if actualPreparations != preparationCount || actualReceipts != receiptCount {
 		return fmt.Errorf("%w: retry evidence counts %d/%d differ from metadata %d/%d",
 			ErrLocalNudgeAuthorityConflict, actualPreparations, actualReceipts, preparationCount, receiptCount)
+	}
+	cursor, err := a.readLocalAuthorityRetryAuditCursor(ctx, a.db)
+	if errors.Is(err, errLocalAuthorityRetryAuditCheckpointInvalid) {
+		if !allowReset {
+			return fmt.Errorf("%w: retry audit checkpoint is invalid before migration", ErrLocalNudgeAuthorityConflict)
+		}
+		return a.resetRetryAuditCursor(ctx, state)
+	}
+	if err != nil {
+		return err
+	}
+	if cursor.generation > generation || cursor.repositoryRevision > state.Revision || cursor.sequenceHighWater > state.SequenceHighWater {
+		return fmt.Errorf("%w: local retry audit checkpoint exceeds current authority lineage", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.phase == localAuthorityRetryAuditIdle || cursor.generation != generation {
+		return nil
+	}
+	if cursor.preparationCount > preparationCount || cursor.receiptCount > receiptCount {
+		return fmt.Errorf("%w: local retry audit checkpoint counts exceed authority metadata", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.phase != localAuthorityRetryAuditPreparations && cursor.preparationCount != preparationCount {
+		return fmt.Errorf("%w: local retry audit checkpoint skipped preparation evidence", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.phase == localAuthorityRetryAuditDone && cursor.receiptCount != receiptCount {
+		return fmt.Errorf("%w: local retry audit checkpoint skipped receipt evidence", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.phase == localAuthorityRetryAuditDone && allowReset {
+		return a.resetRetryAuditCursor(ctx, state)
 	}
 	return nil
 }
@@ -297,15 +285,37 @@ func (a *LocalNudgeAuthority) FinalizeCommandRetryTransition(ctx context.Context
 	}
 	a.retryOwnershipMu.Lock()
 	defer a.retryOwnershipMu.Unlock()
+	return a.finalizeCommandRetryTransitionLocked(ctx, commit, nil, nil)
+}
+
+// finalizeCommandRetryTransitionLocked contains the single atomic retry
+// finalization transaction. The caller must hold retryOwnershipMu. Recovery
+// supplies an expected generation captured before crossing into the command
+// store so it cannot consume evidence that moved during that read.
+func (a *LocalNudgeAuthority) finalizeCommandRetryTransitionLocked(
+	ctx context.Context,
+	commit CommandRetryTransitionCommit,
+	expectedGeneration *uint64,
+	expectedIntent *CommandRetryTransitionIntent,
+) (CommandRetryReceiptDisposition, error) {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("finalizing local retry transition: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if expectedGeneration != nil {
+		generation, _, _, err := localAuthorityRetryMutationState(ctx, tx)
+		if err != nil {
+			return "", err
+		}
+		if generation != *expectedGeneration {
+			return "", errLocalAuthorityRetryAuditMoved
+		}
+	}
 	if existing, found, err := localAuthorityRetryReceiptByAttempt(ctx, tx, a.store, commit.CommandID, commit.AttemptID); err != nil {
 		return "", err
 	} else if found {
-		if !retryReceiptMatchesCommit(existing, commit) {
+		if !retryReceiptMatchesCommit(existing, commit) || (expectedIntent != nil && !retryReceiptMatchesIntent(existing, *expectedIntent)) {
 			return "", fmt.Errorf("%w: finalized retry receipt differs", ErrLocalNudgeAuthorityConflict)
 		}
 		if preparation, prepared, err := localAuthorityRetryPreparationByCommand(ctx, tx, a.store, commit.CommandID); err != nil {
@@ -337,6 +347,9 @@ func (a *LocalNudgeAuthority) FinalizeCommandRetryTransition(ctx context.Context
 	}
 	if !found || !retryIntentMatchesCommit(intent, commit) {
 		return "", fmt.Errorf("%w: retry commit has no exact write-ahead preparation", ErrLocalNudgeAuthorityConflict)
+	}
+	if expectedIntent != nil && !sameCommandRetryTransitionIntent(intent, *expectedIntent) {
+		return "", fmt.Errorf("%w: retry preparation changed across recovery read", ErrLocalNudgeAuthorityConflict)
 	}
 	if owner, owned := a.retryOwners[commit.CommandID]; owned && (owner.writers == 0 || !sameCommandRetryTransitionIntent(owner.intent, intent)) {
 		return "", fmt.Errorf("%w: retry writer ownership differs from commit", ErrLocalNudgeAuthorityConflict)

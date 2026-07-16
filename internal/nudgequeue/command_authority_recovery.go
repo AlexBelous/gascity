@@ -74,6 +74,20 @@ func (a *LocalNudgeAuthority) recoverCommandAuthorityPass(ctx context.Context, r
 	if err := a.repairProvenanceRejectionPreparations(ctx, repository); err != nil {
 		return retryCommandAuthorityRecoveryAfterStageError(ctx, repository, passState, "rechecking provenance rejections", err)
 	}
+	retryState, err := repository.RepairLineage(ctx)
+	if err != nil {
+		if commandAuthorityRepositoryMovedAfterLineageError(ctx, repository, err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("recovering local command authority: fencing retry transition repair: %w", err)
+	}
+	retryToken, retryStable, err := a.repairCommandRetryTransitions(ctx, repository, retryState)
+	if err != nil {
+		return retryCommandAuthorityRecoveryAfterStageError(ctx, repository, retryState, "repairing retry transitions", err)
+	}
+	if !retryStable {
+		return false, nil
+	}
 	claimState, err := repository.RepairLineage(ctx)
 	if err != nil {
 		if commandAuthorityRepositoryMovedAfterLineageError(ctx, repository, err) {
@@ -100,7 +114,7 @@ func (a *LocalNudgeAuthority) recoverCommandAuthorityPass(ctx context.Context, r
 		}
 		return false, fmt.Errorf("recovering local command authority: fencing repository lineage: %w", err)
 	}
-	stable, err = a.verifyCommandAuthorityRecoveryFence(ctx, state, observed, claimToken)
+	stable, err = a.verifyCommandAuthorityRecoveryFence(ctx, state, observed, retryToken, claimToken)
 	if err != nil {
 		return false, err
 	}
@@ -119,6 +133,13 @@ func (a *LocalNudgeAuthority) recoverCommandAuthorityPass(ctx context.Context, r
 		return false, err
 	}
 	if !claimAuditDone || confirmedClaimToken != claimToken {
+		return false, nil
+	}
+	confirmedRetryToken, retryAuditDone, err := a.completedRetryAuditToken(ctx, confirmed)
+	if err != nil {
+		return false, err
+	}
+	if !retryAuditDone || confirmedRetryToken != retryToken {
 		return false, nil
 	}
 	return true, nil
@@ -186,6 +207,7 @@ func (a *LocalNudgeAuthority) verifyCommandAuthorityRecoveryFence(
 	ctx context.Context,
 	state CommandRepositoryState,
 	observed localAuthorityRepositoryHighWater,
+	retryToken localAuthorityRetryRecoveryToken,
 	claimToken localAuthorityClaimRecoveryToken,
 ) (bool, error) {
 	if err := a.validateRecoveryState(state, observed); err != nil {
@@ -198,20 +220,28 @@ func (a *LocalNudgeAuthority) verifyCommandAuthorityRecoveryFence(
 	if !claimAuditDone || currentClaimToken != claimToken {
 		return false, nil
 	}
+	currentRetryToken, retryAuditDone, err := a.completedRetryAuditToken(ctx, state)
+	if err != nil {
+		return false, err
+	}
+	if !retryAuditDone || currentRetryToken != retryToken {
+		return false, nil
+	}
 	release, err := a.begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer release()
 	var denseWire, highestSequenceWire, highestRevisionWire []byte
-	var admissionPreparations, terminalPreparations, rejectionPreparations int
+	var admissionPreparations, terminalPreparations, rejectionPreparations, retryPreparations int
 	if err := a.db.QueryRowContext(ctx, `SELECT dense_decision_high_water, highest_observed_sequence, highest_observed_revision,
 		(SELECT COUNT(*) FROM admission_preparations),
 		(SELECT COUNT(*) FROM terminal_preparations),
-		(SELECT COUNT(*) FROM rejection_preparations)
+		(SELECT COUNT(*) FROM rejection_preparations),
+		(SELECT COUNT(*) FROM retry_preparations)
 		FROM authority_meta WHERE singleton = 1`).Scan(
 		&denseWire, &highestSequenceWire, &highestRevisionWire,
-		&admissionPreparations, &terminalPreparations, &rejectionPreparations,
+		&admissionPreparations, &terminalPreparations, &rejectionPreparations, &retryPreparations,
 	); err != nil {
 		return false, fmt.Errorf("recovering local command authority: reading final fence: %w", err)
 	}
@@ -234,7 +264,7 @@ func (a *LocalNudgeAuthority) verifyCommandAuthorityRecoveryFence(
 	if highestSequence != observed.sequence || highestRevision != observed.revision {
 		return false, nil
 	}
-	if admissionPreparations != 0 || terminalPreparations != 0 || rejectionPreparations != 0 {
+	if admissionPreparations != 0 || terminalPreparations != 0 || rejectionPreparations != 0 || retryPreparations != 0 {
 		return false, nil
 	}
 	if dense > state.SequenceHighWater {

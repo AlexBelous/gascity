@@ -168,6 +168,79 @@ func TestLocalNudgeAuthorityRetryFinalizationRecoversLostResponseWithoutClaimRec
 	assertLocalAuthorityRetryEvidence(t, fixture.authority, 0, 1, 0)
 }
 
+func TestLocalNudgeAuthorityStartupFinalizesInterruptedRetryAfterStoreCommit(t *testing.T) {
+	fixture := newLocalAuthorityProviderAttemptFixture(t)
+	wantErr := errors.New("injected pre-finalization process death")
+	request := localAuthorityRetryRequest(fixture.command)
+	interrupted := &failOnceLocalRetryFinalizeAuthority{LocalNudgeAuthority: fixture.authority, err: wantErr}
+
+	if _, err := fixture.repository.RetryProviderAttempt(t.Context(), request, fixture.partition, interrupted); !errors.Is(err, wantErr) {
+		t.Fatalf("RetryProviderAttempt before process death error = %v, want %v", err, wantErr)
+	}
+	assertLocalAuthorityRetryEvidence(t, fixture.authority, 1, 0, 1)
+	state, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State after committed retry: %v", err)
+	}
+	if err := fixture.authority.Close(); err != nil {
+		t.Fatalf("Close interrupted authority: %v", err)
+	}
+	reopened, err := OpenLocalNudgeAuthority(t.Context(), fixture.cityPath, state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority after process death: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	if err := reopened.RecoverCommandAuthority(t.Context(), fixture.repository); err != nil {
+		t.Fatalf("RecoverCommandAuthority after committed retry: %v", err)
+	}
+	assertLocalAuthorityRetryEvidence(t, reopened, 0, 1, 0)
+
+	claimAt := request.NextEligibleAt
+	claimed, err := fixture.repository.ClaimAuthorized(t.Context(), CommandClaimRequest{
+		CommandID: fixture.command.ID, ClaimID: "claim-recovered-retry-2", OwnerID: "owner-recovered-retry-2",
+		AttemptID: "attempt-recovered-retry-2", BoundLaunchIdentity: fixture.command.Binding.LaunchIdentity,
+		Partition: fixture.partition, ClaimedAt: claimAt, LeaseUntil: claimAt.Add(time.Minute),
+	}, reopened, reopened)
+	if err != nil || claimed.Disposition != CommandClaimAllowed || claimed.Command.Retry == nil || claimed.Command.Retry.AttemptCount != 2 {
+		t.Fatalf("ClaimAuthorized after recovered retry = %#v, err=%v", claimed, err)
+	}
+}
+
+func TestLocalNudgeAuthorityStartupAbortsInterruptedRetryAfterStoreRollback(t *testing.T) {
+	fixture := newLocalAuthorityProviderAttemptFixture(t)
+	state, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State before retry preparation: %v", err)
+	}
+	intent := localAuthorityRetryIntent(t, state, fixture.command, fixture.partition)
+	if err := fixture.authority.PrepareCommandRetryTransition(t.Context(), intent); err != nil {
+		t.Fatalf("PrepareCommandRetryTransition: %v", err)
+	}
+	if err := fixture.authority.ReleaseCommandRetryTransitionWriter(t.Context(), intent); err != nil {
+		t.Fatalf("ReleaseCommandRetryTransitionWriter before process death: %v", err)
+	}
+	assertLocalAuthorityRetryEvidence(t, fixture.authority, 1, 0, 1)
+	if err := fixture.authority.Close(); err != nil {
+		t.Fatalf("Close interrupted authority: %v", err)
+	}
+	reopened, err := OpenLocalNudgeAuthority(t.Context(), fixture.cityPath, state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority after rolled-back retry: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	if err := reopened.RecoverCommandAuthority(t.Context(), fixture.repository); err != nil {
+		t.Fatalf("RecoverCommandAuthority after rolled-back retry: %v", err)
+	}
+	assertLocalAuthorityRetryEvidence(t, reopened, 0, 0, 1)
+
+	result, err := fixture.repository.RetryProviderAttempt(t.Context(), localAuthorityRetryRequest(fixture.command), fixture.partition, reopened)
+	if err != nil || result.Disposition != CommandRetryRecorded || !result.HasRetryTransitionWitness() {
+		t.Fatalf("RetryProviderAttempt after recovered rollback = %#v, err=%v", result, err)
+	}
+}
+
 func TestLocalNudgeAuthorityTerminalAndRetryPreparationsAreExclusive(t *testing.T) {
 	for _, terminalFirst := range []bool{true, false} {
 		name := "retry-first"

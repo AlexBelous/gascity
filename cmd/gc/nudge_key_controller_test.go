@@ -483,7 +483,7 @@ func TestNudgeKeyControllerRejectsMalformedAdmission(t *testing.T) {
 	}{
 		{name: "zero key", cause: nudgeCauseCommandCommit},
 		{name: "zero cause", key: valid},
-		{name: "unknown cause", key: valid, cause: nudgeReconcileCause(1 << 7)},
+		{name: "unknown cause", key: valid, cause: nudgeReconcileCause(1 << 15)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := controller.Enqueue(tc.key, tc.cause); err == nil {
@@ -673,6 +673,64 @@ func TestNudgeKeyControllerOutcomeAuditAddsCauseAfterBoundedYield(t *testing.T) 
 	}
 	if !second.FirstEnqueuedAt.Equal(first.FirstEnqueuedAt) {
 		t.Fatalf("audit admission = %v, want %v", second.FirstEnqueuedAt, first.FirstEnqueuedAt)
+	}
+	cancel()
+	waitControllerStopped(t, done)
+}
+
+func TestNudgeKeyControllerOutcomeRetryDeadlineSchedulesExactDurableDeadlineWithoutHotLoop(t *testing.T) {
+	key := testSessionReconcileKey(t, "session-provider-retry")
+	start := time.Date(2026, 7, 15, 11, 30, 0, 0, time.UTC)
+	now := start
+	deadline := start.Add(375 * time.Millisecond)
+	batches := make(chan nudgeReconcileBatch, 2)
+	deferred := make(chan time.Duration, 1)
+	var calls atomic.Int32
+	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
+		batches <- batch
+		if calls.Add(1) == 1 {
+			return nudgeReconcileAtRetryDeadline(deadline)
+		}
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	controller.addAfter = func(reconcilekey.Session, time.Duration) {}
+	controller.onDeferred = func(_ reconcilekey.Session, disposition nudgeReconcileDisposition, delay time.Duration) {
+		if disposition != nudgeReconcileOutcomeRetryDeadline {
+			t.Errorf("deferred disposition = %v, want retry deadline", disposition)
+		}
+		deferred <- delay
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runNudgeKeyController(ctx, t, controller)
+	if err := controller.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	first := receiveBeforeDeadline(t, batches)
+	if got := receiveBeforeDeadline(t, deferred); got != deadline.Sub(start) {
+		t.Fatalf("retry deadline delay = %v, want %v", got, deadline.Sub(start))
+	}
+	for attempt := 0; attempt < 10_000; attempt++ {
+		if err := controller.Enqueue(key, nudgeCauseRuntimeReadiness); err != nil {
+			t.Fatalf("duplicate enqueue %d: %v", attempt, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls before durable retry eligibility = %d, want 1", got)
+	}
+
+	now = deadline
+	controller.queue.Add(key)
+	second := receiveBeforeDeadline(t, batches)
+	if want := first.Causes | nudgeCauseRuntimeReadiness | nudgeCauseRetryDeadline; second.Causes != want {
+		t.Fatalf("retry deadline causes = %v, want %v", second.Causes, want)
+	}
+	if !second.FirstEnqueuedAt.Equal(first.FirstEnqueuedAt) {
+		t.Fatalf("retry deadline admission = %v, want original %v", second.FirstEnqueuedAt, first.FirstEnqueuedAt)
 	}
 	cancel()
 	waitControllerStopped(t, done)

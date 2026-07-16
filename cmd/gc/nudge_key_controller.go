@@ -15,7 +15,7 @@ import (
 // nudgeReconcileCause is a bounded bit set of source classes that can change
 // whether one target session has actionable nudge work. The queue carries only
 // the stable key; workers always reconcile the union of causes recorded here.
-type nudgeReconcileCause uint8
+type nudgeReconcileCause uint16
 
 const (
 	nudgeCauseCommandCommit nudgeReconcileCause = 1 << iota
@@ -25,6 +25,7 @@ const (
 	nudgeCauseQuiescenceDeadline
 	nudgeCauseProviderResult
 	nudgeCauseAudit
+	nudgeCauseRetryDeadline
 )
 
 const allNudgeReconcileCauses = nudgeCauseCommandCommit |
@@ -33,7 +34,8 @@ const allNudgeReconcileCauses = nudgeCauseCommandCommit |
 	nudgeCauseQuiescence |
 	nudgeCauseQuiescenceDeadline |
 	nudgeCauseProviderResult |
-	nudgeCauseAudit
+	nudgeCauseAudit |
+	nudgeCauseRetryDeadline
 
 type nudgeReconcileBatch struct {
 	Causes          nudgeReconcileCause
@@ -68,6 +70,7 @@ const (
 	nudgeReconcileOutcomeForget nudgeReconcileDisposition = iota + 1
 	nudgeReconcileOutcomeContinue
 	nudgeReconcileOutcomeAudit
+	nudgeReconcileOutcomeRetryDeadline
 	nudgeReconcileOutcomeTransient
 	nudgeReconcileOutcomeInvariant
 )
@@ -75,6 +78,7 @@ const (
 type nudgeReconcileOutcome struct {
 	disposition nudgeReconcileDisposition
 	err         error
+	notBefore   time.Time
 }
 
 func nudgeReconcileSuccess() nudgeReconcileOutcome {
@@ -89,6 +93,10 @@ func nudgeReconcileAudit() nudgeReconcileOutcome {
 	return nudgeReconcileOutcome{disposition: nudgeReconcileOutcomeAudit}
 }
 
+func nudgeReconcileAtRetryDeadline(notBefore time.Time) nudgeReconcileOutcome {
+	return nudgeReconcileOutcome{disposition: nudgeReconcileOutcomeRetryDeadline, notBefore: notBefore.UTC()}
+}
+
 func nudgeReconcileTransient(err error) nudgeReconcileOutcome {
 	return nudgeReconcileOutcome{disposition: nudgeReconcileOutcomeTransient, err: err}
 }
@@ -100,12 +108,16 @@ func nudgeReconcileInvariant(err error) nudgeReconcileOutcome {
 func (o nudgeReconcileOutcome) validate() error {
 	switch o.disposition {
 	case nudgeReconcileOutcomeForget, nudgeReconcileOutcomeContinue, nudgeReconcileOutcomeAudit:
-		if o.err != nil {
-			return fmt.Errorf("disposition %d unexpectedly carries an error", o.disposition)
+		if o.err != nil || !o.notBefore.IsZero() {
+			return fmt.Errorf("disposition %d unexpectedly carries error or deadline state", o.disposition)
+		}
+	case nudgeReconcileOutcomeRetryDeadline:
+		if o.err != nil || o.notBefore.IsZero() {
+			return fmt.Errorf("disposition %d requires only a retry deadline", o.disposition)
 		}
 	case nudgeReconcileOutcomeTransient, nudgeReconcileOutcomeInvariant:
-		if o.err == nil {
-			return fmt.Errorf("disposition %d requires an error", o.disposition)
+		if o.err == nil || !o.notBefore.IsZero() {
+			return fmt.Errorf("disposition %d requires only an error", o.disposition)
 		}
 	default:
 		return fmt.Errorf("unknown disposition %d", o.disposition)
@@ -261,7 +273,7 @@ func (c *nudgeKeyController) Enqueue(key reconcilekey.Session, cause nudgeReconc
 		return fmt.Errorf("enqueueing nudge reconcile: target key is zero")
 	}
 	if cause == 0 || cause&^allNudgeReconcileCauses != 0 {
-		return fmt.Errorf("enqueueing nudge reconcile for %s: invalid cause bits 0x%x", key, uint8(cause))
+		return fmt.Errorf("enqueueing nudge reconcile for %s: invalid cause bits 0x%x", key, uint16(cause))
 	}
 
 	c.mu.Lock()
@@ -427,6 +439,11 @@ func (c *nudgeKeyController) runWorker(ctx context.Context) {
 			batch.Causes |= nudgeCauseAudit
 			c.deferBatch(key, batch, outcome.disposition, c.yield)
 			c.queue.Done(key)
+		case nudgeReconcileOutcomeRetryDeadline:
+			c.queue.Forget(key)
+			batch.Causes |= nudgeCauseRetryDeadline
+			c.deferBatchUntil(key, batch, outcome.disposition, outcome.notBefore)
+			c.queue.Done(key)
 		case nudgeReconcileOutcomeTransient:
 			delay := c.limiter.When(key)
 			c.deferBatch(key, batch, outcome.disposition, delay)
@@ -491,6 +508,31 @@ func (c *nudgeKeyController) deferBatch(key reconcilekey.Session, batch nudgeRec
 	c.deferred[key] = nudgeDeferredAdmission{
 		disposition: disposition,
 		notBefore:   now.Add(delay),
+	}
+	c.mu.Unlock()
+
+	c.addAfter(key, delay)
+	if c.onDeferred != nil {
+		c.onDeferred(key, disposition, delay)
+	}
+}
+
+func (c *nudgeKeyController) deferBatchUntil(key reconcilekey.Session, batch nudgeReconcileBatch, disposition nudgeReconcileDisposition, notBefore time.Time) {
+	c.mu.Lock()
+	now := c.now()
+	if notBefore.Before(now) {
+		notBefore = now
+	}
+	delay := notBefore.Sub(now)
+	c.restoreBatchLocked(key, batch)
+	pending := c.pending[key]
+	if pending.FirstEnqueuedAt.IsZero() {
+		pending.FirstEnqueuedAt = now
+		c.setPendingLocked(key, pending)
+	}
+	c.deferred[key] = nudgeDeferredAdmission{
+		disposition: disposition,
+		notBefore:   notBefore,
 	}
 	c.mu.Unlock()
 

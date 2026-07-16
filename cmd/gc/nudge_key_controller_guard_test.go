@@ -648,7 +648,7 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 	}
 	allowedCalls := map[string]bool{
 		"<func>": true,
-		"make":   true, "len": true, "uint8": true, "int64": true, "close": true, "clear": true, "delete": true, "recover": true,
+		"make":   true, "len": true, "uint16": true, "int64": true, "close": true, "clear": true, "delete": true, "recover": true,
 		"cancelWorkers": true, "onClosed": true,
 		"fmt.Errorf": true, "fmt.Fprintf": true, "context.WithCancel": true, "debug.Stack": true,
 		"workqueue.NewTypedItemExponentialFailureRateLimiter": true, "workqueue.NewTypedRateLimitingQueue": true,
@@ -658,7 +658,7 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 		"c.queue.Add": true, "c.queue.ShutDown": true, "c.queue.Get": true, "c.queue.Done": true, "c.queue.Forget": true,
 		"workers.Add": true, "workers.Done": true, "workers.Wait": true,
 		"c.runWorker": true, "c.closeAdmission": true, "c.takeBatch": true, "c.invoke": true,
-		"c.restoreBatch": true, "c.restoreBatchLocked": true, "c.deferBatch": true, "c.reportFailure": true, "c.reconcile": true,
+		"c.restoreBatch": true, "c.restoreBatchLocked": true, "c.deferBatch": true, "c.deferBatchUntil": true, "c.reportFailure": true, "c.reconcile": true,
 		"c.setPendingLocked": true, "c.deletePendingLocked": true, "c.clearPendingLocked": true,
 		"c.afterGet": true, "c.onEmptyReplay": true, "c.onDeferred": true, "c.onForget": true, "c.addAfter": true,
 		"c.limiter.When": true, "c.logTransient": true,
@@ -666,6 +666,7 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 		"pending.FirstEnqueuedAt.IsZero": true, "now.Before": true, "now.Add": true,
 		"batch.FirstEnqueuedAt.IsZero": true, "batch.FirstEnqueuedAt.Before": true,
 		"oldest.IsZero": true, "time.Now": true, "now.Sub": true,
+		"notBefore.UTC": true, "notBefore.Before": true, "notBefore.Sub": true, "o.notBefore.IsZero": true,
 	}
 	assertASTCallsOnly(t, fset, file, "nudge keyed core", allowedCalls)
 }

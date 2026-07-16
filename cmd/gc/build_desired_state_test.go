@@ -11468,7 +11468,7 @@ func TestBuildDesiredState_RepairsRigRoutedCityControlWork(t *testing.T) {
 	}
 }
 
-func TestBuildDesiredState_DoesNotWakeRigDispatcherWhenCityRouteRepairFails(t *testing.T) {
+func TestBuildDesiredState_WakesRigDispatcherEvenWhenCityRouteRepairFails(t *testing.T) {
 	cityPath := t.TempDir()
 	cityBase := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -11521,8 +11521,15 @@ func TestBuildDesiredState_DoesNotWakeRigDispatcherWhenCityRouteRepairFails(t *t
 	if got := stored.Metadata[beadmeta.RoutedToMetadataKey]; got != "fixture/core.control-dispatcher" {
 		t.Fatalf("durable gc.routed_to = %q, want unchanged after failed repair", got)
 	}
-	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 0 {
-		t.Fatalf("rig dispatcher demand = %d, want 0 for unreachable city-store control work", got)
+	// Doctrine change (warm cross-store demand fix): a rig control dispatcher
+	// is STARTED when city-store work is routed to it, even while the durable
+	// route repair is failing — a dead dispatcher must not stay down just
+	// because the repair write path is unavailable (production freeze: every
+	// scope-check/retry sat ready-but-unservable behind a dead dispatcher).
+	// Repair still runs and re-homes the route when the store recovers; the
+	// demand signal no longer waits for it.
+	if got := result.ScaleCheckCounts["fixture/core.control-dispatcher"]; got != 1 {
+		t.Fatalf("rig dispatcher demand = %d, want 1: rig dispatchers start on city-store routed control work even when route repair fails", got)
 	}
 	if !strings.Contains(stderr.String(), writeErr.Error()) {
 		t.Fatalf("stderr = %q, want route repair failure", stderr.String())

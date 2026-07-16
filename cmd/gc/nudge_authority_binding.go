@@ -39,11 +39,8 @@ type productionNudgeAuthorityBinding struct {
 	cityScope       string
 	credentialClass string
 	legacyBacklog   legacyNudgeBacklogEvidence
-	// commandProducersCovered stays false until every managed CLI/API/direct
-	// nudge producer is proven to enter through this durable ingress.
-	commandProducersCovered bool
-	closed                  bool
-	closeErr                error
+	closed          bool
+	closeErr        error
 }
 
 // bindProductionNudgeAuthority binds an already-provisioned repository to one
@@ -241,18 +238,16 @@ func (b *productionNudgeAuthorityBinding) live() bool {
 
 func (b *productionNudgeAuthorityBinding) startupEvidence() (
 	complete bool,
-	commandProducersCovered bool,
 	legacyBacklogDrained bool,
 	legacyBacklogDiagnostic string,
 ) {
 	if b == nil {
-		return false, false, false, "legacy nudge backlog evidence is unavailable"
+		return false, false, "legacy nudge backlog evidence is unavailable"
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	complete = b.completeLocked()
 	return complete,
-		complete && b.commandProducersCovered,
 		complete && b.legacyBacklog.Drained,
 		b.legacyBacklog.diagnostic()
 }

@@ -366,7 +366,7 @@ func currentProductionNudgeEffectStartupCapabilities(
 	if len(bindings) != 1 {
 		return capabilities
 	}
-	completeBinding, commandProducersCovered, legacyBacklogDrained, legacyBacklogDiagnostic := bindings[0].startupEvidence()
+	completeBinding, legacyBacklogDrained, legacyBacklogDiagnostic := bindings[0].startupEvidence()
 	if !completeBinding {
 		return capabilities
 	}
@@ -376,7 +376,7 @@ func currentProductionNudgeEffectStartupCapabilities(
 	capabilities.TrustedCityPartition = true
 	capabilities.TrustedCityPartitionResolver = true
 	capabilities.ClaimAuthorizer = true
-	capabilities.CommandProducersCovered = commandProducersCovered
+	capabilities.CommandProducersCovered = productionNudgeProducersCovered()
 	capabilities.LegacyBacklogDrained = legacyBacklogDrained
 	capabilities.LegacyBacklogDiagnostic = legacyBacklogDiagnostic
 	capabilities.CommandSecurity.TrustedIngressAvailable = true

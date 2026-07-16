@@ -108,14 +108,14 @@ func TestProductionNudgeAuthorityBindingStartupRequiresExactRetryAuthority(t *te
 	if binding.source.retry != binding.authority {
 		t.Fatalf("effect retry authority = %T, want exact retained %T", binding.source.retry, binding.authority)
 	}
-	if complete, _, _, _ := binding.startupEvidence(); !complete {
+	if complete, _, _ := binding.startupEvidence(); !complete {
 		t.Fatal("complete production binding did not publish startup evidence")
 	}
 
 	binding.mu.Lock()
 	binding.source.retry = binding.ingress
 	binding.mu.Unlock()
-	if complete, _, _, _ := binding.startupEvidence(); complete {
+	if complete, _, _ := binding.startupEvidence(); complete {
 		t.Fatal("startup accepted ingress wrapper type instead of the exact underlying retry authority")
 	}
 }
@@ -268,7 +268,7 @@ func TestLoadProductionNudgeAuthorityBindingOffAndUnsupportedNeverOpenStore(t *t
 	}
 }
 
-func TestResolveNudgeEffectStartupForCityRetainsOnlyCompleteLiveBinding(t *testing.T) {
+func TestResolveNudgeEffectStartupForCityCompleteBindingStillRequiresManifestCoverage(t *testing.T) {
 	localProfile := string(nudgequeue.CommandSecurityProfileStoreWriterIsController)
 	cfg := &config.City{
 		Beads: config.BeadsConfig{CommandSecurityProfile: localProfile},
@@ -290,9 +290,10 @@ func TestResolveNudgeEffectStartupForCityRetainsOnlyCompleteLiveBinding(t *testi
 		t.Fatalf("bindProductionNudgeAuthority: %v", err)
 	}
 	t.Cleanup(func() { _ = binding.Close() })
-	// This test exercises the future full-coverage selection. Production leaves
-	// this evidence false until every CLI/API producer uses the durable ingress.
-	binding.commandProducersCovered = true
+	capabilities := currentProductionNudgeEffectStartupCapabilities(cfg, runtime.NewFake(), binding)
+	if !capabilities.AtomicCommandRepository || capabilities.CommandProducersCovered {
+		t.Fatalf("complete binding capabilities = %#v, want repository evidence without producer coverage", capabilities)
+	}
 
 	flags, selection, err := resolveNudgeEffectStartupForCityWithOpener(
 		t.Context(), cfg, runtime.NewFake(), "/city/a", "city-a",
@@ -303,15 +304,14 @@ func TestResolveNudgeEffectStartupForCityRetainsOnlyCompleteLiveBinding(t *testi
 	if err != nil {
 		t.Fatalf("resolveNudgeEffectStartupForCityWithOpener: %v", err)
 	}
-	if flags.NudgeEffectOwner() != rollout.Auto || selection.Ownership != nudgeEffectOwnershipKeyed {
-		t.Fatalf("selection = flags %q, %#v; want auto keyed", flags.NudgeEffectOwner(), selection)
+	if flags.NudgeEffectOwner() != rollout.Auto || selection.Ownership != nudgeEffectOwnershipLegacy {
+		t.Fatalf("selection = flags %q, %#v; want auto legacy", flags.NudgeEffectOwner(), selection)
 	}
-	if selection.Binding != binding || !selection.Binding.live() {
-		t.Fatal("startup did not retain the exact live authority binding")
+	if selection.Binding != nil || binding.live() {
+		t.Fatal("startup retained a binding before the closed producer manifest was covered")
 	}
-	capabilities := currentProductionNudgeEffectStartupCapabilities(cfg, runtime.NewFake(), binding)
-	if ok, reason := capabilities.complete(); !ok {
-		t.Fatalf("live binding capability evidence incomplete: %s", reason)
+	if selection.Diagnostic == nil || !strings.Contains(selection.Notice, "canonical CLI/API command ingress") {
+		t.Fatalf("selection diagnostic = %#v notice=%q, want producer coverage degradation", selection.Diagnostic, selection.Notice)
 	}
 }
 

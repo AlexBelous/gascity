@@ -19,6 +19,7 @@ type productionNudgeCommandSource struct {
 	partition    nudgequeue.TrustedCityPartition
 	membership   nudgequeue.TrustedCommandPartitionMembershipRecorder
 	terminal     nudgequeue.TrustedCommandClaimStateAuthority
+	retry        nudgequeue.TrustedCommandRetryTransitionAuthority
 	recovery     nudgequeue.TrustedCommandAuthorityRecovery
 	recoveryGate chan struct{}
 }
@@ -87,6 +88,7 @@ func openVerifiedProductionNudgeCommandSource(
 	source.reader = partitioned
 	source.membership = membership
 	source.terminal = terminal
+	source.retry, _ = resolver.(nudgequeue.TrustedCommandRetryTransitionAuthority)
 	return source, nil
 }
 
@@ -211,6 +213,20 @@ func (s *productionNudgeCommandSource) CompleteProviderAttempt(ctx context.Conte
 	}
 	if err := s.recordTerminalMembership(ctx, result.Command); err != nil {
 		return result, err
+	}
+	return result, nil
+}
+
+func (s *productionNudgeCommandSource) RetryProviderAttempt(ctx context.Context, request nudgequeue.CommandRetryRequest) (nudgequeue.CommandRetryResult, error) {
+	if s == nil || s.repository == nil || s.reader == nil || s.retry == nil {
+		return nudgequeue.CommandRetryResult{}, errors.New("retrying production nudge command: source is not fully bound")
+	}
+	result, err := s.repository.RetryProviderAttempt(ctx, request, s.partition, s.retry)
+	if err != nil {
+		return result, err
+	}
+	if !result.HasRetryTransitionWitness() {
+		return nudgequeue.CommandRetryResult{}, errors.New("retrying production nudge command: repository returned no exact retry transition witness")
 	}
 	return result, nil
 }

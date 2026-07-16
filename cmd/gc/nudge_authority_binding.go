@@ -200,7 +200,7 @@ func openProductionNudgeAuthorityBinding(
 // Admit writes through the retained trusted ingress. Close and Admit are
 // serialized so shutdown either waits for the in-flight durable admission or
 // rejects it before any repository work begins.
-func (b *productionNudgeAuthorityBinding) Admit(ctx context.Context, request nudgequeue.NudgeIngressRequest) (nudgequeue.NudgeIngressResult, error) {
+func (b *productionNudgeAuthorityBinding) Admit(ctx context.Context, request nudgequeue.NudgeIngressRequest) (nudgequeue.NudgeIngressResult, error) { //nolint:unparam // result is consumed through productionSessionNudgeAuthority
 	if b == nil {
 		return nudgequeue.NudgeIngressResult{}, fmt.Errorf("%w: production binding is nil", nudgequeue.ErrLocalNudgeAuthorityUnavailable)
 	}
@@ -215,7 +215,7 @@ func (b *productionNudgeAuthorityBinding) Admit(ctx context.Context, request nud
 // RequesterScope returns the immutable server-owned scope expected by the
 // local authority. Authentication adapters stamp these values only after
 // verifying the transport credential; request bodies never supply them.
-func (b *productionNudgeAuthorityBinding) RequesterScope() (tenantScope, cityScope, credentialClass string) {
+func (b *productionNudgeAuthorityBinding) RequesterScope() (tenantScope, cityScope, credentialClass string) { //nolint:unparam // all scope fields are consumed through productionSessionNudgeAuthority
 	if b == nil {
 		return "", "", ""
 	}

@@ -471,6 +471,114 @@ func (e SessionTranscriptRawResponseFormat) Valid() bool {
 	}
 }
 
+// Defines values for StatusConditionalWriteStoreVerdictLatch.
+const (
+	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
+	StatusConditionalWriteStoreVerdictLatchUnlatched StatusConditionalWriteStoreVerdictLatch = "unlatched"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWriteStoreVerdictLatch enum.
+func (e StatusConditionalWriteStoreVerdictLatch) Valid() bool {
+	switch e {
+	case StatusConditionalWriteStoreVerdictLatchIncapable:
+		return true
+	case StatusConditionalWriteStoreVerdictLatchUnlatched:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWriteStoreVerdictProbe.
+const (
+	StatusConditionalWriteStoreVerdictProbeCapable   StatusConditionalWriteStoreVerdictProbe = "capable"
+	StatusConditionalWriteStoreVerdictProbeIncapable StatusConditionalWriteStoreVerdictProbe = "incapable"
+	StatusConditionalWriteStoreVerdictProbeUnprobed  StatusConditionalWriteStoreVerdictProbe = "unprobed"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWriteStoreVerdictProbe enum.
+func (e StatusConditionalWriteStoreVerdictProbe) Valid() bool {
+	switch e {
+	case StatusConditionalWriteStoreVerdictProbeCapable:
+		return true
+	case StatusConditionalWriteStoreVerdictProbeIncapable:
+		return true
+	case StatusConditionalWriteStoreVerdictProbeUnprobed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesEffective.
+const (
+	StatusConditionalWritesEffectiveActive         StatusConditionalWritesEffective = "active"
+	StatusConditionalWritesEffectiveDegraded       StatusConditionalWritesEffective = "degraded"
+	StatusConditionalWritesEffectiveFailClosed     StatusConditionalWritesEffective = "fail_closed"
+	StatusConditionalWritesEffectiveOff            StatusConditionalWritesEffective = "off"
+	StatusConditionalWritesEffectivePendingRestart StatusConditionalWritesEffective = "pending_restart"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesEffective enum.
+func (e StatusConditionalWritesEffective) Valid() bool {
+	switch e {
+	case StatusConditionalWritesEffectiveActive:
+		return true
+	case StatusConditionalWritesEffectiveDegraded:
+		return true
+	case StatusConditionalWritesEffectiveFailClosed:
+		return true
+	case StatusConditionalWritesEffectiveOff:
+		return true
+	case StatusConditionalWritesEffectivePendingRestart:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesMode.
+const (
+	StatusConditionalWritesModeAuto    StatusConditionalWritesMode = "auto"
+	StatusConditionalWritesModeOff     StatusConditionalWritesMode = "off"
+	StatusConditionalWritesModeRequire StatusConditionalWritesMode = "require"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesMode enum.
+func (e StatusConditionalWritesMode) Valid() bool {
+	switch e {
+	case StatusConditionalWritesModeAuto:
+		return true
+	case StatusConditionalWritesModeOff:
+		return true
+	case StatusConditionalWritesModeRequire:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatusConditionalWritesOrigin.
+const (
+	Builtin StatusConditionalWritesOrigin = "builtin"
+	Config  StatusConditionalWritesOrigin = "config"
+	Env     StatusConditionalWritesOrigin = "env"
+)
+
+// Valid indicates whether the value is a known member of the StatusConditionalWritesOrigin enum.
+func (e StatusConditionalWritesOrigin) Valid() bool {
+	switch e {
+	case Builtin:
+		return true
+	case Config:
+		return true
+	case Env:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SubmitIntent.
 const (
 	Default      SubmitIntent = "default"
@@ -1267,6 +1375,16 @@ type CityUnregisterSucceededPayload struct {
 
 	// RequestId Correlation ID from the 202 response.
 	RequestId string `json:"request_id"`
+}
+
+// ConditionalWritesDegradedPayload defines model for ConditionalWritesDegradedPayload.
+type ConditionalWritesDegradedPayload struct {
+	BdVersion *string `json:"bd_version,omitempty"`
+	Mode      string  `json:"mode"`
+	Origin    string  `json:"origin"`
+	Reason    string  `json:"reason"`
+	StoreId   string  `json:"store_id"`
+	StoreKind string  `json:"store_kind"`
 }
 
 // ConfigAgentResponse defines model for ConfigAgentResponse.
@@ -3282,6 +3400,16 @@ type RunStepsOutputBody struct {
 	Steps *[]RunStep `json:"steps"`
 }
 
+// RunsCensusOutputBody defines model for RunsCensusOutputBody.
+type RunsCensusOutputBody struct {
+	// Partial True when the incremental projection is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Sanitized reasons the census may be incomplete.
+	PartialErrors *[]string       `json:"partial_errors,omitempty"`
+	StatusCounts  RunStatusCounts `json:"status_counts"`
+}
+
 // RunsListOutputBody defines model for RunsListOutputBody.
 type RunsListOutputBody struct {
 	// Partial True when some runs could not be fully projected.
@@ -4623,7 +4751,8 @@ type StatusBody struct {
 	Beads        *BeadsDiagnostic     `json:"beads,omitempty"`
 
 	// BeadsVersion Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
-	BeadsVersion *string `json:"beads_version,omitempty"`
+	BeadsVersion      *string                  `json:"beads_version,omitempty"`
+	ConditionalWrites *StatusConditionalWrites `json:"conditional_writes,omitempty"`
 
 	// DoltVersion Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
 	DoltVersion *string          `json:"dolt_version,omitempty"`
@@ -4667,6 +4796,60 @@ type StatusBody struct {
 	Work    StatusWorkCounts `json:"work"`
 }
 
+// StatusConditionalWriteStoreVerdict defines model for StatusConditionalWriteStoreVerdict.
+type StatusConditionalWriteStoreVerdict struct {
+	// Capable What the write path uses today: false only on a definitive incapable verdict.
+	Capable bool `json:"capable"`
+
+	// Kind Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).
+	Kind string `json:"kind"`
+
+	// Latch Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+	Latch StatusConditionalWriteStoreVerdictLatch `json:"latch"`
+
+	// Probe Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+	Probe StatusConditionalWriteStoreVerdictProbe `json:"probe"`
+
+	// Reason Incapable cause, verbatim from the probe or latch.
+	Reason *string `json:"reason,omitempty"`
+
+	// StoreId Store scope: city, or rig/<name>.
+	StoreId string `json:"store_id"`
+}
+
+// StatusConditionalWriteStoreVerdictLatch Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+type StatusConditionalWriteStoreVerdictLatch string
+
+// StatusConditionalWriteStoreVerdictProbe Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+type StatusConditionalWriteStoreVerdictProbe string
+
+// StatusConditionalWrites defines model for StatusConditionalWrites.
+type StatusConditionalWrites struct {
+	// Effective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+	Effective StatusConditionalWritesEffective `json:"effective"`
+
+	// Mode Boot-latched beads.conditional_writes mode.
+	Mode StatusConditionalWritesMode `json:"mode"`
+
+	// Notices Retained rollout notices (env overrides, drift, invalid spellings).
+	Notices *[]StatusRolloutNotice `json:"notices,omitempty"`
+
+	// Origin Where the latched mode came from.
+	Origin StatusConditionalWritesOrigin `json:"origin"`
+
+	// Stores Per-store verdicts, one row per controller-owned store.
+	Stores *[]StatusConditionalWriteStoreVerdict `json:"stores,omitempty"`
+}
+
+// StatusConditionalWritesEffective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+type StatusConditionalWritesEffective string
+
+// StatusConditionalWritesMode Boot-latched beads.conditional_writes mode.
+type StatusConditionalWritesMode string
+
+// StatusConditionalWritesOrigin Where the latched mode came from.
+type StatusConditionalWritesOrigin string
+
 // StatusMailCounts defines model for StatusMailCounts.
 type StatusMailCounts struct {
 	// Total Total number of messages.
@@ -4707,6 +4890,27 @@ type StatusRigDetail struct {
 
 	// Suspended Whether the rig is suspended (either explicitly or because all its agents are suspended).
 	Suspended bool `json:"suspended"`
+}
+
+// StatusRolloutNotice defines model for StatusRolloutNotice.
+type StatusRolloutNotice struct {
+	// ConfigValue Raw config spelling; empty when unset.
+	ConfigValue *string `json:"config_value,omitempty"`
+
+	// EnvValue Raw env spelling as found.
+	EnvValue *string `json:"env_value,omitempty"`
+
+	// EnvVar Environment variable involved, when env-related.
+	EnvVar *string `json:"env_var,omitempty"`
+
+	// FlagKey Rollout gate key the notice is about.
+	FlagKey string `json:"flag_key"`
+
+	// Kind Notice kind (env_overrides_config, pending_restart, invalid_value, ...).
+	Kind string `json:"kind"`
+
+	// Message Human-readable line carrying the gate and the outcome.
+	Message string `json:"message"`
 }
 
 // StatusSessionCountsDetail defines model for StatusSessionCountsDetail.
@@ -5083,6 +5287,21 @@ type TypedEventStreamEnvelopeBeadWorktreeReaped struct {
 	Ts        time.Time                 `json:"ts"`
 	Type      string                    `json:"type"`
 	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedEventStreamEnvelopeBeadsConditionalWritesDegraded.
+type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
+	Actor     string                           `json:"actor"`
+	Message   *string                          `json:"message,omitempty"`
+	Payload   ConditionalWritesDegradedPayload `json:"payload"`
+	RunId     *string                          `json:"run_id,omitempty"`
+	Seq       int64                            `json:"seq"`
+	SessionId *string                          `json:"session_id,omitempty"`
+	StepId    *string                          `json:"step_id,omitempty"`
+	Subject   *string                          `json:"subject,omitempty"`
+	Ts        time.Time                        `json:"ts"`
+	Type      string                           `json:"type"`
+	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeCityCreated defines model for TypedEventStreamEnvelopeCityCreated.
@@ -6251,6 +6470,22 @@ type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped struct {
 	Ts        time.Time                 `json:"ts"`
 	Type      string                    `json:"type"`
 	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded.
+type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
+	Actor     string                           `json:"actor"`
+	City      string                           `json:"city"`
+	Message   *string                          `json:"message,omitempty"`
+	Payload   ConditionalWritesDegradedPayload `json:"payload"`
+	RunId     *string                          `json:"run_id,omitempty"`
+	Seq       int64                            `json:"seq"`
+	SessionId *string                          `json:"session_id,omitempty"`
+	StepId    *string                          `json:"step_id,omitempty"`
+	Subject   *string                          `json:"subject,omitempty"`
+	Ts        time.Time                        `json:"ts"`
+	Type      string                           `json:"type"`
+	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCityCreated defines model for TypedTaggedEventStreamEnvelopeCityCreated.
@@ -8724,6 +8959,12 @@ type PostV0CityByCityNameUnregisterParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// GetV0CityByCityNameUsageParams defines parameters for GetV0CityByCityNameUsage.
+type GetV0CityByCityNameUsageParams struct {
+	// AggregateOnly Omit the per-session breakdown and return city-level totals only.
+	AggregateOnly *bool `form:"aggregate_only,omitempty" json:"aggregate_only,omitempty"`
+}
+
 // GetV0CityByCityNameWaitsParams defines parameters for GetV0CityByCityNameWaits.
 type GetV0CityByCityNameWaitsParams struct {
 	// State Filter by wait state.
@@ -9178,6 +9419,32 @@ func (t *EventPayload) FromCityUnregisterSucceededPayload(v CityUnregisterSuccee
 
 // MergeCityUnregisterSucceededPayload performs a merge with any union data inside the EventPayload, using the provided CityUnregisterSucceededPayload
 func (t *EventPayload) MergeCityUnregisterSucceededPayload(v CityUnregisterSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsConditionalWritesDegradedPayload returns the union data inside the EventPayload as a ConditionalWritesDegradedPayload
+func (t EventPayload) AsConditionalWritesDegradedPayload() (ConditionalWritesDegradedPayload, error) {
+	var body ConditionalWritesDegradedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromConditionalWritesDegradedPayload overwrites any union data inside the EventPayload as the provided ConditionalWritesDegradedPayload
+func (t *EventPayload) FromConditionalWritesDegradedPayload(v ConditionalWritesDegradedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeConditionalWritesDegradedPayload performs a merge with any union data inside the EventPayload, using the provided ConditionalWritesDegradedPayload
+func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWritesDegradedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -11971,6 +12238,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadWorktreeReap
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
+	var body TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadsConditionalWritesDegraded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadsConditionalWritesDegraded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeCityCreated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeCityCreated
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeCityCreated() (TypedEventStreamEnvelopeCityCreated, error) {
 	var body TypedEventStreamEnvelopeCityCreated
@@ -13935,6 +14230,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.conditional_writes.degraded":
+		return t.AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
 		return t.AsTypedEventStreamEnvelopeCityCreated()
 	case "city.resumed":
@@ -14300,6 +14597,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadW
 // MergeTypedTaggedEventStreamEnvelopeBeadWorktreeReaped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadWorktreeReaped
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadWorktreeReaped(v TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) error {
 	v.Type = "bead.worktree.reaped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
+	v.Type = "beads.conditional_writes.degraded"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16274,6 +16599,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.conditional_writes.degraded":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
 		return t.AsTypedTaggedEventStreamEnvelopeCityCreated()
 	case "city.resumed":
@@ -16946,6 +17273,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameRuns request
 	GetV0CityByCityNameRuns(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameRunsCensus request
+	GetV0CityByCityNameRunsCensus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameRunsByRunId request
 	GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17047,7 +17377,7 @@ type ClientInterface interface {
 	PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameUsage request
-	GetV0CityByCityNameUsage(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameUsage(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameWaitById request
 	GetV0CityByCityNameWaitById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19006,6 +19336,18 @@ func (c *Client) GetV0CityByCityNameRuns(ctx context.Context, cityName string, p
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetV0CityByCityNameRunsCensus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameRunsCensusRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameRunsByRunIdRequest(c.Server, cityName, runId)
 	if err != nil {
@@ -19438,8 +19780,8 @@ func (c *Client) PostV0CityByCityNameUnregister(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameUsage(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameUsageRequest(c.Server, cityName)
+func (c *Client) GetV0CityByCityNameUsage(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameUsageRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -27513,6 +27855,40 @@ func NewGetV0CityByCityNameRunsRequest(server string, cityName string, params *G
 	return req, nil
 }
 
+// NewGetV0CityByCityNameRunsCensusRequest generates requests for GetV0CityByCityNameRunsCensus
+func NewGetV0CityByCityNameRunsCensusRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs/census", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameRunsByRunIdRequest generates requests for GetV0CityByCityNameRunsByRunId
 func NewGetV0CityByCityNameRunsByRunIdRequest(server string, cityName string, runId string) (*http.Request, error) {
 	var err error
@@ -29294,7 +29670,7 @@ func NewPostV0CityByCityNameUnregisterRequest(server string, cityName string, pa
 }
 
 // NewGetV0CityByCityNameUsageRequest generates requests for GetV0CityByCityNameUsage
-func NewGetV0CityByCityNameUsageRequest(server string, cityName string) (*http.Request, error) {
+func NewGetV0CityByCityNameUsageRequest(server string, cityName string, params *GetV0CityByCityNameUsageParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -29317,6 +29693,28 @@ func NewGetV0CityByCityNameUsageRequest(server string, cityName string) (*http.R
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.AggregateOnly != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "aggregate_only", *params.AggregateOnly, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -30409,6 +30807,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameRunsWithResponse request
 	GetV0CityByCityNameRunsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsResponse, error)
 
+	// GetV0CityByCityNameRunsCensusWithResponse request
+	GetV0CityByCityNameRunsCensusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsCensusResponse, error)
+
 	// GetV0CityByCityNameRunsByRunIdWithResponse request
 	GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error)
 
@@ -30510,7 +30911,7 @@ type ClientWithResponsesInterface interface {
 	PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error)
 
 	// GetV0CityByCityNameUsageWithResponse request
-	GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error)
+	GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error)
 
 	// GetV0CityByCityNameWaitByIdWithResponse request
 	GetV0CityByCityNameWaitByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWaitByIdResponse, error)
@@ -33952,6 +34353,31 @@ func (r GetV0CityByCityNameRunsResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameRunsCensusResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RunsCensusOutputBody
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameRunsCensusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameRunsCensusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameRunsByRunIdResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -36360,6 +36786,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameRunsWithResponse(ctx context.Co
 	return ParseGetV0CityByCityNameRunsResponse(rsp)
 }
 
+// GetV0CityByCityNameRunsCensusWithResponse request returning *GetV0CityByCityNameRunsCensusResponse
+func (c *ClientWithResponses) GetV0CityByCityNameRunsCensusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsCensusResponse, error) {
+	rsp, err := c.GetV0CityByCityNameRunsCensus(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameRunsCensusResponse(rsp)
+}
+
 // GetV0CityByCityNameRunsByRunIdWithResponse request returning *GetV0CityByCityNameRunsByRunIdResponse
 func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdResponse, error) {
 	rsp, err := c.GetV0CityByCityNameRunsByRunId(ctx, cityName, runId, reqEditors...)
@@ -36677,8 +37112,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameUnregisterWithResponse(ctx con
 }
 
 // GetV0CityByCityNameUsageWithResponse request returning *GetV0CityByCityNameUsageResponse
-func (c *ClientWithResponses) GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error) {
-	rsp, err := c.GetV0CityByCityNameUsage(ctx, cityName, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameUsageWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameUsageParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameUsageResponse, error) {
+	rsp, err := c.GetV0CityByCityNameUsage(ctx, cityName, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -44503,6 +44938,53 @@ func ParseGetV0CityByCityNameRunsResponse(rsp *http.Response) (*GetV0CityByCityN
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest RunsListOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameRunsCensusResponse parses an HTTP response from a GetV0CityByCityNameRunsCensusWithResponse call
+func ParseGetV0CityByCityNameRunsCensusResponse(rsp *http.Response) (*GetV0CityByCityNameRunsCensusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameRunsCensusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunsCensusOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

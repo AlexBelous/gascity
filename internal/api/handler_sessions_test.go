@@ -903,15 +903,23 @@ func TestHandleSessionListUsesCachedSessionBeadsWhenAvailable(t *testing.T) {
 	}
 }
 
-func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
-	fs := newSessionFakeState(t)
+// newHermeticCodexSessionSearchPath keeps Codex's always-merged default root
+// inside test-owned HOME while preserving a separate configured search path.
+func newHermeticCodexSessionSearchPath(t *testing.T) string {
+	t.Helper()
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
 		t.Fatalf("MkdirAll default codex sessions: %v", err)
 	}
-	searchBase := t.TempDir()
+	return t.TempDir()
+}
+
+func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -961,13 +969,7 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 
 func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
 	fs := newSessionFakeState(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
-	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
-		t.Fatalf("MkdirAll default codex sessions: %v", err)
-	}
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -7554,7 +7556,7 @@ func codexFixtureFilename(sessionKey string) string {
 
 func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
@@ -7731,7 +7733,7 @@ func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testi
 
 func TestHandleSessionTranscriptConversationIncludesCodexSystemError(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
@@ -7789,7 +7791,7 @@ func TestHandleSessionTranscriptConversationIncludesCodexSystemError(t *testing.
 
 func TestHandleSessionStreamConversationIncludesCodexSystemError(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 

@@ -548,6 +548,15 @@ export type CityUnregisterSucceededPayload = {
     request_id: string;
 };
 
+export type ConditionalWritesDegradedPayload = {
+    bd_version?: string;
+    mode: string;
+    origin: string;
+    reason: string;
+    store_id: string;
+    store_kind: string;
+};
+
 export type ConfigAgentResponse = {
     dir?: string;
     is_pool?: boolean;
@@ -835,7 +844,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2929,6 +2938,21 @@ export type RunStepsOutputBody = {
     steps: Array<RunStep> | null;
 };
 
+export type RunsCensusOutputBody = {
+    /**
+     * True when the incremental projection is incomplete.
+     */
+    partial?: boolean;
+    /**
+     * Sanitized reasons the census may be incomplete.
+     */
+    partial_errors?: Array<string> | null;
+    /**
+     * Every projected run by canonical lifecycle state.
+     */
+    status_counts: RunStatusCounts;
+};
+
 export type RunsListOutputBody = {
     /**
      * True when some runs could not be fully projected.
@@ -4569,6 +4593,10 @@ export type StatusBody = {
      */
     beads_version?: string;
     /**
+     * Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface.
+     */
+    conditional_writes?: StatusConditionalWrites;
+    /**
      * Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
      */
     dolt_version?: string;
@@ -4638,6 +4666,56 @@ export type StatusBody = {
     work: StatusWorkCounts;
 };
 
+export type StatusConditionalWriteStoreVerdict = {
+    /**
+     * What the write path uses today: false only on a definitive incapable verdict.
+     */
+    capable: boolean;
+    /**
+     * Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).
+     */
+    kind: string;
+    /**
+     * Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.
+     */
+    latch: 'incapable' | 'unlatched';
+    /**
+     * Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.
+     */
+    probe: 'capable' | 'incapable' | 'unprobed';
+    /**
+     * Incapable cause, verbatim from the probe or latch.
+     */
+    reason?: string;
+    /**
+     * Store scope: city, or rig/<name>.
+     */
+    store_id: string;
+};
+
+export type StatusConditionalWrites = {
+    /**
+     * Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+     */
+    effective: 'off' | 'active' | 'degraded' | 'fail_closed' | 'pending_restart';
+    /**
+     * Boot-latched beads.conditional_writes mode.
+     */
+    mode: 'off' | 'auto' | 'require';
+    /**
+     * Retained rollout notices (env overrides, drift, invalid spellings).
+     */
+    notices?: Array<StatusRolloutNotice> | null;
+    /**
+     * Where the latched mode came from.
+     */
+    origin: 'builtin' | 'config' | 'env';
+    /**
+     * Per-store verdicts, one row per controller-owned store.
+     */
+    stores?: Array<StatusConditionalWriteStoreVerdict> | null;
+};
+
 export type StatusMailCounts = {
     /**
      * Total number of messages.
@@ -4688,6 +4766,33 @@ export type StatusRigDetail = {
      * Whether the rig is suspended (either explicitly or because all its agents are suspended).
      */
     suspended: boolean;
+};
+
+export type StatusRolloutNotice = {
+    /**
+     * Raw config spelling; empty when unset.
+     */
+    config_value?: string;
+    /**
+     * Raw env spelling as found.
+     */
+    env_value?: string;
+    /**
+     * Environment variable involved, when env-related.
+     */
+    env_var?: string;
+    /**
+     * Rollout gate key the notice is about.
+     */
+    flag_key: string;
+    /**
+     * Notice kind (env_overrides_config, pending_restart, invalid_value, ...).
+     */
+    kind: string;
+    /**
+     * Human-readable line carrying the gate and the outcome.
+     */
+    message: string;
 };
 
 export type StatusSessionCountsDetail = {
@@ -4997,6 +5102,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
     type: 'bead.worktree.reaped';
 } & TypedEventStreamEnvelopeBeadWorktreeReaped) | ({
+    type: 'beads.conditional_writes.degraded';
+} & TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
     type: 'city.created';
 } & TypedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -5269,6 +5376,23 @@ export type TypedEventStreamEnvelopeBeadWorktreeReaped = {
     subject?: string;
     ts: string;
     type: 'bead.worktree.reaped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope beads.conditional_writes.degraded
+ */
+export type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
+    actor: string;
+    message?: string;
+    payload: ConditionalWritesDegradedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'beads.conditional_writes.degraded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6467,6 +6591,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
     type: 'bead.worktree.reaped';
 } & TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) | ({
+    type: 'beads.conditional_writes.degraded';
+} & TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
     type: 'city.created';
 } & TypedTaggedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -6747,6 +6873,24 @@ export type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped = {
     subject?: string;
     ts: string;
     type: 'bead.worktree.reaped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope beads.conditional_writes.degraded
+ */
+export type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: ConditionalWritesDegradedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'beads.conditional_writes.degraded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -15542,6 +15686,44 @@ export type GetV0CityByCityNameRunsResponses = {
 
 export type GetV0CityByCityNameRunsResponse = GetV0CityByCityNameRunsResponses[keyof GetV0CityByCityNameRunsResponses];
 
+export type GetV0CityByCityNameRunsCensusData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/runs/census';
+};
+
+export type GetV0CityByCityNameRunsCensusErrors = {
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameRunsCensusError = GetV0CityByCityNameRunsCensusErrors[keyof GetV0CityByCityNameRunsCensusErrors];
+
+export type GetV0CityByCityNameRunsCensusResponses = {
+    /**
+     * OK
+     */
+    200: RunsCensusOutputBody;
+};
+
+export type GetV0CityByCityNameRunsCensusResponse = GetV0CityByCityNameRunsCensusResponses[keyof GetV0CityByCityNameRunsCensusResponses];
+
 export type GetV0CityByCityNameRunsByRunIdData = {
     body?: never;
     path: {
@@ -17278,7 +17460,12 @@ export type GetV0CityByCityNameUsageData = {
          */
         cityName: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Omit the per-session breakdown and return city-level totals only.
+         */
+        aggregate_only?: boolean;
+    };
     url: '/v0/city/{cityName}/usage';
 };
 

@@ -1028,6 +1028,15 @@
           ],
           "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids bd ready/list flags that are unavailable or incomplete in bd\n1.0.4."
         },
+        "conditional_writes": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"off\". Any other value fails config load."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -3159,6 +3168,10 @@
         "provider": {
           "type": "string",
           "description": "Provider is the default provider name used by agents that don't specify one."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Timezone is the city-default IANA time zone (e.g. \"America/New_York\")\nin which cron order schedules are evaluated when an order does not set\nits own tz. Empty means the controller's process-local zone. Invalid\nnames fail order discovery loudly rather than falling back silently."
         },
         "start_command": {
           "type": "string",

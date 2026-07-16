@@ -1480,6 +1480,37 @@
         ],
         "type": "object"
       },
+      "ConditionalWritesDegradedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bd_version": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "store_id": {
+            "type": "string"
+          },
+          "store_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "store_id",
+          "store_kind",
+          "mode",
+          "origin",
+          "reason"
+        ],
+        "type": "object"
+      },
       "ConfigAgentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2331,6 +2362,9 @@
           },
           {
             "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
@@ -6875,6 +6909,33 @@
         ],
         "type": "object"
       },
+      "RunsCensusOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "partial": {
+            "description": "True when the incremental projection is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Sanitized reasons the census may be incomplete.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status_counts": {
+            "$ref": "#/components/schemas/RunStatusCounts",
+            "description": "Every projected run by canonical lifecycle state."
+          }
+        },
+        "required": [
+          "status_counts"
+        ],
+        "type": "object"
+      },
       "RunsListOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -10856,6 +10917,10 @@
             "description": "Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
             "type": "string"
           },
+          "conditional_writes": {
+            "$ref": "#/components/schemas/StatusConditionalWrites",
+            "description": "Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface."
+          },
           "dolt_version": {
             "description": "Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
             "type": "string"
@@ -10961,6 +11026,112 @@
         ],
         "type": "object"
       },
+      "StatusConditionalWriteStoreVerdict": {
+        "additionalProperties": false,
+        "properties": {
+          "capable": {
+            "description": "What the write path uses today: false only on a definitive incapable verdict.",
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).",
+            "type": "string"
+          },
+          "latch": {
+            "description": "Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.",
+            "enum": [
+              "incapable",
+              "unlatched"
+            ],
+            "type": "string"
+          },
+          "probe": {
+            "description": "Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.",
+            "enum": [
+              "capable",
+              "incapable",
+              "unprobed"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Incapable cause, verbatim from the probe or latch.",
+            "type": "string"
+          },
+          "store_id": {
+            "description": "Store scope: city, or rig/\u003cname\u003e.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "store_id",
+          "kind",
+          "probe",
+          "latch",
+          "capable"
+        ],
+        "type": "object"
+      },
+      "StatusConditionalWrites": {
+        "additionalProperties": false,
+        "properties": {
+          "effective": {
+            "description": "Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).",
+            "enum": [
+              "off",
+              "active",
+              "degraded",
+              "fail_closed",
+              "pending_restart"
+            ],
+            "type": "string"
+          },
+          "mode": {
+            "description": "Boot-latched beads.conditional_writes mode.",
+            "enum": [
+              "off",
+              "auto",
+              "require"
+            ],
+            "type": "string"
+          },
+          "notices": {
+            "description": "Retained rollout notices (env overrides, drift, invalid spellings).",
+            "items": {
+              "$ref": "#/components/schemas/StatusRolloutNotice"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "origin": {
+            "description": "Where the latched mode came from.",
+            "enum": [
+              "builtin",
+              "config",
+              "env"
+            ],
+            "type": "string"
+          },
+          "stores": {
+            "description": "Per-store verdicts, one row per controller-owned store.",
+            "items": {
+              "$ref": "#/components/schemas/StatusConditionalWriteStoreVerdict"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "mode",
+          "origin",
+          "effective"
+        ],
+        "type": "object"
+      },
       "StatusMailCounts": {
         "additionalProperties": false,
         "properties": {
@@ -11044,6 +11215,41 @@
           "name",
           "path",
           "suspended"
+        ],
+        "type": "object"
+      },
+      "StatusRolloutNotice": {
+        "additionalProperties": false,
+        "properties": {
+          "config_value": {
+            "description": "Raw config spelling; empty when unset.",
+            "type": "string"
+          },
+          "env_value": {
+            "description": "Raw env spelling as found.",
+            "type": "string"
+          },
+          "env_var": {
+            "description": "Environment variable involved, when env-related.",
+            "type": "string"
+          },
+          "flag_key": {
+            "description": "Rollout gate key the notice is about.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Notice kind (env_overrides_config, pending_restart, invalid_value, ...).",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable line carrying the gate and the outcome.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "flag_key",
+          "message"
         ],
         "type": "object"
       },
@@ -11633,6 +11839,7 @@
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
+            "beads.conditional_writes.degraded": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
@@ -11728,6 +11935,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityCreated"
@@ -12347,6 +12557,57 @@
         "title": "TypedEventStreamEnvelope bead.worktree.reaped",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeBeadsConditionalWritesDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "beads.conditional_writes.degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope beads.conditional_writes.degraded",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeCityCreated": {
         "additionalProperties": false,
         "properties": {
@@ -12864,7 +13125,8 @@
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
                 "emergency.signaled",
-                "emergency.acked"
+                "emergency.acked",
+                "beads.conditional_writes.degraded"
               ]
             },
             "type": "string"
@@ -15955,6 +16217,7 @@
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
+            "beads.conditional_writes.degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
@@ -16050,6 +16313,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated"
@@ -16701,6 +16967,61 @@
         "title": "TypedTaggedEventStreamEnvelope bead.worktree.reaped",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "beads.conditional_writes.degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope beads.conditional_writes.degraded",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeCityCreated": {
         "additionalProperties": false,
         "properties": {
@@ -17253,7 +17574,8 @@
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
                 "emergency.signaled",
-                "emergency.acked"
+                "emergency.acked",
+                "beads.conditional_writes.degraded"
               ]
             },
             "type": "string"
@@ -39482,6 +39804,88 @@
         "summary": "Get v0 city by city name runs"
       }
     },
+    "/v0/city/{cityName}/runs/census": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-runs-census",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunsCensusOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name runs census"
+      }
+    },
     "/v0/city/{cityName}/runs/{run_id}": {
       "get": {
         "operationId": "get-v0-city-by-city-name-runs-by-run-id",
@@ -43962,6 +44366,16 @@
               "minLength": 1,
               "pattern": "\\S",
               "type": "string"
+            }
+          },
+          {
+            "description": "Omit the per-session breakdown and return city-level totals only.",
+            "explode": false,
+            "in": "query",
+            "name": "aggregate_only",
+            "schema": {
+              "description": "Omit the per-session breakdown and return city-level totals only.",
+              "type": "boolean"
             }
           }
         ],

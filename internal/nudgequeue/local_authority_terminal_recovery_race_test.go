@@ -325,6 +325,7 @@ type localAuthorityProviderAttemptFixture struct {
 	repository *CommandRepository
 	store      *repositoryAtomicTestStore
 	authority  *LocalNudgeAuthority
+	cityPath   string
 	command    Command
 	partition  TrustedCityPartition
 }
@@ -333,6 +334,7 @@ type localAuthorityPendingFixture struct {
 	repository *CommandRepository
 	store      *repositoryAtomicTestStore
 	authority  *LocalNudgeAuthority
+	cityPath   string
 	command    Command
 	partition  TrustedCityPartition
 }
@@ -357,7 +359,8 @@ func newLocalAuthorityPendingFixture(t *testing.T) *localAuthorityPendingFixture
 	if err != nil {
 		t.Fatalf("State: %v", err)
 	}
-	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), state, localAuthorityOptions())
+	cityPath := t.TempDir()
+	authority, err := OpenLocalNudgeAuthority(t.Context(), cityPath, state, localAuthorityOptions())
 	if err != nil {
 		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
 	}
@@ -374,7 +377,7 @@ func newLocalAuthorityPendingFixture(t *testing.T) *localAuthorityPendingFixture
 	}
 	return &localAuthorityPendingFixture{
 		repository: repository, store: store, authority: authority,
-		command: *admitted.Entry.Command, partition: admitted.Partition,
+		cityPath: cityPath, command: *admitted.Entry.Command, partition: admitted.Partition,
 	}
 }
 
@@ -392,7 +395,7 @@ func newLocalAuthorityProviderAttemptFixture(t *testing.T) *localAuthorityProvid
 	}
 	return &localAuthorityProviderAttemptFixture{
 		repository: pending.repository, store: pending.store, authority: pending.authority,
-		command: claimed.Command, partition: pending.partition,
+		cityPath: pending.cityPath, command: claimed.Command, partition: pending.partition,
 	}
 }
 

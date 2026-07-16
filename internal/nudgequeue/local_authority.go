@@ -637,7 +637,7 @@ func (a *LocalNudgeAuthority) validateMetadataVersion(ctx context.Context, state
 		return err
 	}
 	if expectedSchema == localNudgeAuthoritySchema {
-		if err := a.validateRetryMetadata(ctx, state); err != nil {
+		if err := a.validateRetryMetadata(ctx, state, advance); err != nil {
 			return err
 		}
 	}

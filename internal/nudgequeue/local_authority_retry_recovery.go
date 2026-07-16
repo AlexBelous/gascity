@@ -835,6 +835,59 @@ func (a *LocalNudgeAuthority) readLocalAuthorityRetryAuditCursor(ctx context.Con
 	return cursor, nil
 }
 
+// readLocalAuthorityRetryAuditCursorV4 validates the checkpoint wire emitted
+// by schema v4. V4 keyed receipt progress only by command and attempt; v5 adds
+// the receipt revision to make the immutable prefix resumable. The migration
+// validates this old evidence before transactionally replacing it with a
+// conservative full-audit cursor in the v5 wire.
+func (a *LocalNudgeAuthority) readLocalAuthorityRetryAuditCursorV4(ctx context.Context, queryer localAuthorityQueryer) (localAuthorityRetryAuditCursor, error) {
+	var generationWire, revisionWire, sequenceWire, identityWire, preparationsWire, receiptsWire, checkpointDigest []byte
+	var phase, afterCommandID, afterAttemptID string
+	if err := queryer.QueryRowContext(ctx, `SELECT audit_generation, audit_repository_revision, audit_sequence_high_water,
+		audit_phase, audit_after_command_id, audit_after_attempt_id, audit_identity,
+		audit_preparation_count, audit_receipt_count, audit_checkpoint_digest
+		FROM retry_meta WHERE singleton = 1`).Scan(
+		&generationWire, &revisionWire, &sequenceWire, &phase, &afterCommandID, &afterAttemptID,
+		&identityWire, &preparationsWire, &receiptsWire, &checkpointDigest,
+	); err != nil {
+		return localAuthorityRetryAuditCursor{}, fmt.Errorf("reading local v4 retry audit cursor: %w", err)
+	}
+	cursor := localAuthorityRetryAuditCursor{
+		phase: localAuthorityRetryAuditPhase(phase), afterCommandID: afterCommandID, afterAttemptID: afterAttemptID,
+	}
+	var err error
+	if cursor.generation, err = decodeLocalAuthorityUint64(generationWire); err != nil {
+		return localAuthorityRetryAuditCursor{}, err
+	}
+	if cursor.repositoryRevision, err = decodeLocalAuthorityUint64(revisionWire); err != nil {
+		return localAuthorityRetryAuditCursor{}, err
+	}
+	if cursor.sequenceHighWater, err = decodeLocalAuthorityUint64(sequenceWire); err != nil {
+		return localAuthorityRetryAuditCursor{}, err
+	}
+	if cursor.preparationCount, err = decodeLocalAuthorityUint64(preparationsWire); err != nil {
+		return localAuthorityRetryAuditCursor{}, err
+	}
+	if cursor.receiptCount, err = decodeLocalAuthorityUint64(receiptsWire); err != nil {
+		return localAuthorityRetryAuditCursor{}, err
+	}
+	if len(identityWire) != sha256.Size {
+		return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: malformed local v4 retry audit identity", ErrLocalNudgeAuthorityConflict)
+	}
+	copy(cursor.identity[:], identityWire)
+	if err := validateLocalAuthorityRetryAuditCursorV4(cursor); err != nil {
+		return localAuthorityRetryAuditCursor{}, err
+	}
+	if len(checkpointDigest) != sha256.Size {
+		return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: malformed local v4 retry audit checkpoint digest", ErrLocalNudgeAuthorityConflict)
+	}
+	wantDigest := localAuthorityRetryAuditCursorDigestV4(cursor, a.store, a.opts.AuthorityID)
+	if !bytes.Equal(checkpointDigest, wantDigest[:]) {
+		return localAuthorityRetryAuditCursor{}, fmt.Errorf("%w: local v4 retry audit checkpoint digest differs", ErrLocalNudgeAuthorityConflict)
+	}
+	return cursor, nil
+}
+
 func (a *LocalNudgeAuthority) updateLocalAuthorityRetryAuditCursor(ctx context.Context, tx *sql.Tx, cursor localAuthorityRetryAuditCursor) error {
 	if err := validateLocalAuthorityRetryAuditCursor(cursor); err != nil {
 		return err
@@ -871,6 +924,27 @@ func localAuthorityRetryAuditCursorDigest(cursor localAuthorityRetryAuditCursor,
 	writeLocalClaimRecoveryUint64(&canonical, cursor.sequenceHighWater)
 	writeLocalClaimRecoveryString(&canonical, string(cursor.phase))
 	writeLocalClaimRecoveryUint64(&canonical, cursor.afterRevision)
+	writeLocalClaimRecoveryString(&canonical, cursor.afterCommandID)
+	writeLocalClaimRecoveryString(&canonical, cursor.afterAttemptID)
+	_, _ = canonical.Write(cursor.identity[:])
+	writeLocalClaimRecoveryUint64(&canonical, cursor.preparationCount)
+	writeLocalClaimRecoveryUint64(&canonical, cursor.receiptCount)
+	return sha256.Sum256(canonical.Bytes())
+}
+
+func localAuthorityRetryAuditCursorDigestV4(cursor localAuthorityRetryAuditCursor, store CommandStoreBinding, authorityID string) [sha256.Size]byte {
+	if cursor.phase == localAuthorityRetryAuditIdle {
+		return localAuthorityRetryAuditCheckpointDigest(store, authorityID, cursor.identity)
+	}
+	var canonical bytes.Buffer
+	writeLocalClaimRecoveryString(&canonical, "gascity.local-retry-audit-checkpoint.v2")
+	writeLocalClaimRecoveryString(&canonical, store.StoreUUID)
+	writeLocalClaimRecoveryUint64(&canonical, store.RestoreEpoch)
+	writeLocalClaimRecoveryString(&canonical, authorityID)
+	writeLocalClaimRecoveryUint64(&canonical, cursor.generation)
+	writeLocalClaimRecoveryUint64(&canonical, cursor.repositoryRevision)
+	writeLocalClaimRecoveryUint64(&canonical, cursor.sequenceHighWater)
+	writeLocalClaimRecoveryString(&canonical, string(cursor.phase))
 	writeLocalClaimRecoveryString(&canonical, cursor.afterCommandID)
 	writeLocalClaimRecoveryString(&canonical, cursor.afterAttemptID)
 	_, _ = canonical.Write(cursor.identity[:])
@@ -920,6 +994,51 @@ func validateLocalAuthorityRetryAuditCursor(cursor localAuthorityRetryAuditCurso
 	}
 	if cursor.identity == ([sha256.Size]byte{}) {
 		return fmt.Errorf("%w: empty local retry audit rolling identity", ErrLocalNudgeAuthorityConflict)
+	}
+	return nil
+}
+
+func validateLocalAuthorityRetryAuditCursorV4(cursor localAuthorityRetryAuditCursor) error {
+	if cursor.afterRevision != 0 || cursor.sequenceHighWater > cursor.repositoryRevision ||
+		cursor.preparationCount > cursor.generation || cursor.receiptCount > cursor.generation {
+		return fmt.Errorf("%w: inconsistent local v4 retry audit checkpoint high-waters", ErrLocalNudgeAuthorityConflict)
+	}
+	if (cursor.afterCommandID == "") != (cursor.afterAttemptID == "") {
+		return fmt.Errorf("%w: partial local v4 retry audit composite cursor", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.afterCommandID != "" {
+		if err := validateCommandIdentity("v4 retry audit command id", cursor.afterCommandID); err != nil {
+			return fmt.Errorf("%w: %w", ErrLocalNudgeAuthorityConflict, err)
+		}
+		if err := validateCommandIdentity("v4 retry audit attempt id", cursor.afterAttemptID); err != nil {
+			return fmt.Errorf("%w: %w", ErrLocalNudgeAuthorityConflict, err)
+		}
+	}
+	initialIdentity := initialLocalAuthorityRetryAuditIdentity()
+	switch cursor.phase {
+	case localAuthorityRetryAuditIdle:
+		want := localAuthorityRetryAuditCursor{phase: localAuthorityRetryAuditIdle, identity: initialIdentity}
+		if cursor != want {
+			return fmt.Errorf("%w: noncanonical idle local v4 retry audit checkpoint", ErrLocalNudgeAuthorityConflict)
+		}
+		return nil
+	case localAuthorityRetryAuditPreparations:
+		if cursor.afterCommandID != "" || cursor.preparationCount != 0 || cursor.receiptCount != 0 || cursor.identity != initialIdentity {
+			return fmt.Errorf("%w: inconsistent preparation local v4 retry audit cursor", ErrLocalNudgeAuthorityConflict)
+		}
+	case localAuthorityRetryAuditReceipts:
+		if cursor.preparationCount != 0 || (cursor.afterCommandID == "") != (cursor.receiptCount == 0) {
+			return fmt.Errorf("%w: inconsistent receipt local v4 retry audit cursor", ErrLocalNudgeAuthorityConflict)
+		}
+	case localAuthorityRetryAuditDone:
+		if cursor.afterCommandID != "" || cursor.preparationCount != 0 {
+			return fmt.Errorf("%w: inconsistent completed local v4 retry audit cursor", ErrLocalNudgeAuthorityConflict)
+		}
+	default:
+		return fmt.Errorf("%w: invalid local v4 retry audit phase %q", ErrLocalNudgeAuthorityConflict, cursor.phase)
+	}
+	if cursor.identity == ([sha256.Size]byte{}) {
+		return fmt.Errorf("%w: empty local v4 retry audit rolling identity", ErrLocalNudgeAuthorityConflict)
 	}
 	return nil
 }

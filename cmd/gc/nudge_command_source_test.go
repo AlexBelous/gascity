@@ -469,6 +469,11 @@ type productionNudgeCommandFixture struct {
 
 func newProductionNudgeCommandFixture(t *testing.T) productionNudgeCommandFixture {
 	t.Helper()
+	return newProductionNudgeCommandFixtureWithLifetime(t, time.Hour)
+}
+
+func newProductionNudgeCommandFixtureWithLifetime(t *testing.T, lifetime time.Duration) productionNudgeCommandFixture {
+	t.Helper()
 	cityPath := t.TempDir()
 	store := newNudgeCommandSourceAtomicStore()
 	repository, err := nudgequeue.NewCommandRepository(store, nudgequeue.NewRestoreAnchorRepositoryVerifier(cityPath))
@@ -504,7 +509,7 @@ func newProductionNudgeCommandFixture(t *testing.T) productionNudgeCommandFixtur
 		Source:       nudgequeue.CommandSourceSession,
 		Message:      "production adapter proof",
 		DeliverAfter: now.Add(time.Second),
-		ExpiresAt:    now.Add(time.Hour),
+		ExpiresAt:    now.Add(lifetime),
 	})
 	if err != nil || admitted.Entry.Command == nil {
 		t.Fatalf("Admit = %#v, err=%v", admitted, err)

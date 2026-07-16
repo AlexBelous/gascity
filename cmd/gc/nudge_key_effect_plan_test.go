@@ -262,6 +262,27 @@ func TestPlanNudgeEffectCandidateRequestsTargetOnlyAfterQueueEligibility(t *test
 	}
 }
 
+func TestPlanNudgeEffectCandidateRoutesExpiredHeadToStoreOnlyTerminalization(t *testing.T) {
+	now := testNudgeEffectTime()
+	command := immediateNudgeEffectCommand(now)
+
+	got := planNudgeEffectCandidate(nudgeEffectCandidateFacts{
+		operationID:   command.ID,
+		expectedStore: command.Store,
+		projection:    nudgeEffectPlanProjection(command),
+		page:          nudgeEffectPlanPage(command),
+		observedAt:    command.ExpiresAt,
+	})
+	want := nudgeEffectCandidatePlan{
+		disposition: nudgeEffectCandidateNeedClaim,
+		reason:      nudgeEffectPlanReasonExpired,
+		commandID:   command.ID,
+	}
+	if got != want {
+		t.Fatalf("expired candidate plan = %#v, want store-only terminalization %#v", got, want)
+	}
+}
+
 func TestPlanNudgeEffectPreEntryExecutesAuthorizedExactLaunch(t *testing.T) {
 	now := testNudgeEffectTime()
 	command := immediateNudgeEffectCommand(now)

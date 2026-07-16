@@ -89,6 +89,50 @@ func TestNudgeKeyEffectOwnerAuthorizedImmediateExecutesAfterDurableClaim(t *test
 	}
 }
 
+func TestNudgeKeyEffectOwnerAlreadyExpiredHeadTerminalizesAndSchedulesNextCommand(t *testing.T) {
+	fixture := newProductionNudgeCommandFixtureWithLifetime(t, 10*time.Minute)
+	next := admitLaterProductionNudgeEffectCommand(t, &fixture)
+	owner, targetReads := newProductionNudgeExpiryOwner(t, &fixture, func() time.Time {
+		return fixture.command.ExpiresAt
+	})
+
+	outcome := owner.reconcile(t.Context(), ownerExpirationTestKey(t, owner, fixture.command.Target.SessionID), nudgeReconcileBatch{
+		Causes: nudgeCauseCommandCommit,
+	})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, outcome)
+	if outcome.disposition != nudgeReconcileOutcomeContinue {
+		t.Fatalf("expired-head outcome = %#v, want immediate continuation for the next command", outcome)
+	}
+	assertProductionNudgeCommandExpired(t, &fixture, fixture.command.ID)
+	assertNudgeEffectNextIndexedCommand(t, owner, fixture.command.Target.SessionID, next.ID)
+	if got := targetReads.callCount(); got != 0 {
+		t.Fatalf("target reads for already-expired command = %d, want 0", got)
+	}
+}
+
+func TestNudgeKeyEffectOwnerExpiryBetweenCandidateAndClaimTerminalizesAndSchedulesNextCommand(t *testing.T) {
+	fixture := newProductionNudgeCommandFixtureWithLifetime(t, 10*time.Minute)
+	next := admitLaterProductionNudgeEffectCommand(t, &fixture)
+	clock := &scriptedNudgeEffectClock{times: []time.Time{
+		fixture.command.ExpiresAt.Add(-time.Nanosecond),
+		fixture.command.ExpiresAt,
+	}}
+	owner, targetReads := newProductionNudgeExpiryOwner(t, &fixture, clock.Now)
+
+	outcome := owner.reconcile(t.Context(), ownerExpirationTestKey(t, owner, fixture.command.Target.SessionID), nudgeReconcileBatch{
+		Causes: nudgeCauseCommandCommit,
+	})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, outcome)
+	if outcome.disposition != nudgeReconcileOutcomeContinue {
+		t.Fatalf("claim-boundary expiry outcome = %#v, want immediate continuation for the next command", outcome)
+	}
+	assertProductionNudgeCommandExpired(t, &fixture, fixture.command.ID)
+	assertNudgeEffectNextIndexedCommand(t, owner, fixture.command.Target.SessionID, next.ID)
+	if got := targetReads.callCount(); got != 1 {
+		t.Fatalf("target reads before claim-boundary expiry = %d, want exactly the candidate read", got)
+	}
+}
+
 func TestNudgeKeyEffectOwnerClaimRefusalsNeverReachWorker(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -529,6 +573,156 @@ func assertNudgeEffectOutcomeDoesNotViolateInvariant(t *testing.T, outcome nudge
 	if outcome.disposition == nudgeReconcileOutcomeInvariant {
 		t.Fatalf("reconcile reported invariant failure: %v", outcome.err)
 	}
+}
+
+func admitLaterProductionNudgeEffectCommand(t *testing.T, fixture *productionNudgeCommandFixture) nudgequeue.Command {
+	t.Helper()
+	result, err := fixture.ingress.Admit(t.Context(), nudgequeue.NudgeIngressRequest{
+		RequestID: "production-source-request-after-expired-head",
+		Mode:      nudgequeue.DeliveryModeQueue,
+		Target:    fixture.command.Target,
+		Source:    nudgequeue.CommandSourceSession,
+		Message:   "command after expired ordered head",
+		ExpiresAt: fixture.now.Add(30 * time.Minute),
+	})
+	if err != nil || result.Entry.Command == nil {
+		t.Fatalf("admit command after expired head = %#v, err=%v", result, err)
+	}
+	if result.Partition != fixture.partition {
+		t.Fatalf("later command partition = %#v, want %#v", result.Partition, fixture.partition)
+	}
+	return *result.Entry.Command
+}
+
+func newProductionNudgeExpiryOwner(
+	t *testing.T,
+	fixture *productionNudgeCommandFixture,
+	now func() time.Time,
+) (*nudgeKeyEffectOwner, *countingNudgeEffectTargetReader) {
+	t.Helper()
+	opened, err := openVerifiedProductionNudgeCommandSource(
+		t.Context(), fixture.cityPath, fixture.store, fixture.partition, fixture.ingress,
+	)
+	if err != nil {
+		t.Fatalf("openVerifiedProductionNudgeCommandSource: %v", err)
+	}
+	source, ok := opened.(nudgeCommandEffectSource)
+	if !ok {
+		t.Fatalf("production source = %T, want nudgeCommandEffectSource", opened)
+	}
+	reader, err := newNudgeKeyReadShadow(t.Context(), source, 8, nil)
+	if err != nil {
+		t.Fatalf("newNudgeKeyReadShadow: %v", err)
+	}
+	targets := &countingNudgeEffectTargetReader{target: nudgeEffectTarget{
+		sessionID:            fixture.command.Target.SessionID,
+		sessionName:          "city--production-worker",
+		intentGeneration:     fixture.command.Target.IntentGeneration,
+		continuationIdentity: fixture.command.Target.ContinuationIdentity,
+		launchIdentity:       "production-launch",
+	}}
+	ids := &nudgeEffectTestIDs{}
+	owner, err := newNudgeKeyEffectOwner(nudgeKeyEffectOwnerConfig{
+		reader:            reader,
+		source:            source,
+		authorizer:        fixture.authority,
+		targets:           targets,
+		handles:           &staticNudgeEffectHandleFactory{},
+		ownerID:           "expiry-owner",
+		now:               now,
+		newID:             ids.newID,
+		claimLease:        time.Minute,
+		completionTimeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("newNudgeKeyEffectOwner: %v", err)
+	}
+	return owner, targets
+}
+
+func ownerExpirationTestKey(t *testing.T, owner *nudgeKeyEffectOwner, sessionID string) reconcilekey.Session {
+	t.Helper()
+	key, err := owner.reader.key(sessionID)
+	if err != nil {
+		t.Fatalf("expiry owner key: %v", err)
+	}
+	return key
+}
+
+func assertProductionNudgeCommandExpired(t *testing.T, fixture *productionNudgeCommandFixture, commandID string) {
+	t.Helper()
+	resolution, err := fixture.repository.Get(t.Context(), commandID)
+	if err != nil || !resolution.Found || resolution.Entry.Command == nil {
+		t.Fatalf("read expired production command = %#v, err=%v", resolution, err)
+	}
+	command := resolution.Entry.Command
+	if command.State != nudgequeue.CommandStateExpired || command.Claim != nil || command.Terminal == nil {
+		t.Fatalf("durable expired command = %#v, want terminal expired state", command)
+	}
+	if command.Terminal.ActionResult != nudgequeue.CommandActionResultExpired ||
+		command.Terminal.ErrorClass != nudgequeue.CommandErrorClassExpired ||
+		command.Terminal.ProviderStage != nudgequeue.ProviderStageNotEntered ||
+		command.Terminal.Completion != nudgequeue.CompletionStateNotCompleted {
+		t.Fatalf("durable expiry evidence = %#v, want definite pre-provider expiry", command.Terminal)
+	}
+}
+
+func assertNudgeEffectNextIndexedCommand(t *testing.T, owner *nudgeKeyEffectOwner, sessionID, commandID string) {
+	t.Helper()
+	page, err := owner.reader.index.Page(sessionID, 0, 1)
+	if err != nil {
+		t.Fatalf("page after expired head: %v", err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].Command == nil ||
+		page.Entries[0].Command.ID != commandID || page.Entries[0].Command.State != nudgequeue.CommandStatePending {
+		t.Fatalf("ordered head after expiry = %#v, want pending command %q", page.Entries, commandID)
+	}
+}
+
+type countingNudgeEffectTargetReader struct {
+	mu     sync.Mutex
+	target nudgeEffectTarget
+	calls  int
+}
+
+func (r *countingNudgeEffectTargetReader) Read(ctx context.Context, sessionID string) (nudgeEffectTarget, error) {
+	if err := ctx.Err(); err != nil {
+		return nudgeEffectTarget{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	if sessionID != r.target.sessionID {
+		return nudgeEffectTarget{}, fmt.Errorf("target read session %q does not match %q", sessionID, r.target.sessionID)
+	}
+	return r.target, nil
+}
+
+func (r *countingNudgeEffectTargetReader) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+type scriptedNudgeEffectClock struct {
+	mu    sync.Mutex
+	times []time.Time
+	next  int
+}
+
+func (c *scriptedNudgeEffectClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.times) == 0 {
+		return time.Time{}
+	}
+	index := c.next
+	if index >= len(c.times) {
+		index = len(c.times) - 1
+	} else {
+		c.next++
+	}
+	return c.times[index]
 }
 
 type nudgeEffectOwnerExecutionFixture struct {

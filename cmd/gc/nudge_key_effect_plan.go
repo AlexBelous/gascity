@@ -76,6 +76,7 @@ const (
 	nudgeEffectPreEntryPark
 	nudgeEffectPreEntryRetry
 	nudgeEffectPreEntryReject
+	nudgeEffectPreEntryTerminalizedExpired
 	nudgeEffectPreEntryTerminalizeSuperseded
 	nudgeEffectPreEntryNeedFinalTarget
 	nudgeEffectPreEntryExecute
@@ -148,7 +149,7 @@ func planNudgeEffectCandidate(facts nudgeEffectCandidateFacts) nudgeEffectCandid
 		return plan
 	}
 	if facts.observedAt.IsZero() || !facts.observedAt.Before(command.ExpiresAt) {
-		plan.disposition = nudgeEffectCandidateNoop
+		plan.disposition = nudgeEffectCandidateNeedClaim
 		plan.reason = nudgeEffectPlanReasonExpired
 		return plan
 	}
@@ -174,6 +175,35 @@ func planNudgeEffectPreEntry(facts nudgeEffectPreEntryFacts) nudgeEffectPreEntry
 		action:              nudgeEffectPlanActionNone,
 		commandID:           facts.candidate.commandID,
 		boundLaunchIdentity: facts.candidate.boundLaunchIdentity,
+	}
+	if facts.request.expireOnly {
+		if facts.candidate.disposition != nudgeEffectCandidateNeedClaim ||
+			(facts.candidate.reason != nudgeEffectPlanReasonExpired && facts.candidate.reason != nudgeEffectPlanReasonReadyToClaim) ||
+			facts.request.commandID != facts.candidate.commandID || facts.request.boundLaunchIdentity != "" {
+			plan.disposition = nudgeEffectPreEntryReject
+			plan.reason = nudgeEffectPlanReasonClaimInvalid
+			return plan
+		}
+		switch facts.claimResult.Disposition {
+		case nudgequeue.CommandClaimBusy:
+			plan.disposition = nudgeEffectPreEntryPark
+			plan.reason = nudgeEffectPlanReasonClaimBusy
+		case nudgequeue.CommandClaimAuthorizationUnknown:
+			plan.disposition = nudgeEffectPreEntryRetry
+			plan.reason = nudgeEffectPlanReasonAuthorizationUnknown
+		case nudgequeue.CommandClaimDenied:
+			if nudgeEffectClaimResultIsExpired(facts.claimResult.Command, facts.request.commandID) {
+				plan.disposition = nudgeEffectPreEntryTerminalizedExpired
+				plan.reason = nudgeEffectPlanReasonExpired
+			} else {
+				plan.disposition = nudgeEffectPreEntryReject
+				plan.reason = nudgeEffectPlanReasonAuthorizationDenied
+			}
+		default:
+			plan.disposition = nudgeEffectPreEntryReject
+			plan.reason = nudgeEffectPlanReasonClaimInvalid
+		}
+		return plan
 	}
 	if facts.candidate.disposition != nudgeEffectCandidateNeedClaim ||
 		facts.candidate.reason != nudgeEffectPlanReasonReadyToClaim ||
@@ -227,4 +257,13 @@ func planNudgeEffectPreEntry(facts nudgeEffectPreEntryFacts) nudgeEffectPreEntry
 	plan.boundLaunchIdentity = finalLaunch
 	plan.interactionPolicy = runtime.NudgeInteractionRequireUnattachedNormal
 	return plan
+}
+
+func nudgeEffectClaimResultIsExpired(command nudgequeue.Command, commandID string) bool {
+	return command.ID == commandID && command.State == nudgequeue.CommandStateExpired &&
+		command.Claim == nil && command.Terminal != nil &&
+		command.Terminal.ActionResult == nudgequeue.CommandActionResultExpired &&
+		command.Terminal.ErrorClass == nudgequeue.CommandErrorClassExpired &&
+		command.Terminal.ProviderStage == nudgequeue.ProviderStageNotEntered &&
+		command.Terminal.Completion == nudgequeue.CompletionStateNotCompleted
 }

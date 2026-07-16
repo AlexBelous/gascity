@@ -184,6 +184,7 @@ func (s *productionNudgeCommandSource) ClaimAuthorized(ctx context.Context, requ
 		OwnerID:             request.ownerID,
 		AttemptID:           request.attemptID,
 		BoundLaunchIdentity: request.boundLaunchIdentity,
+		ExpireOnly:          request.expireOnly,
 		Partition:           s.partition,
 		ClaimedAt:           request.claimedAt,
 		LeaseUntil:          request.leaseUntil,

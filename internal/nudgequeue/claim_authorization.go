@@ -48,12 +48,16 @@ const (
 // CommandClaimRequest contains only ownership and lease data. Payload, target,
 // store, requester, and city-scope values come from durable authority or the
 // opaque partition capability and cannot be substituted by the caller.
+// ExpireOnly asks the same atomic authority path to terminalize the command only
+// when ClaimedAt is outside its delivery window. It can never create a claim and
+// therefore carries no proposed launch binding.
 type CommandClaimRequest struct {
 	CommandID           string
 	ClaimID             string
 	OwnerID             string
 	AttemptID           string
 	BoundLaunchIdentity string
+	ExpireOnly          bool
 	Partition           TrustedCityPartition
 	ClaimedAt           time.Time
 	LeaseUntil          time.Time
@@ -309,6 +313,10 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 			mutated = true
 			return nil
 		}
+		if request.ExpireOnly {
+			result.Disposition = CommandClaimBusy
+			return nil
+		}
 
 		authorization, err := authorizer.AuthorizeNudgeClaim(ctx, NudgeClaimAuthorizationRequest{
 			Command:             cloneCommandValue(command),
@@ -490,11 +498,17 @@ func validateCommandClaimRequest(request CommandClaimRequest) error {
 		{name: "claim id", value: request.ClaimID},
 		{name: "claim owner id", value: request.OwnerID},
 		{name: "claim attempt id", value: request.AttemptID},
-		{name: "claim bound launch identity", value: request.BoundLaunchIdentity},
 	} {
 		if err := validateCommandIdentity(field.name, field.value); err != nil {
 			return fmt.Errorf("%w: %w", ErrCommandClaimInvalid, err)
 		}
+	}
+	if request.ExpireOnly {
+		if request.BoundLaunchIdentity != "" {
+			return fmt.Errorf("%w: expire-only request carries a proposed launch binding", ErrCommandClaimInvalid)
+		}
+	} else if err := validateCommandIdentity("claim bound launch identity", request.BoundLaunchIdentity); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommandClaimInvalid, err)
 	}
 	if !request.Partition.valid() {
 		return fmt.Errorf("%w: trusted city partition capability is required", ErrCommandClaimInvalid)
@@ -551,6 +565,9 @@ func existingCommandClaimDisposition(command Command, request CommandClaimReques
 }
 
 func buildAuthorizedClaim(command Command, request CommandClaimRequest, authorization NudgeClaimAuthorization) (Command, error) {
+	if request.ExpireOnly {
+		return Command{}, fmt.Errorf("%w: expire-only request cannot build a claim", ErrCommandClaimInvalid)
+	}
 	if request.ClaimedAt.Before(command.CreatedAt) || request.ClaimedAt.Before(command.DeliverAfter) || !request.ClaimedAt.Before(command.ExpiresAt) {
 		return Command{}, fmt.Errorf("%w: claim time is outside the command delivery window", ErrCommandClaimInvalid)
 	}

@@ -316,6 +316,58 @@ func TestClaimAuthorizedExpiredIngressDeniesAndExpiredCommandTerminalizes(t *tes
 	}
 }
 
+func TestClaimAuthorizedExpireOnlyTerminalizesUnboundContinuationWithoutPolicy(t *testing.T) {
+	fixture := newAuthorizedClaimFixture(t)
+	if fixture.command.Target.Policy != TargetPolicyContinuation || fixture.command.Binding != nil {
+		t.Fatalf("fixture target = %#v binding=%#v, want unbound continuation", fixture.command.Target, fixture.command.Binding)
+	}
+	request := fixture.claimRequest("expire-only", "expiry-owner", "expire-attempt", fixture.command.ExpiresAt)
+	request.BoundLaunchIdentity = ""
+	request.ExpireOnly = true
+
+	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+	if err != nil {
+		t.Fatalf("ClaimAuthorized expire-only: %v", err)
+	}
+	if result.Disposition != CommandClaimDenied || result.Command.State != CommandStateExpired || result.Command.Terminal == nil {
+		t.Fatalf("expire-only result = %#v, want durable expired denial", result)
+	}
+	if result.Command.Terminal.ActionResult != CommandActionResultExpired ||
+		result.Command.Terminal.ProviderStage != ProviderStageNotEntered ||
+		result.Command.Terminal.Completion != CompletionStateNotCompleted {
+		t.Fatalf("expire-only terminal = %#v, want definite pre-provider expiry", result.Command.Terminal)
+	}
+	if calls := fixture.authority.claimCalls(); calls != 0 {
+		t.Fatalf("expire-only policy calls = %d, want 0", calls)
+	}
+}
+
+func TestClaimAuthorizedExpireOnlyBeforeDeadlineParksWithoutMutationOrPolicy(t *testing.T) {
+	fixture := newAuthorizedClaimFixture(t)
+	request := fixture.claimRequest("expire-too-early", "expiry-owner", "expire-attempt", fixture.now.Add(time.Second))
+	request.BoundLaunchIdentity = ""
+	request.ExpireOnly = true
+	before, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State before expire-only request: %v", err)
+	}
+
+	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+	if err != nil {
+		t.Fatalf("ClaimAuthorized early expire-only: %v", err)
+	}
+	if result.Disposition != CommandClaimBusy || !reflect.DeepEqual(result.Command, fixture.command) {
+		t.Fatalf("early expire-only result = %#v, want unchanged busy command %#v", result, fixture.command)
+	}
+	after, err := fixture.repository.State(t.Context())
+	if err != nil || after != before {
+		t.Fatalf("repository after early expire-only = %#v, err=%v; want %#v", after, err, before)
+	}
+	if calls := fixture.authority.claimCalls(); calls != 0 {
+		t.Fatalf("early expire-only policy calls = %d, want 0", calls)
+	}
+}
+
 func TestClaimAuthorizedCommitResponseLossAndDuplicateRetryConverge(t *testing.T) {
 	fixture := newAuthorizedClaimFixture(t)
 	request := fixture.claimRequest("claim-lost-response", "owner-1", "attempt-1", fixture.now.Add(time.Second))

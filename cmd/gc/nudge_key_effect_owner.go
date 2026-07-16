@@ -32,6 +32,7 @@ type nudgeEffectClaimRequest struct {
 	ownerID             string
 	attemptID           string
 	boundLaunchIdentity string
+	expireOnly          bool
 	claimedAt           time.Time
 	leaseUntil          time.Time
 }
@@ -193,11 +194,9 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 	command := *facts.page.Entries[0].Command
 
 	claimedAt := o.now().UTC()
-	if !claimedAt.Before(command.ExpiresAt) {
-		return nudgeReconcileSuccess()
-	}
+	expireOnly := candidate.reason == nudgeEffectPlanReasonExpired || !claimedAt.Before(command.ExpiresAt)
 	leaseUntil := claimedAt.Add(o.claimLease)
-	if leaseUntil.After(command.ExpiresAt) {
+	if !expireOnly && leaseUntil.After(command.ExpiresAt) {
 		leaseUntil = command.ExpiresAt
 	}
 	if !leaseUntil.After(claimedAt) {
@@ -217,8 +216,12 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		ownerID:             o.ownerID,
 		attemptID:           attemptID,
 		boundLaunchIdentity: candidate.boundLaunchIdentity,
+		expireOnly:          expireOnly,
 		claimedAt:           claimedAt,
 		leaseUntil:          leaseUntil,
+	}
+	if expireOnly {
+		claimRequest.boundLaunchIdentity = ""
 	}
 	claimResult, err := o.source.ClaimAuthorized(ctx, claimRequest, o.authorizer)
 	if err != nil {
@@ -263,6 +266,13 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		preEntryFacts.finalTargetObserved = true
 	}
 	switch preEntry.disposition {
+	case nudgeEffectPreEntryTerminalizedExpired:
+		if _, found, refreshErr := o.reader.acceptCommandHint(ctx, command.ID); refreshErr != nil {
+			return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("refreshing expired keyed nudge command: %w", refreshErr)))
+		} else if !found {
+			return nudgeReconcileInvariant(errors.New("refreshing expired keyed nudge command: command disappeared"))
+		}
+		return o.nextAfterCompletion(key)
 	case nudgeEffectPreEntryPark, nudgeEffectPreEntryRetry:
 		if _, _, refreshErr := o.reader.acceptCommandHint(ctx, command.ID); refreshErr != nil && ctx.Err() == nil {
 			return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("refreshing unentered keyed nudge claim result: %w", refreshErr)))

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -44,19 +45,23 @@ const (
 // controllerSocketConfig contains process-owned controller capabilities. It is
 // never populated from socket input.
 type controllerSocketConfig struct {
-	nudgeToken     string
+	nudgeToken     func() string
 	nudgeAuthority productionSessionNudgeAuthority
 }
 
 type controllerSocketOption func(*controllerSocketConfig) error
 
 func withControllerNudgeAdmission(token string, authority productionSessionNudgeAuthority) controllerSocketOption {
+	return withControllerNudgeAdmissionTokenSource(func() string { return token }, authority)
+}
+
+func withControllerNudgeAdmissionTokenSource(token func() string, authority productionSessionNudgeAuthority) controllerSocketOption {
 	return func(config *controllerSocketConfig) error {
 		if config == nil {
 			return errors.New("configuring controller nudge admission: socket config is nil")
 		}
-		if token == "" {
-			return errors.New("configuring controller nudge admission: token is empty")
+		if token == nil {
+			return errors.New("configuring controller nudge admission: token source is nil")
 		}
 		if isNilProductionSessionNudgeAuthority(authority) {
 			return errors.New("configuring controller nudge admission: authority is nil")
@@ -65,6 +70,29 @@ func withControllerNudgeAdmission(token string, authority productionSessionNudge
 		config.nudgeAuthority = authority
 		return nil
 	}
+}
+
+type controllerNudgeTokenSlot struct {
+	token atomic.Pointer[string]
+}
+
+func (s *controllerNudgeTokenSlot) Store(token string) {
+	if s == nil || token == "" {
+		return
+	}
+	value := token
+	s.token.Store(&value)
+}
+
+func (s *controllerNudgeTokenSlot) Load() string {
+	if s == nil {
+		return ""
+	}
+	value := s.token.Load()
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func newControllerSocketConfig(options ...controllerSocketOption) (controllerSocketConfig, error) {
@@ -154,7 +182,11 @@ func handleControllerNudgeAdmissionPayload(ctx context.Context, w io.Writer, pay
 		))
 		return
 	}
-	if !controllerNudgeTokenMatches(config.nudgeToken, wire.Token) {
+	expectedToken := ""
+	if config.nudgeToken != nil {
+		expectedToken = config.nudgeToken()
+	}
+	if !controllerNudgeTokenMatches(expectedToken, wire.Token) {
 		writeControllerNudgeAdmissionReply(w, rejectedControllerNudgeAdmissionReply(
 			controllerNudgeAdmissionCodeUnauthorized,
 			"controller authentication failed",

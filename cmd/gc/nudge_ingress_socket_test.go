@@ -190,7 +190,7 @@ func TestControllerNudgeAdmissionSocketRejectsInvalidTokenBeforeAuthority(t *tes
 	wire.Token = "wrong-token"
 
 	reply := serveControllerNudgeAdmissionPayload(t, wire, controllerSocketConfig{
-		nudgeToken:     "right-token",
+		nudgeToken:     func() string { return "right-token" },
 		nudgeAuthority: authority,
 	})
 
@@ -199,6 +199,50 @@ func TestControllerNudgeAdmissionSocketRejectsInvalidTokenBeforeAuthority(t *tes
 	}
 	if got := authority.admissionCount(); got != 0 {
 		t.Fatalf("authority admissions = %d, want 0", got)
+	}
+}
+
+func TestControllerNudgeAdmissionTokenSlotRejectsBeforePublication(t *testing.T) {
+	authority := &socketRecordingNudgeAuthority{
+		tenant: "tenant-a", city: "city-a", credential: "credential-a",
+	}
+	var slot controllerNudgeTokenSlot
+	wire := validControllerNudgeAdmissionWire()
+
+	reply := serveControllerNudgeAdmissionPayload(t, wire, controllerSocketConfig{
+		nudgeToken:     slot.Load,
+		nudgeAuthority: authority,
+	})
+
+	if reply.Outcome != controllerNudgeAdmissionRejected || reply.Code != controllerNudgeAdmissionCodeUnauthorized {
+		t.Fatalf("reply = %#v, want unauthorized rejection before token publication", reply)
+	}
+	if got := authority.admissionCount(); got != 0 {
+		t.Fatalf("authority admissions = %d, want 0", got)
+	}
+}
+
+func TestControllerNudgeAdmissionTokenSlotPublishesWrittenToken(t *testing.T) {
+	authority := &socketRecordingNudgeAuthority{
+		tenant: "tenant-a", city: "city-a", credential: "credential-a",
+		result: nudgequeue.NudgeIngressResult{
+			Entry: nudgequeue.CommandIndexEntry{Command: &nudgequeue.Command{
+				ID:    "command-a",
+				State: nudgequeue.CommandStatePending,
+			}},
+		},
+	}
+	var slot controllerNudgeTokenSlot
+	wire := validControllerNudgeAdmissionWire()
+	slot.Store(wire.Token)
+
+	reply := serveControllerNudgeAdmissionPayload(t, wire, controllerSocketConfig{
+		nudgeToken:     slot.Load,
+		nudgeAuthority: authority,
+	})
+
+	if reply.Outcome != controllerNudgeAdmissionAccepted || reply.CommandID != "command-a" {
+		t.Fatalf("reply = %#v, want durable command-a acceptance after publication", reply)
 	}
 }
 
@@ -216,7 +260,7 @@ func TestControllerNudgeAdmissionSocketReturnsDurableAcceptance(t *testing.T) {
 	wire := validControllerNudgeAdmissionWire()
 
 	reply := serveControllerNudgeAdmissionPayload(t, wire, controllerSocketConfig{
-		nudgeToken:     wire.Token,
+		nudgeToken:     func() string { return wire.Token },
 		nudgeAuthority: authority,
 	})
 
@@ -248,7 +292,7 @@ func TestControllerNudgeAdmissionSocketRejectsUnknownRequesterFields(t *testing.
 	payload = bytes.Replace(payload, []byte(`"request_id"`), []byte(`"principal_id":"forged","request_id"`), 1)
 	var out bytes.Buffer
 	handleControllerNudgeAdmissionPayload(t.Context(), &out, string(payload), controllerSocketConfig{
-		nudgeToken:     wire.Token,
+		nudgeToken:     func() string { return wire.Token },
 		nudgeAuthority: &socketRecordingNudgeAuthority{},
 	})
 

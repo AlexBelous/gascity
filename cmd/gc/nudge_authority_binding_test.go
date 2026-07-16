@@ -83,6 +83,43 @@ func TestBindProductionNudgeAuthorityKeepsCityIdentitySeparateFromStoreLineage(t
 	}
 }
 
+func TestProductionNudgeAuthorityBindingStartupRequiresExactRetryAuthority(t *testing.T) {
+	store := newNudgeCommandSourceAtomicStore()
+	repository, err := nudgequeue.NewCommandRepository(
+		store,
+		nudgequeue.NewRestoreAnchorRepositoryVerifier(t.TempDir()),
+	)
+	if err != nil {
+		t.Fatalf("NewCommandRepository: %v", err)
+	}
+	if _, err := repository.Provision(t.Context()); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	binding, err := bindProductionNudgeAuthority(t.Context(), t.TempDir(), "retry-authority-city", store, repository)
+	if err != nil {
+		t.Fatalf("bindProductionNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := binding.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	if binding.source.retry != binding.authority {
+		t.Fatalf("effect retry authority = %T, want exact retained %T", binding.source.retry, binding.authority)
+	}
+	if complete, _ := binding.startupEvidence(); !complete {
+		t.Fatal("complete production binding did not publish startup evidence")
+	}
+
+	binding.mu.Lock()
+	binding.source.retry = binding.ingress
+	binding.mu.Unlock()
+	if complete, _ := binding.startupEvidence(); complete {
+		t.Fatal("startup accepted ingress wrapper type instead of the exact underlying retry authority")
+	}
+}
+
 func TestProductionNudgeAuthorityBindingCloseOwnsResourcesAndFailsClosed(t *testing.T) {
 	store := &bindingCountingStore{nudgeCommandSourceAtomicStore: newNudgeCommandSourceAtomicStore()}
 	repository, err := nudgequeue.NewCommandRepository(

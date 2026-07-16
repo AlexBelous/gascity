@@ -25,7 +25,13 @@ func TestNudgeParityShadowSmokeLegacyActsOnceAndShadowEmitsComparison(t *testing
 		Planner: nudgeparity.PlannerFunc(func(_ context.Context, input nudgeparity.PlanningInput) (nudgeparity.Planned, error) {
 			plannerObserved <- input
 			return nudgeparity.Planned{
-				Plan:      nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge},
+				Input:      input.Input,
+				Watermarks: input.Watermarks,
+				Plan: nudgeparity.Plan{
+					Decision:          nudgeparity.DecisionExecute,
+					Action:            nudgeparity.ActionNudge,
+					InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+				},
 				PlannedAt: now,
 			}, nil
 		}),
@@ -64,8 +70,12 @@ func TestNudgeParityShadowSmokeLegacyActsOnceAndShadowEmitsComparison(t *testing
 			RuntimeRevision: 7,
 			OwnerEpoch:      11,
 		},
-		ExpectedPlan: nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge},
-		CapturedAt:   now,
+		ExpectedPlan: nudgeparity.Plan{
+			Decision:          nudgeparity.DecisionExecute,
+			Action:            nudgeparity.ActionNudge,
+			InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+		},
+		CapturedAt: now,
 		ExpectedTiming: nudgeparity.TimingEvidence{
 			EnqueuedAt: now,
 			PlannedAt:  now,

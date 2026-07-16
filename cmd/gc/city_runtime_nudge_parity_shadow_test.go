@@ -38,7 +38,15 @@ func TestLegacyImmediateNudgeSubmitsSameOperationToEffectFreeParityShadow(t *tes
 		configRev:            "config-revision-9",
 		nudgeEffectOwnership: nudgeEffectOwnershipLegacy,
 		nudgeKeyReader:       &nudgeKeyReadShadow{index: index, store: store},
-		nudgeParityEnabled:   true,
+		nudgeParityTargets: staticNudgeParityTargetReader{target: nudgeEffectTarget{
+			sessionID:        "session-a",
+			sessionName:      "runtime-a",
+			intentGeneration: 23,
+			launchIdentity:   "launch-a",
+			provider:         "fake",
+			transport:        "fake",
+		}},
+		nudgeParityEnabled: true,
 		nudgeParityResultSink: func(_ context.Context, result nudgeparity.Result) error {
 			results <- result
 			return nil
@@ -121,10 +129,28 @@ func TestLegacyImmediateNudgeSubmitsSameOperationToEffectFreeParityShadow(t *tes
 	if err != nil {
 		t.Fatalf("nudgeParityIngressRequestDigest: %v", err)
 	}
-	for side, observation := range map[string]nudgeparity.Observation{
-		"legacy": result.Expected,
-		"keyed":  result.Actual,
+	for side, expectation := range map[string]struct {
+		observation nudgeparity.Observation
+		plan        nudgeparity.Plan
+	}{
+		"legacy": {
+			observation: result.Expected,
+			plan: nudgeparity.Plan{
+				Decision:          nudgeparity.DecisionExecute,
+				Action:            nudgeparity.ActionNudge,
+				InteractionPolicy: nudgeparity.InteractionPolicyForce,
+			},
+		},
+		"keyed": {
+			observation: result.Actual,
+			plan: nudgeparity.Plan{
+				Decision:          nudgeparity.DecisionExecute,
+				Action:            nudgeparity.ActionNudge,
+				InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+			},
+		},
 	} {
+		observation := expectation.observation
 		if observation.OperationID != request.RequestID ||
 			observation.Input.CommandDigest != wantDigest ||
 			observation.Input.TargetSession != request.Target.SessionID ||
@@ -141,8 +167,8 @@ func TestLegacyImmediateNudgeSubmitsSameOperationToEffectFreeParityShadow(t *tes
 		if observation.Watermarks.OwnerEpoch != 0 {
 			t.Fatalf("%s owner epoch = %d, want honest unavailable evidence", side, observation.Watermarks.OwnerEpoch)
 		}
-		if observation.Plan != (nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge}) {
-			t.Fatalf("%s plan = %#v, want immediate nudge", side, observation.Plan)
+		if observation.Plan != expectation.plan {
+			t.Fatalf("%s plan = %#v, want %#v", side, observation.Plan, expectation.plan)
 		}
 	}
 	if result.Classification != nudgeparity.ClassificationIncomparable || result.Reason != nudgeparity.ReasonWatermarkIncomplete {
@@ -279,7 +305,13 @@ func TestProductionNudgeParityRetainsDivergentInjectedKeyedPlan(t *testing.T) {
 		nudgeParityEnabled:   true,
 		nudgeParityPlanner: nudgeparity.PlannerFunc(func(_ context.Context, input nudgeparity.PlanningInput) (nudgeparity.Planned, error) {
 			return nudgeparity.Planned{
-				Plan:      nudgeparity.Plan{Decision: nudgeparity.DecisionReject, Action: nudgeparity.ActionNone},
+				Input:      input.Input,
+				Watermarks: input.Watermarks,
+				Plan: nudgeparity.Plan{
+					Decision:          nudgeparity.DecisionReject,
+					Action:            nudgeparity.ActionNone,
+					InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+				},
 				PlannedAt: input.CapturedAt,
 			}, nil
 		}),
@@ -300,8 +332,15 @@ func TestProductionNudgeParityRetainsDivergentInjectedKeyedPlan(t *testing.T) {
 	}
 	select {
 	case result := <-results:
-		if result.Expected.Plan != (nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge}) ||
-			result.Actual.Plan != (nudgeparity.Plan{Decision: nudgeparity.DecisionReject, Action: nudgeparity.ActionNone}) {
+		if result.Expected.Plan != (nudgeparity.Plan{
+			Decision:          nudgeparity.DecisionExecute,
+			Action:            nudgeparity.ActionNudge,
+			InteractionPolicy: nudgeparity.InteractionPolicyForce,
+		}) || result.Actual.Plan != (nudgeparity.Plan{
+			Decision:          nudgeparity.DecisionReject,
+			Action:            nudgeparity.ActionNone,
+			InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+		}) {
 			t.Fatalf("divergent plans = expected %#v actual %#v", result.Expected.Plan, result.Actual.Plan)
 		}
 	case <-time.After(testutil.GoroutineRaceTimeout):
@@ -309,55 +348,115 @@ func TestProductionNudgeParityRetainsDivergentInjectedKeyedPlan(t *testing.T) {
 	}
 }
 
-func TestValidatedImmediateNudgeParityPlannerRejectsInvalidIndependentFacts(t *testing.T) {
+func TestImmediateNudgeParityInputValidationIsTotal(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
-	valid := nudgeparity.PlanningInput{
-		OperationID: "request-planner",
+	valid := nudgeparity.Input{
+		CommandDigest:    strings.Repeat("a", 64),
+		TargetSession:    "session-planner",
+		TargetGeneration: 8,
+		TargetLaunch:     "launch-planner",
+		DeliveryMode:     string(nudgequeue.DeliveryModeImmediate),
+		TargetPolicy:     string(nudgequeue.TargetPolicyExactLaunch),
+		ExpiresAt:        now.Add(time.Minute),
+	}
+	tests := []struct {
+		name   string
+		mutate func(*nudgeparity.Input)
+		want   bool
+	}{
+		{name: "valid", mutate: func(*nudgeparity.Input) {}, want: true},
+		{name: "expired", mutate: func(input *nudgeparity.Input) { input.ExpiresAt = now }},
+		{name: "missing launch", mutate: func(input *nudgeparity.Input) { input.TargetLaunch = "" }},
+		{name: "missing generation", mutate: func(input *nudgeparity.Input) { input.TargetGeneration = 0 }},
+		{name: "wrong target policy", mutate: func(input *nudgeparity.Input) {
+			input.TargetPolicy = string(nudgequeue.TargetPolicyContinuation)
+		}},
+		{name: "scheduled immediate", mutate: func(input *nudgeparity.Input) { input.DeliverAfter = now.Add(time.Second) }},
+		{name: "bad digest", mutate: func(input *nudgeparity.Input) { input.CommandDigest = "not-a-digest" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := valid
+			test.mutate(&input)
+			if got := validImmediateNudgeParityInput(input, now); got != test.want {
+				t.Fatalf("validImmediateNudgeParityInput = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestProductionNudgeParityPlannerUsesKernelAndIndependentCurrentTarget(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 30, 0, 0, time.UTC)
+	store := nudgequeue.CommandStoreBinding{
+		StoreUUID:    "33333333-3333-4333-8333-333333333333",
+		RestoreEpoch: 5,
+	}
+	index, err := nudgequeue.BuildCommandIndex(nudgequeue.CommandIndexSnapshot{
+		Store:    store,
+		Revision: 41,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandIndex: %v", err)
+	}
+	cr := &CityRuntime{
+		nudgeKeyReader: &nudgeKeyReadShadow{index: index, store: store},
+		nudgeParityTargets: staticNudgeParityTargetReader{target: nudgeEffectTarget{
+			sessionID:        "session-planner-current",
+			sessionName:      "runtime-planner-current",
+			intentGeneration: 12,
+			launchIdentity:   "launch-planner-current",
+			provider:         "fake",
+			transport:        "fake",
+		}},
+	}
+	cr.publishNudgeParityConfigRevision("config-planner-current")
+	planner := productionNudgeParityPlanner{runtime: cr, now: func() time.Time { return now }}
+	planned, err := planner.Plan(t.Context(), nudgeparity.PlanningInput{
+		OperationID: "request-planner-current",
 		Input: nudgeparity.Input{
 			CommandDigest:    strings.Repeat("a", 64),
-			TargetSession:    "session-planner",
-			TargetGeneration: 8,
-			TargetLaunch:     "launch-planner",
+			TargetSession:    "session-planner-current",
+			TargetGeneration: 12,
+			TargetLaunch:     "launch-planner-current",
 			DeliveryMode:     string(nudgequeue.DeliveryModeImmediate),
 			TargetPolicy:     string(nudgequeue.TargetPolicyExactLaunch),
 			ExpiresAt:        now.Add(time.Minute),
 		},
 		CapturedAt: now.Add(-time.Second),
 		EnqueuedAt: now.Add(-time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
 	}
-	planner := validatedImmediateNudgeParityPlanner{now: func() time.Time { return now }}
-	tests := []struct {
-		name   string
-		mutate func(*nudgeparity.PlanningInput)
-		want   nudgeparity.Plan
-	}{
-		{name: "valid", mutate: func(*nudgeparity.PlanningInput) {}, want: nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge}},
-		{name: "expired", mutate: func(input *nudgeparity.PlanningInput) { input.Input.ExpiresAt = now }},
-		{name: "missing launch", mutate: func(input *nudgeparity.PlanningInput) { input.Input.TargetLaunch = "" }},
-		{name: "missing generation", mutate: func(input *nudgeparity.PlanningInput) { input.Input.TargetGeneration = 0 }},
-		{name: "wrong target policy", mutate: func(input *nudgeparity.PlanningInput) {
-			input.Input.TargetPolicy = string(nudgequeue.TargetPolicyContinuation)
-		}},
-		{name: "scheduled immediate", mutate: func(input *nudgeparity.PlanningInput) { input.Input.DeliverAfter = now.Add(time.Second) }},
-		{name: "bad digest", mutate: func(input *nudgeparity.PlanningInput) { input.Input.CommandDigest = "not-a-digest" }},
+	wantPlan := nudgeparity.Plan{
+		Decision:          nudgeparity.DecisionExecute,
+		Action:            nudgeparity.ActionNudge,
+		InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := valid
-			test.mutate(&input)
-			planned, err := planner.Plan(t.Context(), input)
-			if err != nil {
-				t.Fatalf("Plan: %v", err)
-			}
-			want := test.want
-			if want == (nudgeparity.Plan{}) {
-				want = nudgeparity.Plan{Decision: nudgeparity.DecisionReject, Action: nudgeparity.ActionNone}
-			}
-			if planned.Plan != want || !planned.PlannedAt.Equal(now) {
-				t.Fatalf("Plan = %#v at %s, want %#v at %s", planned.Plan, planned.PlannedAt, want, now)
-			}
-		})
+	if planned.Plan != wantPlan {
+		t.Fatalf("Plan = %#v, want %#v", planned.Plan, wantPlan)
 	}
+	if planned.Input.TargetGeneration != 12 || planned.Input.TargetLaunch != "launch-planner-current" {
+		t.Fatalf("independent target input = %#v", planned.Input)
+	}
+	wantWatermarks := nudgeparity.Watermarks{
+		StoreLineage:    nudgeCommandReconcileScope(store),
+		DurableRevision: 41,
+		ConfigRevision:  "config-planner-current",
+		RuntimeRevision: 12,
+	}
+	if planned.Watermarks != wantWatermarks {
+		t.Fatalf("independent watermarks = %#v, want %#v", planned.Watermarks, wantWatermarks)
+	}
+}
+
+type staticNudgeParityTargetReader struct {
+	target nudgeEffectTarget
+	err    error
+}
+
+func (r staticNudgeParityTargetReader) Read(context.Context, string) (nudgeEffectTarget, error) {
+	return r.target, r.err
 }
 
 func validProductionParityIngressRequest(expiresAt time.Time) nudgequeue.NudgeIngressRequest {
@@ -417,12 +516,18 @@ func (s *parityEffectSourceSpy) RetryProviderAttempt(context.Context, nudgequeue
 
 var _ nudgeCommandEffectSource = (*parityEffectSourceSpy)(nil)
 
-func (p *blockingProductionNudgeParityPlanner) Plan(ctx context.Context, _ nudgeparity.PlanningInput) (nudgeparity.Planned, error) {
+func (p *blockingProductionNudgeParityPlanner) Plan(ctx context.Context, input nudgeparity.PlanningInput) (nudgeparity.Planned, error) {
 	p.once.Do(func() { close(p.entered) })
 	select {
 	case <-p.release:
 		return nudgeparity.Planned{
-			Plan:      nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge},
+			Input:      input.Input,
+			Watermarks: input.Watermarks,
+			Plan: nudgeparity.Plan{
+				Decision:          nudgeparity.DecisionExecute,
+				Action:            nudgeparity.ActionNudge,
+				InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+			},
 			PlannedAt: time.Now(),
 		}, nil
 	case <-ctx.Done():

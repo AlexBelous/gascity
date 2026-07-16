@@ -169,7 +169,11 @@ func TestNudgeParitySnapshotRecorderEmitsMonotonicIdentityFreeDeltas(t *testing.
 			RuntimeRevision: 1,
 			OwnerEpoch:      1,
 		},
-		Plan:       nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge},
+		Plan: nudgeparity.Plan{
+			Decision:          nudgeparity.DecisionExecute,
+			Action:            nudgeparity.ActionNudge,
+			InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+		},
 		CapturedAt: now,
 	}
 	if _, err := comparator.Observe(observation); err != nil {

@@ -45,7 +45,15 @@ func TestLegacyImmediateNudgeCrossProcessCLIControllerSocketParity(t *testing.T)
 		cityPath:             cityPath,
 		nudgeEffectOwnership: nudgeEffectOwnershipLegacy,
 		nudgeKeyReader:       &nudgeKeyReadShadow{source: source, index: index, store: store},
-		nudgeParityEnabled:   true,
+		nudgeParityTargets: staticNudgeParityTargetReader{target: nudgeEffectTarget{
+			sessionID:        "session-cross-process",
+			sessionName:      "runtime-cross-process",
+			intentGeneration: 31,
+			launchIdentity:   "launch-cross-process",
+			provider:         "fake",
+			transport:        "fake",
+		}},
+		nudgeParityEnabled: true,
 		nudgeParityResultSink: func(_ context.Context, result nudgeparity.Result) error {
 			results <- result
 			return nil
@@ -121,7 +129,11 @@ func TestLegacyImmediateNudgeCrossProcessCLIControllerSocketParity(t *testing.T)
 		t.Fatalf("cross-process operation IDs = result=%q expected=%q actual=%q, want CLI request %q",
 			result.OperationID, result.Expected.OperationID, result.Actual.OperationID, summary.RequestID)
 	}
-	if result.Actual.Plan != (nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge}) {
+	if result.Actual.Plan != (nudgeparity.Plan{
+		Decision:          nudgeparity.DecisionExecute,
+		Action:            nudgeparity.ActionNudge,
+		InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+	}) {
 		t.Fatalf("cross-process keyed plan = %#v, want validated immediate nudge", result.Actual.Plan)
 	}
 	if got := binding.admissionCount(); got != 0 {

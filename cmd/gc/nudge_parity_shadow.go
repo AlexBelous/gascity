@@ -59,7 +59,7 @@ func (cr *CityRuntime) prepareNudgeParityShadow() error {
 	}
 	planner := cr.nudgeParityPlanner
 	if planner == nil {
-		planner = validatedImmediateNudgeParityPlanner{now: now}
+		planner = productionNudgeParityPlanner{runtime: cr, now: now}
 	}
 	shadow, err := nudgeparity.NewShadow(nudgeparity.ShadowConfig{
 		Comparator: nudgeparity.Config{
@@ -233,9 +233,13 @@ func (cr *CityRuntime) submitLegacyImmediateNudgeParity(request nudgequeue.Nudge
 			DeliverAfter:     request.DeliverAfter,
 			ExpiresAt:        request.ExpiresAt,
 		},
-		Watermarks:   watermarks,
-		ExpectedPlan: nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge},
-		CapturedAt:   capturedAt,
+		Watermarks: watermarks,
+		ExpectedPlan: nudgeparity.Plan{
+			Decision:          nudgeparity.DecisionExecute,
+			Action:            nudgeparity.ActionNudge,
+			InteractionPolicy: nudgeparity.InteractionPolicyForce,
+		},
+		CapturedAt: capturedAt,
 		ExpectedTiming: nudgeparity.TimingEvidence{
 			EnqueuedAt: capturedAt,
 		},
@@ -267,39 +271,172 @@ func (cr *CityRuntime) captureNudgeParityWatermarks(request nudgequeue.NudgeIngr
 	return watermarks
 }
 
-type validatedImmediateNudgeParityPlanner struct {
-	now func() time.Time
+type productionNudgeParityPlanner struct {
+	runtime *CityRuntime
+	now     func() time.Time
 }
 
-func (p validatedImmediateNudgeParityPlanner) Plan(ctx context.Context, input nudgeparity.PlanningInput) (nudgeparity.Planned, error) {
+func (p productionNudgeParityPlanner) Plan(ctx context.Context, input nudgeparity.PlanningInput) (nudgeparity.Planned, error) {
 	if ctx == nil {
-		return nudgeparity.Planned{}, errors.New("planning immediate nudge parity: context is nil")
+		return nudgeparity.Planned{}, errors.New("planning production nudge parity: context is nil")
 	}
 	if err := ctx.Err(); err != nil {
 		return nudgeparity.Planned{}, err
 	}
-	if p.now == nil {
-		return nudgeparity.Planned{}, errors.New("planning immediate nudge parity: clock is nil")
+	if p.runtime == nil || p.now == nil {
+		return nudgeparity.Planned{}, errors.New("planning production nudge parity: runtime and clock are required")
 	}
 	plannedAt := p.now()
 	if plannedAt.IsZero() || plannedAt.Before(input.CapturedAt) {
-		return nudgeparity.Planned{}, errors.New("planning immediate nudge parity: clock is invalid or regressed")
+		return nudgeparity.Planned{}, errors.New("planning production nudge parity: clock is invalid or regressed")
 	}
-	plan := nudgeparity.Plan{Decision: nudgeparity.DecisionReject, Action: nudgeparity.ActionNone}
-	facts := input.Input
+
+	actualInput := input.Input
+	watermarks := nudgeparity.Watermarks{}
+	if revision := p.runtime.nudgeParityConfigRevision.Load(); revision != nil {
+		watermarks.ConfigRevision = *revision
+	}
+	retry := func() nudgeparity.Planned {
+		return nudgeparity.Planned{
+			Input:      actualInput,
+			Watermarks: watermarks,
+			Plan: nudgeparity.Plan{
+				Decision:          nudgeparity.DecisionRetry,
+				Action:            nudgeparity.ActionNone,
+				InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+			},
+			PlannedAt: plannedAt,
+		}
+	}
+	reject := func() nudgeparity.Planned {
+		return nudgeparity.Planned{
+			Input:      actualInput,
+			Watermarks: watermarks,
+			Plan: nudgeparity.Plan{
+				Decision:          nudgeparity.DecisionReject,
+				Action:            nudgeparity.ActionNone,
+				InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+			},
+			PlannedAt: plannedAt,
+		}
+	}
+	if !validImmediateNudgeParityInput(input.Input, plannedAt) {
+		return reject(), nil
+	}
+
+	p.runtime.nudgeKeyShadowMu.RLock()
+	reader := p.runtime.nudgeKeyReader
+	targets := p.runtime.nudgeParityTargets
+	p.runtime.nudgeKeyShadowMu.RUnlock()
+	if reader == nil || reader.index == nil {
+		return retry(), nil
+	}
+	status := reader.index.Status()
+	if status.Synced && status.Store == reader.store {
+		watermarks.StoreLineage = nudgeCommandReconcileScope(status.Store)
+		watermarks.DurableRevision = status.Revision
+	}
+
+	page := nudgequeue.CommandIndexPage{}
+	if status.Synced {
+		var err error
+		page, err = reader.index.Page(input.Input.TargetSession, 0, 1)
+		if errors.Is(err, nudgequeue.ErrCommandIndexUnsynced) {
+			status = reader.index.Status()
+			status.Synced = false
+		} else if err != nil {
+			return nudgeparity.Planned{}, fmt.Errorf("planning production nudge parity ordered head: %w", err)
+		}
+	}
+	commandID := nudgequeue.CommandIDForRequest(reader.store, input.OperationID)
+	if commandID == "" {
+		return reject(), nil
+	}
+	if status.Synced && len(page.Entries) == 0 {
+		command := nudgequeue.Command{
+			ID:    commandID,
+			State: nudgequeue.CommandStatePending,
+			Mode:  nudgequeue.DeliveryMode(input.Input.DeliveryMode),
+			Target: nudgequeue.CommandTarget{
+				SessionID:        input.Input.TargetSession,
+				IntentGeneration: input.Input.TargetGeneration,
+				LaunchIdentity:   input.Input.TargetLaunch,
+				Policy:           nudgequeue.TargetPolicy(input.Input.TargetPolicy),
+			},
+			Store:        reader.store,
+			DeliverAfter: input.Input.DeliverAfter,
+			ExpiresAt:    input.Input.ExpiresAt,
+		}
+		page.Entries = []nudgequeue.CommandIndexEntry{{Command: &command}}
+	}
+
+	facts := nudgeEffectCandidateFacts{
+		operationID:   commandID,
+		expectedStore: reader.store,
+		projection:    status,
+		page:          page,
+		observedAt:    plannedAt,
+	}
+	var candidate nudgeEffectCandidatePlan
+	for {
+		candidate = planNudgeEffectCandidate(facts)
+		if candidate.disposition != nudgeEffectCandidateNeedTarget {
+			break
+		}
+		if targets == nil {
+			return retry(), nil
+		}
+		target, err := targets.Read(ctx, input.Input.TargetSession)
+		if err != nil {
+			return retry(), nil
+		}
+		facts.target = target
+		facts.targetObserved = true
+		actualInput.TargetSession = target.sessionID
+		actualInput.TargetGeneration = target.intentGeneration
+		actualInput.TargetLaunch = target.launchIdentity
+		watermarks.RuntimeRevision = target.intentGeneration
+	}
+
+	return nudgeparity.Planned{
+		Input:      actualInput,
+		Watermarks: watermarks,
+		Plan:       normalizeNudgeParityCandidatePlan(candidate),
+		PlannedAt:  plannedAt,
+	}, nil
+}
+
+func normalizeNudgeParityCandidatePlan(candidate nudgeEffectCandidatePlan) nudgeparity.Plan {
+	plan := nudgeparity.Plan{
+		Action:            nudgeparity.ActionNone,
+		InteractionPolicy: nudgeparity.InteractionPolicyRequireUnattachedNormal,
+	}
+	switch candidate.disposition {
+	case nudgeEffectCandidateNeedClaim:
+		plan.Decision = nudgeparity.DecisionExecute
+		plan.Action = nudgeparity.ActionNudge
+	case nudgeEffectCandidateNoop:
+		plan.Decision = nudgeparity.DecisionNoop
+	case nudgeEffectCandidatePark:
+		plan.Decision = nudgeparity.DecisionPark
+	case nudgeEffectCandidateRetry, nudgeEffectCandidateNeedTarget:
+		plan.Decision = nudgeparity.DecisionRetry
+	case nudgeEffectCandidateReject:
+		plan.Decision = nudgeparity.DecisionReject
+	default:
+		plan.Decision = nudgeparity.DecisionReject
+	}
+	return plan
+}
+
+func validImmediateNudgeParityInput(facts nudgeparity.Input, plannedAt time.Time) bool {
 	digest, digestErr := hex.DecodeString(facts.CommandDigest)
 	validDigest := digestErr == nil && len(digest) == sha256.Size && strings.ToLower(facts.CommandDigest) == facts.CommandDigest
-	if validDigest &&
+	return validDigest &&
 		facts.DeliveryMode == string(nudgequeue.DeliveryModeImmediate) &&
 		facts.TargetPolicy == string(nudgequeue.TargetPolicyExactLaunch) &&
 		facts.TargetSession != "" && facts.TargetGeneration != 0 && facts.TargetLaunch != "" &&
-		facts.DeliverAfter.IsZero() && !facts.ExpiresAt.IsZero() && facts.ExpiresAt.After(plannedAt) {
-		plan = nudgeparity.Plan{Decision: nudgeparity.DecisionExecute, Action: nudgeparity.ActionNudge}
-	}
-	return nudgeparity.Planned{
-		Plan:      plan,
-		PlannedAt: plannedAt,
-	}, nil
+		facts.DeliverAfter.IsZero() && !facts.ExpiresAt.IsZero() && facts.ExpiresAt.After(plannedAt)
 }
 
 func nudgeParityIngressRequestDigest(request nudgequeue.NudgeIngressRequest) (string, error) {

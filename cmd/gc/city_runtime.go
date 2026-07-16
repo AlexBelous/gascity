@@ -264,6 +264,7 @@ type CityRuntime struct {
 	nudgeParityConfigRevision atomic.Pointer[string]
 	nudgeParityResultSink     nudgeparity.ResultSink
 	nudgeParityPlanner        nudgeparity.Planner
+	nudgeParityTargets        nudgeEffectTargetReader
 	nudgeParityNow            func() time.Time
 	nudgeParityLifecycleMu    sync.Mutex
 	nudgeParityStop           func() error
@@ -1065,13 +1066,15 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 		return nil
 	}
 	var effectSessionStore beads.Store
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed || cr.nudgeParityEnabled {
+		effectSessionStore = cr.sessionsBeadStore().Store
+	}
 	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
 		if cr.nudgeClaimAuthorizer == nil {
 			failure := errors.New("installing keyed nudge effect owner: claim authorizer is nil")
 			cr.recordNudgeKeyInstallFailure(failure)
 			return failure
 		}
-		effectSessionStore = cr.sessionsBeadStore().Store
 		if effectSessionStore == nil {
 			failure := errors.New("installing keyed nudge effect owner: session store is nil")
 			cr.recordNudgeKeyInstallFailure(failure)
@@ -1154,6 +1157,9 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	if err != nil {
 		cr.recordNudgeKeyInstallFailure(err)
 		return err
+	}
+	if cr.nudgeParityEnabled && effectSessionStore != nil {
+		cr.nudgeParityTargets = &productionNudgeEffectTargets{store: sessionFrontDoor(effectSessionStore)}
 	}
 	var reconcile nudgeReconcileFunc = reader.reconcile
 	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {

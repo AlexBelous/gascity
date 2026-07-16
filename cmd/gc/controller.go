@@ -1478,6 +1478,7 @@ func runControllerWithLease(
 		ControlDispatcherCh:     controlDispatcherCh,
 		NudgeEffectOwnership:    nudgeEffectSelection.Ownership,
 		NudgeAuthorityBinding:   nudgeEffectSelection.Binding,
+		NudgeParityShadow:       nudgeEffectSelection.ParityShadow,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})

@@ -746,6 +746,30 @@ func deliverSessionNudgeWithIngress(
 	stdout, stderr io.Writer,
 	admit localNudgeIngressAdmitter,
 ) int {
+	return deliverSessionNudgeWithIngressAndLegacy(target, message, mode, jsonOutput, stdout, stderr, admit, func() int {
+		store := openNudgeBeadStore(target.cityPath)
+		if store.Store == nil {
+			fmt.Fprintf(stderr, "gc session nudge: opening city store for %q\n", target.agentKey()) //nolint:errcheck
+			return 1
+		}
+		sp, err := newSessionProvider()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return deliverSessionNudgeWithWorker(target, store.Store, sp, message, mode, jsonOutput, stdout, stderr)
+	})
+}
+
+func deliverSessionNudgeWithIngressAndLegacy(
+	target nudgeTarget,
+	message string,
+	mode nudgeDeliveryMode,
+	jsonOutput bool,
+	stdout, stderr io.Writer,
+	admit localNudgeIngressAdmitter,
+	legacy func() int,
+) int {
 	if mode == nudgeDeliveryImmediate {
 		result := nudgeBridgeResult{
 			Disposition: nudgeBridgeMayHaveEntered,
@@ -785,17 +809,11 @@ func deliverSessionNudgeWithIngress(
 		}
 	}
 
-	store := openNudgeBeadStore(target.cityPath)
-	if store.Store == nil {
-		fmt.Fprintf(stderr, "gc session nudge: opening city store for %q\n", target.agentKey()) //nolint:errcheck
+	if legacy == nil {
+		fmt.Fprintln(stderr, "gc session nudge: legacy nudge delivery is not configured") //nolint:errcheck
 		return 1
 	}
-	sp, err := newSessionProvider()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	return deliverSessionNudgeWithWorker(target, store.Store, sp, message, mode, jsonOutput, stdout, stderr)
+	return legacy()
 }
 
 func writeAcceptedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, result nudgeBridgeResult, jsonOutput bool, stdout, stderr io.Writer) int {

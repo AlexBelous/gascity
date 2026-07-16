@@ -53,6 +53,9 @@ func TestNudgeParityShadowSmokeLegacyActsOnceAndShadowEmitsComparison(t *testing
 			TargetSession:    "session-secret-not-a-metric-label",
 			TargetGeneration: 3,
 			TargetLaunch:     "launch-secret-not-a-metric-label",
+			DeliveryMode:     "immediate",
+			TargetPolicy:     "exact_launch",
+			ExpiresAt:        now.Add(time.Minute),
 		},
 		Watermarks: nudgeparity.Watermarks{
 			StoreLineage:    "store-secret-not-a-metric-label",

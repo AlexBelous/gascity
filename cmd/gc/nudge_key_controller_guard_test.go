@@ -852,7 +852,7 @@ func TestQueuedNudgeWakeIsStructurallyPostCommit(t *testing.T) {
 func TestCityRuntimeStartsNudgeIngressBeforePublishingReadiness(t *testing.T) {
 	fset, file := parseGCTestSource(t, "city_runtime.go")
 	fn := findGCFunction(t, file, "run")
-	var installPos, listenerPos, readyPos token.Pos
+	var installPos, parityPos, listenerPos, readyPos token.Pos
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
@@ -870,6 +870,12 @@ func TestCityRuntimeStartsNudgeIngressBeforePublishingReadiness(t *testing.T) {
 			}
 			installPos = call.Pos()
 		}
+		if calledFunction(call) == "cr.startNudgeParityShadowBeforeReadiness" {
+			if parityPos != token.NoPos {
+				t.Errorf("multiple production nudge parity starts: %s and %s", fset.Position(parityPos), fset.Position(call.Pos()))
+			}
+			parityPos = call.Pos()
+		}
 		return true
 	})
 	// The earlier `defer markReady()` only releases the startup watchdog on an
@@ -884,11 +890,14 @@ func TestCityRuntimeStartsNudgeIngressBeforePublishingReadiness(t *testing.T) {
 			readyPos = expr.Pos()
 		}
 	}
-	if installPos == token.NoPos || listenerPos == token.NoPos || readyPos == token.NoPos {
-		t.Fatalf("install/listener/readiness positions = %s/%s/%s, want all production calls", fset.Position(installPos), fset.Position(listenerPos), fset.Position(readyPos))
+	if installPos == token.NoPos || parityPos == token.NoPos || listenerPos == token.NoPos || readyPos == token.NoPos {
+		t.Fatalf("install/parity/listener/readiness positions = %s/%s/%s/%s, want all production calls", fset.Position(installPos), fset.Position(parityPos), fset.Position(listenerPos), fset.Position(readyPos))
 	}
-	if installPos >= listenerPos {
-		t.Fatalf("nudge reader installs at %s after ingress opens at %s", fset.Position(installPos), fset.Position(listenerPos))
+	if installPos >= parityPos {
+		t.Fatalf("nudge reader installs at %s after parity starts at %s", fset.Position(installPos), fset.Position(parityPos))
+	}
+	if parityPos >= listenerPos {
+		t.Fatalf("nudge parity starts at %s after ingress opens at %s", fset.Position(parityPos), fset.Position(listenerPos))
 	}
 	if listenerPos >= readyPos {
 		t.Fatalf("nudge listener starts at %s after readiness at %s", fset.Position(listenerPos), fset.Position(readyPos))

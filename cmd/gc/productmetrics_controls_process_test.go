@@ -53,10 +53,12 @@ type productMetricsControlProcessDiagnostics struct {
 	SpawnThrottleAgeSeconds  *uint64 `json:"spawn_throttle_age_seconds"`
 }
 
-type productMetricsControlProcessResult struct {
+type testProcessResult struct {
 	stdout []byte
 	stderr []byte
 }
+
+type productMetricsControlProcessResult = testProcessResult
 
 func TestProductMetricsJSONSchemasEnforceClosedDomains(t *testing.T) {
 	statusPayload, err := json.Marshal(productMetricsStatusForJSON(productMetricsStatus{
@@ -396,6 +398,11 @@ func runProductMetricsControlProcessTTY(t *testing.T, binary, workingDir string,
 
 func runProductMetricsControlProcessRaw(t *testing.T, binary, workingDir string, environment []string, args ...string) (productMetricsControlProcessResult, error) {
 	t.Helper()
+	return runTestProcessRaw(t, binary, workingDir, environment, args...)
+}
+
+func runTestProcessRaw(t *testing.T, binary, workingDir string, environment []string, args ...string) (testProcessResult, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, args...)
@@ -406,9 +413,9 @@ func runProductMetricsControlProcessRaw(t *testing.T, binary, workingDir string,
 	command.Stderr = &stderr
 	err := command.Run()
 	if ctx.Err() != nil {
-		t.Fatalf("gc %s exceeded process deadline (pack discovery may have blocked): %v", strings.Join(args, " "), ctx.Err())
+		t.Fatalf("test process exceeded deadline: %v", ctx.Err())
 	}
-	return productMetricsControlProcessResult{stdout: stdout.Bytes(), stderr: stderr.Bytes()}, err
+	return testProcessResult{stdout: stdout.Bytes(), stderr: stderr.Bytes()}, err
 }
 
 func decodeProductMetricsControlProcessStatus(t *testing.T, data []byte) productMetricsControlProcessStatus {

@@ -61,8 +61,15 @@ func TestComparatorRequiresEquivalentCompleteInputsAndWatermarks(t *testing.T) {
 		mutate func(*Observation)
 		reason Reason
 	}{
-		{name: "input incomplete", mutate: func(o *Observation) { o.Input.CommandDigest = "" }, reason: ReasonInputIncomplete},
-		{name: "input mismatch", mutate: func(o *Observation) { o.Input.TargetLaunch = "launch-2" }, reason: ReasonInputMismatch},
+		{name: "command digest incomplete", mutate: func(o *Observation) { o.Input.CommandDigest = "" }, reason: ReasonInputIncomplete},
+		{name: "target launch mismatch", mutate: func(o *Observation) { o.Input.TargetLaunch = "launch-2" }, reason: ReasonInputMismatch},
+		{name: "delivery mode incomplete", mutate: func(o *Observation) { o.Input.DeliveryMode = "" }, reason: ReasonInputIncomplete},
+		{name: "delivery mode mismatch", mutate: func(o *Observation) { o.Input.DeliveryMode = "queued" }, reason: ReasonInputMismatch},
+		{name: "target policy incomplete", mutate: func(o *Observation) { o.Input.TargetPolicy = "" }, reason: ReasonInputIncomplete},
+		{name: "target policy mismatch", mutate: func(o *Observation) { o.Input.TargetPolicy = "continuation" }, reason: ReasonInputMismatch},
+		{name: "delivery time mismatch", mutate: func(o *Observation) { o.Input.DeliverAfter = now }, reason: ReasonInputMismatch},
+		{name: "expiry incomplete", mutate: func(o *Observation) { o.Input.ExpiresAt = time.Time{} }, reason: ReasonInputIncomplete},
+		{name: "expiry mismatch", mutate: func(o *Observation) { o.Input.ExpiresAt = o.Input.ExpiresAt.Add(time.Second) }, reason: ReasonInputMismatch},
 		{name: "watermark incomplete", mutate: func(o *Observation) { o.Watermarks.OwnerEpoch = 0 }, reason: ReasonWatermarkIncomplete},
 		{name: "store lineage mismatch", mutate: func(o *Observation) { o.Watermarks.StoreLineage = "store-2" }, reason: ReasonWatermarkMismatch},
 		{name: "durable revision mismatch", mutate: func(o *Observation) { o.Watermarks.DurableRevision++ }, reason: ReasonWatermarkMismatch},
@@ -347,6 +354,9 @@ func testObservation(operationID string, side Side, capturedAt time.Time) Observ
 			TargetSession:    "session-1",
 			TargetGeneration: 3,
 			TargetLaunch:     "launch-1",
+			DeliveryMode:     "immediate",
+			TargetPolicy:     "exact_launch",
+			ExpiresAt:        capturedAt.Add(time.Minute),
 		},
 		Watermarks: Watermarks{
 			StoreLineage:    "store-1",

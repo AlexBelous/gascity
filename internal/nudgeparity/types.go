@@ -98,19 +98,31 @@ type Input struct {
 	TargetSession    string
 	TargetGeneration uint64
 	TargetLaunch     string
+	DeliveryMode     string
+	TargetPolicy     string
+	DeliverAfter     time.Time
+	ExpiresAt        time.Time
 }
 
 func (i Input) complete() bool {
+	// DeliverAfter is deliberately not required: zero is the canonical value
+	// for immediate delivery. Any nonzero value still participates in the
+	// whole-Input equality check and therefore cannot be silently normalized.
 	return validText(i.CommandDigest, false) &&
 		validText(i.TargetSession, false) &&
 		i.TargetGeneration != 0 &&
-		validText(i.TargetLaunch, false)
+		validText(i.TargetLaunch, false) &&
+		validText(i.DeliveryMode, false) &&
+		validText(i.TargetPolicy, false) &&
+		!i.ExpiresAt.IsZero()
 }
 
 func (i Input) validPartial() bool {
 	return validText(i.CommandDigest, true) &&
 		validText(i.TargetSession, true) &&
-		validText(i.TargetLaunch, true)
+		validText(i.TargetLaunch, true) &&
+		validText(i.DeliveryMode, true) &&
+		validText(i.TargetPolicy, true)
 }
 
 // Watermarks bind a plan to the same durable, configuration, runtime, and

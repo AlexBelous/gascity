@@ -2366,6 +2366,7 @@ func startManagedCity(
 			ControlDispatcherCh:     controlDispatcherCh,
 			NudgeEffectOwnership:    nudgeEffectSelection.Ownership,
 			NudgeAuthorityBinding:   nudgeEffectSelection.Binding,
+			NudgeParityShadow:       nudgeEffectSelection.ParityShadow,
 			OnStarted: func() {
 				cr.UpdateCallback(path, func(m *managedCity) {
 					m.started = true

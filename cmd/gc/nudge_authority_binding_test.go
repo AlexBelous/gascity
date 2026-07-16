@@ -374,17 +374,26 @@ func TestResolveNudgeEffectStartupForCityUnwiredProducersKeepLegacyOrRefuse(t *t
 					return binding, nil
 				},
 			)
-			if mode == rollout.Auto {
+			switch mode {
+			case rollout.Auto:
 				if err != nil || selection.Ownership != nudgeEffectOwnershipLegacy ||
+					selection.Binding != binding || !selection.ParityShadow ||
 					!errors.Is(selection.Diagnostic, errNudgeEffectStartupDegraded) ||
 					!strings.Contains(selection.Notice, "canonical CLI/API command ingress") {
-					t.Fatalf("auto result = selection %#v, err=%v; want precise loud legacy degradation", selection, err)
+					t.Fatalf("auto result = selection %#v, err=%v; want precise loud legacy parity degradation", selection, err)
 				}
-			} else if !errors.Is(err, errNudgeEffectStartupRefused) || !strings.Contains(err.Error(), "canonical CLI/API command ingress") {
-				t.Fatalf("require error = %v, want precise fail-closed producer refusal", err)
-			}
-			if binding.live() {
-				t.Fatal("non-keyed startup retained a live authority binding")
+				if !binding.live() {
+					t.Fatal("auto legacy parity did not retain the read-only authority binding")
+				}
+			case rollout.Require:
+				if !errors.Is(err, errNudgeEffectStartupRefused) || !strings.Contains(err.Error(), "canonical CLI/API command ingress") {
+					t.Fatalf("require error = %v, want precise fail-closed producer refusal", err)
+				}
+				if binding.live() {
+					t.Fatal("refused require startup retained a live authority binding")
+				}
+			default:
+				t.Fatalf("unexpected rollout mode %q", mode)
 			}
 		})
 	}
@@ -456,11 +465,22 @@ func TestCityRuntimeRetainsAndClosesProductionNudgeAuthorityBinding(t *testing.T
 		stdout:                io.Discard,
 		stderr:                io.Discard,
 	}
+	parityStopped := false
+	cr.nudgeParityStop = func() error {
+		if !binding.live() {
+			t.Error("production authority closed before nudge parity drain")
+		}
+		parityStopped = true
+		return nil
+	}
 	cr.preserveSessionsOnShutdown()
 	if got := cr.liveNudgeAuthorityBinding(); got != binding {
 		t.Fatalf("live binding = %#v, want exact %#v", got, binding)
 	}
 	cr.shutdown()
+	if !parityStopped {
+		t.Fatal("CityRuntime shutdown did not drain nudge parity before authority close")
+	}
 	if got := cr.liveNudgeAuthorityBinding(); got != nil {
 		t.Fatalf("live binding after shutdown = %#v, want nil", got)
 	}

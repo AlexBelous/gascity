@@ -95,6 +95,7 @@ func (a *cityRuntimeSessionNudgeAuthority) Admit(ctx context.Context, request nu
 	}
 	switch a.cr.nudgeEffectOwnership {
 	case nudgeEffectOwnershipLegacy:
+		a.cr.submitLegacyImmediateNudgeParity(request)
 		return nudgequeue.NudgeIngressResult{}, errors.Join(
 			errNudgeLegacyEffectOwnership,
 			nudgequeue.ErrLocalNudgeAuthorityUnavailable,

@@ -38,10 +38,11 @@ type nudgeEffectStartupCapabilities struct {
 }
 
 type nudgeEffectStartupSelection struct {
-	Ownership  nudgeEffectOwnership
-	Notice     string
-	Binding    *productionNudgeAuthorityBinding
-	Diagnostic error
+	Ownership    nudgeEffectOwnership
+	Notice       string
+	Binding      *productionNudgeAuthorityBinding
+	ParityShadow bool
+	Diagnostic   error
 }
 
 // nudgeEffectStartupDegradation is retained in auto mode so callers can emit
@@ -173,12 +174,16 @@ func resolveNudgeEffectStartupForCityWithOpener(
 		return flags, nudgeEffectStartupSelection{}, errors.Join(selectionErr, binding.Close())
 	}
 	if selection.Ownership != nudgeEffectOwnershipKeyed {
-		closeErr := binding.Close()
 		reason := selection.Notice
 		if reason == "" {
 			reason = "production startup evidence did not select keyed ownership"
 		}
-		selection.Diagnostic = newNudgeEffectStartupDegradation(mode, profile, reason, closeErr)
+		// Auto retains the complete binding as a read-only reconstruction and
+		// watermark source for the effect-free parity child. Admission still
+		// returns explicit legacy ownership before touching this binding.
+		selection.Binding = binding
+		selection.ParityShadow = true
+		selection.Diagnostic = newNudgeEffectStartupDegradation(mode, profile, reason, nil)
 		return flags, selection, nil
 	}
 	selection.Binding = binding

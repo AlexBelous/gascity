@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgeparity"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -254,6 +255,19 @@ type CityRuntime struct {
 	nudgeKeyUnavailableOnce       sync.Once
 	nudgeKeyHintDiagnosticOnce    sync.Once
 	nudgeKeyEntropyDiagnosticOnce sync.Once
+	// nudgeParityShadow is published during construction so admission before
+	// readiness is counted explicitly as not_running. Run opens it only after
+	// the keyed read projection has installed, and shutdown unpublishes it
+	// before draining accepted samples.
+	nudgeParityEnabled        bool
+	nudgeParityShadow         atomic.Pointer[nudgeparity.Shadow]
+	nudgeParityConfigRevision atomic.Pointer[string]
+	nudgeParityResultSink     nudgeparity.ResultSink
+	nudgeParityPlanner        nudgeparity.Planner
+	nudgeParityNow            func() time.Time
+	nudgeParityLifecycleMu    sync.Mutex
+	nudgeParityStop           func() error
+	nudgeParityClosing        bool
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -348,6 +362,9 @@ type CityRuntimeParams struct {
 	// partition, resolver, authorizer, ingress, and command source selected
 	// before readiness. CityRuntime owns and closes it.
 	NudgeAuthorityBinding *productionNudgeAuthorityBinding
+	// NudgeParityShadow enables the legacy-owned, planning-only same-operation
+	// comparator. It never selects or changes effect ownership.
+	NudgeParityShadow bool
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -511,9 +528,14 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		nudgeEffectOwnership:       p.NudgeEffectOwnership,
 		nudgeClaimAuthorizer:       nudgeAuthorizer,
 		nudgeAuthorityBinding:      p.NudgeAuthorityBinding,
+		nudgeParityEnabled:         p.NudgeParityShadow,
 		logPrefix:                  logPrefix,
 		stdout:                     p.Stdout,
 		stderr:                     p.Stderr,
+	}
+	cr.publishNudgeParityConfigRevision(p.ConfigRev)
+	if err := cr.prepareNudgeParityShadow(); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge parity shadow preparation: %v\n", cr.logPrefix, err) //nolint:errcheck // observational child cannot block legacy startup
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -838,6 +860,15 @@ func (cr *CityRuntime) run(parentCtx context.Context) {
 		return
 	}
 	defer stopNudgeKeyController()
+	stopNudgeParityShadow, nudgeParityStartErr := cr.startNudgeParityShadowBeforeReadiness(ctx)
+	if nudgeParityStartErr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge parity shadow start: %v\n", cr.logPrefix, nudgeParityStartErr) //nolint:errcheck // observational child cannot block legacy readiness
+	}
+	defer func() {
+		if err := stopNudgeParityShadow(); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge parity shadow shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort shutdown diagnostic
+		}
+	}()
 	var nudgeKeyChildFailure <-chan error
 	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed && nudgeKeyChild != nil {
 		nudgeKeyChildFailure = nudgeKeyChild.failure
@@ -2875,6 +2906,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.providerHealthGate = newProviderHealthGate()
 	}
 	cr.configRev = result.Revision
+	cr.publishNudgeParityConfigRevision(result.Revision)
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
 	cr.restartConfigWatcher()
 	if trace != nil {
@@ -4266,6 +4298,9 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		if err := cr.stopNudgeParityShadowBeforeAuthority(); err != nil && cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge parity shadow shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
 		if cr.nudgeAuthorityBinding != nil {
 			if err := cr.nudgeAuthorityBinding.Close(); err != nil && cr.stderr != nil {
 				fmt.Fprintf(cr.stderr, "%s: nudge authority shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr

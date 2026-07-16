@@ -732,7 +732,59 @@ func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time)
 	return now.Sub(missingSince) < defaultNudgePollStartGrace
 }
 
+type localNudgeIngressAdmitter func(context.Context, string, nudgequeue.NudgeIngressRequest) nudgeBridgeResult
+
 func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+	return deliverSessionNudgeWithIngress(target, message, mode, jsonOutput, stdout, stderr, admitNudgeThroughLocalController)
+}
+
+func deliverSessionNudgeWithIngress(
+	target nudgeTarget,
+	message string,
+	mode nudgeDeliveryMode,
+	jsonOutput bool,
+	stdout, stderr io.Writer,
+	admit localNudgeIngressAdmitter,
+) int {
+	if mode == nudgeDeliveryImmediate {
+		result := nudgeBridgeResult{
+			Disposition: nudgeBridgeMayHaveEntered,
+			Err:         errors.New("durable nudge ingress is not configured"),
+		}
+		if admit != nil {
+			result = admit(context.Background(), target.cityPath, nudgequeue.NudgeIngressRequest{
+				RequestID: newQueuedNudgeID(),
+				Mode:      nudgequeue.DeliveryModeImmediate,
+				Target: nudgequeue.CommandTarget{
+					SessionID:        target.sessionID,
+					IntentGeneration: target.intentGeneration,
+					LaunchIdentity:   target.launchIdentity,
+					Policy:           nudgequeue.TargetPolicyExactLaunch,
+				},
+				Source:    nudgequeue.CommandSourceSession,
+				Message:   message,
+				ExpiresAt: time.Now().UTC().Add(defaultQueuedNudgeTTL),
+			})
+		}
+		switch result.Disposition {
+		case nudgeBridgeDurableAccepted:
+			return writeAcceptedSessionNudgeResult(target, mode, result, jsonOutput, stdout, stderr)
+		case nudgeBridgeLegacyOwnership, nudgeBridgePreEntryUnavailable:
+			// This request definitely did not enter durable keyed ownership, or
+			// the live controller explicitly retained the legacy owner.
+		case nudgeBridgeMayHaveEntered:
+			err := result.Err
+			if err == nil {
+				err = errors.New("durable nudge admission outcome is unknown")
+			}
+			fmt.Fprintf(stderr, "gc session nudge: %v; refusing provider fallback\n", err) //nolint:errcheck
+			return 1
+		default:
+			fmt.Fprintf(stderr, "gc session nudge: unknown durable admission outcome %q; refusing provider fallback\n", result.Disposition) //nolint:errcheck
+			return 1
+		}
+	}
+
 	store := openNudgeBeadStore(target.cityPath)
 	if store.Store == nil {
 		fmt.Fprintf(stderr, "gc session nudge: opening city store for %q\n", target.agentKey()) //nolint:errcheck
@@ -744,6 +796,29 @@ func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryM
 		return 1
 	}
 	return deliverSessionNudgeWithWorker(target, store.Store, sp, message, mode, jsonOutput, stdout, stderr)
+}
+
+func writeAcceptedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, result nudgeBridgeResult, jsonOutput bool, stdout, stderr io.Writer) int {
+	if result.CommandID == "" || !knownNudgeBridgeCommandState(result.Status) {
+		fmt.Fprintln(stderr, "gc session nudge: controller returned incomplete durable acceptance; refusing provider fallback") //nolint:errcheck
+		return 1
+	}
+	if jsonOutput {
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			Target:        target.agentKey(),
+			SessionID:     target.sessionID,
+			SessionName:   target.sessionName,
+			Delivery:      string(mode),
+			Queued:        true,
+			Outcome:       "accepted",
+			CommandID:     result.CommandID,
+			CommandStatus: string(result.Status),
+		})
+	}
+	fmt.Fprintf(stdout, "Accepted nudge for %s (command %s)\n", target.agentKey(), result.CommandID) //nolint:errcheck
+	return 0
 }
 
 func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {

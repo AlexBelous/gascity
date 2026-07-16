@@ -68,7 +68,7 @@ SPEC CRITICAL #2 mitigation flipped PROPOSED→ACCEPTED. Then implemented:
 |----|------|-------------|-------|
 | **A** | `gastownhall/beads` (OSS) | **#4842** `feat/credential-exec-info` | OPEN, `status/needs-review-auto`, OSS-neutral language, DO NOT merge w/o review. Canon(idempotent+total), exec-info threading, per-dial connector + bounded one-shot 1045-retry, env timeouts, connector-level token redaction. wt `/data/tmp/bd-s2-wpa`. |
 | **B** | `gascity/gasworks` | **#46** `feat/beads-destination-gate` | OPEN, warn-only default (`GASWORKS_DESTINATION_ENFORCE`). §5.0 gate (fail-closed on DELEGATION presence, not `origin==bd`), trust-gateway allowlist, mint resilience, double-checked cross-process refresh + real Windows `LockFileEx`. wt `/data/tmp/gasworks-s2-wpb`. |
-| **E** | `gascity/crucible` (PRIVATE) | `feat/eia-helper-destination-gate` | IN FLIGHT. §5.0 gate in `eia-helper`; allowlist = `EIA_TRUSTED_GATEWAYS` (independent layer 2) ∪ own `GC_DOLT_HOST` fallback. Spec `/data/tmp/s2-grounding/wpe-spec.md`. wt `/data/tmp/crucible-s2-wpe`. |
+| **E** | `gascity/crucible` (PRIVATE) | **#138** `feat/eia-helper-destination-gate` | OPEN, warn-only default (`EIA_DESTINATION_ENFORCE`). §5.0 gate in `internal/beadsgateway`; scoped to audience==beads + delegation-presence; allowlist = `EIA_TRUSTED_GATEWAYS` (independent layer 2) ∪ own `GC_DOLT_HOST` fallback + fail-closed. Red-teamed (1 confirmed MEDIUM fixed). wt `/data/tmp/crucible-s2-wpe`. |
 | **D** | `gastownhall/beads` (OSS) | — | DEFERRED until deps #4823 + #4842 merge. Doctor gateway-blindness sweep + helper dry-run (fixes `mc-b3clt.4`). |
 
 `CanonicalHost` is **byte-identical** across bd `internal/creds/host.go` +
@@ -80,11 +80,12 @@ configfile.go:426 precedence) + WP-E gate on independent `EIA_TRUSTED_GATEWAYS`.
 the fleet flip additionally on WP-E deployed (+ `EIA_TRUSTED_GATEWAYS` on the
 controller image). Full findings ledger: `/data/tmp/s2-grounding/wpb-redteam-findings.md`.
 
-### Next-session actions
-1. Monitor bd #4842 (OSS, auto-review) + gasworks #46; address review feedback. DON'T merge #4842 without review.
-2. Finish WP-E: red-team the `eia-helper` gate (Fable, adversarial) before commit; crucible is private so push after red-team; deploy warn-only (add `EIA_TRUSTED_GATEWAYS=gw.beads.gascity.com` + `EIA_DESTINATION_ENFORCE=warn` to the controller image via the provisioner/gasworks-internal).
-3. WP-D once #4823 + #4842 merge (stack on them): doctor sweep, fixes `mc-b3clt.4`.
-4. Only flip enforce after WP-A is the default fleet bd AND WP-E is deployed fleet-wide.
+### Next-session actions (S2 security core A/B/E is COMPLETE — all 3 PRs open + red-teamed)
+1. Review + merge the 3 PRs: bd #4842 (OSS, auto-review — DON'T merge without review), gasworks #46, crucible #138 (private — owner merge). All green + mergeable at handoff.
+2. Deploy warn-only (owner decision — outward-facing): add `EIA_TRUSTED_GATEWAYS=gw.beads.gascity.com` + `EIA_DESTINATION_ENFORCE=warn` to the controller image env via the provisioner (gasworks-internal / crucible city-provisioner, identity-ha ns `accounts`).
+3. WP-D once #4823 + #4842 merge (stack on them): doctor gateway-blindness sweep + helper dry-run, fixes `mc-b3clt.4`.
+4. Enforce-flip is GATED and owner-driven: only after WP-A is the default fleet bd AND WP-E is deployed fleet-wide; gasworks `GASWORKS_DESTINATION_ENFORCE` and fleet `EIA_DESTINATION_ENFORCE` flip separately.
+5. Non-blocking follow-ups: shared canon-vector CI fixture across the 3 repos (pin/verify idna parity); couple early-refresh skew to sub-minute id_token realms (gasworks efficiency).
 
 **Historical (superseded) — the old v2 plan below (`bd attach` + bd-side
 allowlist) was DELETED by the pivot; kept only as design rationale.**

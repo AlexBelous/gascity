@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/citywriteauth"
@@ -22,6 +23,43 @@ type productionSessionNudgeAuthority interface {
 type productionSessionNudgeAuthorityResolver func(string) (productionSessionNudgeAuthority, bool)
 
 var errNudgeLegacyEffectOwnership = errors.New("legacy nudge effect ownership")
+
+// cityRuntimeNudgeAuthoritySlot lets a controller socket exist before its
+// CityRuntime is constructed without guessing that legacy ownership applies.
+// Until Store publishes the runtime, admission is explicitly unavailable.
+type cityRuntimeNudgeAuthoritySlot struct {
+	runtime atomic.Pointer[CityRuntime]
+}
+
+func (s *cityRuntimeNudgeAuthoritySlot) Store(cr *CityRuntime) {
+	if s == nil {
+		return
+	}
+	s.runtime.Store(cr)
+}
+
+func (s *cityRuntimeNudgeAuthoritySlot) RequesterScope() (string, string, string) {
+	authority := s.load()
+	if authority == nil {
+		return "", "", ""
+	}
+	return authority.RequesterScope()
+}
+
+func (s *cityRuntimeNudgeAuthoritySlot) Admit(ctx context.Context, request nudgequeue.NudgeIngressRequest) (nudgequeue.NudgeIngressResult, error) {
+	authority := s.load()
+	if authority == nil {
+		return nudgequeue.NudgeIngressResult{}, fmt.Errorf("%w: city runtime is not published", nudgequeue.ErrLocalNudgeAuthorityUnavailable)
+	}
+	return authority.Admit(ctx, request)
+}
+
+func (s *cityRuntimeNudgeAuthoritySlot) load() *cityRuntimeSessionNudgeAuthority {
+	if s == nil {
+		return nil
+	}
+	return newCityRuntimeSessionNudgeAuthority(s.runtime.Load())
+}
 
 // cityRuntimeSessionNudgeAuthority is the effect-owner-aware admission
 // capability for one immutable CityRuntime. It keeps durable admission and

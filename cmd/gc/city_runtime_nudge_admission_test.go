@@ -119,6 +119,28 @@ func TestCityRuntimeNudgeAuthorityRequesterScopeDelegatesToBinding(t *testing.T)
 	}
 }
 
+func TestCityRuntimeNudgeAuthoritySlotFailsClosedBeforeRuntimePublication(t *testing.T) {
+	var slot cityRuntimeNudgeAuthoritySlot
+
+	if tenant, city, credential := slot.RequesterScope(); tenant != "" || city != "" || credential != "" {
+		t.Fatalf("RequesterScope before publication = %q/%q/%q, want empty", tenant, city, credential)
+	}
+	_, err := slot.Admit(t.Context(), nudgequeue.NudgeIngressRequest{RequestID: "request-a"})
+	if !errors.Is(err, nudgequeue.ErrLocalNudgeAuthorityUnavailable) || errors.Is(err, errNudgeLegacyEffectOwnership) {
+		t.Fatalf("Admit error = %v, want unavailable without legacy ownership", err)
+	}
+}
+
+func TestCityRuntimeNudgeAuthoritySlotPublishesRuntimeOwnership(t *testing.T) {
+	var slot cityRuntimeNudgeAuthoritySlot
+	slot.Store(&CityRuntime{nudgeEffectOwnership: nudgeEffectOwnershipLegacy})
+
+	_, err := slot.Admit(t.Context(), nudgequeue.NudgeIngressRequest{RequestID: "request-a"})
+	if !errors.Is(err, errNudgeLegacyEffectOwnership) {
+		t.Fatalf("Admit error = %v, want explicit legacy ownership after publication", err)
+	}
+}
+
 type recordingCityRuntimeNudgeBinding struct {
 	mu         sync.Mutex
 	tenant     string

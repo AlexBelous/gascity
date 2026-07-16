@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -19,6 +20,68 @@ type productionSessionNudgeAuthority interface {
 }
 
 type productionSessionNudgeAuthorityResolver func(string) (productionSessionNudgeAuthority, bool)
+
+var errNudgeLegacyEffectOwnership = errors.New("legacy nudge effect ownership")
+
+// cityRuntimeSessionNudgeAuthority is the effect-owner-aware admission
+// capability for one immutable CityRuntime. It keeps durable admission and
+// exact-key wake together without adding runtime capabilities to the durable
+// repository binding itself.
+type cityRuntimeSessionNudgeAuthority struct {
+	cr      *CityRuntime
+	binding productionSessionNudgeAuthority
+	wake    func(context.Context, nudgeWakeHint)
+}
+
+func newCityRuntimeSessionNudgeAuthority(cr *CityRuntime) *cityRuntimeSessionNudgeAuthority {
+	if cr == nil {
+		return nil
+	}
+	binding := cr.liveNudgeAuthorityBinding()
+	if binding == nil {
+		return nil
+	}
+	return &cityRuntimeSessionNudgeAuthority{
+		cr:      cr,
+		binding: binding,
+		wake:    cr.acceptNudgeKeyShadowHint,
+	}
+}
+
+func (a *cityRuntimeSessionNudgeAuthority) RequesterScope() (string, string, string) {
+	if a == nil || isNilProductionSessionNudgeAuthority(a.binding) {
+		return "", "", ""
+	}
+	return a.binding.RequesterScope()
+}
+
+func (a *cityRuntimeSessionNudgeAuthority) Admit(ctx context.Context, request nudgequeue.NudgeIngressRequest) (nudgequeue.NudgeIngressResult, error) {
+	if a == nil || a.cr == nil || isNilProductionSessionNudgeAuthority(a.binding) {
+		return nudgequeue.NudgeIngressResult{}, fmt.Errorf("%w: city runtime nudge authority is unavailable", nudgequeue.ErrLocalNudgeAuthorityUnavailable)
+	}
+	switch a.cr.nudgeEffectOwnership {
+	case nudgeEffectOwnershipLegacy:
+		return nudgequeue.NudgeIngressResult{}, errors.Join(
+			errNudgeLegacyEffectOwnership,
+			nudgequeue.ErrLocalNudgeAuthorityUnavailable,
+		)
+	case nudgeEffectOwnershipKeyed:
+		// Continue below.
+	default:
+		return nudgequeue.NudgeIngressResult{}, fmt.Errorf("%w: unknown nudge effect ownership %d", nudgequeue.ErrLocalNudgeAuthorityUnavailable, a.cr.nudgeEffectOwnership)
+	}
+	result, err := a.binding.Admit(ctx, request)
+	if err != nil {
+		return nudgequeue.NudgeIngressResult{}, err
+	}
+	if result.Entry.Command == nil || result.Entry.Command.ID == "" {
+		return nudgequeue.NudgeIngressResult{}, fmt.Errorf("%w: durable admission returned no command identity", nudgequeue.ErrLocalNudgeAuthorityUnavailable)
+	}
+	if a.wake != nil {
+		a.wake(ctx, nudgeWakeHint{CommandID: result.Entry.Command.ID})
+	}
+	return result, nil
+}
 
 type productionSessionNudgeAdmission struct {
 	resolve productionSessionNudgeAuthorityResolver

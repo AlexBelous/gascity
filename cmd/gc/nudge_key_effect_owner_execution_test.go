@@ -271,8 +271,14 @@ func TestNudgeKeyEffectOwnerRuntimeInteractionRefusalsBecomeDurableRetryWithoutN
 				command.Retry.ErrorClass != nudgequeue.CommandErrorClassProviderBusy || command.Retry.AttemptID == "" {
 				t.Fatalf("durable retry evidence = %#v, want exact not-entered attempt and future eligibility", command.Retry)
 			}
+			if outcome.disposition != nudgeReconcileOutcomeRetryDeadline || !outcome.notBefore.Equal(*command.Retry.NextEligibleAt) {
+				t.Fatalf("retry outcome = %#v, want exact durable eligibility %v", outcome, command.Retry.NextEligibleAt)
+			}
 
-			owner.reconcile(t.Context(), key, nudgeReconcileBatch{Causes: nudgeCauseRuntimeReadiness})
+			duplicate := owner.reconcile(t.Context(), key, nudgeReconcileBatch{Causes: nudgeCauseRuntimeReadiness})
+			if duplicate.disposition != nudgeReconcileOutcomeRetryDeadline || !duplicate.notBefore.Equal(*command.Retry.NextEligibleAt) {
+				t.Fatalf("duplicate retry outcome = %#v, want same durable eligibility", duplicate)
+			}
 			if got := provider.CountCalls("NudgeEffect", target.sessionName); got != 0 {
 				t.Fatalf("duplicate callback native entries = %d, want no blind replay", got)
 			}

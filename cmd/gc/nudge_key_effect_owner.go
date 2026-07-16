@@ -158,6 +158,12 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 	if !pending || command.Mode == nudgequeue.DeliveryModeWaitIdle {
 		return nudgeReconcileSuccess()
 	}
+	if command.Retry != nil && command.Retry.NextEligibleAt != nil {
+		now := o.now().UTC()
+		if now.Before(*command.Retry.NextEligibleAt) {
+			return nudgeReconcileAtRetryDeadline(*command.Retry.NextEligibleAt)
+		}
+	}
 
 	preClaimTarget, err := o.targets.Read(ctx, command.Target.SessionID)
 	if err != nil {
@@ -418,7 +424,7 @@ func (o *nudgeKeyEffectOwner) retryAttempt(ctx context.Context, key reconcilekey
 	if err != nil {
 		if _, _, refreshErr := o.reader.acceptCommandHint(ctx, command.ID); refreshErr == nil &&
 			o.pendingRetryMatches(command.ID, request) {
-			return nudgeReconcileSuccess()
+			return nudgeReconcileAtRetryDeadline(request.NextEligibleAt)
 		}
 		return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("persisting keyed nudge retry: %w", err)))
 	}
@@ -433,7 +439,7 @@ func (o *nudgeKeyEffectOwner) retryAttempt(ctx context.Context, key reconcilekey
 	if !o.pendingRetryMatches(command.ID, request) {
 		return nudgeReconcileInvariant(errors.New("refreshing keyed nudge retry: exact pending retry is absent"))
 	}
-	return nudgeReconcileSuccess()
+	return nudgeReconcileAtRetryDeadline(request.NextEligibleAt)
 }
 
 func (o *nudgeKeyEffectOwner) pendingRetryMatches(commandID string, request nudgequeue.CommandRetryRequest) bool {

@@ -265,3 +265,69 @@ func TestBuildDesiredState_WarmNamedBackingRigPoolSeesCityStoreRoutedDemand(t *t
 			"the warm/cold boundary (full=%v)", got, dsResult.ScaleCheckCounts)
 	}
 }
+
+// TestBuildDesiredState_RigControlDispatcherStartsOnCityStoreControlDemand:
+// city-side orchestration materializes a rig workflow's graph in the CITY
+// store while routing its control steps to the RIG's control dispatcher (the
+// route follows the execution rig context; the placement follows the source
+// bead's store). A running rig dispatcher serves those city-store control
+// beads fine — but a dead one could never COLD-START on them, because the
+// dispatcher was excluded from the city-store demand probe. Every control
+// bead then sits ready-but-unservable and the whole workflow layer freezes
+// behind it. Rig control dispatchers must be started when there is city-store
+// work routed to them.
+func TestBuildDesiredState_RigControlDispatcherStartsOnCityStoreControlDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "gascity")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gc"},
+		Rigs:      []config.Rig{{Name: "gascity", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"gascity": rigStore}
+
+	// COLD dispatcher (the production failure shape: dispatcher dead, its
+	// control backlog stranded in the city store).
+	dispatcherTemplate := "gascity/" + config.ControlDispatcherAgentName
+	// Production shape: the bead physically lives in the CITY store but its
+	// gc.root_store_ref claims rig ownership (the materializer stamps the ref
+	// from the execution rig context, not from the store it wrote to). That
+	// mismatch makes the bead invisible to route repair and to the
+	// rootStoreRefMatchesCandidate work collection — demand counting is the
+	// only remaining path that can start a dispatcher for it.
+	if _, err := cityStore.Create(beads.Bead{
+		Title:  "ready control step (scope-check) in city store",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":      dispatcherTemplate,
+			"gc.kind":           "scope-check",
+			"gc.root_store_ref": "rig:gascity",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		"gc", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		cityStore, rigStores, nil, nil, io.Discard,
+	)
+
+	if got := dsResult.ScaleCheckCounts[dispatcherTemplate]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[%s] = %d, want 1: a rig control dispatcher must be started "+
+			"when city-store work is routed to it — excluding dispatchers from the city demand "+
+			"probe leaves a dead dispatcher's city-store control backlog permanently unservable "+
+			"(full=%v)", dispatcherTemplate, got, dsResult.ScaleCheckCounts)
+	}
+}

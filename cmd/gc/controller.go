@@ -1412,7 +1412,19 @@ func runControllerWithLease(
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	nudgeTokenSlot := &controllerNudgeTokenSlot{}
+	nudgeAuthoritySlot := &cityRuntimeNudgeAuthoritySlot{}
+	lis, err := startControllerSocket(
+		cityPath,
+		cancel,
+		forceShutdown,
+		configDirty,
+		reloadReqCh,
+		convergenceReqCh,
+		pokeCh,
+		controlDispatcherCh,
+		withControllerNudgeAdmissionTokenSource(nudgeTokenSlot.Load, nudgeAuthoritySlot),
+	)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1436,6 +1448,7 @@ func runControllerWithLease(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	nudgeTokenSlot.Store(controllerToken)
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
@@ -1468,6 +1481,7 @@ func runControllerWithLease(
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
+	nudgeAuthoritySlot.Store(cr)
 	nudgeBindingTransferred = true
 	defer cr.shutdown()
 

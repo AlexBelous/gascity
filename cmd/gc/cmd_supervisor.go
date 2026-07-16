@@ -2441,7 +2441,20 @@ func startManagedCity(
 	// Start controller socket AFTER the alreadyRunning check so we
 	// never destroy a live city's socket or leak a listener.
 	sockPath := filepath.Join(path, ".gc", "controller.sock")
-	lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	nudgeTokenSlot := &controllerNudgeTokenSlot{}
+	nudgeAuthoritySlot := &cityRuntimeNudgeAuthoritySlot{}
+	nudgeAuthoritySlot.Store(cityRuntime)
+	lis, lisErr := startControllerSocket(
+		path,
+		cityCancel,
+		forceShutdown,
+		configDirty,
+		reloadReqCh,
+		convergenceReqCh,
+		pokeCh,
+		controlDispatcherCh,
+		withControllerNudgeAdmissionTokenSource(nudgeTokenSlot.Load, nudgeAuthoritySlot),
+	)
 	if lisErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 		cityCancel()
@@ -2508,6 +2521,7 @@ func startManagedCity(
 		recordInitFailure(cityName, fmt.Sprintf("controller token write: %v", err))
 		return
 	}
+	nudgeTokenSlot.Store(controllerToken)
 
 	// Capture the socket's os.FileInfo so the goroutine can perform
 	// ownership-safe socket removal on exit via os.SameFile — a

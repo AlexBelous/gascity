@@ -41,6 +41,9 @@ func TestNudgeTargetFromSessionInfoGolden(t *testing.T) {
 		wantTransport         string
 		wantProvider          string
 		wantContinuationEpoch string
+		wantIntentGeneration  uint64
+		wantContinuationID    string
+		wantLaunchID          string
 	}{
 		{
 			name: "full",
@@ -58,6 +61,9 @@ func TestNudgeTargetFromSessionInfoGolden(t *testing.T) {
 					"transport":          "acp",
 					"session_name":       "worker-session",
 					"continuation_epoch": "3",
+					"generation":         "7",
+					"session_key":        "continuation-7",
+					"instance_token":     "launch-7",
 					"alias_history":      "old-alias,older-alias",
 				},
 			},
@@ -69,6 +75,9 @@ func TestNudgeTargetFromSessionInfoGolden(t *testing.T) {
 			wantTransport:         "acp",
 			wantProvider:          "claude",
 			wantContinuationEpoch: "3",
+			wantIntentGeneration:  7,
+			wantContinuationID:    "continuation-7",
+			wantLaunchID:          "launch-7",
 		},
 		{
 			// Empty transport → resolver must fall back to the agent's Session.
@@ -177,6 +186,15 @@ func TestNudgeTargetFromSessionInfoGolden(t *testing.T) {
 			if got.continuationEpoch != tc.wantContinuationEpoch {
 				t.Errorf("continuationEpoch = %q, want %q", got.continuationEpoch, tc.wantContinuationEpoch)
 			}
+			if got.intentGeneration != tc.wantIntentGeneration {
+				t.Errorf("intentGeneration = %d, want %d", got.intentGeneration, tc.wantIntentGeneration)
+			}
+			if got.continuationIdentity != tc.wantContinuationID {
+				t.Errorf("continuationIdentity = %q, want %q", got.continuationIdentity, tc.wantContinuationID)
+			}
+			if got.launchIdentity != tc.wantLaunchID {
+				t.Errorf("launchIdentity = %q, want %q", got.launchIdentity, tc.wantLaunchID)
+			}
 		})
 	}
 }
@@ -207,24 +225,30 @@ func TestNudgeTargetFromSessionInfoFullGolden(t *testing.T) {
 			"transport":          "acp",
 			"session_name":       "worker-session",
 			"continuation_epoch": "3",
+			"generation":         "7",
+			"session_key":        "continuation-7",
+			"instance_token":     "launch-7",
 			"alias_history":      "old-alias,older-alias",
 		},
 	}
 
 	got := resolveNudgeTargetFromSessionInfo(cityPath, cfg, sessiontest.SeedBead(t, b))
 	want := nudgeTarget{
-		cityPath:          "/tmp/test-city",
-		cityName:          "test-city",
-		cfg:               cfg,
-		alias:             "worker-alias",
-		aliasHistory:      []string{"old-alias", "older-alias"},
-		identity:          "frontend/worker-1",
-		transport:         "acp",
-		agent:             config.Agent{Name: "worker-1", Dir: "frontend"},
-		resolved:          &config.ResolvedProvider{Name: "claude"},
-		sessionID:         "ga-full",
-		continuationEpoch: "3",
-		sessionName:       "worker-session",
+		cityPath:             "/tmp/test-city",
+		cityName:             "test-city",
+		cfg:                  cfg,
+		alias:                "worker-alias",
+		aliasHistory:         []string{"old-alias", "older-alias"},
+		identity:             "frontend/worker-1",
+		transport:            "acp",
+		agent:                config.Agent{Name: "worker-1", Dir: "frontend"},
+		resolved:             &config.ResolvedProvider{Name: "claude"},
+		sessionID:            "ga-full",
+		continuationEpoch:    "3",
+		sessionName:          "worker-session",
+		intentGeneration:     7,
+		continuationIdentity: "continuation-7",
+		launchIdentity:       "launch-7",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("full nudgeTarget mismatch:\n got=%#v\nwant=%#v", got, want)

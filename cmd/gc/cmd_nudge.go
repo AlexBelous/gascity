@@ -123,6 +123,12 @@ type nudgeTarget struct {
 	sessionID         string
 	continuationEpoch string
 	sessionName       string
+	intentGeneration  uint64
+	// continuationIdentity and launchIdentity are the durable session fences
+	// used by the keyed command path. They come from the typed session
+	// projection, never from caller-supplied aliases or runtime discovery.
+	continuationIdentity string
+	launchIdentity       string
 }
 
 type nudgeStatusJSON struct {
@@ -1171,16 +1177,19 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 // needs. resolveNudgeTargetFromSessionInfo populates it from a session.Info
 // projection, so the identity-resolution tail lives in exactly one place.
 type nudgeTargetFields struct {
-	sessionID         string
-	sessionName       string
-	alias             string
-	agentName         string
-	template          string
-	commonName        string
-	aliasHistory      []string
-	transport         string
-	provider          string
-	continuationEpoch string
+	sessionID            string
+	sessionName          string
+	alias                string
+	agentName            string
+	template             string
+	commonName           string
+	aliasHistory         []string
+	transport            string
+	provider             string
+	continuationEpoch    string
+	intentGeneration     uint64
+	continuationIdentity string
+	launchIdentity       string
 }
 
 // resolveNudgeTargetFromSessionInfo reads the session attributes buildNudgeTarget
@@ -1194,34 +1203,48 @@ func resolveNudgeTargetFromSessionInfo(cityPath string, cfg *config.City, i sess
 		sessionName = sessionNameFromBeadID(i.ID)
 	}
 	return buildNudgeTarget(cityPath, cfg, nudgeTargetFields{
-		sessionID:         i.ID,
-		sessionName:       sessionName,
-		alias:             strings.TrimSpace(i.Alias),
-		agentName:         strings.TrimSpace(i.AgentName),
-		template:          strings.TrimSpace(i.Template),
-		commonName:        strings.TrimSpace(i.CommonName),
-		aliasHistory:      i.AliasHistory,
-		transport:         strings.TrimSpace(i.TransportMetadata),
-		provider:          strings.TrimSpace(i.Provider),
-		continuationEpoch: strings.TrimSpace(i.ContinuationEpoch),
+		sessionID:            i.ID,
+		sessionName:          sessionName,
+		alias:                strings.TrimSpace(i.Alias),
+		agentName:            strings.TrimSpace(i.AgentName),
+		template:             strings.TrimSpace(i.Template),
+		commonName:           strings.TrimSpace(i.CommonName),
+		aliasHistory:         i.AliasHistory,
+		transport:            strings.TrimSpace(i.TransportMetadata),
+		provider:             strings.TrimSpace(i.Provider),
+		continuationEpoch:    strings.TrimSpace(i.ContinuationEpoch),
+		intentGeneration:     parseCanonicalNudgeIntentGeneration(i.Generation),
+		continuationIdentity: i.SessionKey,
+		launchIdentity:       i.InstanceToken,
 	})
+}
+
+func parseCanonicalNudgeIntentGeneration(raw string) uint64 {
+	generation, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || generation == 0 || strconv.FormatUint(generation, 10) != raw {
+		return 0
+	}
+	return generation
 }
 
 func buildNudgeTarget(cityPath string, cfg *config.City, f nudgeTargetFields) nudgeTarget {
 	cityName := loadedCityName(cfg, cityPath)
 	identity := firstNonEmpty(f.agentName, f.template, f.commonName)
 	target := nudgeTarget{
-		cityPath:          cityPath,
-		cityName:          cityName,
-		cfg:               cfg,
-		identity:          identity,
-		alias:             f.alias,
-		aliasHistory:      f.aliasHistory,
-		transport:         f.transport,
-		resolved:          &config.ResolvedProvider{Name: f.provider},
-		sessionID:         f.sessionID,
-		continuationEpoch: f.continuationEpoch,
-		sessionName:       f.sessionName,
+		cityPath:             cityPath,
+		cityName:             cityName,
+		cfg:                  cfg,
+		identity:             identity,
+		alias:                f.alias,
+		aliasHistory:         f.aliasHistory,
+		transport:            f.transport,
+		resolved:             &config.ResolvedProvider{Name: f.provider},
+		sessionID:            f.sessionID,
+		continuationEpoch:    f.continuationEpoch,
+		sessionName:          f.sessionName,
+		intentGeneration:     f.intentGeneration,
+		continuationIdentity: f.continuationIdentity,
+		launchIdentity:       f.launchIdentity,
 	}
 	target.agent = parseNudgeAgentIdentity(identity)
 	for _, candidate := range []string{f.agentName, f.template, f.commonName} {

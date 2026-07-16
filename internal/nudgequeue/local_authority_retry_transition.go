@@ -10,23 +10,17 @@ import (
 	"time"
 )
 
+const (
+	localAuthorityRetryPreparationExistsQuery = `SELECT EXISTS(SELECT 1 FROM retry_preparations LIMIT 1)`
+	localAuthorityRetryReceiptExistsQuery     = `SELECT EXISTS(SELECT 1 FROM retry_receipts LIMIT 1)`
+	localAuthorityRetryClaimIDExistsQuery     = `SELECT EXISTS(SELECT 1 FROM retry_receipts WHERE command_id = ? AND claim_id = ? LIMIT 1)`
+	localAuthorityRetryAttemptIDExistsQuery   = `SELECT EXISTS(SELECT 1 FROM retry_receipts WHERE command_id = ? AND attempt_id = ? LIMIT 1)`
+)
+
 func (a *LocalNudgeAuthority) validateRetryMetadata(ctx context.Context, state CommandRepositoryState, allowReset bool) error {
-	generation, preparationCount, receiptCount, err := localAuthorityRetryMutationState(ctx, a.db)
+	generation, preparationCount, receiptCount, err := a.validateRetryEvidenceCounts(ctx)
 	if err != nil {
 		return err
-	}
-	if preparationCount > generation || receiptCount > generation {
-		return fmt.Errorf("%w: retry authority metadata high-waters are inconsistent", ErrLocalNudgeAuthorityConflict)
-	}
-	var actualPreparations, actualReceipts uint64
-	if err := a.db.QueryRowContext(ctx, `SELECT
-		(SELECT COUNT(*) FROM retry_preparations),
-		(SELECT COUNT(*) FROM retry_receipts)`).Scan(&actualPreparations, &actualReceipts); err != nil {
-		return fmt.Errorf("reading retry authority evidence counts: %w", err)
-	}
-	if actualPreparations != preparationCount || actualReceipts != receiptCount {
-		return fmt.Errorf("%w: retry evidence counts %d/%d differ from metadata %d/%d",
-			ErrLocalNudgeAuthorityConflict, actualPreparations, actualReceipts, preparationCount, receiptCount)
 	}
 	cursor, err := a.readLocalAuthorityRetryAuditCursor(ctx, a.db)
 	if errors.Is(err, errLocalAuthorityRetryAuditCheckpointInvalid) {
@@ -54,6 +48,67 @@ func (a *LocalNudgeAuthority) validateRetryMetadata(ctx context.Context, state C
 		return fmt.Errorf("%w: local retry audit checkpoint skipped receipt evidence", ErrLocalNudgeAuthorityConflict)
 	}
 	return nil
+}
+
+func (a *LocalNudgeAuthority) validateRetryMetadataV4(ctx context.Context, state CommandRepositoryState) error {
+	generation, preparationCount, receiptCount, err := a.validateRetryEvidenceCounts(ctx)
+	if err != nil {
+		return err
+	}
+	cursor, err := a.readLocalAuthorityRetryAuditCursorV4(ctx, a.db)
+	if err != nil {
+		return fmt.Errorf("%w: retry audit checkpoint is invalid before v4 migration: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	if cursor.generation > generation || cursor.repositoryRevision > state.Revision || cursor.sequenceHighWater > state.SequenceHighWater {
+		return fmt.Errorf("%w: local v4 retry audit checkpoint exceeds current authority lineage", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.preparationCount > preparationCount || cursor.receiptCount > receiptCount {
+		return fmt.Errorf("%w: local v4 retry audit checkpoint counts exceed authority metadata", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.phase == localAuthorityRetryAuditIdle || cursor.generation != generation {
+		return nil
+	}
+	if cursor.phase != localAuthorityRetryAuditPreparations && cursor.preparationCount != preparationCount {
+		return fmt.Errorf("%w: local v4 retry audit checkpoint skipped preparation evidence", ErrLocalNudgeAuthorityConflict)
+	}
+	if cursor.phase == localAuthorityRetryAuditDone && cursor.receiptCount != receiptCount {
+		return fmt.Errorf("%w: local v4 retry audit checkpoint skipped receipt evidence", ErrLocalNudgeAuthorityConflict)
+	}
+	return nil
+}
+
+func (a *LocalNudgeAuthority) validateRetryEvidenceCounts(ctx context.Context) (generation, preparationCount, receiptCount uint64, err error) {
+	generation, preparationCount, receiptCount, err = localAuthorityRetryMutationState(ctx, a.db)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if preparationCount > generation || receiptCount > generation {
+		return 0, 0, 0, fmt.Errorf("%w: retry authority metadata high-waters are inconsistent", ErrLocalNudgeAuthorityConflict)
+	}
+	// Retained counters are updated in the same SQLite transaction as every
+	// retry row. Do not recount lifetime receipts on startup: bounded recovery
+	// audits the immutable suffix and proves the exact counter before readiness.
+	// The zero case remains an O(1) absence check so a nonempty table can never
+	// hide behind pristine metadata.
+	if preparationCount == 0 {
+		var exists int
+		if err := a.db.QueryRowContext(ctx, localAuthorityRetryPreparationExistsQuery).Scan(&exists); err != nil {
+			return 0, 0, 0, fmt.Errorf("checking retry preparation absence: %w", err)
+		}
+		if exists != 0 {
+			return 0, 0, 0, fmt.Errorf("%w: retry preparation metadata is zero for nonempty evidence", ErrLocalNudgeAuthorityConflict)
+		}
+	}
+	if receiptCount == 0 {
+		var exists int
+		if err := a.db.QueryRowContext(ctx, localAuthorityRetryReceiptExistsQuery).Scan(&exists); err != nil {
+			return 0, 0, 0, fmt.Errorf("checking retry receipt absence: %w", err)
+		}
+		if exists != 0 {
+			return 0, 0, 0, fmt.Errorf("%w: retry receipt metadata is zero for nonempty evidence", ErrLocalNudgeAuthorityConflict)
+		}
+	}
+	return generation, preparationCount, receiptCount, nil
 }
 
 type localAuthorityRetryTransitionRecord struct {
@@ -112,6 +167,14 @@ func (a *LocalNudgeAuthority) PrepareCommandRetryTransition(ctx context.Context,
 	if intent.RepositoryBeforeRevision < highestRevision || intent.RepositorySequenceHighWater < highestSequence {
 		return fmt.Errorf("%w: retry repository state %d/%d is behind authority effect fence %d/%d",
 			ErrLocalNudgeAuthorityConflict, intent.RepositoryBeforeRevision, intent.RepositorySequenceHighWater, highestRevision, highestSequence)
+	}
+	auditCursor, err := a.readLocalAuthorityRetryAuditCursor(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if intent.RepositoryRevision <= auditCursor.afterRevision {
+		return fmt.Errorf("%w: retry revision %d does not advance certified receipt revision %d",
+			ErrLocalNudgeAuthorityConflict, intent.RepositoryRevision, auditCursor.afterRevision)
 	}
 	if terminal, found, err := localAuthorityPreparationByCommand(ctx, tx, a.store, intent.CommandID); err != nil {
 		return err
@@ -455,13 +518,17 @@ func (a *LocalNudgeAuthority) VerifyCommandRetryClaim(ctx context.Context, verif
 	if !found || !retryReceiptMatchesClaimVerification(latest, verification) {
 		return fmt.Errorf("%w: pending retry differs from its latest immutable receipt", ErrLocalNudgeAuthorityConflict)
 	}
-	var reused int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM retry_receipts
-		WHERE command_id = ? AND (claim_id = ? OR attempt_id = ?)`,
-		verification.CommandID, verification.NextClaimID, verification.NextAttemptID).Scan(&reused); err != nil {
+	var reusedClaimID int
+	if err := tx.QueryRowContext(ctx, localAuthorityRetryClaimIDExistsQuery,
+		verification.CommandID, verification.NextClaimID).Scan(&reusedClaimID); err != nil {
 		return fmt.Errorf("verifying local retry claim identifier freshness: %w", err)
 	}
-	if reused != 0 {
+	var reusedAttemptID int
+	if err := tx.QueryRowContext(ctx, localAuthorityRetryAttemptIDExistsQuery,
+		verification.CommandID, verification.NextAttemptID).Scan(&reusedAttemptID); err != nil {
+		return fmt.Errorf("verifying local retry attempt identifier freshness: %w", err)
+	}
+	if reusedClaimID != 0 || reusedAttemptID != 0 {
 		return fmt.Errorf("%w: retry claim or attempt identifier was already used", ErrLocalNudgeAuthorityConflict)
 	}
 	if err := tx.Commit(); err != nil {

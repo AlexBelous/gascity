@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,6 +61,164 @@ func TestLocalNudgeAuthorityMigratesExactV3JournalInPlace(t *testing.T) {
 	}
 }
 
+func TestLocalNudgeAuthorityMigratesPersistedPreIndexV4InPlace(t *testing.T) {
+	fixture := newLocalAuthorityProviderAttemptFixture(t)
+	if _, err := fixture.repository.RetryProviderAttempt(
+		t.Context(), localAuthorityRetryRequest(fixture.command), fixture.partition, fixture.authority,
+	); err != nil {
+		t.Fatalf("RetryProviderAttempt before v4 migration: %v", err)
+	}
+	state, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State before v4 migration: %v", err)
+	}
+	before, found, err := localAuthorityRetryReceiptByAttempt(
+		t.Context(), fixture.authority.db, fixture.authority.store, fixture.command.ID, fixture.command.Claim.AttemptID,
+	)
+	if err != nil || !found {
+		t.Fatalf("retry receipt before v4 migration = %#v, found=%t err=%v", before, found, err)
+	}
+	generation, preparationCount, receiptCount, err := localAuthorityRetryMutationState(t.Context(), fixture.authority.db)
+	if err != nil || preparationCount != 0 || receiptCount != 1 {
+		t.Fatalf("retry mutation state before v4 migration = %d/%d/%d err=%v, want generation/0/1", generation, preparationCount, receiptCount, err)
+	}
+	v4Cursor := localAuthorityRetryAuditCursor{
+		generation: generation, repositoryRevision: state.Revision, sequenceHighWater: state.SequenceHighWater,
+		phase: localAuthorityRetryAuditDone, identity: advanceLocalAuthorityRetryAuditIdentity(
+			initialLocalAuthorityRetryAuditIdentity(), "receipt", localAuthorityRetryRecordIdentity(before),
+		),
+		receiptCount: receiptCount,
+	}
+	v4Digest := localAuthorityRetryAuditCursorDigestV4(v4Cursor, fixture.authority.store, fixture.authority.opts.AuthorityID)
+	if err := fixture.authority.Close(); err != nil {
+		t.Fatalf("Close before v4 migration: %v", err)
+	}
+
+	db := openLocalAuthorityFixtureDB(t, fixture.cityPath)
+	for _, index := range []string{"retry_receipts_audit", "retry_receipts_claim"} {
+		if _, err := db.ExecContext(t.Context(), `DROP INDEX `+index); err != nil {
+			_ = db.Close()
+			t.Fatalf("remove post-v4 retry index %s: %v", index, err)
+		}
+	}
+	if _, err := db.ExecContext(t.Context(), `UPDATE authority_meta SET schema_version = ? WHERE singleton = 1`, localNudgeAuthorityPreviousSchema); err != nil {
+		_ = db.Close()
+		t.Fatalf("restore persisted v4 schema version: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `UPDATE retry_meta SET
+		audit_generation = ?, audit_repository_revision = ?, audit_sequence_high_water = ?, audit_phase = ?,
+		audit_after_command_id = ?, audit_after_attempt_id = ?, audit_identity = ?,
+		audit_preparation_count = ?, audit_receipt_count = ?, audit_checkpoint_digest = ? WHERE singleton = 1`,
+		encodeLocalAuthorityUint64(v4Cursor.generation), encodeLocalAuthorityUint64(v4Cursor.repositoryRevision),
+		encodeLocalAuthorityUint64(v4Cursor.sequenceHighWater), string(v4Cursor.phase), v4Cursor.afterCommandID,
+		v4Cursor.afterAttemptID, v4Cursor.identity[:], encodeLocalAuthorityUint64(v4Cursor.preparationCount),
+		encodeLocalAuthorityUint64(v4Cursor.receiptCount), v4Digest[:]); err != nil {
+		_ = db.Close()
+		t.Fatalf("write persisted v4 retry cursor: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close persisted v4 fixture: %v", err)
+	}
+
+	reopened, err := OpenLocalNudgeAuthority(t.Context(), fixture.cityPath, state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority(persisted pre-index v4): %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	fixture.authority = reopened
+	var schema, auditIndexes, claimIndexes int
+	if err := reopened.db.QueryRowContext(t.Context(), `SELECT schema_version FROM authority_meta WHERE singleton = 1`).Scan(&schema); err != nil {
+		t.Fatalf("read migrated v4 schema version: %v", err)
+	}
+	if err := reopened.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'retry_receipts_audit'`).Scan(&auditIndexes); err != nil {
+		t.Fatalf("read migrated retry audit index: %v", err)
+	}
+	if err := reopened.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'retry_receipts_claim'`).Scan(&claimIndexes); err != nil {
+		t.Fatalf("read migrated retry claim index: %v", err)
+	}
+	if schema != localNudgeAuthoritySchema || auditIndexes != 1 || claimIndexes != 1 {
+		t.Fatalf("migrated v4 schema/indexes = %d/%d/%d, want %d/1/1", schema, auditIndexes, claimIndexes, localNudgeAuthoritySchema)
+	}
+	after, found, err := localAuthorityRetryReceiptByAttempt(
+		t.Context(), reopened.db, reopened.store, fixture.command.ID, fixture.command.Claim.AttemptID,
+	)
+	if err != nil || !found || !reflect.DeepEqual(after, before) {
+		t.Fatalf("retry receipt after v4 migration = %#v, found=%t err=%v; want %#v", after, found, err, before)
+	}
+	reset, err := reopened.readLocalAuthorityRetryAuditCursor(t.Context(), reopened.db)
+	if err != nil {
+		t.Fatalf("read reset v5 retry cursor: %v", err)
+	}
+	wantReset := localAuthorityRetryAuditCursor{
+		generation: generation, repositoryRevision: state.Revision, sequenceHighWater: state.SequenceHighWater,
+		phase: localAuthorityRetryAuditPreparations, identity: initialLocalAuthorityRetryAuditIdentity(),
+	}
+	if reset != wantReset {
+		t.Fatalf("migrated v5 retry cursor = %#v, want conservative reset %#v", reset, wantReset)
+	}
+	if err := reopened.RecoverCommandAuthority(t.Context(), fixture.repository); err != nil {
+		t.Fatalf("RecoverCommandAuthority after v4 migration: %v", err)
+	}
+	certified, err := reopened.readLocalAuthorityRetryAuditCursor(t.Context(), reopened.db)
+	if err != nil {
+		t.Fatalf("read certified v5 retry cursor: %v", err)
+	}
+	if certified.phase != localAuthorityRetryAuditDone || certified.afterRevision != state.Revision ||
+		certified.receiptCount != receiptCount || certified.identity != v4Cursor.identity {
+		t.Fatalf("certified v5 retry cursor = %#v, want full re-audit through revision %d with one preserved receipt", certified, state.Revision)
+	}
+}
+
+func TestLocalNudgeAuthorityRefusesTamperedV4BeforeMigration(t *testing.T) {
+	cityPath := t.TempDir()
+	state := localAuthorityRepositoryState()
+	authority, err := OpenLocalNudgeAuthority(t.Context(), cityPath, state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	if err := authority.Close(); err != nil {
+		t.Fatalf("Close before v4 tamper: %v", err)
+	}
+	db := openLocalAuthorityFixtureDB(t, cityPath)
+	for _, index := range []string{"retry_receipts_audit", "retry_receipts_claim"} {
+		if _, err := db.ExecContext(t.Context(), `DROP INDEX `+index); err != nil {
+			_ = db.Close()
+			t.Fatalf("remove post-v4 retry index %s: %v", index, err)
+		}
+	}
+	if _, err := db.ExecContext(t.Context(), `UPDATE authority_meta SET schema_version = ? WHERE singleton = 1`, localNudgeAuthorityPreviousSchema); err != nil {
+		_ = db.Close()
+		t.Fatalf("restore persisted v4 schema version: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), `UPDATE retry_meta SET audit_checkpoint_digest = zeroblob(32) WHERE singleton = 1`); err != nil {
+		_ = db.Close()
+		t.Fatalf("tamper persisted v4 retry cursor: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close tampered v4 fixture: %v", err)
+	}
+
+	reopened, err := OpenLocalNudgeAuthority(t.Context(), cityPath, state, localAuthorityOptions())
+	if reopened != nil || !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("OpenLocalNudgeAuthority(tampered v4) = %#v, err=%v; want conflict", reopened, err)
+	}
+	db = openLocalAuthorityFixtureDB(t, cityPath)
+	defer func() { _ = db.Close() }()
+	var schema, v5Indexes int
+	if err := db.QueryRowContext(t.Context(), `SELECT schema_version FROM authority_meta WHERE singleton = 1`).Scan(&schema); err != nil {
+		t.Fatalf("read rejected v4 schema: %v", err)
+	}
+	if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('retry_receipts_audit', 'retry_receipts_claim')`).Scan(&v5Indexes); err != nil {
+		t.Fatalf("inspect rejected v4 migration: %v", err)
+	}
+	if schema != localNudgeAuthorityPreviousSchema || v5Indexes != 0 {
+		t.Fatalf("rejected v4 schema/indexes = %d/%d, want unchanged %d/0", schema, v5Indexes, localNudgeAuthorityPreviousSchema)
+	}
+}
+
 func TestLocalNudgeAuthorityRefusesTamperedV3BeforeMigration(t *testing.T) {
 	cityPath := t.TempDir()
 	state := localAuthorityRepositoryState()
@@ -84,8 +244,8 @@ func TestLocalNudgeAuthorityRefusesTamperedV3BeforeMigration(t *testing.T) {
 	if err := db.QueryRowContext(t.Context(), `SELECT schema_version FROM authority_meta WHERE singleton = 1`).Scan(&schema); err != nil {
 		t.Fatalf("read rejected v3 schema: %v", err)
 	}
-	if schema != localNudgeAuthorityPreviousSchema {
-		t.Fatalf("rejected v3 schema = %d, want unchanged %d", schema, localNudgeAuthorityPreviousSchema)
+	if schema != localNudgeAuthorityV3Schema {
+		t.Fatalf("rejected v3 schema = %d, want unchanged %d", schema, localNudgeAuthorityV3Schema)
 	}
 	var retryMeta int
 	if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'retry_meta'`).Scan(&retryMeta); err != nil {
@@ -93,6 +253,107 @@ func TestLocalNudgeAuthorityRefusesTamperedV3BeforeMigration(t *testing.T) {
 	}
 	if retryMeta != 0 {
 		t.Fatal("tampered v3 authority was partially migrated")
+	}
+}
+
+func TestLocalNudgeAuthorityRetryClaimFreshnessQueriesStayIndexedAtLargeHistory(t *testing.T) {
+	fixture := newLocalAuthorityProviderAttemptFixture(t)
+	if _, err := fixture.repository.RetryProviderAttempt(
+		t.Context(), localAuthorityRetryRequest(fixture.command), fixture.partition, fixture.authority,
+	); err != nil {
+		t.Fatalf("RetryProviderAttempt seed: %v", err)
+	}
+
+	const history = 100_000
+	if _, err := fixture.authority.db.ExecContext(t.Context(), `WITH RECURSIVE history(n) AS (
+		SELECT 1 UNION ALL SELECT n + 1 FROM history WHERE n < ?
+	) INSERT INTO retry_receipts (
+		command_id, attempt_id, decision_kind, sequence, partition_id, repository_before_revision,
+		retry_revision, sequence_high_water, before_digest, after_digest, claim_id, owner_id,
+		operation_id, bound_launch_identity, authorization_decision_id, authorization_policy_version,
+		claimed_at, lease_until, retry_attempt_count, retry_last_attempt_at, retry_next_eligible_at,
+		retry_error_class, retry_error_detail, observed_at, provider_stage, completion,
+		effect_revision, effect_sequence_high_water
+	) SELECT
+		seed.command_id, printf('attempt-history-%06d', history.n), seed.decision_kind, seed.sequence,
+		seed.partition_id, seed.repository_before_revision, seed.retry_revision, seed.sequence_high_water,
+		seed.before_digest, seed.after_digest, printf('claim-history-%06d', history.n), seed.owner_id,
+		seed.operation_id, seed.bound_launch_identity, seed.authorization_decision_id,
+		seed.authorization_policy_version, seed.claimed_at, seed.lease_until, seed.retry_attempt_count,
+		seed.retry_last_attempt_at, seed.retry_next_eligible_at, seed.retry_error_class,
+		seed.retry_error_detail, seed.observed_at, seed.provider_stage, seed.completion,
+		seed.effect_revision, seed.effect_sequence_high_water
+	FROM retry_receipts AS seed CROSS JOIN history
+	WHERE seed.command_id = ? AND seed.attempt_id = ?`, history, fixture.command.ID, fixture.command.Claim.AttemptID); err != nil {
+		t.Fatalf("seed %d same-command retry receipts: %v", history, err)
+	}
+
+	for _, test := range []struct {
+		name      string
+		query     string
+		index     string
+		used      string
+		available string
+	}{
+		{
+			name: "claim id", query: localAuthorityRetryClaimIDExistsQuery, index: "retry_receipts_claim",
+			used: "claim-history-100000", available: "claim-history-new",
+		},
+		{
+			name: "attempt id", query: localAuthorityRetryAttemptIDExistsQuery, index: "sqlite_autoindex_retry_receipts_1",
+			used: "attempt-history-100000", available: "attempt-history-new",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows, err := fixture.authority.db.QueryContext(t.Context(), `EXPLAIN QUERY PLAN `+test.query, fixture.command.ID, test.available)
+			if err != nil {
+				t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+			}
+			var details []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					_ = rows.Close()
+					t.Fatalf("scan query plan: %v", err)
+				}
+				details = append(details, detail)
+			}
+			rowsErr := rows.Err()
+			closeErr := rows.Close()
+			if rowsErr != nil || closeErr != nil {
+				t.Fatalf("read query plan: %v", errors.Join(rowsErr, closeErr))
+			}
+			plan := strings.Join(details, "\n")
+			if !strings.Contains(plan, "COVERING INDEX "+test.index) || strings.Contains(plan, "SCAN retry_receipts") || strings.Contains(plan, "TEMP B-TREE") {
+				t.Fatalf("query plan = %q, want covering index %q without full scan or temp sort", plan, test.index)
+			}
+
+			var exists int
+			if err := fixture.authority.db.QueryRowContext(t.Context(), test.query, fixture.command.ID, test.used).Scan(&exists); err != nil || exists != 1 {
+				t.Fatalf("used %s lookup = %d, err=%v; want 1", test.name, exists, err)
+			}
+			if err := fixture.authority.db.QueryRowContext(t.Context(), test.query, fixture.command.ID, test.available).Scan(&exists); err != nil || exists != 0 {
+				t.Fatalf("available %s lookup = %d, err=%v; want 0", test.name, exists, err)
+			}
+		})
+	}
+}
+
+func TestLocalNudgeAuthorityRetryOpenValidationHasNoLifetimeCountQuery(t *testing.T) {
+	source, err := os.ReadFile("local_authority_retry_transition.go")
+	if err != nil {
+		t.Fatalf("read retry authority source: %v", err)
+	}
+	text := string(source)
+	start := strings.Index(text, "func (a *LocalNudgeAuthority) validateRetryMetadata(")
+	end := strings.Index(text, "type localAuthorityRetryTransitionRecord struct")
+	if start < 0 || end <= start {
+		t.Fatal("retry metadata validation source boundary moved")
+	}
+	validation := strings.ToLower(text[start:end])
+	if strings.Contains(validation, "count(") || strings.Contains(validation, "count (*)") {
+		t.Fatal("retry metadata validation contains a lifetime row-count query; startup must use durable counters and bounded absence checks")
 	}
 }
 
@@ -119,6 +380,40 @@ func TestLocalNudgeAuthorityRetryFinalizationConsumesExactClaimAtomically(t *tes
 	if !commandClaimsEqual(receipt.Claim, *fixture.command.Claim) || receipt.AfterCommandDigest == ([32]byte{}) || receipt.ProviderStage != ProviderStageNotEntered {
 		t.Fatalf("retained retry receipt = %#v, want exact claim and definite non-entry", receipt)
 	}
+}
+
+func TestLocalNudgeAuthorityRetryPreparationMustAdvanceCertifiedReceiptRevision(t *testing.T) {
+	fixture := newLocalAuthorityProviderAttemptFixture(t)
+	state, err := fixture.repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	intent := localAuthorityRetryIntent(t, state, fixture.command, fixture.partition)
+	generation, _, _, err := localAuthorityRetryMutationState(t.Context(), fixture.authority.db)
+	if err != nil {
+		t.Fatalf("localAuthorityRetryMutationState: %v", err)
+	}
+	certified := localAuthorityRetryAuditCursor{
+		generation: generation, repositoryRevision: intent.RepositoryRevision,
+		sequenceHighWater: intent.RepositorySequenceHighWater, phase: localAuthorityRetryAuditDone,
+		afterRevision: intent.RepositoryRevision, identity: initialLocalAuthorityRetryAuditIdentity(),
+	}
+	tx, err := fixture.authority.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin certified cursor fixture: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fixture.authority.updateLocalAuthorityRetryAuditCursor(t.Context(), tx, certified); err != nil {
+		t.Fatalf("update certified cursor fixture: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit certified cursor fixture: %v", err)
+	}
+
+	if err := fixture.authority.PrepareCommandRetryTransition(t.Context(), intent); !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
+		t.Fatalf("PrepareCommandRetryTransition at certified revision error = %v, want conflict", err)
+	}
+	assertLocalAuthorityRetryEvidence(t, fixture.authority, 0, 0, 1)
 }
 
 func TestLocalNudgeAuthorityRetryFinalizationRejectsSubstitutedClaimPartition(t *testing.T) {
@@ -617,7 +912,7 @@ func createExactLocalNudgeAuthorityV3(t *testing.T, cityPath string, state Comma
 		tenant_scope, city_scope, credential_class, policy_version, principal_schema, dense_decision_high_water,
 		highest_observed_sequence, highest_observed_revision, claim_transition_generation, claim_audit_checkpoint_digest
 	) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		localNudgeAuthorityPreviousSchema, opts.Profile, state.Store.StoreUUID, encodeLocalAuthorityUint64(state.Store.RestoreEpoch),
+		localNudgeAuthorityV3Schema, opts.Profile, state.Store.StoreUUID, encodeLocalAuthorityUint64(state.Store.RestoreEpoch),
 		opts.AuthorityID, opts.Issuer, opts.TenantScope, opts.CityScope, opts.CredentialClass, opts.PolicyVersion,
 		NudgePrincipalSchemaVersion, encodeLocalAuthorityUint64(0), encodeLocalAuthorityUint64(state.SequenceHighWater),
 		encodeLocalAuthorityUint64(state.Revision), encodeLocalAuthorityUint64(0), digest[:]); err != nil {

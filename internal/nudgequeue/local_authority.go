@@ -29,8 +29,9 @@ const (
 	// version. Keeping it stable makes old and new binaries contend on one
 	// lifetime lock instead of silently opening split authority journals.
 	localNudgeAuthorityFileName       = "local-authority-v1.sqlite"
-	localNudgeAuthorityPreviousSchema = 3
-	localNudgeAuthoritySchema         = 4
+	localNudgeAuthorityV3Schema       = 3
+	localNudgeAuthorityPreviousSchema = 4
+	localNudgeAuthoritySchema         = 5
 	// LocalNudgeAuthorityProfileStoreWriterIsController is the sole security
 	// profile supported by the local single-controller authority journal.
 	LocalNudgeAuthorityProfileStoreWriterIsController = string(CommandSecurityProfileStoreWriterIsController)
@@ -297,23 +298,54 @@ func (a *LocalNudgeAuthority) initializeOrValidate(ctx context.Context, state Co
 	if err == nil {
 		return a.validateMetadata(ctx, state)
 	}
-	previousEmpty, previousErr := validateLocalAuthoritySchemaManifest(ctx, a.db, localNudgeAuthorityV3SchemaStatements)
-	if previousErr != nil || previousEmpty {
+	previousEmpty, previousErr := validateLocalAuthoritySchemaManifest(ctx, a.db, localNudgeAuthorityV4SchemaStatements)
+	if previousErr == nil && !previousEmpty {
+		if err := a.validateMetadataVersion(ctx, state, localNudgeAuthorityPreviousSchema, false); err != nil {
+			return err
+		}
+		if err := a.migrateV4ToV5(ctx, state); err != nil {
+			return err
+		}
+		return a.validateMigratedSchema(ctx, state)
+	}
+	v3Empty, v3Err := validateLocalAuthoritySchemaManifest(ctx, a.db, localNudgeAuthorityV3SchemaStatements)
+	if v3Err != nil || v3Empty {
 		return err
 	}
-	if err := a.validateMetadataVersion(ctx, state, localNudgeAuthorityPreviousSchema, false); err != nil {
+	if err := a.validateMetadataVersion(ctx, state, localNudgeAuthorityV3Schema, false); err != nil {
 		return err
 	}
 	if err := a.migrateV3ToV4(ctx); err != nil {
 		return err
 	}
-	if empty, err := validateLocalAuthoritySchema(ctx, a.db); err != nil || empty {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("%w: migrated authority schema is empty", ErrLocalNudgeAuthorityConflict)
+	if empty, err := validateLocalAuthoritySchemaManifest(ctx, a.db, localNudgeAuthorityV4SchemaStatements); err != nil || empty {
+		return migratedLocalAuthoritySchemaError(err, empty, "v4")
+	}
+	if err := a.validateMetadataVersion(ctx, state, localNudgeAuthorityPreviousSchema, false); err != nil {
+		return err
+	}
+	if err := a.migrateV4ToV5(ctx, state); err != nil {
+		return err
+	}
+	return a.validateMigratedSchema(ctx, state)
+}
+
+func (a *LocalNudgeAuthority) validateMigratedSchema(ctx context.Context, state CommandRepositoryState) error {
+	empty, err := validateLocalAuthoritySchema(ctx, a.db)
+	if err != nil || empty {
+		return migratedLocalAuthoritySchemaError(err, empty, "current")
 	}
 	return a.validateMetadata(ctx, state)
+}
+
+func migratedLocalAuthoritySchemaError(err error, empty bool, version string) error {
+	if err != nil {
+		return err
+	}
+	if empty {
+		return fmt.Errorf("%w: migrated authority %s schema is empty", ErrLocalNudgeAuthorityConflict, version)
+	}
+	return nil
 }
 
 func validateLocalAuthoritySchema(ctx context.Context, db *sql.DB) (bool, error) {
@@ -521,7 +553,7 @@ var localNudgeAuthorityV3SchemaStatements = []localNudgeAuthoritySchemaStatement
 	{objectType: "index", name: "admission_decisions_partition_terminal", tableName: "admission_decisions", sql: `CREATE INDEX admission_decisions_partition_terminal ON admission_decisions(partition_id, terminal_revision, sequence) WHERE decision_kind = 'admitted' AND terminal_revision IS NOT NULL`},
 }
 
-var localNudgeAuthorityRetrySchemaStatements = []localNudgeAuthoritySchemaStatement{
+var localNudgeAuthorityRetryV4SchemaStatements = []localNudgeAuthoritySchemaStatement{
 	{objectType: "table", name: "retry_meta", tableName: "retry_meta", sql: `CREATE TABLE retry_meta (
 		singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
 		transition_generation BLOB NOT NULL CHECK (length(transition_generation) = 8),
@@ -579,12 +611,27 @@ var localNudgeAuthorityRetrySchemaStatements = []localNudgeAuthoritySchemaStatem
 		FOREIGN KEY (command_id, decision_kind) REFERENCES admission_decisions(command_id, decision_kind)
 	)`},
 	{objectType: "index", name: "retry_receipts_latest", tableName: "retry_receipts", sql: `CREATE INDEX retry_receipts_latest ON retry_receipts(command_id, retry_revision DESC, attempt_id)`},
-	{objectType: "index", name: "retry_receipts_audit", tableName: "retry_receipts", sql: `CREATE INDEX retry_receipts_audit ON retry_receipts(retry_revision, command_id, attempt_id)`},
 }
 
-var localNudgeAuthoritySchemaStatements = append(
+var localNudgeAuthorityRetryV5SchemaStatements = []localNudgeAuthoritySchemaStatement{
+	{
+		objectType: "index", name: "retry_receipts_audit", tableName: "retry_receipts",
+		sql: `CREATE INDEX retry_receipts_audit ON retry_receipts(retry_revision, command_id, attempt_id)`,
+	},
+	{
+		objectType: "index", name: "retry_receipts_claim", tableName: "retry_receipts",
+		sql: `CREATE INDEX retry_receipts_claim ON retry_receipts(command_id, claim_id)`,
+	},
+}
+
+var localNudgeAuthorityV4SchemaStatements = append(
 	append([]localNudgeAuthoritySchemaStatement(nil), localNudgeAuthorityV3SchemaStatements...),
-	localNudgeAuthorityRetrySchemaStatements...,
+	localNudgeAuthorityRetryV4SchemaStatements...,
+)
+
+var localNudgeAuthoritySchemaStatements = append(
+	append([]localNudgeAuthoritySchemaStatement(nil), localNudgeAuthorityV4SchemaStatements...),
+	localNudgeAuthorityRetryV5SchemaStatements...,
 )
 
 func (a *LocalNudgeAuthority) validateMetadata(ctx context.Context, state CommandRepositoryState) error {
@@ -637,7 +684,12 @@ func (a *LocalNudgeAuthority) validateMetadataVersion(ctx context.Context, state
 	if err := a.validateClaimAuditMetadata(ctx, state, advance); err != nil {
 		return err
 	}
-	if expectedSchema == localNudgeAuthoritySchema {
+	switch expectedSchema {
+	case localNudgeAuthorityPreviousSchema:
+		if err := a.validateRetryMetadataV4(ctx, state); err != nil {
+			return err
+		}
+	case localNudgeAuthoritySchema:
 		if err := a.validateRetryMetadata(ctx, state, advance); err != nil {
 			return err
 		}
@@ -657,7 +709,7 @@ func (a *LocalNudgeAuthority) migrateV3ToV4(ctx context.Context) error {
 		return fmt.Errorf("migrating local nudge authority v3 to v4: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, statement := range localNudgeAuthorityRetrySchemaStatements {
+	for _, statement := range localNudgeAuthorityRetryV4SchemaStatements {
 		if _, err := tx.ExecContext(ctx, statement.sql); err != nil {
 			return fmt.Errorf("migrating local nudge authority v3 to v4: creating %s:%s: %w", statement.objectType, statement.name, err)
 		}
@@ -666,7 +718,7 @@ func (a *LocalNudgeAuthority) migrateV3ToV4(ctx context.Context) error {
 		return fmt.Errorf("migrating local nudge authority v3 to v4: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE authority_meta SET schema_version = ? WHERE singleton = 1 AND schema_version = ?`,
-		localNudgeAuthoritySchema, localNudgeAuthorityPreviousSchema)
+		localNudgeAuthorityPreviousSchema, localNudgeAuthorityV3Schema)
 	if err != nil {
 		return fmt.Errorf("migrating local nudge authority v3 to v4: advancing schema version: %w", err)
 	}
@@ -675,6 +727,46 @@ func (a *LocalNudgeAuthority) migrateV3ToV4(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("migrating local nudge authority v3 to v4: commit: %w", err)
+	}
+	return osRestoreAnchorFileOps.syncDirectory(filepath.Dir(a.path))
+}
+
+func (a *LocalNudgeAuthority) migrateV4ToV5(ctx context.Context, state CommandRepositoryState) error {
+	if state.Store != a.store {
+		return fmt.Errorf("%w: v4 migration repository store differs from authority", ErrLocalNudgeAuthorityConflict)
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("migrating local nudge authority v4 to v5: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, statement := range localNudgeAuthorityRetryV5SchemaStatements {
+		if _, err := tx.ExecContext(ctx, statement.sql); err != nil {
+			return fmt.Errorf("migrating local nudge authority v4 to v5: creating %s:%s: %w",
+				statement.objectType, statement.name, err)
+		}
+	}
+	generation, _, _, err := localAuthorityRetryMutationState(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("migrating local nudge authority v4 to v5: %w", err)
+	}
+	reset := localAuthorityRetryAuditCursor{
+		generation: generation, repositoryRevision: state.Revision, sequenceHighWater: state.SequenceHighWater,
+		phase: localAuthorityRetryAuditPreparations, identity: initialLocalAuthorityRetryAuditIdentity(),
+	}
+	if err := a.updateLocalAuthorityRetryAuditCursor(ctx, tx, reset); err != nil {
+		return fmt.Errorf("migrating local nudge authority v4 to v5: resetting retry audit cursor: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE authority_meta SET schema_version = ? WHERE singleton = 1 AND schema_version = ?`,
+		localNudgeAuthoritySchema, localNudgeAuthorityPreviousSchema)
+	if err != nil {
+		return fmt.Errorf("migrating local nudge authority v4 to v5: advancing schema version: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		return fmt.Errorf("%w: migrating local nudge authority v4 to v5 changed %d metadata rows: %w", ErrLocalNudgeAuthorityConflict, affected, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrating local nudge authority v4 to v5: commit: %w", err)
 	}
 	return osRestoreAnchorFileOps.syncDirectory(filepath.Dir(a.path))
 }

@@ -212,3 +212,7 @@ func (s *keyedChildLivenessSource) ClaimAuthorized(context.Context, nudgeEffectC
 func (s *keyedChildLivenessSource) CompleteProviderAttempt(context.Context, nudgequeue.CommandCompletionRequest) (nudgequeue.CommandCompletionResult, error) {
 	return nudgequeue.CommandCompletionResult{}, errors.New("unexpected keyed child liveness completion")
 }
+
+func (s *keyedChildLivenessSource) RetryProviderAttempt(context.Context, nudgequeue.CommandRetryRequest) (nudgequeue.CommandRetryResult, error) {
+	return nudgequeue.CommandRetryResult{}, errors.New("unexpected keyed child liveness retry")
+}

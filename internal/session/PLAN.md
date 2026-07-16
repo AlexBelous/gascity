@@ -160,3 +160,31 @@ pattern has survived contact with Steps 1-6; they are explicitly not next.
 Unchanged from the design core: no reconciler rewrite, no `SessionService`
 facade, no generic command bus, no event sourcing, no movement of work, mail,
 extmsg, pool, or provider policy into `internal/session`.
+
+## P0.2 semantic-ratification disposition ledger
+
+Ratified under bead `ga-f7v2ft.11` (P0.2), which depends on `ga-f7v2ft.9`
+(P0.1 effect inventory). The full record, open-fork resolutions, and evidence
+crosswalk live in
+`../../engdocs/plans/reconciler-redesign/P0_SEMANTIC_RATIFICATION.md`. This
+ledger gives every step above one disposition and changes no behavior.
+
+| Step | Bead(s) | Disposition | Replacement / note |
+|---|---|---|---|
+| Step 0 — behavior ledger | this-PR | completed | `REQUIREMENTS.md` / `AGENTS.md` committed. |
+| Step 1 — lifecycle-timer decider | `ga-ltlwc1` | completed | `SESSION-RECON-008/009`. |
+| Step 2 — stability / churn / rate-limit | `ga-i9r8fi` | completed | `SESSION-RECON-010/011`. |
+| Step 3 — real bug fixes | `ga-4of1nc`, `ga-7f6ocx`, `ga-frfj2d`, `ga-kmoj9c` | completed | Four independent bug PRs landed. |
+| Step 4 — store-fence ADR | `ga-q65c22` | completed | `session-store-fences.md` is Accepted and preserved as controlling. |
+| Step 5 — read-only target classifier | `ga-mxchkb` | completed | `SESSION-ID-011`. |
+| Step 6 — first mutating extraction (wake, then close) | future (gated on Steps 1–5) | preserved → superseded on approval | Controlling for current code; superseded by the redesign's phased mutation slices once the plan is approved and the conditional-write capability lands. |
+
+### Non-goal amendment (D11)
+
+The non-goals above are **amended, not contradicted**, by the reconciler
+redesign: "no reconciler rewrite" is preserved as an incremental strangler
+behind a parity pin, and "no CAS" is preserved as "no general CAS and no CAS as
+a refactor precondition," leaving room for a single narrow conditional primitive
+(the existing `ReleaseIfCurrent` precedent) under its own future bead. Until
+that primitive lands, this document and `session-store-fences.md` remain
+controlling.

@@ -138,3 +138,16 @@ One paragraph in the slice's PR description, not a contract artifact:
 - Not treating events as a fence. Events are post-commit facts; safety-
   critical convergence comes from durable state scans (root `AGENTS.md`,
   the convergence-because-work-persists principle).
+
+## P0.2 disposition
+
+Ratified under bead `ga-f7v2ft.11`: this document is **preserved and remains
+controlling** for every current mutating session extraction. Per decision D11 in
+`engdocs/plans/reconciler-redesign/P0_SEMANTIC_RATIFICATION.md`, it is superseded
+only through that successor record, and only when a narrow conditional-write
+capability actually lands. The "not adding CAS as a refactor precondition"
+stance above is preserved; it is amended only to this extent — a single narrow
+conditional primitive following the existing
+`ConditionalAssignmentReleaser.ReleaseIfCurrent` precedent may later be proposed
+under its own bead and justification. General CAS, and CAS as a refactor
+precondition, remain rejected.

@@ -170,6 +170,20 @@ one registry rather than adding competing scanners.
 | SESSION-EFFECT-002 | Classified ownership registry | The canonical registry classifies load-bearing effect routes by owner, action family, executing process, fence strength, rollout gate, target source, and access path, and every classified site must resolve to a site the analyzer discovers on the execution head. Weak-fence and bypass routes carry an explicit temporary exception anchored to an immutable commit with an expiry. | `internal/reconciletest/effectinventory/{registry.go,inventory.go}`; `internal/reconciletest/effectinventory/{registry_test.go,inventory_test.go}` |
 | SESSION-EFFECT-003 | Bypasses and provider-internal effects are recorded | Route recovery's live-reread/non-CAS residual store write, direct raw external-store (`*beads.BdStore`) bypasses, and provider-internal kill/signal sites are all present in the inventory. Provider-internal kill/signal sites are never absent. | `internal/reconciletest/effectinventory/inventory.go` (route-recovery route); `cmd/gc/reconciler_effect_inventory_test.go` (bypass and provider-internal process assertions) |
 
+## Semantic Ratification (P0.2)
+
+These rows record decisions ratified under bead `ga-f7v2ft.11` (P0.2). They add
+no runtime behavior; each pins a decision whose timing, retention window, or
+document-control statement had no prior scenario row. The full record,
+open-fork resolutions, and evidence crosswalk live in
+`engdocs/plans/reconciler-redesign/P0_SEMANTIC_RATIFICATION.md`.
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-RATIFY-004 | Immediate corroborated-death confirmation | After the first authoritative-list absence, a corroborated-death verdict requires an immediate targeted `GC_SESSION_ID` process confirmation in the same pass; it does not wait for a second 30-second patrol cycle. Any live matching process vetoes death — doubt stays `Unknown`, never `Dead`. | `engdocs/plans/reconciler-redesign/P0_SEMANTIC_RATIFICATION.md` §1 (D4), §2 (Fork 5); `engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md` `RC-OBS-002`/`RC-OBS-005`; `engdocs/plans/reconciler-redesign/PROPOSAL.md` §10 |
+| SESSION-RATIFY-007 | Trace-taxonomy retention window | The current trace/event taxonomy stays supported through migration and for at least one release after final cutover; readers stay N/N-1 compatible and additive, and no phase label authorizes dropping it earlier. | `engdocs/plans/reconciler-redesign/P0_SEMANTIC_RATIFICATION.md` §1 (D7); `engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md` `RC-EVENT-004`/`RC-MIG-002` |
+| SESSION-RATIFY-011 | Extraction order and store fences remain controlling | `PLAN.md`'s extraction order and the Accepted `engdocs/design/session-store-fences.md` remain controlling for current code until this plan is approved and a narrow conditional-write capability actually lands; the "no reconciler rewrite / no CAS" non-goals are amended, not contradicted. | `engdocs/plans/reconciler-redesign/P0_SEMANTIC_RATIFICATION.md` §4, §6; `PLAN.md` (P0.2 disposition ledger); `engdocs/plans/reconciler-redesign/ACCEPTANCE_MATRIX.md` `RC-STATE-003`/`RC-GATE-001` |
+
 ## Maintenance Rules
 
 - Add one row per behavior scenario, not one paragraph per file.

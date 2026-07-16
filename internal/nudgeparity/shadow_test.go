@@ -10,13 +10,13 @@ import (
 	"time"
 )
 
-func TestShadowUsesOneCapturedInputAndLegacyRemainsSoleEffectOwner(t *testing.T) {
+func TestShadowPassesCapturedViewToPlannerAndLegacyRemainsSoleEffectOwner(t *testing.T) {
 	now := time.Date(2026, 7, 16, 3, 0, 0, 0, time.UTC)
 	plannerInputs := make(chan PlanningInput, 1)
 	results := make(chan Result, 1)
 	shadow := newTestShadow(t, now, 4, PlannerFunc(func(_ context.Context, input PlanningInput) (Planned, error) {
 		plannerInputs <- input
-		return Planned{Plan: Plan{Decision: DecisionExecute, Action: ActionNudge}}, nil
+		return Planned{Input: input.Input, Watermarks: input.Watermarks, Plan: testPlan()}, nil
 	}), func(_ context.Context, result Result) error {
 		results <- result
 		return nil
@@ -41,7 +41,7 @@ func TestShadowUsesOneCapturedInputAndLegacyRemainsSoleEffectOwner(t *testing.T)
 		t.Fatalf("comparison = %s/%s, want same/equivalent", result.Classification, result.Reason)
 	}
 	if result.Expected.Input != result.Actual.Input || result.Expected.Watermarks != result.Actual.Watermarks {
-		t.Fatalf("comparison did not retain one captured view: %#v", result)
+		t.Fatalf("comparison did not retain independently matching views: %#v", result)
 	}
 	if legacyEffects.Load() != 1 {
 		t.Fatalf("legacy effects = %d, want exactly one", legacyEffects.Load())
@@ -56,15 +56,119 @@ func TestShadowUsesOneCapturedInputAndLegacyRemainsSoleEffectOwner(t *testing.T)
 	}
 }
 
+func TestShadowRetainsIndependentActualEvidence(t *testing.T) {
+	now := time.Date(2026, 7, 16, 3, 0, 0, 0, time.UTC)
+	base := testSample("operation-1", now)
+	tests := []struct {
+		name               string
+		planned            Planned
+		wantClassification Classification
+		wantReason         Reason
+	}{
+		{
+			name: "omitted input",
+			planned: Planned{
+				Watermarks: base.Watermarks,
+				Plan:       base.ExpectedPlan,
+			},
+			wantClassification: ClassificationIncomparable,
+			wantReason:         ReasonInputIncomplete,
+		},
+		{
+			name: "changed input",
+			planned: Planned{
+				Input: func() Input {
+					changed := base.Input
+					changed.TargetLaunch = "launch-actual"
+					return changed
+				}(),
+				Watermarks: base.Watermarks,
+				Plan:       base.ExpectedPlan,
+			},
+			wantClassification: ClassificationIncomparable,
+			wantReason:         ReasonInputMismatch,
+		},
+		{
+			name: "omitted watermarks",
+			planned: Planned{
+				Input: base.Input,
+				Plan:  base.ExpectedPlan,
+			},
+			wantClassification: ClassificationIncomparable,
+			wantReason:         ReasonWatermarkIncomplete,
+		},
+		{
+			name: "changed watermarks",
+			planned: Planned{
+				Input: base.Input,
+				Watermarks: func() Watermarks {
+					changed := base.Watermarks
+					changed.RuntimeRevision++
+					return changed
+				}(),
+				Plan: base.ExpectedPlan,
+			},
+			wantClassification: ClassificationIncomparable,
+			wantReason:         ReasonWatermarkMismatch,
+		},
+		{
+			name: "changed interaction policy",
+			planned: Planned{
+				Input:      base.Input,
+				Watermarks: base.Watermarks,
+				Plan: func() Plan {
+					changed := base.ExpectedPlan
+					changed.InteractionPolicy = InteractionPolicyForce
+					return changed
+				}(),
+			},
+			wantClassification: ClassificationDivergent,
+			wantReason:         ReasonPlanMismatch,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			results := make(chan Result, 1)
+			shadow := newTestShadow(t, now, 1, PlannerFunc(func(_ context.Context, _ PlanningInput) (Planned, error) {
+				return test.planned, nil
+			}), func(_ context.Context, result Result) error {
+				results <- result
+				return nil
+			})
+			_, cancel, runErr := runTestShadow(t, shadow)
+
+			if disposition, err := shadow.Submit(base); err != nil || disposition != SubmissionAccepted {
+				t.Fatalf("Submit() = %s, %v; want accepted", disposition, err)
+			}
+			result := <-results
+			if result.Classification != test.wantClassification || result.Reason != test.wantReason {
+				t.Fatalf("comparison = %s/%s, want %s/%s", result.Classification, result.Reason, test.wantClassification, test.wantReason)
+			}
+			if !result.HasActual || result.Actual.Input != test.planned.Input || result.Actual.Watermarks != test.planned.Watermarks || result.Actual.Plan != test.planned.Plan {
+				t.Fatalf("actual observation = %#v, want planner evidence input=%#v watermarks=%#v plan=%#v", result.Actual, test.planned.Input, test.planned.Watermarks, test.planned.Plan)
+			}
+			if result.Expected.Input != base.Input || result.Expected.Watermarks != base.Watermarks {
+				t.Fatalf("expected observation changed = %#v", result.Expected)
+			}
+
+			cancel()
+			if err := <-runErr; err != nil {
+				t.Fatalf("Run() shutdown: %v", err)
+			}
+		})
+	}
+}
+
 func TestShadowSubmissionIsNonblockingAndStrictlyBounded(t *testing.T) {
 	now := time.Date(2026, 7, 16, 3, 0, 0, 0, time.UTC)
 	plannerEntered := make(chan struct{}, 1)
 	releasePlanner := make(chan struct{})
 	results := make(chan Result, 2)
-	shadow := newTestShadow(t, now, 1, PlannerFunc(func(_ context.Context, _ PlanningInput) (Planned, error) {
+	shadow := newTestShadow(t, now, 1, PlannerFunc(func(_ context.Context, input PlanningInput) (Planned, error) {
 		plannerEntered <- struct{}{}
 		<-releasePlanner
-		return Planned{Plan: Plan{Decision: DecisionExecute, Action: ActionNudge}}, nil
+		return Planned{Input: input.Input, Watermarks: input.Watermarks, Plan: testPlan()}, nil
 	}), func(_ context.Context, result Result) error {
 		results <- result
 		return nil
@@ -210,14 +314,14 @@ func TestShadowConcurrentSubmissionNeverExceedsQueueBound(t *testing.T) {
 	plannerEntered := make(chan struct{})
 	releasePlanner := make(chan struct{})
 	results := make(chan Result, capacity+1)
-	shadow := newTestShadow(t, now, capacity, PlannerFunc(func(_ context.Context, _ PlanningInput) (Planned, error) {
+	shadow := newTestShadow(t, now, capacity, PlannerFunc(func(_ context.Context, input PlanningInput) (Planned, error) {
 		select {
 		case <-plannerEntered:
 		default:
 			close(plannerEntered)
 		}
 		<-releasePlanner
-		return Planned{Plan: Plan{Decision: DecisionExecute, Action: ActionNudge}}, nil
+		return Planned{Input: input.Input, Watermarks: input.Watermarks, Plan: testPlan()}, nil
 	}), func(_ context.Context, result Result) error {
 		results <- result
 		return nil

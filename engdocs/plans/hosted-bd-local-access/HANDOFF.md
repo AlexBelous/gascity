@@ -12,9 +12,12 @@ Handoff for the next session continuing the 9-slice program in
 
 ## TL;DR — where things stand
 
-**S1 is COMPLETE and FULLY VERIFIED end-to-end (2026-07-15). S2 was REDESIGNED
-around a thin-bd pivot (2026-07-16) — design `S2-DESIGN.md` v4, grounded +
-red-teamed; blocked on TWO OWNER DECISIONS before implementation (see below).**
+**S1 is COMPLETE and FULLY VERIFIED end-to-end (2026-07-15). S2 (thin-bd pivot)
+is IMPLEMENTED and PUSHED as PRs (2026-07-16): the owner ruled both §11 decisions
+(single helper-contract layer + eia-helper enforcement in scope); WP-A (bd) and
+WP-B (gasworks) are through three adversarial red-team rounds (14→4→0 findings)
+and open as PRs; WP-E (eia-helper) is in flight; WP-D (doctor sweep) is deferred
+until its deps merge. See "S2 STATE" below.**
 
 Session-2 completion evidence:
 - Cherry's `beads-provisioner` deployed to `d090d99` (gasworks-internal PR #125,
@@ -55,11 +58,36 @@ WebPKI TLS → EIA auth → gateway routing all work.
 
 ---
 
-## ▶ IMMEDIATE NEXT ACTION — S2 needs TWO OWNER DECISIONS, then implement
+## ▶ S2 STATE — implemented + pushed; finish WP-E, then WP-D
 
-**S2 was REDESIGNED (2026-07-16) around a thin-bd pivot** and is at
-`S2-DESIGN.md` **v4** in this dir (bead `mc-b3clt.6`). Do NOT implement from the
-old v2 plan (`bd attach` + bd-side allowlist) — it was superseded.
+**Owner ruled both §11 decisions (2026-07-16): Decision 1 = single
+helper-contract layer; Decision 2 = `eia-helper` enforcement (WP-E) in scope.**
+SPEC CRITICAL #2 mitigation flipped PROPOSED→ACCEPTED. Then implemented:
+
+| WP | Repo | PR / branch | State |
+|----|------|-------------|-------|
+| **A** | `gastownhall/beads` (OSS) | **#4842** `feat/credential-exec-info` | OPEN, `status/needs-review-auto`, OSS-neutral language, DO NOT merge w/o review. Canon(idempotent+total), exec-info threading, per-dial connector + bounded one-shot 1045-retry, env timeouts, connector-level token redaction. wt `/data/tmp/bd-s2-wpa`. |
+| **B** | `gascity/gasworks` | **#46** `feat/beads-destination-gate` | OPEN, warn-only default (`GASWORKS_DESTINATION_ENFORCE`). §5.0 gate (fail-closed on DELEGATION presence, not `origin==bd`), trust-gateway allowlist, mint resilience, double-checked cross-process refresh + real Windows `LockFileEx`. wt `/data/tmp/gasworks-s2-wpb`. |
+| **E** | `gascity/crucible` (PRIVATE) | `feat/eia-helper-destination-gate` | IN FLIGHT. §5.0 gate in `eia-helper`; allowlist = `EIA_TRUSTED_GATEWAYS` (independent layer 2) ∪ own `GC_DOLT_HOST` fallback. Spec `/data/tmp/s2-grounding/wpe-spec.md`. wt `/data/tmp/crucible-s2-wpe`. |
+| **D** | `gastownhall/beads` (OSS) | — | DEFERRED until deps #4823 + #4842 merge. Doctor gateway-blindness sweep + helper dry-run (fixes `mc-b3clt.4`). |
+
+`CanonicalHost` is **byte-identical** across bd `internal/creds/host.go` +
+gasworks `internal/gateway/canon.go` (parity-verified 30 vectors); eia-helper
+copies the same. **FLEET = two layers:** env-pin (mirrorBeadsDoltEnv projects
+spawn-pinned `GC_DOLT_HOST`→`BEADS_DOLT_SERVER_HOST`, wins over repo config;
+configfile.go:426 precedence) + WP-E gate on independent `EIA_TRUSTED_GATEWAYS`.
+**Enforce-flip is gated:** gasworks→enforce once WP-A is the default bd install;
+the fleet flip additionally on WP-E deployed (+ `EIA_TRUSTED_GATEWAYS` on the
+controller image). Full findings ledger: `/data/tmp/s2-grounding/wpb-redteam-findings.md`.
+
+### Next-session actions
+1. Monitor bd #4842 (OSS, auto-review) + gasworks #46; address review feedback. DON'T merge #4842 without review.
+2. Finish WP-E: red-team the `eia-helper` gate (Fable, adversarial) before commit; crucible is private so push after red-team; deploy warn-only (add `EIA_TRUSTED_GATEWAYS=gw.beads.gascity.com` + `EIA_DESTINATION_ENFORCE=warn` to the controller image via the provisioner/gasworks-internal).
+3. WP-D once #4823 + #4842 merge (stack on them): doctor sweep, fixes `mc-b3clt.4`.
+4. Only flip enforce after WP-A is the default fleet bd AND WP-E is deployed fleet-wide.
+
+**Historical (superseded) — the old v2 plan below (`bd attach` + bd-side
+allowlist) was DELETED by the pivot; kept only as design rationale.**
 
 **The pivot (owner direction):** *"the gasworks CLI owns authentication; bd only
 delegates to a credential command."* This mirrors the parallel gc change

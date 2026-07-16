@@ -579,6 +579,7 @@ var localNudgeAuthorityRetrySchemaStatements = []localNudgeAuthoritySchemaStatem
 		FOREIGN KEY (command_id, decision_kind) REFERENCES admission_decisions(command_id, decision_kind)
 	)`},
 	{objectType: "index", name: "retry_receipts_latest", tableName: "retry_receipts", sql: `CREATE INDEX retry_receipts_latest ON retry_receipts(command_id, retry_revision DESC, attempt_id)`},
+	{objectType: "index", name: "retry_receipts_audit", tableName: "retry_receipts", sql: `CREATE INDEX retry_receipts_audit ON retry_receipts(retry_revision, command_id, attempt_id)`},
 }
 
 var localNudgeAuthoritySchemaStatements = append(

@@ -6,7 +6,7 @@
 Go source through parsed syntax and import identity, while only `*_test.go`
 files contribute resource occurrences. The raw audit and source-debt rows
 freeze process, sleep, environment, CWD, slow-process, HTTP test-server, and
-package-level `net.Listen`, `net.ListenConfig.Listen`, `net.ListenUnixgram`,
+package-level `net` stream/packet listeners, `net.ListenConfig` listeners,
 direct `syscall.Listen`, and typed or literal tmux dependency call/file totals.
 Exact Medium rows name a repository-relative directory, package clause,
 top-level runnable owner, and resource list. Small-debt rows apply those exact
@@ -64,19 +64,22 @@ calls inside `TestMain`, never sibling tests.
 This bootstrap does **not** infer resources recursively through arbitrary
 helper calls or claim a complete shared-resource inventory. P0.4c currently
 covers the three `net/http/httptest` constructors that open loopback servers
-and the exact package-level `net.Listen` and `net.ListenUnixgram` constructors,
-`net.ListenConfig.Listen` on lexically identified receivers, and direct
-`syscall.Listen`. The tmux catalog recognizes canonical `test/tmuxtest`
+and the exact package-level stream constructors `net.Listen`, `net.ListenTCP`,
+and `net.ListenUnix`; packet constructors `net.ListenPacket`, `net.ListenUDP`,
+`net.ListenIP`, `net.ListenUnixgram`, and `net.ListenMulticastUDP`;
+`net.ListenConfig.Listen` and `ListenPacket` on lexically identified receivers;
+and direct `syscall.Listen`. The tmux catalog recognizes canonical `test/tmuxtest`
 namespace/lifecycle helpers, imported `internal/runtime/tmux` production
 constructors, and literal `os/exec` tmux commands and probes. Its untagged
 source census is 6 calls in 2 files, all owned by exact Medium `TestMain`
 rows; the 33 tagged calls in 13 files remain E1 Large inventory rather than
-being relabeled Medium. Direct `syscall.Socket`/`Bind` setup calls, typed and
-packet-specific `net` constructors, helper-backed listeners whose constructors
-live outside test source, Dolt, and other shared-host resources remain
-explicit follow-up catalogs. A Medium resource may describe a helper-backed
-runtime cost, but only syntax-owned calls in that exact runnable declaration
-leave Small-debt accounting. The `ListenConfig` matcher uses lexical Go types
+being relabeled Medium. Direct `syscall.Socket`/`Bind` setup calls,
+`net.FileListener`/`FilePacketConn` descriptor duplication,
+helper-backed listeners whose constructors live outside test source, Dolt, and
+other shared-host resources remain explicit follow-up catalogs. A Medium resource
+may describe a helper-backed runtime cost, but only syntax-owned calls in that
+exact runnable declaration leave Small-debt accounting. The `ListenConfig`
+matcher uses lexical Go types
 to follow same-file values, pointers, parameters, aliases, and typed factory
 results rooted in the imported `net.ListenConfig` type; it does not load
 cross-file package bodies or host toolchain export data.
@@ -89,8 +92,10 @@ shared-host catalogs. E1
 separately owns Large journey and provider entries.
 
 The scanner recognizes direct calls to `os/exec.Command{,Context}` and
-`time.Sleep`; package-level `net.Listen` and `net.ListenUnixgram`;
-`net.ListenConfig.Listen` on identified receivers; direct `syscall.Listen`;
+`time.Sleep`; package-level `net.Listen`, `ListenTCP`, `ListenUnix`,
+`ListenPacket`, `ListenUDP`, `ListenIP`, `ListenUnixgram`, and
+`ListenMulticastUDP`; `net.ListenConfig.Listen` and `ListenPacket` on identified
+receivers; direct `syscall.Listen`;
 `net/http/httptest.NewServer`,
 `NewTLSServer`, and `NewUnstartedServer`; `os.Setenv`, `os.Unsetenv`,
 `os.Clearenv`, and `os.Chdir`; and
@@ -157,9 +162,9 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 74 calls / 25 files (historical regex census: 75 / 25) | ga-80po0c.2.1 | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | fixed_sleep: 286 calls / 113 files (historical regex census: 287 / 113) | ga-80po0c.2.1 | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | http_test_server: 300 calls / 66 files | ga-80po0c.2.2 | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
-| Small debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2 | untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
-| Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
-| Small debt ratchet | all untagged test source | net_listen_unixgram: 3 calls / 2 files | ga-80po0c.2.2 | untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2.2 | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | subprocess: 399 calls / 107 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
 | Small debt ratchet | all untagged test source | tmux: 0 calls / 0 files | ga-80po0c.2.2.1 | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-01 |
@@ -168,9 +173,9 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 74 calls / 25 files (historical regex census: 78 / 27) | ga-80po0c.2.3 | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | fixed_sleep: 286 calls / 113 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | http_test_server: 300 calls / 66 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2 | untagged net.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2 | untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | net_listen_unixgram: 3 calls / 2 files | ga-80po0c.2.2 | untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline; each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2.2 | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | subprocess: 401 calls / 108 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | tmux: 6 calls / 2 files | ga-80po0c.2.2.1 | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-01 |

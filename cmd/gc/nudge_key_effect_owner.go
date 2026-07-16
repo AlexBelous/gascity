@@ -352,6 +352,10 @@ func (o *nudgeKeyEffectOwner) refreshClaimedCommand(ctx context.Context, command
 }
 
 func (o *nudgeKeyEffectOwner) completeAttempt(ctx context.Context, key reconcilekey.Session, command nudgequeue.Command, completion nudgeProviderCompletion) nudgeReconcileOutcome {
+	return o.completeAttemptAt(ctx, key, command, completion, o.now().UTC())
+}
+
+func (o *nudgeKeyEffectOwner) completeAttemptAt(ctx context.Context, key reconcilekey.Session, command nudgequeue.Command, completion nudgeProviderCompletion, completedAt time.Time) nudgeReconcileOutcome {
 	if command.Claim == nil || !completion.terminal {
 		return nudgeReconcileInvariant(errors.New("completing keyed nudge attempt: terminal completion has no durable claim"))
 	}
@@ -360,7 +364,7 @@ func (o *nudgeKeyEffectOwner) completeAttempt(ctx context.Context, key reconcile
 		ClaimID:       command.Claim.ID,
 		OperationID:   command.Claim.OperationID,
 		AttemptID:     command.Claim.AttemptID,
-		CompletedAt:   o.now().UTC(),
+		CompletedAt:   completedAt.UTC(),
 		ActionResult:  completion.actionResult,
 		ErrorClass:    completion.errorClass,
 		Detail:        completion.detail,
@@ -399,14 +403,14 @@ func (o *nudgeKeyEffectOwner) retryAttempt(ctx context.Context, key reconcilekey
 	}
 	nextEligibleAt := observedAt.Add(o.retryDelay)
 	if !nextEligibleAt.Before(command.ExpiresAt) {
-		return o.completeAttempt(ctx, key, command, nudgeProviderCompletion{
+		return o.completeAttemptAt(ctx, key, command, nudgeProviderCompletion{
 			terminal:      true,
 			actionResult:  nudgequeue.CommandActionResultExpired,
 			errorClass:    nudgequeue.CommandErrorClassExpired,
 			detail:        "command expired before a safe provider retry",
 			providerStage: nudgequeue.ProviderStageNotEntered,
 			completion:    nudgequeue.CompletionStateNotCompleted,
-		})
+		}, command.ExpiresAt)
 	}
 	request := nudgequeue.CommandRetryRequest{
 		CommandID:      command.ID,

@@ -289,6 +289,43 @@ func TestNudgeKeyEffectOwnerRuntimeInteractionRefusalsBecomeDurableRetryWithoutN
 	}
 }
 
+func TestNudgeKeyEffectOwnerDefiniteNonEntryExpiresAtDeliveryBoundaryWhenNoRetryWindowRemains(t *testing.T) {
+	fixture := newNudgeEffectOwnerExecutionFixture(t)
+	fixture.handle.mu.Lock()
+	fixture.handle.result = worker.NudgeResult{Effect: &runtime.NudgeEffectResult{
+		Stage:      runtime.NudgeEffectStageNotEntered,
+		Completion: runtime.NudgeEffectCompletionNotCompleted,
+	}}
+	fixture.handle.effectErr = errors.New("provider proved nudge was not entered")
+	fixture.handle.mu.Unlock()
+	fixture.owner.retryDelay = fixture.command.ExpiresAt.Sub(fixture.now)
+
+	outcome := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, outcome)
+
+	command := fixture.source.currentCommand()
+	if command.State != nudgequeue.CommandStateExpired || command.Claim != nil || command.Terminal == nil {
+		t.Fatalf("command after exhausted retry window = %#v, want expired terminal", command)
+	}
+	if !command.Terminal.At.Equal(command.ExpiresAt) {
+		t.Fatalf("expired terminal at = %v, want delivery boundary %v", command.Terminal.At, command.ExpiresAt)
+	}
+	if command.Terminal.ActionResult != nudgequeue.CommandActionResultExpired ||
+		command.Terminal.ProviderStage != nudgequeue.ProviderStageNotEntered ||
+		command.Terminal.Completion != nudgequeue.CompletionStateNotCompleted {
+		t.Fatalf("expired terminal evidence = %#v, want definite non-entry at expiry", command.Terminal)
+	}
+	if _, err := nudgequeue.EncodeCommandV1(command); err != nil {
+		t.Fatalf("expired command must remain valid production wire state: %v", err)
+	}
+	if got := fixture.source.retryCallCount(); got != 0 {
+		t.Fatalf("retry transitions after exhausted delivery window = %d, want 0", got)
+	}
+	if got := fixture.handle.nativeEntryCount(); got != 0 {
+		t.Fatalf("native entries after definite non-entry refusal = %d, want 0", got)
+	}
+}
+
 func TestNudgeKeyEffectOwnerRetriesSameLogicalCommandAfterInteractionConflictClears(t *testing.T) {
 	fixture := newNudgeEffectOwnerExecutionFixture(t)
 	target := fixture.targets.firstTarget()

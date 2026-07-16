@@ -151,34 +151,46 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		return nudgeReconcileSuccess()
 	}
 
-	command, pending, outcome := o.firstPending(key)
+	facts, outcome := o.candidateFacts(key, o.now().UTC())
 	if outcome.disposition != nudgeReconcileOutcomeForget || outcome.err != nil {
 		return outcome
 	}
-	if !pending || command.Mode == nudgequeue.DeliveryModeWaitIdle {
+	var candidate nudgeEffectCandidatePlan
+	for {
+		candidate = planNudgeEffectCandidate(facts)
+		if candidate.disposition != nudgeEffectCandidateNeedTarget {
+			break
+		}
+		command := facts.page.Entries[0].Command
+		preClaimTarget, err := o.targets.Read(ctx, command.Target.SessionID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nudgeReconcileSuccess()
+			}
+			return nudgeReconcileTransient(fmt.Errorf("reading keyed nudge target before claim: %w", err))
+		}
+		facts.target = preClaimTarget
+		facts.targetObserved = true
+	}
+	switch candidate.disposition {
+	case nudgeEffectCandidateNoop, nudgeEffectCandidatePark:
 		return nudgeReconcileSuccess()
-	}
-	if command.Retry != nil && command.Retry.NextEligibleAt != nil {
-		now := o.now().UTC()
-		if now.Before(*command.Retry.NextEligibleAt) {
-			return nudgeReconcileAtRetryDeadline(*command.Retry.NextEligibleAt)
+	case nudgeEffectCandidateRetry:
+		if candidate.reason == nudgeEffectPlanReasonRetryDeadline {
+			return nudgeReconcileAtRetryDeadline(candidate.retryAt)
 		}
-	}
-
-	preClaimTarget, err := o.targets.Read(ctx, command.Target.SessionID)
-	if err != nil {
-		if ctx.Err() != nil {
+		return nudgeReconcileAudit()
+	case nudgeEffectCandidateReject:
+		if candidate.reason == nudgeEffectPlanReasonTargetChanged {
 			return nudgeReconcileSuccess()
 		}
-		return nudgeReconcileTransient(fmt.Errorf("reading keyed nudge target before claim: %w", err))
+		return nudgeReconcileInvariant(fmt.Errorf("planning keyed nudge candidate %q: rejected reason %d", candidate.commandID, candidate.reason))
+	case nudgeEffectCandidateNeedClaim:
+		// Continue below.
+	default:
+		return nudgeReconcileInvariant(fmt.Errorf("planning keyed nudge candidate %q: unknown disposition %d", candidate.commandID, candidate.disposition))
 	}
-	boundLaunch, err := selectNudgeEffectLaunch(command, preClaimTarget)
-	if err != nil {
-		if errors.Is(err, errNudgeEffectTargetChanged) {
-			return nudgeReconcileSuccess()
-		}
-		return nudgeReconcileInvariant(fmt.Errorf("selecting keyed nudge launch: %w", err))
-	}
+	command := *facts.page.Entries[0].Command
 
 	claimedAt := o.now().UTC()
 	if !claimedAt.Before(command.ExpiresAt) {
@@ -200,11 +212,11 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		return nudgeReconcileInvariant(fmt.Errorf("allocating keyed nudge attempt id: %w", err))
 	}
 	claimRequest := nudgeEffectClaimRequest{
-		commandID:           command.ID,
+		commandID:           candidate.commandID,
 		claimID:             claimID,
 		ownerID:             o.ownerID,
 		attemptID:           attemptID,
-		boundLaunchIdentity: boundLaunch,
+		boundLaunchIdentity: candidate.boundLaunchIdentity,
 		claimedAt:           claimedAt,
 		leaseUntil:          leaseUntil,
 	}
@@ -221,58 +233,70 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		}
 		return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("claiming keyed nudge command: %w", err)))
 	}
-	switch claimResult.Disposition {
-	case nudgequeue.CommandClaimDenied, nudgequeue.CommandClaimAuthorizationUnknown, nudgequeue.CommandClaimBusy:
+	preEntryFacts := nudgeEffectPreEntryFacts{
+		candidate:   candidate,
+		request:     claimRequest,
+		claimResult: claimResult,
+	}
+	providerCtx := ctx
+	cancelProvider := func() {}
+	providerContextOpened := false
+	var preEntry nudgeEffectPreEntryPlan
+	for {
+		preEntry = planNudgeEffectPreEntry(preEntryFacts)
+		if preEntry.disposition != nudgeEffectPreEntryNeedFinalTarget {
+			break
+		}
+		providerCtx, cancelProvider = context.WithTimeout(context.WithoutCancel(ctx), o.completionTimeout)
+		providerContextOpened = true
+		defer cancelProvider()
+		claimed, err := o.refreshClaimedCommand(providerCtx, command.ID, claimRequest)
+		if err != nil {
+			return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, err))
+		}
+		finalTarget, err := o.targets.Read(providerCtx, claimed.Target.SessionID)
+		if err != nil {
+			return nudgeReconcileTransient(fmt.Errorf("reading keyed nudge target after claim: %w", err))
+		}
+		preEntryFacts.claimResult.Command = claimed
+		preEntryFacts.finalTarget = finalTarget
+		preEntryFacts.finalTargetObserved = true
+	}
+	switch preEntry.disposition {
+	case nudgeEffectPreEntryPark, nudgeEffectPreEntryRetry:
 		if _, _, refreshErr := o.reader.acceptCommandHint(ctx, command.ID); refreshErr != nil && ctx.Err() == nil {
 			return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("refreshing unentered keyed nudge claim result: %w", refreshErr)))
 		}
 		return nudgeReconcileSuccess()
-	case nudgequeue.CommandClaimAllowed:
-		if err := validateNudgeEffectClaim(claimResult.Command, claimRequest); err != nil {
-			return nudgeReconcileInvariant(err)
+	case nudgeEffectPreEntryReject:
+		if preEntry.reason == nudgeEffectPlanReasonAuthorizationDenied {
+			if _, _, refreshErr := o.reader.acceptCommandHint(ctx, command.ID); refreshErr != nil && ctx.Err() == nil {
+				return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("refreshing denied keyed nudge claim result: %w", refreshErr)))
+			}
+			return nudgeReconcileSuccess()
 		}
+		return nudgeReconcileInvariant(fmt.Errorf("planning keyed nudge pre-entry %q: rejected reason %d", preEntry.commandID, preEntry.reason))
+	case nudgeEffectPreEntryTerminalizeSuperseded:
+		cancelProvider()
+		return o.completeAttemptDetached(ctx, key, preEntryFacts.claimResult.Command, nudgeProviderCompletion{
+			terminal:      true,
+			actionResult:  nudgequeue.CommandActionResultSuperseded,
+			errorClass:    nudgequeue.CommandErrorClassSuperseded,
+			detail:        nudgeTargetSupersededDetail,
+			providerStage: nudgequeue.ProviderStageNotEntered,
+			completion:    nudgequeue.CompletionStateNotCompleted,
+		})
+	case nudgeEffectPreEntryExecute:
+		if !providerContextOpened || preEntry.action != nudgeEffectPlanActionNudge {
+			return nudgeReconcileInvariant(errors.New("planning keyed nudge pre-entry: execute plan has no bounded provider context or nudge action"))
+		}
+		// Continue below.
 	default:
-		return nudgeReconcileInvariant(fmt.Errorf("claiming keyed nudge command: unknown disposition %q", claimResult.Disposition))
+		return nudgeReconcileInvariant(fmt.Errorf("planning keyed nudge pre-entry %q: unknown disposition %d", preEntry.commandID, preEntry.disposition))
 	}
 
-	providerCtx, cancelProvider := context.WithTimeout(context.WithoutCancel(ctx), o.completionTimeout)
-	defer cancelProvider()
-	claimed, err := o.refreshClaimedCommand(providerCtx, command.ID, claimRequest)
-	if err != nil {
-		return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, err))
-	}
-
-	finalTarget, err := o.targets.Read(providerCtx, claimed.Target.SessionID)
-	if err != nil {
-		return nudgeReconcileTransient(fmt.Errorf("reading keyed nudge target after claim: %w", err))
-	}
-	finalLaunch, err := selectNudgeEffectLaunch(claimed, finalTarget)
-	if errors.Is(err, errNudgeEffectTargetChanged) {
-		cancelProvider()
-		return o.completeAttemptDetached(ctx, key, claimed, nudgeProviderCompletion{
-			terminal:      true,
-			actionResult:  nudgequeue.CommandActionResultSuperseded,
-			errorClass:    nudgequeue.CommandErrorClassSuperseded,
-			detail:        nudgeTargetSupersededDetail,
-			providerStage: nudgequeue.ProviderStageNotEntered,
-			completion:    nudgequeue.CompletionStateNotCompleted,
-		})
-	}
-	if err != nil {
-		return nudgeReconcileInvariant(fmt.Errorf("revalidating keyed nudge launch: %w", err))
-	}
-	if finalLaunch != claimRequest.boundLaunchIdentity {
-		cancelProvider()
-		return o.completeAttemptDetached(ctx, key, claimed, nudgeProviderCompletion{
-			terminal:      true,
-			actionResult:  nudgequeue.CommandActionResultSuperseded,
-			errorClass:    nudgequeue.CommandErrorClassSuperseded,
-			detail:        nudgeTargetSupersededDetail,
-			providerStage: nudgequeue.ProviderStageNotEntered,
-			completion:    nudgequeue.CompletionStateNotCompleted,
-		})
-	}
-
+	claimed := preEntryFacts.claimResult.Command
+	finalTarget := preEntryFacts.finalTarget
 	handle, err := o.handles.Handle(finalTarget)
 	if err != nil {
 		return nudgeReconcileTransient(fmt.Errorf("constructing keyed nudge worker handle: %w", err))
@@ -284,8 +308,8 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		Wake:     worker.NudgeWakeLiveOnly,
 		Effect: &runtime.NudgeEffectContract{
 			OperationID:            claimed.Claim.OperationID,
-			ExpectedLaunchIdentity: finalLaunch,
-			InteractionPolicy:      runtime.NudgeInteractionRequireUnattachedNormal,
+			ExpectedLaunchIdentity: preEntry.boundLaunchIdentity,
+			InteractionPolicy:      preEntry.interactionPolicy,
 		},
 	})
 	completion := mapNudgeProviderCompletion(result, effectErr)
@@ -297,25 +321,30 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 	return o.completeAttemptDetached(ctx, key, claimed, completion)
 }
 
-func (o *nudgeKeyEffectOwner) firstPending(key reconcilekey.Session) (nudgequeue.Command, bool, nudgeReconcileOutcome) {
+func (o *nudgeKeyEffectOwner) candidateFacts(key reconcilekey.Session, observedAt time.Time) (nudgeEffectCandidateFacts, nudgeReconcileOutcome) {
+	status := o.reader.index.Status()
+	facts := nudgeEffectCandidateFacts{
+		expectedStore: o.reader.store,
+		projection:    status,
+		observedAt:    observedAt,
+	}
+	if !status.Synced {
+		return facts, nudgeReconcileSuccess()
+	}
 	page, err := o.reader.index.Page(key.SessionID(), 0, 1)
 	if err != nil {
 		if errors.Is(err, nudgequeue.ErrCommandIndexUnsynced) {
-			return nudgequeue.Command{}, false, nudgeReconcileAudit()
+			facts.projection = o.reader.index.Status()
+			facts.projection.Synced = false
+			return facts, nudgeReconcileSuccess()
 		}
-		return nudgequeue.Command{}, false, nudgeReconcileInvariant(fmt.Errorf("reading keyed nudge ordered head: %w", err))
+		return nudgeEffectCandidateFacts{}, nudgeReconcileInvariant(fmt.Errorf("reading keyed nudge ordered head: %w", err))
 	}
-	if page.Store != o.reader.store {
-		return nudgequeue.Command{}, false, nudgeReconcileInvariant(errors.New("reading keyed nudge ordered head: projection lineage changed"))
+	facts.page = page
+	if len(page.Entries) != 0 {
+		facts.operationID = nudgeCommandEntryID(page.Entries[0])
 	}
-	if len(page.Entries) == 0 {
-		return nudgequeue.Command{}, false, nudgeReconcileSuccess()
-	}
-	entry := page.Entries[0]
-	if entry.Command == nil || entry.Command.State != nudgequeue.CommandStatePending {
-		return nudgequeue.Command{}, false, nudgeReconcileSuccess()
-	}
-	return *entry.Command, true, nudgeReconcileSuccess()
+	return facts, nudgeReconcileSuccess()
 }
 
 func validateNudgeEffectClaim(command nudgequeue.Command, request nudgeEffectClaimRequest) error {

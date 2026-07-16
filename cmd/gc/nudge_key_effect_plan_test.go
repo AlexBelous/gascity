@@ -1,12 +1,39 @@
 package main
 
 import (
+	"go/ast"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func TestNudgeKeyEffectOwnerRoutesProviderAdmissionThroughPurePlans(t *testing.T) {
+	_, file := parseGCTestSource(t, "nudge_key_effect_owner.go")
+	reconcile := findGCFunction(t, file, "reconcile")
+	want := map[string]int{
+		"planNudgeEffectCandidate": 1,
+		"planNudgeEffectPreEntry":  1,
+	}
+	got := make(map[string]int, len(want))
+	ast.Inspect(reconcile.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := selectorPath(call.Fun)
+		if _, tracked := want[name]; tracked {
+			got[name]++
+		}
+		return true
+	})
+	for name, count := range want {
+		if got[name] != count {
+			t.Errorf("nudgeKeyEffectOwner.reconcile calls %s %d times, want %d", name, got[name], count)
+		}
+	}
+}
 
 func TestPlanNudgeEffectCandidateParksBehindEarlierOrderedHead(t *testing.T) {
 	now := testNudgeEffectTime()
@@ -215,6 +242,26 @@ func TestPlanNudgeEffectCandidateSelectsClaimForCurrentExactLaunch(t *testing.T)
 	}
 }
 
+func TestPlanNudgeEffectCandidateRequestsTargetOnlyAfterQueueEligibility(t *testing.T) {
+	now := testNudgeEffectTime()
+	command := immediateNudgeEffectCommand(now)
+	got := planNudgeEffectCandidate(nudgeEffectCandidateFacts{
+		operationID:   command.ID,
+		expectedStore: command.Store,
+		projection:    nudgeEffectPlanProjection(command),
+		page:          nudgeEffectPlanPage(command),
+		observedAt:    now,
+	})
+	want := nudgeEffectCandidatePlan{
+		disposition: nudgeEffectCandidateNeedTarget,
+		reason:      nudgeEffectPlanReasonTargetObservationRequired,
+		commandID:   command.ID,
+	}
+	if got != want {
+		t.Fatalf("candidate plan without target = %#v, want %#v", got, want)
+	}
+}
+
 func TestPlanNudgeEffectPreEntryExecutesAuthorizedExactLaunch(t *testing.T) {
 	now := testNudgeEffectTime()
 	command := immediateNudgeEffectCommand(now)
@@ -280,6 +327,74 @@ func TestPlanNudgeEffectPreEntryExecutesAuthorizedExactLaunch(t *testing.T) {
 	if got != want {
 		t.Fatalf("pre-entry plan = %#v, want %#v", got, want)
 	}
+}
+
+func TestPlanNudgeEffectPreEntryRequestsFinalTargetAfterExactClaim(t *testing.T) {
+	now := testNudgeEffectTime()
+	command := immediateNudgeEffectCommand(now)
+	target := currentNudgeEffectPlanTarget()
+	candidate := nudgeEffectCandidatePlan{
+		disposition:         nudgeEffectCandidateNeedClaim,
+		reason:              nudgeEffectPlanReasonReadyToClaim,
+		commandID:           command.ID,
+		boundLaunchIdentity: target.launchIdentity,
+	}
+	request, claimed := authorizedNudgeEffectPlanClaim(command, target, now)
+	got := planNudgeEffectPreEntry(nudgeEffectPreEntryFacts{
+		candidate: candidate,
+		request:   request,
+		claimResult: nudgequeue.CommandClaimResult{
+			Disposition: nudgequeue.CommandClaimAllowed,
+			Command:     claimed,
+		},
+	})
+	want := nudgeEffectPreEntryPlan{
+		disposition:         nudgeEffectPreEntryNeedFinalTarget,
+		action:              nudgeEffectPlanActionNone,
+		reason:              nudgeEffectPlanReasonFinalTargetObservationRequired,
+		commandID:           command.ID,
+		boundLaunchIdentity: target.launchIdentity,
+	}
+	if got != want {
+		t.Fatalf("pre-entry plan without final target = %#v, want %#v", got, want)
+	}
+}
+
+func authorizedNudgeEffectPlanClaim(command nudgequeue.Command, target nudgeEffectTarget, now time.Time) (nudgeEffectClaimRequest, nudgequeue.Command) {
+	request := nudgeEffectClaimRequest{
+		commandID:           command.ID,
+		claimID:             "claim-1",
+		ownerID:             "owner-1",
+		attemptID:           "attempt-1",
+		boundLaunchIdentity: target.launchIdentity,
+		claimedAt:           now,
+		leaseUntil:          now.Add(time.Minute),
+	}
+	claimed := command
+	claimed.State = nudgequeue.CommandStateInFlight
+	claimed.Order.Revision++
+	claimed.Claim = &nudgequeue.CommandClaim{
+		ID:                         request.claimID,
+		OwnerID:                    request.ownerID,
+		OperationID:                request.commandID,
+		AttemptID:                  request.attemptID,
+		BoundLaunchIdentity:        request.boundLaunchIdentity,
+		AuthorizationDecisionID:    "claim-decision-1",
+		AuthorizationPolicyVersion: "policy-v2",
+		ClaimedAt:                  request.claimedAt,
+		LeaseUntil:                 request.leaseUntil,
+	}
+	claimed.Retry = &nudgequeue.CommandRetry{
+		AttemptCount:               1,
+		LastAttemptAt:              request.claimedAt,
+		ClaimID:                    request.claimID,
+		OperationID:                request.commandID,
+		AttemptID:                  request.attemptID,
+		BoundLaunchIdentity:        request.boundLaunchIdentity,
+		AuthorizationDecisionID:    claimed.Claim.AuthorizationDecisionID,
+		AuthorizationPolicyVersion: claimed.Claim.AuthorizationPolicyVersion,
+	}
+	return request, claimed
 }
 
 func nudgeEffectPlanProjection(command nudgequeue.Command) nudgequeue.CommandIndexStatus {

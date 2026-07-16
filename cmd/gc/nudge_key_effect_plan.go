@@ -15,6 +15,7 @@ const (
 	nudgeEffectCandidatePark
 	nudgeEffectCandidateRetry
 	nudgeEffectCandidateReject
+	nudgeEffectCandidateNeedTarget
 	nudgeEffectCandidateNeedClaim
 )
 
@@ -38,15 +39,18 @@ const (
 	nudgeEffectPlanReasonAuthorizationUnknown
 	nudgeEffectPlanReasonAuthorizationDenied
 	nudgeEffectPlanReasonClaimInvalid
+	nudgeEffectPlanReasonTargetObservationRequired
+	nudgeEffectPlanReasonFinalTargetObservationRequired
 )
 
 type nudgeEffectCandidateFacts struct {
-	operationID   string
-	expectedStore nudgequeue.CommandStoreBinding
-	projection    nudgequeue.CommandIndexStatus
-	page          nudgequeue.CommandIndexPage
-	target        nudgeEffectTarget
-	observedAt    time.Time
+	operationID    string
+	expectedStore  nudgequeue.CommandStoreBinding
+	projection     nudgequeue.CommandIndexStatus
+	page           nudgequeue.CommandIndexPage
+	target         nudgeEffectTarget
+	targetObserved bool
+	observedAt     time.Time
 }
 
 type nudgeEffectCandidatePlan struct {
@@ -58,10 +62,11 @@ type nudgeEffectCandidatePlan struct {
 }
 
 type nudgeEffectPreEntryFacts struct {
-	candidate   nudgeEffectCandidatePlan
-	request     nudgeEffectClaimRequest
-	claimResult nudgequeue.CommandClaimResult
-	finalTarget nudgeEffectTarget
+	candidate           nudgeEffectCandidatePlan
+	request             nudgeEffectClaimRequest
+	claimResult         nudgequeue.CommandClaimResult
+	finalTarget         nudgeEffectTarget
+	finalTargetObserved bool
 }
 
 type nudgeEffectPreEntryDisposition uint8
@@ -72,6 +77,7 @@ const (
 	nudgeEffectPreEntryRetry
 	nudgeEffectPreEntryReject
 	nudgeEffectPreEntryTerminalizeSuperseded
+	nudgeEffectPreEntryNeedFinalTarget
 	nudgeEffectPreEntryExecute
 )
 
@@ -146,6 +152,11 @@ func planNudgeEffectCandidate(facts nudgeEffectCandidateFacts) nudgeEffectCandid
 		plan.reason = nudgeEffectPlanReasonExpired
 		return plan
 	}
+	if !facts.targetObserved && facts.target == (nudgeEffectTarget{}) {
+		plan.disposition = nudgeEffectCandidateNeedTarget
+		plan.reason = nudgeEffectPlanReasonTargetObservationRequired
+		return plan
+	}
 	launch, err := selectNudgeEffectLaunch(command, facts.target)
 	if err != nil {
 		plan.disposition = nudgeEffectCandidateReject
@@ -196,6 +207,11 @@ func planNudgeEffectPreEntry(facts nudgeEffectPreEntryFacts) nudgeEffectPreEntry
 	if err := validateNudgeEffectClaim(facts.claimResult.Command, facts.request); err != nil {
 		plan.disposition = nudgeEffectPreEntryReject
 		plan.reason = nudgeEffectPlanReasonClaimInvalid
+		return plan
+	}
+	if !facts.finalTargetObserved && facts.finalTarget == (nudgeEffectTarget{}) {
+		plan.disposition = nudgeEffectPreEntryNeedFinalTarget
+		plan.reason = nudgeEffectPlanReasonFinalTargetObservationRequired
 		return plan
 	}
 	finalLaunch, err := selectNudgeEffectLaunch(facts.claimResult.Command, facts.finalTarget)

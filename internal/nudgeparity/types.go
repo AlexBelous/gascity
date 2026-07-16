@@ -85,10 +85,30 @@ const (
 
 func (a Action) valid() bool { return a == ActionNone || a == ActionNudge }
 
+// InteractionPolicy is the normalized provider-entry policy selected by a
+// plan. It is part of plan equality even when decision and action are equal.
+type InteractionPolicy uint8
+
+const (
+	// InteractionPolicyUnknown is the invalid zero value.
+	InteractionPolicyUnknown InteractionPolicy = iota
+	// InteractionPolicyRequireUnattachedNormal refuses native input unless the
+	// target is unattached and outside copy mode at provider entry.
+	InteractionPolicyRequireUnattachedNormal
+	// InteractionPolicyForce permits a separately authorized same-operation
+	// force policy to enter despite interactive attachment state.
+	InteractionPolicyForce
+)
+
+func (p InteractionPolicy) valid() bool {
+	return p == InteractionPolicyRequireUnattachedNormal || p == InteractionPolicyForce
+}
+
 // Plan is the small, comparable output produced independently by each planner.
 type Plan struct {
-	Decision Decision
-	Action   Action
+	Decision          Decision
+	Action            Action
+	InteractionPolicy InteractionPolicy
 }
 
 // Input captures the immutable operation target presented to both planners.
@@ -192,7 +212,7 @@ func (o Observation) validate(now time.Time) error {
 	if !o.Watermarks.validPartial() {
 		return fmt.Errorf("%w: watermark identity is non-canonical", ErrInvalidObservation)
 	}
-	if !o.Plan.Decision.valid() || !o.Plan.Action.valid() {
+	if !o.Plan.Decision.valid() || !o.Plan.Action.valid() || !o.Plan.InteractionPolicy.valid() {
 		return fmt.Errorf("%w: plan is unknown", ErrInvalidObservation)
 	}
 	if o.CapturedAt.IsZero() || o.CapturedAt.After(now) {

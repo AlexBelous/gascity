@@ -9,7 +9,8 @@ import (
 )
 
 // Sample is one immutable capture from the authoritative legacy planner. The
-// shadow planner receives the same input and watermarks, but never ExpectedPlan.
+// shadow planner receives that captured view as planning input, but its actual
+// observation comes only from the independently returned Planned evidence.
 type Sample struct {
 	OperationID    string
 	Input          Input
@@ -41,11 +42,15 @@ type PlanningInput struct {
 	EnqueuedAt  time.Time
 }
 
-// Planned is the independently computed keyed output. A planning-only shadow
-// cannot claim provider-native T8 entry, so it can report only plan evidence.
+// Planned is the independently observed and computed keyed output. Input and
+// Watermarks must report the actual planner's view; Shadow never fills them
+// from the expected sample. A planning-only shadow cannot claim provider-native
+// T8 entry, so it can report only planning timing evidence.
 type Planned struct {
-	Plan      Plan
-	PlannedAt time.Time
+	Input      Input
+	Watermarks Watermarks
+	Plan       Plan
+	PlannedAt  time.Time
 }
 
 // Planner computes one keyed plan without executing it. Implementations must
@@ -133,7 +138,7 @@ func (s ShadowState) String() string {
 	}
 }
 
-// ShadowConfig configures a bounded single-worker same-input comparison lane.
+// ShadowConfig configures a bounded single-worker independent comparison lane.
 type ShadowConfig struct {
 	Comparator    Config
 	QueueCapacity int
@@ -188,7 +193,7 @@ type Shadow struct {
 	unreported         atomic.Uint64
 }
 
-// NewShadow constructs a stopped same-input shadow with explicit queue and
+// NewShadow constructs a stopped independent shadow with explicit queue and
 // comparator bounds. Run must be called exactly once to open admission.
 func NewShadow(config ShadowConfig) (*Shadow, error) {
 	if config.QueueCapacity <= 0 {
@@ -347,8 +352,8 @@ func (s *Shadow) process(ctx context.Context, sample Sample) error {
 	actual := Observation{
 		OperationID: sample.OperationID,
 		Side:        SideActual,
-		Input:       sample.Input,
-		Watermarks:  sample.Watermarks,
+		Input:       planned.Input,
+		Watermarks:  planned.Watermarks,
 		Plan:        planned.Plan,
 		CapturedAt:  now,
 		Timing: TimingEvidence{

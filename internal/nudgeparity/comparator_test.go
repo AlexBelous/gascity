@@ -42,8 +42,32 @@ func TestComparatorClassifiesDivergentPlan(t *testing.T) {
 	comparator := newTestComparator(t, func() time.Time { return now }, 8, 8)
 	expected := testObservation("operation-1", SideExpected, now)
 	actual := testObservation("operation-1", SideActual, now)
-	actual.Plan = Plan{Decision: DecisionPark, Action: ActionNone}
+	actual.Plan = Plan{
+		Decision: DecisionPark, Action: ActionNone,
+		InteractionPolicy: expected.Plan.InteractionPolicy,
+	}
 
+	if _, err := comparator.Observe(expected); err != nil {
+		t.Fatal(err)
+	}
+	results, err := comparator.Observe(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSingleResult(t, results, ClassificationDivergent, ReasonPlanMismatch)
+}
+
+func TestComparatorClassifiesDifferentInteractionPoliciesAsDivergent(t *testing.T) {
+	now := time.Date(2026, 7, 16, 2, 0, 0, 0, time.UTC)
+	comparator := newTestComparator(t, func() time.Time { return now }, 8, 8)
+	expected := testObservation("operation-1", SideExpected, now)
+	actual := testObservation("operation-1", SideActual, now)
+	expected.Plan.InteractionPolicy = InteractionPolicyRequireUnattachedNormal
+	actual.Plan.InteractionPolicy = InteractionPolicyForce
+
+	if expected.Plan.Decision != actual.Plan.Decision || expected.Plan.Action != actual.Plan.Action {
+		t.Fatal("test fixture decisions and actions differ before interaction policy comparison")
+	}
 	if _, err := comparator.Observe(expected); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +172,10 @@ func TestComparatorClassifiesIdenticalAndConflictingDuplicates(t *testing.T) {
 			assertSingleResult(t, results, ClassificationDuplicate, ReasonDuplicateIdentical)
 
 			conflict := original
-			conflict.Plan = Plan{Decision: DecisionReject, Action: ActionNone}
+			conflict.Plan = Plan{
+				Decision: DecisionReject, Action: ActionNone,
+				InteractionPolicy: original.Plan.InteractionPolicy,
+			}
 			results, err = comparator.Observe(conflict)
 			if err != nil {
 				t.Fatal(err)
@@ -196,6 +223,11 @@ func TestComparatorRejectsInvalidObservationsAndClockRegressionWithoutRetainingT
 	if _, err := comparator.Observe(invalidUTF8); !errors.Is(err, ErrInvalidObservation) {
 		t.Fatalf("invalid UTF-8 Observe() error = %v, want ErrInvalidObservation", err)
 	}
+	missingInteractionPolicy := testObservation("operation-policy", SideExpected, now)
+	missingInteractionPolicy.Plan.InteractionPolicy = InteractionPolicyUnknown
+	if _, err := comparator.Observe(missingInteractionPolicy); !errors.Is(err, ErrInvalidObservation) {
+		t.Fatalf("missing interaction policy Observe() error = %v, want ErrInvalidObservation", err)
+	}
 	future := testObservation("operation-future", SideExpected, now.Add(time.Second))
 	if _, err := comparator.Observe(future); !errors.Is(err, ErrInvalidObservation) {
 		t.Fatalf("future Observe() error = %v, want ErrInvalidObservation", err)
@@ -211,8 +243,8 @@ func TestComparatorRejectsInvalidObservationsAndClockRegressionWithoutRetainingT
 		t.Fatalf("regressing Sweep() error = %v, want ErrClockRegression", err)
 	}
 	snapshot := comparator.Snapshot()
-	if snapshot.ClockRegressions != 1 || snapshot.InvalidObservations != 3 {
-		t.Fatalf("error counters = clock:%d invalid:%d, want 1/3", snapshot.ClockRegressions, snapshot.InvalidObservations)
+	if snapshot.ClockRegressions != 1 || snapshot.InvalidObservations != 4 {
+		t.Fatalf("error counters = clock:%d invalid:%d, want 1/4", snapshot.ClockRegressions, snapshot.InvalidObservations)
 	}
 	assertBounds(t, snapshot, 1, 0, 8, 8)
 }
@@ -365,8 +397,15 @@ func testObservation(operationID string, side Side, capturedAt time.Time) Observ
 			RuntimeRevision: 11,
 			OwnerEpoch:      13,
 		},
-		Plan:       Plan{Decision: DecisionExecute, Action: ActionNudge},
+		Plan:       testPlan(),
 		CapturedAt: capturedAt,
+	}
+}
+
+func testPlan() Plan {
+	return Plan{
+		Decision: DecisionExecute, Action: ActionNudge,
+		InteractionPolicy: InteractionPolicyRequireUnattachedNormal,
 	}
 }
 

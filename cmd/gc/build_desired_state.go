@@ -645,7 +645,7 @@ func buildDesiredStateWithSessionBeads(
 				// Same guard conditions apply: healthy own rig store, not
 				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
-				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+				if ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
 					if namedSessionMode != "always" {
 						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
@@ -705,6 +705,18 @@ func buildDesiredStateWithSessionBeads(
 			// both yields the correct union demand. A city-scoped pool's
 			// own target is already the city store, so it needs no extra probe.
 			//
+			// Rig control dispatchers are NOT excluded: city-side orchestration
+			// materializes a rig workflow's graph in the city store while
+			// routing its control steps to the rig's dispatcher (the route
+			// follows the execution rig context; the placement follows the
+			// source bead's store), and a running rig dispatcher serves those
+			// city-store control beads. Excluding dispatchers here meant a DEAD
+			// rig dispatcher could never cold-start on its city-store control
+			// backlog: every scope-check/retry/finalize sat ready-but-
+			// unservable and the entire workflow layer froze behind them. A rig
+			// control dispatcher must be started when there is city-store work
+			// routed to it.
+			//
 			// Gated on a healthy own rig store: when the rig store is missing or
 			// errored we stay partial and do NOT wake on cross-store demand —
 			// a rig executor cannot do its work while its rig store is
@@ -722,10 +734,23 @@ func buildDesiredStateWithSessionBeads(
 			// definition below), and is the load-bearing defense now that the
 			// city probe is no longer cold-gated. Current store-map builders skip
 			// such rigs, so today this is defense-in-depth against future callers.
-			// Control dispatchers are deliberately store-scoped: a rig copy cannot
-			// claim a route from the city store. Keep their cold-wake probe on the
-			// owning store instead of applying generic cross-store pool delivery.
-			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+			//
+			// SPLIT-STORE CONTROL DISPATCHER (fork): control dispatchers are NOT
+			// excluded from the city probe here. Upstream store-scopes them on the
+			// rationale that "a rig copy cannot claim a route from the city store"
+			// — but the fork serve-loop (drainWorkflowServeWork federated sweep,
+			// dispatch_runtime.go) makes exactly that possible, so a rig control
+			// dispatcher legitimately needs city-store demand to cold-start for
+			// city-routed control beads. City-side orchestration materializes a
+			// rig workflow's graph in the city store while routing its control
+			// steps to the rig dispatcher; those beads carry gc.root_store_ref=
+			// rig:gascity while physically in the city store, so route repair
+			// (repairControlDispatcherRoutesForStoreScope) never sees them — they
+			// are filtered by collectOpenUnassignedRoutedWork's
+			// rootStoreRefMatchesCandidate. The city-store sweep + this un-gated
+			// demand probe are what claim them. Retire both together only when the
+			// lying root_store_ref stamping is fixed at molecule placement.
+			if ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
 			}
 			continue

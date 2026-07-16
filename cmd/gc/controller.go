@@ -115,7 +115,11 @@ func startControllerSocket(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	options ...controllerSocketOption,
 ) (net.Listener, error) {
+	if _, err := newControllerSocketConfig(options...); err != nil {
+		return nil, err
+	}
 	sockPath := controllerSocketPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("creating controller socket dir: %w", err)
@@ -132,7 +136,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, options...)
 		}
 	}()
 	return lis, nil
@@ -152,8 +156,13 @@ func handleControllerConn(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	options ...controllerSocketOption,
 ) {
-	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	socketConfig, err := newControllerSocketConfig(options...)
+	if err != nil {
+		return
+	}
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
 	scanner := bufio.NewScanner(conn)
 	// Increase scanner buffer for convergence commands which may carry large payloads.
@@ -199,6 +208,8 @@ func handleControllerConn(
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
+		case strings.HasPrefix(line, controllerNudgeAdmissionCommandPrefix):
+			handleControllerNudgeAdmissionPayload(context.Background(), conn, line[len(controllerNudgeAdmissionCommandPrefix):], socketConfig)
 		case strings.HasPrefix(line, "converge:"):
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):

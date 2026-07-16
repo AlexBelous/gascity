@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"strings"
@@ -45,6 +46,38 @@ const (
 type controllerSocketConfig struct {
 	nudgeToken     string
 	nudgeAuthority productionSessionNudgeAuthority
+}
+
+type controllerSocketOption func(*controllerSocketConfig) error
+
+func withControllerNudgeAdmission(token string, authority productionSessionNudgeAuthority) controllerSocketOption {
+	return func(config *controllerSocketConfig) error {
+		if config == nil {
+			return errors.New("configuring controller nudge admission: socket config is nil")
+		}
+		if token == "" {
+			return errors.New("configuring controller nudge admission: token is empty")
+		}
+		if isNilProductionSessionNudgeAuthority(authority) {
+			return errors.New("configuring controller nudge admission: authority is nil")
+		}
+		config.nudgeToken = token
+		config.nudgeAuthority = authority
+		return nil
+	}
+}
+
+func newControllerSocketConfig(options ...controllerSocketOption) (controllerSocketConfig, error) {
+	var config controllerSocketConfig
+	for i, option := range options {
+		if option == nil {
+			return controllerSocketConfig{}, fmt.Errorf("configuring controller socket option %d: option is nil", i)
+		}
+		if err := option(&config); err != nil {
+			return controllerSocketConfig{}, fmt.Errorf("configuring controller socket option %d: %w", i, err)
+		}
+	}
+	return config, nil
 }
 
 // controllerNudgeAdmissionRequest is the local socket's typed caller-owned

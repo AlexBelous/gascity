@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"reflect"
 	"strings"
 	"sync"
@@ -11,7 +14,66 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestHandleControllerConnRoutesAuthenticatedNudgeAdmission(t *testing.T) {
+	authority := &socketRecordingNudgeAuthority{
+		tenant: "tenant-a", city: "city-a", credential: "credential-a",
+		result: nudgequeue.NudgeIngressResult{Entry: nudgequeue.CommandIndexEntry{
+			Command: &nudgequeue.Command{ID: "command-a", State: nudgequeue.CommandStatePending},
+		}},
+	}
+	wire := validControllerNudgeAdmissionWire()
+	payload, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	server, client := net.Pipe()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = client.Close()
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleControllerConn(
+			server,
+			"/city/a",
+			func() {},
+			nil,
+			nil,
+			nil,
+			nil,
+			make(chan struct{}, 1),
+			make(chan struct{}, 1),
+			withControllerNudgeAdmission(wire.Token, authority),
+		)
+	}()
+	deadline := time.Now().Add(testutil.GoroutineRaceTimeout)
+	if err := client.SetDeadline(deadline); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	if _, err := fmt.Fprintf(client, "%s%s\n", controllerNudgeAdmissionCommandPrefix, payload); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	line, err := bufio.NewReader(client).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read reply: %v", err)
+	}
+	var reply controllerNudgeAdmissionReply
+	if err := json.Unmarshal(bytes.TrimSpace(line), &reply); err != nil {
+		t.Fatalf("Unmarshal reply: %v", err)
+	}
+	if reply.Outcome != controllerNudgeAdmissionAccepted || reply.CommandID != "command-a" {
+		t.Fatalf("reply = %#v, want accepted command-a", reply)
+	}
+	select {
+	case <-done:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("controller connection handler did not exit")
+	}
+}
 
 func TestControllerNudgeAdmissionSocketRejectsInvalidTokenBeforeAuthority(t *testing.T) {
 	authority := &socketRecordingNudgeAuthority{

@@ -848,7 +848,7 @@ func TestRigGraphControlLaneMaterializeServeAndAdvanceEndToEnd(t *testing.T) {
 		return processErr
 	}
 
-	if _, err := drainWorkflowServeWork(rigDispatcher, cityPath, rigPath, serveQuery, nil, io.Discard); err != nil {
+	if _, err := drainWorkflowServeWork(rigDispatcher, cityPath, []workflowServeSweepTarget{{dir: rigPath}}, serveQuery, io.Discard); err != nil {
 		t.Fatalf("drain rig workflow serve: %v", err)
 	}
 	if queryCalls < 2 {

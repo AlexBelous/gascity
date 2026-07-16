@@ -117,6 +117,7 @@ func bindProductionNudgeAuthority(
 		partition:    partition,
 		membership:   authority,
 		terminal:     authority,
+		retry:        authority,
 		recovery:     authority,
 		recoveryGate: make(chan struct{}, 1),
 	}
@@ -252,7 +253,8 @@ func (b *productionNudgeAuthorityBinding) completeLocked() bool {
 		b.resolver == b.ingress && b.claimAuthorizer == b.authority && b.ingress != nil &&
 		b.source != nil && b.source.repository == b.repository && b.source.reader != nil &&
 		b.source.partition == b.partition && b.source.membership == b.authority &&
-		b.source.terminal == b.authority && b.source.recovery == b.authority && b.source.recoveryGate != nil &&
+		b.source.terminal == b.authority && b.source.retry == b.authority &&
+		b.source.recovery == b.authority && b.source.recoveryGate != nil &&
 		b.tenantScope != "" && b.cityScope != "" && b.credentialClass != ""
 }
 

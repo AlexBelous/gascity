@@ -18,9 +18,11 @@ var errNudgeEffectTargetChanged = errors.New("durable nudge target changed")
 const (
 	defaultNudgeEffectClaimLease        = 30 * time.Second
 	defaultNudgeEffectCompletionTimeout = 10 * time.Second
+	defaultNudgeEffectRetryDelay        = 100 * time.Millisecond
 	nudgeTargetSupersededDetail         = "target generation or launch identity changed after claim"
 	nudgeProviderAmbiguousDetail        = "provider may have accepted the nudge without a durable result"
 	nudgeProviderRejectedDetail         = "provider definitively rejected the nudge"
+	nudgeProviderNotEnteredDetail       = "provider proved that native nudge entry did not occur"
 	nudgeProviderInvalidEvidenceDetail  = "provider returned incomplete or contradictory delivery evidence"
 )
 
@@ -41,6 +43,7 @@ type nudgeCommandEffectSource interface {
 	nudgeCommandSource
 	ClaimAuthorized(context.Context, nudgeEffectClaimRequest, nudgequeue.NudgeClaimAuthorizer) (nudgequeue.CommandClaimResult, error)
 	CompleteProviderAttempt(context.Context, nudgequeue.CommandCompletionRequest) (nudgequeue.CommandCompletionResult, error)
+	RetryProviderAttempt(context.Context, nudgequeue.CommandRetryRequest) (nudgequeue.CommandRetryResult, error)
 }
 
 type nudgeEffectTargetReader interface {
@@ -64,6 +67,7 @@ type nudgeKeyEffectOwnerConfig struct {
 	newID             nudgeEffectIDGenerator
 	claimLease        time.Duration
 	completionTimeout time.Duration
+	retryDelay        time.Duration
 }
 
 // nudgeKeyEffectOwner executes at most one exact pending command per callback.
@@ -80,6 +84,7 @@ type nudgeKeyEffectOwner struct {
 	newID             nudgeEffectIDGenerator
 	claimLease        time.Duration
 	completionTimeout time.Duration
+	retryDelay        time.Duration
 }
 
 func newNudgeKeyEffectOwner(config nudgeKeyEffectOwnerConfig) (*nudgeKeyEffectOwner, error) {
@@ -101,6 +106,9 @@ func newNudgeKeyEffectOwner(config nudgeKeyEffectOwnerConfig) (*nudgeKeyEffectOw
 	if config.completionTimeout <= 0 {
 		config.completionTimeout = defaultNudgeEffectCompletionTimeout
 	}
+	if config.retryDelay <= 0 {
+		config.retryDelay = defaultNudgeEffectRetryDelay
+	}
 	return &nudgeKeyEffectOwner{
 		reader:            config.reader,
 		source:            config.source,
@@ -112,6 +120,7 @@ func newNudgeKeyEffectOwner(config nudgeKeyEffectOwnerConfig) (*nudgeKeyEffectOw
 		newID:             config.newID,
 		claimLease:        config.claimLease,
 		completionTimeout: config.completionTimeout,
+		retryDelay:        config.retryDelay,
 	}, nil
 }
 
@@ -275,9 +284,8 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 	})
 	completion := mapNudgeProviderCompletion(result, effectErr)
 	if !completion.terminal {
-		// Definite non-entry is intentionally parked. Claim release/retry needs a
-		// separate same-operation policy; lease expiry alone is never replay proof.
-		return nudgeReconcileSuccess()
+		cancelProvider()
+		return o.retryAttemptDetached(ctx, key, claimed, completion)
 	}
 	cancelProvider()
 	return o.completeAttemptDetached(ctx, key, claimed, completion)
@@ -372,6 +380,82 @@ func (o *nudgeKeyEffectOwner) completeAttempt(ctx context.Context, key reconcile
 		return nudgeReconcileInvariant(errors.New("refreshing keyed nudge completion: command disappeared"))
 	}
 	return o.nextAfterCompletion(key)
+}
+
+func (o *nudgeKeyEffectOwner) retryAttempt(ctx context.Context, key reconcilekey.Session, command nudgequeue.Command, completion nudgeProviderCompletion) nudgeReconcileOutcome {
+	if command.Claim == nil || command.Retry == nil || completion.terminal ||
+		completion.providerStage != nudgequeue.ProviderStageNotEntered || completion.completion != nudgequeue.CompletionStateNotCompleted {
+		return nudgeReconcileInvariant(errors.New("retrying keyed nudge attempt: exact definite-non-entry claim evidence is required"))
+	}
+	observedAt := o.now().UTC()
+	if observedAt.Before(command.Claim.ClaimedAt) {
+		return nudgeReconcileInvariant(errors.New("retrying keyed nudge attempt: clock regressed before claim"))
+	}
+	nextEligibleAt := observedAt.Add(o.retryDelay)
+	if !nextEligibleAt.Before(command.ExpiresAt) {
+		return o.completeAttempt(ctx, key, command, nudgeProviderCompletion{
+			terminal:      true,
+			actionResult:  nudgequeue.CommandActionResultExpired,
+			errorClass:    nudgequeue.CommandErrorClassExpired,
+			detail:        "command expired before a safe provider retry",
+			providerStage: nudgequeue.ProviderStageNotEntered,
+			completion:    nudgequeue.CompletionStateNotCompleted,
+		})
+	}
+	request := nudgequeue.CommandRetryRequest{
+		CommandID:      command.ID,
+		ClaimID:        command.Claim.ID,
+		OperationID:    command.Claim.OperationID,
+		AttemptID:      command.Claim.AttemptID,
+		ObservedAt:     observedAt,
+		NextEligibleAt: nextEligibleAt,
+		ErrorClass:     nudgequeue.CommandErrorClassProviderBusy,
+		Detail:         nudgeProviderNotEnteredDetail,
+		ProviderStage:  completion.providerStage,
+		Completion:     completion.completion,
+	}
+	result, err := o.source.RetryProviderAttempt(ctx, request)
+	if err != nil {
+		if _, _, refreshErr := o.reader.acceptCommandHint(ctx, command.ID); refreshErr == nil &&
+			o.pendingRetryMatches(command.ID, request) {
+			return nudgeReconcileSuccess()
+		}
+		return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("persisting keyed nudge retry: %w", err)))
+	}
+	if result.Disposition != nudgequeue.CommandRetryRecorded && result.Disposition != nudgequeue.CommandRetryAlreadyRecorded {
+		return nudgeReconcileInvariant(fmt.Errorf("persisting keyed nudge retry: disposition %q does not own the exact attempt", result.Disposition))
+	}
+	if _, found, err := o.reader.acceptCommandHint(ctx, command.ID); err != nil {
+		return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, fmt.Errorf("refreshing keyed nudge retry: %w", err)))
+	} else if !found {
+		return nudgeReconcileInvariant(errors.New("refreshing keyed nudge retry: command disappeared"))
+	}
+	if !o.pendingRetryMatches(command.ID, request) {
+		return nudgeReconcileInvariant(errors.New("refreshing keyed nudge retry: exact pending retry is absent"))
+	}
+	return nudgeReconcileSuccess()
+}
+
+func (o *nudgeKeyEffectOwner) pendingRetryMatches(commandID string, request nudgequeue.CommandRetryRequest) bool {
+	resolved, err := o.reader.index.Resolve(commandID)
+	if err != nil || !resolved.Found || resolved.Entry.Command == nil {
+		return false
+	}
+	command := resolved.Entry.Command
+	return command.State == nudgequeue.CommandStatePending && command.Claim == nil && command.Terminal == nil && command.Retry != nil &&
+		command.Retry.ClaimID == request.ClaimID && command.Retry.OperationID == request.OperationID &&
+		command.Retry.AttemptID == request.AttemptID && command.Retry.NextEligibleAt != nil &&
+		command.Retry.NextEligibleAt.Equal(request.NextEligibleAt) && command.Retry.ErrorClass == request.ErrorClass &&
+		command.Retry.ErrorDetail == request.Detail
+}
+
+func (o *nudgeKeyEffectOwner) retryAttemptDetached(parent context.Context, key reconcilekey.Session, command nudgequeue.Command, completion nudgeProviderCompletion) nudgeReconcileOutcome {
+	if parent == nil {
+		return nudgeReconcileInvariant(errors.New("retrying keyed nudge attempt: parent context is nil"))
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), o.completionTimeout)
+	defer cancel()
+	return o.retryAttempt(ctx, key, command, completion)
 }
 
 // completeAttemptDetached gives terminal marker-last persistence a fresh

@@ -202,7 +202,7 @@ func TestNudgeKeyEffectOwnerFinalRereadTerminalizesChangedTargetWithoutProviderE
 	}
 }
 
-func TestNudgeKeyEffectOwnerRuntimeInteractionRefusalsNeverEnterNativeProvider(t *testing.T) {
+func TestNudgeKeyEffectOwnerRuntimeInteractionRefusalsBecomeDurableRetryWithoutNativeEntry(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(*runtime.Fake, string)
@@ -258,18 +258,114 @@ func TestNudgeKeyEffectOwnerRuntimeInteractionRefusalsNeverEnterNativeProvider(t
 				t.Fatalf("legacy Nudge entries = %d, want 0", got)
 			}
 			if got := fixture.source.completionCallCount(); got != 0 {
-				t.Fatalf("terminal completion calls = %d, want 0 for parked pre-entry refusal", got)
+				t.Fatalf("terminal completion calls = %d, want 0 for retryable pre-entry refusal", got)
+			}
+			if got := fixture.source.retryCallCount(); got != 1 {
+				t.Fatalf("definite-non-entry retry calls = %d, want 1", got)
 			}
 			command := fixture.source.currentCommand()
-			if command.State != nudgequeue.CommandStateInFlight || command.Claim == nil || command.Terminal != nil {
-				t.Fatalf("durable command after refusal = %#v, want claimed parked command", command)
+			if command.State != nudgequeue.CommandStatePending || command.Claim != nil || command.Terminal != nil || command.Retry == nil {
+				t.Fatalf("durable command after refusal = %#v, want retryable pending command", command)
+			}
+			if command.Retry.NextEligibleAt == nil || !command.Retry.NextEligibleAt.After(fixture.now) ||
+				command.Retry.ErrorClass != nudgequeue.CommandErrorClassProviderBusy || command.Retry.AttemptID == "" {
+				t.Fatalf("durable retry evidence = %#v, want exact not-entered attempt and future eligibility", command.Retry)
 			}
 
 			owner.reconcile(t.Context(), key, nudgeReconcileBatch{Causes: nudgeCauseRuntimeReadiness})
 			if got := provider.CountCalls("NudgeEffect", target.sessionName); got != 0 {
 				t.Fatalf("duplicate callback native entries = %d, want no blind replay", got)
 			}
+			if got := fixture.source.retryCallCount(); got != 1 {
+				t.Fatalf("duplicate callback retry calls = %d, want original retry only", got)
+			}
 		})
+	}
+}
+
+func TestNudgeKeyEffectOwnerRetriesSameLogicalCommandAfterInteractionConflictClears(t *testing.T) {
+	fixture := newNudgeEffectOwnerExecutionFixture(t)
+	target := fixture.targets.firstTarget()
+	provider := runtime.NewFake()
+	if err := provider.Start(t.Context(), target.sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("start fake runtime target: %v", err)
+	}
+	if err := provider.SetMeta(target.sessionName, "GC_INSTANCE_TOKEN", target.launchIdentity); err != nil {
+		t.Fatalf("set fake runtime launch identity: %v", err)
+	}
+	provider.SetAttached(target.sessionName, true)
+	handle, err := worker.NewRuntimeHandle(worker.RuntimeHandleConfig{Provider: provider, SessionName: target.sessionName})
+	if err != nil {
+		t.Fatalf("worker.NewRuntimeHandle: %v", err)
+	}
+	now := fixture.now
+	owner, key := newNudgeEffectOwnerForSourceWithClock(
+		t,
+		fixture.source,
+		fixture.targets,
+		&staticNudgeEffectHandleFactory{handle: handle},
+		func() time.Time { return now },
+		"runtime-retry-owner",
+	)
+
+	first := owner.reconcile(t.Context(), key, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, first)
+	retryable := fixture.source.currentCommand()
+	if retryable.State != nudgequeue.CommandStatePending || retryable.Retry == nil || retryable.Retry.NextEligibleAt == nil {
+		t.Fatalf("first attempt = %#v, want durable pending retry", retryable)
+	}
+	firstAttemptID := retryable.Retry.AttemptID
+	provider.SetAttached(target.sessionName, false)
+	now = *retryable.Retry.NextEligibleAt
+
+	second := owner.reconcile(t.Context(), key, nudgeReconcileBatch{Causes: nudgeCauseRuntimeReadiness})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, second)
+	completed := fixture.source.currentCommand()
+	if completed.State != nudgequeue.CommandStateDelivered || completed.Terminal == nil || completed.Retry == nil {
+		t.Fatalf("second attempt = %#v, want delivered command", completed)
+	}
+	if completed.ID != retryable.ID || completed.Retry.AttemptCount != 2 || completed.Retry.AttemptID == firstAttemptID ||
+		completed.Terminal.AttemptID != completed.Retry.AttemptID {
+		t.Fatalf("retry identity = retry %#v terminal %#v, want same command with fresh second attempt", completed.Retry, completed.Terminal)
+	}
+	if got := provider.CountCalls("NudgeEffect", target.sessionName); got != 1 {
+		t.Fatalf("native provider entries = %d, want exactly one after conflict clears", got)
+	}
+	if got := fixture.source.retryCallCount(); got != 1 {
+		t.Fatalf("definite-non-entry transitions = %d, want 1", got)
+	}
+	if got := fixture.source.completionCallCount(); got != 1 {
+		t.Fatalf("terminal completions = %d, want 1", got)
+	}
+}
+
+func TestNudgeKeyEffectOwnerRetryStoreResponseLossRecoversWithoutProviderReplay(t *testing.T) {
+	fixture := newNudgeEffectOwnerExecutionFixture(t)
+	fixture.handle.mu.Lock()
+	fixture.handle.result = worker.NudgeResult{Effect: &runtime.NudgeEffectResult{
+		Stage:      runtime.NudgeEffectStageNotEntered,
+		Completion: runtime.NudgeEffectCompletionNotCompleted,
+	}}
+	fixture.handle.effectErr = errors.New("provider proved nudge was not entered")
+	fixture.handle.mu.Unlock()
+	fixture.source.setRetryError(errors.New("lost retry store response"), true)
+
+	first := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, first)
+	command := fixture.source.currentCommand()
+	if command.State != nudgequeue.CommandStatePending || command.Claim != nil || command.Retry == nil || command.Retry.NextEligibleAt == nil {
+		t.Fatalf("command after lost retry response = %#v, want recovered pending retry", command)
+	}
+	duplicate := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseProviderResult, WorkqueueReplay: true})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, duplicate)
+	if got := fixture.handle.nudgeCallCount(); got != 1 {
+		t.Fatalf("provider calls after retry response loss = %d, want original call only", got)
+	}
+	if got := fixture.handle.nativeEntryCount(); got != 0 {
+		t.Fatalf("native provider entries after retry response loss = %d, want 0", got)
+	}
+	if got := fixture.source.retryCallCount(); got != 1 {
+		t.Fatalf("durable retry calls after response loss = %d, want 1", got)
 	}
 }
 
@@ -455,6 +551,17 @@ func newNudgeEffectOwnerForSource(
 	now time.Time,
 	ownerID string,
 ) (*nudgeKeyEffectOwner, reconcilekey.Session) {
+	return newNudgeEffectOwnerForSourceWithClock(t, source, targets, handles, func() time.Time { return now }, ownerID)
+}
+
+func newNudgeEffectOwnerForSourceWithClock(
+	t *testing.T,
+	source *mutexNudgeEffectSource,
+	targets nudgeEffectTargetReader,
+	handles nudgeEffectHandleFactory,
+	now func() time.Time,
+	ownerID string,
+) (*nudgeKeyEffectOwner, reconcilekey.Session) {
 	t.Helper()
 	reader, err := newNudgeKeyReadShadow(t.Context(), source, 8, nil)
 	if err != nil {
@@ -468,7 +575,7 @@ func newNudgeEffectOwnerForSource(
 		targets:           targets,
 		handles:           handles,
 		ownerID:           ownerID,
-		now:               func() time.Time { return now },
+		now:               now,
 		newID:             ids.newID,
 		claimLease:        time.Minute,
 		completionTimeout: time.Minute,
@@ -532,8 +639,11 @@ type mutexNudgeEffectSource struct {
 	claimDisposition nudgequeue.CommandClaimDisposition
 	claimErr         error
 	completionErr    error
+	retryErr         error
+	retryErrAfter    bool
 	claimCalls       []nudgeEffectClaimRequest
 	completionCalls  []nudgequeue.CommandCompletionRequest
+	retryCalls       []nudgequeue.CommandRetryRequest
 }
 
 func newMutexNudgeEffectSource(command nudgequeue.Command) *mutexNudgeEffectSource {
@@ -613,8 +723,18 @@ func (s *mutexNudgeEffectSource) ClaimAuthorized(ctx context.Context, request nu
 			Command:     cloneNudgeEffectTestCommand(s.command),
 		}, nil
 	}
+	if s.command.Retry != nil && s.command.Retry.NextEligibleAt != nil && request.claimedAt.Before(*s.command.Retry.NextEligibleAt) {
+		return nudgequeue.CommandClaimResult{
+			Disposition: nudgequeue.CommandClaimBusy,
+			Command:     cloneNudgeEffectTestCommand(s.command),
+		}, nil
+	}
 	if request.commandID != s.command.ID || request.boundLaunchIdentity != s.command.Target.LaunchIdentity {
 		return nudgequeue.CommandClaimResult{}, fmt.Errorf("claim does not address the exact command launch")
+	}
+	attemptCount := uint32(1)
+	if s.command.Retry != nil {
+		attemptCount = s.command.Retry.AttemptCount + 1
 	}
 	claim := &nudgequeue.CommandClaim{
 		ID:                         request.claimID,
@@ -631,7 +751,7 @@ func (s *mutexNudgeEffectSource) ClaimAuthorized(ctx context.Context, request nu
 	s.command.Order.Revision++
 	s.command.Claim = claim
 	s.command.Retry = &nudgequeue.CommandRetry{
-		AttemptCount:               1,
+		AttemptCount:               attemptCount,
 		LastAttemptAt:              request.claimedAt,
 		ClaimID:                    claim.ID,
 		OperationID:                claim.OperationID,
@@ -686,6 +806,41 @@ func (s *mutexNudgeEffectSource) CompleteProviderAttempt(ctx context.Context, re
 	}, nil
 }
 
+func (s *mutexNudgeEffectSource) RetryProviderAttempt(ctx context.Context, request nudgequeue.CommandRetryRequest) (nudgequeue.CommandRetryResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nudgequeue.CommandRetryResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retryCalls = append(s.retryCalls, request)
+	if s.retryErr != nil && !s.retryErrAfter {
+		return nudgequeue.CommandRetryResult{}, s.retryErr
+	}
+	if s.command.State != nudgequeue.CommandStateInFlight || s.command.Claim == nil || s.command.Retry == nil ||
+		s.command.Claim.ID != request.ClaimID || s.command.Claim.AttemptID != request.AttemptID {
+		return nudgequeue.CommandRetryResult{
+			Disposition: nudgequeue.CommandRetryStale,
+			Command:     cloneNudgeEffectTestCommand(s.command),
+		}, nil
+	}
+	s.command.Order.Revision++
+	s.command.State = nudgequeue.CommandStatePending
+	s.command.Claim = nil
+	s.command.Retry.NextEligibleAt = nudgeEffectTestTimePointer(request.NextEligibleAt)
+	s.command.Retry.ErrorClass = request.ErrorClass
+	s.command.Retry.ErrorDetail = request.Detail
+	result := nudgequeue.CommandRetryResult{
+		Disposition: nudgequeue.CommandRetryRecorded,
+		Command:     cloneNudgeEffectTestCommand(s.command),
+	}
+	return result, s.retryErr
+}
+
+func nudgeEffectTestTimePointer(value time.Time) *time.Time {
+	cloned := value
+	return &cloned
+}
+
 func (s *mutexNudgeEffectSource) terminalizeAuthorizationDenied(at time.Time) {
 	if s.command.State != nudgequeue.CommandStatePending {
 		return
@@ -724,6 +879,12 @@ func (s *mutexNudgeEffectSource) completionCallCount() int {
 	return len(s.completionCalls)
 }
 
+func (s *mutexNudgeEffectSource) retryCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.retryCalls)
+}
+
 func (s *mutexNudgeEffectSource) setClaimResult(disposition nudgequeue.CommandClaimDisposition, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -735,6 +896,13 @@ func (s *mutexNudgeEffectSource) setCompletionError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.completionErr = err
+}
+
+func (s *mutexNudgeEffectSource) setRetryError(err error, afterCommit bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retryErr = err
+	s.retryErrAfter = afterCommit
 }
 
 func nudgeEffectTerminalState(result nudgequeue.CommandActionResult) nudgequeue.CommandState {
@@ -851,6 +1019,7 @@ type mutexNudgeEffectHandle struct {
 	mu            sync.Mutex
 	source        *mutexNudgeEffectSource
 	result        worker.NudgeResult
+	effectErr     error
 	calls         []nudgeEffectNudgeCall
 	nativeEntries int
 	started       chan struct{}
@@ -873,7 +1042,7 @@ func (h *mutexNudgeEffectHandle) Nudge(ctx context.Context, request worker.Nudge
 	if h.result.Effect != nil && h.result.Effect.Stage != runtime.NudgeEffectStageNotEntered {
 		h.nativeEntries++
 	}
-	result := h.result
+	result, effectErr := h.result, h.effectErr
 	started, release := h.started, h.release
 	h.mu.Unlock()
 	if started != nil {
@@ -886,7 +1055,7 @@ func (h *mutexNudgeEffectHandle) Nudge(ctx context.Context, request worker.Nudge
 			return worker.NudgeResult{}, ctx.Err()
 		}
 	}
-	return result, nil
+	return result, effectErr
 }
 
 func (h *mutexNudgeEffectHandle) nudgeCallCount() int {

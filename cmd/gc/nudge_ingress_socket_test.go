@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"reflect"
 	"strings"
@@ -16,6 +18,111 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestLocalNudgeBridgeDialFailureIsDefinitePreEntry(t *testing.T) {
+	dials := 0
+	result := admitNudgeThroughLocalControllerWithDeps(
+		t.Context(),
+		"/city/a",
+		validControllerNudgeAdmissionWire().domainRequest(),
+		func(string) (string, error) { return "token-a", nil },
+		func(context.Context, string, string) (net.Conn, error) {
+			dials++
+			return nil, errors.New("socket absent")
+		},
+	)
+	if result.Disposition != nudgeBridgePreEntryUnavailable {
+		t.Fatalf("result = %#v, want definite pre-entry unavailable", result)
+	}
+	if dials != 1 {
+		t.Fatalf("dial count = %d, want 1", dials)
+	}
+}
+
+func TestLocalNudgeBridgePartialWriteNeverFallsBack(t *testing.T) {
+	first := newScriptedNudgeConn(nil)
+	first.writeLimit = 8
+	first.writeErr = io.ErrClosedPipe
+	dial := newScriptedNudgeDial(
+		scriptedNudgeDialStep{conn: first},
+		scriptedNudgeDialStep{err: errors.New("controller disappeared")},
+	)
+
+	result := admitNudgeThroughLocalControllerWithDeps(
+		t.Context(), "/city/a", validControllerNudgeAdmissionWire().domainRequest(),
+		func(string) (string, error) { return "token-a", nil }, dial.call,
+	)
+	if result.Disposition != nudgeBridgeMayHaveEntered {
+		t.Fatalf("result = %#v, want fail-closed may-have-entered", result)
+	}
+	if first.written.Len() == 0 {
+		t.Fatal("partial-write fixture did not enter the transport")
+	}
+	if dial.calls() != 2 {
+		t.Fatalf("dial count = %d, want one idempotent retry", dial.calls())
+	}
+}
+
+func TestLocalNudgeBridgeRetriesLostResponseWithSameRequestID(t *testing.T) {
+	first := newScriptedNudgeConn(nil)
+	first.readErr = io.ErrUnexpectedEOF
+	second := newScriptedNudgeConn(controllerNudgeReplyBytes(t, controllerNudgeAdmissionReply{
+		Outcome: controllerNudgeAdmissionAccepted, CommandID: "command-a", Status: nudgequeue.CommandStatePending, Created: true,
+	}))
+	dial := newScriptedNudgeDial(
+		scriptedNudgeDialStep{conn: first},
+		scriptedNudgeDialStep{conn: second},
+	)
+
+	request := validControllerNudgeAdmissionWire().domainRequest()
+	result := admitNudgeThroughLocalControllerWithDeps(
+		t.Context(), "/city/a", request,
+		func(string) (string, error) { return "token-a", nil }, dial.call,
+	)
+	if result.Disposition != nudgeBridgeDurableAccepted || result.CommandID != "command-a" {
+		t.Fatalf("result = %#v, want durable command-a acceptance", result)
+	}
+	firstWire := decodeWrittenNudgeRequest(t, first.written.Bytes())
+	secondWire := decodeWrittenNudgeRequest(t, second.written.Bytes())
+	if firstWire.RequestID != request.RequestID || secondWire.RequestID != request.RequestID || firstWire.RequestID != secondWire.RequestID {
+		t.Fatalf("retry request IDs = %q/%q, want stable %q", firstWire.RequestID, secondWire.RequestID, request.RequestID)
+	}
+}
+
+func TestLocalNudgeBridgeLegacyReplyAfterAmbiguousEntryStaysFailClosed(t *testing.T) {
+	first := newScriptedNudgeConn(nil)
+	first.readErr = io.ErrUnexpectedEOF
+	second := newScriptedNudgeConn(controllerNudgeReplyBytes(t, controllerNudgeAdmissionReply{
+		Outcome: controllerNudgeAdmissionLegacy,
+	}))
+	dial := newScriptedNudgeDial(
+		scriptedNudgeDialStep{conn: first},
+		scriptedNudgeDialStep{conn: second},
+	)
+
+	result := admitNudgeThroughLocalControllerWithDeps(
+		t.Context(), "/city/a", validControllerNudgeAdmissionWire().domainRequest(),
+		func(string) (string, error) { return "token-a", nil }, dial.call,
+	)
+	if result.Disposition != nudgeBridgeMayHaveEntered {
+		t.Fatalf("result = %#v, want fail-closed ambiguity", result)
+	}
+}
+
+func TestLocalNudgeBridgeInitialLegacyReplyPermitsLegacyOwner(t *testing.T) {
+	conn := newScriptedNudgeConn(controllerNudgeReplyBytes(t, controllerNudgeAdmissionReply{
+		Outcome: controllerNudgeAdmissionLegacy,
+	}))
+	dial := newScriptedNudgeDial(scriptedNudgeDialStep{conn: conn})
+
+	result := admitNudgeThroughLocalControllerWithDeps(
+		t.Context(), "/city/a", validControllerNudgeAdmissionWire().domainRequest(),
+		func(string) (string, error) { return "token-a", nil }, dial.call,
+	)
+	if result.Disposition != nudgeBridgeLegacyOwnership {
+		t.Fatalf("result = %#v, want explicit legacy ownership", result)
+	}
+}
 
 func TestHandleControllerConnRoutesAuthenticatedNudgeAdmission(t *testing.T) {
 	authority := &socketRecordingNudgeAuthority{
@@ -229,4 +336,111 @@ func (a *socketRecordingNudgeAuthority) lastRequest() nudgequeue.NudgeIngressReq
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.request
+}
+
+type scriptedNudgeConn struct {
+	written    bytes.Buffer
+	read       *bytes.Reader
+	readErr    error
+	writeLimit int
+	writeErr   error
+}
+
+func newScriptedNudgeConn(reply []byte) *scriptedNudgeConn {
+	return &scriptedNudgeConn{read: bytes.NewReader(reply), writeLimit: -1}
+}
+
+func (c *scriptedNudgeConn) Read(p []byte) (int, error) {
+	if c.read != nil && c.read.Len() > 0 {
+		return c.read.Read(p)
+	}
+	if c.readErr != nil {
+		err := c.readErr
+		c.readErr = nil
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (c *scriptedNudgeConn) Write(p []byte) (int, error) {
+	limit := len(p)
+	if c.writeLimit >= 0 && c.writeLimit < limit {
+		limit = c.writeLimit
+	}
+	if limit > 0 {
+		_, _ = c.written.Write(p[:limit])
+	}
+	if c.writeErr != nil {
+		err := c.writeErr
+		c.writeErr = nil
+		return limit, err
+	}
+	return limit, nil
+}
+
+func (*scriptedNudgeConn) Close() error                     { return nil }
+func (*scriptedNudgeConn) LocalAddr() net.Addr              { return scriptedNudgeAddr("local") }
+func (*scriptedNudgeConn) RemoteAddr() net.Addr             { return scriptedNudgeAddr("remote") }
+func (*scriptedNudgeConn) SetDeadline(time.Time) error      { return nil }
+func (*scriptedNudgeConn) SetReadDeadline(time.Time) error  { return nil }
+func (*scriptedNudgeConn) SetWriteDeadline(time.Time) error { return nil }
+
+type scriptedNudgeAddr string
+
+func (a scriptedNudgeAddr) Network() string { return "unix" }
+func (a scriptedNudgeAddr) String() string  { return string(a) }
+
+type scriptedNudgeDialStep struct {
+	conn net.Conn
+	err  error
+}
+
+type scriptedNudgeDial struct {
+	mu    sync.Mutex
+	steps []scriptedNudgeDialStep
+	count int
+}
+
+func newScriptedNudgeDial(steps ...scriptedNudgeDialStep) *scriptedNudgeDial {
+	return &scriptedNudgeDial{steps: steps}
+}
+
+func (d *scriptedNudgeDial) call(context.Context, string, string) (net.Conn, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.count++
+	if len(d.steps) == 0 {
+		return nil, errors.New("unexpected dial")
+	}
+	step := d.steps[0]
+	d.steps = d.steps[1:]
+	return step.conn, step.err
+}
+
+func (d *scriptedNudgeDial) calls() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.count
+}
+
+func controllerNudgeReplyBytes(t *testing.T, reply controllerNudgeAdmissionReply) []byte {
+	t.Helper()
+	data, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatalf("Marshal reply: %v", err)
+	}
+	return append(data, '\n')
+}
+
+func decodeWrittenNudgeRequest(t *testing.T, written []byte) controllerNudgeAdmissionRequest {
+	t.Helper()
+	line := strings.TrimSpace(string(written))
+	if !strings.HasPrefix(line, controllerNudgeAdmissionCommandPrefix) {
+		t.Fatalf("written command = %q, missing nudge prefix", line)
+	}
+	var wire controllerNudgeAdmissionRequest
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, controllerNudgeAdmissionCommandPrefix)), &wire); err != nil {
+		t.Fatalf("Unmarshal written request: %v", err)
+	}
+	return wire
 }

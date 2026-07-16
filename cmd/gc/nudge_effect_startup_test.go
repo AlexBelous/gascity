@@ -308,6 +308,7 @@ func completeNudgeEffectStartupCapabilities() nudgeEffectStartupCapabilities {
 		TrustedCityPartitionResolver: true,
 		ClaimAuthorizer:              true,
 		CommandProducersCovered:      true,
+		LegacyBacklogDrained:         true,
 		ProviderEffect:               true,
 		CommandSecurity: nudgequeue.CommandSecurityCapabilities{
 			ProtectedNamespace:              true,

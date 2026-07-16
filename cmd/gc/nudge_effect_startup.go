@@ -31,6 +31,8 @@ type nudgeEffectStartupCapabilities struct {
 	TrustedCityPartitionResolver bool
 	ClaimAuthorizer              bool
 	CommandProducersCovered      bool
+	LegacyBacklogDrained         bool
+	LegacyBacklogDiagnostic      string
 	ProviderEffect               bool
 	CommandSecurity              nudgequeue.CommandSecurityCapabilities
 }
@@ -301,7 +303,7 @@ func newNudgeEffectStartupRefusal(
 }
 
 func (c nudgeEffectStartupCapabilities) complete() (bool, string) {
-	missing := make([]string, 0, 9)
+	missing := make([]string, 0, 10)
 	if !c.SupervisorDispatcher {
 		missing = append(missing, "supervisor nudge dispatcher")
 	}
@@ -325,6 +327,13 @@ func (c nudgeEffectStartupCapabilities) complete() (bool, string) {
 	}
 	if !c.CommandProducersCovered {
 		missing = append(missing, "canonical CLI/API command ingress")
+	}
+	if !c.LegacyBacklogDrained {
+		detail := strings.TrimSpace(c.LegacyBacklogDiagnostic)
+		if detail == "" {
+			detail = "not proven drained"
+		}
+		missing = append(missing, "legacy nudge backlog: "+detail)
 	}
 	if !c.ProviderEffect {
 		missing = append(missing, "runtime nudge effect provider")
@@ -357,7 +366,7 @@ func currentProductionNudgeEffectStartupCapabilities(
 	if len(bindings) != 1 {
 		return capabilities
 	}
-	completeBinding, commandProducersCovered := bindings[0].startupEvidence()
+	completeBinding, commandProducersCovered, legacyBacklogDrained, legacyBacklogDiagnostic := bindings[0].startupEvidence()
 	if !completeBinding {
 		return capabilities
 	}
@@ -368,6 +377,8 @@ func currentProductionNudgeEffectStartupCapabilities(
 	capabilities.TrustedCityPartitionResolver = true
 	capabilities.ClaimAuthorizer = true
 	capabilities.CommandProducersCovered = commandProducersCovered
+	capabilities.LegacyBacklogDrained = legacyBacklogDrained
+	capabilities.LegacyBacklogDiagnostic = legacyBacklogDiagnostic
 	capabilities.CommandSecurity.TrustedIngressAvailable = true
 	capabilities.CommandSecurity.ClaimAuthorizationAvailable = true
 	return capabilities

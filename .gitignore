@@ -6,6 +6,7 @@ coverage.noncmdgc.txt
 coverage.cmdgc.*.txt
 cmd/gc/.runtime/
 /bin/
+/dist/
 /gc
 
 # Dashboard e2e (Layer B) build + run artifacts. The fakesupervisor is a
@@ -14,6 +15,7 @@ cmd/gc/.runtime/
 # run from the repo root (which drops the binary in cwd), not just the -o form.
 test/dashport/cmd/fakesupervisor/fakesupervisor
 /fakesupervisor
+# Dashboard browser-e2e reports and local browser state.
 internal/api/dashboardspa/web/frontend/test-results/
 internal/api/dashboardspa/web/frontend/playwright-report/
 internal/api/dashboardspa/web/frontend/blob-report/

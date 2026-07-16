@@ -83,7 +83,7 @@ func run() error {
 	}
 	baseURL := "http://" + ln.Addr().String()
 
-	handler, err := api.ServeSeededCity(ctx, api.SeededCityDeps{
+	handler, stopPlane, err := api.ServeSeededCity(ctx, api.SeededCityDeps{
 		CityName:      fx.CityName,
 		CityPath:      fx.CityPath,
 		Config:        fx.Config,
@@ -96,6 +96,10 @@ func run() error {
 		_ = ln.Close()
 		return fmt.Errorf("serve seeded city: %w", err)
 	}
+	// LIFO teardown: the server stops accepting/serving first, then stopPlane
+	// synchronously drains the plane's run tailers and status samplers (deferred
+	// here so it runs before the corpus Close/RemoveAll defers above unwind).
+	defer stopPlane()
 
 	srv := &http.Server{
 		Handler:           handler,

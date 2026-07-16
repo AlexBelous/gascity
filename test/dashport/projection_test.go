@@ -73,6 +73,15 @@ func TestAnchorRunProjection(t *testing.T) {
 		}
 	})
 
+	t.Run("run census (typed event-log projection)", func(t *testing.T) {
+		var census genclient.RunsCensusOutputBody
+		h.getJSON(h.cityURL("/runs/census"), &census)
+
+		if census.StatusCounts.Active != 1 {
+			t.Fatalf("run census active = %d, want 1 seeded active run", census.StatusCounts.Active)
+		}
+	})
+
 	t.Run("run detail (event-log projection)", func(t *testing.T) {
 		var detail runproj.FormulaRunDetail
 		h.getJSON(h.apiURL("/runs/"+anchorRunID+"/detail"), &detail)
@@ -232,8 +241,10 @@ func TestEventsView(t *testing.T) {
 	if list.Total == 0 || list.Items == nil || len(*list.Items) == 0 {
 		t.Fatal("events feed empty; seeded event log not projected")
 	}
-	// The seeded log carries five events (3 created + woke + updated); the mail
-	// send also records a bead.created, so the feed is at least the log length.
+	// The seeded event log carries exactly five events (3 created + woke +
+	// updated). Seeded mail does not appear here: it is written via beadmail over
+	// MemStore.Create, which emits no event-log entry, and is asserted separately
+	// by TestMailView. So the feed reflects just the five seeded log records.
 	if list.Total < 5 {
 		t.Errorf("events total = %d, want >= 5 seeded events", list.Total)
 	}

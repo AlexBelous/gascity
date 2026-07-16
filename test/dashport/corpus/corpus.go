@@ -137,7 +137,7 @@ func Load(dataDir, cityPath string) (*Fixtures, error) {
 	return &Fixtures{
 		CityName:           CityName,
 		CityPath:           cityPath,
-		Config:             corpusConfig(),
+		Config:             corpusConfig(cityPath),
 		CityStore:          store,
 		RigStores:          map[string]beads.Store{RigName: beads.NewMemStore()},
 		EventProv:          rec,
@@ -223,18 +223,27 @@ func seedMail(store beads.Store) (*beadmail.Provider, error) {
 	return mp, nil
 }
 
+// TranscriptRoot is the provider-transcript directory the seeded city config
+// observes, under cityPath. The serve-level test seeds a live session
+// transcript beneath it; the corpus only wires the path into the config's
+// Daemon.ObservePaths so both layers agree on where transcripts live.
+func TranscriptRoot(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "provider-transcripts")
+}
+
 // corpusConfig builds the seeded city config in Go (config.City uses TOML tags,
 // so it is authored here rather than deserialized from the corpus). It mirrors
 // the fake-state defaults but names one rig and one agent the assertions
 // expect.
-func corpusConfig() *config.City {
+func corpusConfig(cityPath string) *config.City {
 	return &config.City{
 		Workspace: config.Workspace{Name: CityName},
+		Daemon:    config.DaemonConfig{ObservePaths: []string{TranscriptRoot(cityPath)}},
 		Agents: []config.Agent{
 			{Name: AgentName, Dir: RigName, Provider: "test-agent", MaxActiveSessions: intPtr(2)},
 		},
 		Rigs: []config.Rig{
-			{Name: RigName, Path: filepath.Join(os.TempDir(), "dashport-"+RigName)},
+			{Name: RigName, Path: filepath.Join(cityPath, "rigs", RigName)},
 		},
 		Providers: map[string]config.ProviderSpec{
 			"test-agent": {DisplayName: "Test Agent"},

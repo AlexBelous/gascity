@@ -37,13 +37,9 @@ func newCityRuntimeSessionNudgeAuthority(cr *CityRuntime) *cityRuntimeSessionNud
 	if cr == nil {
 		return nil
 	}
-	binding := cr.liveNudgeAuthorityBinding()
-	if binding == nil {
-		return nil
-	}
 	return &cityRuntimeSessionNudgeAuthority{
 		cr:      cr,
-		binding: binding,
+		binding: cr.liveNudgeAuthorityBinding(),
 		wake:    cr.acceptNudgeKeyShadowHint,
 	}
 }
@@ -56,7 +52,7 @@ func (a *cityRuntimeSessionNudgeAuthority) RequesterScope() (string, string, str
 }
 
 func (a *cityRuntimeSessionNudgeAuthority) Admit(ctx context.Context, request nudgequeue.NudgeIngressRequest) (nudgequeue.NudgeIngressResult, error) {
-	if a == nil || a.cr == nil || isNilProductionSessionNudgeAuthority(a.binding) {
+	if a == nil || a.cr == nil {
 		return nudgequeue.NudgeIngressResult{}, fmt.Errorf("%w: city runtime nudge authority is unavailable", nudgequeue.ErrLocalNudgeAuthorityUnavailable)
 	}
 	switch a.cr.nudgeEffectOwnership {
@@ -69,6 +65,9 @@ func (a *cityRuntimeSessionNudgeAuthority) Admit(ctx context.Context, request nu
 		// Continue below.
 	default:
 		return nudgequeue.NudgeIngressResult{}, fmt.Errorf("%w: unknown nudge effect ownership %d", nudgequeue.ErrLocalNudgeAuthorityUnavailable, a.cr.nudgeEffectOwnership)
+	}
+	if isNilProductionSessionNudgeAuthority(a.binding) {
+		return nudgequeue.NudgeIngressResult{}, fmt.Errorf("%w: city runtime durable binding is unavailable", nudgequeue.ErrLocalNudgeAuthorityUnavailable)
 	}
 	result, err := a.binding.Admit(ctx, request)
 	if err != nil {

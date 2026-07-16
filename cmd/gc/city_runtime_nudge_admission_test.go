@@ -61,6 +61,32 @@ func TestCityRuntimeNudgeAuthorityLegacyOwnershipIsExplicitAndEffectFree(t *test
 	}
 }
 
+func TestCityRuntimeNudgeAuthorityLegacyOwnershipNeedsNoDurableBinding(t *testing.T) {
+	authority := newCityRuntimeSessionNudgeAuthority(&CityRuntime{
+		nudgeEffectOwnership: nudgeEffectOwnershipLegacy,
+	})
+	if authority == nil {
+		t.Fatal("legacy runtime returned no explicit ownership capability")
+	}
+	_, err := authority.Admit(t.Context(), nudgequeue.NudgeIngressRequest{RequestID: "request-a"})
+	if !errors.Is(err, errNudgeLegacyEffectOwnership) {
+		t.Fatalf("Admit error = %v, want explicit legacy ownership", err)
+	}
+}
+
+func TestCityRuntimeNudgeAuthorityKeyedOwnershipWithoutBindingFailsClosed(t *testing.T) {
+	authority := newCityRuntimeSessionNudgeAuthority(&CityRuntime{
+		nudgeEffectOwnership: nudgeEffectOwnershipKeyed,
+	})
+	if authority == nil {
+		t.Fatal("keyed runtime returned no fail-closed ownership capability")
+	}
+	_, err := authority.Admit(t.Context(), nudgequeue.NudgeIngressRequest{RequestID: "request-a"})
+	if !errors.Is(err, nudgequeue.ErrLocalNudgeAuthorityUnavailable) || errors.Is(err, errNudgeLegacyEffectOwnership) {
+		t.Fatalf("Admit error = %v, want keyed unavailable without legacy ownership", err)
+	}
+}
+
 func TestCityRuntimeNudgeAuthorityFailedAdmissionDoesNotWake(t *testing.T) {
 	binding := &recordingCityRuntimeNudgeBinding{err: nudgequeue.ErrNudgeAuthorizationDenied}
 	woke := false

@@ -569,6 +569,189 @@ func TestSiblingShadow() {
 	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenConfig, "TestTaggedNetListenConfig", true, true)
 }
 
+func TestScanCountsListenerHelpersByExactPackageAndImportIdentity(t *testing.T) {
+	t.Parallel()
+	listenerHelper := ResourceListenerHelper
+
+	t.Run("cataloged helpers retain lexical ownership", func(t *testing.T) {
+		t.Parallel()
+		files := fstest.MapFS{
+			"cmd/gc/helpers.go": &fstest.MapFile{Data: []byte(`package main
+func runSupervisor() {}
+func startControllerSocket() {}
+func runController() {}
+func registryBrowserLogin() {}
+func managedDoltPortAvailableForHost() {}
+func startNudgeWakeListener() {}
+`)},
+			"cmd/gc/resources_test.go": &fstest.MapFile{Data: []byte(`package main
+import (
+	capability "github.com/gastownhall/gascity/internal/runtime/runtimecapability"
+	acceptance "github.com/gastownhall/gascity/test/acceptance/helpers"
+	foreigncap "example.test/internal/runtime/runtimecapability"
+	foreignacceptance "example.test/acceptance/helpers"
+	"testing"
+)
+func TestListenerHelpers(t *testing.T) {
+	((runSupervisor))()
+	startControllerSocket()
+	runController()
+	registryBrowserLogin()
+	managedDoltPortAvailableForHost()
+	startNudgeWakeListener()
+	((capability.Run))()
+	((acceptance.WriteSupervisorConfig))()
+	foreigncap.Run()
+	foreignacceptance.WriteSupervisorConfig()
+	{
+		runSupervisor := func() {}
+		runSupervisor()
+	}
+}
+func listenerHelper() { runController() }
+`)},
+			"cmd/gc/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package main
+import "testing"
+func TestTaggedListenerHelper(t *testing.T) { registryBrowserLogin() }
+`)},
+			"cmd/gc/wrong_package_test.go": &fstest.MapFile{Data: []byte(`package main_test
+import "testing"
+func runSupervisor() {}
+func TestWrongPackage(t *testing.T) { runSupervisor() }
+`)},
+			"test/dashport/harness.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package dashport_test
+func newHarness() {}
+`)},
+			"test/dashport/projection_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package dashport_test
+import "testing"
+func TestDashportHarness(t *testing.T) { ((newHarness))() }
+`)},
+		}
+
+		got, err := ScanFS(files)
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, listenerHelper, 11, 3)
+		assertCount(t, got, ScopeUntagged, listenerHelper, 9, 1)
+		assertOccurrenceOwner(t, got, "cmd/gc/resources_test.go", listenerHelper, "TestListenerHelpers", true, false)
+		assertOccurrenceOwner(t, got, "cmd/gc/resources_test.go", listenerHelper, "listenerHelper", false, false)
+		assertOccurrenceOwner(t, got, "cmd/gc/tagged_test.go", listenerHelper, "TestTaggedListenerHelper", true, true)
+		assertOccurrenceOwner(t, got, "test/dashport/projection_test.go", listenerHelper, "TestDashportHarness", true, true)
+	})
+
+	t.Run("default imported helper uses its declared package name", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import "github.com/gastownhall/gascity/test/acceptance/helpers"
+func TestDefaultImport() { acceptancehelpers.WriteSupervisorConfig() }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, listenerHelper, 1, 1)
+		assertCount(t, got, ScopeUntagged, listenerHelper, 1, 1)
+	})
+
+	t.Run("same-package exported helpers reject lexical shadows", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"internal/runtime/runtimecapability/runner.go": &fstest.MapFile{Data: []byte(`package runtimecapability
+func Run() {}
+`)},
+			"internal/runtime/runtimecapability/runner_test.go": &fstest.MapFile{Data: []byte(`package runtimecapability
+import "testing"
+func TestRuntimeCapability(t *testing.T) {
+	((Run))()
+	{
+		Run := func() {}
+		Run()
+	}
+}
+`)},
+			"test/acceptance/helpers/env.go": &fstest.MapFile{Data: []byte(`package acceptancehelpers
+func WriteSupervisorConfig() {}
+`)},
+			"test/acceptance/helpers/env_test.go": &fstest.MapFile{Data: []byte(`package acceptancehelpers
+import "testing"
+func TestSupervisorConfig(t *testing.T) {
+	((WriteSupervisorConfig))()
+	{
+		WriteSupervisorConfig := func() {}
+		WriteSupervisorConfig()
+	}
+}
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, listenerHelper, 2, 2)
+		assertCount(t, got, ScopeUntagged, listenerHelper, 2, 2)
+		assertOccurrenceOwner(t, got, "internal/runtime/runtimecapability/runner_test.go", listenerHelper, "TestRuntimeCapability", true, false)
+		assertOccurrenceOwner(t, got, "test/acceptance/helpers/env_test.go", listenerHelper, "TestSupervisorConfig", true, false)
+	})
+
+	t.Run("same package name in a different directory is not the helper package", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"other/helpers.go": &fstest.MapFile{Data: []byte(`package main
+func runSupervisor() {}
+`)},
+			"other/helpers_test.go": &fstest.MapFile{Data: []byte(`package main
+import "testing"
+func TestWrongDirectory(t *testing.T) { runSupervisor() }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, listenerHelper, 0, 0)
+		assertCount(t, got, ScopeUntagged, listenerHelper, 0, 0)
+	})
+
+	t.Run("cross-file package function value is not a helper declaration", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"internal/runtime/runtimecapability/runner.go": &fstest.MapFile{Data: []byte(`package runtimecapability
+var Run = func() {}
+`)},
+			"internal/runtime/runtimecapability/runner_test.go": &fstest.MapFile{Data: []byte(`package runtimecapability
+import "testing"
+func TestFunctionValue(t *testing.T) { Run() }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, listenerHelper, 0, 0)
+		assertCount(t, got, ScopeUntagged, listenerHelper, 0, 0)
+	})
+
+	t.Run("same-package helper requires a package declaration", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"cmd/gc/missing_test.go": &fstest.MapFile{Data: []byte(`package main
+import "testing"
+func TestMissingListenerHelper(t *testing.T) { runSupervisor() }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, listenerHelper, 0, 0)
+		assertCount(t, got, ScopeUntagged, listenerHelper, 0, 0)
+	})
+}
+
 func TestResolveBindingsRetainsOnlyNetListenReceiverTypes(t *testing.T) {
 	t.Parallel()
 
@@ -1233,6 +1416,24 @@ func TestResource() { _, _ = Listen("tcp", "127.0.0.1:0") }
 			source: `package sample
 import . "net/http/httptest"
 func TestResource() { _ = NewServer(nil) }
+`,
+		},
+		{
+			name:       "runtime capability helper",
+			path:       "sample/dot_runtimecapability_test.go",
+			importPath: "github.com/gastownhall/gascity/internal/runtime/runtimecapability",
+			source: `package sample
+import . "github.com/gastownhall/gascity/internal/runtime/runtimecapability"
+func TestResource() { Run() }
+`,
+		},
+		{
+			name:       "acceptance listener helper",
+			path:       "sample/dot_acceptance_helpers_test.go",
+			importPath: "github.com/gastownhall/gascity/test/acceptance/helpers",
+			source: `package sample
+import . "github.com/gastownhall/gascity/test/acceptance/helpers"
+func TestResource() { WriteSupervisorConfig() }
 `,
 		},
 		{

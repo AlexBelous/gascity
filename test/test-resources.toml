@@ -115,6 +115,19 @@ expires = "2026-10-01"
 
 [[debt]]
 scope = "untagged"
+resource = "listener_helper"
+baseline_calls = 38
+baseline_files = 13
+reported_calls = 38
+reported_files = 13
+owner_bead = "ga-80po0c.2.2.3"
+invariant = "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership"
+migration_target = "P0.4c-listener-helper"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
 resource = "net_listen"
 baseline_calls = 92
 baseline_files = 34
@@ -336,6 +349,19 @@ owner_bead = "ga-80po0c.2.2"
 invariant = "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "listener_helper"
+baseline_calls = 38
+baseline_files = 13
+reported_calls = 38
+reported_files = 13
+owner_bead = "ga-80po0c.2.2.3"
+invariant = "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership"
+migration_target = "P0.4c-listener-helper"
 expires = "2026-10-01"
 
 [[small_debt]]

@@ -91,12 +91,21 @@ and foreign imports do not count. Its untagged source and Small-debt census is
 38 calls in 13 files. The 16 tagged calls in 10 files remain E1 Large inventory,
 for 54 calls in 23 files across all tracked test source.
 
-Direct `syscall.Socket`/`Bind` setup calls,
-`net.FileListener`/`FilePacketConn` descriptor duplication,
-method-backed `acp.(*Provider).Start` and `subprocess.(*Provider).Start`
-listeners, conditional `cliauth.Client.Login` and `supervisor.LoadConfig`
-listener paths, Dolt, and other shared-host resources remain explicit follow-up
-catalogs. A Medium resource
+The indirect-listener catalog recognizes direct `syscall.Socket`/`Bind` setup,
+`net.FileListener`/`FilePacketConn` descriptor duplication, the exact
+`acp.(*Provider).Start` and `subprocess.(*Provider).Start` methods, and the
+conditional `cliauth.(*Client).Login` and `supervisor.LoadConfig` paths.
+`Login` and `LoadConfig` are conservative conditional proxies: a counted
+invocation reaches code that may bind a listener, but is not proof that the
+invocation actually opened one.
+Method identity requires the canonical production type and pointer-method
+declarations. Same-package constructor results are resolved from a bounded
+catalog of sibling declarations; imported constructors are seeded only when
+the exact production declaration is present. The scanner retains types only
+for cataloged receiver expressions and never loads repository packages or
+toolchain export data. The source census is 66 calls in 6 files overall and 65
+calls in 5 untagged files. Dolt and other shared-host resources remain explicit
+follow-up catalogs. A Medium resource
 may describe a helper-backed runtime cost, but only syntax-owned calls in that
 exact runnable declaration leave Small-debt accounting. The `ListenConfig`
 matcher uses lexical Go types
@@ -116,6 +125,10 @@ The scanner recognizes direct calls to `os/exec.Command{,Context}` and
 `ListenPacket`, `ListenUDP`, `ListenIP`, `ListenUnixgram`, and
 `ListenMulticastUDP`; `net.ListenConfig.Listen` and `ListenPacket` on identified
 receivers; direct `syscall.Listen`;
+direct `syscall.Socket` and `syscall.Bind`; descriptor-backed
+`net.FileListener` and `net.FilePacketConn`; exact
+`acp.(*Provider).Start`, `subprocess.(*Provider).Start`, and
+`cliauth.(*Client).Login` methods; `supervisor.LoadConfig`;
 `net/http/httptest.NewServer`,
 `NewTLSServer`, and `NewUnstartedServer`; `os.Setenv`, `os.Unsetenv`,
 `os.Clearenv`, and `os.Chdir`; and
@@ -136,8 +149,10 @@ Local shadows and wrong signatures do not count. Parenthesized call
 expressions retain the same ownership.
 
 Targeted dot imports of `net`, `os/exec`, `time`, `os`, `syscall`, `testing`,
-`net/http/httptest`, `internal/runtime/runtimecapability`,
-`internal/runtime/tmux`, `test/acceptance/helpers`, or `test/tmuxtest` are
+`net/http/httptest`, `internal/cliauth`, `internal/runtime/acp`,
+`internal/runtime/runtimecapability`, `internal/runtime/subprocess`,
+`internal/runtime/tmux`, `internal/supervisor`,
+`test/acceptance/helpers`, or `test/tmuxtest` are
 rejected with file and import context because their resources cannot be
 attributed safely; blank imports remain harmless.
 Explicit constraints follow Go's leading-header
@@ -173,6 +188,7 @@ all-source audit while staying outside untagged and Small debt.
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 440 calls / 158 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | listener_indirect: 66 calls / 6 files | ga-80po0c.2.2.4 | tracked indirect-listener totals remain visible as audit evidence; ga-80po0c.2.2.4 owns this point-in-time indirect-listener source census | P0.4c-listener-indirect | 2026-10-01 |
 | Audit baseline | all tracked test source | subprocess: 528 calls / 154 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-80po0c.2.1 | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-01 |
 | Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-80po0c.2.1 | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-01 |
@@ -184,6 +200,7 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | all untagged test source | fixed_sleep: 286 calls / 113 files (historical regex census: 287 / 113) | ga-80po0c.2.1 | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | http_test_server: 300 calls / 66 files | ga-80po0c.2.2 | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
 | Small debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-80po0c.2.2.3 | untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-01 |
+| Small debt ratchet | all untagged test source | listener_indirect: 65 calls / 5 files | ga-80po0c.2.2.4 | untagged Small indirect-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace descriptor, provider, or conditional listeners or declare exact isolated ownership | P0.4c-listener-indirect | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2.2 | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
@@ -196,6 +213,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | all untagged test source | fixed_sleep: 286 calls / 113 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | http_test_server: 300 calls / 66 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-80po0c.2.2.3 | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-01 |
+| Source debt ratchet | all untagged test source | listener_indirect: 65 calls / 5 files | ga-80po0c.2.2.4 | untagged indirect-listener call/file totals cannot grow; reductions must lower this baseline; each owning test replaces descriptor, provider, or conditional listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-indirect | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2.2 | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |

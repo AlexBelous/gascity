@@ -45,6 +45,9 @@ const (
 	// ResourceListenerHelper counts calls to the explicit catalog of helpers
 	// whose implementation owns a network listener.
 	ResourceListenerHelper Resource = "listener_helper"
+	// ResourceListenerIndirect counts descriptor, provider, and conditional
+	// boundaries that may open a listener without calling net.Listen directly.
+	ResourceListenerIndirect Resource = "listener_indirect"
 	// ResourceNetListen counts direct stream listeners opened by package-level
 	// net constructors.
 	ResourceNetListen Resource = "net_listen"
@@ -61,18 +64,19 @@ const (
 )
 
 var knownResources = map[Resource]struct{}{
-	ResourceSubprocess:      {},
-	ResourceFixedSleep:      {},
-	ResourceEnvironment:     {},
-	ResourceCWD:             {},
-	ResourceSlowProcessGate: {},
-	ResourceHTTPTestServer:  {},
-	ResourceListenerHelper:  {},
-	ResourceNetListen:       {},
-	ResourceNetListenConfig: {},
-	ResourceNetListenPacket: {},
-	ResourceSyscallListen:   {},
-	ResourceTmux:            {},
+	ResourceSubprocess:       {},
+	ResourceFixedSleep:       {},
+	ResourceEnvironment:      {},
+	ResourceCWD:              {},
+	ResourceSlowProcessGate:  {},
+	ResourceHTTPTestServer:   {},
+	ResourceListenerHelper:   {},
+	ResourceListenerIndirect: {},
+	ResourceNetListen:        {},
+	ResourceNetListenConfig:  {},
+	ResourceNetListenPacket:  {},
+	ResourceSyscallListen:    {},
+	ResourceTmux:             {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -144,6 +148,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "tracked test source totals remain visible as audit evidence",
 			ResourceOwner:   "ga-80po0c.2 owns this point-in-time source census",
 			MigrationTarget: "P0.4a",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeAll,
+			Resource:        ResourceListenerIndirect,
+			BaselineCalls:   66,
+			BaselineFiles:   6,
+			ReportedCalls:   66,
+			ReportedFiles:   6,
+			OwnerBead:       "ga-80po0c.2.2.4",
+			Invariant:       "tracked indirect-listener totals remain visible as audit evidence",
+			ResourceOwner:   "ga-80po0c.2.2.4 owns this point-in-time indirect-listener source census",
+			MigrationTarget: "P0.4c-listener-indirect",
 			Expires:         "2026-10-01",
 		},
 	},
@@ -237,6 +254,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership",
 			MigrationTarget: "P0.4c-listener-helper",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceListenerIndirect,
+			BaselineCalls:   65,
+			BaselineFiles:   5,
+			ReportedCalls:   65,
+			ReportedFiles:   5,
+			OwnerBead:       "ga-80po0c.2.2.4",
+			Invariant:       "untagged indirect-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test replaces descriptor, provider, or conditional listeners or moves the retained boundary to exact Medium ownership",
+			MigrationTarget: "P0.4c-listener-indirect",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -475,6 +505,19 @@ var bootstrapPolicy = Ledger{
 		},
 		{
 			Scope:           ScopeUntagged,
+			Resource:        ResourceListenerIndirect,
+			BaselineCalls:   65,
+			BaselineFiles:   5,
+			ReportedCalls:   65,
+			ReportedFiles:   5,
+			OwnerBead:       "ga-80po0c.2.2.4",
+			Invariant:       "untagged Small indirect-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners replace descriptor, provider, or conditional listeners or declare exact isolated ownership",
+			MigrationTarget: "P0.4c-listener-indirect",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
 			BaselineCalls:   92,
 			BaselineFiles:   34,
@@ -656,6 +699,10 @@ type bindingInfo struct {
 	expressionTypes            map[ast.Expr]types.TypeAndValue
 	packageDeclarations        map[string]struct{}
 	packageFunctions           map[string]struct{}
+	packageTypes               map[string]struct{}
+	packageMethods             map[resourceMethodKey]struct{}
+	resourcePackageTypes       map[packageKey]map[string]struct{}
+	resourcePackageMethods     map[packageKey]map[resourceMethodKey]struct{}
 	unresolvedImportQualifiers map[string]struct{}
 }
 
@@ -664,15 +711,17 @@ type packageKey struct {
 	packageName string
 }
 
-type listenerHelperPackageIdentity struct {
+type packageFunctionIdentity struct {
+	resource   Resource
 	importPath string
 	key        packageKey
 	names      []string
 }
 
-var listenerHelperPackageIdentities = []listenerHelperPackageIdentity{
+var packageFunctionIdentities = []packageFunctionIdentity{
 	{
-		key: packageKey{directory: "cmd/gc", packageName: "main"},
+		resource: ResourceListenerHelper,
+		key:      packageKey{directory: "cmd/gc", packageName: "main"},
 		names: []string{
 			"managedDoltPortAvailableForHost",
 			"registryBrowserLogin",
@@ -683,24 +732,84 @@ var listenerHelperPackageIdentities = []listenerHelperPackageIdentity{
 		},
 	},
 	{
+		resource:   ResourceListenerHelper,
 		importPath: "github.com/gastownhall/gascity/internal/runtime/runtimecapability",
 		key:        packageKey{directory: "internal/runtime/runtimecapability", packageName: "runtimecapability"},
 		names:      []string{"Run"},
 	},
 	{
+		resource:   ResourceListenerHelper,
 		importPath: "github.com/gastownhall/gascity/test/acceptance/helpers",
 		key:        packageKey{directory: "test/acceptance/helpers", packageName: "acceptancehelpers"},
 		names:      []string{"WriteSupervisorConfig"},
 	},
 	{
-		key:   packageKey{directory: "test/dashport", packageName: "dashport_test"},
-		names: []string{"newHarness"},
+		resource: ResourceListenerHelper,
+		key:      packageKey{directory: "test/dashport", packageName: "dashport_test"},
+		names:    []string{"newHarness"},
 	},
+	{
+		resource:   ResourceListenerIndirect,
+		importPath: "github.com/gastownhall/gascity/internal/supervisor",
+		key:        packageKey{directory: "internal/supervisor", packageName: "supervisor"},
+		names:      []string{"LoadConfig"},
+	},
+}
+
+type resourceMethodKey struct {
+	receiver string
+	method   string
+}
+
+type resourceMethodIdentity struct {
+	resource   Resource
+	importPath string
+	key        packageKey
+	receiver   string
+	method     string
+	pointer    bool
+}
+
+var resourceMethodIdentities = []resourceMethodIdentity{
+	{
+		resource:   ResourceListenerIndirect,
+		importPath: "github.com/gastownhall/gascity/internal/runtime/acp",
+		key:        packageKey{directory: "internal/runtime/acp", packageName: "acp"},
+		receiver:   "Provider",
+		method:     "Start",
+		pointer:    true,
+	},
+	{
+		resource:   ResourceListenerIndirect,
+		importPath: "github.com/gastownhall/gascity/internal/runtime/subprocess",
+		key:        packageKey{directory: "internal/runtime/subprocess", packageName: "subprocess"},
+		receiver:   "Provider",
+		method:     "Start",
+		pointer:    true,
+	},
+	{
+		resource:   ResourceListenerIndirect,
+		importPath: "github.com/gastownhall/gascity/internal/cliauth",
+		key:        packageKey{directory: "internal/cliauth", packageName: "cliauth"},
+		receiver:   "Client",
+		method:     "Login",
+		pointer:    true,
+	},
+}
+
+type resourceConstructor struct {
+	receiver   string
+	pointer    bool
+	importable bool
 }
 
 var targetedDotImportPaths = map[string]struct{}{
 	"github.com/gastownhall/gascity/internal/runtime/runtimecapability": {},
+	"github.com/gastownhall/gascity/internal/runtime/acp":               {},
+	"github.com/gastownhall/gascity/internal/runtime/subprocess":        {},
 	"github.com/gastownhall/gascity/internal/runtime/tmux":              {},
+	"github.com/gastownhall/gascity/internal/cliauth":                   {},
+	"github.com/gastownhall/gascity/internal/supervisor":                {},
 	"github.com/gastownhall/gascity/test/acceptance/helpers":            {},
 	"github.com/gastownhall/gascity/test/tmuxtest":                      {},
 	"net":               {},
@@ -719,11 +828,20 @@ type resourceCall struct {
 }
 
 type emptyPackageImporter struct {
-	packages map[string]*types.Package
+	packages                 map[string]*types.Package
+	resourcePackageTypes     map[packageKey]map[string]struct{}
+	resourcePackageMethods   map[packageKey]map[resourceMethodKey]struct{}
+	resourcePackageFactories map[packageKey]map[string]resourceConstructor
 }
 
 func newEmptyPackageImporter() *emptyPackageImporter {
 	return &emptyPackageImporter{packages: make(map[string]*types.Package)}
+}
+
+func (importer *emptyPackageImporter) setResourceDeclarations(packageTypes map[packageKey]map[string]struct{}, packageMethods map[packageKey]map[resourceMethodKey]struct{}, packageConstructors map[packageKey]map[string]resourceConstructor) {
+	importer.resourcePackageTypes = packageTypes
+	importer.resourcePackageMethods = packageMethods
+	importer.resourcePackageFactories = packageConstructors
 }
 
 func (importer *emptyPackageImporter) Import(importPath string) (*types.Package, error) {
@@ -731,7 +849,13 @@ func (importer *emptyPackageImporter) Import(importPath string) (*types.Package,
 		return imported, nil
 	}
 	packageName := path.Base(importPath)
-	for _, identity := range listenerHelperPackageIdentities {
+	for _, identity := range packageFunctionIdentities {
+		if importPath == identity.importPath {
+			packageName = identity.key.packageName
+			break
+		}
+	}
+	for _, identity := range resourceMethodIdentities {
 		if importPath == identity.importPath {
 			packageName = identity.key.packageName
 			break
@@ -746,9 +870,56 @@ func (importer *emptyPackageImporter) Import(importPath string) (*types.Package,
 		types.NewNamed(name, types.NewStruct(nil, nil), nil)
 		imported.Scope().Insert(name)
 	}
+	for _, identity := range resourceMethodIdentities {
+		if importPath != identity.importPath {
+			continue
+		}
+		if _, declared := importer.resourcePackageTypes[identity.key][identity.receiver]; !declared {
+			continue
+		}
+		method := resourceMethodKey{receiver: identity.receiver, method: identity.method}
+		if _, declared := importer.resourcePackageMethods[identity.key][method]; !declared {
+			continue
+		}
+		if imported.Scope().Lookup(identity.receiver) != nil {
+			continue
+		}
+		name := types.NewTypeName(token.NoPos, imported, identity.receiver, nil)
+		types.NewNamed(name, types.NewStruct(nil, nil), nil)
+		imported.Scope().Insert(name)
+	}
+	constructors := importer.resourcePackageFactories[resourcePackageKeyForImportPath(importPath)]
+	for _, name := range sortedResourceConstructorNames(constructors) {
+		constructor := constructors[name]
+		if !constructor.importable || imported.Scope().Lookup(name) != nil {
+			continue
+		}
+		typeObject := imported.Scope().Lookup(constructor.receiver)
+		if typeObject == nil {
+			continue
+		}
+		resultType := typeObject.Type()
+		if constructor.pointer {
+			resultType = types.NewPointer(resultType)
+		}
+		anyType := types.Universe.Lookup("any").Type()
+		params := types.NewTuple(types.NewVar(token.NoPos, imported, "args", types.NewSlice(anyType)))
+		results := types.NewTuple(types.NewVar(token.NoPos, imported, "", resultType))
+		signature := types.NewSignatureType(nil, nil, nil, params, results, true)
+		imported.Scope().Insert(types.NewFunc(token.NoPos, imported, name, signature))
+	}
 	imported.MarkComplete()
 	importer.packages[importPath] = imported
 	return imported, nil
+}
+
+func resourcePackageKeyForImportPath(importPath string) packageKey {
+	for _, identity := range resourceMethodIdentities {
+		if importPath == identity.importPath {
+			return identity.key
+		}
+	}
+	return packageKey{}
 }
 
 // These sets mirror internal/syslist.KnownOS and KnownArch in the repository's
@@ -785,6 +956,9 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 	var runnables []RunnableOwner
 	packageDeclarations := make(map[packageKey]map[string]struct{})
 	packageFunctions := make(map[packageKey]map[string]struct{})
+	packageTypes := make(map[packageKey]map[string]struct{})
+	packageMethods := make(map[packageKey]map[resourceMethodKey]struct{})
+	packageConstructors := make(map[packageKey]map[string]resourceConstructor)
 	for _, name := range names {
 		data, err := fs.ReadFile(sourceFS, name)
 		if err != nil {
@@ -802,15 +976,16 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 			packageDeclarations[key] = declarations
 		}
 		recordPackageDeclarations(file, declarations)
-		listenerHelperNames := listenerHelperPackageNames(key)
-		if len(listenerHelperNames) > 0 {
+		functionNames := packageFunctionNames(key)
+		if len(functionNames) > 0 {
 			functions := packageFunctions[key]
 			if functions == nil {
 				functions = make(map[string]struct{})
 				packageFunctions[key] = functions
 			}
-			recordPackageFunctionDeclarations(file, functions, listenerHelperNames)
+			recordPackageFunctionDeclarations(file, functions, functionNames)
 		}
+		recordResourceMethodDeclarations(file, key, !strings.HasSuffix(name, "_test.go"), packageTypes, packageMethods, packageConstructors)
 		source := parsedFile{
 			name:        normalized,
 			directory:   key.directory,
@@ -845,12 +1020,17 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 		}
 		sources = append(sources, source)
 	}
+	importer.setResourceDeclarations(packageTypes, packageMethods, packageConstructors)
 
 	for index := range sources {
 		source := &sources[index]
-		bindings := resolveBindings(fileSet, source.file, importer, fmt.Sprintf("resourcecensus.local/file%d", index))
+		bindings := resolveBindingsForPackage(fileSet, source.file, importer, fmt.Sprintf("resourcecensus.local/file%d", index), source.groupKey(), packageTypes[source.groupKey()], packageConstructors[source.groupKey()])
 		bindings.packageDeclarations = packageDeclarations[source.groupKey()]
 		bindings.packageFunctions = packageFunctions[source.groupKey()]
+		bindings.packageTypes = packageTypes[source.groupKey()]
+		bindings.packageMethods = packageMethods[source.groupKey()]
+		bindings.resourcePackageTypes = packageTypes
+		bindings.resourcePackageMethods = packageMethods
 		bindings.unresolvedImportQualifiers = unresolvedDefaultImportQualifiers(source.file)
 		source.bindings = bindings
 	}
@@ -888,6 +1068,9 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 			files:               hermeticSources,
 			packageDeclarations: packageDeclarations,
 			packageFunctions:    packageFunctions,
+			packageTypes:        packageTypes,
+			packageMethods:      packageMethods,
+			packageConstructors: packageConstructors,
 		},
 	}
 	for _, source := range sources {
@@ -1073,21 +1256,24 @@ func validateImports(file *ast.File) error {
 
 func resourceCandidateCalls(file *ast.File, key packageKey) []resourceCall {
 	aliases := testingImportAliases(file)
-	listenerHelperSelectors := listenerHelperSelectorCandidates(file)
-	samePackageHelperNames := listenerHelperPackageNames(key)
+	selectorCandidates := packageFunctionSelectorCandidates(file)
+	for name := range indirectListenerSelectorCandidates(file, key) {
+		selectorCandidates[name] = struct{}{}
+	}
+	samePackageFunctionNames := packageFunctionNames(key)
 	var calls []resourceCall
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
 		if ok {
-			calls = appendResourceCandidateCalls(calls, function.Body, function.Name.Name, isRunnableOwner(function, aliases), listenerHelperSelectors, samePackageHelperNames)
+			calls = appendResourceCandidateCalls(calls, function.Body, function.Name.Name, isRunnableOwner(function, aliases), selectorCandidates, samePackageFunctionNames)
 			continue
 		}
-		calls = appendResourceCandidateCalls(calls, declaration, "", false, listenerHelperSelectors, samePackageHelperNames)
+		calls = appendResourceCandidateCalls(calls, declaration, "", false, selectorCandidates, samePackageFunctionNames)
 	}
 	return calls
 }
 
-func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner string, runnable bool, listenerHelperSelectors map[string]struct{}, listenerHelperPackageNames []string) []resourceCall {
+func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner string, runnable bool, selectorCandidates map[string]struct{}, packageFunctionNames []string) []resourceCall {
 	ast.Inspect(node, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
@@ -1099,11 +1285,11 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 			case "Command", "CommandContext", "ConfigureProcessEnv", "KillAllTestSessions", "LookPath", "NewGuard", "NewGuardWithSocket", "NewProvider", "NewProviderWithConfig", "NewSeamBackedWithConfig", "NewServer", "NewTLSServer", "NewTmux", "NewTmuxWithConfig", "NewUnstartedServer", "RequireTmux", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenIP", "ListenMulticastUDP", "ListenPacket", "ListenTCP", "ListenUDP", "ListenUnix", "ListenUnixgram":
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
-			if _, candidate := listenerHelperSelectors[function.Sel.Name]; candidate {
+			if _, candidate := selectorCandidates[function.Sel.Name]; candidate {
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		case *ast.Ident:
-			if function.Name == "skipSlowCmdGCTest" || containsString(listenerHelperPackageNames, function.Name) {
+			if function.Name == "skipSlowCmdGCTest" || containsString(packageFunctionNames, function.Name) {
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		}
@@ -1112,7 +1298,7 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 	return calls
 }
 
-func listenerHelperSelectorCandidates(file *ast.File) map[string]struct{} {
+func packageFunctionSelectorCandidates(file *ast.File) map[string]struct{} {
 	candidates := make(map[string]struct{})
 	for _, spec := range file.Imports {
 		if spec.Name != nil && spec.Name.Name == "_" {
@@ -1122,7 +1308,7 @@ func listenerHelperSelectorCandidates(file *ast.File) map[string]struct{} {
 		if err != nil {
 			continue
 		}
-		for _, identity := range listenerHelperPackageIdentities {
+		for _, identity := range packageFunctionIdentities {
 			if importPath == identity.importPath {
 				for _, name := range identity.names {
 					candidates[name] = struct{}{}
@@ -1133,13 +1319,46 @@ func listenerHelperSelectorCandidates(file *ast.File) map[string]struct{} {
 	return candidates
 }
 
-func listenerHelperPackageNames(key packageKey) []string {
-	for _, identity := range listenerHelperPackageIdentities {
+func packageFunctionNames(key packageKey) []string {
+	var names []string
+	for _, identity := range packageFunctionIdentities {
 		if key == identity.key {
-			return identity.names
+			names = append(names, identity.names...)
 		}
 	}
-	return nil
+	return names
+}
+
+func indirectListenerSelectorCandidates(file *ast.File, key packageKey) map[string]struct{} {
+	candidates := make(map[string]struct{})
+	for _, identity := range resourceMethodIdentities {
+		if key == identity.key {
+			candidates[identity.method] = struct{}{}
+		}
+	}
+	for _, spec := range file.Imports {
+		if spec.Name != nil && spec.Name.Name == "_" {
+			continue
+		}
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			continue
+		}
+		switch importPath {
+		case "syscall":
+			candidates["Socket"] = struct{}{}
+			candidates["Bind"] = struct{}{}
+		case "net":
+			candidates["FileListener"] = struct{}{}
+			candidates["FilePacketConn"] = struct{}{}
+		}
+		for _, identity := range resourceMethodIdentities {
+			if importPath == identity.importPath {
+				candidates[identity.method] = struct{}{}
+			}
+		}
+	}
+	return candidates
 }
 
 func containsString(values []string, want string) bool {
@@ -1248,12 +1467,16 @@ func uniqueSortedRunnables(runnables []RunnableOwner) []RunnableOwner {
 }
 
 func resolveBindings(fileSet *token.FileSet, file *ast.File, importer types.Importer, packagePath string) bindingInfo {
+	return resolveBindingsForPackage(fileSet, file, importer, packagePath, packageKey{}, nil, nil)
+}
+
+func resolveBindingsForPackage(fileSet *token.FileSet, file *ast.File, importer types.Importer, packagePath string, key packageKey, packageTypes map[string]struct{}, packageConstructors map[string]resourceConstructor) bindingInfo {
 	info := bindingInfo{
 		defs:            make(map[*ast.Ident]types.Object),
 		uses:            make(map[*ast.Ident]types.Object),
 		expressionTypes: make(map[ast.Expr]types.TypeAndValue),
 	}
-	receivers := netListenReceiverExpressions(file)
+	receivers := resourceReceiverExpressions(file, key)
 	var checkedExpressionTypes map[ast.Expr]types.TypeAndValue
 	if len(receivers) > 0 {
 		checkedExpressionTypes = make(map[ast.Expr]types.TypeAndValue)
@@ -1264,7 +1487,11 @@ func resolveBindings(fileSet *token.FileSet, file *ast.File, importer types.Impo
 		IgnoreFuncBodies:         false,
 		Error:                    func(error) {},
 	}
-	_, _ = config.Check(packagePath, fileSet, []*ast.File{file}, &types.Info{
+	files := []*ast.File{file}
+	if stub := resourcePackageTypeStub(file, key, packageTypes, packageConstructors); stub != nil {
+		files = append(files, stub)
+	}
+	_, _ = config.Check(packagePath, fileSet, files, &types.Info{
 		Defs:  info.defs,
 		Uses:  info.uses,
 		Types: checkedExpressionTypes,
@@ -1275,6 +1502,124 @@ func resolveBindings(fileSet *token.FileSet, file *ast.File, importer types.Impo
 		}
 	}
 	return info
+}
+
+func resourceReceiverExpressions(file *ast.File, key packageKey) []ast.Expr {
+	receivers := netListenReceiverExpressions(file)
+	candidates := indirectListenerSelectorCandidates(file, key)
+	if len(candidates) == 0 {
+		return receivers
+	}
+	methodNames := make(map[string]struct{})
+	for _, identity := range resourceMethodIdentities {
+		if _, candidate := candidates[identity.method]; candidate {
+			methodNames[identity.method] = struct{}{}
+		}
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if _, candidate := methodNames[selector.Sel.Name]; candidate {
+			receivers = append(receivers, unparen(selector.X))
+		}
+		return true
+	})
+	return receivers
+}
+
+func resourcePackageTypeStub(file *ast.File, key packageKey, packageTypes map[string]struct{}, packageConstructors map[string]resourceConstructor) *ast.File {
+	if len(packageTypes) == 0 && len(packageConstructors) == 0 {
+		return nil
+	}
+	declaredHere := make(map[string]struct{})
+	functionsHere := make(map[string]struct{})
+	for _, declaration := range file.Decls {
+		switch declaration := declaration.(type) {
+		case *ast.GenDecl:
+			if declaration.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range declaration.Specs {
+				if typeSpec, ok := spec.(*ast.TypeSpec); ok {
+					declaredHere[typeSpec.Name.Name] = struct{}{}
+				}
+			}
+		case *ast.FuncDecl:
+			if declaration.Recv == nil {
+				functionsHere[declaration.Name.Name] = struct{}{}
+			}
+		}
+	}
+
+	var specs []ast.Spec
+	for _, identity := range resourceMethodIdentities {
+		if key != identity.key {
+			continue
+		}
+		if _, declared := packageTypes[identity.receiver]; !declared {
+			continue
+		}
+		if _, declared := declaredHere[identity.receiver]; declared {
+			continue
+		}
+		alreadyAdded := false
+		for _, spec := range specs {
+			if spec.(*ast.TypeSpec).Name.Name == identity.receiver {
+				alreadyAdded = true
+				break
+			}
+		}
+		if !alreadyAdded {
+			specs = append(specs, &ast.TypeSpec{Name: ast.NewIdent(identity.receiver), Type: &ast.StructType{Fields: &ast.FieldList{}}})
+		}
+	}
+
+	var declarations []ast.Decl
+	if len(specs) > 0 {
+		declarations = append(declarations, &ast.GenDecl{Tok: token.TYPE, Specs: specs})
+	}
+	for _, name := range sortedResourceConstructorNames(packageConstructors) {
+		constructor := packageConstructors[name]
+		if _, declared := functionsHere[name]; declared {
+			continue
+		}
+		if _, declared := packageTypes[constructor.receiver]; !declared {
+			continue
+		}
+		result := ast.Expr(ast.NewIdent(constructor.receiver))
+		if constructor.pointer {
+			result = &ast.StarExpr{X: result}
+		}
+		declarations = append(declarations, &ast.FuncDecl{
+			Name: ast.NewIdent(name),
+			Type: &ast.FuncType{
+				Params: &ast.FieldList{List: []*ast.Field{{
+					Names: []*ast.Ident{ast.NewIdent("args")},
+					Type:  &ast.Ellipsis{Elt: ast.NewIdent("any")},
+				}}},
+				Results: &ast.FieldList{List: []*ast.Field{{Type: result}}},
+			},
+		})
+	}
+	if len(declarations) == 0 {
+		return nil
+	}
+	return &ast.File{Name: ast.NewIdent(file.Name.Name), Decls: declarations}
+}
+
+func sortedResourceConstructorNames(constructors map[string]resourceConstructor) []string {
+	names := make([]string, 0, len(constructors))
+	for name := range constructors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func netListenReceiverExpressions(file *ast.File) []ast.Expr {
@@ -1334,6 +1679,100 @@ func recordPackageFunctionDeclarations(file *ast.File, functions map[string]stru
 			functions[function.Name.Name] = struct{}{}
 		}
 	}
+}
+
+func recordResourceMethodDeclarations(file *ast.File, key packageKey, production bool, packageTypes map[packageKey]map[string]struct{}, packageMethods map[packageKey]map[resourceMethodKey]struct{}, packageConstructors map[packageKey]map[string]resourceConstructor) {
+	targets := make(map[resourceMethodKey]bool)
+	targetReceivers := make(map[string]struct{})
+	for _, identity := range resourceMethodIdentities {
+		if key == identity.key {
+			targets[resourceMethodKey{receiver: identity.receiver, method: identity.method}] = identity.pointer
+			targetReceivers[identity.receiver] = struct{}{}
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	for _, declaration := range file.Decls {
+		switch declaration := declaration.(type) {
+		case *ast.GenDecl:
+			if !production || declaration.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range declaration.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				for target := range targets {
+					if typeSpec.Name.Name == target.receiver {
+						if packageTypes[key] == nil {
+							packageTypes[key] = make(map[string]struct{})
+						}
+						packageTypes[key][target.receiver] = struct{}{}
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			if declaration.Recv == nil {
+				receiver, pointer, ok := resourceConstructorResult(declaration.Type.Results, targetReceivers)
+				if !ok {
+					continue
+				}
+				if packageConstructors[key] == nil {
+					packageConstructors[key] = make(map[string]resourceConstructor)
+				}
+				packageConstructors[key][declaration.Name.Name] = resourceConstructor{
+					receiver:   receiver,
+					pointer:    pointer,
+					importable: production && ast.IsExported(declaration.Name.Name),
+				}
+				continue
+			}
+			if !production || len(declaration.Recv.List) != 1 {
+				continue
+			}
+			receiver, pointer, ok := receiverTypeIdentity(declaration.Recv.List[0].Type)
+			if !ok {
+				continue
+			}
+			method := resourceMethodKey{receiver: receiver, method: declaration.Name.Name}
+			wantPointer, target := targets[method]
+			if !target || pointer != wantPointer {
+				continue
+			}
+			if packageMethods[key] == nil {
+				packageMethods[key] = make(map[resourceMethodKey]struct{})
+			}
+			packageMethods[key][method] = struct{}{}
+		}
+	}
+}
+
+func resourceConstructorResult(results *ast.FieldList, targets map[string]struct{}) (string, bool, bool) {
+	if results == nil || len(results.List) == 0 {
+		return "", false, false
+	}
+	receiver, pointer, ok := receiverTypeIdentity(results.List[0].Type)
+	if !ok {
+		return "", false, false
+	}
+	_, target := targets[receiver]
+	return receiver, pointer, target
+}
+
+func receiverTypeIdentity(expression ast.Expr) (string, bool, bool) {
+	expression = unparen(expression)
+	isPointer := false
+	if pointer, ok := expression.(*ast.StarExpr); ok {
+		isPointer = true
+		expression = unparen(pointer.X)
+	}
+	identifier, ok := expression.(*ast.Ident)
+	if !ok {
+		return "", false, false
+	}
+	return identifier.Name, isPointer, true
 }
 
 // unresolvedDefaultImportQualifiers returns common versioned-import package
@@ -1575,12 +2014,12 @@ func functionParameterCount(fields *ast.FieldList) int {
 	return count
 }
 
-func isListenerHelperPackageCall(call *ast.CallExpr, key packageKey, bindings bindingInfo) bool {
+func packageFunctionResourceForCall(call *ast.CallExpr, key packageKey, bindings bindingInfo) (Resource, bool) {
 	identifier, ok := unparen(call.Fun).(*ast.Ident)
 	if !ok {
-		return false
+		return "", false
 	}
-	for _, identity := range listenerHelperPackageIdentities {
+	for _, identity := range packageFunctionIdentities {
 		if key != identity.key {
 			continue
 		}
@@ -1589,17 +2028,61 @@ func isListenerHelperPackageCall(call *ast.CallExpr, key packageKey, bindings bi
 				continue
 			}
 			if _, declared := bindings.packageFunctions[helperName]; !declared {
-				return false
+				return "", false
 			}
 			object := bindings.uses[identifier]
 			if object == nil {
-				return true
+				return identity.resource, true
 			}
 			function, ok := object.(*types.Func)
-			return ok && function.Pkg() != nil && function.Pkg().Name() == key.packageName && function.Parent() == function.Pkg().Scope()
+			if ok && function.Pkg() != nil && function.Pkg().Name() == key.packageName && function.Parent() == function.Pkg().Scope() {
+				return identity.resource, true
+			}
+			return "", false
 		}
 	}
-	return false
+	return "", false
+}
+
+func resourceMethodForCall(call *ast.CallExpr, key packageKey, bindings bindingInfo) (Resource, bool) {
+	selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	receiver := unparen(selector.X)
+	typeAndValue, ok := bindings.expressionTypes[receiver]
+	if !ok || typeAndValue.Type == nil {
+		return "", false
+	}
+	receiverType := types.Unalias(typeAndValue.Type)
+	if pointer, ok := receiverType.(*types.Pointer); ok {
+		receiverType = types.Unalias(pointer.Elem())
+	}
+	named, ok := receiverType.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil || named.Obj().Parent() != named.Obj().Pkg().Scope() {
+		return "", false
+	}
+	for _, identity := range resourceMethodIdentities {
+		if selector.Sel.Name != identity.method || named.Obj().Name() != identity.receiver {
+			continue
+		}
+		method := resourceMethodKey{receiver: identity.receiver, method: identity.method}
+		if _, declared := bindings.resourcePackageTypes[identity.key][identity.receiver]; !declared {
+			continue
+		}
+		if _, declared := bindings.resourcePackageMethods[identity.key][method]; !declared {
+			continue
+		}
+		if named.Obj().Pkg().Path() == identity.importPath {
+			return identity.resource, true
+		}
+		_, typeDeclared := bindings.packageTypes[identity.receiver]
+		_, methodDeclared := bindings.packageMethods[method]
+		if key == identity.key && typeDeclared && methodDeclared {
+			return identity.resource, true
+		}
+	}
+	return "", false
 }
 
 func isSlowHelperCall(call *ast.CallExpr, bindings bindingInfo, ownership types.Object) bool {

@@ -29,6 +29,9 @@ type hermeticSourceIndex struct {
 	files               []parsedFile
 	packageDeclarations map[packageKey]map[string]struct{}
 	packageFunctions    map[packageKey]map[string]struct{}
+	packageTypes        map[packageKey]map[string]struct{}
+	packageMethods      map[packageKey]map[resourceMethodKey]struct{}
+	packageConstructors map[packageKey]map[string]resourceConstructor
 }
 
 type hermeticFile struct {
@@ -50,6 +53,9 @@ type hermeticAnalyzer struct {
 	importer            *emptyPackageImporter
 	packageDeclarations map[packageKey]map[string]struct{}
 	packageFunctions    map[packageKey]map[string]struct{}
+	packageTypes        map[packageKey]map[string]struct{}
+	packageMethods      map[packageKey]map[resourceMethodKey]struct{}
+	packageConstructors map[packageKey]map[string]resourceConstructor
 	functions           map[packageKey]map[string][]*hermeticFunction
 	slowHelpers         map[packageKey]types.Object
 }
@@ -272,22 +278,29 @@ func newHermeticAnalyzer(sourceIndex *hermeticSourceIndex, rows []ReviewedHermet
 
 	declarations := sourceIndex.packageDeclarations
 	functionDeclarations := sourceIndex.packageFunctions
+	typeDeclarations := sourceIndex.packageTypes
+	methodDeclarations := sourceIndex.packageMethods
+	constructorDeclarations := sourceIndex.packageConstructors
 	if declarations == nil {
 		declarations = make(map[packageKey]map[string]struct{})
 		functionDeclarations = make(map[packageKey]map[string]struct{})
+		typeDeclarations = make(map[packageKey]map[string]struct{})
+		methodDeclarations = make(map[packageKey]map[resourceMethodKey]struct{})
+		constructorDeclarations = make(map[packageKey]map[string]resourceConstructor)
 		for _, source := range files {
 			key := source.groupKey()
 			if declarations[key] == nil {
 				declarations[key] = make(map[string]struct{})
 			}
 			recordPackageDeclarations(source.file, declarations[key])
-			catalogNames := listenerHelperPackageNames(key)
+			catalogNames := packageFunctionNames(key)
 			if len(catalogNames) > 0 {
 				if functionDeclarations[key] == nil {
 					functionDeclarations[key] = make(map[string]struct{})
 				}
 				recordPackageFunctionDeclarations(source.file, functionDeclarations[key], catalogNames)
 			}
+			recordResourceMethodDeclarations(source.file, key, !strings.HasSuffix(source.name, "_test.go"), typeDeclarations, methodDeclarations, constructorDeclarations)
 		}
 	}
 
@@ -296,9 +309,13 @@ func newHermeticAnalyzer(sourceIndex *hermeticSourceIndex, rows []ReviewedHermet
 		importer:            newEmptyPackageImporter(),
 		packageDeclarations: declarations,
 		packageFunctions:    functionDeclarations,
+		packageTypes:        typeDeclarations,
+		packageMethods:      methodDeclarations,
+		packageConstructors: constructorDeclarations,
 		functions:           make(map[packageKey]map[string][]*hermeticFunction),
 		slowHelpers:         make(map[packageKey]types.Object),
 	}
+	analyzer.importer.setResourceDeclarations(typeDeclarations, methodDeclarations, constructorDeclarations)
 	indexedFiles := make([]hermeticFile, len(files))
 	for index, source := range files {
 		indexedFiles[index] = hermeticFile{source: source, index: index}
@@ -354,9 +371,14 @@ func (a *hermeticAnalyzer) resolveFile(file *hermeticFile) error {
 		file.resolveErr = fmt.Errorf("scanning imports in %s: %w", file.source.name, err)
 		return file.resolveErr
 	}
-	bindings := resolveBindings(a.fileSet, file.source.file, a.importer, fmt.Sprintf("resourcecensus.hermetic/file%d", file.index))
+	key := file.source.groupKey()
+	bindings := resolveBindingsForPackage(a.fileSet, file.source.file, a.importer, fmt.Sprintf("resourcecensus.hermetic/file%d", file.index), key, a.packageTypes[key], a.packageConstructors[key])
 	bindings.packageDeclarations = a.packageDeclarations[file.source.groupKey()]
 	bindings.packageFunctions = a.packageFunctions[file.source.groupKey()]
+	bindings.packageTypes = a.packageTypes[file.source.groupKey()]
+	bindings.packageMethods = a.packageMethods[file.source.groupKey()]
+	bindings.resourcePackageTypes = a.packageTypes
+	bindings.resourcePackageMethods = a.packageMethods
 	bindings.unresolvedImportQualifiers = unresolvedDefaultImportQualifiers(file.source.file)
 	testingObjects, err := testingParameterObjects(file.source.file, bindings)
 	if err != nil {
@@ -624,19 +646,28 @@ func matchedResourcesForCall(call *ast.CallExpr, key packageKey, bindings bindin
 	if err := appendImported(ResourceSyscallListen, "syscall", "Listen"); err != nil {
 		return nil, err
 	}
+	if err := appendImported(ResourceListenerIndirect, "syscall", "Socket", "Bind"); err != nil {
+		return nil, err
+	}
+	if err := appendImported(ResourceListenerIndirect, "net", "FileListener", "FilePacketConn"); err != nil {
+		return nil, err
+	}
 	if err := appendImported(ResourceHTTPTestServer, "net/http/httptest", "NewServer", "NewTLSServer", "NewUnstartedServer"); err != nil {
 		return nil, err
 	}
-	for _, identity := range listenerHelperPackageIdentities {
+	for _, identity := range packageFunctionIdentities {
 		if identity.importPath == "" {
 			continue
 		}
-		if err := appendImported(ResourceListenerHelper, identity.importPath, identity.names...); err != nil {
+		if err := appendImported(identity.resource, identity.importPath, identity.names...); err != nil {
 			return nil, err
 		}
 	}
-	if isListenerHelperPackageCall(call, key, bindings) {
-		resources = append(resources, ResourceListenerHelper)
+	if resource, matched := packageFunctionResourceForCall(call, key, bindings); matched {
+		resources = append(resources, resource)
+	}
+	if resource, matched := resourceMethodForCall(call, key, bindings); matched {
+		resources = append(resources, resource)
 	}
 	if err := appendImported(ResourceSubprocess, "os/exec", "Command", "CommandContext"); err != nil {
 		return nil, err

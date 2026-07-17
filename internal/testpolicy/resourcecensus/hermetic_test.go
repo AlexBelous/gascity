@@ -179,6 +179,133 @@ func TestHermetic(t *testing.T) { ((runSupervisor))() }
 	requireErrorContains(t, validateReviewedHermeticBodies([]ReviewedHermeticBody{row}, census), "listener_helper")
 }
 
+func TestValidateReviewedHermeticBodiesRejectsIndirectListenerResources(t *testing.T) {
+	t.Parallel()
+	indirectListener := ResourceListenerIndirect
+
+	tests := []struct {
+		name  string
+		row   ReviewedHermeticBody
+		files fstest.MapFS
+	}{
+		{
+			name: "syscall Socket",
+			row:  validReviewedHermeticBody("TestHermetic"),
+			files: fstest.MapFS{
+				"sample/resource_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	"syscall"
+	"testing"
+)
+func TestHermetic(t *testing.T) { _, _ = syscall.Socket(0, 0, 0) }
+`)},
+			},
+		},
+		{
+			name: "syscall Bind",
+			row:  validReviewedHermeticBody("TestHermetic"),
+			files: fstest.MapFS{
+				"sample/resource_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	"syscall"
+	"testing"
+)
+func TestHermetic(t *testing.T) { _ = syscall.Bind(0, nil) }
+`)},
+			},
+		},
+		{
+			name: "net FileListener zero guard",
+			row:  validReviewedHermeticBody("TestHermetic"),
+			files: fstest.MapFS{
+				"sample/resource_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	"net"
+	"testing"
+)
+func TestHermetic(t *testing.T) { _, _ = net.FileListener(nil) }
+`)},
+			},
+		},
+		{
+			name: "net FilePacketConn zero guard",
+			row:  validReviewedHermeticBody("TestHermetic"),
+			files: fstest.MapFS{
+				"sample/resource_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	"net"
+	"testing"
+)
+func TestHermetic(t *testing.T) { _, _ = net.FilePacketConn(nil) }
+`)},
+			},
+		},
+		{
+			name: "ACP Provider Start",
+			row:  ReviewedHermeticBody{PackageDir: "internal/runtime/acp", PackageName: "acp", Owner: "TestHermetic", EffectiveSize: "medium", MediumReason: "package TestMain mutates process state"},
+			files: fstest.MapFS{
+				"internal/runtime/acp/provider.go": &fstest.MapFile{Data: []byte(`package acp
+type Provider struct{}
+func (*Provider) Start() {}
+`)},
+				"internal/runtime/acp/provider_test.go": &fstest.MapFile{Data: []byte(`package acp
+import "testing"
+func TestHermetic(t *testing.T) { (&Provider{}).Start() }
+`)},
+			},
+		},
+		{
+			name: "subprocess Provider Start",
+			row:  ReviewedHermeticBody{PackageDir: "internal/runtime/subprocess", PackageName: "subprocess", Owner: "TestHermetic", EffectiveSize: "medium", MediumReason: "package TestMain mutates process state"},
+			files: fstest.MapFS{
+				"internal/runtime/subprocess/provider.go": &fstest.MapFile{Data: []byte(`package subprocess
+type Provider struct{}
+func (*Provider) Start() {}
+`)},
+				"internal/runtime/subprocess/provider_test.go": &fstest.MapFile{Data: []byte(`package subprocess
+import "testing"
+func TestHermetic(t *testing.T) { (&Provider{}).Start() }
+`)},
+			},
+		},
+		{
+			name: "cliauth Client Login",
+			row:  ReviewedHermeticBody{PackageDir: "internal/cliauth", PackageName: "cliauth", Owner: "TestHermetic", EffectiveSize: "medium", MediumReason: "package TestMain mutates process state"},
+			files: fstest.MapFS{
+				"internal/cliauth/client.go": &fstest.MapFile{Data: []byte(`package cliauth
+type Client struct{}
+func (*Client) Login() {}
+`)},
+				"internal/cliauth/client_test.go": &fstest.MapFile{Data: []byte(`package cliauth
+import "testing"
+func TestHermetic(t *testing.T) { (&Client{}).Login() }
+`)},
+			},
+		},
+		{
+			name: "supervisor LoadConfig",
+			row:  ReviewedHermeticBody{PackageDir: "internal/supervisor", PackageName: "supervisor", Owner: "TestHermetic", EffectiveSize: "medium", MediumReason: "package TestMain mutates process state"},
+			files: fstest.MapFS{
+				"internal/supervisor/config.go": &fstest.MapFile{Data: []byte(`package supervisor
+func LoadConfig() {}
+`)},
+				"internal/supervisor/config_test.go": &fstest.MapFile{Data: []byte(`package supervisor
+import "testing"
+func TestHermetic(t *testing.T) { LoadConfig() }
+`)},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			census := scanHermeticFixture(t, tt.files)
+			requireErrorContains(t, validateReviewedHermeticBodies([]ReviewedHermeticBody{tt.row}, census), string(indirectListener))
+		})
+	}
+}
+
 func TestValidateReviewedHermeticBodiesFollowsHelpersWithoutShadowFalseMatches(t *testing.T) {
 	t.Parallel()
 

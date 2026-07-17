@@ -752,6 +752,350 @@ func TestMissingListenerHelper(t *testing.T) { runSupervisor() }
 	})
 }
 
+func TestScanCountsIndirectListenerDescriptorFunctionsByImportIdentity(t *testing.T) {
+	t.Parallel()
+	indirectListener := ResourceListenerIndirect
+
+	t.Run("syscall Socket and Bind retain lexical ownership", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/syscall"
+	calls "syscall"
+	"testing"
+)
+type localSyscall struct{}
+func (localSyscall) Socket(int, int, int) (int, error) { return 0, nil }
+func (localSyscall) Bind(int, any) error { return nil }
+func TestIndirectListenerSyscall(t *testing.T) {
+	_, _ = ((calls.Socket))(calls.AF_UNIX, calls.SOCK_STREAM, 0)
+	_ = (((calls)).Bind)(1, nil)
+	t.Run("nested", func(t *testing.T) {
+		_, _ = calls.Socket(calls.AF_INET, calls.SOCK_STREAM, 0)
+	})
+	local := localSyscall{}
+	_, _ = local.Socket(0, 0, 0)
+	_ = local.Bind(0, nil)
+	_, _ = foreign.Socket(0, 0, 0)
+	_ = foreign.Bind(0, nil)
+}
+func descriptorHelper() { _ = calls.Bind(2, nil) }
+`)},
+			"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	calls "syscall"
+	"testing"
+)
+func TestTaggedIndirectListener(t *testing.T) { _, _ = calls.Socket(0, 0, 0) }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, indirectListener, 5, 2)
+		assertCount(t, got, ScopeUntagged, indirectListener, 4, 1)
+		assertOccurrenceOwner(t, got, "sample/resources_test.go", indirectListener, "TestIndirectListenerSyscall", true, false)
+		assertOccurrenceOwner(t, got, "sample/resources_test.go", indirectListener, "descriptorHelper", false, false)
+		assertOccurrenceOwner(t, got, "sample/tagged_test.go", indirectListener, "TestTaggedIndirectListener", true, true)
+	})
+
+	t.Run("zero-baseline FileListener and FilePacketConn remain guarded", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"sample/resources_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/net"
+	sockets "net"
+	"testing"
+)
+type localNet struct{}
+func (localNet) FileListener(any) (any, error) { return nil, nil }
+func (localNet) FilePacketConn(any) (any, error) { return nil, nil }
+func TestIndirectListenerDescriptors(t *testing.T) {
+	_, _ = ((sockets.FileListener))(nil)
+	t.Run("nested", func(t *testing.T) { _, _ = sockets.FilePacketConn(nil) })
+	local := localNet{}
+	_, _ = local.FileListener(nil)
+	_, _ = local.FilePacketConn(nil)
+	_, _ = foreign.FileListener(nil)
+	_, _ = foreign.FilePacketConn(nil)
+}
+func descriptorHelper() { _, _ = sockets.FileListener(nil) }
+`)},
+			"sample/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package sample
+import (
+	sockets "net"
+	"testing"
+)
+func TestTaggedIndirectListenerDescriptor(t *testing.T) { _, _ = sockets.FilePacketConn(nil) }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, indirectListener, 4, 2)
+		assertCount(t, got, ScopeUntagged, indirectListener, 3, 1)
+		assertOccurrenceOwner(t, got, "sample/resources_test.go", indirectListener, "TestIndirectListenerDescriptors", true, false)
+		assertOccurrenceOwner(t, got, "sample/resources_test.go", indirectListener, "descriptorHelper", false, false)
+		assertOccurrenceOwner(t, got, "sample/tagged_test.go", indirectListener, "TestTaggedIndirectListenerDescriptor", true, true)
+	})
+}
+
+func TestScanCountsIndirectListenerProviderStartsByExactReceiverIdentity(t *testing.T) {
+	t.Parallel()
+	indirectListener := ResourceListenerIndirect
+
+	for _, provider := range []struct {
+		name        string
+		directory   string
+		packageName string
+		importPath  string
+	}{
+		{name: "ACP", directory: "internal/runtime/acp", packageName: "acp", importPath: "github.com/gastownhall/gascity/internal/runtime/acp"},
+		{name: "subprocess", directory: "internal/runtime/subprocess", packageName: "subprocess", importPath: "github.com/gastownhall/gascity/internal/runtime/subprocess"},
+	} {
+		provider := provider
+		t.Run(provider.name, func(t *testing.T) {
+			t.Parallel()
+			files := fstest.MapFS{
+				provider.directory + "/provider.go": &fstest.MapFile{Data: []byte(fmt.Sprintf(`package %s
+type Provider struct{}
+func (*Provider) Start() {}
+func NewProvider() *Provider { return &Provider{} }
+`, provider.packageName))},
+				provider.directory + "/provider_test.go": &fstest.MapFile{Data: []byte(fmt.Sprintf(`package %s
+import "testing"
+type localProvider struct{}
+func (*localProvider) Start() {}
+func TestIndirectListenerProviderStart(t *testing.T) {
+	value := Provider{}
+	((&value).Start)()
+	pointer := &Provider{}
+	((pointer.Start))()
+	new(Provider).Start()
+	NewProvider().Start()
+	local := &localProvider{}
+	local.Start()
+}
+func providerHelper(provider *Provider) { provider.Start() }
+`, provider.packageName))},
+				provider.directory + "/tagged_test.go": &fstest.MapFile{Data: []byte(fmt.Sprintf(`//go:build integration
+
+package %s
+import "testing"
+func TestTaggedIndirectListenerProviderStart(t *testing.T) {
+	provider := &Provider{}
+	provider.Start()
+}
+`, provider.packageName))},
+				"sample/" + provider.packageName + "_test.go": &fstest.MapFile{Data: []byte(fmt.Sprintf(`package sample
+import (
+	foreign "example.test/%s"
+	providerpkg %q
+	"testing"
+)
+type localProvider struct{}
+func (*localProvider) Start() {}
+func TestImportedIndirectListenerProviderStart(t *testing.T) {
+	var pointer *providerpkg.Provider
+	pointer.Start()
+	value := providerpkg.Provider{}
+	value.Start()
+	((&providerpkg.Provider{}).Start)()
+	providerpkg.NewProvider().Start()
+	local := &localProvider{}
+	local.Start()
+	var foreignProvider *foreign.Provider
+	foreignProvider.Start()
+}
+`, provider.packageName, provider.importPath))},
+				"wrong/" + provider.packageName + "/provider_test.go": &fstest.MapFile{Data: []byte(fmt.Sprintf(`package %s
+type Provider struct{}
+func (*Provider) Start() {}
+func TestWrongPackage() { (&Provider{}).Start() }
+`, provider.packageName))},
+			}
+
+			got, err := ScanFS(files)
+			if err != nil {
+				t.Fatalf("ScanFS: %v", err)
+			}
+			assertCount(t, got, ScopeAll, indirectListener, 10, 3)
+			assertCount(t, got, ScopeUntagged, indirectListener, 9, 2)
+			assertOccurrenceOwner(t, got, provider.directory+"/provider_test.go", indirectListener, "TestIndirectListenerProviderStart", true, false)
+			assertOccurrenceOwner(t, got, provider.directory+"/provider_test.go", indirectListener, "providerHelper", false, false)
+			assertOccurrenceOwner(t, got, "sample/"+provider.packageName+"_test.go", indirectListener, "TestImportedIndirectListenerProviderStart", true, false)
+			assertOccurrenceOwner(t, got, provider.directory+"/tagged_test.go", indirectListener, "TestTaggedIndirectListenerProviderStart", true, true)
+		})
+	}
+}
+
+func TestScanRequiresCanonicalDeclarationsForImportedIndirectListenerMethods(t *testing.T) {
+	t.Parallel()
+	t.Run("missing target package", func(t *testing.T) {
+		got, err := ScanFS(fstest.MapFS{
+			"sample/acp_test.go": &fstest.MapFile{Data: []byte(`package sample
+import providerpkg "github.com/gastownhall/gascity/internal/runtime/acp"
+func helper() { var provider *providerpkg.Provider; provider.Start() }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, ResourceListenerIndirect, 0, 0)
+	})
+
+	t.Run("value receiver is not the cataloged pointer method", func(t *testing.T) {
+		got, err := ScanFS(fstest.MapFS{
+			"internal/runtime/acp/provider.go": &fstest.MapFile{Data: []byte(`package acp
+type Provider struct{}
+func (Provider) Start() {}
+`)},
+			"sample/acp_test.go": &fstest.MapFile{Data: []byte(`package sample
+import providerpkg "github.com/gastownhall/gascity/internal/runtime/acp"
+func helper() { var provider providerpkg.Provider; provider.Start() }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, ResourceListenerIndirect, 0, 0)
+	})
+}
+
+func TestScanCountsIndirectListenerConditionalBoundariesByExactIdentity(t *testing.T) {
+	t.Parallel()
+	indirectListener := ResourceListenerIndirect
+
+	t.Run("cliauth Client Login", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"internal/cliauth/client.go": &fstest.MapFile{Data: []byte(`package cliauth
+type Client struct{}
+func (*Client) Login() {}
+func NewClient(string) *Client { return &Client{} }
+`)},
+			"internal/cliauth/client_test.go": &fstest.MapFile{Data: []byte(`package cliauth
+import "testing"
+type localClient struct{}
+func (*localClient) Login() {}
+func TestIndirectListenerClientLogin(t *testing.T) {
+	value := Client{}
+	((&value).Login)()
+	pointer := &Client{}
+	((pointer.Login))()
+	new(Client).Login()
+	NewClient("same-package").Login()
+	local := &localClient{}
+	local.Login()
+}
+func clientHelper(client *Client) { client.Login() }
+`)},
+			"internal/cliauth/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package cliauth
+import "testing"
+func TestTaggedIndirectListenerClientLogin(t *testing.T) { (&Client{}).Login() }
+`)},
+			"sample/cliauth_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/cliauth"
+	auth "github.com/gastownhall/gascity/internal/cliauth"
+	"testing"
+)
+type localClient struct{}
+func (*localClient) Login() {}
+func TestImportedIndirectListenerClientLogin(t *testing.T) {
+	var pointer *auth.Client
+	pointer.Login()
+	value := auth.Client{}
+	value.Login()
+	auth.NewClient("imported").Login()
+	local := &localClient{}
+	local.Login()
+	var foreignClient *foreign.Client
+	foreignClient.Login()
+}
+`)},
+			"wrong/cliauth/client_test.go": &fstest.MapFile{Data: []byte(`package cliauth
+type Client struct{}
+func (*Client) Login() {}
+func TestWrongPackage() { (&Client{}).Login() }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, indirectListener, 9, 3)
+		assertCount(t, got, ScopeUntagged, indirectListener, 8, 2)
+		assertOccurrenceOwner(t, got, "internal/cliauth/client_test.go", indirectListener, "TestIndirectListenerClientLogin", true, false)
+		assertOccurrenceOwner(t, got, "internal/cliauth/client_test.go", indirectListener, "clientHelper", false, false)
+		assertOccurrenceOwner(t, got, "sample/cliauth_test.go", indirectListener, "TestImportedIndirectListenerClientLogin", true, false)
+		assertOccurrenceOwner(t, got, "internal/cliauth/tagged_test.go", indirectListener, "TestTaggedIndirectListenerClientLogin", true, true)
+	})
+
+	t.Run("supervisor LoadConfig", func(t *testing.T) {
+		t.Parallel()
+		got, err := ScanFS(fstest.MapFS{
+			"internal/supervisor/config.go": &fstest.MapFile{Data: []byte(`package supervisor
+func LoadConfig() {}
+`)},
+			"internal/supervisor/config_test.go": &fstest.MapFile{Data: []byte(`package supervisor
+import "testing"
+func TestIndirectListenerLoadConfig(t *testing.T) {
+	((LoadConfig))()
+	{
+		LoadConfig := func() {}
+		LoadConfig()
+	}
+}
+func configHelper() { LoadConfig() }
+`)},
+			"internal/supervisor/tagged_test.go": &fstest.MapFile{Data: []byte(`//go:build integration
+
+package supervisor
+import "testing"
+func TestTaggedIndirectListenerLoadConfig(t *testing.T) { LoadConfig() }
+`)},
+			"sample/supervisor_test.go": &fstest.MapFile{Data: []byte(`package sample
+import (
+	foreign "example.test/supervisor"
+	sv "github.com/gastownhall/gascity/internal/supervisor"
+	"testing"
+)
+func TestImportedIndirectListenerLoadConfig(t *testing.T) {
+	((sv.LoadConfig))()
+	foreign.LoadConfig()
+}
+`)},
+			"wrong/supervisor/config.go": &fstest.MapFile{Data: []byte(`package supervisor
+func LoadConfig() {}
+`)},
+			"wrong/supervisor/config_test.go": &fstest.MapFile{Data: []byte(`package supervisor
+func TestWrongPackage() { LoadConfig() }
+`)},
+			"internal/supervisor/wrong_package_test.go": &fstest.MapFile{Data: []byte(`package supervisor_test
+func LoadConfig() {}
+func TestWrongPackageClause() { LoadConfig() }
+`)},
+		})
+		if err != nil {
+			t.Fatalf("ScanFS: %v", err)
+		}
+		assertCount(t, got, ScopeAll, indirectListener, 4, 3)
+		assertCount(t, got, ScopeUntagged, indirectListener, 3, 2)
+		assertOccurrenceOwner(t, got, "internal/supervisor/config_test.go", indirectListener, "TestIndirectListenerLoadConfig", true, false)
+		assertOccurrenceOwner(t, got, "internal/supervisor/config_test.go", indirectListener, "configHelper", false, false)
+		assertOccurrenceOwner(t, got, "sample/supervisor_test.go", indirectListener, "TestImportedIndirectListenerLoadConfig", true, false)
+		assertOccurrenceOwner(t, got, "internal/supervisor/tagged_test.go", indirectListener, "TestTaggedIndirectListenerLoadConfig", true, true)
+	})
+}
+
 func TestResolveBindingsRetainsOnlyNetListenReceiverTypes(t *testing.T) {
 	t.Parallel()
 
@@ -1428,6 +1772,42 @@ func TestResource() { Run() }
 `,
 		},
 		{
+			name:       "ACP provider",
+			path:       "sample/dot_acp_test.go",
+			importPath: "github.com/gastownhall/gascity/internal/runtime/acp",
+			source: `package sample
+import . "github.com/gastownhall/gascity/internal/runtime/acp"
+func TestResource() { (&Provider{}).Start() }
+`,
+		},
+		{
+			name:       "subprocess provider",
+			path:       "sample/dot_subprocess_test.go",
+			importPath: "github.com/gastownhall/gascity/internal/runtime/subprocess",
+			source: `package sample
+import . "github.com/gastownhall/gascity/internal/runtime/subprocess"
+func TestResource() { (&Provider{}).Start() }
+`,
+		},
+		{
+			name:       "CLI auth client",
+			path:       "sample/dot_cliauth_test.go",
+			importPath: "github.com/gastownhall/gascity/internal/cliauth",
+			source: `package sample
+import . "github.com/gastownhall/gascity/internal/cliauth"
+func TestResource() { (&Client{}).Login() }
+`,
+		},
+		{
+			name:       "supervisor config",
+			path:       "sample/dot_supervisor_test.go",
+			importPath: "github.com/gastownhall/gascity/internal/supervisor",
+			source: `package sample
+import . "github.com/gastownhall/gascity/internal/supervisor"
+func TestResource() { LoadConfig() }
+`,
+		},
+		{
 			name:       "acceptance listener helper",
 			path:       "sample/dot_acceptance_helpers_test.go",
 			importPath: "github.com/gastownhall/gascity/test/acceptance/helpers",
@@ -1463,6 +1843,10 @@ func TestScanAllowsBlankImportsOfTargetedPackages(t *testing.T) {
 	files := fstest.MapFS{
 		"sample/blank_import_test.go": &fstest.MapFile{Data: []byte(`package sample
 import (
+	_ "github.com/gastownhall/gascity/internal/cliauth"
+	_ "github.com/gastownhall/gascity/internal/runtime/acp"
+	_ "github.com/gastownhall/gascity/internal/runtime/subprocess"
+	_ "github.com/gastownhall/gascity/internal/supervisor"
 	_ "net"
 	_ "net/http/httptest"
 	_ "os"
@@ -1880,6 +2264,27 @@ func TestBootstrapPolicyOwnsHTTPTestServerDebt(t *testing.T) {
 		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
 			t.Fatalf("HTTP test server owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
+	}
+}
+
+func TestBootstrapPolicyOwnsIndirectListener(t *testing.T) {
+	t.Parallel()
+
+	audit := findRow(t, bootstrapPolicy.AuditBaseline, ScopeAll, ResourceListenerIndirect)
+	if audit.BaselineCalls != 66 || audit.BaselineFiles != 6 || audit.ReportedCalls != 66 || audit.ReportedFiles != 6 {
+		t.Fatalf("all-source indirect-listener baseline = %d/%d reported=%d/%d, want 66/6 reported=66/6", audit.BaselineCalls, audit.BaselineFiles, audit.ReportedCalls, audit.ReportedFiles)
+	}
+	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
+		row := findRow(t, rows, ScopeUntagged, ResourceListenerIndirect)
+		if row.BaselineCalls != 65 || row.BaselineFiles != 5 {
+			t.Fatalf("untagged indirect-listener baseline = %d/%d, want 65/5", row.BaselineCalls, row.BaselineFiles)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2.4" || row.MigrationTarget != "P0.4c-listener-indirect" {
+			t.Fatalf("indirect-listener owner = %q/%q, want ga-80po0c.2.2.4/P0.4c-listener-indirect", row.OwnerBead, row.MigrationTarget)
+		}
+	}
+	if audit.OwnerBead != "ga-80po0c.2.2.4" || audit.MigrationTarget != "P0.4c-listener-indirect" {
+		t.Fatalf("all-source indirect-listener owner = %q/%q, want ga-80po0c.2.2.4/P0.4c-listener-indirect", audit.OwnerBead, audit.MigrationTarget)
 	}
 }
 

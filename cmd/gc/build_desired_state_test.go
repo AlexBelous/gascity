@@ -5866,6 +5866,9 @@ func TestBuildDesiredState_GH1654PoolReadyWorkGrowsPastMinActiveSessions(t *test
 	if got := dsResult.ScaleCheckCounts[template]; got != 6 {
 		t.Fatalf("ScaleCheckCounts[%s] = %d, want 6 queued ready beads", template, got)
 	}
+	if got := len(dsResult.ReadyRoutedDemand[template].WorkBeadIDs); got != 6 {
+		t.Fatalf("ReadyRoutedDemand[%s] has %d work IDs, want 6 ready routed beads", template, got)
+	}
 	desiredSessionNames := make(map[string]bool)
 	for _, tp := range dsResult.State {
 		if tp.TemplateName == template {

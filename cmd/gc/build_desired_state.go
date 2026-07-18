@@ -53,7 +53,12 @@ type DesiredStateResult struct {
 	NamedScaleCheckPartialTemplates map[string]bool
 	PoolDesiredCounts               map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
 	WorkSet                         map[string]bool
-	AssignedWorkBeads               []beads.Bead // actionable assigned work, plus stranded pool work that needs release
+	// ReadyRoutedDemand is the ready, unassigned routed-work snapshot used to
+	// wake an already-running generic pool slot. It originates solely from the
+	// store Ready()/dependency-gated default scale demand; blocked routed work
+	// is therefore absent and cannot cause a prompt.
+	ReadyRoutedDemand map[string]scaleCheckDemand
+	AssignedWorkBeads []beads.Bead // actionable assigned work, plus stranded pool work that needs release
 	// AssignedWorkStores is aligned by index with AssignedWorkBeads, so later
 	// mutation paths update rig-owned work in the right store even when
 	// independent stores produce overlapping bead IDs.
@@ -1037,6 +1042,7 @@ func buildDesiredStateWithSessionBeads(
 		ScaleCheckPartialTemplates:      scaleCheckPartialTemplates,
 		PoolScaleCheckPartialTemplates:  poolScaleCheckPartialTemplates,
 		NamedScaleCheckPartialTemplates: namedScaleCheckPartialTemplates,
+		ReadyRoutedDemand:               scaleCheckDemandByTemplate,
 		AssignedWorkBeads:               assignedWorkBeads,
 		AssignedWorkStores:              assignedWorkStores,
 		AssignedWorkStoreRefs:           assignedWorkStoreRefs,

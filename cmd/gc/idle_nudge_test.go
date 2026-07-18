@@ -133,3 +133,71 @@ func TestNudgeStalledPoolClaims_SkipsNonPool(t *testing.T) {
 		t.Fatalf("must not touch a non-pool session: %q", out.String())
 	}
 }
+
+// A ready routed bead is normal reconciler demand. When a warm pool slot is
+// already running, the reconciler must deliver the claim prompt itself rather
+// than depending on an event order to nudge the worker when routing happened.
+func TestNudgeReadyRoutedPoolClaims_NudgesWarmPoolImmediately(t *testing.T) {
+	sp := runningFake(t)
+	cfg := idleClaimTestCfg()
+	session := idleClaimPoolSession()
+	delete(session.Metadata, beadmeta.TriggerBeadIDMetadataKey)
+	sessions := []beads.Bead{session}
+	store := beads.SessionStore{Store: beads.NewMemStoreFrom(0, sessions, nil)}
+	ready := map[string]scaleCheckDemand{
+		"polecat": {WorkBeadIDs: []string{"w-ready", "w-next"}},
+	}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var out bytes.Buffer
+
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, ready, base, &out)
+
+	if !bytes.Contains(out.Bytes(), []byte("nudged worker-1 to claim w-ready")) {
+		t.Fatalf("expected immediate reconciler nudge, got: %q", out.String())
+	}
+	if got := sessions[0].Metadata[idleClaimNudgeTriggerKey]; got != "w-ready" {
+		t.Fatalf("marker trigger = %q, want w-ready", got)
+	}
+	if got := sessions[0].Metadata[idleClaimNudgeCountKey]; got != "1" {
+		t.Fatalf("marker count = %q, want 1", got)
+	}
+
+	// The same ready demand on a later patrol is already acknowledged by the
+	// persisted marker, so it must not inject a duplicate prompt.
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, ready, base.Add(time.Minute), &out)
+	if got := bytes.Count(out.Bytes(), []byte("nudged worker-1 to claim w-ready")); got != 1 {
+		t.Fatalf("ready routed work was nudged %d times, want exactly once: %q", got, out.String())
+	}
+	if bytes.Contains(out.Bytes(), []byte("nudged worker-1 to claim w-next")) {
+		t.Fatalf("slot was prompted for a second item before claiming the first: %q", out.String())
+	}
+}
+
+func TestNudgeReadyRoutedPoolClaims_SkipsBusyAndBlockedDemand(t *testing.T) {
+	sp := runningFake(t)
+	cfg := idleClaimTestCfg()
+	session := idleClaimPoolSession()
+	delete(session.Metadata, beadmeta.TriggerBeadIDMetadataKey)
+	session.Metadata["currently_processing_bead_id"] = "w-active"
+	sessions := []beads.Bead{session}
+	store := beads.SessionStore{Store: beads.NewMemStoreFrom(0, sessions, nil)}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var out bytes.Buffer
+
+	// The readiness snapshot is empty when the routed work is still blocked, so
+	// no prompt is emitted merely because a route exists.
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, nil, base, &out)
+	if out.Len() != 0 {
+		t.Fatalf("blocked routed work must not nudge: %q", out.String())
+	}
+
+	// A ready queued item also must not interrupt a slot with different active
+	// work. It will be handed to another compatible slot or wait for this one to
+	// return to the idle pool.
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, map[string]scaleCheckDemand{
+		"polecat": {WorkBeadIDs: []string{"w-ready"}},
+	}, base, &out)
+	if out.Len() != 0 {
+		t.Fatalf("busy pool slot must not be nudged: %q", out.String())
+	}
+}

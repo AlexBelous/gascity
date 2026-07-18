@@ -3116,6 +3116,68 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeRunsForReportActivityRuntime
 	}
 }
 
+// Ready generic pool work must be handed to a warm running slot by the
+// reconciler itself. This is intentionally independent of route-write orders:
+// the route can be set while the bead is blocked, then become ready later.
+func TestCityRuntimeBeadReconcileTick_ReadyRoutedWorkNudgesWarmPool(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-bd-warm", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-warm",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), Nudge: "Run gc hook --claim --json now."}}},
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+		State:             map[string]TemplateParams{},
+		ScaleCheckCounts:  map[string]int{"worker": 1},
+		PoolDesiredCounts: map[string]int{"worker": 1},
+		ReadyRoutedDemand: map[string]scaleCheckDemand{
+			"worker": {WorkBeadIDs: []string{"w-ready"}},
+		},
+	}, cr.loadSessionBeadSnapshot(), nil, false)
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after tick: %v", err)
+	}
+	if got.Metadata[idleClaimNudgeTriggerKey] != "w-ready" {
+		t.Fatalf("ready routed trigger marker = %q, want w-ready", got.Metadata[idleClaimNudgeTriggerKey])
+	}
+	if got.Metadata[idleClaimNudgeCountKey] != "1" {
+		t.Fatalf("ready routed nudge count = %q, want 1", got.Metadata[idleClaimNudgeCountKey])
+	}
+}
+
 func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSession(t *testing.T) {
 	store := beads.NewMemStore()
 	worker, err := store.Create(beads.Bead{

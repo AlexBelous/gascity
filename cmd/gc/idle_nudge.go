@@ -136,6 +136,124 @@ func nudgeStalledPoolClaims(
 	}
 }
 
+// nudgeReadyRoutedPoolClaims immediately hands newly-ready, unassigned routed
+// work to a compatible warm pool slot. Desired-state reconciliation already
+// creates or starts a slot when none is available; this closes the other half
+// of the contract: a slot that is already running must be prompted when its
+// work becomes ready, rather than relying on route-write timing or a shell
+// order to have prompted it earlier.
+//
+// The demand map is built from Ready() only, so blocked routed work is never
+// eligible. A persisted marker acknowledges one work item per idle slot and
+// prevents repeated patrol ticks from injecting duplicate prompts. Slots with
+// a current/trigger bead remain reserved for that work and are not disturbed.
+func nudgeReadyRoutedPoolClaims(
+	sp runtime.Provider,
+	cfg *config.City,
+	sessStore beads.SessionStore,
+	sessionBeads []beads.Bead,
+	readyDemand map[string]scaleCheckDemand,
+	now time.Time,
+	stdout io.Writer,
+) {
+	if sp == nil || cfg == nil || sessStore.Store == nil || len(readyDemand) == 0 {
+		return
+	}
+
+	// One work item needs at most one prompt. Reserve items acknowledged on a
+	// prior patrol before assigning the remaining items to currently-idle warm
+	// slots, so a delayed claim cannot create a prompt storm.
+	reserved := make(map[string]map[string]bool, len(readyDemand))
+	for i := range sessionBeads {
+		s := &sessionBeads[i]
+		if strings.TrimSpace(s.Metadata["pool_managed"]) != "true" {
+			continue
+		}
+		template := normalizedSessionTemplate(*s, cfg)
+		demand, ok := readyDemand[template]
+		if !ok || len(demand.WorkBeadIDs) == 0 {
+			continue
+		}
+		marker := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey])
+		if marker == "" || atoiOr0(s.Metadata[idleClaimNudgeCountKey]) < 1 {
+			continue
+		}
+		if !demandContainsWorkID(demand, marker) {
+			continue
+		}
+		if reserved[template] == nil {
+			reserved[template] = make(map[string]bool)
+		}
+		reserved[template][marker] = true
+	}
+
+	for i := range sessionBeads {
+		s := &sessionBeads[i]
+		if strings.TrimSpace(s.Metadata["pool_managed"]) != "true" {
+			continue
+		}
+		sessName := strings.TrimSpace(s.Metadata["session_name"])
+		if sessName == "" || !sp.IsRunning(sessName) {
+			continue
+		}
+		// A live session that already owns work must finish that work before it
+		// claims another queued routed bead.
+		if strings.TrimSpace(s.Metadata["currently_processing_bead_id"]) != "" {
+			continue
+		}
+		if strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey]) != "" {
+			continue
+		}
+
+		template := normalizedSessionTemplate(*s, cfg)
+		demand, ok := readyDemand[template]
+		if !ok {
+			continue
+		}
+		// This slot already has an acknowledged prompt for a still-ready item.
+		// Keep it reserved for that item rather than delivering a second prompt
+		// for the next queued bead before it has had a chance to claim the first.
+		if marker := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey]); marker != "" && atoiOr0(s.Metadata[idleClaimNudgeCountKey]) >= 1 && demandContainsWorkID(demand, marker) {
+			continue
+		}
+		workID := nextUnreservedDemandWorkID(demand, reserved[template])
+		if workID == "" {
+			continue
+		}
+		if nudge := claimNudgeFor(cfg, *s); nudge != "" {
+			if err := sp.Nudge(sessName, runtime.TextContent(nudge)); err != nil {
+				fmt.Fprintf(stdout, "ready-routed-claim-nudge: %s failed: %v\n", sessName, err) //nolint:errcheck // best-effort
+				continue
+			}
+			fmt.Fprintf(stdout, "ready-routed-claim-nudge: nudged %s to claim %s\n", sessName, workID) //nolint:errcheck // best-effort
+			writeIdleClaimMarker(sessStore, s, workID, 1, now, stdout)
+			if reserved[template] == nil {
+				reserved[template] = make(map[string]bool)
+			}
+			reserved[template][workID] = true
+		}
+	}
+}
+
+func demandContainsWorkID(demand scaleCheckDemand, workID string) bool {
+	for _, id := range demand.WorkBeadIDs {
+		if strings.TrimSpace(id) == workID {
+			return true
+		}
+	}
+	return false
+}
+
+func nextUnreservedDemandWorkID(demand scaleCheckDemand, reserved map[string]bool) string {
+	for _, id := range demand.WorkBeadIDs {
+		id = strings.TrimSpace(id)
+		if id != "" && !reserved[id] {
+			return id
+		}
+	}
+	return ""
+}
+
 // isUnclaimedTrigger reports whether the pool slot's trigger bead is still
 // waiting to be claimed: status open and not already assigned to this slot
 // (a non-empty assignee equal to the session means the claim is mid-flight).

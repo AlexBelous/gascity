@@ -2255,6 +2255,21 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	openInfos := sessionBeads.OpenInfos()
 
+	// Generic pool demand has two reconciler-owned paths. A cold pool is
+	// materialized and started by reconcileSessionBeads below. A compatible
+	// warm running slot needs an explicit claim prompt at the same readiness
+	// boundary; otherwise a route written while its work was blocked can leave
+	// the slot idle forever once the dependency closes. Do this before session
+	// reconciliation so a newly-created slot still follows its normal startup
+	// prompt path, while an existing slot is nudged immediately.
+	phaseStart = time.Now()
+	if readyPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: loading sessions for ready routed claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort
+	} else {
+		nudgeReadyRoutedPoolClaims(cr.sp, cr.cfg, sessStore, readyPoolBeads, result.ReadyRoutedDemand, time.Now(), cr.stdout)
+	}
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_ready_routed_pool_claims", phaseStart, nil)
+
 	// Use cr.cityName consistently — it's the authoritative runtime name.
 	cityName := cr.cityName
 

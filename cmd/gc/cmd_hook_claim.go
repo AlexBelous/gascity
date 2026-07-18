@@ -620,7 +620,9 @@ func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
 // so a best-effort claim-time write cannot outlast the caller's deadline even if
 // the underlying bd update stalls.
 func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, actor string) *beads.BdStore {
-	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
+	overrides := hookClaimEnvMap(env, dir, actor)
+	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, overrides),
+		beads.WithBdStoreCommandEnvRunner(beads.ExecCommandEnvRunnerWithEnvContext(ctx, overrides)))
 }
 
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {

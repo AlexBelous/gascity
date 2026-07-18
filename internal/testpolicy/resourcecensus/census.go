@@ -113,8 +113,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   533,
-			BaselineFiles:   158,
+			BaselineCalls:   535,
+			BaselineFiles:   160,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -141,8 +141,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   405,
-			BaselineFiles:   111,
+			BaselineCalls:   407,
+			BaselineFiles:   113,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -167,8 +167,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4348,
-			BaselineFiles:   203,
+			BaselineCalls:   4359,
+			BaselineFiles:   205,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
 			OwnerBead:       "ga-80po0c.2.3",
@@ -180,7 +180,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceCWD,
-			BaselineCalls:   285,
+			BaselineCalls:   290,
 			BaselineFiles:   43,
 			ReportedCalls:   98,
 			ReportedFiles:   13,
@@ -349,8 +349,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   402,
-			BaselineFiles:   109,
+			BaselineCalls:   404,
+			BaselineFiles:   111,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -375,8 +375,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4342,
-			BaselineFiles:   203,
+			BaselineCalls:   4353,
+			BaselineFiles:   205,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -388,7 +388,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceCWD,
-			BaselineCalls:   285,
+			BaselineCalls:   290,
 			BaselineFiles:   43,
 			ReportedCalls:   284,
 			ReportedFiles:   43,

@@ -96,6 +96,7 @@ export function FormulaDetailPage() {
           <div data-testid="formula-launcher-slot">
             {formula && (
               <FormulaLauncher
+                key={name}
                 name={name}
                 varDefs={formula.var_defs ?? []}
                 onLaunched={() => void refreshRuns()}

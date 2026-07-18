@@ -1132,13 +1132,17 @@ describe('supervisor client wrapper', () => {
       fetch: fetchSpy as typeof fetch,
     });
 
-    await expect(api.formulas('test-city')).resolves.toMatchObject({
+    await expect(
+      api.formulas('test-city', { scope_kind: 'city', scope_ref: 'test-city' }),
+    ).resolves.toMatchObject({
       items: [{ name: 'code-review', run_count: 12 }],
       total: 1,
     });
-    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/formulas',
-    );
+    const listUrl = new URL(requestedUrl(fetchSpy.mock.calls[0]?.[0]));
+    expect(listUrl.pathname).toBe('/v0/city/test-city/formulas');
+    // The scope required by the Huma handler reaches the wire.
+    expect(listUrl.searchParams.get('scope_kind')).toBe('city');
+    expect(listUrl.searchParams.get('scope_ref')).toBe('test-city');
   });
 
   it('calls supervisor formula runs through the generated SDK', async () => {
@@ -1168,13 +1172,63 @@ describe('supervisor client wrapper', () => {
       fetch: fetchSpy as typeof fetch,
     });
 
-    await expect(api.formulaRuns('test-city', 'code-review')).resolves.toMatchObject({
+    await expect(
+      api.formulaRuns('test-city', 'code-review', { scope_kind: 'city', scope_ref: 'test-city' }),
+    ).resolves.toMatchObject({
       formula: 'code-review',
       recent_runs: [{ workflow_id: 'wf_9a1c' }],
     });
-    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/formulas/code-review/runs',
+    const runsUrl = new URL(requestedUrl(fetchSpy.mock.calls[0]?.[0]));
+    expect(runsUrl.pathname).toBe('/v0/city/test-city/formulas/code-review/runs');
+    expect(runsUrl.searchParams.get('scope_kind')).toBe('city');
+    expect(runsUrl.searchParams.get('scope_ref')).toBe('test-city');
+  });
+
+  it('previews a formula through the generated SDK with mutation headers', async () => {
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL) =>
+        new Response(
+          JSON.stringify({
+            name: 'code-review',
+            description: '',
+            version: 'v2',
+            preview: { nodes: [], edges: [] },
+            deps: [],
+            var_defs: [],
+            steps: [{ id: 'review', kind: 'agent', title: 'Review the change' }],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
     );
+
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(
+      api.formulaPreview('test-city', 'code-review', {
+        target: 'reviewer',
+        scope_kind: 'city',
+        scope_ref: 'test-city',
+        vars: { repo: 'gc/ds' },
+      }),
+    ).resolves.toMatchObject({ steps: [{ id: 'review' }] });
+
+    const req = fetchSpy.mock.calls[0]?.[0];
+    expect(requestedUrl(req)).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/formulas/code-review/preview',
+    );
+    expect(req).toBeInstanceOf(Request);
+    const request = req as Request;
+    expect(request.method).toBe('POST');
+    expect(request.headers.get('X-GC-Request')).toBe('dashboard');
+    await expect(request.json()).resolves.toEqual({
+      target: 'reviewer',
+      scope_kind: 'city',
+      scope_ref: 'test-city',
+      vars: { repo: 'gc/ds' },
+    });
   });
 
   it('normalizes supervisor error responses', async () => {
@@ -1350,6 +1404,7 @@ describe('supervisor client wrapper', () => {
       formulas: vi.fn(),
       formulaRuns: vi.fn(),
       formulaDetail: vi.fn(),
+      formulaPreview: vi.fn(),
     };
 
     setSupervisorApiForTests(fake);

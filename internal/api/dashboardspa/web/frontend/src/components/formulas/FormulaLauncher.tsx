@@ -12,8 +12,10 @@ import { useCachedData } from '../../hooks/useCachedData';
 import { listSupervisorAgents } from '../../supervisor/agentReads';
 import {
   type SupervisorFormulaVarDef,
+  getSupervisorFormulaPreview,
   getSupervisorFormulaSteps,
 } from '../../supervisor/formulaReads';
+import { cleanVars, pickDeclaredVars, varsCacheKey } from '../../supervisor/formulaVars';
 import { slingFormula } from '../../supervisor/formulaWrites';
 import { FormulaSteps } from './FormulaSteps';
 
@@ -61,7 +63,11 @@ export function FormulaLauncher({ name, varDefs, onLaunched }: FormulaLauncherPr
     setLaunching(true);
     setError(null);
     try {
-      const res = await slingFormula({ formula: name, target: trimmedTarget, vars });
+      const res = await slingFormula({
+        formula: name,
+        target: trimmedTarget,
+        vars: pickDeclaredVars(vars, varDefs),
+      });
       const workflowId = res.workflow_id ?? '';
       if (workflowId) {
         setLaunchedId(workflowId);
@@ -126,7 +132,7 @@ export function FormulaLauncher({ name, varDefs, onLaunched }: FormulaLauncherPr
           </Field>
         ))}
 
-        {trimmedTarget !== '' && <StepsPreview name={name} target={trimmedTarget} />}
+        {trimmedTarget !== '' && <StepsPreview name={name} target={trimmedTarget} vars={vars} />}
 
         <div className="flex flex-wrap items-center gap-4 pt-1">
           <Button
@@ -161,11 +167,30 @@ export function FormulaLauncher({ name, varDefs, onLaunched }: FormulaLauncherPr
   );
 }
 
-function StepsPreview({ name, target }: { name: string; target: string }) {
+function StepsPreview({
+  name,
+  target,
+  vars,
+}: {
+  name: string;
+  target: string;
+  vars: Record<string, string>;
+}) {
   const cityName = getActiveCity();
+  const readOnly = useReadOnly();
+  // Read-write: POST preview compiles against the operator's entered vars, so
+  // the preview matches what Launch would submit. Read-only: launching (and the
+  // POST preview that mirrors it) is disabled by the server mutation gate, so
+  // fall back to GET detail, which compiles the declared defaults and passes
+  // the read-only proxy. Cleaned vars are part of the cache key so an edited
+  // variable recompiles.
+  const previewVars = readOnly ? undefined : cleanVars(vars);
   const { data: steps, error } = useCachedData(
-    `formula:steps:${cityName ?? ''}:${name}:${target}`,
-    () => getSupervisorFormulaSteps(name, target),
+    `formula:steps:${cityName ?? ''}:${name}:${target}:${varsCacheKey(previewVars)}`,
+    () =>
+      readOnly
+        ? getSupervisorFormulaSteps(name, target)
+        : getSupervisorFormulaPreview(name, target, previewVars),
   );
   return (
     <div>

@@ -1,5 +1,5 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActiveCity } from '../api/cityBase';
 import { invalidate } from '../api/cache';
@@ -157,5 +157,42 @@ describe('FormulaDetailPage', () => {
     renderDetail('ghost');
 
     expect(await screen.findByText("This formula is not in the city's catalog.")).toBeTruthy();
+  });
+
+  it('remounts the launcher per formula so entered vars do not leak across routes', async () => {
+    const repoVar = [{ name: 'repo', type: 'string', required: true }];
+    stubFetch({
+      formulas: [
+        { ...FORMULA, name: 'alpha', var_defs: repoVar },
+        { ...FORMULA, name: 'beta', var_defs: repoVar },
+      ],
+    });
+
+    render(
+      <MemoryRouter
+        initialEntries={['/formulas/alpha']}
+        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+      >
+        <NowProvider intervalMs={1_000_000}>
+          <ReadOnlyProvider readOnly={false}>
+            <Link to="/formulas/beta">go-beta</Link>
+            <Routes>
+              <Route path="/formulas/:name" element={<FormulaDetailPage />} />
+            </Routes>
+          </ReadOnlyProvider>
+        </NowProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'alpha' });
+    fireEvent.change(screen.getByLabelText('repo (required)'), { target: { value: 'from-alpha' } });
+    expect((screen.getByLabelText('repo (required)') as HTMLInputElement).value).toBe('from-alpha');
+
+    fireEvent.click(screen.getByText('go-beta'));
+    await screen.findByRole('heading', { name: 'beta' });
+
+    // key={name} remounts the launcher on the formula switch, so beta starts
+    // from its own defaults rather than carrying alpha's entered repo value.
+    expect((screen.getByLabelText('repo (required)') as HTMLInputElement).value).toBe('');
   });
 });

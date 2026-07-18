@@ -26,6 +26,7 @@ import {
   postV0CityByCityNameAgentByBaseByAction,
   postV0CityByCityNameAgentByDirByBaseByAction,
   postV0CityByCityNameBeadByIdClose,
+  postV0CityByCityNameFormulasByNamePreview,
   postV0CityByCityNameSling,
   postV0CityByCityNameMailByIdArchive,
   postV0CityByCityNameMailByIdMarkUnread,
@@ -42,6 +43,7 @@ import type {
   AgentPrimeBody,
   FormulaFeedBody,
   FormulaListBody,
+  FormulaPreviewBody,
   FormulaRunsResponse,
   GetV0CityByCityNameBeadsData,
   GetV0CityByCityNameEventsData,
@@ -166,6 +168,11 @@ export interface SupervisorApi {
     cityName: string,
     name: string,
     query: GetV0CityByCityNameFormulasByNameData['query'],
+  ): Promise<FormulaDetailResponse>;
+  formulaPreview(
+    cityName: string,
+    name: string,
+    body: FormulaPreviewBody,
   ): Promise<FormulaDetailResponse>;
   formulas(
     cityName: string,
@@ -528,6 +535,17 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           query,
         }) as Promise<SupervisorResult<FormulaDetailResponse>>,
         'gc supervisor formula detail response was empty',
+      );
+    },
+    formulaPreview(cityName, name, body) {
+      return unwrapSupervisorResult<FormulaDetailResponse>(
+        postV0CityByCityNameFormulasByNamePreview({
+          client,
+          path: { cityName, name },
+          headers: GC_MUTATION_HEADERS,
+          body,
+        }) as Promise<SupervisorResult<FormulaDetailResponse>>,
+        'gc supervisor formula preview response was empty',
       );
     },
     formulas(cityName, query) {

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FormulaVarDefResponse } from 'gas-city-dashboard-shared/gc-supervisor';
@@ -17,8 +17,19 @@ const calls: Recorded[] = [];
 let cityCounter = 0;
 
 const AGENTS_PATH = /\/agents$/;
+const PREVIEW_PATH = /\/formulas\/[^/]+\/preview$/;
 const DETAIL_PATH = /\/formulas\/[^/]+$/;
 const SLING_PATH = /\/sling$/;
+
+const PREVIEW_BODY = {
+  name: 'code-review',
+  description: '',
+  version: 'v2',
+  preview: { nodes: [], edges: [] },
+  deps: null,
+  var_defs: null,
+  steps: [{ id: 'review', kind: 'agent', title: 'Review the change', assignee: 'reviewer' }],
+};
 
 function parsedUrl(input: RequestInfo | URL): URL {
   if (input instanceof Request) return new URL(input.url);
@@ -77,18 +88,8 @@ function stubFetch(opts: { slingStatus?: number; slingBody?: unknown } = {}): vo
           total: 2,
         });
       }
-      if (DETAIL_PATH.test(url.pathname)) {
-        return jsonResponse({
-          name: 'code-review',
-          description: '',
-          version: 'v2',
-          preview: { nodes: [], edges: [] },
-          deps: null,
-          var_defs: null,
-          steps: [
-            { id: 'review', kind: 'agent', title: 'Review the change', assignee: 'reviewer' },
-          ],
-        });
+      if (PREVIEW_PATH.test(url.pathname) || DETAIL_PATH.test(url.pathname)) {
+        return jsonResponse(PREVIEW_BODY);
       }
       return jsonResponse({ error: `unexpected ${url.pathname}` }, 404);
     }),
@@ -189,14 +190,48 @@ describe('FormulaLauncher', () => {
     expect(alert.textContent).toMatch(/supervisor down/i);
   });
 
-  it('compiles a target-bound steps preview once a target is chosen', async () => {
+  it('compiles a variable-aware steps preview via POST once a target is chosen', async () => {
     renderLauncher();
     fireEvent.change(targetInput(), { target: { value: 'reviewer' } });
 
     expect(await screen.findByText('Review the change')).toBeTruthy();
-    const detail = calls.find(
-      (c) => c.method === 'GET' && DETAIL_PATH.test(c.path) && !SLING_PATH.test(c.path),
+    // Read-write mode uses POST preview (variable-aware), never GET detail
+    // (which compiles defaults and drops entered vars).
+    expect(calls.some((c) => c.method === 'POST' && PREVIEW_PATH.test(c.path))).toBe(true);
+    expect(calls.some((c) => c.method === 'GET' && DETAIL_PATH.test(c.path))).toBe(false);
+  });
+
+  it('recompiles the preview through POST when a variable changes (vars reach the body)', async () => {
+    renderLauncher();
+    fireEvent.change(targetInput(), { target: { value: 'reviewer' } });
+    fireEvent.change(screen.getByLabelText('repo (required)'), { target: { value: 'gc/ds' } });
+
+    await waitFor(() =>
+      expect(previewVars(calls)).toContainEqual(expect.objectContaining({ repo: 'gc/ds' })),
     );
-    expect(detail).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText('repo (required)'), { target: { value: 'gc/next' } });
+
+    await waitFor(() =>
+      expect(previewVars(calls)).toContainEqual(expect.objectContaining({ repo: 'gc/next' })),
+    );
+  });
+
+  it('falls back to GET detail for the steps preview in read-only mode', async () => {
+    renderLauncher({ readOnly: true });
+    fireEvent.change(targetInput(), { target: { value: 'reviewer' } });
+
+    expect(await screen.findByText('Review the change')).toBeTruthy();
+    // Read-only 405s any POST, so the preview uses GET detail (default-compiled)
+    // instead — never the POST preview.
+    expect(calls.some((c) => c.method === 'GET' && DETAIL_PATH.test(c.path))).toBe(true);
+    expect(calls.some((c) => c.method === 'POST' && PREVIEW_PATH.test(c.path))).toBe(false);
   });
 });
+
+/** The `vars` bodies of every POST preview call recorded by the fetch stub. */
+function previewVars(recorded: Recorded[]): Array<Record<string, string> | undefined> {
+  return recorded
+    .filter((c) => c.method === 'POST' && PREVIEW_PATH.test(c.path))
+    .map((c) => (c.body as { vars?: Record<string, string> } | undefined)?.vars);
+}

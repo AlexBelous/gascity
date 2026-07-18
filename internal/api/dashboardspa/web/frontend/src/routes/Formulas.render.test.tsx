@@ -118,7 +118,11 @@ describe('FormulasPage', () => {
     expect(screen.getByRole('columnheader', { name: 'Formula' })).toBeTruthy();
     expect(screen.getByRole('columnheader', { name: 'Vars' })).toBeTruthy();
     expect(screen.getByRole('columnheader', { name: 'Last run' })).toBeTruthy();
-    expect(fetchCalls.some((c) => FORMULAS_PATH.test(c.path))).toBe(true);
+    // The catalog read carries the active city scope the server requires.
+    const listCall = fetchCalls.find((c) => FORMULAS_PATH.test(c.path));
+    expect(listCall).toBeTruthy();
+    expect(listCall?.query.get('scope_kind')).toBe('city');
+    expect(listCall?.query.get('scope_ref')).toBe(activeTestCity);
   });
 
   it('shows vars + run counts and a glyph+word last-run badge', async () => {

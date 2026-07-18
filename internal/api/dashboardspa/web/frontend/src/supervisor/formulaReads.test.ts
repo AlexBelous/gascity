@@ -11,6 +11,7 @@ import {
   setSupervisorApiForTests,
 } from './client';
 import {
+  getSupervisorFormulaPreview,
   getSupervisorFormulaRuns,
   getSupervisorFormulaSteps,
   listSupervisorFormulas,
@@ -51,14 +52,19 @@ afterEach(() => {
 });
 
 describe('formulaReads', () => {
-  it('lists the active city formulas and passes no query by default', async () => {
+  it('lists the active city formulas and defaults to the active city scope', async () => {
     const formulas = vi.fn(async () => ({ items: [summary()], partial: false, total: 1 }));
     stub({ formulas });
 
     await expect(listSupervisorFormulas()).resolves.toEqual([
       expect.objectContaining({ name: 'code-review', run_count: 3 }),
     ]);
-    expect(formulas).toHaveBeenCalledWith('test-city', undefined);
+    // The server rejects a missing scope with "scope_kind and scope_ref are
+    // required", so the adapter defaults to the active city scope.
+    expect(formulas).toHaveBeenCalledWith('test-city', {
+      scope_kind: 'city',
+      scope_ref: 'test-city',
+    });
   });
 
   it('normalizes a null formulas list to []', async () => {
@@ -86,7 +92,10 @@ describe('formulaReads', () => {
     await expect(getSupervisorFormulaRuns('demo')).resolves.toEqual([
       expect.objectContaining({ workflow_id: 'wf-a' }),
     ]);
-    expect(formulaRuns).toHaveBeenCalledWith('test-city', 'demo', undefined);
+    expect(formulaRuns).toHaveBeenCalledWith('test-city', 'demo', {
+      scope_kind: 'city',
+      scope_ref: 'test-city',
+    });
   });
 
   it('normalizes null recent_runs to [] and forwards a limit', async () => {
@@ -99,7 +108,28 @@ describe('formulaReads', () => {
     stub({ formulaRuns });
 
     await expect(getSupervisorFormulaRuns('demo', { limit: 5 })).resolves.toEqual([]);
-    expect(formulaRuns).toHaveBeenCalledWith('test-city', 'demo', { limit: 5 });
+    expect(formulaRuns).toHaveBeenCalledWith('test-city', 'demo', {
+      scope_kind: 'city',
+      scope_ref: 'test-city',
+      limit: 5,
+    });
+  });
+
+  it('honors an explicit rig scope over the city default', async () => {
+    const formulaRuns = vi.fn(async () => ({
+      formula: 'demo',
+      partial: false,
+      recent_runs: null,
+      run_count: 0,
+    }));
+    stub({ formulaRuns });
+
+    await getSupervisorFormulaRuns('demo', { scope_kind: 'rig', scope_ref: 'east', limit: 2 });
+    expect(formulaRuns).toHaveBeenCalledWith('test-city', 'demo', {
+      scope_kind: 'rig',
+      scope_ref: 'east',
+      limit: 2,
+    });
   });
 
   it('propagates a SupervisorApiError from the facade (no swallow)', async () => {
@@ -111,7 +141,7 @@ describe('formulaReads', () => {
     await expect(listSupervisorFormulas()).rejects.toBeInstanceOf(SupervisorApiError);
   });
 
-  it('compiles target-bound steps and normalizes null steps to []', async () => {
+  it('compiles default-var target steps via GET detail with the city scope', async () => {
     const formulaDetail = vi.fn(async () => ({
       name: 'demo',
       description: '',
@@ -126,7 +156,11 @@ describe('formulaReads', () => {
     await expect(getSupervisorFormulaSteps('demo', 'reviewer')).resolves.toEqual([
       expect.objectContaining({ id: 'review' }),
     ]);
-    expect(formulaDetail).toHaveBeenCalledWith('test-city', 'demo', { target: 'reviewer' });
+    expect(formulaDetail).toHaveBeenCalledWith('test-city', 'demo', {
+      target: 'reviewer',
+      scope_kind: 'city',
+      scope_ref: 'test-city',
+    });
 
     formulaDetail.mockResolvedValueOnce({
       name: 'demo',
@@ -138,6 +172,48 @@ describe('formulaReads', () => {
       steps: null,
     });
     await expect(getSupervisorFormulaSteps('demo', 'reviewer')).resolves.toEqual([]);
+  });
+
+  it('compiles variable-aware target steps via POST preview (vars + city scope)', async () => {
+    const formulaPreview = vi.fn(async () => ({
+      name: 'demo',
+      description: '',
+      version: 'v1',
+      preview: { nodes: [], edges: [] },
+      deps: null,
+      var_defs: null,
+      steps: [{ id: 'review', kind: 'agent', title: 'Review' }],
+    }));
+    stub({ formulaPreview });
+
+    await expect(
+      getSupervisorFormulaPreview('demo', 'reviewer', { repo: 'gc/ds' }),
+    ).resolves.toEqual([expect.objectContaining({ id: 'review' })]);
+    // Entered vars reach the POST body — GET detail would drop them.
+    expect(formulaPreview).toHaveBeenCalledWith('test-city', 'demo', {
+      target: 'reviewer',
+      scope_kind: 'city',
+      scope_ref: 'test-city',
+      vars: { repo: 'gc/ds' },
+    });
+
+    // No vars: the vars key is omitted rather than sent as {}.
+    formulaPreview.mockClear();
+    formulaPreview.mockResolvedValueOnce({
+      name: 'demo',
+      description: '',
+      version: 'v1',
+      preview: { nodes: [], edges: [] },
+      deps: null,
+      var_defs: null,
+      steps: [],
+    });
+    await expect(getSupervisorFormulaPreview('demo', 'reviewer', undefined)).resolves.toEqual([]);
+    expect(formulaPreview).toHaveBeenCalledWith('test-city', 'demo', {
+      target: 'reviewer',
+      scope_kind: 'city',
+      scope_ref: 'test-city',
+    });
   });
 
   it('maps run status to a glyph+word StatusBadge tone', () => {

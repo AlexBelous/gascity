@@ -1,6 +1,7 @@
 import type { SlingInputBody, SlingResponse } from 'gas-city-dashboard-shared/gc-supervisor';
 import { activeCityOrThrow } from '../api/cityBase';
 import { supervisorApi } from './client';
+import { cleanVars } from './formulaVars';
 
 export interface SlingFormulaInput {
   formula: string;
@@ -35,14 +36,4 @@ export async function slingFormula(input: SlingFormulaInput): Promise<SlingRespo
   if (input.title && input.title.trim().length > 0) body.title = input.title.trim();
 
   return supervisorApi().sling(cityName, body);
-}
-
-/** Drop empty values; return undefined when nothing remains so an empty `vars` key is omitted. */
-function cleanVars(vars: Record<string, string> | undefined): Record<string, string> | undefined {
-  if (vars === undefined) return undefined;
-  const out: Record<string, string> = {};
-  for (const [name, value] of Object.entries(vars)) {
-    if (value !== '') out[name] = value;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
 }

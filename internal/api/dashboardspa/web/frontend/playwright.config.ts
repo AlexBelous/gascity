@@ -35,6 +35,15 @@ const DEFAULT_PORT = 20000 + (checkoutSalt % 12000);
 const PORT = Number(process.env.FAKESUPERVISOR_PORT ?? DEFAULT_PORT);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 
+// The emission project runs a SECOND fakesupervisor (started with -seed=emit) on
+// a distinct derived port so the two servers never collide. Since DEFAULT_PORT is
+// keyed on import.meta.url (identical for both projects in this one config file),
+// offset by one within the same 20000–31999 range; override with
+// FAKESUPERVISOR_EMIT_PORT.
+const DEFAULT_EMIT_PORT = 20000 + ((checkoutSalt + 1) % 12000);
+const EMIT_PORT = Number(process.env.FAKESUPERVISOR_EMIT_PORT ?? DEFAULT_EMIT_PORT);
+const EMIT_BASE_URL = `http://127.0.0.1:${EMIT_PORT}`;
+
 // The compiled fake supervisor and the corpus dir, resolved from the frontend
 // workspace (this config's cwd). Overridable so CI or a worktree can point at a
 // different build output.
@@ -61,27 +70,55 @@ export default defineConfig({
     // The seeded corpus is deterministic, so any console error is a real defect;
     // specs assert on the DOM, but the trace on retry captures the console too.
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
-  webServer: {
-    command: `${BINARY} -addr 127.0.0.1:${PORT} -data ${CORPUS_DIR}`,
-    url: BASE_URL,
-    timeout: 30_000,
-    // SIGTERM (not the default SIGKILL) so the fakesupervisor's signal handler
-    // runs: it drains the plane's run tailers/status samplers and removes its
-    // scratch city dir. 5s is well within its 5s graceful-shutdown budget.
-    gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
-    // Local footgun: reuse means a leftover fakesupervisor already on PORT is
-    // reused as-is, and it serves the embedded SPA bundle it was built with — so
-    // an old process serves a STALE bundle after you rebuild the SPA. The corpus
-    // loader also re-stamps event timestamps to now at startup, so a server left
-    // running for >24h would serve events that have aged OUT of the Activity
-    // 24h window and the activity specs would flake — another reason to restart
-    // a stale local server. If a local run looks wrong, kill the process on PORT
-    // (or run `make dashboard-e2e-play`, which rebuilds both). CI sets
-    // reuseExistingServer=false, so it always launches the freshly built binary
-    // and never hits either footgun.
-    reuseExistingServer: !process.env.CI,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  },
+  // Each project is file-scoped via testMatch so the corpus and emission specs
+  // run against their OWN seeded server: the default 'chromium' project drives
+  // the corpus render smoke at BASE_URL; 'chromium-emit' drives the
+  // emission-driven spec at EMIT_BASE_URL (its own -seed=emit server, below).
+  projects: [
+    {
+      name: 'chromium',
+      testMatch: /render-smoke\.spec\.ts$/,
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'chromium-emit',
+      testMatch: /emission-driven\.spec\.ts$/,
+      use: { ...devices['Desktop Chrome'], baseURL: EMIT_BASE_URL },
+    },
+  ],
+  webServer: [
+    {
+      command: `${BINARY} -addr 127.0.0.1:${PORT} -data ${CORPUS_DIR}`,
+      url: BASE_URL,
+      timeout: 30_000,
+      // SIGTERM (not the default SIGKILL) so the fakesupervisor's signal handler
+      // runs: it drains the plane's run tailers/status samplers and removes its
+      // scratch city dir. 5s is well within its 5s graceful-shutdown budget.
+      gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
+      // Local footgun: reuse means a leftover fakesupervisor already on PORT is
+      // reused as-is, and it serves the embedded SPA bundle it was built with — so
+      // an old process serves a STALE bundle after you rebuild the SPA. The corpus
+      // loader also re-stamps event timestamps to now at startup, so a server left
+      // running for >24h would serve events that have aged OUT of the Activity
+      // 24h window and the activity specs would flake — another reason to restart
+      // a stale local server. If a local run looks wrong, kill the process on PORT
+      // (or run `make dashboard-e2e-play`, which rebuilds both). CI sets
+      // reuseExistingServer=false, so it always launches the freshly built binary
+      // and never hits either footgun.
+      reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+    {
+      // The emission server needs no -data: -seed=emit generates its event log
+      // and bead-store state from scratch by driving the real write pipeline.
+      command: `${BINARY} -seed=emit -addr 127.0.0.1:${EMIT_PORT}`,
+      url: EMIT_BASE_URL,
+      timeout: 30_000,
+      gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
+      reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  ],
 });

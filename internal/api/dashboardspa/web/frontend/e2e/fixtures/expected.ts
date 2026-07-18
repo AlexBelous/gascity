@@ -140,3 +140,51 @@ export const CLIENT_ERROR_ENDPOINT = '/api/client-errors';
  * this is NOT present on any seeded route.
  */
 export const ERROR_BOUNDARY_TEXT = 'Dashboard view failed.';
+
+// ---------------------------------------------------------------------------
+// Emission-driven scenario (test/dashport/emitseed). These mirror the exported
+// constants in test/dashport/emitseed/emitseed.go and back the SECOND Playwright
+// project (chromium-emit), which drives the fakesupervisor started with
+// -seed=emit: its entire state is produced by the real event-emission pipeline,
+// NOT a hand-authored corpus. Keep these in lockstep with emitseed.go by hand
+// (no automated parity check), exactly as the corpus constants above.
+// ---------------------------------------------------------------------------
+
+/** The emission-driven city (emitseed.CityName). Distinct from the corpus city. */
+export const EMIT_CITY_NAME = 'dashport-emit';
+
+/** Base path for the emission city's client routes. */
+export const EMIT_CITY_BASE = `/city/${EMIT_CITY_NAME}`;
+
+/** The emission run root's bead id and workflow id (emitseed.RunEmitID). */
+export const EMIT_RUN_ID = 'run-emit';
+
+/** The emission run's formula name — the run-detail h1 and its historical lane title (emitseed.RunEmitFormula). */
+export const EMIT_FORMULA = 'mol-emit-v1';
+
+/** The emission run's two step bead ids (emitseed.StepAID / StepBID). step-a carries the fail-once/recovered edge. */
+export const EMIT_STEP_A_ID = 'run-emit.step-a';
+export const EMIT_STEP_B_ID = 'run-emit.step-b';
+
+/**
+ * The terminal lane phase label the runs list renders for the completed emission
+ * run (RunLane.phase === 'complete'). Same grammar as COMPLETED_PHASE_LABEL.
+ */
+export const EMIT_PHASE_LABEL = 'complete';
+
+/**
+ * The run-detail synopsis for the completed emission run: three nodes (root + two
+ * steps), all terminal. A projection break that leaves a node non-terminal shows
+ * "N done." with N<3.
+ */
+export const EMIT_RUN_DETAIL_SYNOPSIS = '3 nodes. 3 done.';
+
+/** The emission agent name / active-session alias (emitseed.AgentName). */
+export const EMIT_AGENT_NAME = 'emitter';
+
+/**
+ * The home synopsis for the emission scenario: one active session and zero
+ * in-flight runs (the run completed). It is the status/census-derived line that
+ * renders ONLY once the home data loaded.
+ */
+export const EMIT_HOME_SYNOPSIS = 'dashport-emit · 1 active sessions · 0 running';

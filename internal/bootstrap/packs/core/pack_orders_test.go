@@ -136,3 +136,21 @@ func TestNudgeOnRouteResolvesPoolMembers(t *testing.T) {
 		}
 	}
 }
+
+// TestCascadeNudgeWakesUnassignedRoutedDependents guards the transition from
+// blocked to ready work. Graph-v2 beads are routed before their blockers close,
+// so they often have no assignee when a blocker closes. The cascade order must
+// then resolve gc.routed_to as a pool template and nudge a live member; relying
+// only on assignee leaves the newly-ready bead stranded.
+func TestCascadeNudgeWakesUnassignedRoutedDependents(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/cascade-nudge-on-blocker-close.sh")
+	if err != nil {
+		t.Fatalf("reading cascade-nudge-on-blocker-close.sh: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{"gc.routed_to", "gc session list", "--template"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cascade-nudge script must wake unassigned routed dependents; missing %q", want)
+		}
+	}
+}

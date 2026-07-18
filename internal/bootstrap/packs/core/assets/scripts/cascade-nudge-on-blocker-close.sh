@@ -7,8 +7,10 @@
 #
 # This order subscribes to bead.closed events. For each closed bead it
 # resolves the dependents linked by a `blocks` dependency and nudges the
-# assignee of every open or deferred dependent. Idempotent: a given
-# (blocker, dependent) pair is nudged at most once. Dedup state lives in
+# assignee of every open or deferred dependent. A newly-unblocked graph bead
+# may not have an assignee yet: routing is established before its blockers
+# close. In that case, it resolves and nudges the bead's `gc.routed_to` target.
+# Idempotent: a given (blocker, dependent) pair is nudged at most once. Dedup state lives in
 # $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
 # both city- and pack-scoped — multi-city installs never cross-pollinate.
 #
@@ -87,6 +89,29 @@ set_rig_args() {
     fi
 }
 
+# Nudge either one explicitly named session or the active members of a routed
+# pool. A graph route is normally the pool template, while `gc session nudge`
+# accepts a concrete session name; resolving active members preserves the
+# pool-aware behavior of nudge-on-route.sh.
+nudge_routed_target() {
+    _target="$1"
+    _members="$(gc session list ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} --json --state active --template "$_target" 2>/dev/null \
+        | jq -r '(.sessions // [])[] | .name // .id' 2>/dev/null)" || _members=""
+    if [ -n "$_members" ]; then
+        _any=1
+        while IFS= read -r _member; do
+            [ -n "$_member" ] || continue
+            if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$_member" "$NUDGE_MESSAGE" >/dev/null 2>&1; then
+                _any=0
+            fi
+        done <<MEMBERS
+$_members
+MEMBERS
+        return "$_any"
+    fi
+    gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$_target" "$NUDGE_MESSAGE" >/dev/null 2>&1
+}
+
 # Pull recent bead.closed events. Best-effort: a read failure must not
 # crash the controller's order loop.
 EVENTS="$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
@@ -110,16 +135,20 @@ while IFS= read -r blocker; do
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
 
-    # Dependents that are still open/deferred and have an assignee to nudge.
+    # Dependents that are still open/deferred and either have an assignee or a
+    # route target. Graph-v2 work is intentionally routed before it is ready,
+    # so a dependent can become ready with no assignee after its final blocker
+    # closes. Wake the routed worker in that case.
     ROWS="$(printf '%s' "$DEPS" \
         | jq -r '.[]
                  | select((.status == "open" or .status == "deferred")
-                          and (.assignee != null and .assignee != ""))
-                 | [.id, .assignee] | @tsv' 2>/dev/null)" || ROWS=""
+                          and ((.assignee != null and .assignee != "")
+                               or (.metadata."gc.routed_to" != null and .metadata."gc.routed_to" != "")))
+                 | [.id, (.assignee // ""), (.metadata."gc.routed_to" // "")] | @tsv' 2>/dev/null)" || ROWS=""
     [ -n "$ROWS" ] || continue
 
-    while IFS="$(printf '\t')" read -r dep_id assignee; do
-        if [ -z "$dep_id" ] || [ -z "$assignee" ]; then continue; fi
+    while IFS="$(printf '\t')" read -r dep_id assignee routed_to; do
+        if [ -z "$dep_id" ]; then continue; fi
         key="$blocker|$dep_id"
         if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
@@ -127,7 +156,11 @@ while IFS= read -r blocker; do
         fi
         set_rig_args "$dep_id"
         msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
-        if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$assignee" "$msg" >/dev/null 2>&1; then
+        target="$assignee"
+        [ -n "$target" ] || target="$routed_to"
+        [ -n "$target" ] || continue
+        NUDGE_MESSAGE="$msg"
+        if nudge_routed_target "$target"; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
             NUDGED=$((NUDGED + 1))
         fi

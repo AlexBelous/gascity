@@ -153,6 +153,7 @@ func nudgeReadyRoutedPoolClaims(
 	sessStore beads.SessionStore,
 	sessionBeads []beads.Bead,
 	readyDemand map[string]scaleCheckDemand,
+	readyClaimIDs map[string]bool,
 	now time.Time,
 	stdout io.Writer,
 ) {
@@ -213,7 +214,7 @@ func nudgeReadyRoutedPoolClaims(
 		// This slot already has an acknowledged prompt for a still-ready item.
 		// Keep it reserved for that item rather than delivering a second prompt
 		// for the next queued bead before it has had a chance to claim the first.
-		if marker := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey]); marker != "" && atoiOr0(s.Metadata[idleClaimNudgeCountKey]) >= 1 && demandContainsWorkID(demand, marker) {
+		if marker := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey]); marker != "" && atoiOr0(s.Metadata[idleClaimNudgeCountKey]) >= 1 && readyClaimIDs[marker] {
 			continue
 		}
 		workID := nextUnreservedDemandWorkID(demand, reserved[template])
@@ -252,6 +253,117 @@ func nextUnreservedDemandWorkID(demand scaleCheckDemand, reserved map[string]boo
 		}
 	}
 	return ""
+}
+
+// nudgeReadyAssignedSessionClaims gives a running session one immediate claim
+// prompt when work explicitly assigned to that session becomes ready. The
+// normal reconciler already starts a stopped matching session; this handles the
+// warm-session case, where marking the session awake alone does not create a
+// new agent turn. Readiness is the store-scoped ReadyAssigned verdict, never a
+// status-only inference, so blocked assignments remain silent.
+func nudgeReadyAssignedSessionClaims(
+	sp runtime.Provider,
+	cfg *config.City,
+	sessStore beads.SessionStore,
+	sessionBeads []beads.Bead,
+	assignedWork []beads.Bead,
+	assignedStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+	readyClaimIDs map[string]bool,
+	now time.Time,
+	stdout io.Writer,
+) {
+	if sp == nil || cfg == nil || sessStore.Store == nil || len(assignedWork) == 0 || len(readyAssigned) == 0 {
+		return
+	}
+	for i := range sessionBeads {
+		s := &sessionBeads[i]
+		sessName := strings.TrimSpace(s.Metadata["session_name"])
+		if sessName == "" || !sp.IsRunning(sessName) {
+			continue
+		}
+		if strings.TrimSpace(s.Metadata["currently_processing_bead_id"]) != "" ||
+			strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey]) != "" {
+			continue // the live slot already owns work
+		}
+		readyIDs := readyAssignedWorkIDsForSession(*s, assignedWork, assignedStoreRefs, readyAssigned)
+		if len(readyIDs) == 0 {
+			continue
+		}
+		marker := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey])
+		if marker != "" && atoiOr0(s.Metadata[idleClaimNudgeCountKey]) >= 1 && readyClaimIDs[marker] {
+			continue // an earlier patrol already handed this session its next turn
+		}
+		nudge := claimNudgeFor(cfg, *s)
+		if nudge == "" {
+			continue
+		}
+		workID := readyIDs[0]
+		if err := sp.Nudge(sessName, runtime.TextContent(nudge)); err != nil {
+			fmt.Fprintf(stdout, "ready-assigned-claim-nudge: %s failed: %v\n", sessName, err) //nolint:errcheck // best-effort
+			continue
+		}
+		fmt.Fprintf(stdout, "ready-assigned-claim-nudge: nudged %s to claim %s\n", sessName, workID) //nolint:errcheck // best-effort
+		writeIdleClaimMarker(sessStore, s, workID, 1, now, stdout)
+	}
+}
+
+func readyAssignedWorkIDsForSession(
+	sessionBead beads.Bead,
+	assignedWork []beads.Bead,
+	assignedStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) []string {
+	identities := make(map[string]bool)
+	for _, identity := range sessionBeadAssigneeIdentities(sessionBead) {
+		if identity = strings.TrimSpace(identity); identity != "" {
+			identities[identity] = true
+		}
+	}
+	var ids []string
+	for i, work := range assignedWork {
+		if strings.TrimSpace(work.Status) != "open" || !identities[strings.TrimSpace(work.Assignee)] {
+			continue
+		}
+		storeRef := ""
+		if i < len(assignedStoreRefs) {
+			storeRef = assignedStoreRefs[i]
+		}
+		if !readyAssigned[storeScopedBeadKey{StoreRef: storeRef, ID: work.ID}] {
+			continue
+		}
+		ids = append(ids, work.ID)
+	}
+	return ids
+}
+
+func readyClaimWorkIDs(
+	readyRouted map[string]scaleCheckDemand,
+	assignedWork []beads.Bead,
+	assignedStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) map[string]bool {
+	ids := make(map[string]bool)
+	for _, demand := range readyRouted {
+		for _, id := range demand.WorkBeadIDs {
+			if id = strings.TrimSpace(id); id != "" {
+				ids[id] = true
+			}
+		}
+	}
+	for i, work := range assignedWork {
+		if strings.TrimSpace(work.Status) != "open" {
+			continue
+		}
+		storeRef := ""
+		if i < len(assignedStoreRefs) {
+			storeRef = assignedStoreRefs[i]
+		}
+		if readyAssigned[storeScopedBeadKey{StoreRef: storeRef, ID: work.ID}] {
+			ids[work.ID] = true
+		}
+	}
+	return ids
 }
 
 // isUnclaimedTrigger reports whether the pool slot's trigger bead is still

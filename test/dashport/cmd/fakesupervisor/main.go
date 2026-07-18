@@ -37,7 +37,53 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/test/dashport/corpus"
+	"github.com/gastownhall/gascity/test/dashport/emitseed"
 )
+
+const (
+	// seedModeCorpus replays the hand-authored testdata/dashport corpus.
+	seedModeCorpus = "corpus"
+	// seedModeEmit drives the real event-emission pipeline (package emitseed) so
+	// the served run views and home page are populated by genuine emissions, not
+	// a fixture event log.
+	seedModeEmit = "emit"
+)
+
+// loadSeed builds the SeededCityDeps for the chosen seed mode plus the city name
+// (for sampler warmup) and a close func the caller defers. The corpus mode
+// replays testdata/dashport; the emit mode drives the production write pipeline
+// to generate <cityPath>/.gc/events.jsonl and the bead-store state from scratch.
+func loadSeed(seed, resolvedData, cityPath string) (api.SeededCityDeps, string, func() error, error) {
+	switch seed {
+	case seedModeEmit:
+		res, err := emitseed.SeedByEmission(cityPath)
+		if err != nil {
+			return api.SeededCityDeps{}, "", nil, fmt.Errorf("seed by emission: %w", err)
+		}
+		return api.SeededCityDeps{
+			CityName:      res.CityName,
+			CityPath:      res.CityPath,
+			Config:        res.Config,
+			CityBeadStore: res.CityStore,
+			RigStores:     res.RigStores,
+			EventProvider: res.EventProv,
+		}, res.CityName, res.Close, nil
+	default:
+		fx, err := corpus.Load(resolvedData, cityPath)
+		if err != nil {
+			return api.SeededCityDeps{}, "", nil, fmt.Errorf("load corpus: %w", err)
+		}
+		return api.SeededCityDeps{
+			CityName:      fx.CityName,
+			CityPath:      fx.CityPath,
+			Config:        fx.Config,
+			CityBeadStore: fx.CityStore,
+			RigStores:     fx.RigStores,
+			MailProvider:  fx.MailProv,
+			EventProvider: fx.EventProv,
+		}, fx.CityName, fx.Close, nil
+	}
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -47,15 +93,23 @@ func main() {
 
 func run() error {
 	addr := flag.String("addr", "127.0.0.1:0", "listen address; port 0 picks a free port and prints it")
-	dataDir := flag.String("data", "", "path to the testdata/dashport corpus directory (required)")
+	dataDir := flag.String("data", "", "path to the testdata/dashport corpus directory (required for -seed=corpus)")
+	seed := flag.String("seed", "corpus", "seed mode: \"corpus\" replays the hand-authored corpus; \"emit\" drives the real event-emission pipeline")
 	flag.Parse()
 
-	if *dataDir == "" {
-		return errors.New("-data (path to testdata/dashport) is required")
+	if *seed != seedModeCorpus && *seed != seedModeEmit {
+		return fmt.Errorf("-seed must be %q or %q, got %q", seedModeCorpus, seedModeEmit, *seed)
 	}
-	resolvedData, err := filepath.Abs(*dataDir)
-	if err != nil {
-		return fmt.Errorf("resolve -data %q: %w", *dataDir, err)
+	resolvedData := ""
+	if *seed == seedModeCorpus {
+		if *dataDir == "" {
+			return errors.New("-data (path to testdata/dashport) is required for -seed=corpus")
+		}
+		var err error
+		resolvedData, err = filepath.Abs(*dataDir)
+		if err != nil {
+			return fmt.Errorf("resolve -data %q: %w", *dataDir, err)
+		}
 	}
 
 	// A scratch city root the corpus loader writes the seeded event log into.
@@ -78,11 +132,11 @@ func run() error {
 	_ = os.Setenv("HOME", cityPath)
 	_ = os.Setenv("ADMIN_GIT_REPO", cityPath)
 
-	fx, err := corpus.Load(resolvedData, cityPath)
+	deps, cityName, closeSeed, err := loadSeed(*seed, resolvedData, cityPath)
 	if err != nil {
-		return fmt.Errorf("load corpus: %w", err)
+		return err
 	}
-	defer fx.Close() //nolint:errcheck
+	defer closeSeed() //nolint:errcheck
 
 	// ctx drives the plane's run tailers and status samplers; cancel on signal
 	// so they drain before the process exits.
@@ -97,15 +151,7 @@ func run() error {
 	}
 	baseURL := "http://" + ln.Addr().String()
 
-	handler, stopPlane, err := api.ServeSeededCity(ctx, api.SeededCityDeps{
-		CityName:      fx.CityName,
-		CityPath:      fx.CityPath,
-		Config:        fx.Config,
-		CityBeadStore: fx.CityStore,
-		RigStores:     fx.RigStores,
-		MailProvider:  fx.MailProv,
-		EventProvider: fx.EventProv,
-	}, baseURL)
+	handler, stopPlane, err := api.ServeSeededCity(ctx, deps, baseURL)
 	if err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("serve seeded city: %w", err)
@@ -139,7 +185,7 @@ func run() error {
 	// launches its browser well after this returns — always sees populated tiles.
 	// This mirrors a real supervisor, whose samplers have long since warmed by the
 	// time an operator opens the dashboard.
-	warmHealthSamplers(ctx, baseURL, fx.CityName)
+	warmHealthSamplers(ctx, baseURL, cityName)
 
 	// Announce the bound address on stdout so the Playwright webServer / shell
 	// harness can read the port when -addr used port 0.

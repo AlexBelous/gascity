@@ -22,6 +22,12 @@ var hookClaimMutationTimeout = 10 * time.Second
 
 var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
 
+// hookClaimCommandEnvRunnerWithEnvContext is the env-plane twin of
+// hookClaimCommandRunnerWithEnvContext: BdStore routes lifecycle mutations
+// through its CommandEnvRunner, so tests must be able to stub both through
+// the same seam.
+var hookClaimCommandEnvRunnerWithEnvContext = beads.ExecCommandEnvRunnerWithEnvContext
+
 type hookClaimOptions struct {
 	Assignee           string
 	IdentityCandidates []string
@@ -622,7 +628,7 @@ func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
 func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, actor string) *beads.BdStore {
 	overrides := hookClaimEnvMap(env, dir, actor)
 	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, overrides),
-		beads.WithBdStoreCommandEnvRunner(beads.ExecCommandEnvRunnerWithEnvContext(ctx, overrides)))
+		beads.WithBdStoreCommandEnvRunner(hookClaimCommandEnvRunnerWithEnvContext(ctx, overrides)))
 }
 
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {

@@ -68,7 +68,11 @@ func TestHookRecordSessionPointersUsesCityStoreAfterRigClaim(t *testing.T) {
 	rigDir := filepath.Join(cityDir, "rigs", "demo")
 
 	originalRunner := hookClaimCommandRunnerWithEnvContext
-	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	originalEnvRunner := hookClaimCommandEnvRunnerWithEnvContext
+	t.Cleanup(func() {
+		hookClaimCommandRunnerWithEnvContext = originalRunner
+		hookClaimCommandEnvRunnerWithEnvContext = originalEnvRunner
+	})
 	var capturedDir string
 	var capturedEnv map[string]string
 	var capturedName string
@@ -76,6 +80,15 @@ func TestHookRecordSessionPointersUsesCityStoreAfterRigClaim(t *testing.T) {
 	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandRunner {
 		capturedEnv = env
 		return func(dir, name string, args ...string) ([]byte, error) {
+			capturedDir = dir
+			capturedName = name
+			capturedArgs = append([]string(nil), args...)
+			return nil, nil
+		}
+	}
+	hookClaimCommandEnvRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandEnvRunner {
+		capturedEnv = env
+		return func(dir, name string, _ map[string]string, args ...string) ([]byte, error) {
 			capturedDir = dir
 			capturedName = name
 			capturedArgs = append([]string(nil), args...)

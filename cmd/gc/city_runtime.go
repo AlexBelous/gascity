@@ -2266,11 +2266,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if readyPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: loading sessions for ready routed claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort
 	} else {
-		readyClaimIDs := readyClaimWorkIDs(result.ReadyRoutedDemand, assignedWorkBeads, assignedWorkStoreRefs, result.ReadyAssigned)
-		nudgeReadyRoutedPoolClaims(cr.sp, cr.cfg, sessStore, readyPoolBeads, result.ReadyRoutedDemand, readyClaimIDs, time.Now(), cr.stdout)
+		nudgeReadyRoutedPoolClaims(
+			cr.sp, cr.cfg, sessStore, readyPoolBeads, result.ReadyRoutedDemand,
+			assignedWorkBeads, assignedWorkStoreRefs, result.ReadyAssigned, time.Now(), cr.stdout,
+		)
 		nudgeReadyAssignedSessionClaims(
 			cr.sp, cr.cfg, sessStore, readyPoolBeads,
-			assignedWorkBeads, assignedWorkStoreRefs, result.ReadyAssigned, readyClaimIDs,
+			assignedWorkBeads, assignedWorkStoreRefs, result.ReadyAssigned, result.ReadyRoutedDemand,
 			time.Now(), cr.stdout,
 		)
 	}

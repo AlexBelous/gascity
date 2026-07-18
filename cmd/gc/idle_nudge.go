@@ -153,7 +153,9 @@ func nudgeReadyRoutedPoolClaims(
 	sessStore beads.SessionStore,
 	sessionBeads []beads.Bead,
 	readyDemand map[string]scaleCheckDemand,
-	readyClaimIDs map[string]bool,
+	assignedWork []beads.Bead,
+	assignedStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
 	now time.Time,
 	stdout io.Writer,
 ) {
@@ -214,7 +216,7 @@ func nudgeReadyRoutedPoolClaims(
 		// This slot already has an acknowledged prompt for a still-ready item.
 		// Keep it reserved for that item rather than delivering a second prompt
 		// for the next queued bead before it has had a chance to claim the first.
-		if marker := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey]); marker != "" && atoiOr0(s.Metadata[idleClaimNudgeCountKey]) >= 1 && readyClaimIDs[marker] {
+		if readyClaimPendingForSession(*s, cfg, readyDemand, assignedWork, assignedStoreRefs, readyAssigned) {
 			continue
 		}
 		workID := nextUnreservedDemandWorkID(demand, reserved[template])
@@ -269,7 +271,7 @@ func nudgeReadyAssignedSessionClaims(
 	assignedWork []beads.Bead,
 	assignedStoreRefs []string,
 	readyAssigned map[storeScopedBeadKey]bool,
-	readyClaimIDs map[string]bool,
+	readyRouted map[string]scaleCheckDemand,
 	now time.Time,
 	stdout io.Writer,
 ) {
@@ -290,8 +292,7 @@ func nudgeReadyAssignedSessionClaims(
 		if len(readyIDs) == 0 {
 			continue
 		}
-		marker := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey])
-		if marker != "" && atoiOr0(s.Metadata[idleClaimNudgeCountKey]) >= 1 && readyClaimIDs[marker] {
+		if readyClaimPendingForSession(*s, cfg, readyRouted, assignedWork, assignedStoreRefs, readyAssigned) {
 			continue // an earlier patrol already handed this session its next turn
 		}
 		nudge := claimNudgeFor(cfg, *s)
@@ -337,33 +338,31 @@ func readyAssignedWorkIDsForSession(
 	return ids
 }
 
-func readyClaimWorkIDs(
+// readyClaimPendingForSession keeps a session's acknowledged prompt scoped to
+// work it can actually claim. Bare bead IDs are not globally unique across
+// independent city and rig stores, so a ready bead for another session must
+// never suppress this session's wake.
+func readyClaimPendingForSession(
+	sessionBead beads.Bead,
+	cfg *config.City,
 	readyRouted map[string]scaleCheckDemand,
 	assignedWork []beads.Bead,
 	assignedStoreRefs []string,
 	readyAssigned map[storeScopedBeadKey]bool,
-) map[string]bool {
-	ids := make(map[string]bool)
-	for _, demand := range readyRouted {
-		for _, id := range demand.WorkBeadIDs {
-			if id = strings.TrimSpace(id); id != "" {
-				ids[id] = true
-			}
+) bool {
+	marker := strings.TrimSpace(sessionBead.Metadata[idleClaimNudgeTriggerKey])
+	if marker == "" || atoiOr0(sessionBead.Metadata[idleClaimNudgeCountKey]) < 1 {
+		return false
+	}
+	if demandContainsWorkID(readyRouted[normalizedSessionTemplate(sessionBead, cfg)], marker) {
+		return true
+	}
+	for _, id := range readyAssignedWorkIDsForSession(sessionBead, assignedWork, assignedStoreRefs, readyAssigned) {
+		if id == marker {
+			return true
 		}
 	}
-	for i, work := range assignedWork {
-		if strings.TrimSpace(work.Status) != "open" {
-			continue
-		}
-		storeRef := ""
-		if i < len(assignedStoreRefs) {
-			storeRef = assignedStoreRefs[i]
-		}
-		if readyAssigned[storeScopedBeadKey{StoreRef: storeRef, ID: work.ID}] {
-			ids[work.ID] = true
-		}
-	}
-	return ids
+	return false
 }
 
 // isUnclaimedTrigger reports whether the pool slot's trigger bead is still

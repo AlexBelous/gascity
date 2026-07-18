@@ -3178,6 +3178,67 @@ func TestCityRuntimeBeadReconcileTick_ReadyRoutedWorkNudgesWarmPool(t *testing.T
 	}
 }
 
+// A ready direct assignment needs the same immediate turn handoff as routed
+// pool work. Reconciliation can mark a warm session awake, but that alone does
+// not make its already-running agent enter a new turn.
+func TestCityRuntimeBeadReconcileTick_ReadyAssignedWorkNudgesWarmSession(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-bd-warm", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-warm",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), Nudge: "Run gc hook --claim --json now."}}},
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	work := beads.Bead{ID: "w-ready", Status: "open", Assignee: "worker-bd-warm"}
+	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+		State:             map[string]TemplateParams{},
+		ScaleCheckCounts:  map[string]int{"worker": 1},
+		PoolDesiredCounts: map[string]int{"worker": 1},
+		AssignedWorkBeads: []beads.Bead{work},
+		ReadyAssigned:     map[storeScopedBeadKey]bool{{ID: work.ID}: true},
+	}, cr.loadSessionBeadSnapshot(), nil, false)
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after tick: %v", err)
+	}
+	if got.Metadata[idleClaimNudgeTriggerKey] != work.ID {
+		t.Fatalf("ready assigned trigger marker = %q, want %q", got.Metadata[idleClaimNudgeTriggerKey], work.ID)
+	}
+	if got.Metadata[idleClaimNudgeCountKey] != "1" {
+		t.Fatalf("ready assigned nudge count = %q, want 1", got.Metadata[idleClaimNudgeCountKey])
+	}
+}
+
 func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSession(t *testing.T) {
 	store := beads.NewMemStore()
 	worker, err := store.Create(beads.Bead{

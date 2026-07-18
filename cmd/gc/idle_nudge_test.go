@@ -150,7 +150,7 @@ func TestNudgeReadyRoutedPoolClaims_NudgesWarmPoolImmediately(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var out bytes.Buffer
 
-	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, ready, map[string]bool{"w-ready": true, "w-next": true}, base, &out)
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, ready, nil, nil, nil, base, &out)
 
 	if !bytes.Contains(out.Bytes(), []byte("nudged worker-1 to claim w-ready")) {
 		t.Fatalf("expected immediate reconciler nudge, got: %q", out.String())
@@ -164,7 +164,7 @@ func TestNudgeReadyRoutedPoolClaims_NudgesWarmPoolImmediately(t *testing.T) {
 
 	// The same ready demand on a later patrol is already acknowledged by the
 	// persisted marker, so it must not inject a duplicate prompt.
-	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, ready, map[string]bool{"w-ready": true, "w-next": true}, base.Add(time.Minute), &out)
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, ready, nil, nil, nil, base.Add(time.Minute), &out)
 	if got := bytes.Count(out.Bytes(), []byte("nudged worker-1 to claim w-ready")); got != 1 {
 		t.Fatalf("ready routed work was nudged %d times, want exactly once: %q", got, out.String())
 	}
@@ -186,7 +186,7 @@ func TestNudgeReadyRoutedPoolClaims_SkipsBusyAndBlockedDemand(t *testing.T) {
 
 	// The readiness snapshot is empty when the routed work is still blocked, so
 	// no prompt is emitted merely because a route exists.
-	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, nil, nil, base, &out)
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, nil, nil, nil, nil, base, &out)
 	if out.Len() != 0 {
 		t.Fatalf("blocked routed work must not nudge: %q", out.String())
 	}
@@ -196,7 +196,7 @@ func TestNudgeReadyRoutedPoolClaims_SkipsBusyAndBlockedDemand(t *testing.T) {
 	// return to the idle pool.
 	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, map[string]scaleCheckDemand{
 		"polecat": {WorkBeadIDs: []string{"w-ready"}},
-	}, map[string]bool{"w-ready": true}, base, &out)
+	}, nil, nil, nil, base, &out)
 	if out.Len() != 0 {
 		t.Fatalf("busy pool slot must not be nudged: %q", out.String())
 	}
@@ -220,14 +220,14 @@ func TestNudgeReadyAssignedSessionClaims_NudgesReadySessionWorkOnce(t *testing.T
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var out bytes.Buffer
 
-	nudgeReadyAssignedSessionClaims(sp, cfg, store, sessions, work, nil, ready, map[string]bool{"w-assigned": true, "w-next": true}, base, &out)
+	nudgeReadyAssignedSessionClaims(sp, cfg, store, sessions, work, nil, ready, nil, base, &out)
 	if !bytes.Contains(out.Bytes(), []byte("nudged worker-1 to claim w-assigned")) {
 		t.Fatalf("expected ready assigned nudge, got: %q", out.String())
 	}
 
 	// A second ready item cannot cause a second immediate prompt before the
 	// session has claimed the first one.
-	nudgeReadyAssignedSessionClaims(sp, cfg, store, sessions, work, nil, ready, map[string]bool{"w-assigned": true, "w-next": true}, base.Add(time.Minute), &out)
+	nudgeReadyAssignedSessionClaims(sp, cfg, store, sessions, work, nil, ready, nil, base.Add(time.Minute), &out)
 	if bytes.Contains(out.Bytes(), []byte("nudged worker-1 to claim w-next")) {
 		t.Fatalf("session received a second claim prompt before claiming the first: %q", out.String())
 	}
@@ -252,7 +252,7 @@ func TestNudgeReadyAssignedSessionClaims_SkipsBlockedAndBusyWork(t *testing.T) {
 	}
 	nudgeReadyAssignedSessionClaims(sp, cfg, store, sessions, work, nil, map[storeScopedBeadKey]bool{
 		{StoreRef: "", ID: "w-assigned"}: true,
-	}, map[string]bool{"w-assigned": true}, base, &out)
+	}, nil, base, &out)
 	if out.Len() != 0 {
 		t.Fatalf("busy session must not be nudged: %q", out.String())
 	}
@@ -268,13 +268,32 @@ func TestReadyClaimNudges_ShareOnePendingPromptPerSession(t *testing.T) {
 	assigned := []beads.Bead{{ID: "w-assigned", Status: "open", Assignee: "worker-1"}}
 	readyAssigned := map[storeScopedBeadKey]bool{{StoreRef: "", ID: "w-assigned"}: true}
 	routed := map[string]scaleCheckDemand{"polecat": {WorkBeadIDs: []string{"w-routed"}}}
-	readyClaims := readyClaimWorkIDs(routed, assigned, nil, readyAssigned)
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var out bytes.Buffer
 
-	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, routed, readyClaims, base, &out)
-	nudgeReadyAssignedSessionClaims(sp, cfg, store, sessions, assigned, nil, readyAssigned, readyClaims, base, &out)
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, routed, assigned, nil, readyAssigned, base, &out)
+	nudgeReadyAssignedSessionClaims(sp, cfg, store, sessions, assigned, nil, readyAssigned, routed, base, &out)
 	if bytes.Contains(out.Bytes(), []byte("nudged worker-1 to claim w-assigned")) {
 		t.Fatalf("assigned claim nudge duplicated a pending routed prompt: %q", out.String())
+	}
+}
+
+func TestNudgeReadyRoutedPoolClaims_DoesNotSuppressOtherSessionSameID(t *testing.T) {
+	sp := runningFake(t)
+	cfg := idleClaimTestCfg()
+	session := idleClaimPoolSession()
+	delete(session.Metadata, beadmeta.TriggerBeadIDMetadataKey)
+	session.Metadata[idleClaimNudgeTriggerKey] = "same-id"
+	session.Metadata[idleClaimNudgeCountKey] = "1"
+	sessions := []beads.Bead{session}
+	store := beads.SessionStore{Store: beads.NewMemStoreFrom(0, sessions, nil)}
+	assignedElsewhere := []beads.Bead{{ID: "same-id", Status: "open", Assignee: "worker-2"}}
+	readyAssigned := map[storeScopedBeadKey]bool{{StoreRef: "other-rig", ID: "same-id"}: true}
+	routed := map[string]scaleCheckDemand{"polecat": {WorkBeadIDs: []string{"w-routed"}}}
+	var out bytes.Buffer
+
+	nudgeReadyRoutedPoolClaims(sp, cfg, store, sessions, routed, assignedElsewhere, []string{"other-rig"}, readyAssigned, time.Now(), &out)
+	if !bytes.Contains(out.Bytes(), []byte("nudged worker-1 to claim w-routed")) {
+		t.Fatalf("other session's same-ID work suppressed ready routed wake: %q", out.String())
 	}
 }

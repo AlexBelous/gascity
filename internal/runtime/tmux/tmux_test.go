@@ -802,38 +802,6 @@ func TestHasDescendantWithNames(t *testing.T) {
 	}
 }
 
-func TestGetAllDescendants(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("process-tree traversal uses pgrep")
-	}
-
-	// Test with nonexistent PID - should return empty slice
-	got := getAllDescendants("999999999")
-	if len(got) != 0 {
-		t.Errorf("getAllDescendants(nonexistent) = %v, want empty slice", got)
-	}
-
-	helper := startDescendantTestProcess(t)
-	helperPID := strconv.Itoa(helper.Process.Pid)
-	descendants := getAllDescendants(strconv.Itoa(os.Getpid()))
-	foundHelper := false
-
-	// Verify returned PIDs are all numeric strings
-	for _, pid := range descendants {
-		if pid == helperPID {
-			foundHelper = true
-		}
-		for _, c := range pid {
-			if c < '0' || c > '9' {
-				t.Errorf("getAllDescendants returned non-numeric PID: %q", pid)
-			}
-		}
-	}
-	if !foundHelper {
-		t.Fatalf("getAllDescendants(%d) = %v, want controlled child %s", os.Getpid(), descendants, helperPID)
-	}
-}
-
 func startDescendantTestProcess(t *testing.T) *exec.Cmd {
 	t.Helper()
 
@@ -1000,55 +968,6 @@ func TestKillSessionWithProcessesExcluding_NonexistentSession(t *testing.T) {
 	err := tm.KillSessionWithProcessesExcluding("nonexistent-session-xyz-12345", []string{"12345"})
 	// We don't care about the error value, just that it doesn't panic
 	_ = err
-}
-
-func TestGetProcessGroupID(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping test: process groups not available on Windows")
-	}
-
-	// Test with current process
-	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
-
-	if pgid == "" {
-		t.Error("expected non-empty PGID for current process")
-	}
-
-	// PGID should not be 0 or 1 for a normal process
-	if pgid == "0" || pgid == "1" {
-		t.Errorf("unexpected PGID %q for current process", pgid)
-	}
-
-	// Test with nonexistent PID
-	pgid = getProcessGroupID("999999999")
-	if pgid != "" {
-		t.Errorf("expected empty PGID for nonexistent process, got %q", pgid)
-	}
-}
-
-func TestGetProcessGroupMembers(t *testing.T) {
-	// Get current process's PGID
-	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
-	if pgid == "" {
-		t.Skip("could not get PGID for current process")
-	}
-
-	members := getProcessGroupMembers(pgid)
-
-	// Current process should be in the list
-	found := false
-	for _, m := range members {
-		if m == pid {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Errorf("current process %s not found in process group %s members: %v", pid, pgid, members)
-	}
 }
 
 func TestKillSessionWithProcesses_KillsProcessGroup(t *testing.T) {
@@ -1284,71 +1203,6 @@ func TestCleanupOrphanedSessions_NoSessions(t *testing.T) {
 
 	// May clean some existing GT sessions if they exist, but shouldn't error
 	t.Logf("CleanupOrphanedSessions cleaned %d sessions", cleaned)
-}
-
-func TestCollectReparentedGroupMembers(t *testing.T) {
-	// Test that collectReparentedGroupMembers correctly filters group members.
-	// A returned member must not be in the known set and must have a parent
-	// outside the known descendant set (parents that reparented to init OR to a
-	// user-session subreaper both qualify). The full parent-outside-set rule is
-	// covered deterministically with an injected parentOf by
-	// TestReparentedOrphans_* in tmux_unit_test.go; this test exercises the real
-	// getProcessGroupID/getParentPID integration.
-
-	// Test with current process's PGID
-	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
-	if pgid == "" {
-		t.Skip("could not get PGID for current process")
-	}
-
-	// Build a known set containing the current process
-	knownPIDs := map[string]bool{pid: true}
-
-	// collectReparentedGroupMembers should NOT include our PID (it's in known set)
-	reparented := collectReparentedGroupMembers(pgid, knownPIDs)
-	for _, rpid := range reparented {
-		if rpid == pid {
-			t.Errorf("collectReparentedGroupMembers returned known PID %s", pid)
-		}
-		// A returned member's parent must be outside the known set (the
-		// "parent outside the known descendant set" rule). The process may
-		// exit between collection and this check (TOCTOU race), so skip
-		// verification if getParentPID returns empty for a since-exited PID.
-		ppid := getParentPID(rpid)
-		if ppid == "" && runtime.GOOS != "windows" {
-			if err := exec.Command("kill", "-0", rpid).Run(); err != nil {
-				continue
-			}
-		}
-		if knownPIDs[ppid] {
-			t.Errorf("collectReparentedGroupMembers returned PID %s whose parent %s is in the known set", rpid, ppid)
-		}
-	}
-}
-
-func TestGetParentPID(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("getParentPID returns empty string on Windows (no /proc or ps)")
-	}
-
-	// Test with current process - should have a valid PPID
-	pid := fmt.Sprintf("%d", os.Getpid())
-	ppid := getParentPID(pid)
-	if ppid == "" {
-		t.Error("expected non-empty PPID for current process")
-	}
-
-	// PPID should not be "0" for a normal user process
-	if ppid == "0" {
-		t.Error("unexpected PPID 0 for current process")
-	}
-
-	// Test with nonexistent PID
-	ppid = getParentPID("999999999")
-	if ppid != "" {
-		t.Errorf("expected empty PPID for nonexistent process, got %q", ppid)
-	}
 }
 
 func TestKillSessionWithProcesses_DoesNotKillUnrelatedProcesses(t *testing.T) {

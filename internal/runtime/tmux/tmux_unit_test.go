@@ -17,6 +17,7 @@ func TestBuildKillTargetsFromSnapshot_ContainsBlastRadius(t *testing.T) {
 		child     = "101" // agent's child shell
 		grandkid  = "102" // deepest — must appear before its parent (deepest-first)
 		orphan    = "103" // our child that outlived its parent: pgid 100, reparented to init
+		subreaper = "104" // our orphan adopted by a user-session subreaper instead of init
 		guiApp    = "200" // Finder-like: ppid==1 but a DIFFERENT pgid — must NOT be killed
 		otherPane = "300" // an unrelated pane's tree — must NOT be killed
 	)
@@ -25,6 +26,7 @@ func TestBuildKillTargetsFromSnapshot_ContainsBlastRadius(t *testing.T) {
 		child:     {ppid: pane, pgid: "100", start: "Mon Jul 6 08:00:01 2026"},
 		grandkid:  {ppid: child, pgid: "100", start: "Mon Jul 6 08:00:02 2026"},
 		orphan:    {ppid: "1", pgid: "100", start: "Mon Jul 6 08:00:03 2026"},
+		subreaper: {ppid: "900", pgid: "100", start: "Mon Jul 6 08:00:04 2026"},
 		guiApp:    {ppid: "1", pgid: "200", start: "Mon Jul 6 07:30:00 2026"},
 		otherPane: {ppid: "1", pgid: "300", start: "Mon Jul 6 08:00:00 2026"},
 	}
@@ -38,6 +40,9 @@ func TestBuildKillTargetsFromSnapshot_ContainsBlastRadius(t *testing.T) {
 	// The reparented orphan (our pgid + ppid==1) is collected.
 	if !slices.Contains(reparented, orphan) {
 		t.Errorf("reparented orphan %s (our pgid, reparented to init) must be collected, got %v", orphan, reparented)
+	}
+	if !slices.Contains(reparented, subreaper) {
+		t.Errorf("subreaper orphan %s (our pgid, parent outside tree) must be collected, got %v", subreaper, reparented)
 	}
 	// BLAST-RADIUS GUARD: a ppid==1 GUI app on a different pgid is NEVER a target.
 	all := append(append([]string{}, descendants...), reparented...)
@@ -135,16 +140,17 @@ func TestComputeExcludingKillSet_ExternalCallerKillsEverything(t *testing.T) {
 
 	killList, killPaneLeader := computeExcludingKillSet(
 		agentPID,
-		[]string{"201"},
-		[]string{"202"},
+		[]string{"203", "201"},
+		[]string{"202", "201"},
 		exclude,
 	)
 
 	if !killPaneLeader {
 		t.Error("pane leader must be killed for an external caller")
 	}
-	if !slices.Contains(killList, "201") || !slices.Contains(killList, "202") {
-		t.Errorf("all pane descendants must be killed, got %v", killList)
+	want := []string{"203", "201", "202"}
+	if !slices.Equal(killList, want) {
+		t.Errorf("kill list = %v, want deepest-first descendants followed by unique reparented processes %v", killList, want)
 	}
 }
 

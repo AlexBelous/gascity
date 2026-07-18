@@ -3846,7 +3846,8 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 	var calls [][]string
 	var envs []map[string]string
 	prevRunner := beadsExecCommandRunnerWithEnv
-	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+	prevEnvRunner := beadsExecCommandEnvRunnerWithEnv
+	captureRunner := func(env map[string]string) beads.CommandRunner {
 		envs = append(envs, maps.Clone(env))
 		return func(_ string, name string, args ...string) ([]byte, error) {
 			if name != "bd" {
@@ -3856,7 +3857,18 @@ func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T)
 			return []byte(`[]`), nil
 		}
 	}
-	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+	beadsExecCommandRunnerWithEnv = captureRunner
+	beadsExecCommandEnvRunnerWithEnv = func(base map[string]string) beads.CommandEnvRunner {
+		return func(dir, name string, explicit map[string]string, args ...string) ([]byte, error) {
+			env := maps.Clone(base)
+			maps.Copy(env, explicit)
+			return captureRunner(env)(dir, name, args...)
+		}
+	}
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = prevRunner
+		beadsExecCommandEnvRunnerWithEnv = prevEnvRunner
+	})
 
 	status := "closed"
 	cityStore, err := openControlStoreAtForCity(cityDir, cityDir, cfg)
@@ -3972,7 +3984,8 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 	var calls [][]string
 	var envs []map[string]string
 	prevRunner := beadsExecCommandRunnerWithEnv
-	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+	prevEnvRunner := beadsExecCommandEnvRunnerWithEnv
+	captureRunner := func(env map[string]string) beads.CommandRunner {
 		envs = append(envs, maps.Clone(env))
 		return func(_ string, name string, args ...string) ([]byte, error) {
 			if name != "bd" {
@@ -3982,7 +3995,18 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 			return []byte(`[]`), nil
 		}
 	}
-	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+	beadsExecCommandRunnerWithEnv = captureRunner
+	beadsExecCommandEnvRunnerWithEnv = func(base map[string]string) beads.CommandEnvRunner {
+		return func(dir, name string, explicit map[string]string, args ...string) ([]byte, error) {
+			env := maps.Clone(base)
+			maps.Copy(env, explicit)
+			return captureRunner(env)(dir, name, args...)
+		}
+	}
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = prevRunner
+		beadsExecCommandEnvRunnerWithEnv = prevEnvRunner
+	})
 
 	status := "closed"
 	store, err := openControlStoreAtForCity(staleRigDir, cityDir, cfg)

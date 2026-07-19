@@ -1909,7 +1909,7 @@ case "$1" in
     ;;
   query)
     case "$*" in
-      *"ephemeral=true AND status=in_progress"*)
+      *"status=in_progress"*)
         printf '[{"id":"ga-ephemeral-progress","assignee":"hello-world/dog","status":"in_progress","ephemeral":true}]'
         ;;
       *)
@@ -1980,7 +1980,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	for _, want := range []string{
 		`"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`,
 		`bd list --status in_progress --assignee="$id" --json --limit=1`,
-		`ephemeral=true AND status=in_progress`,
+		`status=in_progress`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("EffectiveAssignedInProgressQuery() missing assigned recovery fragment %q: %q", want, got)
@@ -6233,7 +6233,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+	if !strings.Contains(log, "query --json status=in_progress --limit=0") {
 		t.Fatalf("hook log = %q, want ephemeral in-progress query", log)
 	}
 	if !strings.Contains(log, "update ga-ephemeral-death --assignee  --status open --set-metadata gc.run_target=hello-world/dog") {
@@ -6268,7 +6268,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+	if !strings.Contains(log, "query --json status=in_progress --limit=0") {
 		t.Fatalf("hook log = %q, want legacy ephemeral in-progress query", log)
 	}
 	if !strings.Contains(log, "update ga-legacy-ephemeral-death --assignee  --status open --set-metadata gc.run_target=hello-world/dog") {
@@ -6408,7 +6408,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+	if !strings.Contains(log, "query --json status=in_progress --limit=0") {
 		t.Fatalf("hook log = %q, want ephemeral in-progress query", log)
 	}
 	if !strings.Contains(log, "update ga-ephemeral-boot --status open") {
@@ -6443,7 +6443,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+	if !strings.Contains(log, "query --json status=in_progress --limit=0") {
 		t.Fatalf("hook log = %q, want legacy ephemeral in-progress query", log)
 	}
 	if !strings.Contains(log, "update ga-legacy-ephemeral-boot --status open") {

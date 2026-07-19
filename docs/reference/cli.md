@@ -4722,10 +4722,14 @@ Provision an isolated git worktree of the city repo itself, for bead work
 that targets HQ (the city) rather than a rig.
 
 Idempotent: reuses an existing worktree for the calling role and bead ID if
-one already exists; otherwise creates one via worktree-setup.sh. Always
-freshens onto the latest main via rebase (--freshen-commit), never resets
-it. The worktree's .beads/redirect is unconditionally rewritten to point at
-the city's own beads store.
+one already exists; otherwise creates one via the city's worktree-setup.sh.
+On reuse it invokes the script's --sync mode to freshen the worktree against
+its upstream; it never discards local work. The worktree's .beads/redirect is
+unconditionally rewritten to point at the city's own beads store.
+
+The setup script is resolved from the city's scripts (.gc/scripts or scripts/)
+or a configured pack's assets/scripts directory — the same script and layout
+rig worktrees use.
 
 The calling role is resolved from $GC_TEMPLATE (preferred) or $GC_AGENT.
 

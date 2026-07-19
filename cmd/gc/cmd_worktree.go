@@ -12,10 +12,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// hqWorktreeSetupScriptRelPath is the worktree-setup.sh path, relative to
-// the city root. HQ worktrees are provisioned by the same unmodified script
-// rig worktrees use, invoked against the city repo itself instead of a rig.
-const hqWorktreeSetupScriptRelPath = "packs/gastown/scripts/worktree-setup.sh"
+// hqWorktreeSetupScriptName is the basename of the worktree-setup.sh script
+// that provisions HQ worktrees. It is resolved at runtime from the city's
+// materialized scripts or a configured pack's assets/scripts dir (see
+// resolveHQWorktreeSetupScript) — the same script and layout rig worktrees
+// use — rather than a single hardcoded path, so the command works in both
+// local-pack and imported-pack cities.
+const hqWorktreeSetupScriptName = "worktree-setup.sh"
 
 func newWorktreeCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -43,10 +46,14 @@ func newWorktreeHQCmd(stdout, stderr io.Writer) *cobra.Command {
 that targets HQ (the city) rather than a rig.
 
 Idempotent: reuses an existing worktree for the calling role and bead ID if
-one already exists; otherwise creates one via worktree-setup.sh. Always
-freshens onto the latest main via rebase (--freshen-commit), never resets
-it. The worktree's .beads/redirect is unconditionally rewritten to point at
-the city's own beads store.
+one already exists; otherwise creates one via the city's worktree-setup.sh.
+On reuse it invokes the script's --sync mode to freshen the worktree against
+its upstream; it never discards local work. The worktree's .beads/redirect is
+unconditionally rewritten to point at the city's own beads store.
+
+The setup script is resolved from the city's scripts (.gc/scripts or scripts/)
+or a configured pack's assets/scripts directory — the same script and layout
+rig worktrees use.
 
 The calling role is resolved from $GC_TEMPLATE (preferred) or $GC_AGENT.`,
 		Args: cobra.ExactArgs(1),
@@ -56,7 +63,14 @@ The calling role is resolved from $GC_TEMPLATE (preferred) or $GC_AGENT.`,
 				fmt.Fprintf(stderr, "gc worktree hq: %v\n", err) //nolint:errcheck
 				return errExit
 			}
-			path, err := doWorktreeHQ(cityPath, args[0], stdout, stderr)
+			// Pack asset dirs are one source for locating worktree-setup.sh; a
+			// city that materializes it under .gc/scripts resolves without
+			// config, so a config-load failure here is not fatal.
+			var packDirs []string
+			if cfg, cfgErr := loadCityConfig(cityPath, io.Discard); cfgErr == nil && cfg != nil {
+				packDirs = cfg.PackDirs
+			}
+			path, err := doWorktreeHQ(cityPath, packDirs, args[0], stdout, stderr)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc worktree hq: %v\n", err) //nolint:errcheck
 				return errExit
@@ -82,12 +96,42 @@ func resolveCallingRole() string {
 	return name
 }
 
+// resolveHQWorktreeSetupScript returns the path to the worktree-setup.sh the
+// HQ command should invoke. It searches, in order: the city's materialized
+// scripts (.gc/scripts, then scripts/), then each configured pack dir's
+// assets/scripts and scripts subdirs — the same layout rigs resolve
+// {{.ConfigDir}}/assets/scripts/worktree-setup.sh from. It returns an error
+// naming every searched location when no script exists.
+func resolveHQWorktreeSetupScript(cityPath string, packDirs []string) (string, error) {
+	candidates := []string{
+		filepath.Join(cityPath, ".gc", "scripts", hqWorktreeSetupScriptName),
+		filepath.Join(cityPath, "scripts", hqWorktreeSetupScriptName),
+	}
+	for _, dir := range packDirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		candidates = append(candidates,
+			filepath.Join(dir, "assets", "scripts", hqWorktreeSetupScriptName),
+			filepath.Join(dir, "scripts", hqWorktreeSetupScriptName),
+		)
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%s not found in city scripts or configured pack asset dirs (searched: %s)",
+		hqWorktreeSetupScriptName, strings.Join(candidates, ", "))
+}
+
 // doWorktreeHQ provisions (or reuses) an HQ-targeting bead worktree at
-// cityPath/.gc/worktrees/_hq/<role>-<beadID> via worktree-setup.sh, always
-// with --freshen-commit, and unconditionally rewrites the worktree's
-// .beads/redirect to point at cityPath/.beads. Returns the worktree's
+// cityPath/.gc/worktrees/_hq/<role>-<beadID> via the resolved worktree-setup.sh
+// in --sync mode, and unconditionally rewrites the worktree's .beads/redirect
+// to point at cityPath/.beads. packDirs are the city's configured pack
+// directories, used to locate the setup script. Returns the worktree's
 // absolute path.
-func doWorktreeHQ(cityPath, beadID string, stdout, stderr io.Writer) (string, error) {
+func doWorktreeHQ(cityPath string, packDirs []string, beadID string, stdout, stderr io.Writer) (string, error) {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" {
 		return "", fmt.Errorf("missing bead ID")
@@ -103,9 +147,16 @@ func doWorktreeHQ(cityPath, beadID string, stdout, stderr io.Writer) (string, er
 	if !isStrictlyUnderDir(bucketDir, worktreeDir) {
 		return "", fmt.Errorf("bead ID %q resolves outside the HQ worktree bucket", beadID)
 	}
-	scriptPath := filepath.Join(cityPath, hqWorktreeSetupScriptRelPath)
 
-	cmd := exec.Command(scriptPath, cityPath, worktreeDir, role, "--freshen-commit") // #nosec G204 -- fixed, unmodified in-repo script
+	scriptPath, err := resolveHQWorktreeSetupScript(cityPath, packDirs)
+	if err != nil {
+		return "", err
+	}
+
+	// #nosec G204 -- scriptPath is resolved only from the city's own scripts or
+	// a configured pack's assets/scripts dir (never from user argv); the bead
+	// ID is path-traversal-gated above and the role is env-derived.
+	cmd := exec.Command(scriptPath, cityPath, worktreeDir, role, "--sync")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {

@@ -63,6 +63,19 @@ func poolDemandMigrationFilterJQ(limit int) string {
 }
 
 func bdQueryEphemeralStatusShell(status string) string {
+	// The compound predicate `ephemeral=true AND status=in_progress` silently
+	// returns zero rows on bd v1.1.x even when in_progress wisps exist (the
+	// wisp leg of the AND drops non-open statuses; plain `status=in_progress`
+	// DOES return them). That dead probe blinded the assigned-in-progress
+	// self-adoption tier to every molecule step wisp, so respawned sessions
+	// reported "No routed work" while their own claimed step sat in_progress —
+	// 7 of 21 review runs were stranded this way on 2026-07-19 (ga-oevup7).
+	// Query by status alone for non-open statuses; the callers' jq assignee
+	// filter keeps the result scoped, and duplicate coverage with the
+	// non-ephemeral list tier is harmless (each tier exits on first hit).
+	if status != "open" {
+		return `bd query --json ` + shellquote.Quote("status="+status) + ` --limit=0`
+	}
 	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
 }
 

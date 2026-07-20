@@ -306,6 +306,41 @@ func reapNestedClosedBeadWorktrees(
 			continue
 		}
 
+		// Revalidate immediately before the destructive call: f.SafeToRm was
+		// classified once at the top of this function by
+		// DiscoverNestedWorktrees, but bead-store I/O and the containment
+		// guard above run between that snapshot and WorktreeRemove(force=true)
+		// below — force bypasses git's own dirty-worktree refusal, so a
+		// classification that went stale in that window is the only thing
+		// standing between this call and destroying live work. Mirrors
+		// NestedWorktreePruneCheck.Fix()'s established revalidate-then-remove
+		// pattern.
+		current := doctor.ClassifyNestedWorktree(newNestedWorktreeGitProbe, f.Path, f.Parent, f.Branch)
+		if !current.SafeToRm {
+			reason := current.Reason
+			if reason == "" {
+				reason = "safety revalidation failed"
+			}
+			fmt.Fprintf(stderr, //nolint:errcheck
+				"reapNestedClosedBeadWorktrees: skipping %s (bead %s closed but revalidation found: %s)\n",
+				f.Path, beadID, reason,
+			)
+			if raw, err := json.Marshal(events.BeadWorktreeReapSkippedPayload{
+				BeadID: beadID,
+				Path:   f.Path,
+				Rig:    rigName,
+				Reason: reason,
+			}); err == nil {
+				rec.Record(events.Event{
+					Type:    events.BeadWorktreeReapSkipped,
+					Actor:   "gc",
+					Subject: beadID,
+					Payload: raw,
+				})
+			}
+			continue
+		}
+
 		// Remove the worktree, rooted at its immediate parent (guaranteed to
 		// share its git admin dir by construction of a NestedWorktreeFinding)
 		// — mirrors NestedWorktreePruneCheck.Fix()'s established convention

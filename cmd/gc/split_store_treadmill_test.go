@@ -367,13 +367,11 @@ func TestSessionHasOpenAssignedWork_FindsClaimedInfraWispOnSplitCity(t *testing.
 
 	primary := beads.NewMemStoreHonoringIDs()
 	rigStore := beads.NewMemStore()
-	sess := beads.Bead{
-		ID:   "s-w1",
-		Type: "session",
-		Metadata: map[string]string{
-			"template":     qualified,
-			"session_name": "executor-1",
-		},
+	sess := session.Info{
+		ID:                  "s-w1",
+		Type:                "session",
+		Template:            qualified,
+		SessionNameMetadata: "executor-1",
 	}
 	if _, err := primary.Create(beads.Bead{
 		ID:       "gcg-wisp-1",
@@ -403,13 +401,11 @@ func TestSessionHasOpenAssignedWork_IgnoresPrimaryStoreOnLegacyCity(t *testing.T
 
 	primary := beads.NewMemStoreHonoringIDs()
 	rigStore := beads.NewMemStore()
-	sess := beads.Bead{
-		ID:   "s-w1",
-		Type: "session",
-		Metadata: map[string]string{
-			"template":     qualified,
-			"session_name": "executor-1",
-		},
+	sess := session.Info{
+		ID:                  "s-w1",
+		Type:                "session",
+		Template:            qualified,
+		SessionNameMetadata: "executor-1",
 	}
 	if _, err := primary.Create(beads.Bead{
 		ID:       "gcg-wisp-1",

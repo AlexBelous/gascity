@@ -78,14 +78,14 @@ func TestCollectAllOpenSessionBeadsReadsInfraStoreOnSplitCity(t *testing.T) {
 	// leading store; collectAllOpenSessionBeads takes it as cityStore) and the
 	// standalone start path (cmd_start.go passes cliSessionStore(...)).
 	rigStores := map[string]beads.Store{"alpha": rigWork}
-	got, err := collectAllOpenSessionBeads(cfg, infra, rigStores, nil)
+	got, err := collectAllOpenSessionInfos(cfg, infra, rigStores, nil)
 	if err != nil {
-		t.Fatalf("collectAllOpenSessionBeads returned err = %v", err)
+		t.Fatalf("collectAllOpenSessionInfos returned err = %v", err)
 	}
 
-	if !containsBeadID(got, sessionBead.ID) {
-		t.Fatalf("collectAllOpenSessionBeads did not find the infra-resident session bead %q; got %d bead(s): %v",
-			sessionBead.ID, len(got), beadIDs(got))
+	if !containsSessionInfoID(got, sessionBead.ID) {
+		t.Fatalf("collectAllOpenSessionInfos did not find the infra-resident session bead %q; got %d session(s): %v",
+			sessionBead.ID, len(got), sessionInfoIDs(got))
 	}
 
 	// Discrimination control: had the reconciler fanned only the WORK stores as
@@ -93,11 +93,11 @@ func TestCollectAllOpenSessionBeadsReadsInfraStoreOnSplitCity(t *testing.T) {
 	// the infra-resident session bead would be invisible. Prove that failure mode
 	// concretely, so "already covered" rests on the infra store being the leading
 	// candidate, not on the bead happening to be scanned some other way.
-	missed, err := collectAllOpenSessionBeads(cfg, rigWork, rigStores, nil)
+	missed, err := collectAllOpenSessionInfos(cfg, rigWork, rigStores, nil)
 	if err != nil {
-		t.Fatalf("collectAllOpenSessionBeads (work-leading control) returned err = %v", err)
+		t.Fatalf("collectAllOpenSessionInfos (work-leading control) returned err = %v", err)
 	}
-	if containsBeadID(missed, sessionBead.ID) {
+	if containsSessionInfoID(missed, sessionBead.ID) {
 		t.Fatalf("work-leading control unexpectedly found the infra-resident session bead %q; "+
 			"the discrimination control is not exercising the miss path", sessionBead.ID)
 	}
@@ -133,19 +133,19 @@ func TestCoordClassStoreCandidatesLeadingCandidateIsInfraStoreOnSplitCity(t *tes
 	}
 }
 
-func containsBeadID(list []beads.Bead, id string) bool {
-	for _, b := range list {
-		if b.ID == id {
+func containsSessionInfoID(list []session.Info, id string) bool {
+	for _, info := range list {
+		if info.ID == id {
 			return true
 		}
 	}
 	return false
 }
 
-func beadIDs(list []beads.Bead) []string {
+func sessionInfoIDs(list []session.Info) []string {
 	ids := make([]string, 0, len(list))
-	for _, b := range list {
-		ids = append(ids, b.ID)
+	for _, info := range list {
+		ids = append(ids, info.ID)
 	}
 	return ids
 }

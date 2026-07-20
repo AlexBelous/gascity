@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // closableMemStore is a MemStore that records whether CloseStore was called, so a
@@ -75,7 +76,7 @@ func TestUpdateInfraSucceedsCityFails(t *testing.T) {
 		return infraStoreOpenResult(newInfra), true, nil // infra reopen SUCCEEDS
 	})
 	defer restoreInfra()
-	restoreCity := swapOpenCityStore(func(string) (beads.StoreOpenResult, error) {
+	restoreCity := swapOpenCityStore(func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, errors.New("city store reopen failed") // city FAILS
 	})
 	defer restoreCity()
@@ -111,7 +112,7 @@ func TestUpdateInfraFailsCitySucceeds(t *testing.T) {
 		return beads.StoreOpenResult{}, true, errors.New("transient infra open error") // infra FAILS
 	})
 	defer restoreInfra()
-	restoreCity := swapOpenCityStore(func(string) (beads.StoreOpenResult, error) {
+	restoreCity := swapOpenCityStore(func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return cityStoreOpenResult(beads.NewMemStore()), nil // city SUCCEEDS
 	})
 	defer restoreCity()
@@ -141,7 +142,7 @@ func TestUpdateInfraDeactivatedCitySucceeds(t *testing.T) {
 		return beads.StoreOpenResult{}, false, nil // present=false ⇒ deactivation
 	})
 	defer restoreInfra()
-	restoreCity := swapOpenCityStore(func(string) (beads.StoreOpenResult, error) {
+	restoreCity := swapOpenCityStore(func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return cityStoreOpenResult(beads.NewMemStore()), nil // city SUCCEEDS
 	})
 	defer restoreCity()
@@ -168,7 +169,7 @@ func swapOpenCityInfraStore(fn func(string) (beads.StoreOpenResult, bool, error)
 	return func() { newControllerStateOpenCityInfraStore = prev }
 }
 
-func swapOpenCityStore(fn func(string) (beads.StoreOpenResult, error)) func() {
+func swapOpenCityStore(fn func(string, gate.Mode) (beads.StoreOpenResult, error)) func() {
 	prev := newControllerStateOpenCityStore
 	newControllerStateOpenCityStore = fn
 	return func() { newControllerStateOpenCityStore = prev }

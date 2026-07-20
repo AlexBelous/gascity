@@ -117,7 +117,7 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 
 	released := releaseOrphanedPoolAssignments(
 		e.sessionsStore(), e.cfg, e.cityPath,
-		[]beads.Bead{sess},
+		sessionInfosFromBeads([]beads.Bead{sess}),
 		got, stores, refs,
 		e.rigStores,
 		e.sessionsStore(),
@@ -521,7 +521,7 @@ func conformanceWakeOwnershipFastPath(t *testing.T, e splitEnv) {
 	kept, keptRefs := filterAssignedWorkBeadsForSessionWake(
 		e.cfg, e.cityPath, sessionInfosFromBeads([]beads.Bead{sess}), []beads.Bead{wisp}, []string{""},
 	)
-	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, []beads.Bead{sess}, true)
+	index := makeOpenSessionStoreRefIndex(e.cityPath, e.cfg, sessionInfosFromBeads([]beads.Bead{sess}), true)
 	owns := openSessionOwnsWork(nil, index, sess.ID, "", true)
 
 	if e.split {

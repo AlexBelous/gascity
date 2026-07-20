@@ -4894,7 +4894,7 @@ func TestSlingSourceWorkflowStoreCandidatesUseAuthoritativeProviders(t *testing.
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "local", Path: rigPath}}}
 	providers := make(map[string]string)
-	stores, _, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
+	stores, _, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", false, func(scopeRoot string) string {
 		return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
 	}, func(dir string) (beads.Store, error) {
 		providers[dir] = authoritativeBeadsProviderForScope(dir, cityPath)
@@ -4924,7 +4924,7 @@ provider = "exec:/tmp/remote-beads"
 		t.Fatal(err)
 	}
 	remoteProviders := make(map[string]string)
-	_, _, err = openSourceWorkflowStoresWith(&config.City{}, remoteCity, "", func(dir string) (beads.Store, error) {
+	_, _, err = openSourceWorkflowStoresWith(&config.City{}, remoteCity, "", false, func(dir string) (beads.Store, error) {
 		remoteProviders[dir] = authoritativeBeadsProviderForScope(dir, remoteCity)
 		return beads.NewMemStore(), nil
 	})

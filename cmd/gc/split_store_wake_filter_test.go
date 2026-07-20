@@ -127,7 +127,7 @@ func TestOpenSessionStoreRefIndex_InfraLegOnSplitCity(t *testing.T) {
 	cityPath, cfg, sessions := newRigBoundWakeHolders(t)
 	seedSplitCityInfraMarker(t, cityPath)
 
-	index := makeOpenSessionStoreRefIndex(cityPath, cfg, sessions, true)
+	index := makeOpenSessionStoreRefIndex(cityPath, cfg, sessionInfosFromBeads(sessions), true)
 	if !openSessionOwnsWork(nil, index, "session-1", "", true) {
 		t.Errorf("rig-bound holder does not own its infra-arm (store-ref \"\") claim on a split city — orphan release falls to the per-wisp live probe")
 	}
@@ -145,7 +145,7 @@ func TestOpenSessionStoreRefIndex_InfraLegOnSplitCity(t *testing.T) {
 func TestOpenSessionStoreRefIndex_LegacyCityByteIdentical(t *testing.T) {
 	cityPath, cfg, sessions := newRigBoundWakeHolders(t) // no infra marker → legacy city
 
-	index := makeOpenSessionStoreRefIndex(cityPath, cfg, sessions, true)
+	index := makeOpenSessionStoreRefIndex(cityPath, cfg, sessionInfosFromBeads(sessions), true)
 	if openSessionOwnsWork(nil, index, "session-1", "", true) {
 		t.Errorf("city leg (store-ref \"\") became owned by a rig-bound holder on a LEGACY city (byte-identity violated)")
 	}
@@ -197,7 +197,7 @@ func TestReleaseOrphanedPoolAssignments_OwnsClaimedInfraWispWithoutLiveProbe(t *
 	// the claim, so surviving proves the store-ref index owns the infra leg.
 	released := releaseOrphanedPoolAssignments(
 		workStore, cfg, cityPath,
-		[]beads.Bead{sess},
+		sessionInfosFromBeads([]beads.Bead{sess}),
 		[]beads.Bead{wisp},
 		[]beads.Store{infraStore},
 		[]string{""},
@@ -255,7 +255,7 @@ func TestReleaseOrphanedPoolAssignments_ReleasesCityLegOnLegacyCity(t *testing.T
 
 	released := releaseOrphanedPoolAssignments(
 		workStore, cfg, cityPath,
-		[]beads.Bead{sess},
+		sessionInfosFromBeads([]beads.Bead{sess}),
 		[]beads.Bead{wisp},
 		[]beads.Store{ownerStore},
 		[]string{""},

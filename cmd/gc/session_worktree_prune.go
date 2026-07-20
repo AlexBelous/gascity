@@ -101,6 +101,16 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		return false
 	}
 
+	// Containment guard: never remove a worktree that still has a nested
+	// worktree living inside it. Nested reaping runs before this phase
+	// within a tick, so anything still nested here was deliberately left
+	// behind — removing workerDir would destroy that content as
+	// collateral damage.
+	if blocked, reason := blockedByNestedWorktree(workerDir); blocked {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, reason) //nolint:errcheck
+		return false
+	}
+
 	// Run `git worktree remove` from the rig root rather than from the
 	// worktree being removed: git refuses to remove a worktree whose path
 	// equals cwd in some configurations, and operating from cwd of a
@@ -170,6 +180,16 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	}
 	if hasStashes {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
+		return
+	}
+
+	// Containment guard: never remove a worktree that still has a nested
+	// worktree living inside it. Nested reaping runs before this phase
+	// within a tick, so anything still nested here was deliberately left
+	// behind — removing workerDir would destroy that content as
+	// collateral damage.
+	if blocked, reason := blockedByNestedWorktree(workerDir); blocked {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, reason) //nolint:errcheck
 		return
 	}
 

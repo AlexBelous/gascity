@@ -1151,6 +1151,9 @@ func (cr *CityRuntime) tick(
 	}
 	if cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled() {
 		phaseStart = time.Now()
+		nestedBeadWorktreesReaped := reapNestedClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.rec, cr.stderr)
+		recordPhase(TraceSiteControllerTickPhase, "reap_nested_closed_bead_worktrees", phaseStart, map[string]any{"reaped": nestedBeadWorktreesReaped})
+		phaseStart = time.Now()
 		beadWorktreesReaped := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.rec, cr.stderr)
 		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{"reaped": beadWorktreesReaped})
 		phaseStart = time.Now()

@@ -54,6 +54,7 @@ func setupAgentHomeWorktreeCleanupTest(t *testing.T) (cityPath, builderWTPath st
 		t.Fatalf("creating builder worktree: %v", err)
 	}
 	store = beads.NewMemStore()
+	stubNoNestedWorktrees(t)
 	return
 }
 
@@ -415,5 +416,50 @@ func TestCleanupClosedBeadAgentHomeWorktrees_DetachesToMainNotCurrentBranch(t *t
 	}
 	if fake.checkoutDetachRef == "origin/builder/ga-abc123" {
 		t.Error("reset detached to the closed bead branch; must reset to origin/main")
+	}
+}
+
+// TestCleanupClosedBeadAgentHomeWorktrees_CaseB_NestedWorktreeBlocks verifies
+// that the containment guard blocks the Case B reset+marker-removal when the
+// worktree still contains a nested worktree, even though the bead is closed
+// and there's no uncommitted work.
+func TestCleanupClosedBeadAgentHomeWorktrees_CaseB_NestedWorktreeBlocks(t *testing.T) {
+	cityPath, builderWTPath, _ := setupAgentHomeWorktreeCleanupTest(t)
+	cfg := agentHomeConfig()
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-abc123", Status: "closed"}}, nil)
+
+	stalePath := filepath.Join(builderWTPath, worktreeStaleFileName)
+	if err := os.WriteFile(stalePath, []byte("branch=builder/ga-abc123\n"), 0o644); err != nil {
+		t.Fatalf("write stale marker: %v", err)
+	}
+
+	var fake *fakeAgentWorktreeGit
+	orig := newAgentWorktreeGitProbe
+	defer func() { newAgentWorktreeGitProbe = orig }()
+	newAgentWorktreeGitProbe = func(_ string) agentWorktreeGitProbe {
+		fake = &fakeAgentWorktreeGit{
+			isRepo:        true,
+			currentBranch: "builder/ga-abc123",
+		}
+		return fake
+	}
+
+	nested := filepath.Join(builderWTPath, "child-worktree")
+	stubNestedWorktreeFound(t, nested)
+
+	var stderr bytes.Buffer
+	cleaned := cleanupClosedBeadAgentHomeWorktrees(cityPath, cfg, map[string]beads.Store{"ga-rig": store}, &stderr)
+
+	if cleaned != 0 {
+		t.Errorf("cleaned = %d, want 0 when a nested worktree is still present", cleaned)
+	}
+	if fake.checkoutDetachRef != "" {
+		t.Error("CheckoutDetach was called, want skipped when a nested worktree blocks the reset")
+	}
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Error("stale marker removed despite nested worktree, want untouched")
+	}
+	if !strings.Contains(stderr.String(), "nested") {
+		t.Errorf("stderr = %q, want mention of nested worktree", stderr.String())
 	}
 }

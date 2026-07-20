@@ -129,6 +129,16 @@ func cleanupClosedBeadAgentHomeWorktrees(
 				continue
 			}
 
+			// Containment guard: never reset a worktree that still has a
+			// nested worktree living inside it. Nested reaping runs before
+			// this phase within a tick, so anything still nested here was
+			// deliberately left behind; resetting the parent's branch out
+			// from under a live nested worktree would corrupt it.
+			if blocked, reason := blockedByNestedWorktree(worktreePath); blocked {
+				fmt.Fprintf(stderr, "cleanupClosedBeadAgentHomeWorktrees: skipping %s: bead %s closed but %s\n", worktreePath, beadID, reason) //nolint:errcheck
+				continue
+			}
+
 			defaultBranch, err := wg.DefaultBranch()
 			if err != nil || strings.TrimSpace(defaultBranch) == "" {
 				defaultBranch = "main"

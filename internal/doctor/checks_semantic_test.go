@@ -600,11 +600,11 @@ func TestWorktreeDiskSizeCheck_AllMeasurementsFailedReturnsWarning(t *testing.T)
 
 // --- NestedWorktreePruneCheck ---
 
-// fakeGitWorktree implements gitWorktree for tests. Behaves like the
+// fakeGitWorktree implements GitWorktree for tests. Behaves like the
 // shared admin dir of a multi-worktree repo: list returns the same
 // entries regardless of which path is used to construct it. Per-path
 // "uncommitted/unpushed/stashed" flags drive classifyNested.
-var _ gitWorktree = (*fakeGitWorktree)(nil)
+var _ GitWorktree = (*fakeGitWorktree)(nil)
 
 type fakeGitWorktree struct {
 	listResp    []git.Worktree
@@ -701,7 +701,7 @@ func TestNestedWorktreePruneCheck_NoNestedWorktrees(t *testing.T) {
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "home-branch"},
@@ -745,7 +745,7 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "home-branch"},
@@ -769,7 +769,7 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 
 	var safeCount, unsafeCount int
 	for _, f := range c.findings {
-		if f.safeToRm {
+		if f.SafeToRm {
 			safeCount++
 		} else {
 			unsafeCount++
@@ -783,7 +783,7 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 	}
 
 	for _, f := range c.findings {
-		if f.path == home {
+		if f.Path == home {
 			t.Errorf("agent home %q should not be a nested finding", home)
 		}
 	}
@@ -811,7 +811,7 @@ func TestNestedWorktreePruneCheck_PruneTrueEscalatesSeverity(t *testing.T) {
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{NestedWorktreePrune: true},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "home-branch"},
@@ -839,7 +839,7 @@ func TestNestedWorktreePruneCheck_AllUnsafeReturnsOK(t *testing.T) {
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "home-branch"},
@@ -871,7 +871,7 @@ func TestNestedWorktreePruneCheck_AllUnsafeWithListingErrorReturnsWarning(t *tes
 
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			switch path {
 			case homeB:
 				return &fakeGitWorktree{
@@ -916,7 +916,7 @@ func TestNestedWorktreePruneCheck_DeduplicatesAcrossHomes(t *testing.T) {
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: homeA, Branch: "a"},
@@ -963,7 +963,7 @@ func TestNestedWorktreePruneCheck_FixContinuesPastError(t *testing.T) {
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "home"},
@@ -1007,7 +1007,7 @@ func TestNestedWorktreePruneCheck_FixRevalidatesBeforeRemove(t *testing.T) {
 	uncommitted := map[string]bool{}
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "h"},
@@ -1046,7 +1046,7 @@ func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "h"},
@@ -1068,11 +1068,11 @@ func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
 		t.Fatalf("findings = %d, want 2", len(c.findings))
 	}
 	for _, f := range c.findings {
-		if f.safeToRm {
-			t.Fatalf("%s should not be safe after probe error", f.path)
+		if f.SafeToRm {
+			t.Fatalf("%s should not be safe after probe error", f.Path)
 		}
-		if !strings.Contains(f.reason, "probe failed") {
-			t.Errorf("reason for %s = %q, want probe failure", f.path, f.reason)
+		if !strings.Contains(f.Reason, "probe failed") {
+			t.Errorf("reason for %s = %q, want probe failure", f.Path, f.Reason)
 		}
 	}
 	if err := c.Fix(&CheckContext{}); err != nil {
@@ -1120,7 +1120,7 @@ func TestNestedWorktreePruneCheck_DedupsWorktreeListAcrossSharedAdminDir(t *test
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: homeA, Branch: "a"},
@@ -1163,7 +1163,7 @@ func TestNestedWorktreePruneCheck_DedupCoversNestedUnderEveryHome(t *testing.T) 
 	var listCalls []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: homeA, Branch: "a"},
@@ -1189,7 +1189,7 @@ func TestNestedWorktreePruneCheck_DedupCoversNestedUnderEveryHome(t *testing.T) 
 	}
 	parents := map[string]bool{}
 	for _, f := range c.findings {
-		parents[f.parent] = true
+		parents[f.Parent] = true
 	}
 	if !parents[homeA] || !parents[homeB] {
 		t.Errorf("findings should attribute parents to both homes; got %v", parents)
@@ -1210,7 +1210,7 @@ func TestNestedWorktreePruneCheck_FixUsesParentForGitContext(t *testing.T) {
 	var removes, removeFrom []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "h"},
@@ -1249,7 +1249,7 @@ func TestNestedWorktreePruneCheck_BrokenRepoGate(t *testing.T) {
 	var removes []string
 	c := &NestedWorktreePruneCheck{
 		cfg: config.DoctorConfig{},
-		newGit: func(path string) gitWorktree {
+		newGit: func(path string) GitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
 					{Path: home, Branch: "h"},
@@ -1268,11 +1268,11 @@ func TestNestedWorktreePruneCheck_BrokenRepoGate(t *testing.T) {
 	if len(c.findings) != 1 {
 		t.Fatalf("findings = %d, want 1", len(c.findings))
 	}
-	if c.findings[0].safeToRm {
-		t.Error("broken candidate should NOT be safeToRm")
+	if c.findings[0].SafeToRm {
+		t.Error("broken candidate should NOT be SafeToRm")
 	}
-	if c.findings[0].reason != "git status unreadable" {
-		t.Errorf("reason = %q, want %q", c.findings[0].reason, "git status unreadable")
+	if c.findings[0].Reason != "git status unreadable" {
+		t.Errorf("reason = %q, want %q", c.findings[0].Reason, "git status unreadable")
 	}
 }
 

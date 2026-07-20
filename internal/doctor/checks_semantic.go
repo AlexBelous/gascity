@@ -356,21 +356,23 @@ func (c *WorktreeDiskSizeCheck) Fix(_ *CheckContext) error { return nil }
 
 // --- Nested-worktree prune check ---
 
-// nestedWorktreeFinding describes one nested worktree under an agent
+// NestedWorktreeFinding describes one nested worktree under an agent
 // home and whether it is mechanically safe to remove.
-type nestedWorktreeFinding struct {
-	path     string // absolute, canonical
-	parent   string // agent home that contains it
-	branch   string // branch name (best-effort; empty for detached)
-	reason   string // why it was rejected (empty if safe)
-	probeErr bool   // rejected because a safety probe failed
-	safeToRm bool
+type NestedWorktreeFinding struct {
+	Path     string // absolute, canonical
+	Parent   string // agent home that contains it
+	Branch   string // branch name (best-effort; empty for detached)
+	Reason   string // why it was rejected (empty if safe)
+	ProbeErr bool   // rejected because a safety probe failed
+	SafeToRm bool
 }
 
-// gitWorktree is the slice of internal/git.Git used by NestedWorktreePruneCheck.
-// Defined as an interface so tests can inject a fake without standing up real
-// repositories.
-type gitWorktree interface {
+// GitWorktree is the slice of internal/git.Git used by
+// NestedWorktreePruneCheck and the shared nested-worktree discovery
+// core (DiscoverNestedWorktrees, ListNestedWorktrees). Defined as an
+// interface so callers — gc doctor, the reconciler tick, tests — can
+// inject a fake without standing up real repositories.
+type GitWorktree interface {
 	IsRepo() bool
 	WorktreeList() ([]git.Worktree, error)
 	HasUncommittedWork() bool
@@ -390,18 +392,18 @@ type gitWorktree interface {
 // is reclaimable, regardless of which agent created it.
 type NestedWorktreePruneCheck struct {
 	cfg config.DoctorConfig
-	// newGit produces a gitWorktree handle for a given path. Production
+	// newGit produces a GitWorktree handle for a given path. Production
 	// uses git.New; tests inject fakes.
-	newGit func(path string) gitWorktree
+	newGit func(path string) GitWorktree
 	// findings is populated by Run for Fix to consume.
-	findings []nestedWorktreeFinding
+	findings []NestedWorktreeFinding
 }
 
 // NewNestedWorktreePruneCheck creates the prune check using real git.
 func NewNestedWorktreePruneCheck(cfg config.DoctorConfig) *NestedWorktreePruneCheck {
 	return &NestedWorktreePruneCheck{
 		cfg:    cfg,
-		newGit: func(p string) gitWorktree { return git.New(p) },
+		newGit: func(p string) GitWorktree { return git.New(p) },
 	}
 }
 
@@ -415,103 +417,13 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.findings = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
-	rigEntries, err := os.ReadDir(wtRoot)
+	findings, listingErrs, err := DiscoverNestedWorktrees(ctx.CityPath, c.newGit)
 	if err != nil {
-		if os.IsNotExist(err) {
-			r.Status = StatusOK
-			r.Message = "no .gc/worktrees directory"
-			return r
-		}
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("reading .gc/worktrees: %v", err)
+		r.Message = err.Error()
 		return r
 	}
-
-	// Discover agent homes: <wtRoot>/<rig>/<agent>/ that hold a .git
-	// pointer. Multiple rigs may share a single repo, so we deduplicate
-	// nested findings by canonical path below.
-	var homes []string
-	for _, rigEntry := range rigEntries {
-		if !rigEntry.IsDir() {
-			continue
-		}
-		rigDir := filepath.Join(wtRoot, rigEntry.Name())
-		agentEntries, err := os.ReadDir(rigDir)
-		if err != nil {
-			continue
-		}
-		for _, agentEntry := range agentEntries {
-			if !agentEntry.IsDir() {
-				continue
-			}
-			home := filepath.Join(rigDir, agentEntry.Name())
-			if isGitWorktreePath(home) {
-				homes = append(homes, pathutil.NormalizePathForCompare(home))
-			}
-		}
-	}
-
-	if len(homes) == 0 {
-		r.Status = StatusOK
-		r.Message = "no agent worktrees to inspect"
-		return r
-	}
-
-	// Group homes by their shared git admin dir so each admin's
-	// WorktreeList runs exactly once but every entry is evaluated
-	// against ALL homes in that admin group. Admin-less homes (parse
-	// failure, main checkout) keep one group per home.
-	adminGroups := make(map[string][]string)
-	var adminOrder []string
-	for _, home := range homes {
-		key := readGitAdminDir(home)
-		if key == "" {
-			key = "home:" + home
-		}
-		if _, seen := adminGroups[key]; !seen {
-			adminOrder = append(adminOrder, key)
-		}
-		adminGroups[key] = append(adminGroups[key], home)
-	}
-
-	seen := make(map[string]bool)
-	var listingErrs []string
-	for _, key := range adminOrder {
-		group := adminGroups[key]
-		// Pick the first home as the WorktreeList source. All homes
-		// in a group share the admin dir, so any of them returns the
-		// same content.
-		source := group[0]
-		gw := c.newGit(source)
-		entries, err := gw.WorktreeList()
-		if err != nil {
-			listingErrs = append(listingErrs, fmt.Sprintf("listing worktrees from %s: %v", source, err))
-			continue
-		}
-		for _, wt := range entries {
-			candidate := pathutil.NormalizePathForCompare(wt.Path)
-			if seen[candidate] {
-				continue
-			}
-			// A candidate is nested if it lives strictly inside ANY
-			// home in this admin group. Skipping homes other than
-			// `source` would have lost coverage for entries nested
-			// under those homes.
-			parent := ""
-			for _, home := range group {
-				if pathStrictlyInside(candidate, home) {
-					parent = home
-					break
-				}
-			}
-			if parent == "" {
-				continue
-			}
-			seen[candidate] = true
-			c.findings = append(c.findings, classifyNested(c.newGit, candidate, parent, wt.Branch))
-		}
-	}
+	c.findings = findings
 
 	if len(c.findings) == 0 {
 		r.Status = StatusOK
@@ -529,14 +441,14 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	var safe, unsafe []string
 	var probeErrs int
 	for _, f := range c.findings {
-		line := fmt.Sprintf("%s (branch %q)", f.path, f.branch)
-		if f.safeToRm {
+		line := fmt.Sprintf("%s (branch %q)", f.Path, f.Branch)
+		if f.SafeToRm {
 			safe = append(safe, line)
 		} else {
-			if f.probeErr {
+			if f.ProbeErr {
 				probeErrs++
 			}
-			unsafe = append(unsafe, fmt.Sprintf("%s — %s", line, f.reason))
+			unsafe = append(unsafe, fmt.Sprintf("%s — %s", line, f.Reason))
 		}
 	}
 
@@ -587,68 +499,216 @@ func (c *NestedWorktreePruneCheck) CanFix() bool { return true }
 func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 	var errs []error
 	for _, f := range c.findings {
-		if !f.safeToRm {
+		if !f.SafeToRm {
 			continue
 		}
 		// Run the removal from the parent home rather than the worktree
 		// being removed: git refuses to remove a worktree whose path
 		// equals cwd in some configurations, and operating from cwd of
 		// a directory we're about to delete is fragile in general.
-		current := classifyNested(c.newGit, f.path, f.parent, f.branch)
-		if !current.safeToRm {
-			reason := current.reason
+		current := ClassifyNestedWorktree(c.newGit, f.Path, f.Parent, f.Branch)
+		if !current.SafeToRm {
+			reason := current.Reason
 			if reason == "" {
 				reason = "safety revalidation failed"
 			}
-			errs = append(errs, fmt.Errorf("nested worktree %s no longer safe to remove: %s", f.path, reason))
+			errs = append(errs, fmt.Errorf("nested worktree %s no longer safe to remove: %s", f.Path, reason))
 			continue
 		}
-		gw := c.newGit(f.parent)
-		if err := gw.WorktreeRemove(f.path, true); err != nil {
-			errs = append(errs, fmt.Errorf("removing nested worktree %s: %w", f.path, err))
+		gw := c.newGit(f.Parent)
+		if err := gw.WorktreeRemove(f.Path, true); err != nil {
+			errs = append(errs, fmt.Errorf("removing nested worktree %s: %w", f.Path, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// classifyNested runs the safety gates on a candidate nested worktree
-// and returns a finding describing whether it is safe to remove and,
-// if not, the first reason it was rejected. Order of checks matches
-// the user's manual recovery procedure: probe git, then status, log,
-// stash. Any probe error rejects the candidate with a visible reason:
-// "can't tell" is not safe enough for a destructive fix.
-func classifyNested(newGit func(string) gitWorktree, path, parent, branch string) nestedWorktreeFinding {
-	f := nestedWorktreeFinding{path: path, parent: parent, branch: branch}
+// DiscoverNestedWorktrees walks .gc/worktrees/<rig>/<agent>/ under
+// cityPath for every agent home that is a git worktree, lists each
+// home's sibling worktrees via the git worktree registry (not a
+// directory-tree heuristic, so discovery is correct regardless of
+// which provisioning mechanism created the entry), and classifies
+// every nested entry as safe-to-prune or rejected with a reason.
+//
+// Homes that share a git admin dir are grouped so WorktreeList runs
+// once per distinct repository, not once per agent home; nested
+// entries are still attributed to every home in the group that
+// contains them.
+//
+// Returns the classified findings, any non-fatal per-admin-dir listing
+// failures (partial inspection failures callers must not treat as
+// silent success), and a fatal error only when .gc/worktrees exists
+// but cannot be read. A missing .gc/worktrees directory, or one with
+// no agent-home worktrees inside it, is not an error — it returns zero
+// findings.
+//
+// This is the shared discovery + classification core used by both
+// `gc doctor` (NestedWorktreePruneCheck) and the reconciler tick's
+// automatic nested-worktree reaping, so a fix to the safety logic
+// cannot land in one call site and silently not the other.
+func DiscoverNestedWorktrees(cityPath string, newGit func(string) GitWorktree) ([]NestedWorktreeFinding, []string, error) {
+	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	rigEntries, err := os.ReadDir(wtRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("reading .gc/worktrees: %w", err)
+	}
+
+	// Discover agent homes: <wtRoot>/<rig>/<agent>/ that hold a .git
+	// pointer. Multiple rigs may share a single repo, so we deduplicate
+	// nested findings by canonical path below.
+	var homes []string
+	for _, rigEntry := range rigEntries {
+		if !rigEntry.IsDir() {
+			continue
+		}
+		rigDir := filepath.Join(wtRoot, rigEntry.Name())
+		agentEntries, err := os.ReadDir(rigDir)
+		if err != nil {
+			continue
+		}
+		for _, agentEntry := range agentEntries {
+			if !agentEntry.IsDir() {
+				continue
+			}
+			home := filepath.Join(rigDir, agentEntry.Name())
+			if isGitWorktreePath(home) {
+				homes = append(homes, pathutil.NormalizePathForCompare(home))
+			}
+		}
+	}
+
+	if len(homes) == 0 {
+		return nil, nil, nil
+	}
+
+	findings, listingErrs := discoverNestedWorktreesUnder(homes, newGit)
+	return findings, listingErrs, nil
+}
+
+// ListNestedWorktrees classifies nested worktrees under a single agent
+// home, using the same registry-based discovery and mechanical safety
+// gates as DiscoverNestedWorktrees. Used by callers that already know
+// which single directory they are about to act on (e.g. a
+// containment guard checking one removal target) and don't need a
+// city-wide sweep. Any per-admin-dir listing failure is returned as an
+// error — a single-directory caller has no other findings to report
+// alongside a partial failure, so unlike DiscoverNestedWorktrees there
+// is no separate non-fatal listingErrs channel.
+func ListNestedWorktrees(home string, newGit func(string) GitWorktree) ([]NestedWorktreeFinding, error) {
+	canonical := pathutil.NormalizePathForCompare(home)
+	findings, listingErrs := discoverNestedWorktreesUnder([]string{canonical}, newGit)
+	if len(listingErrs) > 0 {
+		return findings, fmt.Errorf("listing worktrees: %s", strings.Join(listingErrs, "; "))
+	}
+	return findings, nil
+}
+
+// discoverNestedWorktreesUnder runs the admin-dir-grouped WorktreeList
+// + classification pipeline against a known set of canonical agent-home
+// paths. Shared by DiscoverNestedWorktrees (city-wide sweep) and
+// ListNestedWorktrees (single-home targeted lookup).
+func discoverNestedWorktreesUnder(homes []string, newGit func(string) GitWorktree) ([]NestedWorktreeFinding, []string) {
+	// Group homes by their shared git admin dir so each admin's
+	// WorktreeList runs exactly once but every entry is evaluated
+	// against ALL homes in that admin group. Admin-less homes (parse
+	// failure, main checkout) keep one group per home.
+	adminGroups := make(map[string][]string)
+	var adminOrder []string
+	for _, home := range homes {
+		key := readGitAdminDir(home)
+		if key == "" {
+			key = "home:" + home
+		}
+		if _, seen := adminGroups[key]; !seen {
+			adminOrder = append(adminOrder, key)
+		}
+		adminGroups[key] = append(adminGroups[key], home)
+	}
+
+	var findings []NestedWorktreeFinding
+	seen := make(map[string]bool)
+	var listingErrs []string
+	for _, key := range adminOrder {
+		group := adminGroups[key]
+		// Pick the first home as the WorktreeList source. All homes
+		// in a group share the admin dir, so any of them returns the
+		// same content.
+		source := group[0]
+		gw := newGit(source)
+		entries, err := gw.WorktreeList()
+		if err != nil {
+			listingErrs = append(listingErrs, fmt.Sprintf("listing worktrees from %s: %v", source, err))
+			continue
+		}
+		for _, wt := range entries {
+			candidate := pathutil.NormalizePathForCompare(wt.Path)
+			if seen[candidate] {
+				continue
+			}
+			// A candidate is nested if it lives strictly inside ANY
+			// home in this admin group. Skipping homes other than
+			// `source` would have lost coverage for entries nested
+			// under those homes.
+			parent := ""
+			for _, home := range group {
+				if pathStrictlyInside(candidate, home) {
+					parent = home
+					break
+				}
+			}
+			if parent == "" {
+				continue
+			}
+			seen[candidate] = true
+			findings = append(findings, ClassifyNestedWorktree(newGit, candidate, parent, wt.Branch))
+		}
+	}
+
+	return findings, listingErrs
+}
+
+// ClassifyNestedWorktree runs the safety gates on a candidate nested
+// worktree and returns a finding describing whether it is safe to
+// remove and, if not, the first reason it was rejected. Order of
+// checks matches the user's manual recovery procedure: probe git, then
+// status, log, stash. Any probe error rejects the candidate with a
+// visible reason: "can't tell" is not safe enough for a destructive
+// fix.
+func ClassifyNestedWorktree(newGit func(string) GitWorktree, path, parent, branch string) NestedWorktreeFinding {
+	f := NestedWorktreeFinding{Path: path, Parent: parent, Branch: branch}
 	gw := newGit(path)
 	if !gw.IsRepo() {
-		f.reason = "git status unreadable"
+		f.Reason = "git status unreadable"
 		return f
 	}
 	if gw.HasUncommittedWork() {
-		f.reason = "has uncommitted changes"
+		f.Reason = "has uncommitted changes"
 		return f
 	}
 	hasUnpushed, err := gw.HasUnpushedCommitsResult()
 	if err != nil {
-		f.reason = fmt.Sprintf("unpushed commit probe failed: %v", err)
-		f.probeErr = true
+		f.Reason = fmt.Sprintf("unpushed commit probe failed: %v", err)
+		f.ProbeErr = true
 		return f
 	}
 	if hasUnpushed {
-		f.reason = "has unpushed commits"
+		f.Reason = "has unpushed commits"
 		return f
 	}
 	hasStashes, err := gw.HasStashesResult()
 	if err != nil {
-		f.reason = fmt.Sprintf("stash probe failed: %v", err)
-		f.probeErr = true
+		f.Reason = fmt.Sprintf("stash probe failed: %v", err)
+		f.ProbeErr = true
 		return f
 	}
 	if hasStashes {
-		f.reason = "has stashed work"
+		f.Reason = "has stashed work"
 		return f
 	}
-	f.safeToRm = true
+	f.SafeToRm = true
 	return f
 }
 

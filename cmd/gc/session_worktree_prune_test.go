@@ -104,6 +104,8 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 		return probe
 	}
 
+	stubNoNestedWorktrees(t)
+
 	return fx
 }
 
@@ -377,6 +379,25 @@ func TestPruneAgentHomeWorktreeIfSafe_NilConfig(t *testing.T) {
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, nil, &stderr) {
 		t.Fatal("prune returned true with nil cfg")
+	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_NestedWorktreeBlocks(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+
+	nested := filepath.Join(fx.workerDir, "child-worktree")
+	stubNestedWorktreeFound(t, nested)
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("prune returned true while a nested worktree is still present")
+	}
+	if !strings.Contains(stderr.String(), "nested worktree") {
+		t.Errorf("expected nested-worktree-reason log; got %q", stderr.String())
+	}
+	if rigProbe := fx.probesByWD[fx.rigRoot]; rigProbe != nil && rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called on rig root while nested worktree blocks prune")
 	}
 }
 

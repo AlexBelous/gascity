@@ -86,6 +86,7 @@ gc [flags]
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
 | [gc whoami](#gc-whoami) | Show the authenticated hosted Gas City account |
+| [gc worktree](#gc-worktree) | Ensure or verify agent workspace worktrees |
 
 ## gc agent
 
@@ -4713,3 +4714,55 @@ gc whoami [flags]
 |------|------|---------|-------------|
 | `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
 | `--token` | string |  | API token to check; defaults to GC_SERVICE_TOKEN or the stored login |
+
+## gc worktree
+
+Ensure or verify agent workspace worktrees.
+
+gc worktree is the single transactional owner for workspace provisioning.
+Postconditions: the path is the root of a worktree of the given repository,
+with the given branch checked out on an attached HEAD (never detached).
+A new branch is created from --base, resolved verbatim against the local
+repository. Failed creation rolls back everything it created; --dry-run
+plans without mutating anything.
+
+```
+gc worktree
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc worktree ensure](#gc-worktree-ensure) | Ensure the worktree exists and satisfies all postconditions |
+| [gc worktree verify](#gc-worktree-verify) | Verify the worktree satisfies all postconditions without mutating |
+
+## gc worktree ensure
+
+Ensure the worktree exists and satisfies all postconditions
+
+```
+gc worktree ensure [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base` | string |  | base ref for creating a new branch (resolved verbatim locally) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `-n`, `--dry-run` | bool |  | plan without mutating anything |
+| `--json` | bool |  | emit the report as JSON |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+
+## gc worktree verify
+
+Verify the worktree satisfies all postconditions without mutating
+
+```
+gc worktree verify [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |

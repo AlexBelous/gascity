@@ -2981,7 +2981,9 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
 		return ""
 	}
-	base, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	// Pure path computation: this feeds a metadata patch, so it must never
+	// create directories (gc-r9fx dry-run purity).
+	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}

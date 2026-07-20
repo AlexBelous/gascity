@@ -36,10 +36,12 @@ func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
 	if err := validateRefArg("ref", ref); err != nil {
 		return "", err
 	}
-	// ^{commit} both peels tags and rejects non-commit objects. Guard the
-	// caller-supplied ref from double-peeling only when it is a plain ref.
+	// ^{commit} both peels tags and rejects non-commit objects. Append it
+	// only for a plain ref; a caller-supplied peel (e.g. ref^{tree}) is
+	// passed through verbatim to avoid double-peeling.
+	appendedPeel := !strings.Contains(ref, "^{")
 	spec := ref
-	if !strings.Contains(ref, "^{") {
+	if appendedPeel {
 		spec = ref + "^{commit}"
 	}
 	out, err := g.run("rev-parse", "--verify", "--quiet", spec)
@@ -50,13 +52,17 @@ func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
 	if len(sha) != 40 {
 		return "", fmt.Errorf("resolving ref %q: unexpected rev-parse output %q", ref, sha)
 	}
-	// A ^{tree} / ^{blob} spec peels to a non-commit; re-verify object type.
-	typ, err := g.run("cat-file", "-t", sha)
-	if err != nil {
-		return "", fmt.Errorf("resolving ref %q: %w", ref, err)
-	}
-	if strings.TrimSpace(typ) != "commit" {
-		return "", fmt.Errorf("ref %q resolves to a %s, not a commit", ref, strings.TrimSpace(typ))
+	// When we appended ^{commit}, rev-parse already guaranteed a commit.
+	// Only a caller-supplied peel can resolve to a ^{tree}/^{blob}, so
+	// re-verify the object type only in that case.
+	if !appendedPeel {
+		typ, err := g.run("cat-file", "-t", sha)
+		if err != nil {
+			return "", fmt.Errorf("resolving ref %q: %w", ref, err)
+		}
+		if strings.TrimSpace(typ) != "commit" {
+			return "", fmt.Errorf("ref %q resolves to a %s, not a commit", ref, strings.TrimSpace(typ))
+		}
 	}
 	return sha, nil
 }

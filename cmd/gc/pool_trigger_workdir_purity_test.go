@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // TestPoolTriggerWorkDirDoesNotCreateDirectories guards the dry-run purity
@@ -24,7 +25,7 @@ func TestPoolTriggerWorkDirDoesNotCreateDirectories(t *testing.T) {
 	if workDir == "" {
 		t.Fatal("poolTriggerWorkDir returned empty workDir for a valid request")
 	}
-	if want := filepath.Join(cityPath, "agents", "claude"); !pathHasPrefix(workDir, want) {
+	if want := filepath.Join(cityPath, "agents", "claude"); !pathutil.PathWithin(want, workDir) {
 		t.Fatalf("workDir = %q, want under %q", workDir, want)
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, "agents")); !os.IsNotExist(err) {
@@ -33,13 +34,4 @@ func TestPoolTriggerWorkDirDoesNotCreateDirectories(t *testing.T) {
 	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
 		t.Errorf("pure workDir computation created the workDir itself (stat err = %v)", err)
 	}
-}
-
-func pathHasPrefix(path, prefix string) bool {
-	rel, err := filepath.Rel(prefix, path)
-	return err == nil && rel != ".." && !filepath.IsAbs(rel) && (rel == "." || !hasDotDotPrefix(rel))
-}
-
-func hasDotDotPrefix(rel string) bool {
-	return rel == ".." || len(rel) >= 3 && rel[:3] == ".."+string(filepath.Separator)
 }

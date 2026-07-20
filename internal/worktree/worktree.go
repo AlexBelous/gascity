@@ -1,7 +1,7 @@
-// Package worktree is the single transactional owner for agent workspace
-// worktrees. Every workspace-provisioning path (sling, formula setup, the
-// gc worktree CLI) goes through Ensure/Verify instead of running ad hoc
-// git commands, so the postconditions are uniform:
+// Package worktree is the transactional owner for agent workspace
+// worktrees, exposed through the gc worktree CLI so provisioning paths can
+// route through Ensure/Verify instead of running ad hoc git commands. When
+// a path goes through this owner, the postconditions are uniform:
 //
 //   - the path is the root of a git worktree of the requested repository,
 //   - the requested branch is checked out with an attached HEAD (never
@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ErrWorktreeMissing reports that the spec path does not exist at all. It is
@@ -124,7 +125,7 @@ func Verify(spec Spec) (Report, error) {
 	if err != nil {
 		return rep, fmt.Errorf("verifying worktree %q: %w", spec.Path, err)
 	}
-	if !samePath(top, spec.Path) {
+	if !pathutil.SamePath(top, spec.Path) {
 		return rep, fmt.Errorf("verifying worktree %q: path is inside worktree rooted at %q, not a worktree root", spec.Path, top)
 	}
 
@@ -250,15 +251,4 @@ func canonicalCommonDir(g *git.Git) (string, error) {
 		return "", fmt.Errorf("resolving common dir %q: %w", common, err)
 	}
 	return resolved, nil
-}
-
-// samePath reports whether two paths refer to the same location after
-// cleaning and symlink resolution.
-func samePath(a, b string) bool {
-	if filepath.Clean(a) == filepath.Clean(b) {
-		return true
-	}
-	ra, errA := filepath.EvalSymlinks(a)
-	rb, errB := filepath.EvalSymlinks(b)
-	return errA == nil && errB == nil && ra == rb
 }

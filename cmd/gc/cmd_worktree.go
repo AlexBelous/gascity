@@ -21,8 +21,8 @@ type worktreeCmdOpts struct {
 }
 
 // newWorktreeCmd returns the gc worktree command group. It is the CLI face
-// of internal/worktree — the single transactional workspace owner (gc-r9fx).
-// Sling and formula-managed workspace setup call this one owner instead of
+// of internal/worktree — the transactional workspace owner (gc-r9fx) that
+// sling and formula-managed workspace setup can route through instead of
 // running competing ad hoc provisioning.
 func newWorktreeCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{

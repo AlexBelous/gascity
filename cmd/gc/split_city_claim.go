@@ -59,9 +59,13 @@ func splitCityHookClaimOps(cityPath string, cfg *config.City) hookClaimOps {
 			d, e := route(beadID, dir, env)
 			return hookClaimWithBdStore(ctx, d, e, beadID, assignee)
 		},
-		StampWorkBranch: func(ctx context.Context, dir string, env []string, beadID, assignee, branch string) error {
+		// StampWorkMeta writes the claim-time execution-identity patch
+		// (gc.work_branch + session back-reference) onto the claimed bead. On a
+		// split city that bead may be reserved-class, so route the write by the
+		// bead's own id prefix to the infra store.
+		StampWorkMeta: func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 			d, e := route(beadID, dir, env)
-			return hookStampWorkBranchWithBdStore(ctx, d, e, beadID, assignee, branch)
+			return hookStampWorkMetaWithBdStore(ctx, d, e, beadID, assignee, patch)
 		},
 		// Continuation siblings live in the same store as the workflow root, so
 		// route the list read by the ROOT bead's prefix.

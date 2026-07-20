@@ -288,7 +288,7 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 // backing store without the capability returns an error (never a single-id
 // fallback, which would defeat the orphan-preserving contract).
 func (s *beadPolicyStore) DeleteAllOrphaning(ids []string) (int, error) {
-	deleter, ok := s.Store.(beads.IDBatchDeleter)
+	deleter, ok := s.Store.(beads.BatchDeleter)
 	if !ok {
 		return 0, fmt.Errorf("policy store: backing store %T does not support orphan-preserving batch delete", s.Store)
 	}

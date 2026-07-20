@@ -3957,6 +3957,16 @@ func reachableStoresForSessionInfo(cityPath string, cfg *config.City, store bead
 	if !ok || rigStore == nil {
 		return nil, fmt.Errorf("rig store %q unavailable for session %q", storeRef, info.SessionNameMetadata)
 	}
+	// Split city: a rig-bound session's claimed graph wisps live in the primary
+	// (sessions/infra) store the reconciler threads as store, not in its rig
+	// store. Without this leg the *ForReachableStore drain/awake probes cannot
+	// see a claimed wisp and the drain just moves post-claim (spawn/drain
+	// treadmill, post-claim half). On a legacy single-store city cityHasInfraStore
+	// is false and the rig-bound session probes only its rig store, byte-identical
+	// to the historical behavior. Mirrors the bead-form reachableStoresForSession.
+	if cityHasInfraStore(cityPath) && store != nil && store != rigStore {
+		return []beads.Store{rigStore, store}, nil
+	}
 	return []beads.Store{rigStore}, nil
 }
 

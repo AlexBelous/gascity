@@ -186,6 +186,18 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		warnLegacyWorkflowTracePath(cityPath, nil, stderr)
 	}
 
+	// The control bead is a graph-class bead: ProcessControl drives ApplyGraphPlan
+	// (graph step creation) and quarantineControlFailureBead writes the control
+	// bead's terminal disposition, all of which must land in the graph-class
+	// store. On a split city that is the infra store; cliGraphStore returns the
+	// SAME wrapped instance (never a re-wrap) so the GraphApplyFor/HandlesFor
+	// optional-capability assertions inside dispatch keep resolving. On a legacy
+	// single-store city cachedCityInfraStore is nil, so cliGraphStore is identity
+	// over the store the root resolved and this is byte-identical. The recipe
+	// decorators below read routing/session state through the same graph-class
+	// store; source-bead closes stay work-class via opts.ResolveStoreRef.
+	store = cliGraphStore(store, cfg, cityPath)
+
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
 	loadCfg := false
@@ -228,7 +240,26 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			opts.PrepareRecipe = func(recipe *formula.Recipe, source beads.Bead) error {
 				return decorateDrainItemRecipe(recipe, source, store, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
+			// On a split city the drain control runs in the graph/infra store, but a
+			// v2 input convoy + its members + tracks edges live in the WORK store.
+			// Provide the work-class store tail so drain resolves membership and
+			// writes unit-convoy tracks across the boundary. No-op on a single-store
+			// city.
+			memberStores, memberErr := crossStoreMemberStores(cityPath, cfg)
+			if memberErr != nil {
+				return memberErr
+			}
+			opts.MemberStores = memberStores
 		case "retry-eval":
+			// A retry-eval validating a required artifact resolves the artifact
+			// worktree through the workflow's source bead / input convoy, which
+			// live in the WORK store on a split city; supply the member tail so
+			// that cross-store source read succeeds. No-op on a single-store city.
+			memberStores, memberErr := crossStoreMemberStores(cityPath, cfg)
+			if memberErr != nil {
+				return memberErr
+			}
+			opts.MemberStores = memberStores
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
 				return err
@@ -241,6 +272,12 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			// Same cross-store required-artifact resolution as retry-eval.
+			memberStores, memberErr := crossStoreMemberStores(cityPath, cfg)
+			if memberErr != nil {
+				return memberErr
+			}
+			opts.MemberStores = memberStores
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
 				return err
@@ -366,11 +403,43 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 				}
 				return openControlStoreAtForCity(rig.Path, cityPath, cfg)
 			}
-			return nil, fmt.Errorf("rig %q not found in city config", name)
+			// A rig entry can be removed from city.toml while its workflows are
+			// still in flight. A hard error here would fall into the cmd-layer
+			// quarantine catch-all and terminally close the finalizer, stranding
+			// the workflow root AND the domain parent open forever with no retry
+			// handle. Classify as pending instead: the finalizer stays open,
+			// gc.last_finalize_error records the reason, and the chain heals the
+			// moment the rig is restored via `gc rig add`. Fail-loud-not-terminal.
+			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? finalizer retries until the rig is restored)", dispatch.ErrControlPending, name)
 		default:
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}
 	}
+}
+
+// crossStoreMemberStores returns the work-class store tail (city HQ + rigs,
+// never the infra store) that control kinds resolving cross-store source/convoy
+// beads must probe on a split city: drain reads convoy membership, and
+// retry/retry-eval resolve a required-artifact worktree through the source bead
+// or input convoy. Both live in the work store while the control bead runs in
+// the graph/infra store. Fail-loud on a degraded store so a partial member set
+// never silently misclassifies work. Returns nil (no-op) on a single-store city.
+func crossStoreMemberStores(cityPath string, cfg *config.City) ([]beads.Store, error) {
+	if !cityHasInfraStore(cityPath) {
+		return nil, nil
+	}
+	views, skips, err := openSourceWorkflowStores(cfg, cityPath, "")
+	if err != nil {
+		return nil, fmt.Errorf("opening cross-store member stores: %w", err)
+	}
+	if len(skips) > 0 {
+		return nil, fmt.Errorf("cross-store member stores degraded: %s", formatSourceWorkflowStoreSkips(skips))
+	}
+	stores := make([]beads.Store, 0, len(views))
+	for _, view := range views {
+		stores = append(stores, view.store)
+	}
+	return stores, nil
 }
 
 func makeSourceWorkflowLocker(ctx context.Context, cityPath string, cfg *config.City, defaultStorePath string) func(storeRef, sourceBeadID string, fn func() error) error {
@@ -396,7 +465,9 @@ func makeSourceWorkflowStoresListerWithOpenStore(cityPath string, cfg *config.Ci
 			return stores, loadErr
 		}
 		loaded = true
-		views, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, "", openStore)
+		// The finalize lister feeds ListLiveRoots (graph-root scan), so include the
+		// infra store where a split city's workflow roots live.
+		views, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, "", true, openStore)
 		if err != nil {
 			loadErr = err
 			return nil, err
@@ -464,8 +535,19 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 	})
 }
 
-// findBeadAcrossStores tries the city store first, then all rig stores,
-// returning the store and bead on first match.
+// controlDispatchInfraStore returns the city infra store used as an extra
+// discovery candidate for manual control dispatch on a split city, or nil when
+// the city has no infra store (legacy) or the open failed. It is a var so tests
+// can inject a two-store harness without spawning dolt; production reads the
+// shared cached infra store (the same instance the class resolvers use), so the
+// discovery scan sees exactly the store sling/order/cook wrote the control and
+// graph beads into. Mirrors sourceWorkflowInfraStore.
+var controlDispatchInfraStore = func(cityPath string) beads.Store {
+	return cachedCityInfraStore(cityPath, nil)
+}
+
+// findBeadAcrossStores tries the city store first, then the split-city infra
+// store, then all rig stores, returning the store and bead on first match.
 func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (beads.Store, beads.Bead, string, error) {
 	// Try city store first.
 	cityStore, err := openStoreAtForCity(cityPath, cityPath)
@@ -476,6 +558,24 @@ func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (bea
 		return cityStore, b, cityPath, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q from %s: %w", beadID, cityPath, err)
+	}
+
+	// Split-city graph coverage: a control/graph bead lives in the infra store on
+	// a split city, so scan it before the rig work stores. Absent (legacy
+	// single-store city) this is a no-op and byte-identical to the prior
+	// city-then-rigs scan. Routing the processing store in
+	// runControlDispatcherWithStoreAndConfig relocates where a control bead is
+	// PROCESSED; this relocates where it is DISCOVERED, so a manual
+	// `gc convoy control <id>` can find an infra-resident control bead at all.
+	if cityHasInfraStore(cityPath) {
+		if infraStore := controlDispatchInfraStore(cityPath); infraStore != nil {
+			infraDir := infraScopeRoot(cityPath)
+			if b, err := infraStore.Get(beadID); err == nil {
+				return infraStore, b, infraDir, nil
+			} else if !errors.Is(err, beads.ErrNotFound) {
+				return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q from %s: %w", beadID, infraDir, err)
+			}
+		}
 	}
 
 	// Try rig stores.
@@ -914,13 +1014,28 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The gc.workflow_id / gc.root_bead_id membership reads and the CloseAll/delete
+	// that follow are graph-class operations. On a split city every store view
+	// routes through cliGraphStore to the SAME single infra store, so scanning
+	// each work-view separately would read and close the infra store once per rig
+	// and produce duplicate matches; dedup by the resolved graph store's identity
+	// so the split city scans the infra graph store exactly once. On a legacy
+	// single-store city cliGraphStore is identity, so each view resolves to its
+	// own distinct work store and the federated per-store scan is preserved
+	// byte-for-byte (the documented by-id sweep exception).
+	seenGraphStores := make(map[beads.Store]bool, len(stores))
 	for _, info := range stores {
-		found := findWorkflowBeads(info.store, workflowID)
+		graphView := cliGraphStore(info.store, cfg, cityPath)
+		if seenGraphStores[graphView] {
+			continue
+		}
+		seenGraphStores[graphView] = true
+		found := findWorkflowBeads(graphView, workflowID)
 		if len(found) == 0 {
 			continue
 		}
 		matches = append(matches, workflowStoreMatch{
-			store:  info.store,
+			store:  graphView,
 			beads:  found,
 			label:  workflowDeleteStoreLabel(cfg, cityPath, info.path),
 			path:   info.path,
@@ -1447,7 +1562,7 @@ func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	if cd, ok := store.(beads.BatchDeleter); ok {
+	if cd, ok := store.(beads.IDBatchDeleter); ok {
 		// A policy/capability wrapper advertises BatchDeleter to forward it, but
 		// reports ErrBatchDeleteUnsupported when its own backing lacks the
 		// capability; treat that as "not batchable" and fall through to the
@@ -1525,7 +1640,9 @@ func restoreWorkflowDeleteDeps(store beads.Store, downDeps, upDeps []beads.Dep) 
 }
 
 func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, error) {
-	stores, skips, err := openSourceWorkflowStores(cfg, cityPath, sourceBeadID)
+	// Graph-root scan: ListLiveRoots reads workflow-root (graph-class) beads, so
+	// include the infra store where a split city's roots live.
+	stores, skips, err := openSourceWorkflowGraphStores(cfg, cityPath, sourceBeadID)
 	if err != nil {
 		return nil, skips, err
 	}
@@ -1853,37 +1970,75 @@ func unscannedSourceWorkflowStoreSkips(cfg *config.City, cityPath, selectedStore
 	return unscanned, selectedRecovered
 }
 
-// openSourceWorkflowStores opens every candidate bead store used for
-// source-workflow singleton checks. It tolerates broken non-selected stores
-// the same way openConvoyStores does: a failure to open one rig's store must
-// not block launches or recovery city-wide. Only when *every* candidate is
-// unopenable do we surface the first error, because at that point the
-// singleton check has no stores to scan and we cannot proceed safely. Stores
+// openSourceWorkflowStores opens every candidate bead store used for by-id
+// source-bead resolution (findUniqueBeadAcrossStoresView). It tolerates broken
+// non-selected stores the same way openConvoyStores does: a failure to open one
+// rig's store must not block launches or recovery city-wide. Only when *every*
+// candidate is unopenable do we surface the first error, because at that point
+// the lookup has no stores to scan and we cannot proceed safely. Stores
 // explicitly selected via --rig / --store-ref still go through
 // openSourceWorkflowStoreRef, which is strict on purpose.
 //
+// This is the WORK-class use: the source bead resolved by id is the work bead
+// that seeded the workflow (an adopt-PR merge-request bead, etc.), which lives
+// in the city/rig work stores — so the fan-out is exactly convoyStoreCandidates
+// and never the infra store. The graph-root scan (ListLiveRoots) uses
+// openSourceWorkflowGraphStores instead, which additionally includes the infra
+// store where a split city's workflow roots live.
+//
 // The second return value lists the stores that were skipped — callers are
 // expected to surface these (see formatSourceWorkflowStoreSkips) so operators
-// can see when singleton coverage degraded.
+// can see when coverage degraded.
 func openSourceWorkflowStores(cfg *config.City, cityPath, beadID string) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
-	return openSourceWorkflowStoresWith(cfg, cityPath, beadID, func(dir string) (beads.Store, error) {
+	return openSourceWorkflowStoresWith(cfg, cityPath, beadID, false, func(dir string) (beads.Store, error) {
 		return openStoreAtForCity(dir, cityPath)
 	})
 }
 
-// openSourceWorkflowStoresWith is the testable core of openSourceWorkflowStores.
-// It takes the store-opening callback explicitly so tests can inject broken
-// rig stores without touching the filesystem.
-func openSourceWorkflowStoresWith(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
-	return openSourceWorkflowStoresWithProvider(cfg, cityPath, beadID, func(scopeRoot string) string {
+// openSourceWorkflowGraphStores opens every candidate bead store used for the
+// source-workflow ROOT scan (ListLiveRoots in collectSourceWorkflowMatches and
+// the workflow-finalize lister). It is the GRAPH-class use: workflow roots are
+// graph-class beads, so on a split city they live only in the infra store — the
+// city/rig work-store fan-out convoyStoreCandidates returns would miss them and
+// the finalize/delete-source walk would find no roots. This variant therefore
+// appends the infra store to the candidate set (gated on cityHasInfraStore), so
+// the root scan reaches the store the roots were actually created in. On a
+// legacy single-store city cityHasInfraStore is false and this is byte-identical
+// to openSourceWorkflowStores. Kept distinct from the by-id work-read use so a
+// blanket infra include never perturbs source-bead resolution.
+func openSourceWorkflowGraphStores(cfg *config.City, cityPath, beadID string) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+	return openSourceWorkflowStoresWith(cfg, cityPath, beadID, true, func(dir string) (beads.Store, error) {
+		return openStoreAtForCity(dir, cityPath)
+	})
+}
+
+// openSourceWorkflowStoresWith is the testable core of openSourceWorkflowStores
+// and openSourceWorkflowGraphStores. It takes the store-opening callback
+// explicitly so tests can inject broken rig stores without touching the
+// filesystem. When includeInfra is true and the city has an infra store, the
+// infra store is appended as an additional read candidate so the graph-root
+// scan reaches a split city's workflow roots; the infra store is sourced through
+// the sourceWorkflowInfraStore seam (the shared cached infra store in
+// production, injectable in tests). It routes through
+// openSourceWorkflowStoresWithProvider with the default raw scope provider.
+func openSourceWorkflowStoresWith(cfg *config.City, cityPath, beadID string, includeInfra bool, openStore func(string) (beads.Store, error)) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+	return openSourceWorkflowStoresWithProvider(cfg, cityPath, beadID, includeInfra, func(scopeRoot string) string {
 		return rawBeadsProviderForScope(scopeRoot, cityPath)
 	}, openStore)
 }
 
-func openSourceWorkflowStoresWithProvider(cfg *config.City, cityPath, beadID string, providerForScope func(string) string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+// openSourceWorkflowStoresWithProvider is the provider-injectable core shared by
+// openSourceWorkflowStoresWith. The providerForScope callback decides which beads
+// provider each scope root resolves to, so callers that need authoritative reads
+// (the sling source-workflow scan) can route through the authoritative provider
+// while the default path uses the raw scope provider. includeInfra carries the
+// same split-city graph-root coverage as openSourceWorkflowStoresWith: when true
+// and the city has an infra store, the infra store is appended as an extra read
+// candidate.
+func openSourceWorkflowStoresWithProvider(cfg *config.City, cityPath, beadID string, includeInfra bool, providerForScope func(string) string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
 	candidates := convoyStoreCandidatesWithProvider(cfg, cityPath, beadID, providerForScope)
 	var (
-		stores   = make([]convoyStoreView, 0, len(candidates))
+		stores   = make([]convoyStoreView, 0, len(candidates)+1)
 		skips    []sourceWorkflowStoreSkip
 		firstErr error
 	)
@@ -1899,6 +2054,24 @@ func openSourceWorkflowStoresWithProvider(cfg *config.City, cityPath, beadID str
 		}
 		stores = append(stores, convoyStoreView{path: dir, store: store})
 	}
+	// Split-city graph-root coverage: append the infra store so ListLiveRoots
+	// reaches workflow roots that a split city routes to the infra scope. The
+	// infra scope root is a distinct dir from every work-store candidate, so this
+	// never double-scans. Absent (legacy single-store city) it is a no-op, and an
+	// infra-open failure is surfaced as a skip like any other degraded candidate
+	// rather than aborting the whole scan.
+	if includeInfra && cityHasInfraStore(cityPath) {
+		infraDir := infraScopeRoot(cityPath)
+		if infraStore := sourceWorkflowInfraStore(cityPath); infraStore != nil {
+			stores = append(stores, convoyStoreView{path: infraDir, store: infraStore})
+		} else {
+			err := fmt.Errorf("infra store unavailable")
+			skips = append(skips, sourceWorkflowStoreSkip{path: infraDir, err: err})
+			if firstErr == nil {
+				firstErr = fmt.Errorf("opening source workflow store %s: %w", infraDir, err)
+			}
+		}
+	}
 	if len(stores) > 0 {
 		return stores, skips, nil
 	}
@@ -1906,6 +2079,16 @@ func openSourceWorkflowStoresWithProvider(cfg *config.City, cityPath, beadID str
 		return nil, skips, firstErr
 	}
 	return nil, skips, fmt.Errorf("no source workflow stores available")
+}
+
+// sourceWorkflowInfraStore returns the city infra store used as the extra
+// graph-root scan candidate on a split city, or nil when the city has no infra
+// store (legacy) or the open failed. It is a var so tests can inject a
+// two-store harness without spawning dolt; production reads the shared cached
+// infra store (the same instance the class resolvers use), so the root scan
+// sees exactly the store sling/order creates wrote the roots into.
+var sourceWorkflowInfraStore = func(cityPath string) beads.Store {
+	return cachedCityInfraStore(cityPath, nil)
 }
 
 func clearSourceWorkflowMetadata(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget) (bool, error) {

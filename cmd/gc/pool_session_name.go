@@ -94,6 +94,9 @@ func GCSweepSessionBeads(store beads.Store, rigStores map[string]beads.Store, se
 
 // releaseOrphanedPoolAssignmentsWhenSnapshotsComplete skips orphan release
 // unless both the assigned-work and open-session snapshots are complete.
+// sessionStoreOpt optionally carries the sessions-class store for the
+// last-resort liveness probe (see releaseOrphanedPoolAssignments); omitted, it
+// collapses to store — byte-identical to the legacy single-store shape.
 func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	store beads.Store,
 	cfg *config.City,
@@ -101,6 +104,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	openSessionInfos []session.Info,
 	result DesiredStateResult,
 	rigStores map[string]beads.Store,
+	sessionStoreOpt ...beads.Store,
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -108,13 +112,18 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores)
+	return releaseOrphanedPoolAssignments(store, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, sessionStoreOpt...)
 }
 
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
 // assignee no longer maps to any open session bead. This also recovers
 // pool-routed work left in_progress with no assignee, which cannot be claimed
-// again until it is moved back to open.
+// again until it is moved back to open. sessionStoreOpt optionally carries the
+// sessions-class store for the last-resort liveOpenSessionAssignmentExists
+// probe: on a split city session beads live in the INFRA store, not the work
+// store, so probing the work store misses live holders and wrongfully
+// releases their claims. Omitted, the probe stays on store (identity — the
+// legacy single-store shape).
 func releaseOrphanedPoolAssignments(
 	store beads.Store,
 	cfg *config.City,
@@ -124,9 +133,18 @@ func releaseOrphanedPoolAssignments(
 	assignedWorkStores []beads.Store,
 	assignedWorkStoreRefs []string,
 	rigStores map[string]beads.Store,
+	sessionStoreOpt ...beads.Store,
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
+	}
+	// The last-resort liveness probe is a session-class read; route it to the
+	// sessions store when the caller supplies one (the infra store on a split
+	// city). Defaulting to store keeps the legacy single-store shape
+	// byte-identical.
+	sessionStore := store
+	if len(sessionStoreOpt) > 0 && sessionStoreOpt[0] != nil {
+		sessionStore = sessionStoreOpt[0]
 	}
 	storeAware := len(assignedWorkStores) > 0
 	if storeAware && len(assignedWorkStores) != len(assignedWorkBeads) {
@@ -180,7 +198,7 @@ func releaseOrphanedPoolAssignments(
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-			if liveOpenSessionAssignmentExists(store, assignee) {
+			if liveOpenSessionAssignmentExists(sessionStore, assignee) {
 				continue
 			}
 		}
@@ -284,10 +302,13 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, openSession
 		// The caller feeds the typed snapshot (OpenInfos()); read the session
 		// through Info for both the store-ref resolution and the assignee
 		// identities (WI-5 W4 — the boundary projection this loop used to carry
-		// moved to the snapshot's load edge).
-		storeRef := openSessionReachableStoreRefInfo(cityPath, cfg, info)
-		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
-			addOpenSessionStoreRef(index, id, storeRef)
+		// moved to the snapshot's load edge). On a split city a rig-bound holder
+		// is reachable via multiple store-refs (its rig store plus the infra ""
+		// leg), so index it under every ref openSessionReachableStoreRefs returns.
+		for _, storeRef := range openSessionReachableStoreRefs(cityPath, cfg, info) {
+			for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+				addOpenSessionStoreRef(index, id, storeRef)
+			}
 		}
 	}
 	return index

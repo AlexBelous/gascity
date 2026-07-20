@@ -96,8 +96,9 @@ type CityRuntime struct {
 	poolDeathHandlers map[string]poolDeathInfo
 	suspendedNames    map[string]bool
 
-	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
-	standaloneRigStores map[string]beads.Store
+	standaloneCityStore      beads.Store // non-nil when API disabled; for chat auto-suspend
+	standaloneCityInfraStore beads.Store // non-nil when API disabled AND the city has an infra store; else nil (single-store → identity routing)
+	standaloneRigStores      map[string]beads.Store
 
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
@@ -395,6 +396,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			fmt.Fprintf(cr.stderr, "%s: city bead store: %v (auto-suspend disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		} else {
 			cr.standaloneCityStore = store
+		}
+		// Open the standalone infra store when the city is split; nil on every
+		// single-store city, so class routing stays identity.
+		if store, present, err := openCityInfraStoreAt(cityRoot); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: city infra bead store: %v (infra-class routing disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		} else if present {
+			cr.standaloneCityInfraStore = store
 		}
 		cr.standaloneRigStores = buildStandaloneRigStores(cr.cfg, cr.cityPath, cr.stderr)
 	}
@@ -1855,8 +1863,20 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 		appendWarning(fmt.Sprintf("config reload: %v", err))
 	}
-	for _, w := range config.ReservedPrefixWarnings(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)) {
-		appendWarning(fmt.Sprintf("config reload: %s", w))
+	if reserved := config.ReservedPrefixWarnings(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); len(reserved) > 0 {
+		// On a split city the infra store actively mints these prefixes, so a
+		// work-store prefix that shadows one is a hard ambiguity rather than a
+		// forward-looking advisory. A live reload cannot abort the running
+		// controller, so surface it as an error-level reload warning (gc start
+		// blocks the same collision outright).
+		split := cityHasInfraStore(cityRoot)
+		for _, w := range reserved {
+			if split {
+				appendWarning(fmt.Sprintf("config reload: ERROR: %s (split city — rename before the collision misroutes infra beads)", w))
+			} else {
+				appendWarning(fmt.Sprintf("config reload: %s", w))
+			}
+		}
 	}
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
 	var lifecycleErr error
@@ -2027,6 +2047,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 		} else {
 			cr.standaloneCityStore = s
 		}
+		// Refresh the standalone infra store symmetrically; nil on a single-store
+		// city, so class routing stays identity.
+		if s, present, err := openCityInfraStoreAt(cityRoot); err != nil {
+			if cr.standaloneCityInfraStore != nil {
+				appendWarning(fmt.Sprintf("city infra bead store reload: %v", err))
+			}
+		} else if present {
+			cr.standaloneCityInfraStore = s
+		}
 		cr.standaloneRigStores = buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr)
 	}
 
@@ -2174,7 +2203,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
 	phaseStart := time.Now()
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
+	// The release sweep's work reads/writes stay on the work store; its
+	// last-resort session-liveness probe routes to the sessions store, which
+	// on a split city is the infra store where session beads actually live.
+	// Identity to store on a single-store city.
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, sessStore.Store)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})
@@ -3123,6 +3156,17 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 	return cr.standaloneCityStore
 }
 
+// cityInfraBeadStore returns the city's infra bead store — the store owning the
+// coordination classes on a split city — preferring the controllerState store
+// over the standalone store. It is nil on every single-store city, so the class
+// resolvers route to the work store (identity).
+func (cr *CityRuntime) cityInfraBeadStore() beads.Store {
+	if cr.cs != nil {
+		return cr.cs.CityInfraBeadStore()
+	}
+	return cr.standaloneCityInfraStore
+}
+
 func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 	if cr.cs != nil {
 		stores := cr.cs.BeadStores()
@@ -3208,6 +3252,12 @@ func (cr *CityRuntime) loadDemandSnapshot(
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
 	if cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint) {
+		// Stamp the staleness clock from when the data is READ (before the build),
+		// not when the build completes. buildDesiredState can take tens of seconds
+		// under load; stamping at build-end would inflate the patrol re-eval window
+		// by that whole duration and stretch the reconcile interval well past
+		// demandSnapshotPatrolMaxAge (maintainer-city).
+		builtAt := time.Now()
 		result := cr.buildDesiredState(sessionBeads, trace)
 		var openSessionInfos []sessionpkg.Info
 		if sessionBeads != nil {
@@ -3227,7 +3277,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
 		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
-			createdAt:          time.Now(),
+			createdAt:          builtAt,
 			sessionFingerprint: sessionFingerprint,
 			result:             result,
 		}
@@ -3269,7 +3319,15 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 // tick. Non-patrol triggers bypass this entirely (see shouldRefreshDemandSnapshot).
 func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	if cr.demandSnapshotsEnabled() {
-		return runtimeDemandSnapshotMaxAge
+		// Re-evaluate at most once per patrol interval, capped at the 30s
+		// event-backed ceiling. With patrol_interval below 30s the snapshot
+		// tracks the tick cadence instead of idling on a fixed 30s floor; the
+		// event stream still invalidates it earlier via the non-patrol path.
+		maxAge := runtimeDemandSnapshotMaxAge
+		if pi := cr.cfg.Daemon.PatrolIntervalDuration(); pi > 0 && pi < maxAge {
+			maxAge = pi
+		}
+		return maxAge
 	}
 	// Snapshots are not event-backed. Without an event provider the cache
 	// cannot be invalidated by routed-work events, so patrol must rebuild every

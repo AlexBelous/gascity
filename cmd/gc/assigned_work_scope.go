@@ -66,20 +66,22 @@ func sessionAgentConfigInfo(cfg *config.City, info sessionpkg.Info) *config.Agen
 	return findAgentByTemplate(cfg, template)
 }
 
-// openSessionReachableStoreRefInfo returns the store-ref under which an open
-// session bead owns assigned work, for makeOpenSessionStoreRefIndex. The SESSION
-// side reads typed session.Info (WI-5 W3 per-parameter split, migrated alongside
+// openSessionReachableStoreRefInfo returns the single store-ref under which an
+// open session bead owns assigned work. The SESSION side reads typed
+// session.Info (WI-5 W3 per-parameter split, migrated alongside
 // reachableStoresForSession); store-ref resolution stays cfg-derived. A
 // cross-store eligible (city-scoped) session federates across every store
-// (vp-kvp), so it is indexed under crossStoreOpenSessionStoreRef — a wildcard
+// (vp-kvp), so it resolves to crossStoreOpenSessionStoreRef — a wildcard
 // openSessionOwnsWork matches against any work store-ref. This mirrors the
 // cross-store ownership the demand and session-wake filters already grant
 // (filterAssignedWorkBeadsForSessionWake); without it the release path strands a
 // live city-scoped holder's rig-routed work and a backup worker is minted on the
 // same bead (#3453). A session whose template/agent cannot be resolved falls back
 // to unresolvedOpenSessionStoreRef (also a wildcard), preserving the legacy
-// keep-on-match fail-safe; every other session stays scoped to its configured
-// rig's store-ref.
+// keep-on-match fail-safe; every other session resolves to its configured rig's
+// store-ref. This is the split-store-agnostic core pinned by
+// TestOpenSessionReachableStoreRefInfoMatchesRaw; openSessionReachableStoreRefs
+// layers the split-city infra leg on top.
 func openSessionReachableStoreRefInfo(cityPath string, cfg *config.City, info sessionpkg.Info) string {
 	agentCfg := sessionAgentConfigInfo(cfg, info)
 	if agentCfg == nil {
@@ -89,6 +91,32 @@ func openSessionReachableStoreRefInfo(cityPath string, cfg *config.City, info se
 		return crossStoreOpenSessionStoreRef
 	}
 	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+}
+
+// openSessionReachableStoreRefs returns every store-ref under which an open
+// session bead owns assigned work, for makeOpenSessionStoreRefIndex. It reads
+// typed session.Info (WI-5 W3 split) and layers the split-store fan-out on the
+// singular core above: the cross-store / unresolved wildcards are returned
+// verbatim, while a rig-scoped session gets its configured rig's store-ref plus,
+// on a split city, the "" (infra) leg. The reconciler's leading store is the
+// sessions/infra store, and its assigned-work arm is captured under the empty
+// store-ref (coordClassStoreCandidates cityRef ""). Routed graph wisps a
+// rig-bound holder has CLAIMED live there, so the holder must own that leg
+// through the index or releaseOrphanedPoolAssignments falls to the per-wisp
+// last-resort live probe on every tick — correct but slow, and a single
+// fail-open leg. On a legacy single-store city cityHasInfraStore is false and
+// rig-bound holders keep exactly their configured store-ref, byte-identical to
+// the historical behavior.
+func openSessionReachableStoreRefs(cityPath string, cfg *config.City, info sessionpkg.Info) []string {
+	base := openSessionReachableStoreRefInfo(cityPath, cfg, info)
+	if base == unresolvedOpenSessionStoreRef || base == crossStoreOpenSessionStoreRef {
+		return []string{base}
+	}
+	refs := []string{base}
+	if cityHasInfraStore(cityPath) {
+		refs = append(refs, "")
+	}
+	return refs
 }
 
 func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agentCfg *config.Agent, storeRefs []string, index int) bool {
@@ -102,6 +130,18 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	// singleton's work may live in any rig store, so gating it to its own
 	// configured rig is the cross-store dead-drop this fixes.
 	if agentIsCrossStoreEligible(agentCfg) {
+		return true
+	}
+	// Split city: the reconciler's leading store is the sessions/infra store,
+	// and its assigned-work arm is captured under the empty store-ref
+	// (coordClassStoreCandidates cityRef ""). Routed graph wisps a rig pool's
+	// agent has CLAIMED live there, so that leg must stay reachable from the
+	// rig-bound agent or the claim looks orphaned and the pool's resume tier
+	// drops the owning session (the post-claim half of the spawn/drain
+	// treadmill). On a legacy single-store city cityHasInfraStore is false and
+	// the "" (city) leg stays unreachable from rig-bound agents, byte-identical
+	// to the historical behavior.
+	if storeRefs[index] == "" && cityHasInfraStore(cityPath) {
 		return true
 	}
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
@@ -255,6 +295,22 @@ func filterAssignedWorkBeadsForSessionWake(
 		}
 		if refs := reachableRefsByAssignee[assignee]; refs != nil {
 			if _, ok := refs[assignedWorkStoreRefs[i]]; ok {
+				filtered = append(filtered, wb)
+				filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+				continue
+			}
+			// Split city: the reconciler's leading store is the sessions/infra
+			// store, and its assigned-work arm is captured under the empty
+			// store-ref (coordClassStoreCandidates cityRef ""). Routed graph
+			// wisps a rig-bound holder has CLAIMED live there, so that leg must
+			// survive the wake filter or ComputeAwakeSet cannot anchor the claim
+			// to its session — the holder loses its assigned-work wake reason
+			// and cycles through begin-drain/cancel every tick, and the
+			// idle-sleep exemption goes blind to the claim. On a legacy
+			// single-store city cityHasInfraStore is false and the "" (city)
+			// leg stays dropped for rig-bound holders, byte-identical to the
+			// historical behavior.
+			if assignedWorkStoreRefs[i] == "" && cityHasInfraStore(cityPath) {
 				filtered = append(filtered, wb)
 				filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 			}

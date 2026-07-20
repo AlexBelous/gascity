@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -700,7 +701,7 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
 		return true
 	}
-	if !maps.Equal(old.Metadata, fresh.Metadata) {
+	if !metadataEqual(old.Metadata, fresh.Metadata) {
 		return true
 	}
 	// Labels, needs, and dependencies are SETS: their order carries no meaning.
@@ -708,10 +709,10 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 	// different order than the cache holds (the Dolt gcg rig store does not
 	// guarantee a stable order across scans) would otherwise register as a
 	// spurious change. For needs and dependencies that misfires on every
-	// reconcile pass — the cache-reconcile re-absorb churn that needlessly
-	// re-touched live molecule wisps (ga-ocypq2). Labels are skipped during
-	// reconcile (skipLabels: true) and so matter only for the skipLabels:false
-	// change checks.
+	// reconcile pass — the cache-reconcile re-absorb flood that re-touched every
+	// live molecule wisp ~every 80s and starved review molecules from advancing
+	// (ga-ocypq2). Labels are skipped during reconcile (skipLabels: true) and so
+	// matter only for the skipLabels:false change checks.
 	if !skipLabels && !stringSetEqual(old.Labels, fresh.Labels) {
 		return true
 	}
@@ -723,6 +724,66 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 
 func depsChanged(old, fresh []Dep) bool {
 	return !depSetEqual(old, fresh)
+}
+
+// metadataEqual reports whether two metadata maps are equal, treating a value
+// that is valid JSON on both sides as equal when their canonical JSON forms
+// match. Metadata is map[string]string, but a value is often a JSON blob (or a
+// bare JSON number). The Dolt rig-store scan and the cache can re-serialize such
+// a value differently — object key order or insignificant whitespace —
+// so an exact maps.Equal compare reports a spurious change on every ~80s
+// reconcile pass and drives a re-absorb flood of update-only wisps (ga-ocypq2
+// follow-up). A representation-insensitive compare collapses those
+// re-serialization artifacts while still catching a genuine value change.
+func metadataEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok {
+			return false
+		}
+		if av == bv {
+			continue
+		}
+		// Both sides must be valid JSON for a canonical compare to be
+		// meaningful; otherwise the raw strings genuinely differ.
+		if json.Valid([]byte(av)) && json.Valid([]byte(bv)) {
+			ca, okA := canonicalJSON(av)
+			cb, okB := canonicalJSON(bv)
+			if okA && okB && ca == cb {
+				continue
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// canonicalJSON returns a stable canonical serialization of a JSON value:
+// json.Unmarshal into interface{} then json.Marshal, which sorts object keys
+// and drops insignificant whitespace. Reports false when the input is not
+// decodable JSON so callers fall back to an exact compare.
+func canonicalJSON(s string) (string, bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	// UseNumber decodes JSON numbers as json.Number (their exact source text)
+	// rather than float64, so integers beyond 2^53 stay distinct instead of
+	// collapsing to the same float. A float round-trip made e.g.
+	// 9007199254740992 and 9007199254740993 canonicalize identically, so
+	// metadataEqual reported two genuinely different values as equal and the
+	// reconcile dropped the real change — a missed write, worse than a spurious
+	// one. Preserving the source text keeps that comparison exact.
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return "", false
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
 }
 
 // stringSetEqual reports whether two string slices hold the same multiset of

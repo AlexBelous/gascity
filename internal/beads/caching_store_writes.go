@@ -3,7 +3,13 @@ package beads
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+)
+
+var (
+	_ BatchDeleter     = (*CachingStore)(nil)
+	_ ForeignIDCreator = (*CachingStore)(nil)
 )
 
 // Create passes through to the backing store and updates the cache.
@@ -22,6 +28,21 @@ func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, er
 	}
 	return c.createWith(func() (Bead, error) {
 		return storageBacking.CreateWithStorage(b, storage)
+	})
+}
+
+// CreateWithForeignID passes a forced foreign-prefix create to a backing store
+// that supports it, then updates the cache. It satisfies ForeignIDCreator so the
+// capability survives the caching wrapper; a backing store without it returns an
+// error (there is no safe fallback — the ordinary Create would reject or re-mint
+// the foreign id).
+func (c *CachingStore) CreateWithForeignID(b Bead) (Bead, error) {
+	creator, ok := c.backing.(ForeignIDCreator)
+	if !ok {
+		return Bead{}, fmt.Errorf("caching store: backing store %T does not support foreign-id create", c.backing)
+	}
+	return c.createWith(func() (Bead, error) {
+		return creator.CreateWithForeignID(b)
 	})
 }
 
@@ -954,7 +975,7 @@ func (c *CachingStore) Delete(id string) error {
 // rather than left with a dangling edge — the same contract a BatchDeleter
 // backing gets from the schema's ON DELETE CASCADE. It satisfies BatchDeleter.
 func (c *CachingStore) DeleteBatch(ids []string) error {
-	cd, ok := c.backing.(BatchDeleter)
+	cd, ok := c.backing.(IDBatchDeleter)
 	if !ok {
 		for _, id := range ids {
 			if id == "" {
@@ -1118,6 +1139,38 @@ func (c *CachingStore) dropIncomingEdgesToDeletedLocked(deleted map[string]struc
 		}
 		c.clearReadyProjectionLocked(issueID)
 	}
+}
+
+// DeleteAllOrphaning delegates to the backing store's orphan-preserving batch
+// delete (BatchDeleter) and evicts every id from the cache. It satisfies
+// BatchDeleter so the capability survives the caching wrapper. When the backing
+// store does not implement BatchDeleter, it returns an error rather than looping
+// single-id Delete — a single-id fallback would defeat the orphan-preserving
+// contract the batch delete exists to provide.
+func (c *CachingStore) DeleteAllOrphaning(ids []string) (int, error) {
+	batch, ok := c.backing.(BatchDeleter)
+	if !ok {
+		return 0, fmt.Errorf("caching store: backing store %T does not support orphan-preserving batch delete", c.backing)
+	}
+	deleted, err := batch.DeleteAllOrphaning(ids)
+	if err != nil {
+		return deleted, err
+	}
+	c.mu.Lock()
+	now := time.Now()
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		seq := c.noteLocalMutationLocked(id)
+		c.tombstoneLocked(id, seq)
+		c.clearDependentReadyProjectionsLocked(id)
+	}
+	c.markFreshLocked(now)
+	c.updateStatsLocked()
+	c.mu.Unlock()
+	return deleted, nil
 }
 
 func (c *CachingStore) snapshotBeadBeforeDelete(id string) (Bead, bool) {

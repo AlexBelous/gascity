@@ -283,15 +283,15 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 
 // canonicalScopeDoltProjectionAuthoritative reports whether canonical
 // Dolt projection would resolve auth for the city scope: the scope
-// backend is not postgres and the scope config resolves authoritative —
-// the same ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv
+// backend is not postgres or sqlite and the scope config resolves
+// authoritative — the same gates applyOrderExecCanonicalDoltEnv
 // and its managed fallback apply before calling
 // applyCanonicalDoltAuthEnv. Callers that feed ambient environments
 // into the projection use this to strip untrusted password mirrors
 // from the resolution input without breaking the strict no-op
 // pass-through for non-authoritative scopes.
 func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
-	if scopeBackendIsPostgres(cityPath, cityPath) {
+	if scopeBackendIsNonDolt(cityPath, cityPath) {
 		return false
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
@@ -351,6 +351,16 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 // (true, err) on a known backend that failed to project; caller MUST
 // surface this error rather than retrying.
 func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
+	// A scope whose metadata declares bd's sqlite backend is bd-owned:
+	// metadata.json is the routing identity (config.yaml is a compatibility
+	// mirror), so the projection is a clean slate regardless of what shape
+	// the scope's config.yaml resolves to. Checked before config resolution
+	// because contract.LoadMetadataState rejects "sqlite" and would
+	// otherwise surface a parse error for an authoritative scope config.
+	if scopeBackendIsSQLite(scopeRoot) {
+		applySQLiteScopeBackendEnv(env)
+		return true, nil
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil {
 		return false, err
@@ -474,7 +484,16 @@ func scopeMetadataJSONPath(scopeRoot string) string {
 // applyResolvedScopePostgresEnv projects PG credentials and connection
 // info into env. Caller guarantees meta.Backend == "postgres". The
 // resolver chain in internal/pgauth supplies the password; the host,
-// port, user, and database come straight from MetadataState.
+// port, user, and database come from MetadataState via PostgresEndpoint —
+// discrete draft-era fields when present, otherwise derived from bd
+// origin/main's password-free postgres_dsn.
+//
+// The password is projected under three names: GC_POSTGRES_PASSWORD (gc
+// canonical), BEADS_POSTGRES_PASSWORD (draft-era bd), and BEADS_PG_PASSWORD
+// (bd origin/main's static-password read; beads
+// internal/storage/postgres/credential.go). bd-main reopens the store from
+// metadata.json (postgres_dsn + postgres_schema) plus that password env, so
+// no DSN/schema env projection is needed.
 //
 // On resolver exhaustion returns an error wrapping
 // pgauth.ErrNoPasswordResolvable; callers can match with errors.Is.
@@ -490,25 +509,27 @@ func applyResolvedScopePostgresEnv(env map[string]string, cityPath, scopeRoot st
 	clearProjectedDoltEnv(env)
 	mirrorBeadsDoltEnv(env)
 	clearProjectedPostgresEnv(env)
-	endpoint := pgauth.Endpoint{
-		Host: meta.PostgresHost,
-		Port: meta.PostgresPort,
-		User: meta.PostgresUser,
+	endpoint, err := meta.PostgresEndpoint()
+	if err != nil {
+		return fmt.Errorf("deriving postgres endpoint for %s: %w", scopeRoot, err)
 	}
 	// Scope projection clears inherited PG keys first, so credential
 	// resolution intentionally starts at process and file-backed sources.
-	resolved, err := pgauth.ResolveFromEnv(nil, scopeRoot, endpoint)
+	resolved, err := pgauth.ResolveFromEnv(nil, scopeRoot, pgauth.Endpoint{
+		Host: endpoint.Host,
+		Port: endpoint.Port,
+		User: endpoint.User,
+	})
 	if err != nil {
 		return fmt.Errorf("resolving postgres credentials for %s: %w", scopeRoot, err)
 	}
 	env["GC_POSTGRES_PASSWORD"] = resolved.Password
-	env["BEADS_POSTGRES_PASSWORD"] = resolved.Password
-	env["BEADS_POSTGRES_HOST"] = meta.PostgresHost
-	env["BEADS_POSTGRES_PORT"] = meta.PostgresPort
-	env["BEADS_POSTGRES_USER"] = meta.PostgresUser
-	env["BEADS_POSTGRES_DATABASE"] = meta.PostgresDatabase
+	env["BEADS_POSTGRES_HOST"] = endpoint.Host
+	env["BEADS_POSTGRES_PORT"] = endpoint.Port
+	env["BEADS_POSTGRES_USER"] = endpoint.User
+	env["BEADS_POSTGRES_DATABASE"] = endpoint.Database
 	mirrorBeadsPostgresEnv(env)
-	emitPostgresCredentialResolved(cityPath, scopeRoot, meta, resolved.Source)
+	emitPostgresCredentialResolved(cityPath, scopeRoot, endpoint, resolved.Source)
 	return nil
 }
 
@@ -516,8 +537,10 @@ func applyResolvedScopePostgresEnv(env map[string]string, cityPath, scopeRoot st
 // describing the scope and the resolution tier that supplied the password.
 // Best-effort: recorder failures (file unreachable, JSONL write error) do
 // not propagate to the caller. The payload deliberately omits the password
-// value (asserted by TestPostgresEventOmitsPassword).
-func emitPostgresCredentialResolved(cityPath, scopeRoot string, meta contract.MetadataState, source pgauth.Source) {
+// value (asserted by TestPostgresEventOmitsPassword). The endpoint is the
+// effective one (DSN-derived for bd-main scopes), so the recorded
+// host/port/user are never empty for a validated postgres scope.
+func emitPostgresCredentialResolved(cityPath, scopeRoot string, endpoint contract.PostgresEndpoint, source pgauth.Source) {
 	scopeKind, scopeName := scopeKindAndName(cityPath, scopeRoot)
 	subject := "city/" + scopeName
 	if scopeKind == "rig" {
@@ -527,9 +550,9 @@ func emitPostgresCredentialResolved(cityPath, scopeRoot string, meta contract.Me
 		ScopeKind: scopeKind,
 		ScopeName: scopeName,
 		Source:    source.String(),
-		Host:      meta.PostgresHost,
-		Port:      meta.PostgresPort,
-		User:      meta.PostgresUser,
+		Host:      endpoint.Host,
+		Port:      endpoint.Port,
+		User:      endpoint.User,
 	}
 	if _, loaded := postgresCredentialResolvedSeen.LoadOrStore(postgresCredentialResolvedKey(cityPath, payload), struct{}{}); loaded {
 		return
@@ -566,22 +589,26 @@ func scopeKindAndName(cityPath, scopeRoot string) (string, string) {
 }
 
 // mirrorBeadsPostgresEnv copies canonical (GC_*) PG env keys to their
-// bd-expected (BEADS_POSTGRES_*) names. Today only the password has a
-// canonical-vs-bd split; the function exists so future bd-side
-// renames become a one-line change.
+// bd-expected names. The password mirrors to both BEADS_POSTGRES_PASSWORD
+// (draft-era bd read) and BEADS_PG_PASSWORD (bd origin/main's canonical
+// static-password read; beads internal/storage/postgres/credential.go), so
+// one gc projection serves either bd generation.
 func mirrorBeadsPostgresEnv(env map[string]string) {
 	if env == nil {
 		return
 	}
 	if pass := env["GC_POSTGRES_PASSWORD"]; pass != "" {
 		env["BEADS_POSTGRES_PASSWORD"] = pass
+		env["BEADS_PG_PASSWORD"] = pass
 	} else {
 		delete(env, "BEADS_POSTGRES_PASSWORD")
+		delete(env, "BEADS_PG_PASSWORD")
 	}
 	// HOST/PORT/USER/DATABASE: applyResolvedScopePostgresEnv populates
-	// BEADS_POSTGRES_* directly from MetadataState; no GC_-side canonical
-	// exists for those today. If a future refactor introduces GC_POSTGRES_HOST
-	// etc., add the mirror copies here in the same shape as the password.
+	// BEADS_POSTGRES_* directly from the derived endpoint; no GC_-side
+	// canonical exists for those today. If a future refactor introduces
+	// GC_POSTGRES_HOST etc., add the mirror copies here in the same shape
+	// as the password.
 }
 
 // projectedPostgresEnvKeys mirrors projectedDoltEnvKeys: the canonical
@@ -593,6 +620,7 @@ func mirrorBeadsPostgresEnv(env map[string]string) {
 var projectedPostgresEnvKeys = []string{
 	"GC_POSTGRES_PASSWORD",
 	"BEADS_POSTGRES_PASSWORD",
+	"BEADS_PG_PASSWORD",
 	"BEADS_POSTGRES_HOST",
 	"BEADS_POSTGRES_PORT",
 	"BEADS_POSTGRES_USER",
@@ -605,6 +633,14 @@ func postgresMetadataForScope(cityPath, scopeRoot string) (contract.MetadataStat
 	}
 	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
 	if err != nil {
+		// bd's sqlite backend is not representable in MetadataState (the
+		// loader rejects it as unknown), but the classification answer is
+		// unambiguous: a sqlite scope is not Postgres. Answering instead of
+		// erroring keeps the bd error-classification and doctor paths from
+		// wrapping every sqlite-scope failure in a metadata parse error.
+		if scopeBackendIsSQLite(scopeRoot) {
+			return contract.MetadataState{}, false, nil
+		}
 		return contract.MetadataState{}, false, fmt.Errorf("loading metadata for scope %s: %w", scopeRoot, err)
 	}
 	if ok {
@@ -645,6 +681,53 @@ func scopeBackendIsPostgres(cityPath, scopeRoot string) bool {
 		return false
 	}
 	return ok
+}
+
+// scopeBackendIsSQLite reports whether the scope's .beads/metadata.json
+// declares backend "sqlite" — bd's file-based embedded backend, authored by
+// `bd init --backend=sqlite`. gc never manages sqlite storage (no server, no
+// credentials, no Dolt machinery); the only decision this answer feeds is
+// "skip Dolt/Postgres-specific machinery for this scope". The raw JSON read
+// is deliberate: contract.LoadMetadataState rejects "sqlite" as an unknown
+// backend, so callers cannot classify the scope through it (same pattern as
+// allowLegacyDoltMetadataRepair).
+func scopeBackendIsSQLite(scopeRoot string) bool {
+	data, err := os.ReadFile(scopeMetadataJSONPath(scopeRoot))
+	if err != nil {
+		return false
+	}
+	var raw struct {
+		Backend string `json:"backend"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(raw.Backend), "sqlite")
+}
+
+// scopeBackendIsNonDolt reports whether the scope's declared beads backend is
+// one gc must not project Dolt machinery onto: an external Postgres endpoint
+// or bd's sqlite backend. Callers use it where the semantic is "skip
+// Dolt-specific env/preflight/init for this scope" — bd reaches the scope
+// through BEADS_DIR and resolves the backend from the scope's own
+// .beads/metadata.json.
+func scopeBackendIsNonDolt(cityPath, scopeRoot string) bool {
+	return scopeBackendIsPostgres(cityPath, scopeRoot) || scopeBackendIsSQLite(scopeRoot)
+}
+
+// applySQLiteScopeBackendEnv projects the env for a bd-owned sqlite scope: a
+// clean slate. sqlite is file-based and embedded — no server endpoint, no
+// credentials — so gc strips every Dolt/Postgres projection and lets bd
+// resolve the backend from the scope's own .beads/metadata.json via
+// BEADS_DIR (which the callers pin).
+func applySQLiteScopeBackendEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	clearProjectedBeadsBackendEnv(env)
+	clearProjectedDoltEnv(env)
+	clearProjectedPostgresEnv(env)
+	mirrorBeadsDoltEnv(env)
 }
 
 func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot string, state contract.ConfigState) {
@@ -1109,6 +1192,22 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		}
 		ensureProjectedDoltEnvExplicit(env)
 		ensureProjectedPostgresEnvExplicit(env)
+		// envFn resolves credentials for the CITY scope. When this runner
+		// targets a different scope whose backend is Postgres (e.g. a
+		// metadata-backed infra store on a Dolt-work city), the projected
+		// password lands here as an explicit empty string. bd treats an
+		// explicit-empty BEADS_PG_PASSWORD as authoritative and skips its own
+		// .beads/.env resolution, so auth fails against the external endpoint.
+		// Drop the empty projected password keys for a Postgres scope so bd
+		// resolves the scope password from its scope file (the same .beads/.env
+		// gc's own pgauth Tier-5 reads).
+		if _, ok, metaErr := postgresMetadataForScope(cityPath, dir); metaErr == nil && ok {
+			for _, k := range []string{"GC_POSTGRES_PASSWORD", "BEADS_PG_PASSWORD", "BEADS_POSTGRES_PASSWORD"} {
+				if strings.TrimSpace(env[k]) == "" {
+					delete(env, k)
+				}
+			}
+		}
 		runner := beadsExecCommandRunnerWithEnv(env)
 		out, err := runner(dir, name, args...)
 		if name != "bd" {
@@ -1118,12 +1217,25 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		// error gets wrapped with an operator-facing hint and surfaced; gc
 		// does not manage external PG endpoints.
 		if err != nil {
+			// Same for bd's sqlite backend: file-based, no server endpoint —
+			// no PG hint applies and no managed-Dolt recovery could help.
+			// Surface the bd error as-is.
+			if scopeBackendIsSQLite(dir) {
+				return out, err
+			}
 			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
 			if classifyErr != nil {
 				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
 			}
 			if ok {
-				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
+				endpoint, epErr := meta.PostgresEndpoint()
+				if epErr != nil {
+					// meta came from a validated LoadMetadataState, so this is
+					// unreachable in practice; fall back to the raw fields so
+					// the operator hint never masks the bd error.
+					endpoint = contract.PostgresEndpoint{Host: meta.PostgresHost, Port: meta.PostgresPort}
+				}
+				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", endpoint.Host, endpoint.Port, err)
 			}
 		}
 		if err == nil && scopeBackendIsPostgres(cityPath, dir) {
@@ -1741,6 +1853,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
+		"BEADS_PG_PASSWORD",
 		"BEADS_POSTGRES_DATABASE",
 		"BEADS_POSTGRES_HOST",
 		"BEADS_POSTGRES_PASSWORD",

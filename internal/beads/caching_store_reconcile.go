@@ -2,7 +2,6 @@ package beads
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -722,18 +721,22 @@ func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap 
 	return freshDeps
 }
 
-// recoverMissingFromList re-fetches any cached active bead that didn't appear
-// in freshByID and merges verified-alive ones back. This guards against
-// cleanly incomplete List results: a List that drops an active bead must not
-// synthesize a spurious bead.closed event for it.
+// recoverMissingFromList re-checks any cached active bead that didn't appear in
+// the fresh full-scan snapshot and merges the still-alive ones back. It guards
+// against a cleanly incomplete List: a scan that drops an active row must not
+// synthesize a spurious bead.closed for it.
 //
-// On ErrNotFound the bead is left absent so the diff path can emit
-// bead.closed as before. When Get confirms a closed bead, the returned map
-// carries that fresh row so the diff path can emit an authoritative close
-// payload instead of a stale cached status flip. On any other error the cached
-// entry is merged back conservatively, deferring the close to a later scan
-// when the backing store's state is unambiguous. Callers must own freshByID
-// and not access it concurrently while recovery is running.
+// The re-check is a single scoped List (ListQuery.IDs) over exactly the missing
+// ids — a batched id lookup, tier-consistent with the fresh scan and including
+// closed rows so a closed candidate is distinguishable from a gone one. A
+// candidate the backing still returns open is recovered; a closed one yields an
+// authoritative close payload; one absent from the scan is confirmed gone and
+// the diff path emits bead.closed. The transient managed-Dolt scan flakes that
+// caused those drops are absorbed by the backing read retry (native #4197 / bd
+// runBDTransientRead), so a successful scan is trusted — no second per-id
+// re-verify. A backing read ERROR is never trusted for eviction: every candidate
+// is deferred to a later, unambiguous scan. Callers must own freshByID and not
+// access it concurrently while recovery is running.
 func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[string]Bead {
 	c.mu.RLock()
 	candidates := make(map[string]Bead)
@@ -750,49 +753,78 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 	if len(candidates) == 0 {
 		return nil
 	}
+
+	found, err := c.fetchBeadsByIDs(candidates)
+	if err != nil {
+		// A backing read error must not evict: defer every candidate.
+		c.recordProblem("verify missing beads before close", err)
+		for id, cached := range candidates {
+			freshByID[id] = cached
+		}
+		c.mu.Lock()
+		c.stats.ReconcileCloseDeferrals += int64(len(candidates))
+		c.mu.Unlock()
+		return nil
+	}
+
 	var confirmedClosed map[string]Bead
 	var recoveredAlive int64
-	var deferredClose int64
-	for id, cached := range candidates {
-		bead, err := c.backing.Get(id)
-		switch {
-		case err == nil:
-			if bead.ID != id {
-				c.recordProblem(
-					"verify missing bead before close",
-					fmt.Errorf("%s: backing returned bead %q", id, bead.ID),
-				)
-				freshByID[id] = cached
-				deferredClose++
-				continue
-			}
-			if bead.Status == "closed" {
-				if confirmedClosed == nil {
-					confirmedClosed = make(map[string]Bead)
-				}
-				confirmedClosed[id] = cloneBead(bead)
-				continue
-			}
-			freshByID[id] = cloneBead(bead)
-			recoveredAlive++
-		case errors.Is(err, ErrNotFound):
-			// Confirmed gone; let the diff path emit bead.closed.
-		default:
-			c.recordProblem(
-				"verify missing bead before close",
-				fmt.Errorf("%s: %w", id, err),
-			)
-			freshByID[id] = cached
-			deferredClose++
+	for id := range candidates {
+		bead, present := found[id]
+		if !present {
+			// Absent from the backing: confirmed gone; let the diff path emit
+			// bead.closed.
+			continue
 		}
+		if bead.Status == "closed" {
+			// Closed in the backing: carry the fresh row so the diff path emits
+			// an authoritative close payload, not a stale cached status flip.
+			if confirmedClosed == nil {
+				confirmedClosed = make(map[string]Bead)
+			}
+			confirmedClosed[id] = cloneBead(bead)
+			continue
+		}
+		freshByID[id] = cloneBead(bead)
+		recoveredAlive++
 	}
-	if recoveredAlive != 0 || deferredClose != 0 {
+	if recoveredAlive != 0 {
 		c.mu.Lock()
 		c.stats.ReconcileRecoveries += recoveredAlive
-		c.stats.ReconcileCloseDeferrals += deferredClose
 		c.mu.Unlock()
 	}
 	return confirmedClosed
+}
+
+// fetchBeadsByIDs batch-fetches the given ids from the backing in a single
+// scoped List (ListQuery.IDs) — the reconcile fresh scan's tier-consistent
+// TierBoth shape plus IncludeClosed — and returns the found beads keyed by id.
+//
+// The id-scope is load-bearing: an unscoped re-list re-scanned the entire active
+// universe on every recovery pass, and on a large rig (~1622 wisps) that doubled
+// every reconcile pass into a multi-hundred-ms full scan that starved the
+// reconciler. ListQuery.IDs pushes an `id IN (...)` filter to the native and
+// DoltLite stores, so this costs O(missing), not O(active). Stores that cannot
+// push it down still return a correct result: Matches filters the ids, and the
+// want-map filter below is the final guard.
+func (c *CachingStore) fetchBeadsByIDs(want map[string]Bead) (map[string]Bead, error) {
+	q := cacheFullScanQuery()
+	q.IncludeClosed = true
+	q.IDs = make([]string, 0, len(want))
+	for id := range want {
+		q.IDs = append(q.IDs, id)
+	}
+	beads, err := c.backing.List(q)
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[string]Bead, len(want))
+	for _, b := range beads {
+		if _, ok := want[b.ID]; ok {
+			found[b.ID] = b
+		}
+	}
+	return found, nil
 }
 
 func (c *CachingStore) preserveCachedReadyProjectionLocked(items map[string]Bead, depMap map[string][]Dep, useFreshDeps bool) {

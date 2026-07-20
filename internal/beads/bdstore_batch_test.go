@@ -122,4 +122,4 @@ func TestBdStoreDeleteBatchReportsNoCommittedOnFirstChunkFailure(t *testing.T) {
 
 // BdStore must advertise the batched delete capability so the wisp GC discovers
 // it by interface assertion.
-var _ BatchDeleter = (*BdStore)(nil)
+var _ IDBatchDeleter = (*BdStore)(nil)

@@ -20,7 +20,7 @@ import (
 // only an ownership closure and must not reach live work outside it, so the
 // batch delete removes exactly the given ids — the semantics of
 // `bd delete <ids...> --force`, not `bd delete --cascade`.
-type BatchDeleter interface {
+type IDBatchDeleter interface {
 	// DeleteBatch removes exactly the given ids as a batch, orphaning external
 	// dependents. Implementations tolerate ids that are already gone
 	// (idempotent) and may chunk internally to respect backend limits. When an

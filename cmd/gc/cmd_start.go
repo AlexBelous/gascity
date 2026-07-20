@@ -696,10 +696,21 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Reserved coordination-class prefixes are a non-fatal advisory until
-	// per-class stores activate; warn but do not block startup.
-	for _, w := range config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)) {
-		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	// Reserved coordination-class prefixes are a non-fatal advisory on a
+	// single-store city (per-class routing is inert). On a split city the infra
+	// store actively mints these prefixes, so a work-store prefix that shadows one
+	// is a hard ambiguity — fail startup instead of warning.
+	if reserved := config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)); len(reserved) > 0 {
+		if cityHasInfraStore(cityPath) {
+			for _, w := range reserved {
+				fmt.Fprintf(stderr, "gc start: %s\n", w) //nolint:errcheck // best-effort stderr
+			}
+			fmt.Fprintln(stderr, "gc start: a work-store prefix collides with a reserved infra-store class prefix on a split city; rename it before starting") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		for _, w := range reserved {
+			fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -922,9 +933,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// role the daemon routes to the session store today too, tracked as a shared E2
 	// two-store split. Identity to oneShotStore at the single-store backend, so
 	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete keeps
-	// the plain oneShotStore, matching the daemon's cityBeadStore() there (its lone
-	// liveOpenSessionAssignmentExists session read is a shared work-release-boundary
-	// follow-up).
+	// the plain oneShotStore for its work reads/writes, matching the daemon's
+	// cityBeadStore() there; its lone liveOpenSessionAssignmentExists session read
+	// routes to sessStore, matching the daemon's sessions-store threading.
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
 
 	// One-shot bead reconciliation: same code path as the daemon.
@@ -943,7 +954,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 	)
 
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, sessStore); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}

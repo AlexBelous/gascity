@@ -107,6 +107,19 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 	}
 	policyCfg, policyWrapped := beadPolicyConfig(existing)
 	dir := bs.Dir()
+	// A relocated coordination-class store on a split city: the session / graph /
+	// messaging / orders / nudges front door (resolveClassStore) returns the city
+	// INFRA store, whose backing dir is the .gc/infra scope root — neither the
+	// city work store nor a rig. Do NOT rebuild it via the rig env path: that
+	// mis-scopes the read (the rig env resolution is not the infra scope's) and
+	// silently defeats the class front door the caller routed through. Keep
+	// reading through the routed store directly (return nil, nil). The ctx-cancel
+	// clone (ga-cdmx6x) is a best-effort optimization we forgo for this case, not
+	// a correctness requirement — the caller's own timeout still bounds the read.
+	// Guard before the build so we never construct the mis-scoped rig clone.
+	if !samePath(dir, cityPath) && samePath(dir, infraScopeRoot(cityPath)) {
+		return nil, nil
+	}
 	var scoped beads.Store
 	var err error
 	if samePath(dir, cityPath) {
@@ -117,6 +130,8 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 	if err != nil {
 		return nil, err
 	}
+	// Retain the bead-policy layer: policy-aware zero-value List and Ready reads
+	// span both logical tiers, so a scoped clone must keep it.
 	if policyWrapped {
 		scoped = wrapStoreWithBeadPolicies(scoped, policyCfg)
 	}

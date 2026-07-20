@@ -25,7 +25,7 @@ func (s *batchBackingSpy) DeleteBatch(ids []string) error {
 	return nil
 }
 
-var _ BatchDeleter = (*batchBackingSpy)(nil)
+var _ IDBatchDeleter = (*batchBackingSpy)(nil)
 
 func mustBatchCreate(t *testing.T, cs *CachingStore, b Bead) Bead {
 	t.Helper()
@@ -204,7 +204,7 @@ func (s *partialBatchBackingSpy) DeleteBatch(ids []string) error {
 	return nil
 }
 
-var _ BatchDeleter = (*partialBatchBackingSpy)(nil)
+var _ IDBatchDeleter = (*partialBatchBackingSpy)(nil)
 
 // A partial backing failure must not leave the cache divergent from the backing:
 // ids the backend durably removed are evicted and fenced, while ids it never
@@ -276,4 +276,4 @@ func batchContainsAll(haystack []string, needles ...string) bool {
 	return true
 }
 
-var _ BatchDeleter = (*CachingStore)(nil)
+var _ IDBatchDeleter = (*CachingStore)(nil)

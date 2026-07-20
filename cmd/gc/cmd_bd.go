@@ -116,6 +116,31 @@ auto-export behavior, invoke bd directly.`,
 	return cmd
 }
 
+// newBdShimCmd is a hidden alias for `gc bd`: it forwards its args verbatim to
+// the same doBd path, so `gc bd-shim <bd-args…>` behaves identically to
+// `gc bd <bd-args…>`, including the split-city infra-store routing in
+// resolveBdScopeTarget. It exists because the workflows packs invoke
+// `gc bd-shim …` (e.g.
+// `gc bd-shim update gcg-… --set-metadata review.verdict=…`); registering it
+// makes those calls resolve on this build instead of failing as an unknown
+// command. DisableFlagParsing mirrors newBdCmd so gc-owned scope flags and bd's
+// own flags reach doBd unchanged.
+func newBdShimCmd(stdout, stderr io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:                "bd-shim [bd-args...]",
+		Short:              "Alias for `gc bd` (forwards to the bd wrapper)",
+		Hidden:             true,
+		DisableFlagParsing: true,
+		Annotations: map[string]string{
+			jsonRawPassthroughAnnotation: "true",
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			return exitForCode(doBd(args, stdout, stderr))
+		},
+	}
+	return cmd
+}
+
 var bdBeadExists = func(cityPath string, target execStoreTarget, beadID string) bool {
 	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
 	if err != nil {
@@ -144,6 +169,16 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
+	// A split-city INFRA scope is its own Dolt database, distinct from the city
+	// work store. The else-branch above projected the WORK store's Dolt
+	// connection; BEADS_DIR (set just above) selects the infra .beads config but
+	// not a differing managed/external endpoint or its credentials. Re-project the
+	// infra scope's own canonical Dolt target so the exec bd connects to the infra
+	// database — the same re-projection order dispatch applies before writing
+	// infra-class order beads (gco-) via exec bd (applyOrderExecCanonicalDoltEnv).
+	if target.ScopeKind == "infra" {
+		applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, overrides)
+	}
 	applyExportSuppressionEnv(overrides)
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
 }
@@ -206,6 +241,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	// `mol current|progress <id>` on a split city cannot be answered by the
+	// single-store bd exec below: the molecule's step beads are graph-class and
+	// live in the infra store, invisible to the work-scoped bd, so it returns
+	// steps: null and blocks every reader (workflow progress, finalize approval).
+	// Federate the topology through the controller's bead-graph endpoint and
+	// render the same JSON shape bd emits. Single-store cities, non-routable mol
+	// forms, and a controller-down city all fall through to the byte-identical
+	// passthrough. (split-store-conformance port of X2 / commit 305bed90d.)
+	if code, handled := maybeRouteBdMolViaAPI(cityPath, bdArgs, stdout, stderr); handled {
+		return code
 	}
 
 	// Use the full config load path (includes pack expansion + site
@@ -606,6 +653,33 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return cityTarget, nil
 	}
 
+	// Reserved-prefix by-id ops route to the INFRA store on a split city.
+	// Infra-class beads live in a reserved coordination-class id namespace
+	// (gcg-/gcs-/gcm-/gco-/gcn-, including bd's wisp-tier gcg-wisp-… ids) in
+	// the infra store (.gc/infra), never the work store. Without this arm such
+	// an id matches no rig/HQ prefix and falls through to the city WORK store,
+	// where the bead does not exist — so `gc bd update gcg-X …` execs bd
+	// against the wrong store and silently drops the write. The reserved-prefix
+	// classification is authoritative (a bead lives in exactly one store, keyed
+	// by id namespace), so route by prefix without a work-store existence
+	// probe. Gated on cityHasInfraStore: a single-store city has no infra
+	// scope, so this arm is skipped and routing stays byte-identical. Uses the
+	// same predicate as claimableStore.storeForID
+	// (config.IsReservedClassBeadID) so the read and write sides agree on
+	// which store owns a reserved-prefix id. It runs after the explicit
+	// --rig/--city pins (which deliberately scope) but before HQ/rig prefix
+	// auto-detection.
+	if cityHasInfraStore(cityPath) {
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			if config.IsReservedClassBeadID(arg) {
+				return bdInfraScopeTarget(cityPath), nil
+			}
+		}
+	}
+
 	cityPrefix := config.EffectiveHQPrefix(cfg)
 	if cityPrefix != "" {
 		for _, arg := range args {
@@ -705,5 +779,18 @@ func bdCityScopeTarget(cityPath string, cfg *config.City) execStoreTarget {
 		ScopeRoot: resolveStoreScopeRoot(cityPath, cityPath),
 		ScopeKind: "city",
 		Prefix:    config.EffectiveHQPrefix(cfg),
+	}
+}
+
+// bdInfraScopeTarget builds the scope target for a split city's INFRA store —
+// the second (coordination) store that owns reserved-class beads (gcg-/gcs-/…).
+// It mirrors bdCityScopeTarget/bdRigScopeTarget but pins ScopeRoot to the infra
+// scope root and ScopeKind to "infra", so bdCommandEnv points BEADS_DIR (and the
+// canonical Dolt endpoint) at the infra store rather than the city work store.
+func bdInfraScopeTarget(cityPath string) execStoreTarget {
+	return execStoreTarget{
+		ScopeRoot: infraScopeRoot(cityPath),
+		ScopeKind: "infra",
+		Prefix:    config.InfraScopePrefix,
 	}
 }

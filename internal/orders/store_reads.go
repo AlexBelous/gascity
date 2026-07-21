@@ -103,6 +103,15 @@ func (s *Store) CloseRuns(ctx context.Context, ids []string, reason string) (int
 	return s.tracking.CloseRuns(ctx, ids, reason)
 }
 
+// CloseRunsSwept closes a batch of tracking records with the stale-sweep
+// audit vocabulary (close_reason plus the sweep marker and initiating
+// sweeper) — the metadata close the stale-order-tracking sweep performs. On
+// the beads backend it stamps the TrackingSweep* metadata keys; on sqlite the
+// initiator lands in the sweep_by column.
+func (s *Store) CloseRunsSwept(ctx context.Context, ids []string, reason, sweptBy string) (int, error) {
+	return s.tracking.CloseRunsSwept(ctx, ids, reason, sweptBy)
+}
+
 // MarkFailed stamps the failure outcome on a tracking record, appending the
 // event cursor when the order is event-triggered with a non-nil cursor, as ONE
 // atomic mutation (see beadsTracking.MarkFailed for why one write is

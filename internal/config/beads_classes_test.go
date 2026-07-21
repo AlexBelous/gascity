@@ -145,3 +145,22 @@ backend = "sqlite"
 		}
 	}
 }
+
+// TestBeadsClassesOrdersSQLiteAccepted pins the orders capability flip: the
+// internal/classdb/orders store has landed, so [beads.classes.orders]
+// backend="sqlite" parses (other classes stay fail-closed via
+// TestBeadsClassesSQLiteRejectedUntilImplemented's ratchet).
+func TestBeadsClassesOrdersSQLiteAccepted(t *testing.T) {
+	cfg, err := Parse([]byte(`[workspace]
+name = "test"
+
+[beads.classes.orders]
+backend = "sqlite"
+`))
+	if err != nil {
+		t.Fatalf("Parse rejected orders sqlite backend: %v", err)
+	}
+	if got := cfg.Beads.ClassBackend(BeadClassOrders); got != BeadsClassBackendSQLite {
+		t.Errorf("ClassBackend(orders) = %q, want %q", got, BeadsClassBackendSQLite)
+	}
+}

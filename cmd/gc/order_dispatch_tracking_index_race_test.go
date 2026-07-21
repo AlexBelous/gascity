@@ -31,7 +31,7 @@ import (
 // map. Under `-race` the unsynchronized access is reported deterministically;
 // making orderDispatchTrackingIndex guard its maps with a mutex fixes it.
 func TestOrderDispatchTrackingIndexConcurrentGatesAreRaceFree(t *testing.T) {
-	idx := newOrderDispatchTrackingIndex()
+	idx := newOrderDispatchTrackingIndex(orderFrontForStore)
 	stores := []beads.Store{beads.NewMemStore()}
 
 	const (

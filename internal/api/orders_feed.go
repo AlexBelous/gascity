@@ -314,8 +314,11 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 		if info.store == nil {
 			continue
 		}
-		front := orderFrontForStore(info.store)
-		runs, err := front.ListTracking()
+		front, err := orderFrontForState(state, info.store)
+		var runs []orders.OrderRun
+		if err == nil {
+			runs, err = front.ListTracking()
+		}
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err

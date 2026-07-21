@@ -39,14 +39,15 @@ func orderFrontForStore(store beads.Store) *orders.Store {
 
 // orderFrontDoorsForStores wraps a federation of raw stores (the dispatcher's
 // city + rig scopes) as order front doors for the mixed orders+graph reads
-// (LastRunAcross / CursorAcross), via the orderFrontForStore seam. Under a
-// graph-store split the dispatcher's per-scope store resolution would supply a
-// distinct graph leg; that resolution is a separate concern from this
-// front-door construction.
-func orderFrontDoorsForStores(stores []beads.Store) []*orders.Store {
+// (LastRunAcross / CursorAcross), through the caller's routing resolver (the
+// bd shape, or the routed class store with each scope store as its graph
+// leg). Under a graph-store split the dispatcher's per-scope store resolution
+// would supply a distinct graph leg; that resolution is a separate concern
+// from this front-door construction.
+func orderFrontDoorsForStores(front orderFrontResolver, stores []beads.Store) []*orders.Store {
 	out := make([]*orders.Store, 0, len(stores))
 	for _, s := range stores {
-		out = append(out, orderFrontForStore(s))
+		out = append(out, front(s))
 	}
 	return out
 }
@@ -54,10 +55,10 @@ func orderFrontDoorsForStores(stores []beads.Store) []*orders.Store {
 // orderFrontDoorsForTypedStores is orderFrontDoorsForStores over already
 // class-typed orders stores (the per-order resolution outputs), preserving the
 // same orders-leg/graph-leg pairing.
-func orderFrontDoorsForTypedStores(stores []beads.OrdersStore) []*orders.Store {
+func orderFrontDoorsForTypedStores(front orderFrontResolver, stores []beads.OrdersStore) []*orders.Store {
 	out := make([]*orders.Store, 0, len(stores))
 	for _, s := range stores {
-		out = append(out, orderFrontForStore(s.Store))
+		out = append(out, front(s.Store))
 	}
 	return out
 }

@@ -30,6 +30,21 @@ const (
 	closeVerifyRetryDelay = 25 * time.Millisecond
 )
 
+// Stale-sweep audit vocabulary. On the beads backend these are the metadata
+// keys the sweep stamps alongside close_reason; the sqlite backend records
+// the initiator in its sweep_by column. Exported so cmd/gc's wisp-subtree
+// sweep (which stays on raw graph stores) shares the same vocabulary.
+const (
+	// TrackingSweepMetadataKey marks a tracking close as performed by the
+	// stale-order-tracking sweep.
+	TrackingSweepMetadataKey = "order_tracking_sweep"
+	// TrackingSweepStaleReason is TrackingSweepMetadataKey's canonical value.
+	TrackingSweepStaleReason = "stale-order-tracking"
+	// TrackingSweepByKey records which sweeper initiated the close (periodic
+	// sweep order vs controller watchdog).
+	TrackingSweepByKey = "order_tracking_sweep_by"
+)
+
 // beadsTracking implements trackingBackend over a beads.OrdersStore — the
 // bd-backed orders leg. A zero value (nil wrapped store) answers reads with
 // empty results and writes with errors, matching the pre-extraction nil-store
@@ -396,17 +411,36 @@ func (b beadsTracking) LatestOpenRun(scoped string) (OrderRun, bool, error) {
 // is closed — retrying a bounded number of times with a short backoff to
 // tolerate a store that briefly reports a just-closed bead as still open (Dolt
 // write lag). It returns the number of beads actually closed. It is the
-// byte-identical replacement for the dispatcher's
-// closeAndVerifyOrderTrackingBeads for the close_reason-only close sites
-// (dispatch completion, orphaned-startup sweep). ctx cancels the inter-attempt
+// byte-identical replacement for the dispatcher's former
+// closeAndVerifyOrderTrackingBeads: the close_reason-only sites (dispatch
+// completion, orphaned-startup sweep) route here, and the stale sweep's
+// metadata close routes through CloseRunsSwept over the same closeAllVerify
+// loop, so the retry policy has a single home. ctx cancels the inter-attempt
 // backoff.
-//
-// DRIFT GUARD: this retry loop (attempts/backoff via closeVerifyAttempts +
-// closeVerifyRetryDelay, plus uniqueNonEmptyIDs / openIDs / waitCloseRetry) is
-// a deliberate twin of cmd/gc/order_dispatch.go closeAndVerifyOrderTrackingBeads,
-// which survives for the stale sweep's richer sweep-vocabulary metadata close.
-// Any change to the retry policy MUST land in both.
 func (b beadsTracking) CloseRuns(ctx context.Context, ids []string, reason string) (int, error) {
+	return b.closeAllVerify(ctx, ids, map[string]string{"close_reason": reason})
+}
+
+// CloseRunsSwept closes a batch with the stale-sweep audit vocabulary: the
+// sweep marker, close_reason, and (when non-empty) the initiating sweeper. It
+// emits byte-identical CloseAll writes to the dispatcher's former
+// closeAndVerifyOrderTrackingBeads call for the stale sweep, through the same
+// close-verify retry loop as CloseRuns.
+func (b beadsTracking) CloseRunsSwept(ctx context.Context, ids []string, reason, sweptBy string) (int, error) {
+	metadata := map[string]string{
+		TrackingSweepMetadataKey: TrackingSweepStaleReason,
+		"close_reason":           reason,
+	}
+	if sweptBy != "" {
+		metadata[TrackingSweepByKey] = sweptBy
+	}
+	return b.closeAllVerify(ctx, ids, metadata)
+}
+
+// closeAllVerify is the shared close-verify body behind CloseRuns and
+// CloseRunsSwept: batch hygiene, CloseAll with the given metadata, then the
+// bounded re-verify loop.
+func (b beadsTracking) closeAllVerify(ctx context.Context, ids []string, metadata map[string]string) (int, error) {
 	ids = uniqueNonEmptyIDs(ids)
 	if len(ids) == 0 {
 		return 0, nil
@@ -417,7 +451,6 @@ func (b beadsTracking) CloseRuns(ctx context.Context, ids []string, reason strin
 	if b.store.Store == nil {
 		return 0, fmt.Errorf("order-tracking close: nil store")
 	}
-	metadata := map[string]string{"close_reason": reason}
 
 	closed := 0
 	var lastErr error

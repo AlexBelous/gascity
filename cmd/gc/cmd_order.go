@@ -632,7 +632,12 @@ func cmdOrderRun(name, rig string, jsonOutput bool, vars map[string]string, stdo
 			}
 			defer ep.Close() //nolint:errcheck // best-effort
 		}
-		return doOrderRunExecTracked(a, cityPath, cfg, orderFrontForStore(store.Store), ep, vars, stdout, stderr)
+		routing, routingErr := orderClassRoutingFor(cityPath, cfg)
+		if routingErr != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", routingErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return doOrderRunExecTracked(a, cityPath, cfg, routing.front(store.Store), ep, vars, stdout, stderr)
 	}
 	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
 	if store.Store == nil {
@@ -684,7 +689,12 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doOrderRunExecTracked(a, cityPath, cfg, orderFrontForStore(store.Store), ep, vars, stdout, stderr)
+		routing, routingErr := orderClassRoutingFor(cityPath, cfg)
+		if routingErr != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", routingErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return doOrderRunExecTracked(a, cityPath, cfg, routing.front(store.Store), ep, vars, stdout, stderr)
 	}
 
 	// Capture event head before wisp creation (race-free cursor). Event runs
@@ -794,7 +804,9 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// (#3294). Create it closed: its CreatedAt is the cooldown marker, and a
 	// lingering open tracking bead would read as in-flight work and block
 	// re-dispatch (ga-jra/ga-lo8c). Best-effort: the wisp already launched.
-	if _, err := orderFrontForStore(store.Store).CreateRunClosed(scoped, orders.RunOutcomeNone, nil, ""); err != nil {
+	if routing, routingErr := orderClassRoutingFor(cityPath, cfg); routingErr != nil {
+		fmt.Fprintf(stderr, "gc order run: recording tracking bead: %v\n", routingErr) //nolint:errcheck
+	} else if _, err := routing.front(store.Store).CreateRunClosed(scoped, orders.RunOutcomeNone, nil, ""); err != nil {
 		fmt.Fprintf(stderr, "gc order run: recording tracking bead: %v\n", err) //nolint:errcheck
 	}
 
@@ -940,14 +952,6 @@ func cmdOrderCheck(jsonOutput bool, stdout, stderr io.Writer) int {
 	return doOrderCheckWithStoresResolverScopedJSON(cityPath, cfg, aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), jsonOutput, stdout, stderr)
 }
 
-// orderLastRunFn returns a LastRunFunc reporting the most recent run time for a
-// named order via the order front door's mixed orders+graph LastRun read (the
-// single-store city uses one leg for both classes). Returns zero time if never
-// run.
-func orderLastRunFn(store beads.Store) orders.LastRunFunc {
-	return orderFrontForStore(store).LastRun
-}
-
 // doOrderCheck evaluates triggers for all orders and prints a table.
 // Returns 0 if any are due, 1 if none are due.
 func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, stdout io.Writer) int {
@@ -1062,6 +1066,11 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 }
 
 func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
+	routing, routingErr := orderClassRoutingFor(cityPath, cfg)
+	if routingErr != nil {
+		fmt.Fprintf(stderr, "gc order check: %v\n", routingErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if len(aa) == 0 {
 		if jsonOutput {
 			if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", orderCheckJSON{
@@ -1108,7 +1117,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			frontDoors := orderFrontDoorsForTypedStores(typedStores)
+			frontDoors := orderFrontDoorsForTypedStores(routing.front, typedStores)
 			baseLastRunFn := orders.LastRunAcross(frontDoors)
 			var lastRunErr error
 			lastRunFn := func(orderName string) (time.Time, error) {
@@ -1128,7 +1137,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				return last, err
 			}
 			cursorFn := orders.CursorAcross(frontDoors)
-			if a.Trigger == "event" {
+			// The raw bd label-scan cursor override is bd-only: routed cities
+			// read the authoritative seq through the typed path.
+			if a.Trigger == "event" && !routing.routed {
 				cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
@@ -1187,7 +1198,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		frontDoors := orderFrontDoorsForTypedStores(typedStores)
+		frontDoors := orderFrontDoorsForTypedStores(routing.front, typedStores)
 		baseLastRunFn := orders.LastRunAcross(frontDoors)
 		var lastRunErr error
 		lastRunFn := func(orderName string) (time.Time, error) {
@@ -1207,7 +1218,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			return last, err
 		}
 		cursorFn := orders.CursorAcross(frontDoors)
-		if a.Trigger == "event" {
+		// The raw bd label-scan cursor override is bd-only: routed cities
+		// read the authoritative seq through the typed path.
+		if a.Trigger == "event" && !routing.routed {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
@@ -1289,9 +1302,14 @@ func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa [
 	// produce the same aggregated output. The log line documents the
 	// deliberate fallback reason so operators aren't surprised by a
 	// missing route=api.
+	routing, routingErr := orderClassRoutingFor(cityPath, cfg)
+	if routingErr != nil {
+		fmt.Fprintf(stderr, "gc order history: %v\n", routingErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if name == "" {
 		logRoute(stderr, "order history", "fallback", "multi-order")
-		return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
+		return doOrderHistoryWithStoresResolverJSONRouted(routing, name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
 	}
 
 	var cr api.CachedRead[[]api.OrderHistoryView]
@@ -1303,7 +1321,7 @@ func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa [
 		},
 		func() int { return renderOrderHistoryFromAPI(cr, name, rig, jsonOutput, stdout, stderr) },
 		func() int {
-			return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
+			return doOrderHistoryWithStoresResolverJSONRouted(routing, name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
 		},
 	)
 }
@@ -1427,6 +1445,10 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 }
 
 func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
+	return doOrderHistoryWithStoresResolverJSONRouted(bdOrderClassRouting(), name, rig, aa, resolveStores, jsonOutput, stdout, stderr)
+}
+
+func doOrderHistoryWithStoresResolverJSONRouted(routing orderClassRouting, name, rig string, aa []orders.Order, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
 	// Filter orders if name or rig specified.
 	targets := aa
 	if name != "" || rig != "" {
@@ -1461,7 +1483,7 @@ func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, r
 			if store.Store == nil {
 				continue
 			}
-			results, err := orderFrontForStore(store.Store).RecentRuns(a.ScopedName(), 0)
+			results, err := routing.front(store.Store).RecentRuns(a.ScopedName(), 0)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
 				if i == 0 && len(results) == 0 {
@@ -1619,11 +1641,16 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 	var sweepErr error
 	var retentionResult orderTrackingRetentionSweepResult
 	var retentionErr error
+	routing, routingErr := orderClassRoutingFor(cityPath, cfg)
+	if routingErr != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", routingErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if dryRun {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRunRouted(routing, stores, now, staleAfter, onlyOrders, includeWisps)
 	} else {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStores(stores, now, staleAfter, onlyOrders, includeWisps)
-		retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicyForConfig(cfg), onlyOrders)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresRouted(routing, stores, now, staleAfter, onlyOrders, includeWisps)
+		retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStoresRouted(routing, stores, now, orderTrackingRetentionPolicyForConfig(cfg), onlyOrders)
 		result.trackingDeleted = retentionResult.deleted
 	}
 	if err := errors.Join(openErr, sweepErr, retentionErr); err != nil {

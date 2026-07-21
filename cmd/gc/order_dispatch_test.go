@@ -4263,7 +4263,7 @@ func TestCloseOrderTrackingBeadErrorsWhenVerificationStillOpen(t *testing.T) {
 	}
 	store := &noopCloseAllStore{Store: base}
 
-	err = closeOrderTrackingBead(context.Background(), store, tracking.ID)
+	err = closeOrderTrackingBead(context.Background(), orderFrontForStore(store), tracking.ID)
 	if err == nil {
 		t.Fatal("closeOrderTrackingBead err = nil, want read-after-close verification error")
 	}
@@ -4302,7 +4302,7 @@ func TestCloseOrderTrackingBeadRetriesTransientCloseConflict(t *testing.T) {
 	}
 	store := &flakyCloseAllStore{Store: base, failuresRemaining: 1}
 
-	if err := closeOrderTrackingBead(context.Background(), store, tracking.ID); err != nil {
+	if err := closeOrderTrackingBead(context.Background(), orderFrontForStore(store), tracking.ID); err != nil {
 		t.Fatalf("closeOrderTrackingBead: %v", err)
 	}
 	if store.closeCalls != 2 {
@@ -4531,7 +4531,7 @@ func TestSweepStaleOrderTrackingClosesTriggerEnvFailedBeadsAndUnblocksDispatch(t
 	}
 }
 
-func TestCloseAndVerifyOrderTrackingBeadsStopsRetryOnContextCancel(t *testing.T) {
+func TestCloseRunsSweptStopsRetryOnContextCancel(t *testing.T) {
 	base := beads.NewMemStore()
 	tracking, err := base.Create(beads.Bead{
 		Title:     "order:canceled",
@@ -4545,11 +4545,9 @@ func TestCloseAndVerifyOrderTrackingBeadsStopsRetryOnContextCancel(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err = closeAndVerifyOrderTrackingBeads(ctx, store, []string{tracking.ID}, map[string]string{
-		"close_reason": completedOrderTrackingCloseReason,
-	})
+	_, err = orderFrontForStore(store).CloseRunsSwept(ctx, []string{tracking.ID}, completedOrderTrackingCloseReason, orderTrackingSweepMetadataInitiator)
 	if err == nil {
-		t.Fatal("closeAndVerifyOrderTrackingBeads err = nil, want context cancellation")
+		t.Fatal("CloseRunsSwept err = nil, want context cancellation")
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
@@ -10151,7 +10149,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
 	store := beads.NewMemStore()
 	const storeKey = "city"
-	idx := newOrderDispatchTrackingIndex()
+	idx := newOrderDispatchTrackingIndex(orderFrontForStore)
 	indexed := time.Now().Add(-time.Hour)
 	// Pre-seed the history index so lastRunForStore reads it without listing
 	// the store. The "\x00history" suffix matches historyEntriesForStore's key.

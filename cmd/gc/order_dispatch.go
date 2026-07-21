@@ -53,8 +53,6 @@ const (
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
 	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
 	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
-	orderTrackingCloseVerifyAttempts       = 3
-	orderTrackingCloseVerifyRetryDelay     = 25 * time.Millisecond
 
 	// orphanedOrderTrackingCloseReason is the canonical close_reason
 	// stamped on orphan-sweep closes. It satisfies bd's
@@ -283,6 +281,13 @@ type orderSetSnapshot struct {
 // ctx OR dispatchCtx is done (see launchDispatchOne). cancel() cancels
 // dispatchCtx.
 type memoryOrderDispatcher struct {
+	// orderRouting is the city's orders-class backend routing (bd two-leg
+	// fronts, or the sqlite class store once [beads.classes.orders] is
+	// migrated). orderRoutingErr is the fail-closed latch: when the routed
+	// class store cannot open, order dispatch refuses to run rather than
+	// silently splitting tracking state back onto bd.
+	orderRouting         orderClassRouting
+	orderRoutingErr      error
 	aa                   []orders.Order
 	storeFn              orderStoreFunc
 	ep                   events.Provider
@@ -318,6 +323,20 @@ type orderDispatchTrackingIndex struct {
 	mu      sync.Mutex
 	entries map[string]map[string]orderTrackingSummary
 	errs    map[string]error
+
+	// front maps a scope store to its orders front door under the city's
+	// class routing (nil falls back to the bd shape for test-constructed
+	// indexes).
+	front orderFrontResolver
+}
+
+// frontFor resolves the front door for one scope store, defaulting to the bd
+// shape when no routing was supplied.
+func (idx *orderDispatchTrackingIndex) frontFor(store beads.Store) *orders.Store {
+	if idx.front == nil {
+		return orderFrontForStore(store)
+	}
+	return idx.front(store)
 }
 
 type orderTrackingSummary struct {
@@ -426,8 +445,11 @@ func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.Ci
 	}
 
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	orderRouting, orderRoutingErr := orderClassRoutingFor(cityPath, cfg)
 	return &memoryOrderDispatcher{
-		aa: aa,
+		aa:              aa,
+		orderRouting:    orderRouting,
+		orderRoutingErr: orderRoutingErr,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
 			return openStoreAtForCity(target.ScopeRoot, cityPath)
 		},
@@ -445,6 +467,16 @@ func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.Ci
 	}
 }
 
+// orderFront returns the orders front door for a resolved scope store under
+// the dispatcher's class routing. Zero-value dispatchers (test literals) fall
+// back to the bd shape.
+func (m *memoryOrderDispatcher) orderFront(store beads.Store) *orders.Store {
+	if m.orderRouting.front == nil {
+		return orderFrontForStore(store)
+	}
+	return m.orderRouting.front(store)
+}
+
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
 	// Skip all order dispatch when the city is suspended. Use the
 	// dispatcher's in-scope city path so suspension state resolves
@@ -454,6 +486,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if citySuspendedWithState(m.cfg, st) {
 			return
 		}
+	}
+
+	if m.orderRoutingErr != nil {
+		logDispatchError(m.stderr, "gc: order dispatch: orders class store unavailable, refusing to dispatch: %v", m.orderRoutingErr)
+		return
 	}
 
 	stores := make(map[string]beads.Store)
@@ -477,7 +514,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 		}()
 	}()
-	trackingIndex := newOrderDispatchTrackingIndex()
+	trackingIndex := newOrderDispatchTrackingIndex(m.orderFront)
 	budgetSpent := 0
 
 	total := len(m.aa)
@@ -554,7 +591,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)))
+		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcross(orderFrontDoorsForStores(m.orderFront, storesForGate)))
 		var lastRunErr error
 		var lastRunFromCache bool
 		lastRunFn := func(orderName string) (time.Time, error) {
@@ -567,8 +604,12 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 			return last, err
 		}
-		cursorFn := orders.CursorAcross(orderFrontDoorsForStores(storesForGate))
-		if a.Trigger == "event" {
+		cursorFn := orders.CursorAcross(orderFrontDoorsForStores(m.orderFront, storesForGate))
+		// The raw bd label-scan cursor override is bd-only: on a routed city
+		// the seq column is authoritative (the tracking leg receives every
+		// SetCursor) and the typed CursorAcross already unions the wisp-root
+		// seq labels via each front's graph leg.
+		if a.Trigger == "event" && !m.orderRouting.routed {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 			if err != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
@@ -585,7 +626,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %s", a.ScopedName(), redacted)
 			// Leave this open so the existing open-work gate suppresses repeat
 			// ticks until the normal stale tracking sweep gives the order another try.
-			trackingBead, createErr := orderFrontForStore(store).CreateRun(scoped, orders.RunOpts{Outcome: orders.RunOutcomeTriggerEnvFailed})
+			trackingBead, createErr := m.orderFront(store).CreateRun(scoped, orders.RunOpts{Outcome: orders.RunOutcomeTriggerEnvFailed})
 			if createErr != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: creating trigger env failure tracking bead for %s: %v", scoped, createErr)
 			} else {
@@ -742,7 +783,10 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
-	trackingRun, err := orderFrontForStore(store).CreateRun(a.ScopedName(), orders.RunOpts{})
+	if m.orderRoutingErr != nil {
+		return orders.OrderRun{}, fmt.Errorf("orders class store unavailable, refusing to dispatch: %w", m.orderRoutingErr)
+	}
+	trackingRun, err := m.orderFront(store).CreateRun(a.ScopedName(), orders.RunOpts{})
 	if err != nil {
 		return orders.OrderRun{}, err
 	}
@@ -806,10 +850,11 @@ func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
 	}
 }
 
-func newOrderDispatchTrackingIndex() *orderDispatchTrackingIndex {
+func newOrderDispatchTrackingIndex(front orderFrontResolver) *orderDispatchTrackingIndex {
 	return &orderDispatchTrackingIndex{
 		entries: make(map[string]map[string]orderTrackingSummary),
 		errs:    make(map[string]error),
+		front:   front,
 	}
 }
 
@@ -935,7 +980,7 @@ func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store,
 		return entries, nil
 	}
 	idx.mu.Unlock()
-	runs, err := orderFrontForStore(store).RecentRunsAll(orderTrackingHistoryIndexLimit)
+	runs, err := idx.frontFor(store).RecentRunsAll(orderTrackingHistoryIndexLimit)
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-tracking history: %w", err)
 		idx.mu.Lock()
@@ -970,7 +1015,7 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 		return entries, nil
 	}
 	idx.mu.Unlock()
-	runs, err := orderFrontForStore(store).OpenRuns()
+	runs, err := idx.frontFor(store).OpenRuns()
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-tracking beads: %w", err)
 		idx.mu.Lock()
@@ -1156,7 +1201,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
 	defer func() {
-		if err := closeOrderTrackingBead(ctx, store, trackingID); err != nil {
+		if err := closeOrderTrackingBead(ctx, m.orderFront(store), trackingID); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
 		}
 	}()
@@ -1192,7 +1237,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		// per-order coordination point that still holds the raw store for the
 		// closeOrderTrackingBead defer) from the same store, so the bead writes
 		// stay byte-identical.
-		front := orderFrontForStore(store)
+		front := m.orderFront(store)
 		// The exec-env overlay is namespaced by an untrusted caller (webhook);
 		// nil means use the raw vars (tick/CLI), preserving prior behavior.
 		execOverlay := execEnv
@@ -1205,115 +1250,9 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	}
 }
 
-func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
-	_, err := orderFrontForStore(store).CloseRuns(ctx, []string{trackingID}, completedOrderTrackingCloseReason)
+func closeOrderTrackingBead(ctx context.Context, front *orders.Store, trackingID string) error {
+	_, err := front.CloseRuns(ctx, []string{trackingID}, completedOrderTrackingCloseReason)
 	return err
-}
-
-// closeAndVerifyOrderTrackingBeads survives the WI-3 orders migration ONLY for
-// the stale sweep, which stamps richer sweep-vocabulary metadata (order_tracking_sweep
-// + initiator) that orders.Store.CloseRuns's close_reason-only signature does not
-// carry. The close_reason-only sites moved onto CloseRuns.
-//
-// DRIFT GUARD: this retry loop is a deliberate twin of orders.Store.CloseRuns
-// (orderTrackingCloseVerifyAttempts/orderTrackingCloseVerifyRetryDelay mirror
-// closeVerifyAttempts/closeVerifyRetryDelay). Any change to the retry policy MUST
-// land in both.
-func closeAndVerifyOrderTrackingBeads(ctx context.Context, store beads.Store, ids []string, metadata map[string]string) (int, error) {
-	ids = uniqueNonEmptyOrderTrackingIDs(ids)
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if store == nil {
-		return 0, fmt.Errorf("order-tracking close: nil store")
-	}
-
-	closed := 0
-	var lastErr error
-	for attempt := 1; attempt <= orderTrackingCloseVerifyAttempts; attempt++ {
-		n, err := store.CloseAll(ids, metadata)
-		closed += n
-		if closed > len(ids) {
-			closed = len(ids)
-		}
-		if err != nil {
-			lastErr = fmt.Errorf("closing order-tracking beads %s: %w", strings.Join(ids, ", "), err)
-			if attempt < orderTrackingCloseVerifyAttempts {
-				if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
-					return closed, errors.Join(lastErr, waitErr)
-				}
-			}
-			continue
-		}
-		openIDs, err := openOrderTrackingIDs(store, ids)
-		if err != nil {
-			lastErr = fmt.Errorf("verifying order-tracking close for %s: %w", strings.Join(ids, ", "), err)
-			if attempt < orderTrackingCloseVerifyAttempts {
-				if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
-					return closed, errors.Join(lastErr, waitErr)
-				}
-			}
-			continue
-		}
-		if len(openIDs) == 0 {
-			return closed, nil
-		}
-		lastErr = fmt.Errorf("verifying order-tracking close: still open: %s", strings.Join(openIDs, ", "))
-		if attempt < orderTrackingCloseVerifyAttempts {
-			if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
-				return closed, errors.Join(lastErr, waitErr)
-			}
-		}
-	}
-	return closed, lastErr
-}
-
-func waitOrderTrackingCloseRetry(ctx context.Context) error {
-	timer := time.NewTimer(orderTrackingCloseVerifyRetryDelay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func uniqueNonEmptyOrderTrackingIDs(ids []string) []string {
-	out := make([]string, 0, len(ids))
-	seen := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		out = append(out, id)
-	}
-	return out
-}
-
-func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
-	var openIDs []string
-	for _, id := range ids {
-		b, err := store.Get(id)
-		if errors.Is(err, beads.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return openIDs, err
-		}
-		if b.Status != "closed" {
-			openIDs = append(openIDs, id)
-		}
-	}
-	return openIDs, nil
 }
 
 // dispatchExec runs an exec order's shell command.
@@ -1511,7 +1450,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		orderFrontForStore(store).SetOutcome(trackingID, orders.RunOutcomeWispCanceled) //nolint:errcheck // best-effort
+		m.orderFront(store).SetOutcome(trackingID, orders.RunOutcomeWispCanceled) //nolint:errcheck // best-effort
 		return
 	}
 
@@ -1640,7 +1579,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	})
 
 	// Label tracking bead with outcome.
-	orderFrontForStore(store).SetOutcome(trackingID, orders.RunOutcomeWisp) //nolint:errcheck // best-effort
+	m.orderFront(store).SetOutcome(trackingID, orders.RunOutcomeWisp) //nolint:errcheck // best-effort
 }
 
 // orderRigSuspended reports whether the order targets a suspended rig.
@@ -1668,7 +1607,7 @@ func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingI
 		c := orders.EventCursor(headSeq)
 		cursor = &c
 	}
-	front := orderFrontForStore(store)
+	front := m.orderFront(store)
 	if err := front.MarkFailed(trackingID, scoped, orders.RunOutcomeWispFailed, cursor); err != nil {
 		logDispatchError(m.stderr, "gc: order %s: failed to mark tracking bead %s as failed: %v", scoped, trackingID, err)
 	}
@@ -1714,7 +1653,7 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 	// split still unions both classes; on a single-store city the two legs wrap
 	// the same store and the union deduplicates to one read (byte-identical). The
 	// wisp-root subtree verdict stays graph-owned via the injected predicate.
-	front := orderFrontForStore(store)
+	front := m.orderFront(store)
 	return front.HasOpenWork(scopedName, m.wispRootHasOpenWork)
 }
 
@@ -2096,10 +2035,14 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 }
 
 func sweepOrphanedOrderTrackingLimit(store beads.Store, limit int) (int, error) {
+	return sweepOrphanedOrderTrackingLimitRouted(bdOrderClassRouting(), store, limit)
+}
+
+func sweepOrphanedOrderTrackingLimitRouted(routing orderClassRouting, store beads.Store, limit int) (int, error) {
 	// OrphanedOpenRuns lists the OPEN tracking beads across both tiers (new wisp
 	// + legacy issues) and excludes the trigger-env-failure markers the open-work
 	// gate intentionally keeps open.
-	front := orderFrontForStore(store)
+	front := routing.front(store)
 	runs, err := front.OrphanedOpenRuns()
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
@@ -2184,6 +2127,18 @@ func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, st
 	return sweepStaleOrderTrackingAcrossStoresLimit(stores, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0)
 }
 
+func sweepStaleOrderTrackingAcrossStoresRouted(routing orderClassRouting, stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitModeRouted(routing, stores, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, false)
+}
+
+func sweepStaleOrderTrackingAcrossStoresLimitRouted(routing orderClassRouting, stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitModeRouted(routing, stores, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+}
+
+func sweepStaleOrderTrackingAcrossStoresDryRunRouted(routing orderClassRouting, stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitModeRouted(routing, stores, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true)
+}
+
 // sweepStaleOrderTrackingAcrossStoresLimit applies limit only to
 // order-tracking bead closes. Wisp subtree recovery is operator-scoped by
 // order name and closes complete stale subtrees when explicitly requested.
@@ -2191,11 +2146,11 @@ func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, now time.Tim
 	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
 }
 
-func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true)
+func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitModeRouted(bdOrderClassRouting(), stores, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, dryRun)
 }
 
-func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingAcrossStoresLimitModeRouted(routing orderClassRouting, stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -2215,7 +2170,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, now time
 				break
 			}
 		}
-		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, remainingLimit, dryRun)
+		partial, err := sweepStaleOrderTrackingWithOptionsLimitModeRouted(routing, store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, remainingLimit, dryRun)
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
@@ -2267,6 +2222,10 @@ func sweepStaleOrderTrackingWithOptionsLimitDryRun(store beads.Store, now time.T
 }
 
 func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingWithOptionsLimitModeRouted(bdOrderClassRouting(), store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, dryRun)
+}
+
+func sweepStaleOrderTrackingWithOptionsLimitModeRouted(routing orderClassRouting, store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -2276,10 +2235,10 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 	cutoff := now.Add(-staleAfter)
 	// StaleOpenRuns is the typed read half: OPEN tracking runs at or before the
 	// cutoff, across both tiers, with best-effort names. The sweep-vocabulary
-	// close (below) stays raw because it stamps sweep audit metadata that the
-	// domain object deliberately omits, and the wisp-subtree recovery is graph
-	// residual.
-	runs, err := orderFrontForStore(store).StaleOpenRuns(cutoff)
+	// close goes through CloseRunsSwept (the audit-stamped batch close on the
+	// front door); the wisp-subtree recovery stays graph residual on the raw
+	// scope store.
+	runs, err := routing.front(store).StaleOpenRuns(cutoff)
 	if err != nil {
 		return orderTrackingSweepResult{}, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -2308,14 +2267,7 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 		if dryRun {
 			result.trackingClosed = len(ids)
 		} else {
-			metadata := map[string]string{
-				"order_tracking_sweep": orderTrackingSweepMetadataReason,
-				"close_reason":         staleOrderTrackingCloseReason,
-			}
-			if initiator != "" {
-				metadata["order_tracking_sweep_by"] = initiator
-			}
-			n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, ids, metadata)
+			n, err := routing.front(store).CloseRunsSwept(context.Background(), ids, staleOrderTrackingCloseReason, initiator)
 			result.trackingClosed = n
 			if err != nil {
 				return result, fmt.Errorf("closing stale order-tracking beads: %w", err)
@@ -2334,13 +2286,17 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 }
 
 func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
+	return sweepClosedOrderTrackingRetentionAcrossStoresRouted(bdOrderClassRouting(), stores, now, policy, onlyOrders)
+}
+
+func sweepClosedOrderTrackingRetentionAcrossStoresRouted(routing orderClassRouting, stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
 	result := orderTrackingRetentionSweepResult{}
 	var errs []error
 	for i, store := range stores {
 		if store == nil {
 			continue
 		}
-		n, err := sweepClosedOrderTrackingRetention(store, now, policy, onlyOrders)
+		n, err := sweepClosedOrderTrackingRetentionRouted(routing, store, now, policy, onlyOrders)
 		result.deleted += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
@@ -2357,6 +2313,10 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 // count with a nil error on budget exhaustion. Store errors are returned as
 // normal; deletion errors within budget are propagated.
 func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
+	return sweepClosedOrderTrackingRetentionAcrossStoresBoundedRouted(bdOrderClassRouting(), stores, now, policy, onlyOrders, limit)
+}
+
+func sweepClosedOrderTrackingRetentionAcrossStoresBoundedRouted(routing orderClassRouting, stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
@@ -2372,7 +2332,7 @@ func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, 
 		}
 		// Enforce the global budget by passing the remaining allowance to the
 		// per-store bounded sweep, which stops deleting once it is spent.
-		n, err := sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, remaining)
+		n, err := sweepClosedOrderTrackingRetentionBoundedRouted(routing, store, now, policy, onlyOrders, remaining)
 		deleted += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
@@ -2381,7 +2341,22 @@ func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, 
 	return deleted, errors.Join(errs...)
 }
 
-func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+// deleteRetiredOrderRun deletes one aged closed run under the class routing:
+// on a routed city the row lives in the class store (a plain per-record
+// delete); on bd the tracking bead rides the work/graph store, so the
+// graph-aware delete (dep unwind) stays — raw graph residual.
+func deleteRetiredOrderRun(routing orderClassRouting, store beads.Store, runID string) error {
+	if routing.routed {
+		return routing.front(store).DeleteRun(runID)
+	}
+	return deleteWorkflowBead(store, runID)
+}
+
+func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) { //nolint:unparam // onlyOrders is nil at current callers; preserved for API parity with the Routed variant
+	return sweepClosedOrderTrackingRetentionRouted(bdOrderClassRouting(), store, now, policy, onlyOrders)
+}
+
+func sweepClosedOrderTrackingRetentionRouted(routing orderClassRouting, store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
 	}
@@ -2393,7 +2368,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
-	runs, err := orderFrontForStore(store).ClosedRunsForRetention()
+	runs, err := routing.front(store).ClosedRunsForRetention()
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
@@ -2419,9 +2394,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
-			// deleteWorkflowBead is the graph-aware delete (dep unwind) the
-			// retention prune uses; it stays raw graph residual.
-			if err := deleteWorkflowBead(store, run.ID); err != nil {
+			if err := deleteRetiredOrderRun(routing, store, run.ID); err != nil {
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
@@ -2435,7 +2408,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 // sweepClosedOrderTrackingRetention. It stops deleting once limit deletions have
 // occurred within this store call. On budget exhaustion it returns the partial
 // count with a nil error; delete errors are still propagated.
-func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
+func sweepClosedOrderTrackingRetentionBoundedRouted(routing orderClassRouting, store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
 	}
@@ -2445,7 +2418,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
-	runs, err := orderFrontForStore(store).ClosedRunsForRetention()
+	runs, err := routing.front(store).ClosedRunsForRetention()
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
@@ -2477,7 +2450,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
-			if err := deleteWorkflowBead(store, run.ID); err != nil {
+			if err := deleteRetiredOrderRun(routing, store, run.ID); err != nil {
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
@@ -2913,6 +2886,10 @@ func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff ti
 }
 
 func sweepOrphanedOrderTrackingRetryLimit(store beads.Store, attempts int, backoff time.Duration, limit int) (int, error) { //nolint:unparam // attempts is configurable for testability
+	return sweepOrphanedOrderTrackingRetryLimitRouted(bdOrderClassRouting(), store, attempts, backoff, limit)
+}
+
+func sweepOrphanedOrderTrackingRetryLimitRouted(routing orderClassRouting, store beads.Store, attempts int, backoff time.Duration, limit int) (int, error) {
 	if attempts <= 0 {
 		attempts = 1
 	}
@@ -2930,7 +2907,7 @@ func sweepOrphanedOrderTrackingRetryLimit(store beads.Store, attempts int, backo
 			}
 		}
 		var n int
-		n, err = sweepOrphanedOrderTrackingLimit(store, remainingLimit)
+		n, err = sweepOrphanedOrderTrackingLimitRouted(routing, store, remainingLimit)
 		total += n
 		if err == nil {
 			return total, nil

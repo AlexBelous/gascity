@@ -43,6 +43,10 @@ type trackingBackend interface {
 	// CloseRuns closes a batch of runs with a shared close reason and reports
 	// how many closed.
 	CloseRuns(ctx context.Context, ids []string, reason string) (int, error)
+	// CloseRunsSwept closes a batch of runs with the stale-sweep audit
+	// vocabulary: close_reason plus the sweep marker and initiator (metadata
+	// keys on the beads backend, the sweep_by column on sqlite).
+	CloseRunsSwept(ctx context.Context, ids []string, reason, sweptBy string) (int, error)
 	// DeleteRun permanently removes one tracking record (the retention path).
 	DeleteRun(runID string) error
 	// Get reads one run by id.

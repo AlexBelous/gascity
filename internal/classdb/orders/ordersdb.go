@@ -315,6 +315,46 @@ func (s *Store) CloseRuns(ctx context.Context, ids []string, reason string) (int
 	return closed, nil
 }
 
+// CloseRunsSwept is CloseRuns with the stale-sweep audit vocabulary: the
+// initiating sweeper lands in the sweep_by column alongside close_reason.
+func (s *Store) CloseRunsSwept(ctx context.Context, ids []string, reason, sweptBy string) (int, error) {
+	ids = uniqueNonEmptyIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, nanos := nowNanos()
+	args := make([]any, 0, len(ids)+3)
+	args = append(args, reason, sweptBy, nanos)
+	placeholders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	closed := 0
+	err := s.db.Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE order_run SET open = 0, close_reason = ?, sweep_by = ?, updated_at = ? WHERE id IN (`+strings.Join(placeholders, ", ")+`) AND open = 1`,
+			args...,
+		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		closed = int(n)
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("sweep-closing order runs %s: %w", strings.Join(ids, ", "), err)
+	}
+	return closed, nil
+}
+
 // DeleteRun permanently removes one run row — the retention path.
 func (s *Store) DeleteRun(runID string) error {
 	err := s.db.Write(context.Background(), func(tx *sql.Tx) error {

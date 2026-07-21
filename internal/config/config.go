@@ -1490,7 +1490,11 @@ const (
 // when it ships; validateBeadsClasses rejects backend="sqlite" for any class
 // not in this set so a config can never request a store this build cannot
 // provide.
-var sqliteCapableBeadClasses = map[string]bool{}
+var sqliteCapableBeadClasses = map[string]bool{
+	// internal/classdb/orders (ordersdb.Store) — wired through cmd/gc's
+	// orderFrontForStore seam behind the orders migrated-marker.
+	BeadClassOrders: true,
+}
 
 // beadClassConfigurable enumerates the class names accepted under
 // [beads.classes.<name>]. Work is deliberately absent: work beads stay on the

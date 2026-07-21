@@ -735,7 +735,7 @@ func TestOrderCheckEmpty(t *testing.T) {
 	}
 }
 
-func TestOrderLastRunFn(t *testing.T) {
+func TestOrderFrontForStoreLastRun(t *testing.T) {
 	// Simulate a bead store that returns one result for "order-run:digest".
 	store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
@@ -745,7 +745,7 @@ func TestOrderLastRunFn(t *testing.T) {
 		return []byte(`[]`), nil
 	})
 
-	fn := orderLastRunFn(store)
+	fn := orderFrontForStore(store).LastRun
 
 	// Known order — returns CreatedAt.
 	got, err := fn("digest")

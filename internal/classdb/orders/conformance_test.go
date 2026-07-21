@@ -275,6 +275,34 @@ func TestConformanceCloseRunsBatch(t *testing.T) {
 	})
 }
 
+func TestConformanceCloseRunsSwept(t *testing.T) {
+	eachBackend(t, func(t *testing.T, front *orders.Store) {
+		run, err := front.CreateRun("digest", orders.RunOpts{})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		n, err := front.CloseRunsSwept(context.Background(), []string{run.ID}, "stale sweep close reason padding", "order-tracking-sweep")
+		if err != nil {
+			t.Fatalf("CloseRunsSwept: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("CloseRunsSwept closed %d, want 1", n)
+		}
+		got, err := front.Get(run.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Open {
+			t.Fatal("run still open after swept close")
+		}
+		// Already-closed runs are skipped, matching CloseRuns.
+		n, err = front.CloseRunsSwept(context.Background(), []string{run.ID}, "second sweep close reason pad", "controller-watchdog")
+		if err != nil || n != 0 {
+			t.Fatalf("CloseRunsSwept(closed) = (%d, %v), want (0, nil)", n, err)
+		}
+	})
+}
+
 func TestConformanceDeleteRun(t *testing.T) {
 	eachBackend(t, func(t *testing.T, front *orders.Store) {
 		run, err := front.CreateRun("rig/agent", orders.RunOpts{})

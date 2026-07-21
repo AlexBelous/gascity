@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
@@ -89,7 +90,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 			storeInfos = nil
 		}
 		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
-		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, input.Fresh)
+		result := checkOrderTriggerForAPI(s.state, a, now, history, storeInfos, ep, input.Fresh)
 		cr := orderCheckResponse{
 			Name:       a.Name,
 			ScopedName: a.ScopedName(),
@@ -132,7 +133,7 @@ func hasConditionOrder(aa []orders.Order) bool {
 	return false
 }
 
-func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
+func checkOrderTriggerForAPI(state State, a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
 	lastRunFn := func(string) (time.Time, error) {
 		if len(history) == 0 {
 			return time.Time{}, nil
@@ -142,7 +143,13 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
 		if fresh {
-			cursorFn = orders.CursorAcross(orderFrontDoorsFromWorkflowInfos(infos))
+			frontDoors, err := orderFrontDoorsFromWorkflowInfos(state, infos)
+			if err != nil {
+				// Fail closed: reporting not-due with the routing error beats
+				// silently reading a cursor from the wrong backend.
+				return orders.TriggerResult{Reason: fmt.Sprintf("orders class store unavailable: %v", err)}
+			}
+			cursorFn = orders.CursorAcross(frontDoors)
 		} else {
 			labelSets := make([][]string, 0, len(history))
 			for _, row := range history {
@@ -378,17 +385,23 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 }
 
 // orderFrontDoorsFromWorkflowInfos wraps the order read path's store infos as
-// order front doors for the mixed orders+graph Cursor read. Each store is used
-// as both the orders leg and the graph leg (single-store colocation dedups to one
-// read); a graph-store split would supply a distinct graph leg here.
-func orderFrontDoorsFromWorkflowInfos(infos []workflowStoreInfo) []*orders.Store {
+// order front doors for the mixed orders+graph Cursor read, through the
+// state's class routing (bd: each store is both the orders leg and the graph
+// leg, deduped to one read; routed: the class store with each scope store as
+// its graph leg).
+func orderFrontDoorsFromWorkflowInfos(state State, infos []workflowStoreInfo) ([]*orders.Store, error) {
 	out := make([]*orders.Store, 0, len(infos))
 	for _, info := range infos {
-		if info.store != nil {
-			out = append(out, orderFrontForStore(info.store))
+		if info.store == nil {
+			continue
 		}
+		front, err := orderFrontForState(state, info.store)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, front)
 	}
-	return out
+	return out, nil
 }
 
 func orderHistoryBeadsAcrossStoreInfosForCheck(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, fresh bool) ([]orderHistoryStoreBead, error) {

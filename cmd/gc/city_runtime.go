@@ -261,18 +261,23 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// Retry with backoff as defense-in-depth against transient store
 	// errors immediately after ensureBeadsProvider returns (#753).
 	func() {
+		routing, routingErr := orderClassRoutingFor(p.CityPath, p.Cfg)
+		if routingErr != nil {
+			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", routingErr) //nolint:errcheck // best-effort stderr
+			return
+		}
 		sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath)
 		if err != nil {
 			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
 			return
 		}
 		defer closeBeadStoreHandle(sweepStore) //nolint:errcheck
-		if n, err := sweepOrphanedOrderTrackingRetryLimit(sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
+		if n, err := sweepOrphanedOrderTrackingRetryLimitRouted(routing, sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
 			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
 		} else if n > 0 {
 			fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
 		}
-		warnIfClosedOrderTrackingBacklogLarge(sweepStore, p.Stderr)
+		warnIfClosedOrderTrackingBacklogLargeRouted(routing, sweepStore, p.Stderr)
 	}()
 
 	od, orderSnapshot := buildOrderDispatcherWithSnapshot(p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
@@ -1456,7 +1461,14 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	// Closed-history retention is intentionally left to the maintenance exec
 	// order or the gc order sweep-tracking CLI; the watchdog only recovers
 	// stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+	routing, routingErr := orderClassRoutingFor(cr.cityPath, cr.cfg)
+	if routingErr != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, routingErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimitRouted(routing, stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1488,9 +1500,16 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 		return
 	}
 
+	routing, routingErr := orderClassRoutingFor(cr.cityPath, cr.cfg)
+	if routingErr != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, routingErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
 	policy := orderTrackingRetentionPolicyForConfig(cr.cfg)
-	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBoundedRouted(
+		routing, stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
@@ -1515,7 +1534,21 @@ const (
 // closed order-tracking beads. It is best-effort: a nil store or a List error is
 // silently ignored so startup is never blocked.
 func warnIfClosedOrderTrackingBacklogLarge(store beads.Store, stderr io.Writer) {
+	warnIfClosedOrderTrackingBacklogLargeRouted(bdOrderClassRouting(), store, stderr)
+}
+
+func warnIfClosedOrderTrackingBacklogLargeRouted(routing orderClassRouting, store beads.Store, stderr io.Writer) {
 	if store == nil {
+		return
+	}
+	if routing.routed {
+		// On a routed city the closed-run backlog lives in the class store;
+		// the retention read is already bounded by the store's own corpus.
+		runs, err := routing.front(store).ClosedRunsForRetention()
+		if err != nil || len(runs) <= orderTrackingRetentionStartupWarnThreshold {
+			return
+		}
+		fmt.Fprintf(stderr, "gc start: %d closed order-tracking runs detected — retention watchdog will prune automatically (7d TTL default; configure: [beads.policies.order_tracking].delete_after_close). For immediate cleanup: gc order sweep-tracking\n", len(runs)) //nolint:errcheck // best-effort stderr
 		return
 	}
 	closed, err := beads.HandlesFor(store).Live.List(beads.ListQuery{

@@ -184,11 +184,15 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 	}
 	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
 	return func(order orders.Order) (time.Time, error) {
+		routing, err := orderClassRoutingFor(cityPath, cfg)
+		if err != nil {
+			return time.Time{}, err
+		}
 		stores, err := resolveStores(order)
 		if err != nil {
 			return time.Time{}, err
 		}
-		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
+		return orders.LastRunAcross(orderFrontDoorsForTypedStores(routing.front, stores))(order.ScopedName())
 	}
 }
 

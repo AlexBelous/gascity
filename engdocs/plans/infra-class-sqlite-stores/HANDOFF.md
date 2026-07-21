@@ -80,15 +80,44 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   it) — fold into P5's doctor/storehealth extension or a small follow-up
   (`ordersSQLiteRoutingActive` + marker path are trivial to surface).
 
-## Next: P2 nudges (per the design work plan)
+## P2 nudges — in progress
 
-Merged queue (state.json + shadow beads → one `nudges` table over core),
-`nudge.*` typed events, reaper.sh nudge-leg rewrite, deferred-submit
-fold-in. Before the first class flips **by default** (GA), port the
-splittest topology suite from `feat/split-store-conformance`. Also
-outstanding from the design: storehealth `StorePath`/`WalkSize` extension to
-`.gc/store/*.db`, maintenance-loop `wal_checkpoint(TRUNCATE)`/`VACUUM`, and
-the P5 bd-surface work (gc bd write guard, generalized read federation).
+- **Seam plan**: `P2-NUDGES-SEAM-PLAN.md` (this dir) — evidence-grade op
+  inventory + slice specs. Read it before touching nudges.
+- **Slice 1 DONE** (`refactor(nudgequeue)`): the queue ops are reified as
+  `nudgequeue.Queue` over an unexported `queueBackend` — file backend =
+  moved WithState-closure bodies (flock authority + lazy shadow beads +
+  maintenance passes + retry policy constants, all exported vocabulary).
+  `ClaimTarget` carries claim identity as plain values (SQL-translatable);
+  `ClaimDueMatching` remains the file-only func-predicate compat surface.
+  cmd/gc keeps wrappers under existing names (~90 test sites untouched);
+  `session.Manager` deferred submit → `Queue.EnqueueDeferred`; read-only
+  LoadState sites → `Queue.Snapshot`. Behavioral suite `queue_test.go` is
+  the portable conformance base.
+
+Next slices (per the seam plan):
+2. `internal/classdb/nudges` (pkg `nudgesdb`): the design's `nudges` table
+   over classdb/core implementing `queueBackend` (claim = one
+   UPDATE…RETURNING over the queue-key set; rows go terminal instead of
+   being deleted; supersession = one UPDATE preserving
+   at-most-one-redundant-delivery; shadow params ignored — the row IS the
+   record). Run `queue_test.go`'s cases against BOTH backends; crash gate
+   (acked enqueue survives SIGKILL) via the re-exec pattern (integration
+   tag + 3-artifact census bump).
+3. Wiring behind `[beads.classes.nudges]` + `.gc/store/nudges.migrated`
+   (orders pattern: routing resolver at cityNudgeQueue, fail-closed roots,
+   seam-guard test, ratchet flip + config acceptance test). Watch the raw
+   NudgesStore wraps that bypass resolveNudgesStore (seam plan gotchas).
+4. Migration + marker + residue; `nudge.*` typed events (RegisterPayload);
+   reaper.sh nudge-leg rewrite; terminal-row TTL retention via
+   core.StartSweeper (nudges has NO existing retention path — the store's
+   own sweeper is correct here, unlike orders).
+
+Also outstanding from the design: splittest topology port before any class
+flips by default (GA); storehealth `StorePath`/`WalkSize` extension to
+`.gc/store/*.db`; maintenance-loop `wal_checkpoint(TRUNCATE)`/`VACUUM`;
+P5 bd-surface work (gc bd write guard, generalized read federation);
+`gc doctor` migration-state surface.
 
 ## Gotchas carried forward
 

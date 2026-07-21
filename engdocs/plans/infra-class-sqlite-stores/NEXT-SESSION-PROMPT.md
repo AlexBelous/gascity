@@ -13,15 +13,14 @@ worktree; run everything from that directory.
    the Nudges section is the spec for this session.
 
 **Then execute P2 nudges, one slice at a time, TDD, one commit per slice,
-following the P1 pattern** (it is the template — study
-`internal/classdb/orders`, `cmd/gc/order_class_store.go`, and
-`cmd/gc/order_class_migrate.go` before writing anything):
+following the P1 pattern** (study `internal/classdb/orders`,
+`cmd/gc/order_class_store.go`, `cmd/gc/order_class_migrate.go`, and the P2
+seam plan `P2-NUDGES-SEAM-PLAN.md` before writing anything):
 
-1. **Domain backend seam** for the nudge queue (the merged two-tier model):
-   inventory the flock-guarded `state.json` bucket ops and the shadow-bead
-   ops; define an unexported backend interface at the nudgequeue domain
-   edge; existing impl = today's two-tier machinery, byte-identical, all
-   existing tests pass untouched.
+1. **DONE — domain backend seam**: `nudgequeue.Queue` over unexported
+   `queueBackend`; file backend = the moved two-tier bodies; cmd/gc
+   wrappers keep every existing name; `queue_test.go` is the portable
+   conformance base. Start at slice 2.
 2. **`internal/classdb/nudges`** (package `nudgesdb`): the design's `nudges`
    table + indexes over `internal/classdb/core`; claim = single
    UPDATE…RETURNING against a SET of queue keys (alias history, session id,

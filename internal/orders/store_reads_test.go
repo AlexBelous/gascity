@@ -245,7 +245,7 @@ func TestHasOpenWorkOpenTrackingBead(t *testing.T) {
 // to the dispatcher's original markTrackingFailure.
 func TestMarkFailedSingleUpdate(t *testing.T) {
 	st, rec := recordingOrdersStore()
-	seeded, err := st.store.Create(beads.Bead{Title: "order:rig/agent", Labels: []string{"order-run:rig/agent", "order-tracking"}})
+	seeded, err := rec.Create(beads.Bead{Title: "order:rig/agent", Labels: []string{"order-run:rig/agent", "order-tracking"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestMarkFailedSingleUpdate(t *testing.T) {
 // TestMarkFailedNoCursor proves a nil cursor stamps only the outcome labels.
 func TestMarkFailedNoCursor(t *testing.T) {
 	st, rec := recordingOrdersStore()
-	seeded, err := st.store.Create(beads.Bead{Title: "order:rig/agent", Labels: []string{"order-run:rig/agent", "order-tracking"}})
+	seeded, err := rec.Create(beads.Bead{Title: "order:rig/agent", Labels: []string{"order-run:rig/agent", "order-tracking"}})
 	if err != nil {
 		t.Fatal(err)
 	}

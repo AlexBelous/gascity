@@ -77,7 +77,7 @@ func TestSetOutcomeLabelSets(t *testing.T) {
 	}
 	for _, tc := range cases {
 		st, rec := recordingOrdersStore()
-		seeded, err := st.store.Create(beads.Bead{Title: "order:rig/agent"})
+		seeded, err := rec.Create(beads.Bead{Title: "order:rig/agent"})
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -99,7 +99,7 @@ func TestSetOutcomeLabelSets(t *testing.T) {
 // seq:<N>), matching order_dispatch.go:1021/1390.
 func TestSetCursorLabelPair(t *testing.T) {
 	st, rec := recordingOrdersStore()
-	seeded, err := st.store.Create(beads.Bead{Title: "order:rig/agent"})
+	seeded, err := rec.Create(beads.Bead{Title: "order:rig/agent"})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestSetCursorLabelPair(t *testing.T) {
 // closes — matching cmd_order.go's SetMetadata(close_reason)+Close.
 func TestCloseRunStampsReasonThenCloses(t *testing.T) {
 	st, rec := recordingOrdersStore()
-	if _, err := st.store.Create(beads.Bead{Title: "order:rig/agent"}); err != nil {
+	if _, err := rec.Create(beads.Bead{Title: "order:rig/agent"}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// Use the actually-created id.

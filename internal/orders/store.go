@@ -1,7 +1,6 @@
 package orders
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -180,12 +179,14 @@ type RunOpts struct {
 	Outcome RunOutcome
 }
 
-// Store is the order-class domain wrapper. It holds the strongly-typed
-// beads.OrdersStore by value and confines the Title/label codec.
+// Store is the order-class domain wrapper: the front door every consumer
+// holds. It routes all orders-leg operations through a trackingBackend (the
+// bead/label codec for the bd backend, typed columns for the sqlite backend)
+// and keeps the graph-leg composition itself.
 //
 // It optionally carries a graph-class leg. The order-run:<scoped> and
 // order:<scoped>+seq:<N> labels the dispatcher stamps ride BOTH order-tracking
-// beads (orders class) AND the wisp/molecule roots created by instantiation
+// records (orders class) AND the wisp/molecule roots created by instantiation
 // (graph class). The single-flight and cooldown/cursor reads therefore span two
 // classes, so the mixed reads (LastRun, Cursor, HasOpenWork) union order-run
 // evidence across the orders leg and the graph leg. On a single-store city the
@@ -195,8 +196,8 @@ type RunOpts struct {
 // keeps the reads correct (never rebase them onto a single class store — that is
 // the single-store-assumption bug the graph-store-split audit root-caused).
 type Store struct {
-	store beads.OrdersStore
-	graph beads.GraphStore
+	tracking trackingBackend
+	graph    beads.GraphStore
 }
 
 // NewStore wraps a strongly-typed orders-class store as the order front door.
@@ -206,31 +207,33 @@ type Store struct {
 // Use NewStoreWithGraph where the graph store is separately resolvable so the
 // reads stay correct under a graph-store split.
 func NewStore(store beads.OrdersStore) *Store {
-	return &Store{store: store}
+	return &Store{tracking: beadsTracking{store: store}}
 }
 
 // NewStoreWithGraph wraps an orders-class store together with the graph-class
 // store that owns its wisp/molecule roots, enabling the mixed orders+graph reads
 // to union order-run evidence across both classes.
 func NewStoreWithGraph(store beads.OrdersStore, graph beads.GraphStore) *Store {
-	return &Store{store: store, graph: graph}
+	return &Store{tracking: beadsTracking{store: store}, graph: graph}
 }
 
-// mixedLegStores returns the distinct underlying stores the mixed orders+graph
-// reads must union: the orders leg always, plus the graph leg when it is present
-// and backed by a DIFFERENT underlying store. Deduplicating on the underlying
-// store keeps the single-store city (where both legs wrap one store) at a single
-// read — byte-identical to the pre-split behavior — while a real graph-store
-// split contributes a second, distinct read.
-func (s *Store) mixedLegStores() []beads.Store {
-	var stores []beads.Store
-	if s.store.Store != nil {
-		stores = append(stores, s.store.Store)
+// graphLeg returns the graph-class store the mixed reads must union on top of
+// the orders-leg backend halves, or nil when there is nothing extra to read:
+// no graph leg was supplied, or the backend advertises (via the optional
+// beadsBacked assertion) that it wraps the SAME underlying store — the
+// single-store city, where reading the graph leg again would double-read.
+// A backend that is not beads-backed (sqlite) never dedupes: its rows can
+// never be the graph store's, so the graph leg always unions.
+func (s *Store) graphLeg() beads.Store {
+	if s.graph.Store == nil {
+		return nil
 	}
-	if s.graph.Store != nil && s.graph.Store != s.store.Store {
-		stores = append(stores, s.graph.Store)
+	if backed, ok := s.tracking.(beadsBacked); ok {
+		if under := backed.underlying(); under != nil && under == s.graph.Store {
+			return nil
+		}
 	}
-	return stores
+	return s.graph.Store
 }
 
 // trackingTitle returns the canonical tracking-bead title for a scoped order.
@@ -243,174 +246,75 @@ func baseLabels(scoped string, outcome RunOutcome) []string {
 	return append(labels, outcome.Labels()...)
 }
 
-// CreateRun creates an OPEN tracking bead for scoped (the in-flight marker
-// whose CreatedAt advances the cooldown clock). It is the byte-identical
-// replacement for the store.Create(beads.Bead{Title:"order:"+scoped, Labels:
-// {order-run, order-tracking[, outcome]}, NoHistory:true}) sites in
-// order_dispatch.go.
+// CreateRun creates an OPEN tracking record for scoped (the in-flight marker
+// whose CreatedAt advances the cooldown clock). On the beads backend it is the
+// byte-identical replacement for the raw Create sites in order_dispatch.go.
 func (s *Store) CreateRun(scoped string, opts RunOpts) (OrderRun, error) {
-	created, err := s.store.Create(beads.Bead{
-		Title:     trackingTitle(scoped),
-		Labels:    baseLabels(scoped, opts.Outcome),
-		NoHistory: true,
-	})
-	if err != nil {
-		return OrderRun{}, fmt.Errorf("creating order run for %q: %w", scoped, err)
-	}
-	return OrderRun{
-		ID:        created.ID,
-		Scoped:    scoped,
-		Outcome:   opts.Outcome,
-		CreatedAt: created.CreatedAt,
-		Open:      true,
-	}, nil
+	return s.tracking.CreateRun(scoped, opts)
 }
 
-// SetOutcome stamps the outcome label set on an existing tracking bead. It is
-// the byte-identical replacement for the store.Update(id, {Labels: outcome})
-// sites in order_dispatch.go / cmd_order.go.
+// SetOutcome stamps the terminal outcome on an existing tracking record. On
+// the beads backend it is the byte-identical replacement for the
+// store.Update(id, {Labels: outcome}) sites in order_dispatch.go / cmd_order.go.
 func (s *Store) SetOutcome(runID string, outcome RunOutcome) error {
-	if err := s.store.Update(runID, beads.UpdateOpts{Labels: outcome.Labels()}); err != nil {
-		return fmt.Errorf("setting order run outcome on %q: %w", runID, err)
-	}
-	return nil
+	return s.tracking.SetOutcome(runID, outcome)
 }
 
-// SetCursor stamps the event cursor as the label pair (order:<scoped>,
-// seq:<N>) on an existing tracking bead. Replaces the cursor-persist Update
-// sites in order_dispatch.go.
+// SetCursor persists the event-bus cursor high-water mark on an existing
+// tracking record. Replaces the cursor-persist Update sites in
+// order_dispatch.go.
 func (s *Store) SetCursor(runID, scoped string, cursor EventCursor) error {
-	labels := []string{
-		labelOrderTitlePrefix + scoped,
-		fmt.Sprintf("%s%d", labelSeqPrefix, uint64(cursor)),
-	}
-	if err := s.store.Update(runID, beads.UpdateOpts{Labels: labels}); err != nil {
-		return fmt.Errorf("setting order run cursor on %q: %w", runID, err)
-	}
-	return nil
+	return s.tracking.SetCursor(runID, scoped, cursor)
 }
 
-// CloseRun closes a tracking bead, stamping close_reason so validation.on-close
-// cities accept it. Replaces the defer-Close / immediate-close sites in
-// cmd_order.go.
+// CloseRun closes a tracking record, stamping close_reason so
+// validation.on-close cities accept it. Replaces the defer-Close /
+// immediate-close sites in cmd_order.go.
 func (s *Store) CloseRun(runID, reason string) error {
-	if reason != "" {
-		if err := s.store.SetMetadata(runID, "close_reason", reason); err != nil {
-			return fmt.Errorf("stamping close reason on order run %q: %w", runID, err)
-		}
-	}
-	if err := s.store.Close(runID); err != nil {
-		return fmt.Errorf("closing order run %q: %w", runID, err)
-	}
-	return nil
+	return s.tracking.CloseRun(runID, reason)
 }
 
-// CreateRunClosed creates a tracking bead, optionally stamps an event cursor and
-// outcome, then closes it — the cooldown-advance-only path used by manual
-// `gc order run`. The bead's CreatedAt advances the cooldown clock, and it is
-// closed immediately so a lingering open bead is not read as in-flight work
-// (ga-jra/ga-lo8c). It emits byte-identical bead writes to the prior raw
-// Create + (cursor Update) + (outcome Update) + (close_reason SetMetadata) +
-// Close sequence in cmd_order.go. The returned OrderRun is closed (Open=false).
+// DeleteRun permanently removes one tracking record — the retention path.
+// Tracking records are standalone (CreateRun mints them dep-free), so the
+// domain delete is a plain per-record delete; the graph-aware dep-unwind
+// delete the cmd/gc retention prune performs stays at that call site as graph
+// residual.
+func (s *Store) DeleteRun(runID string) error {
+	return s.tracking.DeleteRun(runID)
+}
+
+// CreateRunClosed creates a tracking record, optionally stamps an event cursor
+// and outcome, then closes it — the cooldown-advance-only path used by manual
+// `gc order run`. The record's CreatedAt advances the cooldown clock, and it is
+// closed immediately so a lingering open record is not read as in-flight work
+// (ga-jra/ga-lo8c). The returned OrderRun is closed (Open=false).
 func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *EventCursor, closeReason string) (OrderRun, error) {
-	created, err := s.store.Create(beads.Bead{
-		Title:     trackingTitle(scoped),
-		Labels:    baseLabels(scoped, RunOutcomeNone),
-		NoHistory: true,
-	})
-	if err != nil {
-		return OrderRun{}, fmt.Errorf("creating closed order run for %q: %w", scoped, err)
-	}
-	run := OrderRun{ID: created.ID, Scoped: scoped, CreatedAt: created.CreatedAt}
-	if cursor != nil {
-		if err := s.SetCursor(created.ID, scoped, *cursor); err != nil {
-			return run, err
-		}
-		run.Cursor = *cursor
-	}
-	if outcome != RunOutcomeNone {
-		if err := s.SetOutcome(created.ID, outcome); err != nil {
-			return run, err
-		}
-		run.Outcome = outcome
-	}
-	if err := s.CloseRun(created.ID, closeReason); err != nil {
-		return run, err
-	}
-	return run, nil
+	return s.tracking.CreateRunClosed(scoped, outcome, cursor, closeReason)
 }
 
-// RecentRuns lists the tracking/order-run beads for scoped newest-first
+// RecentRuns lists the tracking/order-run records for scoped newest-first
 // (including closed), decoded into OrderRun values. It is the typed face of the
-// `gc order history` read (cmd_order.go): it confines the order-run-label List
-// and the bead->OrderRun decode. It reads through the raw store with TierMode
-// TierBoth (unioning wisp + issue tiers), byte-identical to the `gc order
-// history` loop.
+// `gc order history` read (cmd_order.go).
 func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
-	if s.store.Store == nil {
-		return nil, nil
-	}
-	beadsList, err := s.store.List(beads.ListQuery{
-		Label:         labelOrderRunPrefix + scoped,
-		Limit:         limit,
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
-	})
-	if err != nil {
-		return decodeRuns(scoped, beadsList), err
-	}
-	return decodeRuns(scoped, beadsList), nil
+	return s.tracking.RecentRuns(scoped, limit)
 }
 
-// ListTracking lists every order tracking bead across both tiers, newest-first,
-// decoded into OrderRun values. It is the typed face of the /v0/orders/feed read
-// it replaces: it confines the order-tracking List and the tracking-bead decode
-// the feed previously performed inline. Beads with no order-run label (which
-// RunFromTrackingBead rejects) are skipped. The query is byte-identical to the
-// feed's prior raw scan — order-tracking label, created-desc, both tiers, and no
-// IncludeClosed so only in-flight/open tracking beads surface. Decoded rows and
-// any list error are returned together (the RecentRuns pattern) so callers keep
-// the feed's err-branch semantics.
+// ListTracking lists every order tracking record newest-first, decoded into
+// OrderRun values. It is the typed face of the /v0/orders/feed read it
+// replaces. Decoded rows and any list error are returned together (the
+// RecentRuns pattern) so callers keep the feed's err-branch semantics.
 func (s *Store) ListTracking() ([]OrderRun, error) {
-	if s.store.Store == nil {
-		return nil, nil
-	}
-	list, err := s.store.List(beads.ListQuery{
-		Label:    labelOrderTracking,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
-	})
-	runs := make([]OrderRun, 0, len(list))
-	for _, b := range list {
-		if run, ok := RunFromTrackingBead(b); ok {
-			runs = append(runs, run)
-		}
-	}
-	return runs, err
+	return s.tracking.ListTracking()
 }
 
-// LatestOpenRun returns the newest OPEN order-run bead for scoped, if any. The
-// query deliberately omits IncludeClosed: the order feed uses the most recent
+// LatestOpenRun returns the newest OPEN order-run record for scoped, if any.
+// Closed runs deliberately never surface: the order feed uses the most recent
 // OPEN run as the freshness signal for a tracking row's UpdatedAt, so a closed
-// run must not advance it. It is byte-identical to the feed's prior raw
-// order-run:<scoped> lookup (limit 1, created-desc, both tiers). The decoded
-// row, a found flag, and any list error are returned together; found can be true
-// alongside a partial-tier error, mirroring the feed's prior handling.
+// run must not advance it. The decoded row, a found flag, and any list error
+// are returned together; found can be true alongside a partial-tier error,
+// mirroring the feed's prior handling.
 func (s *Store) LatestOpenRun(scoped string) (OrderRun, bool, error) {
-	if s.store.Store == nil {
-		return OrderRun{}, false, nil
-	}
-	list, err := s.store.List(beads.ListQuery{
-		Label:    labelOrderRunPrefix + scoped,
-		Limit:    1,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
-	})
-	if len(list) == 0 {
-		return OrderRun{}, false, err
-	}
-	return decodeRun(scoped, list[0]), true, err
+	return s.tracking.LatestOpenRun(scoped)
 }
 
 // RunFromTrackingBead projects an order tracking/run bead onto an OrderRun and

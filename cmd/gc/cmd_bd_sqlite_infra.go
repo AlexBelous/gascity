@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // gc bd verbs served in-process against the embedded sqlite infra store.
@@ -29,6 +30,9 @@ import (
 func maybeDoBdSQLiteInfra(cityPath string, target execStoreTarget, args []string, stdout, stderr io.Writer) (int, bool) {
 	if !cityInfraScopeIsSQLite(cityPath) {
 		return 0, false
+	}
+	if code, handled := maybeDoBdSQLiteInfraList(cityPath, args, stdout, stderr); handled {
+		return code, true
 	}
 	verb, id, rest := splitBdByIDVerb(args)
 	if verb == "" || id == "" {
@@ -75,6 +79,103 @@ func maybeDoBdSQLiteInfra(cityPath string, target execStoreTarget, args []string
 		fmt.Fprintf(stderr, "gc bd: verb %q on infra-resident bead %s is not yet served for the embedded sqlite store (ga-zeex2); use show/update/close or the gc-native surface\n", verb, id) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
+}
+
+// maybeDoBdSQLiteInfraList serves `gc bd list --metadata-field k=v …` from the
+// embedded sqlite infra store when any metadata-field value references an
+// infra-resident id (reserved-class prefix, or point-read hit for migrated
+// legacy prefixes). This is the molecule-member enumerator the workflow gate
+// scripts need (every member carries gc.root_bead_id=<root>): `bd dep tree`
+// cannot open the embedded store, and the mol-progress federation has no
+// projection for it, so gate scripts starved of verdicts and ralph loops
+// hard-failed green PRs.
+func maybeDoBdSQLiteInfraList(cityPath string, args []string, stdout, stderr io.Writer) (int, bool) {
+	isList := false
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		isList = a == "list"
+		break
+	}
+	if !isList {
+		return 0, false
+	}
+	meta := map[string]string{}
+	includeClosed := false
+	limit := 0
+	refID := ""
+	for i := 0; i < len(args); i++ {
+		f := args[i]
+		switch {
+		case f == "list" || f == "--json" || f == "--sandbox" || f == "--readonly":
+		case f == "--include-closed" || f == "--all":
+			includeClosed = true
+		case f == "--metadata-field" || strings.HasPrefix(f, "--metadata-field="):
+			v := strings.TrimPrefix(f, "--metadata-field=")
+			if v == f {
+				if i+1 >= len(args) {
+					return 0, false
+				}
+				i++
+				v = args[i]
+			}
+			kv := strings.SplitN(v, "=", 2)
+			if len(kv) != 2 {
+				return 0, false
+			}
+			meta[kv[0]] = kv[1]
+			if refID == "" {
+				refID = kv[1]
+			}
+		case f == "--limit" || strings.HasPrefix(f, "--limit="):
+			v := strings.TrimPrefix(f, "--limit=")
+			if v == f && i+1 < len(args) {
+				i++
+				v = args[i]
+			}
+			fmt.Sscanf(v, "%d", &limit) //nolint:errcheck // 0 on parse failure = unlimited
+		default:
+			// Unrecognized list shape: leave it on the existing bd routing.
+			return 0, false
+		}
+	}
+	if len(meta) == 0 || refID == "" {
+		return 0, false
+	}
+	scope := infraScopeRoot(cityPath)
+	st, err := beads.OpenSQLiteStore(
+		filepath.Join(scope, ".beads"),
+		beads.WithSQLiteStoreIDPrefix(readScopeIssuePrefix(scope)),
+	)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd list: opening embedded sqlite infra store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	defer func() { _ = closeBeadStoreHandle(st) }()
+	if !config.IsReservedClassBeadID(refID) {
+		if _, getErr := st.Get(refID); getErr != nil {
+			return 0, false
+		}
+	}
+	rows, listErr := st.List(beads.ListQuery{
+		Metadata:      meta,
+		IncludeClosed: includeClosed,
+		Limit:         limit,
+		TierMode:      beads.TierBoth,
+		AllowScan:     true,
+	})
+	if listErr != nil {
+		fmt.Fprintf(stderr, "gc bd list: %v\n", listErr) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	out, mErr := json.MarshalIndent(rows, "", "  ")
+	if mErr != nil {
+		fmt.Fprintf(stderr, "gc bd list: %v\n", mErr) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	fmt.Fprintln(stdout, string(out)) //nolint:errcheck // best-effort stdout
+	return 0, true
 }
 
 // splitBdByIDVerb recognizes the by-id shapes `bd <verb> <id> [flags…]` for

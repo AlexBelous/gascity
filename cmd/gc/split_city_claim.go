@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -50,12 +54,62 @@ func hookClaimInfraDirEnv(cityPath string, cfg *config.City, beadID, dir string,
 // EmitClaimRejected, ResolveWorkBranch, Now) with their production defaults. The
 // wrappers delegate to the same *WithBdStore implementations, only swapping the
 // (dir, env) for a reserved-class target.
+// hookInfraSQLiteOp runs fn against a freshly opened raw embedded-sqlite infra
+// store when targetID is resident there (reserved-class prefix, or a migrated
+// legacy-prefix bead found by point-read). handled=false means the caller must
+// use the bd-routing path (non-sqlite city, or the bead is not infra-resident).
+// bd cannot read the embedded store, so without this every claim-time mutation
+// on an infra-resident bead hangs or fails "not found" in the bd subprocess.
+// Opening the raw store per op is the infra ADR's direct multi-process WAL
+// model; gc hook is a short-lived subprocess.
+func hookInfraSQLiteOp(cityPath, targetID string, fn func(store beads.Store) error) (handled bool, err error) {
+	if !cityInfraScopeIsSQLite(cityPath) {
+		return false, nil
+	}
+	scope := infraScopeRoot(cityPath)
+	st, openErr := beads.OpenSQLiteStore(
+		filepath.Join(scope, ".beads"),
+		beads.WithSQLiteStoreIDPrefix(readScopeIssuePrefix(scope)),
+	)
+	if openErr != nil {
+		return true, fmt.Errorf("opening embedded sqlite infra store for %s: %w", targetID, openErr)
+	}
+	defer func() { _ = closeBeadStoreHandle(st) }()
+	if !config.IsReservedClassBeadID(targetID) {
+		// Migrated legacy-prefix infra beads (ga-wisp roots, mc-wisp session
+		// beads) keep their rig/HQ-era prefixes, so residence — not prefix —
+		// decides ownership.
+		if _, getErr := st.Get(targetID); getErr != nil {
+			if errors.Is(getErr, beads.ErrNotFound) {
+				return false, nil
+			}
+			return true, getErr
+		}
+	}
+	return true, fn(st)
+}
+
 func splitCityHookClaimOps(cityPath string, cfg *config.City) hookClaimOps {
 	route := func(beadID, dir string, env []string) (string, []string) {
 		return hookClaimInfraDirEnv(cityPath, cfg, beadID, dir, env)
 	}
 	return hookClaimOps{
 		Claim: func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			var claimed beads.Bead
+			var ok bool
+			if handled, err := hookInfraSQLiteOp(cityPath, beadID, func(st beads.Store) error {
+				claimer, has := st.(interface {
+					Claim(id, assignee string) (beads.Bead, bool, error)
+				})
+				if !has {
+					return fmt.Errorf("embedded sqlite infra store has no native Claim")
+				}
+				var cerr error
+				claimed, ok, cerr = claimer.Claim(beadID, assignee)
+				return cerr
+			}); handled {
+				return claimed, ok, err
+			}
 			d, e := route(beadID, dir, env)
 			return hookClaimWithBdStore(ctx, d, e, beadID, assignee)
 		},
@@ -64,22 +118,55 @@ func splitCityHookClaimOps(cityPath string, cfg *config.City) hookClaimOps {
 		// split city that bead may be reserved-class, so route the write by the
 		// bead's own id prefix to the infra store.
 		StampWorkMeta: func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
+			if handled, err := hookInfraSQLiteOp(cityPath, beadID, func(st beads.Store) error {
+				return st.Update(beadID, beads.UpdateOpts{Metadata: patch})
+			}); handled {
+				return err
+			}
 			d, e := route(beadID, dir, env)
 			return hookStampWorkMetaWithBdStore(ctx, d, e, beadID, assignee, patch)
 		},
 		// Continuation siblings live in the same store as the workflow root, so
 		// route the list read by the ROOT bead's prefix.
 		ListContinuation: func(ctx context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
+			var listed []beads.Bead
+			if handled, err := hookInfraSQLiteOp(cityPath, rootID, func(st beads.Store) error {
+				var lerr error
+				listed, lerr = st.List(beads.ListQuery{
+					Status: "open",
+					Metadata: map[string]string{
+						beadmeta.RootBeadIDMetadataKey:        rootID,
+						beadmeta.ContinuationGroupMetadataKey: group,
+					},
+					TierMode: beads.TierBoth,
+				})
+				return lerr
+			}); handled {
+				return listed, err
+			}
 			d, e := route(rootID, dir, env)
 			return hookListContinuationWithBdStore(ctx, d, e, rootID, group)
 		},
 		AssignContinuation: func(ctx context.Context, dir string, env []string, beadID, assignee string) error {
+			if handled, err := hookInfraSQLiteOp(cityPath, beadID, func(st beads.Store) error {
+				return st.Update(beadID, beads.UpdateOpts{Assignee: &assignee})
+			}); handled {
+				return err
+			}
 			d, e := route(beadID, dir, env)
 			return hookAssignContinuationWithBdStore(ctx, d, e, beadID, assignee)
 		},
 		// The session bead is session-class, which on a split city also lives in
 		// the infra store — route by the session bead's own id prefix.
 		RecordSessionPointers: func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error {
+			if handled, err := hookInfraSQLiteOp(cityPath, sessionBeadID, func(st beads.Store) error {
+				return st.Update(sessionBeadID, beads.UpdateOpts{Metadata: map[string]string{
+					beadmeta.CurrentRunIDMetadataKey:   runID,
+					beadmeta.ActiveWorkBeadMetadataKey: stepID,
+				}})
+			}); handled {
+				return err
+			}
 			d, e := route(sessionBeadID, dir, env)
 			return hookRecordSessionPointersWithBdStore(ctx, d, e, assignee, sessionBeadID, runID, stepID)
 		},

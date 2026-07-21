@@ -101,13 +101,9 @@ func ensureNudgesClassMigrated(cityPath string, cfg *config.City, stderr io.Writ
 	return true
 }
 
-// importLiveNudgeQueue imports the file queue's three buckets verbatim,
-// returning the imported ids.
-func importLiveNudgeQueue(class *nudgesdb.Store, cityPath string) ([]string, error) {
-	state, err := nudgequeue.LoadState(cityPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading legacy nudge queue: %w", err)
-	}
+// importNudgeQueueState imports one loaded file-queue snapshot's three
+// buckets verbatim, returning the imported ids.
+func importNudgeQueueState(class *nudgesdb.Store, state nudgequeue.State) ([]string, error) {
 	var imported []string
 	for _, bucket := range []struct {
 		items      []nudgequeue.Item
@@ -130,14 +126,41 @@ func importLiveNudgeQueue(class *nudgesdb.Store, cityPath string) ([]string, err
 	return imported, nil
 }
 
+// importLiveNudgeQueue merge-imports the file queue's current buckets
+// (INSERT OR IGNORE — existing class rows, live or terminal, are never
+// touched). It is the straggler / later-boot import: any item another
+// process appended to state.json after the marker flip converges into the
+// class store here, before the residue sweep clears the file copy.
+func importLiveNudgeQueue(class *nudgesdb.Store, cityPath string) ([]string, error) {
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading legacy nudge queue: %w", err)
+	}
+	return importNudgeQueueState(class, state)
+}
+
 // migrateNudgeQueueIntoClassStore imports the live file-queue buckets plus
-// the terminal shadow history created within the queue TTL (24h — older
-// records are past their deliver-by deadline and carry no wait-finalization
-// value). Every imported id is read back from the class store (copy-verify)
-// before the caller may flip the marker.
+// the terminal shadow history whose created OR terminal clock falls within
+// the queue TTL (24h — older records are past their deliver-by deadline and
+// carry no wait-finalization value). It first RESETS the class store's live
+// rows: an interrupted earlier attempt left committed rows behind while the
+// still-file-backed city delivered, acked, released, or dead-lettered past
+// them — re-syncing to the file's current truth keeps the retry from
+// resurrecting an already-delivered item (its terminal record re-enters via
+// the shadow import) or keeping a stale bucket. This runs strictly before
+// the marker, so the file queue is still the authority being copied. Every
+// imported id is read back from the class store (copy-verify) before the
+// caller may flip the marker.
 func migrateNudgeQueueIntoClassStore(class *nudgesdb.Store, cityPath string, front *nudgequeue.Store, now time.Time) (nudgeClassMigrationResult, error) {
 	result := nudgeClassMigrationResult{}
-	importedIDs, err := importLiveNudgeQueue(class, cityPath)
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return result, fmt.Errorf("reading legacy nudge queue: %w", err)
+	}
+	if _, err := class.ResetLive(); err != nil {
+		return result, err
+	}
+	importedIDs, err := importNudgeQueueState(class, state)
 	if err != nil {
 		return result, err
 	}
@@ -194,12 +217,17 @@ func writeNudgesMigratedMarkerFile(cityPath string) error {
 	return nil
 }
 
-// sweepLegacyNudgeResidue clears the legacy queue's residue on a MIGRATED
-// city: file-queue items the class store already owns (so a not-yet-upgraded
-// poller stops redelivering them) and bd shadow beads (closed ones, any
-// whose id the class store owns, and open ones past the grace window).
-// Deleting converges across boots, so a kill mid-sweep costs nothing.
-// Returns the number of file items plus beads removed.
+// sweepLegacyNudgeResidue converges the legacy queue's residue on a
+// MIGRATED city with the documented import-then-sweep: it first
+// merge-imports any file-queue item the class store does not yet own
+// (an enqueue that raced the marker flip, or a mixed-version old binary's
+// append — without this, such items would be stranded in state.json
+// forever, since routed readers never look there), then clears file items
+// the class store owns (so a not-yet-upgraded poller stops redelivering
+// them) and bd shadow beads (closed ones, any whose id the class store
+// owns, and open ones past the grace window). Deleting converges across
+// boots, so a kill mid-sweep costs nothing. Returns the number of file
+// items plus beads removed.
 func sweepLegacyNudgeResidue(cityPath string, cfg *config.City, stderr io.Writer) int {
 	routed, err := nudgesdb.Routed(cityPath, cfg)
 	if err != nil {
@@ -213,6 +241,15 @@ func sweepLegacyNudgeResidue(cityPath string, cfg *config.City, stderr io.Writer
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: nudges legacy residue sweep: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 0
+	}
+	if stragglers, err := importLiveNudgeQueue(class, cityPath); err != nil {
+		// Import failure must skip the file sweep below: sweeping without the
+		// import could only remove already-imported items, but converging is
+		// cheaper than reasoning about partial imports — retry next boot.
+		fmt.Fprintf(stderr, "gc: nudges legacy residue sweep: importing stragglers: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 0
+	} else if len(stragglers) > 0 {
+		fmt.Fprintf(stderr, "gc: nudges legacy residue sweep: merged %d file items into the class store\n", len(stragglers)) //nolint:errcheck // best-effort stderr
 	}
 	inClass := func(id string) (bool, error) {
 		_, ok, err := class.FindRecordIncludingTerminal(id)

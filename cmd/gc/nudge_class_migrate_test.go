@@ -89,9 +89,16 @@ func TestEnsureNudgesClassMigratedImportsQueueAndShadows(t *testing.T) {
 	dead := nudgequeue.Item{ID: "nudge-d", Agent: "boot/dev", Source: "session", Message: "d", CreatedAt: now.Add(-time.Hour), DeliverAfter: now.Add(-time.Hour), ExpiresAt: now.Add(nudgequeue.DefaultTTL), DeadAt: now.Add(-time.Minute), LastError: "boom"}
 	seedLegacyNudgeQueue(t, cityPath, nudgequeue.State{Pending: []nudgequeue.Item{pending}, InFlight: []nudgequeue.Item{inFlight}, Dead: []nudgequeue.Item{dead}})
 
+	// The late-terminal shadow was CREATED beyond the 24h window but turned
+	// terminal recently (expired at CreatedAt+TTL): its unfinalized wait
+	// still needs the terminal record, so the import keys on the terminal
+	// clock too.
+	lateTerminal := legacyNudgeShadowBead("ga-shadow-late", "nudge-late-terminal", "expired", "closed", now.Add(-30*time.Hour))
+	lateTerminal.Metadata["terminal_at"] = now.Add(-time.Hour).UTC().Format(time.RFC3339)
 	store := legacyStoreFrom(t, []beads.Bead{
 		legacyNudgeShadowBead("ga-shadow-term", "wait-w1-e1-1", "injected", "closed", now.Add(-2*time.Hour)),
 		legacyNudgeShadowBead("ga-shadow-old", "nudge-ancient", "injected", "closed", now.Add(-48*time.Hour)),
+		lateTerminal,
 		legacyNudgeShadowBead("ga-shadow-open", "nudge-p", "queued", "open", now.Add(-time.Minute)),
 	})
 	stubNudgeMigrationStore(t, store)
@@ -132,6 +139,13 @@ func TestEnsureNudgesClassMigratedImportsQueueAndShadows(t *testing.T) {
 	}
 	if _, ok, _ := class.FindRecordIncludingTerminal("nudge-ancient"); ok {
 		t.Fatal("shadow older than the 24h TTL was imported")
+	}
+	rec, ok, err = class.FindRecordIncludingTerminal("nudge-late-terminal")
+	if err != nil || !ok {
+		t.Fatalf("late-terminal shadow (old CreatedAt, recent TerminalAt) not imported: found=%v err=%v", ok, err)
+	}
+	if rec.TerminalState != "expired" {
+		t.Fatalf("late-terminal record = %+v, want expired stamps", rec)
 	}
 
 	// The routed front door now reads the imported queue.
@@ -249,5 +263,110 @@ func TestSweepLegacyNudgeResidue(t *testing.T) {
 	// The sweep converges: a second pass finds nothing new.
 	if again := sweepLegacyNudgeResidue(cityPath, cfg, &log); again != 0 {
 		t.Fatalf("second residue sweep removed %d, want 0", again)
+	}
+}
+
+// TestSweepLegacyNudgeResidueImportsStragglers pins the documented
+// import-then-sweep: an item that landed in state.json AFTER the marker
+// flip (an enqueue racing the migration, or a mixed-version old binary's
+// append) is merged into the class store by a later boot's residue sweep
+// and cleared from the file — never stranded.
+func TestSweepLegacyNudgeResidueImportsStragglers(t *testing.T) {
+	now := time.Now().UTC()
+	cityPath := t.TempDir()
+	cfg := sqliteNudgesConfig(t)
+	stubNudgeMigrationStore(t, beads.NewMemStore())
+
+	var log bytes.Buffer
+	if !ensureNudgesClassMigrated(cityPath, cfg, &log) {
+		t.Fatalf("migration failed; log: %s", log.String())
+	}
+
+	// A post-marker file-backend append (the race / mixed-version shape).
+	straggler := nudgequeue.Item{ID: "nudge-straggler", Agent: "boot/dev", Source: "session", Message: "s", CreatedAt: now, DeliverAfter: now, ExpiresAt: now.Add(nudgequeue.DefaultTTL)}
+	seedLegacyNudgeQueue(t, cityPath, nudgequeue.State{Pending: []nudgequeue.Item{straggler}})
+
+	if removed := sweepLegacyNudgeResidue(cityPath, cfg, &log); removed != 1 {
+		t.Fatalf("residue sweep removed %d, want the 1 merged file item; log: %s", removed, log.String())
+	}
+	class, err := nudgesdb.SharedStoreFor(cityPath)
+	if err != nil {
+		t.Fatalf("SharedStoreFor: %v", err)
+	}
+	rec, ok, err := class.FindRecord("nudge-straggler")
+	if err != nil || !ok || rec.QueueState != "pending" {
+		t.Fatalf("straggler not merged into the class store: %+v (%v, %v)", rec, ok, err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("straggler left in the file queue: %+v", state.Pending)
+	}
+}
+
+// nudgeShadowListErrorStore fails List so the shadow-history leg of a
+// migration attempt aborts after the live import committed.
+type nudgeShadowListErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s nudgeShadowListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) { return nil, s.err }
+
+// TestEnsureNudgesClassMigratedRetryConvergesToFileTruth pins the
+// abort-retry contract: an interrupted first attempt leaves committed live
+// rows; the still-file-backed city then delivers one of them (removing it
+// from state.json, terminalizing its shadow); the retry must NOT resurrect
+// the delivered item as pending — it re-syncs the live set to the file's
+// current truth and re-imports the terminal record from the shadow.
+func TestEnsureNudgesClassMigratedRetryConvergesToFileTruth(t *testing.T) {
+	now := time.Now().UTC()
+	cityPath := t.TempDir()
+	cfg := sqliteNudgesConfig(t)
+
+	delivered := nudgequeue.Item{ID: "nudge-delivered", Agent: "boot/dev", Source: "session", Message: "d", CreatedAt: now.Add(-time.Minute), DeliverAfter: now.Add(-time.Minute), ExpiresAt: now.Add(nudgequeue.DefaultTTL)}
+	pending := nudgequeue.Item{ID: "nudge-keep", Agent: "boot/dev", Source: "session", Message: "k", CreatedAt: now.Add(-time.Minute), DeliverAfter: now.Add(-time.Minute), ExpiresAt: now.Add(nudgequeue.DefaultTTL)}
+	seedLegacyNudgeQueue(t, cityPath, nudgequeue.State{Pending: []nudgequeue.Item{delivered, pending}})
+
+	// Attempt 1: the live buckets import, then the shadow-history read fails
+	// — rows are committed but no marker is written.
+	failing := nudgeShadowListErrorStore{Store: beads.NewMemStore(), err: fmt.Errorf("shadow store listing unavailable")}
+	stubNudgeMigrationStore(t, failing)
+	var log bytes.Buffer
+	if ensureNudgesClassMigrated(cityPath, cfg, &log) {
+		t.Fatal("attempt 1 reported success despite the shadow-listing failure")
+	}
+	if _, err := os.Stat(nudgesdb.MigratedMarkerPath(cityPath)); err == nil {
+		t.Fatal("marker written by the aborted attempt")
+	}
+
+	// The still-file-backed city delivers one item: it leaves state.json and
+	// its shadow terminalizes.
+	seedLegacyNudgeQueue(t, cityPath, nudgequeue.State{Pending: []nudgequeue.Item{pending}})
+	store := legacyStoreFrom(t, []beads.Bead{
+		legacyNudgeShadowBead("ga-shadow-del", "nudge-delivered", "injected", "closed", now.Add(-time.Minute)),
+	})
+	stubNudgeMigrationStore(t, store)
+
+	// Attempt 2 succeeds and converges to the file's current truth.
+	if !ensureNudgesClassMigrated(cityPath, cfg, &log) {
+		t.Fatalf("retry failed; log: %s", log.String())
+	}
+	class, err := nudgesdb.SharedStoreFor(cityPath)
+	if err != nil {
+		t.Fatalf("SharedStoreFor: %v", err)
+	}
+	if rec, ok, err := class.FindRecord("nudge-delivered"); err != nil || ok {
+		t.Fatalf("delivered item resurrected as live: %+v (%v, %v)", rec, ok, err)
+	}
+	rec, ok, err := class.FindRecordIncludingTerminal("nudge-delivered")
+	if err != nil || !ok || rec.TerminalState != "injected" {
+		t.Fatalf("delivered item's terminal record missing after retry: %+v (%v, %v)", rec, ok, err)
+	}
+	rec, ok, err = class.FindRecord("nudge-keep")
+	if err != nil || !ok || rec.QueueState != "pending" {
+		t.Fatalf("undelivered item lost by the retry: %+v (%v, %v)", rec, ok, err)
 	}
 }

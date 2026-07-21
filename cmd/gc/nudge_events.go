@@ -11,23 +11,32 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/events"
 )
 
 // recordNudgeLifecycleEvents appends one lifecycle event per item to the
-// city event log. reasonFor lets the dead path carry per-item causes; nil
-// means no reason.
+// city event log (one recorder open per batch). reasonFor lets the dead
+// path carry per-item causes; nil means no reason.
+//
+// The recorder is opened DIRECTLY on the event log with default rotation
+// options — deliberately not openCityRecorderAt, whose loadCityConfig runs
+// a full pack-expansion parse per call. These emissions sit on delivery
+// paths (every enqueue before the wake ping; the controller's per-ready-wait
+// dispatch loop; drain/poller acks), where the hook-emission norm (#2099,
+// fastEventsProviderName) forbids config loads. Matches the ad-hoc
+// direct-open precedent in bd_env.go / dolt_project_id.go / cmd_hook_claim's
+// recorder use; [events] rotation overrides do not apply to these appends.
 func recordNudgeLifecycleEvents(cityPath, eventType, outcome string, reasonFor func(queuedNudge) string, items []queuedNudge) {
 	if cityPath == "" || len(items) == 0 {
 		return
 	}
-	rec := openCityRecorderAt(cityPath, io.Discard)
-	defer func() {
-		if closer, ok := rec.(io.Closer); ok {
-			_ = closer.Close()
-		}
-	}()
+	rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+	if err != nil {
+		return
+	}
+	defer rec.Close() //nolint:errcheck // best-effort close
 	for _, item := range items {
 		reason := ""
 		if reasonFor != nil {

@@ -361,10 +361,13 @@ func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs m
 }
 
 // ShadowHistorySince lists every nudge shadow (open and terminal, both
-// storage tiers) created at or after since, oldest first. It is the
-// migration read: the bd->sqlite cutover imports the recent terminal
-// history so wait finalization that runs after the cutover still reads the
-// terminal stamps of nudges delivered before it.
+// storage tiers) whose created OR terminal clock is at or after since,
+// oldest first. It is the migration read: the bd->sqlite cutover imports the
+// recent terminal history so wait finalization that runs after the cutover
+// still reads the terminal stamps of nudges delivered before it. The
+// terminal-clock arm matters for shadows that turned terminal long after
+// creation (e.g. expired at CreatedAt+TTL): their unfinalized waits read the
+// terminal stamps by TerminalAt recency, not CreatedAt.
 func (s *Store) ShadowHistorySince(since time.Time) ([]NudgeShadow, error) {
 	if s == nil || s.store.Store == nil {
 		return nil, nil
@@ -380,10 +383,11 @@ func (s *Store) ShadowHistorySince(since time.Time) ([]NudgeShadow, error) {
 	}
 	shadows := make([]NudgeShadow, 0, len(candidates))
 	for _, b := range candidates {
-		if b.CreatedAt.Before(since) {
+		shadow := decodeNudgeItem(b)
+		if b.CreatedAt.Before(since) && (shadow.TerminalAt.IsZero() || shadow.TerminalAt.Before(since)) {
 			continue
 		}
-		shadows = append(shadows, decodeNudgeItem(b))
+		shadows = append(shadows, shadow)
 	}
 	return shadows, nil
 }

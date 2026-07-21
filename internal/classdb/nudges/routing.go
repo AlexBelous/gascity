@@ -19,10 +19,12 @@ package nudgesdb
 // back to "bd").
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -50,24 +52,73 @@ func MigratedMarkerPath(cityPath string) string {
 // this city: the migrated marker exists AND [beads.classes.nudges] selects
 // the sqlite backend. cfg may be nil, in which case the city config is loaded
 // from disk (config.LoadWithIncludes — the same layered load the cmd/gc
-// loaders wrap; the extras they add never touch the [beads] section). A
-// config-load failure on a MARKED city is an error, not a bd fallback:
+// loaders wrap; the extras they add never touch the [beads] section) behind
+// a city.toml mtime+size cache so long-lived routed processes (the 2s
+// poller, the controller tick) do not re-parse the pack graph per queue op.
+// Only an ABSENT marker means "not migrated"; any other stat failure — like
+// a config-load failure on a marked city — is an error, not a bd fallback:
 // guessing "file" there would land writes where a routed reader never looks.
 func Routed(cityPath string, cfg *config.City) (bool, error) {
 	if cityPath == "" {
 		return false, nil
 	}
 	if _, err := os.Stat(MigratedMarkerPath(cityPath)); err != nil {
-		return false, nil
-	}
-	if cfg == nil {
-		loaded, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-		if err != nil {
-			return false, fmt.Errorf("resolving nudges-class routing for migrated city: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
 		}
-		cfg = loaded
+		return false, fmt.Errorf("checking nudges migrated marker: %w", err)
 	}
-	return cfg.Beads.ClassBackend(config.BeadClassNudges) == config.BeadsClassBackendSQLite, nil
+	if cfg != nil {
+		return cfg.Beads.ClassBackend(config.BeadClassNudges) == config.BeadsClassBackendSQLite, nil
+	}
+	sqlite, err := sqliteBackendConfigured(cityPath)
+	if err != nil {
+		return false, fmt.Errorf("resolving nudges-class routing for migrated city: %w", err)
+	}
+	return sqlite, nil
+}
+
+// routedConfigCache memoizes the self-loaded [beads.classes.nudges] decision
+// per city, keyed by city.toml's (mtime, size). A knob flip rewrites
+// city.toml and invalidates the entry; edits confined to included fragments
+// are picked up on the next process start or city.toml touch (documented
+// limitation — the backend knob lives in city.toml).
+var routedConfigCache struct {
+	mu     sync.Mutex
+	byPath map[string]routedConfigEntry
+}
+
+type routedConfigEntry struct {
+	modTime time.Time
+	size    int64
+	sqlite  bool
+}
+
+func sqliteBackendConfigured(cityPath string) (bool, error) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	info, statErr := os.Stat(tomlPath)
+	if statErr == nil {
+		routedConfigCache.mu.Lock()
+		entry, ok := routedConfigCache.byPath[tomlPath]
+		routedConfigCache.mu.Unlock()
+		if ok && entry.modTime.Equal(info.ModTime()) && entry.size == info.Size() {
+			return entry.sqlite, nil
+		}
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		return false, err
+	}
+	sqlite := cfg.Beads.ClassBackend(config.BeadClassNudges) == config.BeadsClassBackendSQLite
+	if statErr == nil {
+		routedConfigCache.mu.Lock()
+		if routedConfigCache.byPath == nil {
+			routedConfigCache.byPath = make(map[string]routedConfigEntry)
+		}
+		routedConfigCache.byPath[tomlPath] = routedConfigEntry{modTime: info.ModTime(), size: info.Size(), sqlite: sqlite}
+		routedConfigCache.mu.Unlock()
+	}
+	return sqlite, nil
 }
 
 // sharedHandles is the process-wide cache of open nudges class stores, one

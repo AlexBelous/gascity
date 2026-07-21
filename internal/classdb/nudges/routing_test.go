@@ -110,6 +110,49 @@ func TestRoutedMarkedCityConfigLoadFailureFailsClosed(t *testing.T) {
 	}
 }
 
+// Only an ABSENT marker means "not migrated": any other stat failure (EACCES,
+// EIO) must fail closed rather than silently routing a possibly-migrated city
+// to the file backend.
+func TestRoutedMarkerStatErrorFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based stat failures are not observable as root")
+	}
+	cityPath := t.TempDir()
+	writeMigratedMarker(t, cityPath)
+	writeCityConfig(t, cityPath, "sqlite")
+	if err := os.Chmod(StoreDir(cityPath), 0o000); err != nil {
+		t.Fatalf("chmod store dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(StoreDir(cityPath), 0o755)
+	})
+	if _, err := Routed(cityPath, nil); err == nil {
+		t.Fatal("Routed succeeded with an unstatable marker; a non-ENOENT stat failure must fail closed")
+	}
+}
+
+// The self-load config decision is cached by city.toml (mtime, size); a knob
+// rewrite invalidates it.
+func TestRoutedConfigDecisionCacheInvalidatesOnRewrite(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMigratedMarker(t, cityPath)
+	writeCityConfig(t, cityPath, "sqlite")
+	routed, err := Routed(cityPath, nil)
+	if err != nil || !routed {
+		t.Fatalf("Routed = (%v, %v), want routed", routed, err)
+	}
+	// Rollback: flip the knob back to bd (different content length, so the
+	// (mtime, size) key misses even on a coarse-clock filesystem).
+	writeCityConfig(t, cityPath, "bd")
+	routed, err = Routed(cityPath, nil)
+	if err != nil {
+		t.Fatalf("Routed after rollback: %v", err)
+	}
+	if routed {
+		t.Fatal("Routed = true after the knob flipped back to bd (stale cache entry)")
+	}
+}
+
 func TestQueueForCityUnroutedUsesFileBackend(t *testing.T) {
 	cityPath := t.TempDir()
 	now := time.Now()

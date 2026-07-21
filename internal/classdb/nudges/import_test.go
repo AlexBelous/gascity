@@ -41,7 +41,7 @@ func TestImportItemPreservesBucketsAndClocks(t *testing.T) {
 	}
 	dead := routingTestItem("nudge-d", "boot/dev", now.Add(-2*time.Hour))
 	dead.DeadAt = now.Add(-time.Minute)
-	dead.LastError = "failed"
+	dead.LastError = "boom: delivery failed"
 	if err := st.ImportItem(dead, "dead"); err != nil {
 		t.Fatalf("ImportItem dead: %v", err)
 	}
@@ -68,6 +68,59 @@ func TestImportItemPreservesBucketsAndClocks(t *testing.T) {
 	}
 	if !snap.Dead[0].DeadAt.Equal(dead.DeadAt) {
 		t.Fatalf("DeadAt = %v, want %v", snap.Dead[0].DeadAt, dead.DeadAt)
+	}
+
+	// Dead imports carry their terminal stamps immediately (the merged-model
+	// dead shape), so routed wait finalization does not wait out the 1h
+	// DeadRetention aging pass.
+	rec, ok, err := st.FindRecord("nudge-d")
+	if err != nil || !ok {
+		t.Fatalf("FindRecord(dead) = %v, %v", ok, err)
+	}
+	if rec.TerminalState != "failed" || rec.TerminalReason != "boom: delivery failed" {
+		t.Fatalf("imported dead row terminal stamps = %+v, want failed/boom", rec)
+	}
+	if !rec.TerminalAt.Equal(dead.DeadAt) {
+		t.Fatalf("imported dead row TerminalAt = %v, want DeadAt %v", rec.TerminalAt, dead.DeadAt)
+	}
+	if s := rec.Shadow(); s.Open || s.State != "failed" {
+		t.Fatalf("dead import Shadow() = %+v, want closed failed", s)
+	}
+}
+
+// ResetLive is the pre-marker convergence primitive: it clears every live
+// bucket while terminal history survives.
+func TestResetLiveKeepsTerminalHistory(t *testing.T) {
+	st := importTestStore(t)
+	now := time.Now().UTC()
+	if err := st.ImportItem(routingTestItem("nudge-p", "boot/dev", now), "pending"); err != nil {
+		t.Fatalf("ImportItem: %v", err)
+	}
+	dead := routingTestItem("nudge-d", "boot/dev", now)
+	dead.DeadAt = now
+	if err := st.ImportItem(dead, "dead"); err != nil {
+		t.Fatalf("ImportItem dead: %v", err)
+	}
+	if err := st.ImportTerminalShadow(nudgequeue.NudgeShadow{ID: "nudge-t", State: "injected"}, now, now); err != nil {
+		t.Fatalf("ImportTerminalShadow: %v", err)
+	}
+
+	deleted, err := st.ResetLive()
+	if err != nil {
+		t.Fatalf("ResetLive: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("ResetLive deleted %d, want 2", deleted)
+	}
+	snap, err := st.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Pending)+len(snap.InFlight)+len(snap.Dead) != 0 {
+		t.Fatalf("live rows survived ResetLive: %+v", snap)
+	}
+	if _, ok, err := st.FindRecordIncludingTerminal("nudge-t"); err != nil || !ok {
+		t.Fatalf("terminal history lost by ResetLive: %v, %v", ok, err)
 	}
 }
 

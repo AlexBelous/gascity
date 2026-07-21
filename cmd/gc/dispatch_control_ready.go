@@ -370,6 +370,26 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
+	// An embedded-sqlite infra scope cannot be read by the bd fallback: bd
+	// does not speak the embedded store and silently resolves a DIFFERENT
+	// workspace (the city Dolt store), so every candidate/route filter comes
+	// up empty and ready control beads are never discovered. Read the scope
+	// in-process through the memoized infra store instead.
+	if scopeBackendIsSQLite(dir) && samePath(dir, infraScopeRoot(cityPath)) {
+		if store := cachedCityInfraStore(cityPath, cfg); store != nil {
+			q := beads.ReadyQuery{}
+			if parsed.includeEphemeral {
+				q.TierMode = beads.TierBoth
+			}
+			ready, rerr := beads.HandlesFor(store).Live.Ready(q)
+			if rerr != nil {
+				return nil, true, rerr
+			}
+			beads.SortBeadsReadyOrder(ready)
+			return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
+		}
+	}
+
 	if !parsed.includeEphemeral {
 		if cache := controlReadyCacheFor(dir, cityPath, cfg); cache != nil {
 			if ready, ok := cache.CachedReady(); ok {

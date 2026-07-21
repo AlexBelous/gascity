@@ -5562,7 +5562,14 @@ exit 0
 	}
 }
 
-func TestReaperClosesNudgeBeadWithElapsedExpiresAt(t *testing.T) {
+// TestReaperDrivesStoreOwnedNudgeMailSweep pins the reaper's rewritten
+// nudge leg (infra-class-sqlite-stores design, "stores own retention"): the
+// former Step-4 raw-SQL close of expired gc:nudge beads is gone — it would
+// be a silent no-op once the nudges class relocates to the embedded sqlite
+// store — and the reaper instead drives the store's own front door with one
+// city-level `gc order sweep-nudge-mail` invocation, which covers both
+// backends (bd shadow sweep / relocated terminal-row retention).
+func TestReaperDrivesStoreOwnedNudgeMailSweep(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "citydb")
 	binDir := t.TempDir()
@@ -5570,11 +5577,6 @@ func TestReaperClosesNudgeBeadWithElapsedExpiresAt(t *testing.T) {
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
-	// The Step 3 close query is the only one that compares against
-	// UTC_TIMESTAMP(); the gc:nudge-scoped anomaly pre-scan ends in IS NULL.
-	// Returning a row from the close query exercises the positive TTL-expiry
-	// path: an elapsed nudge bead is closed with reason "ttl:expired by reaper"
-	// and counted in the summary as expired:1.
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
@@ -5583,9 +5585,6 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
-    ;;
-  *"UTC_TIMESTAMP()"*)
-    printf 'id\nga-expired\n'
     ;;
   *"gc:nudge"*)
     printf 'id\n'
@@ -5623,42 +5622,31 @@ exit 0
 
 	runScript(t, coreScriptPath("reaper.sh"), env)
 
-	bdData, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	bdLogText := string(bdData)
-	// The expired nudge bead is unassigned, so the reaper must close it bare; an
-	// inserted --force would defeat bd's cross-actor guard. Pin the full argv and
-	// assert --force is absent so a regression toward forcing is caught.
-	if !strings.Contains(bdLogText, "close ga-expired --reason ttl:expired by reaper") {
-		t.Fatalf("reaper did not close elapsed nudge bead with the expected bare argv:\n%s", bdLogText)
-	}
-	if strings.Contains(bdLogText, "close ga-expired --force") {
-		t.Fatalf("reaper force-closed an unassigned expired nudge bead; the bare close must be preserved:\n%s", bdLogText)
-	}
-
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	gcLogText := string(gcData)
-	if !strings.Contains(gcLogText, "expired:1") {
-		t.Fatalf("reaper summary did not report expired:1:\n%s", gcLogText)
+	if !strings.Contains(gcLogText, "order sweep-nudge-mail --quiet") {
+		t.Fatalf("reaper did not drive the store-owned nudge-mail sweep:\n%s", gcLogText)
 	}
 
-	// The bare close above is only safe because the Step 3 expired-nudge query
-	// restricts to unassigned beads; that COALESCE(i.assignee,'')='' filter is
-	// the invariant that keeps the bare close out of bd's cross-actor guard.
-	// Pin it against the emitted SQL so a future edit that drops the filter
-	// while keeping the bare close fails here instead of silently leaking an
-	// assigned expired nudge at the next BD_VERSION bump.
+	// The raw-SQL expiry close is gone for good: no bd close may be issued for
+	// nudge TTL work, and the emitted SQL must not resurrect the
+	// expires_at-vs-UTC_TIMESTAMP comparison the old Step 4 ran.
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if strings.Contains(string(bdData), "ttl:expired by reaper") {
+		t.Fatalf("reaper still raw-closes expired nudge beads:\n%s", bdData)
+	}
 	doltData, err := os.ReadFile(doltLog)
 	if err != nil {
 		t.Fatalf("ReadFile(dolt args log): %v", err)
 	}
-	if !strings.Contains(string(doltData), "COALESCE(i.assignee, '') = ''") {
-		t.Fatalf("expired-nudge query dropped the unassigned filter; bare close would become cross-actor:\n%s", doltData)
+	if strings.Contains(string(doltData), "UTC_TIMESTAMP()") {
+		t.Fatalf("reaper still issues the raw expires_at expiry query:\n%s", doltData)
 	}
 }
 
@@ -5671,11 +5659,11 @@ func TestReaperDoesNotTTLCloseNonNudgeBeadWithElapsedExpiresAt(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	// ga-binding is an expired bead that is NOT labeled gc:nudge (e.g. a
-	// gc:extmsg-binding session binding). The Step 3 queries INNER JOIN on the
-	// gc:nudge label, so they return no rows for it, and the Step 4 stale path
-	// explicitly excludes any bead carrying expires_at. Only a query lacking
-	// both guards would surface ga-binding — which the reaper never issues — so
-	// the bead must never be closed.
+	// gc:extmsg-binding session binding). Nudge TTL reaping now lives behind
+	// `gc order sweep-nudge-mail` (store-owned), and the stale auto-close
+	// query explicitly excludes any bead carrying expires_at. Only a query
+	// lacking that guard would surface ga-binding — which the reaper never
+	// issues — so the bead must never be closed.
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in

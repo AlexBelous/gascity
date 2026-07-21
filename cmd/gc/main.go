@@ -1310,6 +1310,15 @@ func cityHasInfraStore(cityPath string) bool {
 	return err == nil
 }
 
+// cityInfraScopeIsSQLite reports whether the city's infra scope is backed by
+// the embedded sqlite store (its .beads/metadata.json declares backend=sqlite).
+// bd cannot read that store, so callers use this to route infra reads through
+// the in-process store instead of shelling to bd, and to relax preflights whose
+// rationale assumes a Dolt-backed infra scope.
+func cityInfraScopeIsSQLite(cityPath string) bool {
+	return cityHasInfraStore(cityPath) && scopeBackendIsSQLite(infraScopeRoot(cityPath))
+}
+
 // openCityInfraStoreResultAt opens the city's infra bead store. It returns
 // (zero, false, nil) when the city has no infra scope (every existing city), so
 // callers treat absence as "single-store, route to the work store". When the

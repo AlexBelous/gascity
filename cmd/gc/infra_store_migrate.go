@@ -195,9 +195,16 @@ func doMigrateInfraStore(cityPath string, dryRun bool, stderr io.Writer) (*migra
 		return nil, errors.New("migrate infra-store: city does not use the bd/Dolt store contract; " +
 			"the infra store split applies only to bd-backed cities")
 	}
-	if isExternalDolt(cityPath) {
+	externalDolt := isExternalDolt(cityPath)
+	infraSQLite := cityInfraScopeIsSQLite(cityPath)
+	// The hosted-Dolt refusal exists because hosted tenancy is one Dolt database
+	// per project, so a second (infra) Dolt database cannot be created. When the
+	// infra scope is the embedded sqlite store no second Dolt database is
+	// involved, so the tenancy concern is void and the migration may proceed.
+	if externalDolt && !infraSQLite {
 		return nil, errors.New("migrate infra-store: city is backed by an external/hosted Dolt endpoint; " +
-			"the two-store split is not supported for hosted Dolt (one database per project)")
+			"the two-store split is not supported for hosted Dolt (one database per project) " +
+			"unless the infra scope is the embedded sqlite store")
 	}
 	if pid := controllerAlive(cityPath); pid != 0 {
 		return nil, fmt.Errorf("migrate infra-store: a controller is running (pid %d); "+
@@ -206,11 +213,15 @@ func doMigrateInfraStore(cityPath string, dryRun bool, stderr io.Writer) (*migra
 
 	// Bring managed Dolt up and wait for readiness so the infra scope's database
 	// can be created and both stores opened. Mirrors initDirIfReadyManagedDolt.
-	if err := initDirIfReadyEnsureBeadsProvider(cityPath); err != nil {
-		return nil, fmt.Errorf("migrate infra-store: starting bead store provider: %w", err)
-	}
-	if err := initDirIfReadyWaitForManagedDolt(cityPath, managedDoltInitReadyTimeout); err != nil {
-		return nil, fmt.Errorf("migrate infra-store: waiting for managed Dolt: %w", err)
+	// An external-Dolt city has no managed server to bring up — its endpoint is
+	// already live — so skip the managed bring-up there.
+	if !externalDolt {
+		if err := initDirIfReadyEnsureBeadsProvider(cityPath); err != nil {
+			return nil, fmt.Errorf("migrate infra-store: starting bead store provider: %w", err)
+		}
+		if err := initDirIfReadyWaitForManagedDolt(cityPath, managedDoltInitReadyTimeout); err != nil {
+			return nil, fmt.Errorf("migrate infra-store: waiting for managed Dolt: %w", err)
+		}
 	}
 
 	cfg, err := loadCityConfig(cityPath, io.Discard)
@@ -223,9 +234,19 @@ func doMigrateInfraStore(cityPath string, dryRun bool, stderr io.Writer) (*migra
 	// cross-boundary DepAdd (gcy-cv1 → gcy-45) can resolve the read-only target in
 	// the HQ db. Both steps are the exact E2.5 calls plus the new routes step.
 	if !dryRun {
-		fmt.Fprintln(stderr, "migrate infra-store: creating infra scope and routes...") //nolint:errcheck // best-effort progress
-		if err := ensureInfraScopeForMigration(cityPath, cfg); err != nil {
-			return nil, err
+		if infraSQLite {
+			// The infra scope already exists as the embedded sqlite store.
+			// Seeding would bd-init the scope, which can rewrite its
+			// metadata.json backend marker (bd has no sqlite backend), and
+			// routes.jsonl only serves bd prefix routing, which never reads a
+			// sqlite scope. The embedded store creates its own database file on
+			// open, so there is nothing to seed.
+			fmt.Fprintln(stderr, "migrate infra-store: infra scope already present (embedded sqlite); skipping scope seeding") //nolint:errcheck // best-effort progress
+		} else {
+			fmt.Fprintln(stderr, "migrate infra-store: creating infra scope and routes...") //nolint:errcheck // best-effort progress
+			if err := ensureInfraScopeForMigration(cityPath, cfg); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		fmt.Fprintln(stderr, "migrate infra-store: dry run (no writes)") //nolint:errcheck // best-effort progress

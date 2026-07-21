@@ -338,6 +338,12 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, controlDispatcherGraphReadNeedsGCNative(cityPath), config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
+	if isWorkflowServeControlDispatcherAgent(agentCfg) && controlDispatcherGraphReadNeedsGCNative(cityPath) {
+		// Packs may configure their own bd-based work_query (mc does); on a
+		// sqlite-infra city that query must still read through gc, because bd
+		// cannot open the embedded store. Idempotent on the built-in query.
+		workQuery = rewriteControlReadyQueryGCNative(workQuery)
+	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	sweepTargets := workflowServeSweepTargets(cityPath, cfg, agentCfg, workDir, workEnv, stderr)
 	if !follow {
@@ -802,7 +808,19 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 // beads.Store (which bd cannot read); on a Dolt-backed infra store or a
 // single-store city the `bd`-shell discovery path is unchanged.
 func controlDispatcherGraphReadNeedsGCNative(cityPath string) bool {
-	return cityHasInfraStore(cityPath) && scopeBackendIsSQLite(infraScopeRoot(cityPath))
+	return cityInfraScopeIsSQLite(cityPath)
+}
+
+// rewriteControlReadyQueryGCNative rewrites every bd ready invocation in a
+// control-dispatcher work query to the in-process `gc ready` reader. Packs may
+// configure their own bd-based work_query (so the built-in control-ready query
+// never runs); on a sqlite-infra city every such query must still read through
+// gc, because bd cannot open the embedded store. GC_BIN pins the exact deployed
+// binary; bare `gc` on PATH may be an older wrapper.
+func rewriteControlReadyQueryGCNative(workQuery string) string {
+	workQuery = strings.ReplaceAll(workQuery, "bd --readonly --sandbox ready", `"${GC_BIN:-gc}" ready`)
+	workQuery = strings.ReplaceAll(workQuery, "bd ready", `"${GC_BIN:-gc}" ready`)
+	return workQuery
 }
 
 func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, graphReadGCNative bool, controlSessionNames ...string) string {
@@ -818,7 +836,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	// work + infra legs) instead of `bd --readonly --sandbox ready`.
 	readyCmd := "bd --readonly --sandbox ready"
 	if graphReadGCNative {
-		readyCmd = "gc ready"
+		readyCmd = `"${GC_BIN:-gc}" ready`
 	}
 	includeEphemeral := ""
 	if beadsCfg.UsesBD105ReadySemantics() {

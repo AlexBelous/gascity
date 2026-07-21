@@ -3422,9 +3422,9 @@ func TestWorkflowServeControlReadyQueryGCNativeOnSQLiteInfra(t *testing.T) {
 		t.Fatalf("gc-native control query still shells to bd: %q", query)
 	}
 	for _, want := range []string{
-		`gc ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
-		`gc ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
-		`gc ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
+		`"${GC_BIN:-gc}" ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
+		`"${GC_BIN:-gc}" ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
+		`"${GC_BIN:-gc}" ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("gc-native control query missing %q in %q", want, query)

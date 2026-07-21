@@ -133,6 +133,37 @@ func TestMixedReadsFoldBackendHalvesWithGraphLeg(t *testing.T) {
 	}
 }
 
+// TestRunOutcomeTokenRoundTrip pins the store-column encoding of every
+// outcome: Token must be the outcome's primary label, and RunOutcomeFromToken
+// must reverse it exactly; unknown tokens are rejected.
+func TestRunOutcomeTokenRoundTrip(t *testing.T) {
+	cases := []struct {
+		outcome RunOutcome
+		token   string
+	}{
+		{RunOutcomeNone, ""},
+		{RunOutcomeExec, "exec"},
+		{RunOutcomeExecFailed, "exec-failed"},
+		{RunOutcomeExecEnvFailed, "exec-env-failed"},
+		{RunOutcomeWisp, "wisp"},
+		{RunOutcomeWispFailed, "wisp-failed"},
+		{RunOutcomeWispCanceled, "wisp-canceled"},
+		{RunOutcomeTriggerEnvFailed, "trigger-env-failed"},
+	}
+	for _, tc := range cases {
+		if got := tc.outcome.Token(); got != tc.token {
+			t.Errorf("Token(%v) = %q, want %q", tc.outcome, got, tc.token)
+		}
+		back, ok := RunOutcomeFromToken(tc.token)
+		if !ok || back != tc.outcome {
+			t.Errorf("RunOutcomeFromToken(%q) = (%v, %v), want (%v, true)", tc.token, back, ok, tc.outcome)
+		}
+	}
+	if _, ok := RunOutcomeFromToken("bogus"); ok {
+		t.Error("RunOutcomeFromToken(bogus) ok = true, want false")
+	}
+}
+
 // TestBeadsTrackingUnderlyingExposesOrdersLeg pins the dedupe seam itself:
 // the beads backend advertises its raw store via underlying(), and the zero
 // OrdersStore advertises nil (which must never dedupe the graph leg away).

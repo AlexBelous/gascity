@@ -96,6 +96,57 @@ func (o RunOutcome) Labels() []string {
 	}
 }
 
+// Token returns the canonical single-token encoding of the outcome — the
+// value class stores persist in their outcome column and the migration slice
+// writes when importing tracking beads. It is the outcome's primary label
+// (RunOutcomeWispFailed encodes as "wisp-failed", not the {wisp, wisp-failed}
+// label pair); RunOutcomeNone encodes as "" (an in-flight run).
+func (o RunOutcome) Token() string {
+	switch o {
+	case RunOutcomeExec:
+		return labelExec
+	case RunOutcomeExecFailed:
+		return labelExecFailed
+	case RunOutcomeExecEnvFailed:
+		return labelExecEnvFailed
+	case RunOutcomeWisp:
+		return labelWisp
+	case RunOutcomeWispFailed:
+		return labelWispFailed
+	case RunOutcomeWispCanceled:
+		return labelWispCanceled
+	case RunOutcomeTriggerEnvFailed:
+		return labelTriggerEnvFail
+	default:
+		return ""
+	}
+}
+
+// RunOutcomeFromToken reverses Token. ok is false for an unknown token; the
+// empty token decodes to (RunOutcomeNone, true) — an in-flight run.
+func RunOutcomeFromToken(token string) (RunOutcome, bool) {
+	switch token {
+	case "":
+		return RunOutcomeNone, true
+	case labelExec:
+		return RunOutcomeExec, true
+	case labelExecFailed:
+		return RunOutcomeExecFailed, true
+	case labelExecEnvFailed:
+		return RunOutcomeExecEnvFailed, true
+	case labelWisp:
+		return RunOutcomeWisp, true
+	case labelWispFailed:
+		return RunOutcomeWispFailed, true
+	case labelWispCanceled:
+		return RunOutcomeWispCanceled, true
+	case labelTriggerEnvFail:
+		return RunOutcomeTriggerEnvFailed, true
+	default:
+		return RunOutcomeNone, false
+	}
+}
+
 // IsExec reports whether the outcome belongs to the synchronous-exec family
 // (Exec, ExecFailed, ExecEnvFailed). It is the typed replacement for the order
 // feed's exec-label fallback (orderLabelsContainExec) used to derive an exec
@@ -215,6 +266,18 @@ func NewStore(store beads.OrdersStore) *Store {
 // to union order-run evidence across both classes.
 func NewStoreWithGraph(store beads.OrdersStore, graph beads.GraphStore) *Store {
 	return &Store{tracking: beadsTracking{store: store}, graph: graph}
+}
+
+// NewStoreWithTracking wraps a non-beads tracking backend (an embedded class
+// store such as internal/classdb/orders) together with the graph-class store
+// that owns the wisp/molecule roots. The backend parameter is deliberately the
+// unexported trackingBackend interface: callers in other packages pass any
+// value that structurally implements it, but only *Store ever escapes — the
+// backend never becomes public API. Because such a backend does not implement
+// the beadsBacked dedupe assertion, the mixed reads always union the graph
+// leg.
+func NewStoreWithTracking(tracking trackingBackend, graph beads.GraphStore) *Store {
+	return &Store{tracking: tracking, graph: graph}
 }
 
 // graphLeg returns the graph-class store the mixed reads must union on top of

@@ -116,8 +116,12 @@ var bootstrapPolicy = Ledger{
 			// 530/162: +1 call/file for internal/classdb/core/multiprocess_test.go,
 			// the integration-tagged G0 multi-process WAL gate (re-exec children
 			// are the point of the test).
-			BaselineCalls:   530,
-			BaselineFiles:   162,
+			// 531/163: +1 call/file for
+			// internal/classdb/orders/crash_integration_test.go, the
+			// integration-tagged orders-class crash-durability gate (same
+			// re-exec pattern).
+			BaselineCalls:   531,
+			BaselineFiles:   163,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",

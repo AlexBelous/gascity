@@ -120,8 +120,11 @@ var bootstrapPolicy = Ledger{
 			// internal/classdb/orders/crash_integration_test.go, the
 			// integration-tagged orders-class crash-durability gate (same
 			// re-exec pattern).
-			BaselineCalls:   531,
-			BaselineFiles:   163,
+			// 532/164: +1 call/file for
+			// internal/classdb/nudges/crash_integration_test.go, the
+			// nudges-class acked-enqueue crash gate (same pattern).
+			BaselineCalls:   532,
+			BaselineFiles:   164,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",

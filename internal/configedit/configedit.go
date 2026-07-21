@@ -163,6 +163,9 @@ func validateCityForEdit(cfg *config.City) error {
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
+	if err := config.ValidateBeadsClassPrefixes(cfg); err != nil {
+		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
+	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
 	}

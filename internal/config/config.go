@@ -1541,6 +1541,39 @@ func validateBeadsClasses(b BeadsConfig) error {
 	return nil
 }
 
+// ValidateBeadsClassPrefixes hard-rejects an effective HQ or rig work-store
+// prefix that shadows a reserved coordination-class id-prefix
+// (gcg/gcm/gcs/gco/gcn) — but only when a [beads.classes] backend is active
+// (non-bd). While every class rides bd the class stores are an identity seam,
+// by-id class routing never fires, and a shadowing prefix stays the non-fatal
+// ReservedPrefixWarnings advisory so an existing city keeps starting. The
+// moment a class relocates, a shadowing prefix would make its bead ids
+// ambiguous across stores, so the config fails instead.
+func ValidateBeadsClassPrefixes(cfg *City) error {
+	if cfg == nil {
+		return nil
+	}
+	active := false
+	for class := range cfg.Beads.Classes {
+		if cfg.Beads.ClassBackend(class) != BeadsClassBackendBD {
+			active = true
+			break
+		}
+	}
+	if !active {
+		return nil
+	}
+	if hq := EffectiveHQPrefix(cfg); IsReservedClassPrefix(hq) {
+		return fmt.Errorf("HQ prefix %q shadows a reserved coordination-class id-prefix (%s) while a [beads.classes] backend is active; rename the prefix or revert the class backend to %q", strings.ToLower(strings.TrimSpace(hq)), reservedClassPrefixListText(), BeadsClassBackendBD)
+	}
+	for _, r := range cfg.Rigs {
+		if prefix := strings.ToLower(r.EffectivePrefix()); IsReservedClassPrefix(prefix) {
+			return fmt.Errorf("rig %q prefix %q shadows a reserved coordination-class id-prefix (%s) while a [beads.classes] backend is active; rename the prefix or revert the class backend to %q", r.Name, prefix, reservedClassPrefixListText(), BeadsClassBackendBD)
+		}
+	}
+	return nil
+}
+
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
 // command-line behavior.
 func (b BeadsConfig) UsesBD105CLISemantics() bool {
@@ -4216,8 +4249,8 @@ func validateDependsOn(agents []Agent) error {
 // the multi-backend fork makes per-class stores independently routable. Making
 // the prefix fatal would break gc start and config reload for an existing city
 // that already uses one, so ReservedPrefixWarnings surfaces it as a non-fatal
-// advisory instead. Promote it back into a hard error here once per-class
-// routing activates.
+// advisory instead. ValidateBeadsClassPrefixes is the conditional hard error:
+// it fires the moment a [beads.classes] backend goes non-bd for the city.
 func ValidateRigs(rigs []Rig, hqPrefix string) error {
 	seenNames := make(map[string]bool, len(rigs))
 	seenPrefixes := make(map[string]string) // lowercase prefix → rig name (for error messages)
@@ -4534,6 +4567,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateBeadsClasses(cfg.Beads); err != nil {
+		return nil, err
+	}
+	if err := ValidateBeadsClassPrefixes(&cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

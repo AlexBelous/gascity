@@ -210,6 +210,9 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 			return rigMutationPlan{}, err
 		}
+		if err := config.ValidateBeadsClassPrefixes(nextCfg); err != nil {
+			return rigMutationPlan{}, err
+		}
 	}
 
 	return rigMutationPlan{

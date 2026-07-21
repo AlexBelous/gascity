@@ -709,10 +709,16 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 		return result, code
 	}
 	// Route SESSION/wait access to the session coordination-class store; the
-	// nudge lookup rides a NudgesStore over the same work store. Identity today.
+	// nudge lookup routes through the nudges-class resolver (identity on bd)
+	// and, on a routed city, reads the merged queue row instead of a shadow.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
-	nudges := beads.NudgesStore{Store: store}
+	nudges := beads.NudgesStore{Store: resolveNudgesStore(store, cfg, cityPath, nil)}
+	nudgeReader, err := nudgeShadowReaderFor(cityPath, cfg, nudges)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+		return result, 1
+	}
 	w, err := sessFront.GetWait(waitID)
 	if err != nil {
 		if errors.Is(err, sessionpkg.ErrNotAWait) {
@@ -730,7 +736,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	}
 	now := time.Now().UTC()
 	if state == waitStateReady && w.Status == "closed" {
-		nextAttempt, err := nextWaitDeliveryAttempt(nudgeFrontDoor(nudges), w)
+		nextAttempt, err := nextWaitDeliveryAttempt(nudgeReader, w)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
 			return result, 1
@@ -749,7 +755,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	}
 	switch state {
 	case waitStateReady:
-		nextAttempt, err := nextWaitDeliveryAttempt(nudgeFrontDoor(nudges), w)
+		nextAttempt, err := nextWaitDeliveryAttempt(nudgeReader, w)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
 			return result, 1
@@ -997,10 +1003,14 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
 		return loadWaitDependencyBead(cityPath, store, depID)
 	})
-	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, beads.NudgesStore{Store: store}, now, nil)
+	nudgeReader, err := nudgeShadowReaderFor(cityPath, cfg, beads.NudgesStore{Store: resolveNudgesStore(store, cfg, cityPath, nil)})
+	if err != nil {
+		return nil, err
+	}
+	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, nudgeReader, now, nil)
 }
 
-func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges nudgeShadowReader, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1139,10 +1149,19 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provi
 	if strings.TrimSpace(cityPath) != "" {
 		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	}
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), beads.NudgesStore{Store: store}, now, nil)
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), beads.NudgesStore{Store: resolveNudgesStore(store, cfg, cityPath, nil)}, now, nil)
 }
 
 func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+	// The existence gate reads the nudge record through the class reader (the
+	// shadow bead on bd, the merged row when routed); the enqueue below hands
+	// the same nudges store to the queue as the file backend's shadow leg
+	// (ignored by a routed backend). Fail closed when a routed city's class
+	// store cannot be reached.
+	nudgeReader, err := nudgeShadowReaderFor(cityPath, cfg, nudges)
+	if err != nil {
+		return err
+	}
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1173,7 +1192,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if nudgeID == "" {
 			continue
 		}
-		_, ok, err := nudgeFrontDoor(nudges).Find(nudgeID)
+		_, ok, err := nudgeReader.Find(nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
 				stampWaitLookupCapDiagnostic(sessFront, sessionID, err, now, "ready-wait-nudge")
@@ -1234,9 +1253,10 @@ func cachedSessionCanReceiveWaitNudge(info sessionpkg.Info) bool {
 
 // finalizeReadyWaitFromNudge closes a ready wait once its shadow nudge reaches a
 // terminal state. sessFront is the session coordination-class front door for the
-// wait bead and cap-diagnostic stamp; nudges is the nudges-class store for the
-// shadow nudge lookup. Identity today (both wrap the same work store).
-func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.NudgesStore, wait sessionpkg.WaitInfo, now time.Time) (bool, error) {
+// wait bead and cap-diagnostic stamp; nudges is the nudges-class record reader
+// for the nudge lookup (the shadow bead on bd, the merged queue row when the
+// class is routed).
+func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges nudgeShadowReader, wait sessionpkg.WaitInfo, now time.Time) (bool, error) {
 	nudgeID := wait.NudgeID
 	if nudgeID == "" {
 		nudgeID = waitNudgeID(wait)
@@ -1244,7 +1264,7 @@ func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.Nudges
 	if nudgeID == "" {
 		return false, nil
 	}
-	nudge, ok, err := nudgeFrontDoor(nudges).FindIncludingTerminal(nudgeID)
+	nudge, ok, err := nudges.FindIncludingTerminal(nudgeID)
 	if err != nil {
 		if beads.IsLookupLimitError(err) {
 			stampWaitLookupCapDiagnostic(sessFront, wait.SessionID, err, now, "ready-wait-finalize-nudge")
@@ -1362,7 +1382,7 @@ func sessionProviderFamily(info sessionpkg.Info) string {
 	return sessionpkg.ProviderFamilyFromInfo(info, "")
 }
 
-func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) (string, error) {
+func nextWaitDeliveryAttempt(front nudgeShadowReader, wait sessionpkg.WaitInfo) (string, error) {
 	state := wait.State
 	if state == waitStatePending || state == waitStateReady {
 		return "", nil
@@ -1389,7 +1409,11 @@ func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) 
 }
 
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath).Store, cityPath, nudgeIDs)
+	// Routes through the queue front door so a relocated nudges backend
+	// receives the withdraw; the file backend delegates to the package-level
+	// WithdrawWaitNudges with the same store, byte-identical to the prior
+	// direct call.
+	return cityNudgeQueue(cityPath).WithdrawQueuedWaitNudges(openNudgeBeadStore(cityPath).Store, nudgeIDs)
 }
 
 func waitLifecycleEnabled() error {

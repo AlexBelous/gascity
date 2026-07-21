@@ -180,6 +180,42 @@ func NewQueueWithBackend(backend queueBackend) *Queue {
 	return &Queue{backend: backend}
 }
 
+// NewUnavailableQueue returns a Queue whose every operation fails with err.
+// It is the fail-closed shape for a routed city whose class store cannot be
+// reached: falling back to the file backend would split the class across two
+// backends (writes landing where reads no longer look), so every root must
+// surface the error instead.
+func NewUnavailableQueue(err error) *Queue {
+	return &Queue{backend: unavailableBackend{err: err}}
+}
+
+// unavailableBackend fails every queue operation with the same error.
+type unavailableBackend struct {
+	err error
+}
+
+func (u unavailableBackend) Enqueue(Item, beads.NudgesStore) error { return u.err }
+func (u unavailableBackend) EnqueueDeferred(Item) error            { return u.err }
+func (u unavailableBackend) ClaimDue(ClaimTarget, time.Time) ([]Item, error) {
+	return nil, u.err
+}
+
+func (u unavailableBackend) ListForAgent(string, time.Time) (pending, inFlight, dead []Item, err error) {
+	return nil, nil, nil, u.err
+}
+
+func (u unavailableBackend) ListFor(ClaimTarget, time.Time) (pending, inFlight, dead []Item, err error) {
+	return nil, nil, nil, u.err
+}
+func (u unavailableBackend) Snapshot() (State, error)                   { return State{}, u.err }
+func (u unavailableBackend) Ack([]string, string, string, string) error { return u.err }
+func (u unavailableBackend) ReleaseClaims([]string) error               { return u.err }
+func (u unavailableBackend) RecordFailure([]string, beads.NudgesStore, error, time.Time, io.Writer) ([]Item, error) {
+	return nil, u.err
+}
+func (u unavailableBackend) Rollback(*Store, Item, string) error            { return u.err }
+func (u unavailableBackend) WithdrawWaitNudges(beads.Store, []string) error { return u.err }
+
 // Enqueue runs the full enqueue transaction. See queueBackend.Enqueue.
 func (q *Queue) Enqueue(item Item, shadow beads.NudgesStore) error {
 	return q.backend.Enqueue(item, shadow)

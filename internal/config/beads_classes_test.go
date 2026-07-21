@@ -164,3 +164,21 @@ backend = "sqlite"
 		t.Errorf("ClassBackend(orders) = %q, want %q", got, BeadsClassBackendSQLite)
 	}
 }
+
+// TestBeadsClassesNudgesSQLiteAccepted pins the nudges capability flip: the
+// internal/classdb/nudges merged-queue store has landed, so
+// [beads.classes.nudges] backend="sqlite" parses.
+func TestBeadsClassesNudgesSQLiteAccepted(t *testing.T) {
+	cfg, err := Parse([]byte(`[workspace]
+name = "test"
+
+[beads.classes.nudges]
+backend = "sqlite"
+`))
+	if err != nil {
+		t.Fatalf("Parse rejected nudges sqlite backend: %v", err)
+	}
+	if got := cfg.Beads.ClassBackend(BeadClassNudges); got != BeadsClassBackendSQLite {
+		t.Errorf("ClassBackend(nudges) = %q, want %q", got, BeadsClassBackendSQLite)
+	}
+}

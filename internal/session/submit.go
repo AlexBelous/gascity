@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	nudgesdb "github.com/gastownhall/gascity/internal/classdb/nudges"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
@@ -558,9 +559,10 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	}
 	// EnqueueDeferred is the queue front door's bare-append shape: no shadow
 	// bead, no maintenance, no supersession — the deferred-submit semantics
-	// this path has always had, now routed through the seam so a relocated
-	// nudges backend receives these items too.
-	if err := nudgequeue.NewFileQueue(m.cityPath, nil).EnqueueDeferred(item); err != nil {
+	// this path has always had. QueueForCity resolves the city's routing
+	// (file backend until [beads.classes.nudges] relocates the class), so a
+	// relocated nudges backend receives these items too.
+	if err := nudgesdb.QueueForCity(m.cityPath, nil).EnqueueDeferred(item); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {

@@ -685,6 +685,28 @@ func (s *Store) findRecord(id string, includeTerminal bool) (TerminalRecord, boo
 	return rec, true, nil
 }
 
+// CountRetention reports how many rows SweepRetention would delete at now
+// with ttl, without writing anything: terminal rows past the ttl, plus dead
+// rows that maintenance would age into terminal (dead past DeadRetention)
+// whose inherited terminal clock also lands past the ttl. It is the dry-run
+// twin of SweepRetention.
+func (s *Store) CountRetention(now time.Time, ttl time.Duration) (int, error) {
+	cutoff := nanos(now.Add(-ttl))
+	aged := nanos(now.Add(-nudgequeue.DeadRetention))
+	var count int
+	err := s.db.Read().QueryRow(
+		`SELECT COUNT(*) FROM nudges
+		 WHERE (queue_state = ? AND terminal_at > 0 AND terminal_at < ?)
+		    OR (queue_state = ? AND dead_at > 0 AND dead_at < ?
+		        AND (CASE WHEN terminal_at > 0 THEN terminal_at ELSE dead_at END) < ?)`,
+		stateTerminal, cutoff, stateDead, aged, cutoff,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("counting nudge retention candidates: %w", err)
+	}
+	return count, nil
+}
+
 // SweepRetention deletes terminal rows past ttl (the design's terminal-row
 // retention; dead rows age into terminal via maintain first). Returns the
 // number of rows deleted.

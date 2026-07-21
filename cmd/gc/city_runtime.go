@@ -1588,6 +1588,16 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
+	// Nudge-class routing: on a routed city the nudge leg becomes the merged
+	// queue's terminal-row retention; a resolve failure skips the sweep (fail
+	// closed) rather than sweeping the wrong backend.
+	routing, routingErr := nudgeSweepRoutingFor(cr.cityPath, cr.cfg)
+	if routingErr != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, routingErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
 	// error (LoadState returns empty state), so any error here is a real
 	// read/parse failure: fail closed and skip this sweep rather than sweeping
@@ -1601,7 +1611,7 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 	statePtr := &nudgeState
 
-	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	result, sweepErr := sweepStaleNudgeMailRouted(routing, nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}
@@ -1609,6 +1619,17 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	if total > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog closed %d nudge bead(s), %d mail bead(s)\n", cr.logPrefix, result.NudgeClosed, result.MailClosed) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// prepareWaitWakeStateForTick runs the tick's wait wake-state pass with the
+// nudge lookup routed through the nudges-class reader (shadow beads on bd,
+// merged queue rows when routed; fail closed on a routed resolve error).
+func (cr *CityRuntime) prepareWaitWakeStateForTick(sessStore beads.SessionStore, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+	nudgeReader, err := nudgeShadowReaderFor(cr.cityPath, cr.cfg, cr.nudgesBeadStore())
+	if err != nil {
+		return nil, err
+	}
+	return prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), nudgeReader, time.Now(), sessionBeads)
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
@@ -2315,7 +2336,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), cr.nudgesBeadStore(), time.Now(), sessionBeads)
+	readyWaitSet, err := cr.prepareWaitWakeStateForTick(sessStore, store, rigStores, sessionBeads)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil

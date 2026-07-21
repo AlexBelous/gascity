@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	nudgesdb "github.com/gastownhall/gascity/internal/classdb/nudges"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -206,10 +207,13 @@ func nudgeShadowOpener(cityPath string) nudgequeue.ShadowStoreOpener {
 	}
 }
 
-// cityNudgeQueue returns the nudge-queue front door for a city. File backend
-// today; the [beads.classes.nudges] backend dispatch plugs in here.
+// cityNudgeQueue returns the nudge-queue front door for a city: the embedded
+// class store when [beads.classes.nudges] has relocated the class (config
+// backend=sqlite AND the .gc/store/nudges.migrated marker — resolved inside
+// nudgesdb.QueueForCity, fail-closed when a marked city's routing cannot be
+// resolved), else the two-tier file backend with the lazy shadow opener.
 func cityNudgeQueue(cityPath string) *nudgequeue.Queue {
-	return nudgequeue.NewFileQueue(cityPath, nudgeShadowOpener(cityPath))
+	return nudgesdb.QueueForCity(cityPath, nudgeShadowOpener(cityPath))
 }
 
 func (t nudgeTarget) sessionTransport() string {
@@ -901,12 +905,13 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) error {
-	// store is class-mixed here: the enqueue/rollback arms are nudge-class (wrap
-	// into the typed NudgesStore), while the wake arm reads the session bead and
-	// wakes it (sessions class), so it routes through the session coordination-class
-	// store via cliSessionStore (identity today). enqueue (NudgesStore wrap) and
-	// rollback (nudgeFrontDoor) stay nudges.
-	nudges := beads.NudgesStore{Store: store}
+	// store is class-mixed here: the enqueue/rollback arms are nudge-class
+	// (routed through resolveNudgesStore into the typed NudgesStore), while the
+	// wake arm reads the session bead and wakes it (sessions class), so it
+	// routes through the session coordination-class store via cliSessionStore
+	// (identity today). enqueue (NudgesStore wrap) and rollback
+	// (nudgeFrontDoor) stay nudges.
+	nudges := beads.NudgesStore{Store: resolveNudgesStore(store, target.cfg, target.cityPath, nil)}
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudges, item); err != nil {
 		return err
 	}

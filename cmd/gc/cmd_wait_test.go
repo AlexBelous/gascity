@@ -2636,7 +2636,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
 				sessionFrontDoor(cityStore),
 				newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}),
-				beads.NudgesStore{Store: cityStore},
+				nudgeFrontDoor(beads.NudgesStore{Store: cityStore}),
 				now,
 				nil,
 			)

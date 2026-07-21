@@ -1494,6 +1494,10 @@ var sqliteCapableBeadClasses = map[string]bool{
 	// internal/classdb/orders (ordersdb.Store) — wired through cmd/gc's
 	// orderFrontForStore seam behind the orders migrated-marker.
 	BeadClassOrders: true,
+	// internal/classdb/nudges (nudgesdb.Store) — wired through the
+	// nudgequeue.Queue front door behind the nudges migrated-marker
+	// (nudgesdb.QueueForCity).
+	BeadClassNudges: true,
 }
 
 // beadClassConfigurable enumerates the class names accepted under

@@ -156,10 +156,25 @@ the other landing first — but they are designed to compose:
   This design's infra classes need *none* of that machinery — no worker
   claims a mail/session/order/nudge bead — which is exactly why they can
   drop generic beads behavior while graph cannot.
-- **Touching points.** Orders' `HasOpenWork` wisp-subtree walk reads the
-  graph class through `resolveGraphStore` and is correct whichever backend
-  graph has that day. The orders migration seeds its cursor from the
-  tracking∪wisp-root union regardless of where the wisp roots live.
+- **No dep edge ever spans stores.** A dep row names both endpoints in one
+  store's deps table, so a cross-store edge cannot express blocking
+  faithfully: bd silently stores it as a non-blocking `depends_on_external`
+  row (the parent shows READY mid-DAG and can double-execute) while
+  doltlite/MemStore readers fail closed (parent stranded). The split design's
+  replacement (landmine #4, `eae511422`): within-graph deps — the whole
+  molecule topology, which is why pours classify wholesale — stay native in
+  the graph store where Ready's blocking subquery sees them; cross-boundary
+  relationships become **metadata linkage enforced at the composite seam**
+  (`gc.attached_workflow_root` on the work parent, `gc.attach_bead_id`/
+  `gc.attach_store_ref` back-linkage on the graph root; `claimableStore.Ready`
+  withholds the parent while the root is open in its owning store, fails loud
+  on dangling markers). Conformance pins the rule: `splittest.StrictStore`
+  makes `DepAdd` resolve both endpoints bd-shaped, and "strict cross-store
+  dep rejection" is one of the topology invariants. The infra classes in this
+  design sidestep the problem entirely — they create **no dep edges at all**
+  (waits carry `dep_ids` as CSV metadata by design; wait↔nudge, orders, and
+  extmsg couplings are all by-id references resolved through the owning
+  store's front door).
 - **End state.** Once *both* tracks land, bd/Dolt holds only work beads —
   the full "remove our dependence on beads" line. This design gets infra
   there; the graph ADR gets graph there.

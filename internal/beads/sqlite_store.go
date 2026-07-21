@@ -41,6 +41,7 @@ type SQLiteStoreOptions struct {
 }
 
 var _ ConditionalAssignmentReleaser = (*SQLiteStore)(nil)
+var _ ForeignIDCreator = (*SQLiteStore)(nil)
 
 // SQLiteStoreOption customizes OpenSQLiteStore.
 type SQLiteStoreOption func(*SQLiteStoreOptions)
@@ -301,6 +302,18 @@ func (s *SQLiteStore) CloseStore() error {
 }
 
 // Create persists a new bead.
+// CreateWithForeignID persists a new bead KEEPING its explicit ID (any prefix),
+// mirroring BdStore's forced foreign-prefix create for the store-migration copy
+// path. Create already honors a caller-pinned id verbatim and enforces the hard
+// duplicate-id contract, so this is a guarded delegation. It satisfies
+// ForeignIDCreator.
+func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
+	if strings.TrimSpace(b.ID) == "" {
+		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
+	}
+	return s.Create(b)
+}
+
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
 	var stored Bead
 	autoID := b.ID == ""

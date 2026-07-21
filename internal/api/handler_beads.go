@@ -450,6 +450,11 @@ func collectBeadGraph(store beads.Store, root beads.Bead, memberStores ...beads.
 	metadataChildren, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 		IncludeClosed: true,
+		// Molecule members are overwhelmingly wisp-tier; the zero TierMode
+		// (TierIssues) filtered them out, so run-detail rendered only the few
+		// main-tier beads of a live run (Factory showed 3 of 68 steps).
+		TierMode:  beads.TierBoth,
+		AllowScan: true,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)

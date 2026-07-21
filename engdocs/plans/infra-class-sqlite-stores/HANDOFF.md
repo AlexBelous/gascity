@@ -80,7 +80,7 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   it) — fold into P5's doctor/storehealth extension or a small follow-up
   (`ordersSQLiteRoutingActive` + marker path are trivial to surface).
 
-## P2 nudges — in progress
+## P2 nudges — COMPLETE (all four slices)
 
 - **Seam plan**: `P2-NUDGES-SEAM-PLAN.md` (this dir) — evidence-grade op
   inventory + slice specs. Read it before touching nudges.
@@ -107,26 +107,96 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   Both-backend conformance in classdb/nudges/conformance_test.go; crash
   gate (acked enqueue survives SIGKILL); census 532/164.
 
-Next slices (per the seam plan):
-3. Wiring behind `[beads.classes.nudges]` + `.gc/store/nudges.migrated`
-   (orders pattern: routing resolver at cityNudgeQueue, fail-closed roots,
-   seam-guard test, ratchet flip + config acceptance test). Watch the raw
-   NudgesStore wraps that bypass resolveNudgesStore (seam plan gotchas).
-4. Migration + marker + residue; `nudge.*` typed events (RegisterPayload);
-   reaper.sh nudge-leg rewrite; hook `Store.SweepRetention` into
-   core.StartSweeper on the controller (nudges has NO existing retention
-   path — the store's own sweeper is correct here, unlike orders).
-   Wiring notes for slice 3: the routed backend must also serve the wait
-   paths' shadow reads (Find/FindIncludingTerminal → FindRecord*) and the
-   nudge-mail sweep's nudge leg becomes SweepRetention (StaleShadowsBefore/
-   SweepStale are file-backend-only); ClaimDueMatching (func predicate) is
-   file-only — routed cities must go through ClaimTarget.
+- **Slice 3 DONE** (`feat(nudges)` 5c0a5223c — routing): ratchet flipped
+  (`sqliteCapableBeadClasses` += nudges) + config acceptance test.
+  DELIBERATE DEVIATION from the orders pattern: the routing resolver lives
+  in nudgesdb (`Routed` / `SharedStoreFor` / `QueueForCity`), not cmd/gc,
+  because THREE packages produce queue traffic — cmd/gc (`cityNudgeQueue`
+  delegates), internal/session (deferred submit, submit.go), internal/api
+  (wait-nudge withdraw). `Routed` is marker-FIRST (unmigrated cities never
+  load config) and self-loads via `config.LoadWithIncludes` when cfg is nil
+  (safe: the cmd/gc loader extras never touch `[beads]`); a marked city
+  whose config can't load or store can't open gets
+  `nudgequeue.NewUnavailableQueue` — every op fails closed, no bd fallback.
+  Wait-path shadow reads route through the cmd/gc `nudgeShadowReader` seam
+  (file: `*nudgequeue.Store`; routed: `FindRecord*` +
+  `TerminalRecord.Shadow()` projection — dead rows always carry terminal
+  stamps, so the projection is total). Both package-level
+  `WithdrawWaitNudges` call sites (cmd_wait.go + api/wait_nudges.go) route
+  through `Queue.WithdrawQueuedWaitNudges` (file leg byte-identical).
+  Nudge-mail sweep gained `...Routed` variants (unrouted names = bd test
+  surface): routed nudge leg = `SweepRetention`/`CountRetention` over the
+  24h terminal TTL, budget-exempt; `--nudge-ttl` governs only the bd shadow
+  shape (review-flagged). Raw NudgesStore wraps now route through
+  `resolveNudgesStore` (cmd_nudge managed-wake, cmd_sling, three cmd_wait
+  roots); cmd_order sweep wraps deliberately left (routed leg bypasses the
+  store; bd leg identity forever). Import primitives (`ImportItem` /
+  `ImportTerminalShadow`) landed HERE (only public surface carrying a
+  legacy terminal clock — the routed-sweep test needs one). Seam guard:
+  `TestNudgeQueueSeamIsTheOnlyConstructionPoint`.
 
-Also outstanding from the design: splittest topology port before any class
-flips by default (GA); storehealth `StorePath`/`WalkSize` extension to
-`.gc/store/*.db`; maintenance-loop `wal_checkpoint(TRUNCATE)`/`VACUUM`;
-P5 bd-surface work (gc bd write guard, generalized read federation);
-`gc doctor` migration-state surface.
+- **Slice 4 DONE** (`feat(nudges)` be1e5f9bf — migration + events +
+  retention + reaper): `cmd/gc/nudge_class_migrate.go`
+  (`ensureNudgesClassMigrated` on controller boot next to orders'): imports
+  live buckets verbatim + ≤24h TERMINAL shadow history — the history import
+  is CORRECTNESS, not observability: post-cutover wait finalization reads
+  `FindRecordIncludingTerminal`, so a pre-cutover delivery must stay
+  findable or its wait wedges. Copy-verify → atomic marker → straggler
+  re-import; aborts before the marker on ANY store-open/import failure.
+  `sweepLegacyNudgeResidue` (bg): clears file items the class store owns
+  (`nudgequeue.SweepFileResidue` — stops old-binary pollers redelivering)
+  and deletes bd shadows (closed ∪ class-owned ∪ open-past-10m-grace;
+  fresh open UNKNOWN ids spared for the next boot's import-then-sweep).
+  `nudge.queued/delivered/dead` typed events
+  (`events.NudgeLifecyclePayload`, registered in events/payloads.go init;
+  spec + genclient + dashboard TS client + dist regenerated,
+  dashboard-check green) fired from cmd/gc queue wrappers for BOTH
+  backends; maintenance-internal expiry dead-letters are NOT evented.
+  Retention: `nudgesdb.Store.StartRetentionSweeper` (core.StartSweeper,
+  sync.Once per shared handle) started at controller boot — the
+  SDK-self-sufficient path (nudge-mail watchdog rides the order dispatch
+  tick); overlapping triggers converge on idempotent SweepRetention.
+  reaper.sh Step 4 raw-SQL expiry close → one city-level
+  `gc order sweep-nudge-mail` step (both backends); embed-guard needle
+  moved from "expires_at" to "sweep-nudge-mail"; Step 5's expires_at
+  exclusion untouched; bundled-pack pin NOT bumped (precedent: prior
+  reaper.sh edits don't).
+
+- **Review-hardening DONE** (post-slice-4 fix commit, from a 4-dimension
+  adversarial review of both commits): (1) later boots now actually run the
+  documented import-then-sweep — `sweepLegacyNudgeResidue` merge-imports
+  file items the class store doesn't own before clearing residue, so an
+  enqueue racing the marker (or an old binary's post-marker append) is
+  never stranded; (2) the pre-marker migration RESETS the class store's
+  live rows and re-imports the file's current truth, so an interrupted
+  attempt + retry never resurrects a delivered/dead item (its terminal
+  record re-enters via the shadow import); (3) `nudgesdb.Routed` treats
+  only ENOENT as "unmigrated" — any other marker stat error fails closed;
+  (4) dead-bucket imports carry their terminal stamps immediately (no 1h
+  aging wedge for wait finalization); (5) `ShadowHistorySince` keys on
+  created OR terminal clock (old-created recently-expired shadows import);
+  (6) nudge event emission opens the event log directly (no per-emission
+  full config load — the #2099 hook-emission norm); (7) the self-loaded
+  routing decision is cached by city.toml (mtime, size).
+
+## What remains (P3+ per the design work plan)
+
+- **P3 messaging**: mail table + retention (incl. 30d unread TTL) + native
+  counts; then extmsg typed tables + constraints + transcript pruning.
+- **P4 sessions+waits**: store + shadow-write gate + reconciler/doctor
+  lockstep + `gc session show/prune` + orphan-sweep.sh rewrite.
+- Also outstanding from the design: splittest topology port before any
+  class flips by default (GA); storehealth `StorePath`/`WalkSize` extension
+  to `.gc/store/*.db`; maintenance-loop `wal_checkpoint(TRUNCATE)`/`VACUUM`;
+  P5 bd-surface work (gc bd write guard, generalized read federation);
+  `gc doctor` migration-state surface (orders AND nudges routing/marker
+  state — both trivial to surface now); the design's every-prompt drain
+  soak + chaos "acked-write survival" gate beyond the existing crash test.
+- Review follow-up for P1 orders: `ordersSQLiteRoutingActive`
+  (cmd/gc/order_class_store.go:50) has the marker-stat conflation the
+  nudges review fixed — any stat error (EACCES/EIO, not just ENOENT) reads
+  as "not routed" and silently falls back to bd on a migrated city. Port
+  the ENOENT-only check (needs the bool signature to grow an error).
 
 ## Gotchas carried forward
 

@@ -95,23 +95,32 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   LoadState sites → `Queue.Snapshot`. Behavioral suite `queue_test.go` is
   the portable conformance base.
 
+- **Slice 2 DONE** (`feat(classdb)` nudgesdb): the merged `nudges` table
+  over classdb/core implements `queueBackend` — enqueue = one INSERT,
+  claim = deterministic select-then-update in one immediate tx (fence gate
+  as SQL), terminal transitions are row updates, supersession one UPDATE,
+  maintenance set-based in the same txs (dead-letter stamping now atomic
+  with the transition — ratified-better). `bead_id` transition column
+  beyond the design sketch (lossless import round-trip).
+  `FindRecord/FindRecordIncludingTerminal` replace the shadow reads for
+  the wait paths; `SweepRetention` implements dead(1h)→terminal→TTL-swept.
+  Both-backend conformance in classdb/nudges/conformance_test.go; crash
+  gate (acked enqueue survives SIGKILL); census 532/164.
+
 Next slices (per the seam plan):
-2. `internal/classdb/nudges` (pkg `nudgesdb`): the design's `nudges` table
-   over classdb/core implementing `queueBackend` (claim = one
-   UPDATE…RETURNING over the queue-key set; rows go terminal instead of
-   being deleted; supersession = one UPDATE preserving
-   at-most-one-redundant-delivery; shadow params ignored — the row IS the
-   record). Run `queue_test.go`'s cases against BOTH backends; crash gate
-   (acked enqueue survives SIGKILL) via the re-exec pattern (integration
-   tag + 3-artifact census bump).
 3. Wiring behind `[beads.classes.nudges]` + `.gc/store/nudges.migrated`
    (orders pattern: routing resolver at cityNudgeQueue, fail-closed roots,
    seam-guard test, ratchet flip + config acceptance test). Watch the raw
    NudgesStore wraps that bypass resolveNudgesStore (seam plan gotchas).
 4. Migration + marker + residue; `nudge.*` typed events (RegisterPayload);
-   reaper.sh nudge-leg rewrite; terminal-row TTL retention via
-   core.StartSweeper (nudges has NO existing retention path — the store's
-   own sweeper is correct here, unlike orders).
+   reaper.sh nudge-leg rewrite; hook `Store.SweepRetention` into
+   core.StartSweeper on the controller (nudges has NO existing retention
+   path — the store's own sweeper is correct here, unlike orders).
+   Wiring notes for slice 3: the routed backend must also serve the wait
+   paths' shadow reads (Find/FindIncludingTerminal → FindRecord*) and the
+   nudge-mail sweep's nudge leg becomes SweepRetention (StaleShadowsBefore/
+   SweepStale are file-backend-only); ClaimDueMatching (func predicate) is
+   file-only — routed cities must go through ClaimTarget.
 
 Also outstanding from the design: splittest topology port before any class
 flips by default (GA); storehealth `StorePath`/`WalkSize` extension to

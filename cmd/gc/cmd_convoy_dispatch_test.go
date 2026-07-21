@@ -3421,10 +3421,13 @@ func TestWorkflowServeControlReadyQueryGCNativeOnSQLiteInfra(t *testing.T) {
 	if strings.Contains(query, "bd --readonly --sandbox ready") {
 		t.Fatalf("gc-native control query still shells to bd: %q", query)
 	}
+	if strings.Contains(query, "--json") {
+		t.Fatalf("gc-native control query still passes --json (front door rejects it): %q", query)
+	}
 	for _, want := range []string{
-		`"${GC_BIN:-gc}" ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
-		`"${GC_BIN:-gc}" ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
-		`"${GC_BIN:-gc}" ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
+		`"${GC_BIN:-gc}" ready --include-ephemeral --assignee="$cand" --exclude-type=epic --limit=20`,
+		`"${GC_BIN:-gc}" ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --sort oldest --limit=20`,
+		`"${GC_BIN:-gc}" ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --sort oldest --limit=20`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("gc-native control query missing %q in %q", want, query)

@@ -818,9 +818,15 @@ func controlDispatcherGraphReadNeedsGCNative(cityPath string) bool {
 // gc, because bd cannot open the embedded store. GC_BIN pins the exact deployed
 // binary; bare `gc` on PATH may be an older wrapper.
 func rewriteControlReadyQueryGCNative(workQuery string) string {
-	workQuery = strings.ReplaceAll(workQuery, "bd --readonly --sandbox ready", `"${GC_BIN:-gc}" ready`)
-	workQuery = strings.ReplaceAll(workQuery, "bd ready", `"${GC_BIN:-gc}" ready`)
-	return workQuery
+	rewritten := strings.ReplaceAll(workQuery, "bd --readonly --sandbox ready", `"${GC_BIN:-gc}" ready`)
+	rewritten = strings.ReplaceAll(rewritten, "bd ready", `"${GC_BIN:-gc}" ready`)
+	if rewritten != workQuery {
+		// gc's JSON-contract front door rejects --json on commands without a
+		// registered schema, and `gc ready` prints a JSON array unconditionally,
+		// so the flag is both unnecessary and fatal on the rewritten command.
+		rewritten = strings.ReplaceAll(rewritten, " --json", "")
+	}
+	return rewritten
 }
 
 func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, graphReadGCNative bool, controlSessionNames ...string) string {
@@ -835,8 +841,13 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	// in-process federated reader `gc ready` (claimableStore fans out over the
 	// work + infra legs) instead of `bd --readonly --sandbox ready`.
 	readyCmd := "bd --readonly --sandbox ready"
+	// bd needs --json for machine output; gc ready prints a JSON array
+	// unconditionally and gc's JSON-contract front door rejects --json on
+	// commands without a registered schema, so the gc-native form drops it.
+	jsonFlag := " --json"
 	if graphReadGCNative {
 		readyCmd = `"${GC_BIN:-gc}" ready`
+		jsonFlag = ""
 	}
 	includeEphemeral := ""
 	if beadsCfg.UsesBD105ReadySemantics() {
@@ -869,10 +880,10 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
-		`emit_ready ` + readyCmd + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
+		`emit_ready ` + readyCmd + includeEphemeral + ` --assignee="$cand" --exclude-type=epic` + jsonFlag + ` --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready ` + readyCmd + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready ` + readyCmd + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready ` + readyCmd + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic` + jsonFlag + ` --sort oldest --limit=` + limit + `; ` +
+		`emit_ready ` + readyCmd + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic` + jsonFlag + ` --sort oldest --limit=` + limit + `; ` +
 		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +

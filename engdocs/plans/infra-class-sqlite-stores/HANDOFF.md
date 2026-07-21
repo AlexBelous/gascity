@@ -179,10 +179,56 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   full config load — the #2099 hook-emission norm); (7) the self-loaded
   routing decision is cached by city.toml (mtime, size).
 
+## P3 messaging — slices 1–2 DONE (mail half, landing DARK)
+
+- **Seam plan**: `P3-MESSAGING-SEAM-PLAN.md` (this dir) — mail op
+  inventory + THE structural decision: ClassMessaging covers mail AND all
+  `gc:extmsg-*` records (extmsg services are built on
+  `resolveMailMessagesStore`), so the mail store lands dark and the single
+  `[beads.classes.messaging]` flip + `messaging.migrated` marker +
+  migration wait until the extmsg typed tables exist in the SAME
+  `messaging.db` — the class relocates atomically. Do NOT flip
+  `sqliteCapableBeadClasses[BeadClassMessaging]` before then.
+- **Slice 1 DONE** (`refactor(beadmail)` 81e87d3e5): unexported
+  `messagesBackend` seam inside beadmail; `Record`/`NewMessage` carry the
+  design's row shape + bd-compat fields (`ReadLabel` for the conditional
+  mark-read write; Priority/CC decode-only; ExtraLabels passthrough). bd
+  backend = moved codec verbatim (backend_bead.go). Provider keeps
+  addressing (session store), title derivation, the 6b0eb0d6b gate
+  (`isRemovedRecord`), per-op error vocabulary (`NotAMessageError`).
+  Constructors keep all signatures; `NewWithBackend` admits the class
+  store. DELIBERATE TIGHTENING (no test pinned the old shape):
+  Read/MarkRead/MarkUnread/Reply on a NON-message bead now error like Get
+  always did, instead of mutating the foreign bead.
+- **Slice 2 DONE** (`feat(classdb)` 271eec45a): `internal/classdb/messaging`
+  (package messagingdb) — messages table + 3 indexes over core; `gcm-<n>`
+  mint (prefix-lockstep guard test); native counts; `ImportMessage`
+  (verbatim, OR IGNORE); `SweepUnreadBefore` (the design's net-new 30d
+  unread TTL, dormant); `Provider.SweepReadMessages`/`PurgeReadMessages`
+  backend-routed retention forms (the routed sweep callers adopt these at
+  the wiring slice). Conformance: the FULL mailtest.RunProviderTests over
+  `beadmail.NewWithBackend(sqlite, mem-session-store)` + both-backend
+  retention/removal contract; crash gate (acked Send survives SIGKILL);
+  census 533/165.
+
 ## What remains (P3+ per the design work plan)
 
-- **P3 messaging**: mail table + retention (incl. 30d unread TTL) + native
-  counts; then extmsg typed tables + constraints + transcript pruning.
+- **P3 messaging, remaining**: (a) extmsg seam plan doc (inventory
+  internal/extmsg's label-KV records + the in-process mutex-pool
+  invariants) then extmsg typed tables + UNIQUE constraints + transcript
+  pruning slices into the same messaging.db; (b) ONE wiring slice —
+  ratchet flip + config acceptance test + `messaging.migrated` marker +
+  routing at the construction roots (`newCityMailProvider`,
+  `openCityMailProvider`, cmd_handoff.go:338's direct
+  `beadmail.NewWithStores`, the nudge-mail sweep mail leg →
+  `Provider.SweepReadMessages`, wisp GC leg → `PurgeReadMessages`, extmsg
+  services) + seam-guard test + fail-closed erroring backend; the API
+  needs no provider seam (it consumes state.MailProvider, which the
+  controller builds routed); (c) migration — import open mail + extmsg
+  actives (drop >30d unread, >TTL read), marker, residue, reaper.sh
+  `mail_wisps` count + `issue_type='message'` filters, doctor/hook-claim
+  raw-consumer touch-ups, and the store retention sweeper
+  (read close→purge + unread TTL) on the controller.
 - **P4 sessions+waits**: store + shadow-write gate + reconciler/doctor
   lockstep + `gc session show/prune` + orphan-sweep.sh rewrite.
 - Also outstanding from the design: splittest topology port before any

@@ -776,7 +776,23 @@ const RetentionSweepCloseReason = "mail gc-swept: read mail bead past gc retenti
 // swept), while closeErrs holds the per-bead metadata/close failures that do not
 // abort the sweep. Returns the number of beads closed.
 func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int, closeReason string) (closed int, closeErrs []error, listErr error) {
-	backend := beadStore{store: store.Store}
+	return sweepReadMessages(beadStore{store: store.Store}, cutoff, limit, closeReason)
+}
+
+// SweepReadMessages is the backend-routed form of [SweepReadMessagesBefore]:
+// the same retention sweep through the provider's own messages backend, so a
+// relocated messaging class sweeps its rows instead of bd beads.
+func (p *Provider) SweepReadMessages(cutoff time.Time, limit int, closeReason string) (closed int, closeErrs []error, listErr error) {
+	return sweepReadMessages(p.backend, cutoff, limit, closeReason)
+}
+
+// PurgeReadMessages is the backend-routed form of [PurgeReadMessageWisps]:
+// the consumed-mail purge through the provider's own messages backend.
+func (p *Provider) PurgeReadMessages(cutoff time.Time) (int, error) {
+	return p.backend.PurgeReadCreatedBefore(cutoff)
+}
+
+func sweepReadMessages(backend messagesBackend, cutoff time.Time, limit int, closeReason string) (closed int, closeErrs []error, listErr error) {
 	candidates, err := backend.ListReadCreatedBefore(cutoff, limit)
 	if err != nil {
 		return 0, nil, err

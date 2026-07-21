@@ -123,8 +123,11 @@ var bootstrapPolicy = Ledger{
 			// 532/164: +1 call/file for
 			// internal/classdb/nudges/crash_integration_test.go, the
 			// nudges-class acked-enqueue crash gate (same pattern).
-			BaselineCalls:   532,
-			BaselineFiles:   164,
+			// 533/165: +1 call/file for
+			// internal/classdb/messaging/crash_integration_test.go, the
+			// messaging-class acked-send crash gate (same pattern).
+			BaselineCalls:   533,
+			BaselineFiles:   165,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",

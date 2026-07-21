@@ -314,7 +314,7 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 		if info.store == nil {
 			continue
 		}
-		front := orders.NewStore(beads.OrdersStore{Store: info.store})
+		front := orderFrontForStore(info.store)
 		runs, err := front.ListTracking()
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {

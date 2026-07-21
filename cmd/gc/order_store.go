@@ -23,19 +23,30 @@ type (
 	orderStoresResolver func(orders.Order) ([]beads.OrdersStore, error)
 )
 
+// orderFrontForStore is the SINGLE construction point for orders front doors
+// over a resolved scope store in cmd/gc: every dispatch, sweep, check,
+// history, and manual-run path routes here instead of constructing
+// orders.NewStore inline, so the [beads.classes.orders] backend dispatch is a
+// change to this one seam. At the bd backend the store is used as BOTH the
+// orders leg and the graph leg: on a single-store city the order-tracking
+// beads and the wisp/molecule roots are colocated, so the two legs wrap one
+// store and the union deduplicates to a single read — byte-identical both to
+// the pre-seam inline orders.NewStore(...) sites (where the deduped graph leg
+// is a no-op) and to the prior NewStoreWithGraph sites.
+func orderFrontForStore(store beads.Store) *orders.Store {
+	return orders.NewStoreWithGraph(beads.OrdersStore{Store: store}, beads.GraphStore{Store: store})
+}
+
 // orderFrontDoorsForStores wraps a federation of raw stores (the dispatcher's
 // city + rig scopes) as order front doors for the mixed orders+graph reads
-// (LastRunAcross / CursorAcross). Each store is used as BOTH the orders leg and
-// the graph leg: on a single-store city the order-tracking beads and the
-// wisp/molecule roots are colocated, so the two legs wrap one store and the
-// union deduplicates to a single read — byte-identical to the pre-split behavior.
-// Under a graph-store split the dispatcher's per-scope store resolution would
-// supply a distinct graph leg; that resolution is a separate concern from this
+// (LastRunAcross / CursorAcross), via the orderFrontForStore seam. Under a
+// graph-store split the dispatcher's per-scope store resolution would supply a
+// distinct graph leg; that resolution is a separate concern from this
 // front-door construction.
 func orderFrontDoorsForStores(stores []beads.Store) []*orders.Store {
 	out := make([]*orders.Store, 0, len(stores))
 	for _, s := range stores {
-		out = append(out, orders.NewStoreWithGraph(beads.OrdersStore{Store: s}, beads.GraphStore{Store: s}))
+		out = append(out, orderFrontForStore(s))
 	}
 	return out
 }
@@ -46,7 +57,7 @@ func orderFrontDoorsForStores(stores []beads.Store) []*orders.Store {
 func orderFrontDoorsForTypedStores(stores []beads.OrdersStore) []*orders.Store {
 	out := make([]*orders.Store, 0, len(stores))
 	for _, s := range stores {
-		out = append(out, orders.NewStoreWithGraph(s, beads.GraphStore(s)))
+		out = append(out, orderFrontForStore(s.Store))
 	}
 	return out
 }

@@ -385,10 +385,7 @@ func orderFrontDoorsFromWorkflowInfos(infos []workflowStoreInfo) []*orders.Store
 	out := make([]*orders.Store, 0, len(infos))
 	for _, info := range infos {
 		if info.store != nil {
-			out = append(out, orders.NewStoreWithGraph(
-				beads.OrdersStore{Store: info.store},
-				beads.GraphStore{Store: info.store},
-			))
+			out = append(out, orderFrontForStore(info.store))
 		}
 	}
 	return out

@@ -632,7 +632,7 @@ func cmdOrderRun(name, rig string, jsonOutput bool, vars map[string]string, stdo
 			}
 			defer ep.Close() //nolint:errcheck // best-effort
 		}
-		return doOrderRunExecTracked(a, cityPath, cfg, orders.NewStore(store), ep, vars, stdout, stderr)
+		return doOrderRunExecTracked(a, cityPath, cfg, orderFrontForStore(store.Store), ep, vars, stdout, stderr)
 	}
 	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
 	if store.Store == nil {
@@ -684,7 +684,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doOrderRunExecTracked(a, cityPath, cfg, orders.NewStore(store), ep, vars, stdout, stderr)
+		return doOrderRunExecTracked(a, cityPath, cfg, orderFrontForStore(store.Store), ep, vars, stdout, stderr)
 	}
 
 	// Capture event head before wisp creation (race-free cursor). Event runs
@@ -794,7 +794,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// (#3294). Create it closed: its CreatedAt is the cooldown marker, and a
 	// lingering open tracking bead would read as in-flight work and block
 	// re-dispatch (ga-jra/ga-lo8c). Best-effort: the wisp already launched.
-	if _, err := orders.NewStore(store).CreateRunClosed(scoped, orders.RunOutcomeNone, nil, ""); err != nil {
+	if _, err := orderFrontForStore(store.Store).CreateRunClosed(scoped, orders.RunOutcomeNone, nil, ""); err != nil {
 		fmt.Fprintf(stderr, "gc order run: recording tracking bead: %v\n", err) //nolint:errcheck
 	}
 
@@ -945,7 +945,7 @@ func cmdOrderCheck(jsonOutput bool, stdout, stderr io.Writer) int {
 // single-store city uses one leg for both classes). Returns zero time if never
 // run.
 func orderLastRunFn(store beads.Store) orders.LastRunFunc {
-	return orders.NewStoreWithGraph(beads.OrdersStore{Store: store}, beads.GraphStore{Store: store}).LastRun
+	return orderFrontForStore(store).LastRun
 }
 
 // doOrderCheck evaluates triggers for all orders and prints a table.
@@ -1461,7 +1461,7 @@ func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, r
 			if store.Store == nil {
 				continue
 			}
-			results, err := orders.NewStore(store).RecentRuns(a.ScopedName(), 0)
+			results, err := orderFrontForStore(store.Store).RecentRuns(a.ScopedName(), 0)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
 				if i == 0 && len(results) == 0 {

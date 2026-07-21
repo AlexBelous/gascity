@@ -585,7 +585,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %s", a.ScopedName(), redacted)
 			// Leave this open so the existing open-work gate suppresses repeat
 			// ticks until the normal stale tracking sweep gives the order another try.
-			trackingBead, createErr := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun(scoped, orders.RunOpts{Outcome: orders.RunOutcomeTriggerEnvFailed})
+			trackingBead, createErr := orderFrontForStore(store).CreateRun(scoped, orders.RunOpts{Outcome: orders.RunOutcomeTriggerEnvFailed})
 			if createErr != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: creating trigger env failure tracking bead for %s: %v", scoped, createErr)
 			} else {
@@ -742,7 +742,7 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
-	trackingRun, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun(a.ScopedName(), orders.RunOpts{})
+	trackingRun, err := orderFrontForStore(store).CreateRun(a.ScopedName(), orders.RunOpts{})
 	if err != nil {
 		return orders.OrderRun{}, err
 	}
@@ -935,7 +935,7 @@ func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store,
 		return entries, nil
 	}
 	idx.mu.Unlock()
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).RecentRunsAll(orderTrackingHistoryIndexLimit)
+	runs, err := orderFrontForStore(store).RecentRunsAll(orderTrackingHistoryIndexLimit)
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-tracking history: %w", err)
 		idx.mu.Lock()
@@ -970,7 +970,7 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 		return entries, nil
 	}
 	idx.mu.Unlock()
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).OpenRuns()
+	runs, err := orderFrontForStore(store).OpenRuns()
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-tracking beads: %w", err)
 		idx.mu.Lock()
@@ -1192,7 +1192,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		// per-order coordination point that still holds the raw store for the
 		// closeOrderTrackingBead defer) from the same store, so the bead writes
 		// stay byte-identical.
-		front := orders.NewStore(beads.OrdersStore{Store: store})
+		front := orderFrontForStore(store)
 		// The exec-env overlay is namespaced by an untrusted caller (webhook);
 		// nil means use the raw vars (tick/CLI), preserving prior behavior.
 		execOverlay := execEnv
@@ -1206,7 +1206,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 }
 
 func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
-	_, err := orders.NewStore(beads.OrdersStore{Store: store}).CloseRuns(ctx, []string{trackingID}, completedOrderTrackingCloseReason)
+	_, err := orderFrontForStore(store).CloseRuns(ctx, []string{trackingID}, completedOrderTrackingCloseReason)
 	return err
 }
 
@@ -1511,7 +1511,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		orders.NewStore(beads.OrdersStore{Store: store}).SetOutcome(trackingID, orders.RunOutcomeWispCanceled) //nolint:errcheck // best-effort
+		orderFrontForStore(store).SetOutcome(trackingID, orders.RunOutcomeWispCanceled) //nolint:errcheck // best-effort
 		return
 	}
 
@@ -1640,7 +1640,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	})
 
 	// Label tracking bead with outcome.
-	orders.NewStore(beads.OrdersStore{Store: store}).SetOutcome(trackingID, orders.RunOutcomeWisp) //nolint:errcheck // best-effort
+	orderFrontForStore(store).SetOutcome(trackingID, orders.RunOutcomeWisp) //nolint:errcheck // best-effort
 }
 
 // orderRigSuspended reports whether the order targets a suspended rig.
@@ -1668,7 +1668,7 @@ func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingI
 		c := orders.EventCursor(headSeq)
 		cursor = &c
 	}
-	front := orders.NewStore(beads.OrdersStore{Store: store})
+	front := orderFrontForStore(store)
 	if err := front.MarkFailed(trackingID, scoped, orders.RunOutcomeWispFailed, cursor); err != nil {
 		logDispatchError(m.stderr, "gc: order %s: failed to mark tracking bead %s as failed: %v", scoped, trackingID, err)
 	}
@@ -1714,10 +1714,7 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 	// split still unions both classes; on a single-store city the two legs wrap
 	// the same store and the union deduplicates to one read (byte-identical). The
 	// wisp-root subtree verdict stays graph-owned via the injected predicate.
-	front := orders.NewStoreWithGraph(
-		beads.OrdersStore{Store: store},
-		beads.GraphStore{Store: store},
-	)
+	front := orderFrontForStore(store)
 	return front.HasOpenWork(scopedName, m.wispRootHasOpenWork)
 }
 
@@ -2102,7 +2099,7 @@ func sweepOrphanedOrderTrackingLimit(store beads.Store, limit int) (int, error) 
 	// OrphanedOpenRuns lists the OPEN tracking beads across both tiers (new wisp
 	// + legacy issues) and excludes the trigger-env-failure markers the open-work
 	// gate intentionally keeps open.
-	front := orders.NewStore(beads.OrdersStore{Store: store})
+	front := orderFrontForStore(store)
 	runs, err := front.OrphanedOpenRuns()
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
@@ -2282,7 +2279,7 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 	// close (below) stays raw because it stamps sweep audit metadata that the
 	// domain object deliberately omits, and the wisp-subtree recovery is graph
 	// residual.
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(cutoff)
+	runs, err := orderFrontForStore(store).StaleOpenRuns(cutoff)
 	if err != nil {
 		return orderTrackingSweepResult{}, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -2396,7 +2393,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+	runs, err := orderFrontForStore(store).ClosedRunsForRetention()
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
@@ -2448,7 +2445,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+	runs, err := orderFrontForStore(store).ClosedRunsForRetention()
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}

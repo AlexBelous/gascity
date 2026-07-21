@@ -1404,6 +1404,12 @@ type BeadsConfig struct {
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
 	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+	// Classes selects the store backend per coordination class
+	// ([beads.classes.<name>], names from the BeadClass* constants). Unknown
+	// class names and unknown backends fail load; the work class is not
+	// configurable (work beads stay on the bd store). Absent entries default
+	// to "bd".
+	Classes map[string]BeadClassConfig `toml:"classes,omitempty"`
 }
 
 // EventHooksEnabled reports whether bead event hooks should be installed.
@@ -1458,6 +1464,81 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 		return "off"
 	}
 	return b.GuardedRelease
+}
+
+// BeadClassConfig configures one coordination class's store backend.
+type BeadClassConfig struct {
+	// Backend selects the class's store: "bd" (default; the class stays in
+	// the city's bd-backed store) or "sqlite" (the class's dedicated embedded
+	// store under .gc/store/). "sqlite" is accepted only for classes whose
+	// dedicated store has landed; requesting it elsewhere fails load rather
+	// than silently running on bd.
+	Backend string `toml:"backend,omitempty" jsonschema:"enum=bd,enum=sqlite"`
+}
+
+// Bead-class store backends for [beads.classes.<name>].backend.
+const (
+	// BeadsClassBackendBD keeps the class in the city's bd-backed store.
+	BeadsClassBackendBD = "bd"
+	// BeadsClassBackendSQLite routes the class to its dedicated embedded
+	// SQLite store.
+	BeadsClassBackendSQLite = "sqlite"
+)
+
+// sqliteCapableBeadClasses enumerates the classes whose dedicated SQLite
+// store has landed. Each class's store implementation flips its entry to true
+// when it ships; validateBeadsClasses rejects backend="sqlite" for any class
+// not in this set so a config can never request a store this build cannot
+// provide.
+var sqliteCapableBeadClasses = map[string]bool{}
+
+// beadClassConfigurable enumerates the class names accepted under
+// [beads.classes.<name>]. Work is deliberately absent: work beads stay on the
+// bd store and a config attempting to relocate them must fail loudly.
+var beadClassConfigurable = map[string]bool{
+	BeadClassGraph:     true,
+	BeadClassMessaging: true,
+	BeadClassSessions:  true,
+	BeadClassOrders:    true,
+	BeadClassNudges:    true,
+}
+
+// ClassBackend returns the configured store backend for a coordination class,
+// mapping the absent/empty state to the "bd" default. Values are validated at
+// load (validateBeadsClasses), so callers can switch on the two backend
+// constants without a default arm for typos.
+func (b BeadsConfig) ClassBackend(class string) string {
+	entry, ok := b.Classes[class]
+	if !ok || strings.TrimSpace(entry.Backend) == "" {
+		return BeadsClassBackendBD
+	}
+	return entry.Backend
+}
+
+// validateBeadsClasses rejects unknown class names, the non-configurable work
+// class, unknown backend values, and sqlite requests for classes whose store
+// has not landed in this build. All four are load failures for the same
+// reason as conditional_writes: a typo silently meaning "bd" would leave an
+// operator believing a class had relocated while every op still ran on bd.
+func validateBeadsClasses(b BeadsConfig) error {
+	for class, entry := range b.Classes {
+		if class == BeadClassWork {
+			return fmt.Errorf("beads.classes.work: the work class is not configurable (work beads stay on the bd store)")
+		}
+		if !beadClassConfigurable[class] {
+			return fmt.Errorf("beads.classes.%s: unknown coordination class (known: graph, messaging, sessions, orders, nudges)", class)
+		}
+		switch strings.TrimSpace(entry.Backend) {
+		case "", BeadsClassBackendBD:
+		case BeadsClassBackendSQLite:
+			if !sqliteCapableBeadClasses[class] {
+				return fmt.Errorf("beads.classes.%s: backend %q is not supported by this build (the %s store has not landed); remove the setting or use %q", class, entry.Backend, class, BeadsClassBackendBD)
+			}
+		default:
+			return fmt.Errorf("beads.classes.%s: unknown backend %q (known: %q, %q)", class, entry.Backend, BeadsClassBackendBD, BeadsClassBackendSQLite)
+		}
+	}
+	return nil
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -4450,6 +4531,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
+	if err := validateBeadsClasses(cfg.Beads); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

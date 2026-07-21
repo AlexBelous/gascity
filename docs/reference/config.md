@@ -265,6 +265,14 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
+## BeadClassConfig
+
+BeadClassConfig configures one coordination class's store backend.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `backend` | string |  |  | Backend selects the class's store: "bd" (default; the class stays in the city's bd-backed store) or "sqlite" (the class's dedicated embedded store under .gc/store/). "sqlite" is accepted only for classes whose dedicated store has landed; requesting it elsewhere fails load rather than silently running on bd. Enum: `bd`, `sqlite` |
+
 ## BeadPolicyConfig
 
 BeadPolicyConfig holds storage and retention defaults for a named bead use.
@@ -287,6 +295,7 @@ BeadsConfig holds bead store settings.
 | `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
+| `classes` | map[string]BeadClassConfig |  |  | Classes selects the store backend per coordination class ([beads.classes.&lt;name&gt;], names from the BeadClass* constants). Unknown class names and unknown backends fail load; the work class is not configurable (work beads stay on the bd store). Absent entries default to "bd". |
 
 ## ChatSessionsConfig
 

@@ -984,6 +984,21 @@
       ],
       "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
     },
+    "BeadClassConfig": {
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "bd",
+            "sqlite"
+          ],
+          "description": "Backend selects the class's store: \"bd\" (default; the class stays in\nthe city's bd-backed store) or \"sqlite\" (the class's dedicated embedded\nstore under .gc/store/). \"sqlite\" is accepted only for classes whose\ndedicated store has landed; requesting it elsewhere fails load rather\nthan silently running on bd."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadClassConfig configures one coordination class's store backend."
+    },
     "BeadPolicyConfig": {
       "properties": {
         "storage": {
@@ -1052,6 +1067,13 @@
           },
           "type": "object",
           "description": "Policies defines per-bead-use storage and garbage-collection defaults.\nPolicy names are interpreted by higher-level systems; unknown names are\npreserved so packs can stage future policy classes without breaking load."
+        },
+        "classes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BeadClassConfig"
+          },
+          "type": "object",
+          "description": "Classes selects the store backend per coordination class\n([beads.classes.\u003cname\u003e], names from the BeadClass* constants). Unknown\nclass names and unknown backends fail load; the work class is not\nconfigurable (work beads stay on the bd store). Absent entries default\nto \"bd\"."
         }
       },
       "additionalProperties": false,

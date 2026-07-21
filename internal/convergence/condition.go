@@ -24,6 +24,20 @@ const (
 	textFileBusyRetryDelay    = 25 * time.Millisecond
 )
 
+// conditionGCHome resolves the gc state dir for gate-script subprocesses:
+// the controller's own GC_HOME when set, else <real home>/.gc. The sandbox
+// HOME (CityPath) deliberately hides the operator home; without this, gc's
+// import cache resolves under the city and config load fails inside gates.
+func conditionGCHome() string {
+	if v := strings.TrimSpace(os.Getenv("GC_HOME")); v != "" {
+		return v
+	}
+	if h, err := os.UserHomeDir(); err == nil && strings.TrimSpace(h) != "" {
+		return filepath.Join(h, ".gc")
+	}
+	return filepath.Join(os.TempDir(), ".gc")
+}
+
 // conditionPATH resolves the tool directories gate scripts actually need.
 // This keeps the env narrow while ensuring gate scripts use the same bd/gc
 // binaries as the running city instead of whatever older copy happens to live
@@ -90,6 +104,12 @@ func (ce ConditionEnv) Environ() []string {
 	env := []string{
 		"PATH=" + conditionPATH(),
 		"HOME=" + home,
+		// HOME is sandboxed to the city above, which also relocates gc's
+		// import cache — every `gc` invocation inside a gate script then dies
+		// at config load ("import locked but not cached" under <city>/.gc).
+		// Propagate the real GC_HOME (gc state dir only — no .ssh/.gnupg
+		// exposure, so the sandbox intent stands) so gate scripts can call gc.
+		"GC_HOME=" + conditionGCHome(),
 		"TMPDIR=" + os.TempDir(),
 		"BEADS_DIR=" + filepath.Join(storePath, ".beads"),
 		"GC_BEAD_ID=" + ce.BeadID,

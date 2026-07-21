@@ -3395,6 +3395,7 @@ func TestWorkflowServeControlReadyQueryBD105IncludesEphemeral(t *testing.T) {
 	query := workflowServeControlReadyQueryForBeads(
 		config.Agent{Name: config.ControlDispatcherAgentName},
 		config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+		false,
 	)
 	for _, want := range []string{
 		`bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
@@ -3403,6 +3404,30 @@ func TestWorkflowServeControlReadyQueryBD105IncludesEphemeral(t *testing.T) {
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQueryForBeads(bd-1.0.5) missing %q in %q", want, query)
+		}
+	}
+}
+
+// TestWorkflowServeControlReadyQueryGCNativeOnSQLiteInfra guards Change 2: when
+// the city's infra/graph store is an embedded SQLite beads.Store (which bd cannot
+// read), the control-dispatcher's ready discovery must route through the in-process
+// `gc ready` reader, never `bd --readonly --sandbox ready`.
+func TestWorkflowServeControlReadyQueryGCNativeOnSQLiteInfra(t *testing.T) {
+	query := workflowServeControlReadyQueryForBeads(
+		config.Agent{Name: config.ControlDispatcherAgentName},
+		config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+		true,
+	)
+	if strings.Contains(query, "bd --readonly --sandbox ready") {
+		t.Fatalf("gc-native control query still shells to bd: %q", query)
+	}
+	for _, want := range []string{
+		`gc ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
+		`gc ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
+		`gc ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=20`,
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("gc-native control query missing %q in %q", want, query)
 		}
 	}
 }

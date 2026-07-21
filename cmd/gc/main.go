@@ -1533,6 +1533,24 @@ func openStoreResultAtForCityFull(storePath, cityPath string, modeOverride gate.
 				"update provider in city.toml to a supported value such as %q, or remove the setting to use the default",
 			provider, "doltlite")
 	}
+	// A scope whose .beads/metadata.json declares the sqlite backend is the
+	// embedded graph/infra store: an in-process, pure-Go modernc SQLite
+	// beads.Store (graph ADR — bd never grows a SQLite backend; the beads.Store
+	// interface is satisfied natively). This is the metadata-backend signal,
+	// distinct from the removed top-level "sqlite" provider rejected above. The
+	// store file lives beside the scope's metadata at <scope>/.beads/beads.sqlite;
+	// the wrapper still pre-mints reserved-prefix ids, so the store's own prefix
+	// only governs id-less native creates.
+	if scopeBackendIsSQLite(scopeRoot) {
+		store, sqErr := beads.OpenSQLiteStore(
+			filepath.Join(scopeRoot, ".beads"),
+			beads.WithSQLiteStoreIDPrefix(readScopeIssuePrefix(scopeRoot)),
+		)
+		if sqErr != nil {
+			return beads.StoreOpenResult{}, fmt.Errorf("opening embedded sqlite store at %s: %w", scopeRoot, sqErr)
+		}
+		return beads.StoreOpenResult{Store: wrap(store, cfg), Diagnostic: beads.BeadsDiagnostic{Store: "sqlite"}}, nil
+	}
 	mode := resolvedConditionalWritesMode(cfg)
 	if haveMode {
 		mode = modeOverride

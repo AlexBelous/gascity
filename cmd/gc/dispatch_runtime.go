@@ -336,7 +336,7 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// on every iteration. #793.
 	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
-		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
+		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, controlDispatcherGraphReadNeedsGCNative(cityPath), config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	sweepTargets := workflowServeSweepTargets(cityPath, cfg, agentCfg, workDir, workEnv, stderr)
@@ -793,15 +793,33 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 }
 
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
-	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, controlSessionNames...)
+	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, false, controlSessionNames...)
 }
 
-func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
+// controlDispatcherGraphReadNeedsGCNative reports whether the control-dispatcher's
+// ready discovery must use the in-process `gc ready` reader instead of shelling to
+// `bd`. It is true when the city's infra/graph store is an embedded SQLite
+// beads.Store (which bd cannot read); on a Dolt-backed infra store or a
+// single-store city the `bd`-shell discovery path is unchanged.
+func controlDispatcherGraphReadNeedsGCNative(cityPath string) bool {
+	return cityHasInfraStore(cityPath) && scopeBackendIsSQLite(infraScopeRoot(cityPath))
+}
+
+func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, graphReadGCNative bool, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
 		target = config.ControlDispatcherAgentName
 	}
 	limit := fmt.Sprintf("%d", workflowServeScanLimit)
+	// The control-dispatcher discovers ready control beads by shelling to a
+	// `ready` command. On a city whose infra/graph store is an embedded SQLite
+	// beads.Store, bd cannot read that store, so route discovery through the
+	// in-process federated reader `gc ready` (claimableStore fans out over the
+	// work + infra legs) instead of `bd --readonly --sandbox ready`.
+	readyCmd := "bd --readonly --sandbox ready"
+	if graphReadGCNative {
+		readyCmd = "gc ready"
+	}
 	includeEphemeral := ""
 	if beadsCfg.UsesBD105ReadySemantics() {
 		includeEphemeral = " --include-ephemeral"
@@ -833,10 +851,10 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
+		`emit_ready ` + readyCmd + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready ` + readyCmd + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready ` + readyCmd + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
 		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +

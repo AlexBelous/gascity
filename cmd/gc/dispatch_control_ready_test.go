@@ -42,6 +42,7 @@ func TestParseControlReadyQueryIncludeEphemeralWhenBD105(t *testing.T) {
 	query := workflowServeControlReadyQueryForBeads(
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
 		config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+		false,
 	)
 	parsed, ok := parseControlReadyQuery(query)
 	if !ok {

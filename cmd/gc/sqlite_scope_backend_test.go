@@ -14,12 +14,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -321,10 +319,7 @@ func TestBdRuntimeEnvForRigSQLiteScopeSkipsDoltProjection(t *testing.T) {
 	}
 }
 
-func TestOpenCityInfraStoreSQLiteScopeFallsBackToBdStore(t *testing.T) {
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not in PATH")
-	}
+func TestOpenCityInfraStoreSQLiteScopeOpensEmbeddedStore(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 	cityPath := writeExternalCanonicalCityFixture(t)
 	infraDir := infraScopeRoot(cityPath)
@@ -332,16 +327,18 @@ func TestOpenCityInfraStoreSQLiteScopeFallsBackToBdStore(t *testing.T) {
 
 	result, present, err := openCityInfraStoreResultAt(cityPath)
 	if err != nil {
-		t.Fatalf("openCityInfraStoreResultAt() error = %v, want nil (BdStore fallback is backend-transparent)", err)
+		t.Fatalf("openCityInfraStoreResultAt() error = %v, want nil (embedded sqlite store)", err)
 	}
 	if !present {
 		t.Fatal("present = false, want true (infra scope exists)")
 	}
 	if result.Store == nil {
-		t.Fatal("store = nil, want bd-shelling store")
+		t.Fatal("store = nil, want embedded sqlite store")
 	}
-	if result.Diagnostic.Store != beads.BeadsStoreNameBdStore {
-		t.Fatalf("diagnostic store = %q, want %q (native Dolt store must decline a sqlite scope)", result.Diagnostic.Store, beads.BeadsStoreNameBdStore)
+	// A sqlite-backed infra scope must open the embedded, in-process SQLite
+	// beads.Store (which bd cannot serve), not fall back to a bd-shelling store.
+	if result.Diagnostic.Store != "sqlite" {
+		t.Fatalf("diagnostic store = %q, want %q (sqlite infra scope must open the embedded SQLite store)", result.Diagnostic.Store, "sqlite")
 	}
 }
 

@@ -278,6 +278,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
 	}
+	// By-id verbs on beads resident in the embedded sqlite infra store are
+	// served in-process: the bd subprocess cannot open that store and either
+	// hangs or silently resolves a different workspace (ga-zeex2).
+	if code, handled := maybeDoBdSQLiteInfra(cityPath, target, bdArgs, stdout, stderr); handled {
+		return code
+	}
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {

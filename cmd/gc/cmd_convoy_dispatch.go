@@ -160,6 +160,19 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 	}
 	bead, err := store.Get(beadID)
 	if err != nil {
+		// The routed control bead may physically live in a different store than
+		// the one this serve loop is scoped to — e.g. a graph bead written to the
+		// work store before (or without) an infra-store migration. Federated
+		// discovery (gc ready over work+infra) can surface such a bead while the
+		// scoped control store cannot Get it. Fall back to the cross-store
+		// resolver (city → infra → rigs) so the dispatcher processes the bead in
+		// place instead of error-looping on it.
+		if errors.Is(err, beads.ErrNotFound) {
+			fedStore, fedBead, fedPath, fedErr := findBeadAcrossStores(cityPath, beadID, stderr)
+			if fedErr == nil {
+				return runControlDispatcherWithStoreAndConfig(cityPath, fedPath, fedStore, fedBead, beadID, cfg, stdout, stderr)
+			}
+		}
 		return fmt.Errorf("loading bead %s from scoped control store %q: %w", beadID, storePath, err)
 	}
 

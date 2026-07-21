@@ -30,7 +30,7 @@ var urnLiteralRe = regexp.MustCompile("urn:gascity:error:[^\"\\s`]*")
 // guardSkipDirs are directory names pruned from the source walk: VCS/build/vendor
 // noise plus nested worktree state, none of which is shipped Gas City Go.
 var guardSkipDirs = map[string]bool{
-	".git": true, ".claude": true, "node_modules": true, "vendor": true, "testdata": true,
+	".git": true, ".claude": true, ".gc": true, "node_modules": true, "vendor": true, "testdata": true,
 }
 
 // TestEveryEmittedErrorCodeIsRegistered is the error-contract analog of

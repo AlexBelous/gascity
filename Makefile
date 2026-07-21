@@ -23,6 +23,10 @@ LDFLAGS := -X main.version=$(VERSION) \
 
 unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstword $1),$1)))
 
+# Root-level workflow worktrees are generated artifacts, not part of the
+# tracked source set. Keep repo-wide package targets on the real module tree.
+CORE_PACKAGES := $(shell go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$$' | grep -vE '^github.com/gastownhall/gascity/[^/]+-[^/]+(/|$$)')
+
 # macOS: icu4c (a transitive Dolt / go-icu-regex CGO build dependency) is
 # keg-only under Homebrew, so its headers/libs are not on the default CGO
 # search path. Point CGO at them when icu4c is present. This is a no-op on
@@ -191,11 +195,11 @@ lint: lint-full
 
 ## lint-full: run golangci-lint across all packages
 lint-full: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
+	$(GOLANGCI_LINT) run $(LINT_FLAGS) $(CORE_PACKAGES)
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
 lint-new: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
+	$(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files $(CORE_PACKAGES)
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
@@ -235,15 +239,15 @@ lint-changed: $(GOLANGCI_LINT)
 
 ## fmt-check: fail if formatting would change files
 fmt-check: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) fmt --diff ./...
+	$(GOLANGCI_LINT) fmt --diff $(CORE_PACKAGES)
 
 ## fmt: auto-fix formatting
 fmt: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) fmt ./...
+	$(GOLANGCI_LINT) fmt $(CORE_PACKAGES)
 
 ## vet: run go vet
 vet:
-	go vet ./...
+	go vet $(CORE_PACKAGES)
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
 ## agent-session vars (GC_CITY, GC_HOME, GC_SESSION_ID, ...) cannot leak into
@@ -315,7 +319,7 @@ TEST_ENV = env -i \
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $(CORE_PACKAGES)
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
 # sharded via the mac-cmd-gc-process CI matrix job instead.

@@ -41,6 +41,12 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs
 // gitignored scratch space for local work).
 var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
 
+func isEphemeralWorkflowRoot(name string) bool {
+	return strings.HasPrefix(name, "ga-") ||
+		strings.HasPrefix(name, "mc-") ||
+		strings.HasPrefix(name, "gcg-")
+}
+
 // isNestedWorktreeRoot reports whether path is the root of a linked git
 // worktree checked out inside this tree. Linked worktrees have a .git FILE
 // (a "gitdir: ..." pointer) rather than a .git directory, so this catches
@@ -811,6 +817,9 @@ func TestDocDirCoverage(t *testing.T) {
 			continue
 		}
 		if known[name] {
+			continue
+		}
+		if isEphemeralWorkflowRoot(name) {
 			continue
 		}
 		dirPath := filepath.Join(root, name)

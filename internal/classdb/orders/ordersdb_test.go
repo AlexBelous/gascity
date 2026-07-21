@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/classdb/core"
 	"github.com/gastownhall/gascity/internal/config"
@@ -204,5 +206,53 @@ func TestCreateRunRejectsEmptyScopedName(t *testing.T) {
 	}
 	if _, err := st.CreateRunClosed("", orders.RunOutcomeNone, nil, ""); err == nil {
 		t.Fatal("CreateRunClosed(blank) succeeded, want error")
+	}
+}
+
+// TestImportRunPreservesLegacyRow pins the migration import contract: legacy
+// id, clocks, open state, outcome, and cursor round-trip verbatim, and
+// re-import is an idempotent no-op.
+func TestImportRunPreservesLegacyRow(t *testing.T) {
+	st := openTestStore(t)
+	created := time.Unix(0, time.Now().Add(-48*time.Hour).UnixNano())
+	updated := created.Add(time.Hour)
+	legacy := orders.OrderRun{
+		ID:        "gc-legacy-7",
+		Scoped:    "digest:rig:demo",
+		Outcome:   orders.RunOutcomeWispFailed,
+		CreatedAt: created,
+		UpdatedAt: updated,
+		Open:      false,
+		Cursor:    9,
+	}
+	if err := st.ImportRun(legacy); err != nil {
+		t.Fatalf("ImportRun: %v", err)
+	}
+	got, err := st.Get("gc-legacy-7")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !reflect.DeepEqual(got, legacy) {
+		t.Fatalf("imported run = %+v, want %+v", got, legacy)
+	}
+	// Re-import (resumed migration) leaves the row untouched.
+	changed := legacy
+	changed.Cursor = 1
+	if err := st.ImportRun(changed); err != nil {
+		t.Fatalf("re-ImportRun: %v", err)
+	}
+	if got, err := st.Get("gc-legacy-7"); err != nil || got.Cursor != 9 {
+		t.Fatalf("row after re-import = (%+v, %v), want the original untouched", got, err)
+	}
+
+	// Rejections: empty id / scoped / zero clock.
+	for _, bad := range []orders.OrderRun{
+		{Scoped: "x", CreatedAt: created},
+		{ID: "gc-1", CreatedAt: created},
+		{ID: "gc-1", Scoped: "x"},
+	} {
+		if err := st.ImportRun(bad); err == nil {
+			t.Fatalf("ImportRun(%+v) succeeded, want rejection", bad)
+		}
 	}
 }

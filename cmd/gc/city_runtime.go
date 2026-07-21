@@ -255,6 +255,14 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, managedDoltHealth, managedDoltOwned, managedDoltPort)
 
+	// Seamless orders-class cutover: when [beads.classes.orders] selects the
+	// sqlite backend, import legacy tracking beads and write the migrated
+	// marker before anything order-related runs this boot; the residue sweep
+	// clears the bd-side copies in the background and converges across boots.
+	if ensureOrdersClassMigrated(p.CityPath, p.Cfg, p.Stderr) {
+		go sweepLegacyOrderTrackingResidue(p.CityPath, p.Cfg, p.Stderr)
+	}
+
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).

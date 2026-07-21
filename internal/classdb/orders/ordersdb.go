@@ -192,6 +192,41 @@ func (s *Store) insertRun(scoped string, nanos int64, open bool, outcome orders.
 	return id, nil
 }
 
+// ImportRun inserts one migrated legacy tracking run, preserving its id
+// (legacy bd prefixes stay valid row keys), clocks, open state, outcome, and
+// cursor. INSERT OR IGNORE keeps re-imports idempotent, so an interrupted
+// migration simply resumes; an id that already exists is left untouched.
+func (s *Store) ImportRun(run orders.OrderRun) error {
+	if strings.TrimSpace(run.ID) == "" {
+		return fmt.Errorf("importing order run: empty id")
+	}
+	if strings.TrimSpace(run.Scoped) == "" {
+		return fmt.Errorf("importing order run %q: empty scoped order name", run.ID)
+	}
+	if run.CreatedAt.IsZero() {
+		return fmt.Errorf("importing order run %q: zero CreatedAt (the cooldown clock)", run.ID)
+	}
+	created := run.CreatedAt.UnixNano()
+	updated := created
+	if !run.UpdatedAt.IsZero() {
+		updated = run.UpdatedAt.UnixNano()
+	}
+	openInt := 0
+	if run.Open {
+		openInt = 1
+	}
+	return s.db.Write(context.Background(), func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT OR IGNORE INTO order_run (id, scoped_name, created_at, updated_at, open, outcome, seq, close_reason) VALUES (?, ?, ?, ?, ?, ?, ?, '')`,
+			run.ID, run.Scoped, created, updated, openInt, run.Outcome.Token(), int64(run.Cursor), //nolint:gosec // event-bus sequence, far below int64 range
+		)
+		if err != nil {
+			return fmt.Errorf("importing order run %q: %w", run.ID, err)
+		}
+		return nil
+	})
+}
+
 // mutateRun runs one UPDATE against a single run id and converts a zero
 // rows-affected result into the store's not-found error, matching the beads
 // backend's ErrNotFound behavior for mutations of missing runs.

@@ -122,13 +122,22 @@ the other landing first — but they are designed to compose:
   *not* port from the deleted store (deps table, `Ready()` with the
   blocking-dep subquery, main/wisp tiers, CAS claim) are exactly the
   graph-specific extensions the graph store adds on top of core.
-- **Different access model, on purpose.** Graph stays strictly
-  controller-embedded (its writers — dispatcher, molecule engine — are
-  controller-only, and `gc ready`/`gc hook` already resolve through the
-  controller API). The infra classes use direct multi-process WAL because
-  their writers include prompt hooks, CLI fallbacks, and controller-less
-  cities. Do not conflate the two disciplines; each is documented at its
-  seam.
+- **Different access model, on purpose.** Graph is planned as
+  controller-embedded, but note its writers are *not* controller-only:
+  besides the dispatcher and molecule engine, **normal workers claim, update,
+  and close graph-class beads** — `ClassifyGraphPlan` routes a formula pour
+  wholesale, so the work-typed executable steps embedded in molecules are
+  graph-class, surface through `Ready()` + `gc.routed_to`, and are claimed by
+  `gc hook --claim` (today a direct `bd update --claim` from the worker's CLI
+  subprocess), while the control dispatcher claims the `gc.kind` control lane
+  via its store-scoped claim loop. The graph ADR handles this by
+  *prescribing* that `gc ready`/`gc hook` route through the controller API
+  (its `ReadyCandidates` + CAS-`Claim` gap items exist for exactly these
+  worker claims) — viable for graph because graph work only progresses while
+  a controller is running. The infra classes use direct multi-process WAL
+  instead because their writers include prompt hooks, CLI fallbacks, and
+  controller-less cities where no controller is guaranteed. Do not conflate
+  the two disciplines; each is documented at its seam.
 - **Touching points.** Orders' `HasOpenWork` wisp-subtree walk reads the
   graph class through `resolveGraphStore` and is correct whichever backend
   graph has that day. The orders migration seeds its cursor from the

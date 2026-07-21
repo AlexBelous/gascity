@@ -138,6 +138,24 @@ the other landing first — but they are designed to compose:
   instead because their writers include prompt hooks, CLI fallbacks, and
   controller-less cities where no controller is guaranteed. Do not conflate
   the two disciplines; each is documented at its seam.
+- **"bd doesn't support SQLite" is not a blocker — for either track.** bd
+  never grows a SQLite backend. `beads.Store` is a *gascity* Go interface;
+  `BdStore` (fork/exec bd) is just one implementation, and the deleted store
+  was already a complete in-process SQLite `beads.Store` (Ready with
+  blocking-dep subquery, deps, CAS, tiers, metadata). Graph keeps full beads
+  *semantics* by implementing that surface natively; the bd-*CLI* touchpoints
+  are replaced by gc-native paths the split branch already built: a composite
+  `claimableStore` + top-level `gc ready` fanning work ∪ graph and merging in
+  canonical (priority, created_at, id) order (`63235fe0a`, landmine #2a); the
+  Go-composed work_query/count-form scripts re-routed from bare `bd` to
+  `gc ready` on split cities (`2ed2fc961`, #2b — `workquery.go` is the single
+  composition point, so prompts need no edits); the worker claim mutation
+  routed to the owning store by reserved prefix (#2c); and HTTP ready/list
+  federation (`c224a9792`, #13). R2.3's `bd` PATH-shim remains the
+  last-resort compat for any bare-`bd` surface that cannot be re-pointed.
+  This design's infra classes need *none* of that machinery — no worker
+  claims a mail/session/order/nudge bead — which is exactly why they can
+  drop generic beads behavior while graph cannot.
 - **Touching points.** Orders' `HasOpenWork` wisp-subtree walk reads the
   graph class through `resolveGraphStore` and is correct whichever backend
   graph has that day. The orders migration seeds its cursor from the

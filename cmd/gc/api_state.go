@@ -211,7 +211,9 @@ func newControllerState(
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
-		svc := extmsg.NewServices(cs.cityBeadStore)
+		svc := extmsg.NewServicesWithSessionStore(
+			resolveMailMessagesStore(cs.cityBeadStore, cfg, cityPath, ep),
+			resolveSessionStore(cs.cityBeadStore, cfg, cityPath, ep))
 		cs.extmsgSvc = &svc
 	}
 	cs.preflightConditionalWrites()
@@ -728,7 +730,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
 		cityMailProv = newCityMailProvider(cityStore, cfg, cs.cityPath, cs.eventProv)
-		svc := extmsg.NewServices(cityStore)
+		svc := extmsg.NewServicesWithSessionStore(
+			resolveMailMessagesStore(cityStore, cfg, cs.cityPath, cs.eventProv),
+			resolveSessionStore(cityStore, cfg, cs.cityPath, cs.eventProv))
 		extSvc = &svc
 	}
 

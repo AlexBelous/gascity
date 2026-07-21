@@ -48,7 +48,7 @@ type BindingReapStats struct {
 // The sweep is idempotent and safe to run on every reconciler tick; it must run
 // after session beads have been synced for the tick so a respawned session's
 // replacement bead is already visible.
-func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (BindingReapStats, error) {
+func ReapStaleBindings(ctx context.Context, store, sessionStore beads.Store, now time.Time) (BindingReapStats, error) {
 	var stats BindingReapStats
 	if err := checkContext(ctx); err != nil {
 		return stats, err
@@ -56,11 +56,14 @@ func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (B
 	if store == nil {
 		return stats, nil
 	}
+	if sessionStore == nil {
+		sessionStore = store
+	}
 	items, err := store.List(beads.ListQuery{Label: labelBindingBase})
 	if err != nil {
 		return stats, fmt.Errorf("list active bindings: %w", err)
 	}
-	svc := NewServices(store)
+	svc := NewServicesWithSessionStore(store, sessionStore)
 	caller := Caller{Kind: CallerController, ID: "binding-reaper"}
 	now = zeroNow(now)
 	// reassigned tracks stale session IDs already processed so we don't call
@@ -80,7 +83,7 @@ func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (B
 		}
 		stats.Scanned++
 
-		liveID, dead := bindingLiveTarget(store, record)
+		liveID, dead := bindingLiveTarget(sessionStore, record)
 		switch {
 		case dead:
 			if _, err := svc.Bindings.Unbind(ctx, caller, UnbindInput{
@@ -145,13 +148,16 @@ type ParticipantReapStats struct {
 // The sweep is idempotent and safe to run on every reconciler tick; it must run
 // after session beads have been synced for the tick so a respawned session's
 // replacement bead is already visible.
-func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantReapStats, error) {
+func ReapStaleParticipants(ctx context.Context, store, sessionStore beads.Store) (ParticipantReapStats, error) {
 	var stats ParticipantReapStats
 	if err := checkContext(ctx); err != nil {
 		return stats, err
 	}
 	if store == nil {
 		return stats, nil
+	}
+	if sessionStore == nil {
+		sessionStore = store
 	}
 	items, err := store.List(beads.ListQuery{Label: labelGroupParticipantBase})
 	if err != nil {
@@ -178,7 +184,7 @@ func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantR
 		if name == "" || oldID == "" {
 			continue
 		}
-		liveID, err := resolveLiveSessionID(store, name)
+		liveID, err := resolveLiveSessionID(sessionStore, name)
 		if err != nil || liveID == "" {
 			continue
 		}
@@ -223,10 +229,11 @@ func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantR
 }
 
 // bindingLiveTarget resolves the current live session bead a binding should
-// point at. It returns (liveID, false) when a live target exists, ("", true)
-// when the binding's session is definitively gone (so the binding should be
-// cleared), and ("", false) when the state is indeterminate and the binding
-// should be left untouched (e.g. a transient store error or an ambiguous name).
+// point at, reading only the SESSION-class store. It returns (liveID, false)
+// when a live target exists, ("", true) when the binding's session is
+// definitively gone (so the binding should be cleared), and ("", false) when
+// the state is indeterminate and the binding should be left untouched (e.g. a
+// transient store error or an ambiguous name).
 func bindingLiveTarget(store beads.Store, record SessionBindingRecord) (liveID string, dead bool) {
 	name := record.SessionName
 	if name != "" {

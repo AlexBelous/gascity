@@ -1224,14 +1224,14 @@ func (cr *CityRuntime) tick(
 	// Re-point external-message bindings at respawned sessions (and clear
 	// bindings whose session is gone) now that replacement beads are visible.
 	phaseStart = time.Now()
-	reapStaleExtmsgBindings(ctx, cr.sessionsBeadStore(), time.Now(), cr.stderr)
+	reapStaleExtmsgBindings(ctx, cr.mailBeadStore(), cr.sessionsBeadStore(), time.Now(), cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
 	// Re-point group participants at respawned sessions and carry their
 	// group-owned transcript membership; the participant side has no read-time
 	// membership overlay, so this backstop is what converges binding-less
 	// participants the binding reaper never sees.
 	phaseStart = time.Now()
-	reapStaleExtmsgParticipants(ctx, cr.sessionsBeadStore(), cr.stderr)
+	reapStaleExtmsgParticipants(ctx, cr.mailBeadStore(), cr.sessionsBeadStore(), cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
 	phaseStart = time.Now()
 	result = refreshDesiredStateWithSessionBeads(

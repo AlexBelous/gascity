@@ -139,7 +139,7 @@ func TestReapStaleBindingsReassignsToRespawnedSession(t *testing.T) {
 	}
 	newID := respawn(t, store, oldID, "gc-pl")
 
-	stats, err := ReapStaleBindings(context.Background(), store, testNow())
+	stats, err := ReapStaleBindings(context.Background(), store, store, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindings: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestReapStaleBindingsClearsDeadNamedSession(t *testing.T) {
 		t.Fatalf("close session: %v", err)
 	}
 
-	stats, err := ReapStaleBindings(context.Background(), store, testNow())
+	stats, err := ReapStaleBindings(context.Background(), store, store, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindings: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestReapStaleBindingsClearsLegacyBindingWithClosedBead(t *testing.T) {
 	}
 
 	// While the bead is open the reaper must leave the legacy binding alone.
-	stats, err := ReapStaleBindings(context.Background(), store, testNow())
+	stats, err := ReapStaleBindings(context.Background(), store, store, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindings (open): %v", err)
 	}
@@ -240,7 +240,7 @@ func TestReapStaleBindingsClearsLegacyBindingWithClosedBead(t *testing.T) {
 	if err := store.Close(legacy.ID); err != nil {
 		t.Fatalf("close legacy session: %v", err)
 	}
-	stats, err = ReapStaleBindings(context.Background(), store, testNow())
+	stats, err = ReapStaleBindings(context.Background(), store, store, testNow())
 	if err != nil {
 		t.Fatalf("ReapStaleBindings (closed): %v", err)
 	}

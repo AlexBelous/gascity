@@ -499,7 +499,7 @@ func TestBindingServiceUnbindBySessionReturnsPartialClosedOnFailure(t *testing.T
 		failConversationIDs: map[string]bool{refFirst.ConversationID: true},
 		err:                 errors.New("boom"),
 	}
-	svc := newBindingService(store, delivery, nil, newBindingLockPool())
+	svc := newBindingService(store, store, delivery, nil, newBindingLockPool())
 
 	bindingFirst, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: refFirst,
@@ -549,7 +549,7 @@ func TestBindingServiceUnbindKeepsClosedBindingWhenDeliveryClearFails(t *testing
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	delivery := &failingDeliveryContextService{err: errors.New("boom")}
-	svc := newBindingService(store, delivery, nil, newBindingLockPool())
+	svc := newBindingService(store, store, delivery, nil, newBindingLockPool())
 	ref := testConversationRef()
 
 	binding, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -678,7 +678,7 @@ func TestEmptyMetadataRecordsEncodeAsObjects(t *testing.T) {
 func TestBindingServiceTouchDebouncesMetadataWrites(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := newBindingService(store, nil, nil, newBindingLockPool(), WithBindingTouchDebounce(time.Hour))
+	svc := newBindingService(store, store, nil, nil, newBindingLockPool(), WithBindingTouchDebounce(time.Hour))
 	ref := testConversationRef()
 	start := testNow()
 
@@ -1988,7 +1988,7 @@ func TestBindingServiceUnbindRetriesTranscriptCleanupWhenRemovalFails(t *testing
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
-	svc := newBindingService(store, nil, transcript, newBindingLockPool())
+	svc := newBindingService(store, store, nil, transcript, newBindingLockPool())
 	ref := testConversationRef()
 
 	binding, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -2065,7 +2065,7 @@ func TestGroupServiceUpsertParticipantRetriesTranscriptCleanupAfterReassignment(
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
-	svc := newGroupService(store, sharedBindingLockPool(store), transcript)
+	svc := newGroupService(store, store, sharedBindingLockPool(store), transcript)
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -2124,7 +2124,7 @@ func TestGroupServiceUpsertParticipantCarriesDeferredCleanupAcrossLaterReassignm
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
-	svc := newGroupService(store, sharedBindingLockPool(store), transcript)
+	svc := newGroupService(store, store, sharedBindingLockPool(store), transcript)
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -2175,7 +2175,7 @@ func TestBindingServiceBindRetriesTranscriptSyncOnRebind(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
-	svc := newBindingService(store, nil, transcript, newBindingLockPool())
+	svc := newBindingService(store, store, nil, transcript, newBindingLockPool())
 	ref := testConversationRef()
 
 	_, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -2203,7 +2203,7 @@ func TestGroupServiceUpsertParticipantRetriesTranscriptSync(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
-	svc := newGroupService(store, sharedBindingLockPool(store), transcript)
+	svc := newGroupService(store, store, sharedBindingLockPool(store), transcript)
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -2239,7 +2239,7 @@ func TestGroupServiceRemoveParticipantRetriesTranscriptCleanup(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	transcript := &flakyTranscriptService{failRemoveCount: 1, err: errors.New("boom")}
-	svc := newGroupService(store, sharedBindingLockPool(store), transcript)
+	svc := newGroupService(store, store, sharedBindingLockPool(store), transcript)
 	ref := testConversationRef()
 
 	group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -2741,7 +2741,7 @@ func TestReapStaleParticipants(t *testing.T) {
 	// exists, so only the participant reaper can converge this session.
 	sessBID := respawn(t, store, sessAID, "pl-alpha")
 
-	stats, err := ReapStaleParticipants(context.Background(), store)
+	stats, err := ReapStaleParticipants(context.Background(), store, store)
 	if err != nil {
 		t.Fatalf("ReapStaleParticipants: %v", err)
 	}
@@ -2761,7 +2761,7 @@ func TestReapStaleParticipants(t *testing.T) {
 
 	// Idempotent: a second sweep finds nothing stale now that the participant
 	// already points at the live bead.
-	stats, err = ReapStaleParticipants(context.Background(), store)
+	stats, err = ReapStaleParticipants(context.Background(), store, store)
 	if err != nil {
 		t.Fatalf("ReapStaleParticipants(second): %v", err)
 	}
@@ -2833,7 +2833,7 @@ func TestReapStaleParticipantsFinishesPendingCleanupAfterPartialHandover(t *test
 	// transcript lets the reaper finish the handover.
 	healthy := &flakyTranscriptService{}
 	overrideReassignmentTranscript(t, healthy)
-	stats, err := ReapStaleParticipants(context.Background(), store)
+	stats, err := ReapStaleParticipants(context.Background(), store, store)
 	if err != nil {
 		t.Fatalf("ReapStaleParticipants: %v", err)
 	}
@@ -2861,7 +2861,7 @@ func TestReapStaleParticipantsFinishesPendingCleanupAfterPartialHandover(t *test
 	}
 
 	// Idempotent: a second sweep finds nothing pending now.
-	stats, err = ReapStaleParticipants(context.Background(), store)
+	stats, err = ReapStaleParticipants(context.Background(), store, store)
 	if err != nil {
 		t.Fatalf("ReapStaleParticipants(second): %v", err)
 	}

@@ -12,9 +12,14 @@ import (
 )
 
 type groupService struct {
-	store      beads.Store
-	locks      *bindingLockPool
-	transcript groupTranscriptSync
+	store beads.Store
+	// sessionStore holds session-class beads, read only for session-liveness
+	// resolution (sessionNameForSelector / overlayLiveParticipantSessionID).
+	// Identical to store on a single-store city; distinct once a class
+	// relocates. Record mutations never touch it.
+	sessionStore beads.Store
+	locks        *bindingLockPool
+	transcript   groupTranscriptSync
 }
 
 type groupTranscriptSync interface {
@@ -22,14 +27,19 @@ type groupTranscriptSync interface {
 	RemoveMembership(ctx context.Context, input RemoveMembershipInput) error
 }
 
-// NewGroupService creates a GroupService backed by the given bead store.
+// NewGroupService creates a GroupService backed by the given bead store,
+// which serves both record persistence and session-liveness reads (the
+// single-store shape).
 func NewGroupService(store beads.Store) GroupService {
 	locks := sharedBindingLockPool(store)
-	return newGroupService(store, locks, newTranscriptService(store, locks))
+	return newGroupService(store, store, locks, newTranscriptService(store, locks))
 }
 
-func newGroupService(store beads.Store, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
-	return &groupService{store: store, locks: locks, transcript: transcript}
+func newGroupService(store, sessionStore beads.Store, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
+	if sessionStore == nil {
+		sessionStore = store
+	}
+	return &groupService{store: store, sessionStore: sessionStore, locks: locks, transcript: transcript}
 }
 
 func groupTranscriptCaller() Caller {
@@ -148,7 +158,7 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 	}
 	// Capture the stable session name so the participant survives respawn.
 	// Best-effort: empty when the selector resolves to no session bead.
-	sessionName := sessionNameForSelector(s.store, sessionID)
+	sessionName := sessionNameForSelector(s.sessionStore, sessionID)
 	title := groupID + "/" + handle
 	fields := encodeMetadataFields(input.Metadata, map[string]string{
 		"schema_version": strconv.Itoa(schemaVersion),
@@ -356,7 +366,7 @@ func (s *groupService) ResolveInbound(ctx context.Context, event ExternalInbound
 	}
 	byHandle := make(map[string]ConversationGroupParticipant, len(participants))
 	for _, participant := range participants {
-		overlayLiveParticipantSessionID(s.store, &participant)
+		overlayLiveParticipantSessionID(s.sessionStore, &participant)
 		byHandle[participant.Handle] = participant
 	}
 	if explicit := normalizeHandle(event.ExplicitTarget); explicit != "" {
@@ -419,7 +429,7 @@ func (s *groupService) ResolveOutbound(ctx context.Context, ref ConversationRef,
 		return nil, err
 	}
 	for _, participant := range participants {
-		overlayLiveParticipantSessionID(s.store, &participant)
+		overlayLiveParticipantSessionID(s.sessionStore, &participant)
 		if participant.SessionID == sessionID {
 			return &GroupOutboundDecision{
 				Match:       GroupRouteParticipantMatch,

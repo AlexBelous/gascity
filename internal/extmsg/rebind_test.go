@@ -74,7 +74,7 @@ func TestBindingServiceHandoffKeepsBindingWhenDeliveryClearFails(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
 	delivery := &failingDeliveryContextService{err: errors.New("boom")}
-	svc := newBindingService(store, delivery, nil, newBindingLockPool())
+	svc := newBindingService(store, store, delivery, nil, newBindingLockPool())
 	ref := testConversationRef()
 
 	// Displaced binding to a concrete session so the handoff attempts to clear
@@ -149,7 +149,7 @@ func TestBindingServiceHandoffRollsBackMembershipWhenReplacementFails(t *testing
 	// left behind, and the displaced membership dropped before the swap is
 	// re-ensured.
 	flaky := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
-	flakySvc := newBindingService(store, nil, flaky, newBindingLockPool())
+	flakySvc := newBindingService(store, store, nil, flaky, newBindingLockPool())
 	if _, err := flakySvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/specialist",
@@ -221,7 +221,7 @@ func TestBindingServiceHandoffReportsDisplacedMembershipRestoreFailure(t *testin
 	// failEnsureCount: 2 fails both the replacement ensure (driving the rollback)
 	// and the subsequent displaced-membership restore.
 	flaky := &flakyTranscriptService{failEnsureCount: 2, err: errors.New("boom")}
-	flakySvc := newBindingService(store, nil, flaky, newBindingLockPool())
+	flakySvc := newBindingService(store, store, nil, flaky, newBindingLockPool())
 	_, err = flakySvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/specialist",
@@ -281,7 +281,7 @@ func TestBindingServiceHandoffConvergesOnNonAtomicStore(t *testing.T) {
 	}
 
 	flaky := &flakyTranscriptService{failEnsureCount: 1, err: errors.New("boom")}
-	flakySvc := newBindingService(store, nil, flaky, newBindingLockPool())
+	flakySvc := newBindingService(store, store, nil, flaky, newBindingLockPool())
 	if _, err := flakySvc.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
 		AgentName:    "myrig/specialist",

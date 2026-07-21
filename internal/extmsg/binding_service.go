@@ -41,7 +41,13 @@ type bindingMembershipEnsurer interface {
 }
 
 type bindingService struct {
-	store         beads.Store
+	store beads.Store
+	// sessionStore is the store holding session-class beads, read for
+	// session-liveness resolution (sessionNameForSelector /
+	// overlayLiveSession). Identical to store on a single-store city;
+	// distinct once [beads.classes.messaging] or [beads.classes.sessions]
+	// relocates a class. Record mutations never touch it.
+	sessionStore  beads.Store
 	delivery      bindingCleaner
 	transcript    bindingMembershipEnsurer
 	touchDebounce time.Duration
@@ -60,9 +66,13 @@ func WithBindingTouchDebounce(d time.Duration) BindingServiceOption {
 	}
 }
 
-func newBindingService(store beads.Store, delivery bindingCleaner, transcript bindingMembershipEnsurer, locks *bindingLockPool, opts ...BindingServiceOption) BindingService {
+func newBindingService(store, sessionStore beads.Store, delivery bindingCleaner, transcript bindingMembershipEnsurer, locks *bindingLockPool, opts ...BindingServiceOption) BindingService {
+	if sessionStore == nil {
+		sessionStore = store
+	}
 	svc := &bindingService{
 		store:         store,
+		sessionStore:  sessionStore,
 		touchDebounce: defaultTouchDebounce,
 		locks:         locks,
 	}
@@ -115,7 +125,7 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 	target := bindTarget{
 		sessionID:   sessionID,
 		agentName:   agentName,
-		sessionName: sessionNameForSelector(s.store, sessionID),
+		sessionName: sessionNameForSelector(s.sessionStore, sessionID),
 	}
 	now := zeroNow(input.Now)
 
@@ -375,7 +385,7 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 	if err != nil || record == nil {
 		return record, err
 	}
-	overlayLiveSession(s.store, record)
+	overlayLiveSession(s.sessionStore, record)
 	return record, nil
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -426,6 +427,44 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 		}
 		if !strings.Contains(content, "cliSessionStore(") && !strings.Contains(content, "cliSessionFrontDoor(") {
 			t.Errorf("%s is listed as session-relocation-routed but never calls cliSessionStore( / cliSessionFrontDoor( — did the routing get dropped?", name)
+		}
+	}
+}
+
+// classResolverNilCfgPattern matches a resolve*Store class-resolver call whose
+// cfg argument is the literal nil. A nil cfg makes the resolver blind to
+// [beads.classes.<name>] — the call site would silently keep using the work
+// store after a class relocates (split-brain: the controller routes to the
+// class store while this path writes bd). Every call site must thread a real
+// *config.City; paths with no config in hand load one (see
+// openCityMailProvider's no-refresh loader pattern). A nil recorder stays
+// allowed: the relocated class stores are bead.*-silent by design.
+var classResolverNilCfgPattern = regexp.MustCompile(
+	`resolve(?:NudgesStore|MailMessagesStore|SessionStore|OrderStore|GraphStore)\([^,\n]+,\s*nil\s*,`)
+
+// TestClassResolversNeverCalledWithNilConfig pins the relocation-routing
+// invariant across every non-test cmd/gc source file.
+func TestClassResolversNeverCalledWithNilConfig(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(currentFile)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", dir, err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", name, err)
+		}
+		if m := classResolverNilCfgPattern.Find(data); m != nil {
+			t.Errorf("%s calls a class resolver with a nil cfg (%q) — thread a real *config.City so [beads.classes] relocation reaches this path", name, string(m))
 		}
 	}
 }

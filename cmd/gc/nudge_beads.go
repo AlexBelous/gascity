@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -25,12 +26,19 @@ type nudgeReference = nudgequeue.Reference
 // strongly-typed beads.NudgesStore so the nudges class is statically visible to
 // every leaf nudge-bead helper; the wrapper carries the same underlying store
 // value (identity to the work store until the nudges class relocates).
+//
+// The city config is loaded with the no-refresh loader (this is the hottest
+// CLI root — every provider prompt hook drains) so [beads.classes.nudges]
+// routing reaches hook/CLI paths; a failed load yields nil cfg, which the
+// resolver treats as identity, matching openCityMailProvider's posture. The
+// recorder stays nil: relocated class stores are bead.*-silent by design.
 var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		return beads.NudgesStore{}
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(store, nil, cityPath, nil)}
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	return beads.NudgesStore{Store: resolveNudgesStore(store, cfg, cityPath, nil)}
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

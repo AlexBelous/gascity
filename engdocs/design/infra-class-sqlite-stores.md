@@ -101,6 +101,42 @@ re-measure before freezing targets):
 - End state: bd/Dolt holds only work beads (and graph until its own ADR
   lands). That is the "remove our dependence on beads" line for infra.
 
+## Relationship to the graph class (out of scope here, converging)
+
+Graph is excluded from this design by scoping — it travels with work beads —
+but it is **not** staying on bd: its own ADR
+(`09830032e:engdocs/design/graph-store-backend-selection.md`, Proposed)
+already selects an embedded modernc SQLite store for `ClassGraph`, owned by
+the controller at the anticipated `.gc/beads.sqlite` location, behind the
+narrow `GraphStore` seam. The two tracks are independent — neither depends on
+the other landing first — but they are designed to compose:
+
+- **Same dispatch, same prefixes, same federation.** Both plug into
+  `resolveClassStore` (graph's resolver arm already exists and is
+  deliberately event-silent), both mint reserved-prefix ids (`gcg-` alongside
+  `gcm-/gcs-/gco-/gcn-`), and the generalized `gc bd show` federation in this
+  design loops over *all* reserved class prefixes — it subsumes the
+  graph-only shim from `124bca8c3` rather than sitting beside it.
+- **Shared substrate on offer.** `classdb/core` is the graph store's natural
+  substrate when that ADR executes: the pieces this design deliberately does
+  *not* port from the deleted store (deps table, `Ready()` with the
+  blocking-dep subquery, main/wisp tiers, CAS claim) are exactly the
+  graph-specific extensions the graph store adds on top of core.
+- **Different access model, on purpose.** Graph stays strictly
+  controller-embedded (its writers — dispatcher, molecule engine — are
+  controller-only, and `gc ready`/`gc hook` already resolve through the
+  controller API). The infra classes use direct multi-process WAL because
+  their writers include prompt hooks, CLI fallbacks, and controller-less
+  cities. Do not conflate the two disciplines; each is documented at its
+  seam.
+- **Touching points.** Orders' `HasOpenWork` wisp-subtree walk reads the
+  graph class through `resolveGraphStore` and is correct whichever backend
+  graph has that day. The orders migration seeds its cursor from the
+  tracking∪wisp-root union regardless of where the wisp roots live.
+- **End state.** Once *both* tracks land, bd/Dolt holds only work beads —
+  the full "remove our dependence on beads" line. This design gets infra
+  there; the graph ADR gets graph there.
+
 ## Shared substrate: `internal/classdb`
 
 New fork-owned package tree (upstream-alignment: new files, no broad edits to

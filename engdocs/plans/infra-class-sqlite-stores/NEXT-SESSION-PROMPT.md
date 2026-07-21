@@ -7,44 +7,51 @@ worktree; run everything from that directory.
 
 **First, read (in this order):**
 1. `engdocs/plans/infra-class-sqlite-stores/HANDOFF.md` — state, next steps,
-   gotchas. START HERE.
-2. `engdocs/design/infra-class-sqlite-stores.md` — the authoritative design
-   (ratified decisions, per-class schemas, migration story).
+   gotchas. START HERE. P1 orders is COMPLETE (backend seam, ordersdb store,
+   routing behind the migrated marker, seamless migration + residue sweep).
+2. `engdocs/design/infra-class-sqlite-stores.md` — the authoritative design;
+   the Nudges section is the spec for this session.
 
-**Then execute HANDOFF "Next: P1 orders", one slice at a time, TDD, one
-commit per slice:**
-1. **Backend extraction** (byte-identical): unexported domain-level
-   `trackingBackend` interface in `internal/orders`; move the bead/label
-   bodies into a `beadsTracking` impl; `Store` keeps the graph-leg
-   composition (`NewStoreWithGraph`/`mixedLegStores` already exist —
-   preserve their dedupe via an optional `underlying() beads.Store`
-   assertion). Public surface unchanged; all existing orders tests must pass
-   untouched.
-2. **`internal/classdb/orders`**: `order_run` table per the design's Orders
-   schema (created_at DESC, id DESC tie-break; partial open indexes) over
-   `internal/classdb/core`; run the orders store test suites against BOTH
-   backends; crash-durability via core's re-exec pattern (integration tag —
-   see census gotcha).
-3. **Wiring**: dispatch in `resolveOrderStore` on
-   `cfg.Beads.ClassBackend(config.BeadClassOrders)` → `.gc/store/orders.db`
-   (controller persistent handle; CLI `WithSingleConn`); flip
-   `sqliteCapableBeadClasses["orders"] = true` + update
-   `TestBeadsClassesSQLiteRejectedUntilImplemented`; construct
-   `NewStoreWithGraph(sqliteBacked, graphStore)` so wisp-root evidence keeps
-   unioning.
-4. **Migration + migrated-marker** per the design's "Seamless upgrade"
-   section; retention sweeper (7d delete_after_close, retain-last-10).
+**Then execute P2 nudges, one slice at a time, TDD, one commit per slice,
+following the P1 pattern** (it is the template — study
+`internal/classdb/orders`, `cmd/gc/order_class_store.go`, and
+`cmd/gc/order_class_migrate.go` before writing anything):
+
+1. **Domain backend seam** for the nudge queue (the merged two-tier model):
+   inventory the flock-guarded `state.json` bucket ops and the shadow-bead
+   ops; define an unexported backend interface at the nudgequeue domain
+   edge; existing impl = today's two-tier machinery, byte-identical, all
+   existing tests pass untouched.
+2. **`internal/classdb/nudges`** (package `nudgesdb`): the design's `nudges`
+   table + indexes over `internal/classdb/core`; claim = single
+   UPDATE…RETURNING against a SET of queue keys (alias history, session id,
+   qualified name); supersession semantics preserved, not "fixed"
+   (superseded in-flight may still deliver once; dead-letter stamping never
+   rolls back); both-backend conformance suite through the public queue
+   surface; crash gate (acked-enqueue survival) via core's re-exec pattern
+   (integration tag + three-artifact census bump).
+3. **Wiring** behind `[beads.classes.nudges]` + `.gc/store/nudges.migrated`
+   (mirror orders exactly: routing resolver, fail-closed roots, seam-guard
+   test, ratchet flip + config acceptance test); fold in the
+   `session.Manager` deferred-submit direct write
+   (`internal/session/submit.go:544`); wake socket and session/epoch fences
+   unchanged.
+4. **Migration** (drain-or-import live queue + ≤24h shadow history) + marker
+   + residue cleanup; **`nudge.*` typed events**
+   (`events.RegisterPayload`!); reaper.sh nudge-leg rewrite per the design's
+   bd-surface story; terminal-row TTL retention via `core.StartSweeper` —
+   nudges has NO existing retention path (unlike orders, where the routed
+   watchdog already owned it), so the store's own sweeper is correct here.
 
 **Discipline / gotchas (all recorded in HANDOFF.md):**
-- Quality gates per slice: package tests + affected neighbors; sharded
-  targets only (never monolithic `go test ./cmd/gc`).
+- Sharded test targets only (never monolithic `go test ./cmd/gc`); give
+  `git commit` a long timeout (the pre-commit hook runs `go vet ./...`).
 - This box's default `umask 002` fails `TestWriteRunMap*` everywhere incl.
-  clean main — run pre-push/full suites and `git push` under
-  `(umask 022 && …)` for CI parity.
-- New subprocess-spawning tests: `//go:build integration` tag, else the
-  resource-census untagged ratchet fires; ScopeAll bumps touch THREE
-  lockstepped artifacts (resourcecensus/census.go, test/test-resources.toml,
-  TESTING.md).
-- Do not port Dolt-lag workarounds (close-verify retries, ≥20-char
-  close_reason floors) into the sqlite backend.
+  clean main — run full suites and `git push` under `(umask 022 && …)`.
+- New subprocess tests: `//go:build integration` + the THREE lockstepped
+  census artifacts; `git add` new test files before running the census.
+- Never `time.Sleep` in tests (fixed_sleep ratchet is hard); consecutive
+  `time.Now()` stamps are distinct.
+- Never wrap a beads.Store that flows into capability-asserting paths —
+  thread routing explicitly (dispatcher field / params / State provider).
 - Push to `origin/feat/infra-class-sqlite-stores` before ending the session.

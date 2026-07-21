@@ -244,6 +244,16 @@ func doBdSQLiteInfraUpdate(st beads.Store, id string, flags []string, stdout, st
 				return 1
 			}
 			meta[kv[0]] = kv[1]
+		case f == "--unset-metadata" || strings.HasPrefix(f, "--unset-metadata="):
+			// bd removes the key; the Store metadata patch has no delete, so an
+			// empty value is the unset the workflow contracts read (all these
+			// keys are truthiness markers: failure_reason, failed_attempt, …).
+			v, ok := val()
+			if !ok {
+				fmt.Fprintln(stderr, "gc bd update: --unset-metadata requires a key") //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			meta[v] = ""
 		case f == "--status" || strings.HasPrefix(f, "--status="):
 			v, ok := val()
 			if !ok {

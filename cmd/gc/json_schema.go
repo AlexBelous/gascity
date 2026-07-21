@@ -284,6 +284,14 @@ func resolveJSONContractDisposition(root *cobra.Command, args []string) (jsonReq
 	if isBDCommandPath(commandPath) {
 		return request, jsonContractPassthrough
 	}
+	// Commands that declare raw-JSON passthrough (gc ready, mirroring gc bd)
+	// always emit machine-readable JSON; --json is accepted for bd parity and
+	// must not require a registered schema. Without this the front door
+	// rejects the split-city work-query rewrite (bd ready -> gc ready --json)
+	// and every worker hook on a split city goes blind.
+	if cmd.Annotations[jsonRawPassthroughAnnotation] == "true" {
+		return request, jsonContractPassthrough
+	}
 	if _, err := readCommandSchema(cmd, commandPath, jsonSchemaResultRole); err != nil {
 		if allowMissingLocalJSONSchemaPassthrough(cmd, err) {
 			return request, jsonContractPassthroughWithWarning

@@ -36,14 +36,15 @@ const (
 	cachedSessionBeadRefreshInterval = 30 * time.Second
 )
 
-// Provider implements [mail.Provider] using [beads.Store] as the backend.
+// Provider implements [mail.Provider] over a messages backend.
 //
-// store persists message beads (messaging class); sessionStore serves the
-// session-bead reads/writes mail uses for addressing and identity resolution
-// (session class). They are the same work store at the single-store bd backend
-// and diverge only once [beads.classes.sessions] relocates the session backend.
+// backend persists messages (messaging class — the bd bead codec today, the
+// embedded class store once [beads.classes.messaging] relocates the class);
+// sessionStore serves the session-bead reads/writes mail uses for addressing
+// and identity resolution (session class). At the single-store bd backend
+// both ride the same work store and diverge only as classes relocate.
 type Provider struct {
-	store        beads.Store
+	backend      messagesBackend
 	sessionStore beads.Store
 	sessionCache *sessionBeadCache
 }
@@ -73,7 +74,15 @@ func New(store beads.Store) *Provider {
 // same store for both at the single-store bd backend; pass the relocated session
 // store once [beads.classes.sessions] moves so mail addressing follows it.
 func NewWithStores(msgStore, sessionStore beads.Store) *Provider {
-	return &Provider{store: msgStore, sessionStore: sessionStore}
+	return &Provider{backend: beadStore{store: msgStore}, sessionStore: sessionStore}
+}
+
+// NewWithBackend wraps a non-bead messages backend (the embedded class
+// store) as a mail provider, with session addressing on sessionStore. The
+// backend parameter is deliberately the unexported interface: callers pass
+// any structural implementation, but only *Provider escapes.
+func NewWithBackend(backend messagesBackend, sessionStore beads.Store) *Provider {
+	return &Provider{backend: backend, sessionStore: sessionStore}
 }
 
 // NewCached returns a beadmail provider backed by the given store with a
@@ -91,7 +100,7 @@ func NewCached(store beads.Store) *Provider {
 // session enumeration cache reading from sessionStore.
 func NewCachedWithStores(msgStore, sessionStore beads.Store) *Provider {
 	return &Provider{
-		store:        msgStore,
+		backend:      beadStore{store: msgStore},
 		sessionStore: sessionStore,
 		sessionCache: &sessionBeadCache{refreshInterval: cachedSessionBeadRefreshInterval},
 	}
@@ -145,12 +154,10 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
 	}
-	from, metadata, err := p.resolveSenderRoute(from)
+	from, fromSessionID, fromDisplay, err := p.resolveSenderRoute(from)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
 	}
-	threadID := generateThreadID()
-	labels := []string{"thread:" + threadID}
 
 	title := subject
 	if title == "" && body != "" {
@@ -160,11 +167,19 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		}
 	}
 
-	b, err := p.createMessageBead(title, body, from, to, labels, metadata)
+	rec, err := p.backend.Create(NewMessage{
+		Subject:       title,
+		Body:          body,
+		From:          from,
+		To:            to,
+		ThreadID:      generateThreadID(),
+		FromSessionID: fromSessionID,
+		FromDisplay:   fromDisplay,
+	})
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
 	}
-	return beadToMessage(b), nil
+	return rec.Message(), nil
 }
 
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks
@@ -176,60 +191,49 @@ func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) 
 	if intent.To == "" {
 		return mail.Message{}, fmt.Errorf("beadmail handoff: recipient is required")
 	}
-	from, metadata, err := p.resolveSenderRoute(intent.From)
+	from, fromSessionID, fromDisplay, err := p.resolveSenderRoute(intent.From)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
 	}
-	labels := make([]string, 0, 1+len(intent.ExtraLabels))
-	labels = append(labels, "thread:"+intent.ThreadID)
-	labels = append(labels, intent.ExtraLabels...)
 
-	b, err := p.createMessageBead(intent.Subject, intent.Body, from, intent.To, labels, metadata)
-	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
-	}
-	return beadToMessage(b), nil
-}
-
-// createMessageBead is the single confined edge where a mail message becomes a
-// type=message bead. Every mail-creating method (Send, SendHandoff, Reply)
-// funnels its already-resolved fields through here so the bead shape stays in
-// one place.
-func (p *Provider) createMessageBead(title, body, from, to string, labels []string, metadata map[string]string) (beads.Bead, error) {
-	return p.store.Create(beads.Bead{
-		Title:       title,
-		Description: body,
-		Type:        messageBeadType,
-		Assignee:    to,
-		From:        from,
-		Labels:      labels,
-		Metadata:    metadata,
-		Ephemeral:   true,
+	rec, err := p.backend.Create(NewMessage{
+		Subject:       intent.Subject,
+		Body:          intent.Body,
+		From:          from,
+		To:            intent.To,
+		ThreadID:      intent.ThreadID,
+		FromSessionID: fromSessionID,
+		FromDisplay:   fromDisplay,
+		ExtraLabels:   intent.ExtraLabels,
 	})
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+	}
+	return rec.Message(), nil
 }
 
-func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {
+// resolveSenderRoute resolves a sender to its display address plus the
+// stable session id / display fields the create path persists for reply
+// routing. Unresolvable senders (blank, "human", no session store, or a
+// not-found/ambiguous lookup) pass through with empty routing fields.
+func (p *Provider) resolveSenderRoute(from string) (resolved, fromSessionID, fromDisplay string, err error) {
 	from = strings.TrimSpace(from)
 	if from == "" || from == "human" || p.sessionStore == nil {
-		return from, nil, nil
+		return from, "", "", nil
 	}
 	sessionID, err := session.ResolveSessionID(p.sessionStore, from)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, session.ErrAmbiguous) {
-			return from, nil, nil
+			return from, "", "", nil
 		}
-		return "", nil, fmt.Errorf("resolving sender %q: %w", from, err)
+		return "", "", "", fmt.Errorf("resolving sender %q: %w", from, err)
 	}
 	b, err := p.sessionStore.Get(sessionID)
 	if err != nil {
-		return "", nil, fmt.Errorf("loading sender session %q: %w", sessionID, err)
+		return "", "", "", fmt.Errorf("loading sender session %q: %w", sessionID, err)
 	}
 	display := senderDisplayAddress(b, from)
-	metadata := map[string]string{fromSessionIDMetadataKey: sessionID}
-	if display != "" {
-		metadata[fromDisplayMetadataKey] = display
-	}
-	return display, metadata, nil
+	return display, sessionID, display, nil
 }
 
 func senderDisplayAddress(b beads.Bead, fallback string) string {
@@ -260,73 +264,75 @@ func (p *Provider) InboxRecipients(recipients []string) ([]mail.Message, error) 
 	return p.filterMessagesForRecipients(recipients, false)
 }
 
-// Get retrieves a message by ID without marking it read.
-// Returns an error if the bead is not a message type.
-func (p *Provider) Get(id string) (mail.Message, error) {
-	b, err := p.store.Get(id)
+// getRecord loads the record for id with the per-operation error
+// vocabulary: absent → beadmailError(op, not-found); removed (the
+// 6b0eb0d6b addressability gate) → beadmailError(op, not-found);
+// wrong-class → the caller-supplied formatter (nil formats the operation's
+// generic wrap around NotAMessageError).
+func (p *Provider) getRecord(op, id string, wrongType func(NotAMessageError) error) (Record, error) {
+	rec, found, err := p.backend.Get(id)
 	if err != nil {
-		return mail.Message{}, beadmailError("get", err)
+		var notMsg NotAMessageError
+		if errors.As(err, &notMsg) {
+			if wrongType != nil {
+				return Record{}, wrongType(notMsg)
+			}
+			return Record{}, fmt.Errorf("beadmail %s: %w", op, notMsg)
+		}
+		return Record{}, beadmailError(op, err)
 	}
-	if b.Type != messageBeadType {
-		return mail.Message{}, fmt.Errorf("beadmail get: bead %s is type %q, not message", id, b.Type)
+	if !found {
+		return Record{}, beadmailError(op, beads.ErrNotFound)
 	}
-	if isRemovedMessageBead(b) {
-		return mail.Message{}, beadmailError("get", beads.ErrNotFound)
+	if isRemovedRecord(rec) {
+		return Record{}, beadmailError(op, beads.ErrNotFound)
 	}
-	return beadToMessage(b), nil
+	return rec, nil
 }
 
-// Read retrieves a message by ID and marks it as read (adds "read" label).
+// Get retrieves a message by ID without marking it read.
+// Returns an error if the stored record is not a message.
+func (p *Provider) Get(id string) (mail.Message, error) {
+	rec, err := p.getRecord("get", id, func(e NotAMessageError) error {
+		return fmt.Errorf("beadmail get: bead %s is type %q, not message", e.ID, e.Type)
+	})
+	if err != nil {
+		return mail.Message{}, err
+	}
+	return rec.Message(), nil
+}
+
+// Read retrieves a message by ID and marks it as read.
 // The message remains in the store (not closed).
 func (p *Provider) Read(id string) (mail.Message, error) {
-	b, err := p.store.Get(id)
+	rec, err := p.getRecord("read", id, nil)
 	if err != nil {
-		return mail.Message{}, beadmailError("read", err)
+		return mail.Message{}, err
 	}
-	if isRemovedMessageBead(b) {
-		return mail.Message{}, beadmailError("read", beads.ErrNotFound)
-	}
-	if !hasLabel(b.Labels, "read") {
-		if err := p.store.Update(id, beads.UpdateOpts{
-			Labels:   []string{"read"},
-			Metadata: map[string]string{"mail.read": "true"},
-		}); err != nil {
+	if !rec.ReadLabel {
+		if err := p.backend.SetRead(id, true); err != nil {
 			return mail.Message{}, fmt.Errorf("beadmail read: marking as read: %w", err)
 		}
 	}
-	msg := beadToMessage(b)
+	msg := rec.Message()
 	msg.Read = true
 	return msg, nil
 }
 
-// MarkRead marks a message as read (adds "read" label).
+// MarkRead marks a message as read.
 func (p *Provider) MarkRead(id string) error {
-	b, err := p.store.Get(id)
-	if err != nil {
-		return beadmailError("mark-read", err)
+	if _, err := p.getRecord("mark-read", id, nil); err != nil {
+		return err
 	}
-	if isRemovedMessageBead(b) {
-		return beadmailError("mark-read", beads.ErrNotFound)
-	}
-	return p.store.Update(id, beads.UpdateOpts{
-		Labels:   []string{"read"},
-		Metadata: map[string]string{"mail.read": "true"},
-	})
+	return p.backend.SetRead(id, true)
 }
 
-// MarkUnread marks a message as unread (removes "read" label).
+// MarkUnread marks a message as unread.
 func (p *Provider) MarkUnread(id string) error {
-	b, err := p.store.Get(id)
-	if err != nil {
-		return beadmailError("mark-unread", err)
+	if _, err := p.getRecord("mark-unread", id, nil); err != nil {
+		return err
 	}
-	if isRemovedMessageBead(b) {
-		return beadmailError("mark-unread", beads.ErrNotFound)
-	}
-	return p.store.Update(id, beads.UpdateOpts{
-		RemoveLabels: []string{"read"},
-		Metadata:     map[string]string{"mail.read": "false"},
-	})
+	return p.backend.SetRead(id, false)
 }
 
 // ArchiveFilter selects open message beads for bounded archive cleanup.
@@ -341,32 +347,27 @@ type ArchiveFilter struct {
 	Limit           int
 }
 
-// Archive deletes a message bead without reading it.
+// Archive deletes a message without reading it.
 func (p *Provider) Archive(id string) error {
-	b, err := p.store.Get(id)
+	rec, found, err := p.backend.Get(id)
 	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			return mail.ErrAlreadyArchived
+		var notMsg NotAMessageError
+		if errors.As(err, &notMsg) {
+			return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
-	if b.Type != messageBeadType {
-		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
-	}
-	if b.Status == "closed" {
-		if err := p.store.Delete(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return mail.ErrAlreadyArchived
-			}
-			return fmt.Errorf("beadmail archive: %w", err)
-		}
+	if !found {
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Delete(id); err != nil {
+	if err := p.backend.Delete(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
+	}
+	if !rec.Open {
+		return mail.ErrAlreadyArchived
 	}
 	return nil
 }
@@ -375,20 +376,14 @@ func (p *Provider) Archive(id string) error {
 // them.
 func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, error) {
 	routes := p.recipientRoutesForAll(filter.Recipients)
-	candidates, err := p.messageCandidatesForRoutes(routes)
+	candidates, err := p.backend.ListOpenForRecipients(routes, true)
 	if err != nil {
 		return nil, fmt.Errorf("beadmail archive matching: %w", err)
 	}
 	matches := make([]mail.Message, 0, len(candidates))
-	for _, b := range candidates {
-		if b.Status != "open" {
-			continue
-		}
-		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
-			continue
-		}
-		msg := beadToMessage(b)
-		if !filter.IncludeRead && msg.Read {
+	for _, rec := range candidates {
+		msg := rec.Message()
+		if !filter.IncludeRead && rec.Read {
 			continue
 		}
 		if !archiveExactMatches(msg.From, filter.From, filter.CaseInsensitive) {
@@ -428,7 +423,7 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Delete(id); err != nil {
+		if err := p.backend.Delete(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
 				continue
@@ -448,20 +443,19 @@ func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 		if id == "" {
 			continue
 		}
-		b, err := p.store.Get(id)
+		rec, found, err := p.backend.Get(id)
 		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
+			var notMsg NotAMessageError
+			if errors.As(err, &notMsg) {
 				continue
 			}
 			errs = append(errs, fmt.Errorf("loading %s: %w", id, err))
 			continue
 		}
-		if b.Type != messageBeadType ||
-			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
-			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
+		if !found || !rec.AutoHandoff || !rec.ArchiveAfterInject {
 			continue
 		}
-		if err := p.store.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		if err := p.backend.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
 			errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
 		}
 	}
@@ -542,60 +536,48 @@ func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 // original, sets ReplyTo to the original's ID. Reply is addressed to the
 // original sender.
 func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
-	original, err := p.store.Get(id)
+	original, err := p.getRecord("reply", id, nil)
 	if err != nil {
-		return mail.Message{}, beadmailError("reply", err)
+		return mail.Message{}, err
 	}
-	if isRemovedMessageBead(original) {
-		return mail.Message{}, beadmailError("reply", beads.ErrNotFound)
-	}
-	toSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
+	toSessionID := original.FromSessionID
 	to := toSessionID
 	if to == "" {
-		to = strings.TrimSpace(original.From)
+		to = strings.TrimSpace(original.FromAddr)
 	}
 	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
 	}
-	toDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
+	toDisplay := original.FromDisplay
 	if toDisplay == "" {
-		toDisplay = strings.TrimSpace(original.From)
+		toDisplay = strings.TrimSpace(original.FromAddr)
 	}
-	from, metadata, err := p.resolveSenderRoute(from)
+	from, fromSessionID, fromDisplay, err := p.resolveSenderRoute(from)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
-	if metadata == nil {
-		metadata = make(map[string]string)
-	}
-	if toSessionID != "" {
-		metadata[toSessionIDMetadataKey] = toSessionID
-	}
-	if toDisplay != "" {
-		metadata[toDisplayMetadataKey] = toDisplay
-	}
 
-	threadID := extractLabel(original.Labels, "thread:")
+	threadID := original.ThreadID
 	if threadID == "" {
 		threadID = generateThreadID()
 	}
 
-	labels := []string{"thread:" + threadID, "reply-to:" + id}
-
-	b, err := p.store.Create(beads.Bead{
-		Title:       deriveReplyTitle(subject, original.Title, body),
-		Description: body,
-		Type:        messageBeadType,
-		Assignee:    to, // reply goes back to sender
-		From:        from,
-		Labels:      labels,
-		Metadata:    metadata,
-		Ephemeral:   true,
+	rec, err := p.backend.Create(NewMessage{
+		Subject:       deriveReplyTitle(subject, original.Subject, body),
+		Body:          body,
+		From:          from,
+		To:            to, // reply goes back to sender
+		ThreadID:      threadID,
+		ReplyToID:     id,
+		FromSessionID: fromSessionID,
+		FromDisplay:   fromDisplay,
+		ToSessionID:   toSessionID,
+		ToDisplay:     toDisplay,
 	})
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
-	return beadToMessage(b), nil
+	return rec.Message(), nil
 }
 
 // beadmailError wraps a store error for the given mail operation, deliberately
@@ -610,32 +592,33 @@ func beadmailError(operation string, err error) error {
 	return fmt.Errorf("beadmail %s: %w", operation, err)
 }
 
-// isRemovedMessageBead reports whether b is a message bead that direct-ID
-// operations must treat as removed. The eager-delete archive path removes a
-// message bead from the store outright, but a store upgraded from a release
+// isRemovedRecord reports whether a stored message record must be treated
+// as removed by direct-ID operations. The eager-delete archive path removes
+// a message from the store outright, but a store upgraded from a release
 // that archived by closing (rather than deleting) can still hold closed
-// Type=="message" beads. Those legacy user-removed beads must not stay readable
-// or mutable through Get/Read/MarkRead/MarkUnread/Reply/Thread — the same "open
-// only" visibility the list views (Inbox/Check/All/Count) already enforce — even
-// though Archive can still delete one when it is called explicitly.
+// messages. Those legacy user-removed records must not stay readable or
+// mutable through Get/Read/MarkRead/MarkUnread/Reply/Thread — the same
+// "open only" visibility the list views (Inbox/Check/All/Count) already
+// enforce — even though Archive can still delete one when it is called
+// explicitly.
 //
-// Retention-swept read mail is NOT user-removed and must be excluded here. The
-// always-on nudge-mail watchdog closes read mail past its TTL (stamping
-// [RetentionSweepCloseReason]) and PurgeReadMessageWisps deletes it later;
+// Retention-swept read mail is NOT user-removed and must be excluded here.
+// The always-on nudge-mail watchdog closes read mail past its TTL (stamping
+// [RetentionSweepCloseReason]) and the read-mail purge deletes it later;
 // between close and purge the message is only system-aged. Gating on bare
-// Status!="open" turned every retention-swept read message into a not-found the
-// moment the sweep ran — an always-on regression for any caller that holds a
-// message ID and re-reads or replies to it after the TTL (a long-latency human
-// approval reply, a persisted molecule handle). Excluding the retention reason
-// preserves that pre-sweep addressability while still hiding genuinely
-// user-removed beads.
-func isRemovedMessageBead(b beads.Bead) bool {
-	if b.Type != messageBeadType || b.Status == "open" {
+// not-open turned every retention-swept read message into a not-found the
+// moment the sweep ran — an always-on regression for any caller that holds
+// a message ID and re-reads or replies to it after the TTL (a long-latency
+// human approval reply, a persisted molecule handle). Excluding the
+// retention reason preserves that pre-sweep addressability while still
+// hiding genuinely user-removed records.
+func isRemovedRecord(rec Record) bool {
+	if rec.Open {
 		return false
 	}
 	// Retention-swept mail is system-aged, not user-removed; it stays
-	// addressable until PurgeReadMessageWisps deletes it.
-	return b.Metadata["close_reason"] != RetentionSweepCloseReason
+	// addressable until the read-mail purge deletes it.
+	return rec.CloseReason != RetentionSweepCloseReason
 }
 
 // deriveReplyTitle returns a non-empty title for a reply message. Callers
@@ -672,44 +655,36 @@ func deriveReplyTitle(subject, originalTitle, body string) string {
 // so callers that already know the thread ID still work.
 func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	threadID := id
-	msgBead, err := p.store.Get(id)
+	rec, found, err := p.backend.Get(id)
 	switch {
-	case err == nil:
-		if msgBead.Type != messageBeadType {
-			return nil, fmt.Errorf("beadmail thread: bead %q is type %q, want message", id, msgBead.Type)
+	case err == nil && found:
+		if rec.ThreadID != "" {
+			threadID = rec.ThreadID
 		}
-		if t := extractLabel(msgBead.Labels, "thread:"); t != "" {
-			threadID = t
-		}
-	case errors.Is(err, beads.ErrNotFound):
-		// Caller passed a non-bead-id (e.g., a real thread-id); fall through.
+	case err == nil && !found:
+		// Caller passed a non-message-id (e.g., a real thread-id); fall through.
 	default:
+		var notMsg NotAMessageError
+		if errors.As(err, &notMsg) {
+			return nil, fmt.Errorf("beadmail thread: bead %q is type %q, want message", notMsg.ID, notMsg.Type)
+		}
 		return nil, fmt.Errorf("beadmail thread: resolving %q: %w", id, err)
 	}
-	bs, err := p.store.List(beads.ListQuery{
-		Label:    "thread:" + threadID,
-		Type:     messageBeadType,
-		Sort:     beads.SortCreatedAsc,
-		TierMode: beads.TierBoth,
-	})
+	recs, err := p.backend.ListThread(threadID)
 	if err != nil {
 		return nil, fmt.Errorf("beadmail thread: %w", err)
 	}
-	msgs := make([]mail.Message, 0, len(bs))
-	for _, b := range bs {
-		if b.Status != "open" {
-			// Thread listings show only open messages, matching the list views
-			// and the pre-removal List-without-IncludeClosed behavior: a closed
-			// message bead — whether a legacy close-on-archive remnant or a
+	msgs := make([]mail.Message, 0, len(recs))
+	for _, rec := range recs {
+		if !rec.Open {
+			// Thread listings show only open messages, matching the list views:
+			// a closed message — whether a legacy close-on-archive remnant or a
 			// retention-swept read message — stays out of thread views. (A
-			// retention-swept message is still resolvable by direct-ID Get, but,
-			// like the list views, it is retired from these aggregate views.)
+			// retention-swept message is still resolvable by direct-ID Get.)
 			continue
 		}
-		msgs = append(msgs, beadToMessage(b))
+		msgs = append(msgs, rec.Message())
 	}
-	// Note: store.List already sorts by SortCreatedAsc with an ID tie-break
-	// (see sortBeadsForQuery in internal/beads/query.go), so no post-sort here.
 	return msgs, nil
 }
 
@@ -729,52 +704,30 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 		return 0, 0, nil
 	}
 	routes := p.recipientRoutesForAll(recipients)
-	candidates, err := p.messageCandidatesForRoutes(routes)
+	total, unread, err := p.backend.CountOpenForRecipients(routes)
 	if err != nil {
 		return 0, 0, fmt.Errorf("listing messages: %w", err)
-	}
-	var total, unread int
-	for _, b := range candidates {
-		if b.Status != "open" {
-			continue
-		}
-		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
-			continue
-		}
-		total++
-		if !hasLabel(b.Labels, "read") {
-			unread++
-		}
 	}
 	return total, unread, nil
 }
 
-// filterMessages returns open message beads assigned to the recipient.
-// When includeRead is false, messages with the "read" label are excluded.
+// filterMessages returns open messages assigned to the recipient.
+// When includeRead is false, read messages are excluded.
 func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
 	return p.filterMessagesForRecipients([]string{recipient}, includeRead)
 }
 
-// filterMessagesForRecipients returns open message beads assigned to any
+// filterMessagesForRecipients returns open messages assigned to any
 // recipient route represented by recipients. Empty recipients mean all routes.
 func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead bool) ([]mail.Message, error) {
 	routes := p.recipientRoutesForAll(recipients)
-	candidates, err := p.messageCandidatesForRoutes(routes)
+	recs, err := p.backend.ListOpenForRecipients(routes, includeRead)
 	if err != nil {
 		return nil, fmt.Errorf("beadmail: listing beads: %w", err)
 	}
 	var msgs []mail.Message
-	for _, b := range candidates {
-		if b.Status != "open" {
-			continue
-		}
-		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
-			continue
-		}
-		if !includeRead && hasLabel(b.Labels, "read") {
-			continue
-		}
-		msgs = append(msgs, beadToMessage(b))
+	for _, rec := range recs {
+		msgs = append(msgs, rec.Message())
 	}
 	return msgs, nil
 }
@@ -789,22 +742,6 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 // would route such a bead to ClassGraph).
 func IsMessageBead(b beads.Bead) bool {
 	return b.Type == messageBeadType
-}
-
-// readMessagesBefore lists read message beads created before `before`, oldest
-// first — the candidate set for the stale-mail retention sweep. The message-bead
-// query shape (Type + "read" label) stays confined to this package, per the
-// package invariant that callers above beadmail never construct a message-bead
-// query directly. limit == 0 means unbounded.
-func readMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads.Bead, error) {
-	return store.List(beads.ListQuery{
-		Type:          messageBeadType,
-		Label:         "read",
-		CreatedBefore: before,
-		Limit:         limit,
-		Sort:          beads.SortCreatedAsc,
-		TierMode:      beads.TierBoth,
-	})
 }
 
 // RetentionSweepCloseReason is the canonical close_reason the read-mail
@@ -839,23 +776,20 @@ const RetentionSweepCloseReason = "mail gc-swept: read mail bead past gc retenti
 // swept), while closeErrs holds the per-bead metadata/close failures that do not
 // abort the sweep. Returns the number of beads closed.
 func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int, closeReason string) (closed int, closeErrs []error, listErr error) {
-	candidates, err := readMessagesBefore(store.Store, cutoff, limit)
+	backend := beadStore{store: store.Store}
+	candidates, err := backend.ListReadCreatedBefore(cutoff, limit)
 	if err != nil {
 		return 0, nil, err
 	}
-	for _, b := range candidates {
+	for _, rec := range candidates {
 		if limit > 0 && closed >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !rec.Open {
 			continue
 		}
-		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
-			closeErrs = append(closeErrs, fmt.Errorf("mail %s: set close_reason: %w", b.ID, err))
-			continue
-		}
-		if err := store.Close(b.ID); err != nil {
-			closeErrs = append(closeErrs, fmt.Errorf("mail %s: close: %w", b.ID, err))
+		if err := backend.CloseReadWithReason(rec.ID, closeReason); err != nil {
+			closeErrs = append(closeErrs, err)
 			continue
 		}
 		closed++
@@ -868,16 +802,16 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 // dry-run twin of the sweep and shares its candidate query and limit semantics so
 // the two stay in lockstep.
 func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int) (int, error) {
-	candidates, err := readMessagesBefore(store.Store, cutoff, limit)
+	candidates, err := beadStore{store: store.Store}.ListReadCreatedBefore(cutoff, limit)
 	if err != nil {
 		return 0, err
 	}
 	count := 0
-	for _, b := range candidates {
+	for _, rec := range candidates {
 		if limit > 0 && count >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !rec.Open {
 			continue
 		}
 		count++
@@ -895,28 +829,7 @@ func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int)
 // skipped. Per-bead delete failures are joined and returned without aborting the
 // sweep; returns the number of beads purged.
 func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time) (int, error) {
-	entries, err := store.List(beads.ListQuery{
-		Type:          messageBeadType,
-		Metadata:      map[string]string{mail.ReadMetadataKey: "true"},
-		IncludeClosed: true,
-		TierMode:      beads.TierWisps,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("listing read message wisps: %w", err)
-	}
-	purged := 0
-	var deleteErr error
-	for _, entry := range entries {
-		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
-			continue
-		}
-		if err := deleteMessageWispBead(store.Store, entry.ID); err != nil {
-			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting expired bead %q: %w", entry.ID, err))
-			continue
-		}
-		purged++
-	}
-	return purged, deleteErr
+	return beadStore{store: store.Store}.PurgeReadCreatedBefore(cutoff)
 }
 
 // deleteMessageWispBead removes a message wisp bead, stripping its dependencies
@@ -1183,77 +1096,6 @@ func matchesRecipientRoute(routes []string, assignee string) bool {
 		}
 	}
 	return false
-}
-
-func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, error) {
-	return p.messageCandidatesAll(routes)
-}
-
-// messageCandidatesAll returns all open message beads matching any route.
-// TierBoth is one logical query; BdStore may satisfy it with separate
-// issue-tier and wisp-tier reads before deduping. Empty routes return all open
-// messages. Live reads are required so command-visible mail sees fresh wisps
-// even when the active store cache was primed earlier.
-func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
-	query := beads.ListQuery{
-		Type:     messageBeadType,
-		Status:   "open",
-		TierMode: beads.TierBoth,
-		Live:     true,
-	}
-	if len(routes) > 0 {
-		query.Assignees = routes
-	} else {
-		query.AllowScan = true
-	}
-	all, err := p.store.List(query)
-	if err != nil {
-		return nil, fmt.Errorf("scanning message beads: %w", err)
-	}
-	if len(routes) == 0 {
-		return all, nil
-	}
-	out := make([]beads.Bead, 0, len(all))
-	for _, b := range all {
-		// matchesRecipientRoute is defense-in-depth: HQStore returns exact
-		// matches from the index; BdStore multi-route fallback may return excess.
-		if matchesRecipientRoute(routes, b.Assignee) {
-			out = append(out, b)
-		}
-	}
-	return out, nil
-}
-
-// beadToMessage converts a bead to a mail.Message.
-func beadToMessage(b beads.Bead) mail.Message {
-	from := b.From
-	if display := strings.TrimSpace(b.Metadata[fromDisplayMetadataKey]); display != "" {
-		from = display
-	}
-	to := b.Assignee
-	if display := strings.TrimSpace(b.Metadata[toDisplayMetadataKey]); display != "" {
-		to = display
-	}
-	read := hasLabel(b.Labels, "read")
-	switch b.Metadata["mail.read"] {
-	case "true":
-		read = true
-	case "false":
-		read = false
-	}
-	return mail.Message{
-		ID:        b.ID,
-		From:      from,
-		To:        to,
-		Subject:   b.Title,
-		Body:      b.Description,
-		CreatedAt: b.CreatedAt,
-		Read:      read,
-		ThreadID:  extractLabel(b.Labels, "thread:"),
-		ReplyTo:   extractLabel(b.Labels, "reply-to:"),
-		Priority:  extractPriority(b.Labels),
-		CC:        extractCC(b.Labels),
-	}
 }
 
 // hasLabel reports whether labels contains the target string.

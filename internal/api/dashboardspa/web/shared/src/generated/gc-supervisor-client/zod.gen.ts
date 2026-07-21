@@ -826,6 +826,14 @@ export const zFormulaFeedBody = z.object({
 
 export const zNoPayload = z.record(z.string(), z.never());
 
+export const zNudgeLifecyclePayload = z.object({
+    agent: z.string(),
+    id: z.string(),
+    outcome: z.string().optional(),
+    reason: z.string().optional(),
+    source: z.string().optional()
+});
+
 export const zOkResponseBody = z.object({
     status: z.string()
 });
@@ -3217,6 +3225,7 @@ export const zEventPayload = z.union([
     zMailEventPayload,
     zMoleculeResolvedPayload,
     zNoPayload,
+    zNudgeLifecyclePayload,
     zOutboundChannelMismatchPayload,
     zOutboundEventPayload,
     zPostgresCredentialResolvedPayload,
@@ -4033,6 +4042,57 @@ export const zTypedEventStreamEnvelopeMoleculeResolved = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope nudge.dead
+ */
+export const zTypedEventStreamEnvelopeNudgeDead = z.object({
+    actor: z.string(),
+    message: z.string().optional(),
+    payload: zNudgeLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('nudge.dead'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope nudge.delivered
+ */
+export const zTypedEventStreamEnvelopeNudgeDelivered = z.object({
+    actor: z.string(),
+    message: z.string().optional(),
+    payload: zNudgeLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('nudge.delivered'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope nudge.queued
+ */
+export const zTypedEventStreamEnvelopeNudgeQueued = z.object({
+    actor: z.string(),
+    message: z.string().optional(),
+    payload: zNudgeLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('nudge.queued'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope order.completed
  */
 export const zTypedEventStreamEnvelopeOrderCompleted = z.object({
@@ -4707,6 +4767,9 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeMailReplied.extend({ type: z.literal('mail.replied') }),
     zTypedEventStreamEnvelopeMailSent.extend({ type: z.literal('mail.sent') }),
     zTypedEventStreamEnvelopeMoleculeResolved.extend({ type: z.literal('molecule.resolved') }),
+    zTypedEventStreamEnvelopeNudgeDead.extend({ type: z.literal('nudge.dead') }),
+    zTypedEventStreamEnvelopeNudgeDelivered.extend({ type: z.literal('nudge.delivered') }),
+    zTypedEventStreamEnvelopeNudgeQueued.extend({ type: z.literal('nudge.queued') }),
     zTypedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
@@ -5494,6 +5557,60 @@ export const zTypedTaggedEventStreamEnvelopeMoleculeResolved = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope nudge.dead
+ */
+export const zTypedTaggedEventStreamEnvelopeNudgeDead = z.object({
+    actor: z.string(),
+    city: z.string(),
+    message: z.string().optional(),
+    payload: zNudgeLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('nudge.dead'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope nudge.delivered
+ */
+export const zTypedTaggedEventStreamEnvelopeNudgeDelivered = z.object({
+    actor: z.string(),
+    city: z.string(),
+    message: z.string().optional(),
+    payload: zNudgeLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('nudge.delivered'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope nudge.queued
+ */
+export const zTypedTaggedEventStreamEnvelopeNudgeQueued = z.object({
+    actor: z.string(),
+    city: z.string(),
+    message: z.string().optional(),
+    payload: zNudgeLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('nudge.queued'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope order.completed
  */
 export const zTypedTaggedEventStreamEnvelopeOrderCompleted = z.object({
@@ -6205,6 +6322,9 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeMailReplied.extend({ type: z.literal('mail.replied') }),
     zTypedTaggedEventStreamEnvelopeMailSent.extend({ type: z.literal('mail.sent') }),
     zTypedTaggedEventStreamEnvelopeMoleculeResolved.extend({ type: z.literal('molecule.resolved') }),
+    zTypedTaggedEventStreamEnvelopeNudgeDead.extend({ type: z.literal('nudge.dead') }),
+    zTypedTaggedEventStreamEnvelopeNudgeDelivered.extend({ type: z.literal('nudge.delivered') }),
+    zTypedTaggedEventStreamEnvelopeNudgeQueued.extend({ type: z.literal('nudge.queued') }),
     zTypedTaggedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedTaggedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedTaggedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),

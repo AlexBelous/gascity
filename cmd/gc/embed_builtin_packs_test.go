@@ -144,7 +144,7 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		{"core", "assets/scripts/reaper.sh", doltSystemNeedle, 1},
 		{"core", "assets/scripts/reaper.sh", maintenanceScratchNeedle, 1},
 		{"core", "assets/scripts/reaper.sh", maintenanceTempNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", "expires_at", 1},
+		{"core", "assets/scripts/reaper.sh", "sweep-nudge-mail", 1},
 		{"dolt", "commands/list/run.sh", doltSystemNeedle, 1},
 		{"dolt", "commands/cleanup/run.sh", doltSystemNeedle, 1},
 		{"dolt", "commands/health/run.sh", doltSystemNeedle, 2},

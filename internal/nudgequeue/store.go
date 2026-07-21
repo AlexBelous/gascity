@@ -75,6 +75,10 @@ type NudgeShadow struct {
 	// DeliverAfter / ExpiresAt are the parsed scheduling timestamps if present.
 	DeliverAfter time.Time
 	ExpiresAt    time.Time
+	// CreatedAt is the shadow bead's creation clock (bead-authoritative).
+	CreatedAt time.Time
+	// TerminalAt is the parsed terminal_at stamp, zero while the nudge is live.
+	TerminalAt time.Time
 }
 
 // Store is the nudge-class domain wrapper. It holds the strongly-typed
@@ -126,6 +130,12 @@ func decodeNudgeItem(b beads.Bead) NudgeShadow {
 	if raw := b.Metadata["expires_at"]; raw != "" {
 		if ts, err := time.Parse(time.RFC3339, raw); err == nil {
 			s.ExpiresAt = ts
+		}
+	}
+	s.CreatedAt = b.CreatedAt
+	if raw := b.Metadata["terminal_at"]; raw != "" {
+		if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+			s.TerminalAt = ts
 		}
 	}
 	return s
@@ -346,6 +356,34 @@ func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs m
 			continue
 		}
 		shadows = append(shadows, shadow)
+	}
+	return shadows, nil
+}
+
+// ShadowHistorySince lists every nudge shadow (open and terminal, both
+// storage tiers) created at or after since, oldest first. It is the
+// migration read: the bd->sqlite cutover imports the recent terminal
+// history so wait finalization that runs after the cutover still reads the
+// terminal stamps of nudges delivered before it.
+func (s *Store) ShadowHistorySince(since time.Time) ([]NudgeShadow, error) {
+	if s == nil || s.store.Store == nil {
+		return nil, nil
+	}
+	candidates, err := s.store.List(beads.ListQuery{
+		Label:         nudgeBeadLabel,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, err
+	}
+	shadows := make([]NudgeShadow, 0, len(candidates))
+	for _, b := range candidates {
+		if b.CreatedAt.Before(since) {
+			continue
+		}
+		shadows = append(shadows, decodeNudgeItem(b))
 	}
 	return shadows, nil
 }

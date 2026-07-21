@@ -142,11 +142,21 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated                     = "city.created"
-	CityUnregisterRequested         = "city.unregister_requested"
-	OrderFired                      = "order.fired"
-	OrderCompleted                  = "order.completed"
-	OrderFailed                     = "order.failed"
+	CityCreated             = "city.created"
+	CityUnregisterRequested = "city.unregister_requested"
+	OrderFired              = "order.fired"
+	OrderCompleted          = "order.completed"
+	OrderFailed             = "order.failed"
+
+	// Nudge-queue lifecycle events (infra-class-sqlite-stores design,
+	// Nudges section): typed observability for the deferred-nudge queue,
+	// replacing the incidental bead.* stream the shadow beads produced.
+	// Queued fires on a successful enqueue, Delivered on an injection ack,
+	// Dead on a delivery-failure dead-letter. Emitted for both queue
+	// backends (file and relocated sqlite) — they are queue-level facts.
+	NudgeQueued                     = "nudge.queued"
+	NudgeDelivered                  = "nudge.delivered"
+	NudgeDead                       = "nudge.dead"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -269,6 +279,7 @@ var KnownEventTypes = []string{
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
+	NudgeQueued, NudgeDelivered, NudgeDead,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,

@@ -77,10 +77,29 @@ type BeadClaimRejectedPayload struct {
 // IsEventPayload marks BeadClaimRejectedPayload as an events.Payload variant.
 func (BeadClaimRejectedPayload) IsEventPayload() {}
 
+// NudgeLifecyclePayload is the typed payload for the nudge.queued /
+// nudge.delivered / nudge.dead lifecycle events: the queue-level identity of
+// one deferred nudge plus the transition's outcome vocabulary. Outcome is
+// the ack outcome on delivered ("injected" | "accepted_for_injection") and
+// empty on queued; Reason carries the dead-letter cause on dead.
+type NudgeLifecyclePayload struct {
+	ID      string `json:"id"`
+	Agent   string `json:"agent"`
+	Source  string `json:"source,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// IsEventPayload marks NudgeLifecyclePayload as an events.Payload variant.
+func (NudgeLifecyclePayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
+	RegisterPayload(NudgeQueued, NudgeLifecyclePayload{})
+	RegisterPayload(NudgeDelivered, NudgeLifecyclePayload{})
+	RegisterPayload(NudgeDead, NudgeLifecyclePayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.

@@ -956,89 +956,15 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 4: Close nudge beads whose metadata.expires_at is in the past.
-    # Only beads labelled gc:nudge are candidates — other bead types that stamp
-    # expires_at (e.g. gc:extmsg-binding session bindings) must not be closed
-    # here.  The COALESCE handles whole-second RFC3339+Z, microsecond-width
-    # RFC3339 (MySQL %f tops out at 6 fractional digits), and full
-    # RFC3339Nano (7-9 fractional digits) by truncating the fractional part to
-    # whole seconds for parsing — sub-second precision is immaterial for TTL
-    # expiry.  Rows where every pattern fails STR_TO_DATE return NULL and are
-    # recorded as anomalies rather than silently skipped.
+    # Step 4: Nudge TTL reaping is owned by the nudge store
+    # (infra-class-sqlite-stores design, "stores own retention"): queue
+    # maintenance dead-letters expired items and terminalizes their records,
+    # and the city-level `gc order sweep-nudge-mail` step below closes leaked
+    # bd shadow beads (file backend) or sweeps aged terminal rows (relocated
+    # sqlite backend). The former raw-SQL expiry close over
+    # metadata.expires_at would be a silent no-op once the nudges class
+    # relocates, so the reaper drives the store's own front door instead.
     DB_EXPIRED_ISSUES_CLOSED=0
-    get_sql_rows "$DB" "expired nudge bead with parse anomaly" "
-        SELECT i.id
-        FROM \`$DB\`.issues i
-        INNER JOIN \`$DB\`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
-        WHERE i.status IN ('open', 'in_progress')
-        AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
-        AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
-        AND COALESCE(
-            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
-            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
-            STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
-        ) IS NULL
-    "
-    if [ -n "$SQL_ROWS_RESULT" ]; then
-        while IFS= read -r bad_id; do
-            [ -z "$bad_id" ] && continue
-            record_anomaly "$DB" "nudge bead $bad_id in $DB has unparseable expires_at; skipped by TTL reaper"
-        done <<< "$SQL_ROWS_RESULT"
-    fi
-
-    # Expired nudge beads are closed bare (no --force) below, which is only safe
-    # when they are unassigned: bd's cross-actor close guard would otherwise
-    # reject the reaper's bare close and the expired nudge would leak. Nudge
-    # shadow beads are created unassigned, so the COALESCE(i.assignee,'')=''
-    # filter makes that invariant explicit rather than relying on producers to
-    # never assign one. An assigned expired nudge is skipped here, and the
-    # stale path below skips it too because that query excludes rows with a
-    # non-empty expires_at; that is acceptable because an assigned nudge would
-    # be a producer anomaly rather than expected TTL work.
-    get_sql_rows "$DB" "expired nudge bead" "
-        SELECT i.id
-        FROM \`$DB\`.issues i
-        INNER JOIN \`$DB\`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
-        WHERE i.status IN ('open', 'in_progress')
-        AND COALESCE(i.assignee, '') = ''
-        AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
-        AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
-        AND COALESCE(
-            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
-            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
-            STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
-        ) < UTC_TIMESTAMP()
-    "
-    EXPIRED_IDS=$SQL_ROWS_RESULT
-    if [ -n "$EXPIRED_IDS" ]; then
-        WOULD_EXPIRE_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-        TOTAL_WOULD_EXPIRE=$((TOTAL_WOULD_EXPIRE + WOULD_EXPIRE_COUNT))
-    fi
-
-    if [ -n "$EXPIRED_IDS" ] && [ -z "$DRY_RUN" ]; then
-        if [ -z "$CITY_DB" ]; then
-            if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
-                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; expired nudge close disabled"
-                CITY_DB_ANOMALY_RECORDED=1
-            fi
-            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
-        elif [ "$DB" != "$CITY_DB" ]; then
-            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
-        else
-            while IFS= read -r issue_id; do
-                [ -z "$issue_id" ] && continue
-                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "ttl:expired by reaper" 2>&1); then
-                    DB_EXPIRED_ISSUES_CLOSED=$((DB_EXPIRED_ISSUES_CLOSED + 1))
-                    TOTAL_EXPIRED_ISSUES_CLOSED=$((TOTAL_EXPIRED_ISSUES_CLOSED + 1))
-                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
-                else
-                    record_anomaly "$DB" "closing expired nudge bead $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
-                fi
-            done <<< "$EXPIRED_IDS"
-        fi
-    fi
 
     # Step 5: Auto-close stale issues (exclude P0/P1, epics, active deps).
     DB_ISSUES_CLOSED=0
@@ -1224,6 +1150,21 @@ if [ -d "$CITY_BEADS_DIR" ] && [ -z "$DRY_RUN" ] && command -v gc >/dev/null 2>&
     TOTAL_SESSIONS_PRUNED=$((TOTAL_SESSIONS_PRUNED + SESSION_STATE_PRUNE_COUNT))
     if [ "$SESSION_STATE_PRUNE_COUNT" -gt 1000 ]; then
         record_anomaly "gm" "$SESSION_STATE_PRUNE_COUNT terminal session-state beads pruned in one run (threshold: 1000)"
+    fi
+fi
+
+# Nudge/mail retention through the stores' own front door: `gc order
+# sweep-nudge-mail` closes stale bd nudge shadow beads plus read mail on a
+# file-backend city, and sweeps aged terminal queue rows once
+# [beads.classes.nudges] relocates the class — the same command covers both
+# backends, replacing reaper Step 4's raw-SQL expiry close.
+if [ -d "$CITY_BEADS_DIR" ] && command -v gc >/dev/null 2>&1; then
+    NUDGE_SWEEP_ARGS=(order sweep-nudge-mail --quiet)
+    if [ -n "$DRY_RUN" ]; then NUDGE_SWEEP_ARGS+=(--dry-run); fi
+    if NUDGE_SWEEP_OUTPUT=$( (cd "$CITY_ABS" && gc "${NUDGE_SWEEP_ARGS[@]}") 2>&1); then
+        :
+    else
+        record_anomaly "city" "nudge-mail sweep failed: $(sanitize_output "$NUDGE_SWEEP_OUTPUT")"
     fi
 fi
 

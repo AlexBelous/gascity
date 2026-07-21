@@ -2382,6 +2382,9 @@
             "$ref": "#/components/schemas/NoPayload"
           },
           {
+            "$ref": "#/components/schemas/NudgeLifecyclePayload"
+          },
+          {
             "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
           },
           {
@@ -4707,6 +4710,31 @@
       },
       "NoPayload": {
         "additionalProperties": false,
+        "type": "object"
+      },
+      "NudgeLifecyclePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "agent"
+        ],
         "type": "object"
       },
       "OKResponseBody": {
@@ -11898,6 +11926,9 @@
             "mail.replied": "#/components/schemas/TypedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
+            "nudge.dead": "#/components/schemas/TypedEventStreamEnvelopeNudgeDead",
+            "nudge.delivered": "#/components/schemas/TypedEventStreamEnvelopeNudgeDelivered",
+            "nudge.queued": "#/components/schemas/TypedEventStreamEnvelopeNudgeQueued",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
@@ -12058,6 +12089,15 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeNudgeDead"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeNudgeDelivered"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeNudgeQueued"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted"
@@ -13127,6 +13167,9 @@
                 "order.fired",
                 "order.completed",
                 "order.failed",
+                "nudge.queued",
+                "nudge.delivered",
+                "nudge.dead",
                 "provider.swapped",
                 "worker.operation",
                 "project.identity.stamped",
@@ -14343,6 +14386,159 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope molecule.resolved",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeNudgeDead": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NudgeLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "nudge.dead",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope nudge.dead",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeNudgeDelivered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NudgeLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "nudge.delivered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope nudge.delivered",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeNudgeQueued": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NudgeLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "nudge.queued",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope nudge.queued",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOrderCompleted": {
@@ -16276,6 +16472,9 @@
             "mail.replied": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
+            "nudge.dead": "#/components/schemas/TypedTaggedEventStreamEnvelopeNudgeDead",
+            "nudge.delivered": "#/components/schemas/TypedTaggedEventStreamEnvelopeNudgeDelivered",
+            "nudge.queued": "#/components/schemas/TypedTaggedEventStreamEnvelopeNudgeQueued",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
@@ -16436,6 +16635,15 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeNudgeDead"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeNudgeDelivered"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeNudgeQueued"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted"
@@ -17576,6 +17784,9 @@
                 "order.fired",
                 "order.completed",
                 "order.failed",
+                "nudge.queued",
+                "nudge.delivered",
+                "nudge.dead",
                 "provider.swapped",
                 "worker.operation",
                 "project.identity.stamped",
@@ -18885,6 +19096,171 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope molecule.resolved",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeNudgeDead": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NudgeLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "nudge.dead",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope nudge.dead",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeNudgeDelivered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NudgeLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "nudge.delivered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope nudge.delivered",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeNudgeQueued": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NudgeLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "nudge.queued",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope nudge.queued",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOrderCompleted": {

@@ -262,6 +262,15 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		go sweepLegacyOrderTrackingResidue(p.CityPath, p.Cfg, p.Stderr)
 	}
 
+	// Seamless nudges-class cutover, same shape: import the live file queue
+	// plus the recent terminal shadow history, flip the marker, clear the
+	// residue in the background, and start the class store's own
+	// terminal-row retention loop.
+	if ensureNudgesClassMigrated(p.CityPath, p.Cfg, p.Stderr) {
+		go sweepLegacyNudgeResidue(p.CityPath, p.Cfg, p.Stderr)
+		startNudgesRetentionSweeper(p.CityPath, p.Stderr)
+	}
+
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).

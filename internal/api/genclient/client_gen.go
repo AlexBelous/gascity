@@ -2553,6 +2553,15 @@ type MonitorFeedItemResponse struct {
 // NoPayload defines model for NoPayload.
 type NoPayload = map[string]interface{}
 
+// NudgeLifecyclePayload defines model for NudgeLifecyclePayload.
+type NudgeLifecyclePayload struct {
+	Agent   string  `json:"agent"`
+	Id      string  `json:"id"`
+	Outcome *string `json:"outcome,omitempty"`
+	Reason  *string `json:"reason,omitempty"`
+	Source  *string `json:"source,omitempty"`
+}
+
 // OKResponseBody defines model for OKResponseBody.
 type OKResponseBody struct {
 	// Status Operation result.
@@ -5801,6 +5810,51 @@ type TypedEventStreamEnvelopeMoleculeResolved struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeNudgeDead defines model for TypedEventStreamEnvelopeNudgeDead.
+type TypedEventStreamEnvelopeNudgeDead struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NudgeLifecyclePayload    `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeNudgeDelivered defines model for TypedEventStreamEnvelopeNudgeDelivered.
+type TypedEventStreamEnvelopeNudgeDelivered struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NudgeLifecyclePayload    `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeNudgeQueued defines model for TypedEventStreamEnvelopeNudgeQueued.
+type TypedEventStreamEnvelopeNudgeQueued struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NudgeLifecyclePayload    `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeOrderCompleted defines model for TypedEventStreamEnvelopeOrderCompleted.
 type TypedEventStreamEnvelopeOrderCompleted struct {
 	Actor     string                   `json:"actor"`
@@ -7007,6 +7061,54 @@ type TypedTaggedEventStreamEnvelopeMoleculeResolved struct {
 	City      string                   `json:"city"`
 	Message   *string                  `json:"message,omitempty"`
 	Payload   MoleculeResolvedPayload  `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeNudgeDead defines model for TypedTaggedEventStreamEnvelopeNudgeDead.
+type TypedTaggedEventStreamEnvelopeNudgeDead struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NudgeLifecyclePayload    `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeNudgeDelivered defines model for TypedTaggedEventStreamEnvelopeNudgeDelivered.
+type TypedTaggedEventStreamEnvelopeNudgeDelivered struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NudgeLifecyclePayload    `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeNudgeQueued defines model for TypedTaggedEventStreamEnvelopeNudgeQueued.
+type TypedTaggedEventStreamEnvelopeNudgeQueued struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NudgeLifecyclePayload    `json:"payload"`
 	RunId     *string                  `json:"run_id,omitempty"`
 	Seq       int64                    `json:"seq"`
 	SessionId *string                  `json:"session_id,omitempty"`
@@ -9592,6 +9694,32 @@ func (t *EventPayload) FromNoPayload(v NoPayload) error {
 
 // MergeNoPayload performs a merge with any union data inside the EventPayload, using the provided NoPayload
 func (t *EventPayload) MergeNoPayload(v NoPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsNudgeLifecyclePayload returns the union data inside the EventPayload as a NudgeLifecyclePayload
+func (t EventPayload) AsNudgeLifecyclePayload() (NudgeLifecyclePayload, error) {
+	var body NudgeLifecyclePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromNudgeLifecyclePayload overwrites any union data inside the EventPayload as the provided NudgeLifecyclePayload
+func (t *EventPayload) FromNudgeLifecyclePayload(v NudgeLifecyclePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeNudgeLifecyclePayload performs a merge with any union data inside the EventPayload, using the provided NudgeLifecyclePayload
+func (t *EventPayload) MergeNudgeLifecyclePayload(v NudgeLifecyclePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13151,6 +13279,90 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMoleculeResolved
 	return err
 }
 
+// AsTypedEventStreamEnvelopeNudgeDead returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeNudgeDead
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeNudgeDead() (TypedEventStreamEnvelopeNudgeDead, error) {
+	var body TypedEventStreamEnvelopeNudgeDead
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeNudgeDead overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeNudgeDead
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeNudgeDead(v TypedEventStreamEnvelopeNudgeDead) error {
+	v.Type = "nudge.dead"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeNudgeDead performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeNudgeDead
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeNudgeDead(v TypedEventStreamEnvelopeNudgeDead) error {
+	v.Type = "nudge.dead"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeNudgeDelivered returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeNudgeDelivered
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeNudgeDelivered() (TypedEventStreamEnvelopeNudgeDelivered, error) {
+	var body TypedEventStreamEnvelopeNudgeDelivered
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeNudgeDelivered overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeNudgeDelivered
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeNudgeDelivered(v TypedEventStreamEnvelopeNudgeDelivered) error {
+	v.Type = "nudge.delivered"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeNudgeDelivered performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeNudgeDelivered
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeNudgeDelivered(v TypedEventStreamEnvelopeNudgeDelivered) error {
+	v.Type = "nudge.delivered"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeNudgeQueued returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeNudgeQueued
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeNudgeQueued() (TypedEventStreamEnvelopeNudgeQueued, error) {
+	var body TypedEventStreamEnvelopeNudgeQueued
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeNudgeQueued overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeNudgeQueued
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeNudgeQueued(v TypedEventStreamEnvelopeNudgeQueued) error {
+	v.Type = "nudge.queued"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeNudgeQueued performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeNudgeQueued
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeNudgeQueued(v TypedEventStreamEnvelopeNudgeQueued) error {
+	v.Type = "nudge.queued"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderCompleted
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderCompleted() (TypedEventStreamEnvelopeOrderCompleted, error) {
 	var body TypedEventStreamEnvelopeOrderCompleted
@@ -14311,6 +14523,12 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedEventStreamEnvelopeMoleculeResolved()
+	case "nudge.dead":
+		return t.AsTypedEventStreamEnvelopeNudgeDead()
+	case "nudge.delivered":
+		return t.AsTypedEventStreamEnvelopeNudgeDelivered()
+	case "nudge.queued":
+		return t.AsTypedEventStreamEnvelopeNudgeQueued()
 	case "order.completed":
 		return t.AsTypedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":
@@ -15520,6 +15738,90 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMole
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeNudgeDead returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeNudgeDead
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeNudgeDead() (TypedTaggedEventStreamEnvelopeNudgeDead, error) {
+	var body TypedTaggedEventStreamEnvelopeNudgeDead
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeNudgeDead overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeNudgeDead
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeNudgeDead(v TypedTaggedEventStreamEnvelopeNudgeDead) error {
+	v.Type = "nudge.dead"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeNudgeDead performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeNudgeDead
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeNudgeDead(v TypedTaggedEventStreamEnvelopeNudgeDead) error {
+	v.Type = "nudge.dead"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeNudgeDelivered returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeNudgeDelivered
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeNudgeDelivered() (TypedTaggedEventStreamEnvelopeNudgeDelivered, error) {
+	var body TypedTaggedEventStreamEnvelopeNudgeDelivered
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeNudgeDelivered overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeNudgeDelivered
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeNudgeDelivered(v TypedTaggedEventStreamEnvelopeNudgeDelivered) error {
+	v.Type = "nudge.delivered"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeNudgeDelivered performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeNudgeDelivered
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeNudgeDelivered(v TypedTaggedEventStreamEnvelopeNudgeDelivered) error {
+	v.Type = "nudge.delivered"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeNudgeQueued returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeNudgeQueued
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeNudgeQueued() (TypedTaggedEventStreamEnvelopeNudgeQueued, error) {
+	var body TypedTaggedEventStreamEnvelopeNudgeQueued
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeNudgeQueued overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeNudgeQueued
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeNudgeQueued(v TypedTaggedEventStreamEnvelopeNudgeQueued) error {
+	v.Type = "nudge.queued"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeNudgeQueued performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeNudgeQueued
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeNudgeQueued(v TypedTaggedEventStreamEnvelopeNudgeQueued) error {
+	v.Type = "nudge.queued"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderCompleted
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderCompleted() (TypedTaggedEventStreamEnvelopeOrderCompleted, error) {
 	var body TypedTaggedEventStreamEnvelopeOrderCompleted
@@ -16680,6 +16982,12 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeMoleculeResolved()
+	case "nudge.dead":
+		return t.AsTypedTaggedEventStreamEnvelopeNudgeDead()
+	case "nudge.delivered":
+		return t.AsTypedTaggedEventStreamEnvelopeNudgeDelivered()
+	case "nudge.queued":
+		return t.AsTypedTaggedEventStreamEnvelopeNudgeQueued()
 	case "order.completed":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":

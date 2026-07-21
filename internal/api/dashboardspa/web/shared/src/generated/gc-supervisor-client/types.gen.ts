@@ -844,7 +844,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | NudgeLifecyclePayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1942,6 +1942,14 @@ export type MonitorFeedItemResponse = {
 
 export type NoPayload = {
     [key: string]: never;
+};
+
+export type NudgeLifecyclePayload = {
+    agent: string;
+    id: string;
+    outcome?: string;
+    reason?: string;
+    source?: string;
 };
 
 export type OkResponseBody = {
@@ -5188,6 +5196,12 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeMailSent) | ({
     type: 'molecule.resolved';
 } & TypedEventStreamEnvelopeMoleculeResolved) | ({
+    type: 'nudge.dead';
+} & TypedEventStreamEnvelopeNudgeDead) | ({
+    type: 'nudge.delivered';
+} & TypedEventStreamEnvelopeNudgeDelivered) | ({
+    type: 'nudge.queued';
+} & TypedEventStreamEnvelopeNudgeQueued) | ({
     type: 'order.completed';
 } & TypedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -5963,6 +5977,57 @@ export type TypedEventStreamEnvelopeMoleculeResolved = {
 };
 
 /**
+ * TypedEventStreamEnvelope nudge.dead
+ */
+export type TypedEventStreamEnvelopeNudgeDead = {
+    actor: string;
+    message?: string;
+    payload: NudgeLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'nudge.dead';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope nudge.delivered
+ */
+export type TypedEventStreamEnvelopeNudgeDelivered = {
+    actor: string;
+    message?: string;
+    payload: NudgeLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'nudge.delivered';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope nudge.queued
+ */
+export type TypedEventStreamEnvelopeNudgeQueued = {
+    actor: string;
+    message?: string;
+    payload: NudgeLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'nudge.queued';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope order.completed
  */
 export type TypedEventStreamEnvelopeOrderCompleted = {
@@ -6677,6 +6742,12 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeMailSent) | ({
     type: 'molecule.resolved';
 } & TypedTaggedEventStreamEnvelopeMoleculeResolved) | ({
+    type: 'nudge.dead';
+} & TypedTaggedEventStreamEnvelopeNudgeDead) | ({
+    type: 'nudge.delivered';
+} & TypedTaggedEventStreamEnvelopeNudgeDelivered) | ({
+    type: 'nudge.queued';
+} & TypedTaggedEventStreamEnvelopeNudgeQueued) | ({
     type: 'order.completed';
 } & TypedTaggedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -7489,6 +7560,60 @@ export type TypedTaggedEventStreamEnvelopeMoleculeResolved = {
     subject?: string;
     ts: string;
     type: 'molecule.resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope nudge.dead
+ */
+export type TypedTaggedEventStreamEnvelopeNudgeDead = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NudgeLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'nudge.dead';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope nudge.delivered
+ */
+export type TypedTaggedEventStreamEnvelopeNudgeDelivered = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NudgeLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'nudge.delivered';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope nudge.queued
+ */
+export type TypedTaggedEventStreamEnvelopeNudgeQueued = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NudgeLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'nudge.queued';
     workflow?: WorkflowEventProjection;
 };
 

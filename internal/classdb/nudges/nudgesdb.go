@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -83,6 +84,8 @@ func migrations() []core.Migration {
 // Store is the embedded-SQLite nudges-class queue backend.
 type Store struct {
 	db *core.DB
+
+	retentionSweeperOnce sync.Once
 }
 
 // Open opens (creating and migrating if needed) the nudges store file at
@@ -683,6 +686,24 @@ func (s *Store) findRecord(id string, includeTerminal bool) (TerminalRecord, boo
 	rec.Item = item
 	rec.TerminalAt = fromNanos(terminalAt)
 	return rec, true, nil
+}
+
+// StartRetentionSweeper starts the store's own periodic terminal-row
+// retention sweep (the design's "stores own retention": nudges has no
+// pre-existing retention path that could be routed, so the class store runs
+// its own). Idempotent per handle — the first call starts the loop, later
+// calls no-op, so controller rebuilds over the process-shared handle never
+// stack tickers. The loop stops when the store closes (core.StartSweeper
+// registers with the DB); sweep failures are reported to warn (nil
+// discards them).
+func (s *Store) StartRetentionSweeper(interval, ttl time.Duration, warn io.Writer) {
+	s.retentionSweeperOnce.Do(func() {
+		s.db.StartSweeper(interval, func(ctx context.Context) {
+			if _, err := s.SweepRetention(ctx, time.Now(), ttl); err != nil && warn != nil {
+				fmt.Fprintf(warn, "nudges retention sweep: %v\n", err) //nolint:errcheck // best-effort warning
+			}
+		})
+	})
 }
 
 // CountRetention reports how many rows SweepRetention would delete at now

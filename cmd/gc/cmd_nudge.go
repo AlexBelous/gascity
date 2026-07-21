@@ -549,6 +549,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			fmt.Fprintf(stderr, "gc nudge drain: recording injection ack: %v\n", err) //nolint:errcheck
 			return 0
 		}
+		recordNudgeDeliveredEvents(target.cityPath, "accepted_for_injection", items...)
 		stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 		return 0
 	}
@@ -556,6 +557,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	recordNudgeDeliveredEvents(target.cityPath, "injected", items...)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 	return 0
 }
@@ -1417,7 +1419,11 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	}
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
-	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+	ackErr := ackQueuedNudges(target.cityPath, queuedNudgeIDs(items))
+	if ackErr == nil {
+		recordNudgeDeliveredEvents(target.cityPath, "injected", items...)
+	}
+	return true, errors.Join(bookkeepErr, ackErr)
 }
 
 func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t time.Time) {
@@ -1773,12 +1779,18 @@ func enqueueQueuedNudge(cityPath string, item queuedNudge) error {
 }
 
 func rollbackQueuedNudge(cityPath string, front *nudgequeue.Store, item queuedNudge, reason string) error {
-	return cityNudgeQueue(cityPath).Rollback(front, item, reason)
+	err := cityNudgeQueue(cityPath).Rollback(front, item, reason)
+	if err == nil {
+		item.LastError = reason
+		recordNudgeDeadEvents(cityPath, item)
+	}
+	return err
 }
 
 func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) error {
 	err := cityNudgeQueue(cityPath).Enqueue(item, store)
 	if err == nil {
+		recordNudgeQueuedEvents(cityPath, item)
 		// Best-effort wake of the supervisor's nudge dispatcher. Legacy-mode
 		// cities and ad-hoc invocations (no listener) get a fast dial
 		// failure and fall through to the per-session poller / patrol tick.
@@ -1812,7 +1824,9 @@ func recordQueuedNudgeFailureWithStore(cityPath string, store beads.NudgesStore,
 // the *Detailed name promises it), even though the only production caller today
 // is recordQueuedNudgeFailureWithStore, which discards it.
 func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
-	return cityNudgeQueue(cityPath).RecordFailure(ids, store, cause, now, nudgeWarningWriter)
+	deadLettered, err := cityNudgeQueue(cityPath).RecordFailure(ids, store, cause, now, nudgeWarningWriter)
+	recordNudgeDeadEvents(cityPath, deadLettered...)
+	return deadLettered, err
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {

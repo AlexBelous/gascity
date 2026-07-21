@@ -121,6 +121,43 @@ func WithState(cityPath string, fn func(*State) error) error {
 	return nil
 }
 
+// SweepFileResidue removes legacy file-queue items that a relocated class
+// store already owns (migrated reports whether an id exists there). It is
+// the bd->sqlite migration's residue sweep: clearing imported copies stops a
+// not-yet-upgraded process's poller from redelivering them out of
+// state.json. A missing state file is a no-op. Items the callback cannot
+// resolve — or that the class store does not know (enqueued by an old
+// binary after the straggler import) — are left in place; a later boot's
+// import-then-sweep converges on them. Returns the number of items removed.
+func SweepFileResidue(cityPath string, migrated func(id string) (bool, error)) (int, error) {
+	if _, err := os.Stat(StatePath(cityPath)); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	removed := 0
+	err := WithState(cityPath, func(state *State) error {
+		filter := func(items []Item) []Item {
+			kept := items[:0]
+			for _, item := range items {
+				inClass, err := migrated(item.ID)
+				if err != nil || !inClass {
+					kept = append(kept, item)
+					continue
+				}
+				removed++
+			}
+			return kept
+		}
+		state.Pending = filter(state.Pending)
+		state.InFlight = filter(state.InFlight)
+		state.Dead = filter(state.Dead)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
 // LoadState reads the persisted queue state from disk.
 func LoadState(cityPath string) (State, error) {
 	data, err := os.ReadFile(StatePath(cityPath))

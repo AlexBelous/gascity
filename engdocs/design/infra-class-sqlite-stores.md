@@ -577,6 +577,30 @@ class = flip the config knob back + replay-or-accept-loss per class's
 disposability (48 h Dolt cold-backup window for sessions; the ephemeral
 classes are within-TTL disposable). Shadow-write applies to sessions only.
 
+**Seamless upgrade (requirement).** A user upgrading to the shipping version
+must get the new stores with zero manual steps and only upside. Concretely:
+
+- The per-class backend default becomes `"sqlite"` at GA; the
+  `[beads.classes.<name>] backend = "bd"` knob is demoted to a per-class
+  escape hatch (kept through one release cycle, then the bd arm for infra
+  classes is removed).
+- On first controller boot at the new version, each class store detects
+  legacy infra beads in bd (a cheap classified count) and runs the migration
+  slice **automatically** — idempotent, resumable, crash-safe, recomputed
+  from live state, so an interrupted first boot just resumes. The ephemeral
+  classes import within-TTL rows only (seconds); sessions imports open beads
+  + waits with ids preserved.
+- CLI one-shots and hooks that run *before* the first migrated boot fall
+  back to bd transparently (the resolver returns the bd-backed store until
+  the sqlite store is marked migrated), so a mixed-version window never
+  splits a class across two backends: the migrated marker, not the binary
+  version, decides routing.
+- Nothing an operator sees regresses: `gc mail/session/order/nudge/wait`
+  behave identically; `gc bd show <infra-id>` federates; `bd`-side infra
+  beads are gone *after* migration completes, never before.
+- Fresh cities simply start on sqlite; the bd store is created only for
+  work beads.
+
 ## Testing & proof
 
 - **Domain conformance**: each front door already has or gets a conformance

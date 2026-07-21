@@ -1287,6 +1287,50 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 	return out, nil
 }
 
+// DeleteAllOrphaning permanently removes the given beads with set-based SQL
+// DELETEs against the issues and wisps tables, never touching neighbors' text
+// fields — the batch shape the infra-store migration requires (BatchDeleter).
+// Dependency rows are cleaned up by the schema's ON DELETE CASCADE foreign
+// keys, matching BdStore.DeleteAllOrphaning.
+func (s *NativeDoltStore) DeleteAllOrphaning(ids []string) (int, error) {
+	ids = dedupeNonEmpty(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	accessor, ok := storage.(rawDBGetter)
+	if !ok {
+		return 0, fmt.Errorf("native store: raw DB access unavailable for batch delete")
+	}
+	db := accessor.DB()
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+	deleted := 0
+	for _, chunk := range chunkIDs(ids, testBatchDeleteChunkSize) {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		for _, table := range []string{"issues", "wisps"} {
+			res, execErr := db.ExecContext(ctx, "DELETE FROM `"+table+"` WHERE id IN ("+placeholders+")", args...)
+			if execErr != nil {
+				return deleted, fmt.Errorf("native batch delete from %s: %w", table, execErr)
+			}
+			if n, raErr := res.RowsAffected(); raErr == nil {
+				deleted += int(n)
+			}
+		}
+	}
+	return deleted, nil
+}
+
+var _ BatchDeleter = (*NativeDoltStore)(nil)
+
 // Children returns all beads whose parent-child dependency points at parentID.
 func (s *NativeDoltStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	return s.List(ListQuery{

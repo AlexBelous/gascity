@@ -111,10 +111,13 @@ var bootstrapPolicy = Ledger{
 	Version: 2,
 	AuditBaseline: []Baseline{
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   529,
-			BaselineFiles:   161,
+			Scope:    ScopeAll,
+			Resource: ResourceSubprocess,
+			// 530/162: +1 call/file for internal/classdb/core/multiprocess_test.go,
+			// the integration-tagged G0 multi-process WAL gate (re-exec children
+			// are the point of the test).
+			BaselineCalls:   530,
+			BaselineFiles:   162,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",

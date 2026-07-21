@@ -1,3 +1,5 @@
+//go:build integration
+
 package core
 
 // G0 validation (engdocs/design/infra-class-sqlite-stores.md): the ratified

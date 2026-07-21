@@ -1310,6 +1310,11 @@ func cityHasInfraStore(cityPath string) bool {
 	return err == nil
 }
 
+// sqliteRetentionDisableEnv, when "1", disables the embedded sqlite store's
+// retention sweeper for stores opened by THIS process. Set by the infra-store
+// migration so copied historical beads survive until verify-then-delete.
+const sqliteRetentionDisableEnv = "GC_SQLITE_RETENTION_DISABLE"
+
 // cityInfraScopeIsSQLite reports whether the city's infra scope is backed by
 // the embedded sqlite store (its .beads/metadata.json declares backend=sqlite).
 // bd cannot read that store, so callers use this to route infra reads through
@@ -1551,9 +1556,20 @@ func openStoreResultAtForCityFull(storePath, cityPath string, modeOverride gate.
 	// the wrapper still pre-mints reserved-prefix ids, so the store's own prefix
 	// only governs id-less native creates.
 	if scopeBackendIsSQLite(scopeRoot) {
+		sqliteOpts := []beads.SQLiteStoreOption{
+			beads.WithSQLiteStoreIDPrefix(readScopeIssuePrefix(scopeRoot)),
+		}
+		// The infra-store migration copies historical (closed) beads whose
+		// closed_at is far older than the retention period; the sweeper would
+		// purge them between copy and verify, failing verification. The migrate
+		// command sets this env for its own process so the destination it opens
+		// keeps every copy; runtime opens keep the default sweeper.
+		if os.Getenv(sqliteRetentionDisableEnv) == "1" {
+			sqliteOpts = append(sqliteOpts, beads.WithSQLiteStoreRetention(0, 0))
+		}
 		store, sqErr := beads.OpenSQLiteStore(
 			filepath.Join(scopeRoot, ".beads"),
-			beads.WithSQLiteStoreIDPrefix(readScopeIssuePrefix(scopeRoot)),
+			sqliteOpts...,
 		)
 		if sqErr != nil {
 			return beads.StoreOpenResult{}, fmt.Errorf("opening embedded sqlite store at %s: %w", scopeRoot, sqErr)

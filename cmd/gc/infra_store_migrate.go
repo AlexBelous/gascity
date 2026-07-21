@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
@@ -197,6 +198,14 @@ func doMigrateInfraStore(cityPath string, dryRun bool, stderr io.Writer) (*migra
 	}
 	externalDolt := isExternalDolt(cityPath)
 	infraSQLite := cityInfraScopeIsSQLite(cityPath)
+	if infraSQLite {
+		// Keep every copied bead until verify-then-delete completes: the sqlite
+		// store's retention sweeper would otherwise purge migrated closed beads
+		// (their closed_at long predates the retention window) between copy and
+		// verification. Process-local; runtime opens keep the default sweeper.
+		os.Setenv(sqliteRetentionDisableEnv, "1")        //nolint:errcheck // process-local migration flag
+		defer os.Unsetenv(sqliteRetentionDisableEnv)     //nolint:errcheck // process exits after migration
+	}
 	// The hosted-Dolt refusal exists because hosted tenancy is one Dolt database
 	// per project, so a second (infra) Dolt database cannot be created. When the
 	// infra scope is the embedded sqlite store no second Dolt database is

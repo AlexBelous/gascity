@@ -1889,7 +1889,7 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 	// state file is not an error (LoadState returns empty state), so any error
 	// here is a real read/parse failure: fail closed rather than sweeping with
 	// no live-ID protection, which could close beads for in-flight nudges.
-	nudgeState, stateErr := nudgequeue.LoadState(cityPath)
+	nudgeState, stateErr := cityNudgeQueue(cityPath).Snapshot()
 	if stateErr != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", stateErr) //nolint:errcheck // best-effort stderr
 		return 1

@@ -556,11 +556,11 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		DeliverAfter:      now,
 		ExpiresAt:         now.Add(defaultQueuedSubmitTTL),
 	}
-	if err := nudgequeue.WithState(m.cityPath, func(state *nudgequeue.State) error {
-		state.Pending = append(state.Pending, item)
-		nudgequeue.SortState(state)
-		return nil
-	}); err != nil {
+	// EnqueueDeferred is the queue front door's bare-append shape: no shadow
+	// bead, no maintenance, no supersession — the deferred-submit semantics
+	// this path has always had, now routed through the seam so a relocated
+	// nudges backend receives these items too.
+	if err := nudgequeue.NewFileQueue(m.cityPath, nil).EnqueueDeferred(item); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {

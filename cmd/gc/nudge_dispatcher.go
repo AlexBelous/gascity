@@ -119,7 +119,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	state, err := nudgequeue.LoadState(cityPath)
+	state, err := cityNudgeQueue(cityPath).Snapshot()
 	if err != nil {
 		return 0, fmt.Errorf("loading nudge queue: %w", err)
 	}

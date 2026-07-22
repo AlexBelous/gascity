@@ -179,7 +179,7 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   full config load — the #2099 hook-emission norm); (7) the self-loaded
   routing decision is cached by city.toml (mtime, size).
 
-## P3 messaging — slices 1–2 DONE (mail half, landing DARK)
+## P3 messaging — slices 1–3 DONE (mail half + extmsg plan, landing DARK)
 
 - **Seam plan**: `P3-MESSAGING-SEAM-PLAN.md` (this dir) — mail op
   inventory + THE structural decision: ClassMessaging covers mail AND all
@@ -211,18 +211,44 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   retention/removal contract; crash gate (acked Send survives SIGKILL);
   census 533/165.
 
+- **Slice 3 DONE** (`docs(plans)` ead558f26): P3-EXTMSG-SEAM-PLAN.md —
+  evidence-grade extmsg inventory (full package read + repo-wide consumer
+  sweep). Key ratifications: the seven record kinds' exact bd encodings
+  (incl. the participant dual-base-label quirk and transcript text living
+  in bead Description); writer topology is CONTROLLER-RESIDENT (gc extmsg
+  CLI is a pure API client), so the in-process conversation lock pool
+  stays the serializer ABOVE the seam and the sqlite UNIQUE constraints
+  are the cross-process backstop; extmsg tables share the gcm mint, the
+  id_seq counter, and the SAME messagingdb.Store as the mail backend (one
+  handle per db → one lock-pool key); binding_generation monotonicity
+  rule (retention spares the max-generation ended row per conversation —
+  orders precedent); Append's entry-then-state-bump non-atomicity is a bd
+  crash window the sqlite tx closes (bd leg preserved verbatim). NEW
+  WIRING HAZARD RECORDED: session-repair call sites (session_beads.go
+  :1275/:1278/:1302 via their two wrappers, session_lifecycle_parallel.go
+  :2519/:2523, api/session_resolution.go:186/:189) pass SESSION-class
+  stores into the three messaging-record pkg funcs
+  (Reassign*/CloseSessionBindings) — silent no-op post-flip (#1939
+  shape); routed twins required at the wiring slice.
+
 ## What remains (P3+ per the design work plan)
 
-- **P3 messaging, remaining**: (a) extmsg seam plan doc (inventory
-  internal/extmsg's label-KV records + the in-process mutex-pool
-  invariants) then extmsg typed tables + UNIQUE constraints + transcript
-  pruning slices into the same messaging.db; (b) ONE wiring slice —
+- **P3 messaging, remaining**: (a) the extmsg seam slices per
+  P3-EXTMSG-SEAM-PLAN.md — refactor(extmsg) fabricBackend seam
+  (byte-identical, bd backend = moved codec, NewServicesWithBackend,
+  full 3229-line suite untouched), then feat(classdb) migration
+  Version 2 seven typed tables + both-backend conformance through the
+  public Services surface + crash gate + dormant retention; (b) ONE
+  wiring slice —
   ratchet flip + config acceptance test + `messaging.migrated` marker +
   routing at the construction roots (`newCityMailProvider`,
   `openCityMailProvider`, cmd_handoff.go:338's direct
   `beadmail.NewWithStores`, the nudge-mail sweep mail leg →
   `Provider.SweepReadMessages`, wisp GC leg → `PurgeReadMessages`, extmsg
-  services) + seam-guard test + fail-closed erroring backend; the API
+  services, AND routed twins of the three extmsg pkg funcs for the
+  session-repair call sites + the ReapStale* pair — see the wiring
+  inventory in P3-EXTMSG-SEAM-PLAN.md) + seam-guard test + fail-closed
+  erroring backend; the API
   needs no provider seam (it consumes state.MailProvider, which the
   controller builds routed); (c) migration — import open mail + extmsg
   actives (drop >30d unread, >TTL read), marker, residue, reaper.sh

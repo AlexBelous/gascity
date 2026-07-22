@@ -179,7 +179,7 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   full config load — the #2099 hook-emission norm); (7) the self-loaded
   routing decision is cached by city.toml (mtime, size).
 
-## P3 messaging — slices 1–3 DONE (mail half + extmsg plan, landing DARK)
+## P3 messaging — slices 1–4 DONE (mail half + extmsg plan + seam, DARK)
 
 - **Seam plan**: `P3-MESSAGING-SEAM-PLAN.md` (this dir) — mail op
   inventory + THE structural decision: ClassMessaging covers mail AND all
@@ -231,15 +231,35 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   (Reassign*/CloseSessionBindings) — silent no-op post-flip (#1939
   shape); routed twins required at the wiring slice.
 
+- **Slice 4 DONE** (`refactor(extmsg)` 67e6b0a20 — the fabricBackend
+  seam): unexported interface + exported method names/transport structs
+  (backend.go), bd backend = moved codec verbatim (backend_bead.go —
+  doubled base labels, participant dual-base-label quirk, Append's
+  two-write sequence, StoreSupportsAtomicTx handoff branches). Composite
+  single-commit ops: `CreateBinding` (displaced close + membership
+  sub-writes via the `FabricWriter` callback, #3735), `RefreshBinding`,
+  `AppendTranscript`, delivery upsert. The expiry cascade is the shared
+  `expireBindingFunc`; the owner algebra/hydration gates/routing stayed
+  in services untouched. `NewServicesWithBackend(backend, sessionStore)`
+  admits the class store (lock pool per backend handle;
+  `sharedBindingLockPoolForBackend` collapses bd backends to store-keyed
+  pools). ALL constructor/pkg-func signatures preserved; ONE mechanical
+  test edit (flaky stub's writer param type). Full suite + api +
+  cmd/gc extmsg tests + fast-suite pre-push all green. Documented
+  micro-divergences: store-failure wrap texts unified at op level;
+  GetBinding parses last_touched_at unconditionally.
+
 ## What remains (P3+ per the design work plan)
 
-- **P3 messaging, remaining**: (a) the extmsg seam slices per
-  P3-EXTMSG-SEAM-PLAN.md — refactor(extmsg) fabricBackend seam
-  (byte-identical, bd backend = moved codec, NewServicesWithBackend,
-  full 3229-line suite untouched), then feat(classdb) migration
-  Version 2 seven typed tables + both-backend conformance through the
-  public Services surface + crash gate + dormant retention; (b) ONE
-  wiring slice —
+- **P3 messaging, remaining**: (a) feat(classdb) extmsg typed tables —
+  messagingdb migration Version 2, seven tables + partial UNIQUE
+  constraints + meta JSON columns per the plan's Schema section;
+  implements fabricBackend structurally (exported names in
+  extmsg/backend.go are the contract); Import* primitives; dormant
+  retention; both-backend conformance through the public
+  extmsg.Services surface (bd leg `NewServicesWithSessionStore(mem,
+  mem)`, sqlite leg `NewServicesWithBackend(store, mem)`); crash gate +
+  census bump; (b) ONE wiring slice —
   ratchet flip + config acceptance test + `messaging.migrated` marker +
   routing at the construction roots (`newCityMailProvider`,
   `openCityMailProvider`, cmd_handoff.go:338's direct

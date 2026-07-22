@@ -8,9 +8,9 @@ worktree; run everything from that directory.
 **First, read (in this order):**
 1. `engdocs/plans/infra-class-sqlite-stores/HANDOFF.md` — state, next
    steps, gotchas. START HERE. P1 orders + P2 nudges are COMPLETE; P3
-   messaging slices 1–3 (mail seam + messagingdb messages store + the
-   extmsg seam plan) are DONE and deliberately DARK — no routing until
-   the extmsg tables exist.
+   messaging slices 1–4 (mail seam + messagingdb messages store + the
+   extmsg seam plan + the extmsg fabricBackend seam refactor) are DONE
+   and deliberately DARK — no routing until the extmsg tables exist.
 2. `engdocs/plans/infra-class-sqlite-stores/P3-EXTMSG-SEAM-PLAN.md` —
    THE spec for the next two slices: record/op inventory, what stays
    above the seam, invariant→constraint mapping, schema deviations,
@@ -24,18 +24,7 @@ worktree; run everything from that directory.
 
 **Then execute the remaining P3 slices, TDD, one commit per slice:**
 
-1. **refactor(extmsg): the fabricBackend seam** (byte-identical). Per
-   plan section "The seam (slice 1)": unexported backend interface,
-   `backend_bead.go` = moved codec/label bodies verbatim (keep the
-   doubled base labels, the participant label quirk, Append's
-   entry-then-state two-write shape, the StoreSupportsAtomicTx handoff
-   branches), composite ops single-commit (CreateBinding w/ displace +
-   membership threading, RefreshBinding, AppendTranscript,
-   UpsertDeliveryContext), `NewServicesWithBackend`, lock-pool key
-   variant. Full extmsg suite (3229-line extmsg_test.go + two_store +
-   rebind + binding_survival + reaper tests) runs UNTOUCHED — that is
-   the byte-compat gate.
-2. **feat(classdb): extmsg typed tables** in messagingdb (migration
+1. **feat(classdb): extmsg typed tables** in messagingdb (migration
    Version 2, same db/Store/mint/id_seq). Seven tables + partial UNIQUE
    constraints + meta JSON column per plan "Schema" section; implements
    fabricBackend structurally; Import* primitives (verbatim ids/clocks,
@@ -45,8 +34,11 @@ worktree; run everything from that directory.
    conformance through the public extmsg.Services surface (nudges
    eachBackend pattern); crash gate (acked Bind + acked Append survive
    SIGKILL; integration tag; bump the THREE census artifacts, `git add`
-   new files first).
-3. **Wiring** (one slice, whole class): per NEXT-slice inventories in
+   new files first). The backend contract is `internal/extmsg/backend.go`
+   (fabricBackend + FabricWriter + transport structs) — implement it
+   structurally; do NOT alter the interface without re-running the whole
+   extmsg suite.
+2. **Wiring** (one slice, whole class): per NEXT-slice inventories in
    BOTH P3 plan docs — ratchet flip + config acceptance test +
    `messaging.migrated` marker + route mail construction roots
    (newCityMailProvider, openCityMailProvider, cmd_handoff.go:338,
@@ -58,7 +50,7 @@ worktree; run everything from that directory.
    fail-closed erroring backend. Resolver home: internal/api also
    produces record traffic → nudges precedent (resolver in the classdb
    package) likely; decide there.
-4. **Migration + marker + residue + retention**: import open mail (drop
+3. **Migration + marker + residue + retention**: import open mail (drop
    >30d unread, >TTL read) + extmsg actives (active bindings +
    max-generation ended per conv, open delivery/groups/participants/
    memberships, transcript state + retained entries) with copy-verify

@@ -85,10 +85,12 @@ func TestMessagingRepairClassForUsesRegisteredCity(t *testing.T) {
 func TestMessagingSeamIsTheOnlyConstructionPoint(t *testing.T) {
 	// messaging_class_store.go IS the seam; providers.go holds the bd leg of
 	// the [mail] provider-knob dispatch the seam delegates to, plus the CLI
-	// opener's routed branch.
+	// opener's routed branch; messaging_class_migrate.go is the migration
+	// (it opens the shared class store to fill it before routing flips).
 	allowedFiles := map[string]bool{
-		"messaging_class_store.go": true,
-		"providers.go":             true,
+		"messaging_class_store.go":   true,
+		"providers.go":               true,
+		"messaging_class_migrate.go": true,
 	}
 	forbidden := []string{
 		"beadmail.New(",

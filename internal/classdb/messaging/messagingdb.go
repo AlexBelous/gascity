@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -76,7 +77,8 @@ func migrations() []core.Migration {
 
 // Store is the embedded-SQLite messaging-class messages backend.
 type Store struct {
-	db *core.DB
+	db                   *core.DB
+	retentionSweeperOnce sync.Once
 }
 
 // Open opens (creating and migrating if needed) the messaging store file at

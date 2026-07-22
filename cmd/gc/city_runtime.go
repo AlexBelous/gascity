@@ -270,6 +270,10 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		go sweepLegacyNudgeResidue(p.CityPath, p.Cfg, p.Stderr)
 		startNudgesRetentionSweeper(p.CityPath, p.Stderr)
 	}
+	if ensureMessagingClassMigrated(p.CityPath, p.Cfg, p.Stderr) {
+		go sweepLegacyMessagingResidue(p.CityPath, p.Cfg, p.Stderr)
+		startMessagingRetentionSweeper(p.CityPath, p.Stderr)
+	}
 
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open

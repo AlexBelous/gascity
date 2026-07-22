@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -321,4 +323,71 @@ func (s *Store) allTranscriptStates() ([]extmsg.ConversationTranscriptStateRecor
 		return nil, err
 	}
 	return out, nil
+}
+
+// ExtmsgRecordExists reports whether any extmsg table owns id — the
+// copy-verify and residue-sweep ownership check (bd bead ids are unique
+// across families, so one id belongs to at most one table).
+func (s *Store) ExtmsgRecordExists(id string) (bool, error) {
+	for _, table := range []string{
+		"extmsg_bindings", "extmsg_delivery_contexts", "extmsg_groups",
+		"extmsg_participants", "extmsg_memberships", "extmsg_transcript_state",
+		"extmsg_transcript_entries",
+	} {
+		var one int
+		err := s.db.Read().QueryRow(`SELECT 1 FROM `+table+` WHERE id = ?`, id).Scan(&one)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("checking %s for %q: %w", table, id, err)
+		}
+	}
+	return false, nil
+}
+
+// ResetForMigration clears every messaging row (mail messages AND all seven
+// extmsg tables) in one transaction. The pre-marker migration runs it so an
+// interrupted earlier attempt's committed rows re-sync to the bd store's
+// CURRENT truth — a message consumed or a binding ended on the still-bd
+// city between attempts must not be resurrected by the retry. Strictly a
+// pre-marker operation: the bd store is still the authority being copied.
+func (s *Store) ResetForMigration() error {
+	return s.db.Write(context.Background(), func(tx *sql.Tx) error {
+		for _, table := range []string{
+			"messages",
+			"extmsg_bindings", "extmsg_delivery_contexts", "extmsg_groups",
+			"extmsg_participants", "extmsg_memberships", "extmsg_transcript_state",
+			"extmsg_transcript_entries",
+		} {
+			if _, err := tx.Exec(`DELETE FROM ` + table); err != nil {
+				return fmt.Errorf("resetting %s: %w", table, err)
+			}
+		}
+		return nil
+	})
+}
+
+// StartRetentionSweeper starts the store's own periodic retention loop on
+// the controller (idempotent per process-shared handle): the design's
+// net-new 30d unread-mail TTL, the extmsg terminal-row TTL (sparing each
+// conversation's generation-ceiling binding), and transcript pruning
+// (per-conversation max_retained_entries, else defaultTranscriptKeep).
+// Read-mail close→purge stays with the routed nudge-mail sweep and wisp GC
+// legs; overlapping triggers converge on idempotent deletes.
+func (s *Store) StartRetentionSweeper(interval, unreadTTL, extmsgTTL time.Duration, transcriptKeep int, warn io.Writer) {
+	s.retentionSweeperOnce.Do(func() {
+		s.db.StartSweeper(interval, func(context.Context) {
+			now := time.Now().UTC()
+			if _, err := s.SweepUnreadBefore(now.Add(-unreadTTL)); err != nil && warn != nil {
+				fmt.Fprintf(warn, "messaging retention sweep (unread mail): %v\n", err) //nolint:errcheck // best-effort warning
+			}
+			if _, err := s.SweepExtmsgRetention(now.Add(-extmsgTTL)); err != nil && warn != nil {
+				fmt.Fprintf(warn, "messaging retention sweep (extmsg): %v\n", err) //nolint:errcheck // best-effort warning
+			}
+			if _, err := s.PruneTranscripts(transcriptKeep); err != nil && warn != nil {
+				fmt.Fprintf(warn, "messaging retention sweep (transcripts): %v\n", err) //nolint:errcheck // best-effort warning
+			}
+		})
+	})
 }

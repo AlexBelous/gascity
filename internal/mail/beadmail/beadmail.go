@@ -858,6 +858,42 @@ func countReadMessages(backend messagesBackend, cutoff time.Time, limit int) (in
 	return count, nil
 }
 
+// ExportOpenMessages returns every OPEN message record (read and unread)
+// from a bd mail store in the persistence-edge Record shape — the
+// messaging-class migration's read surface. Retention-swept closed mail is
+// deliberately excluded: it has left the aggregate views and its purge
+// window expires on the bd side.
+func ExportOpenMessages(store beads.MailStore) ([]Record, error) {
+	return beadStore{store: store.Store}.ListOpenForRecipients(nil, true)
+}
+
+// ResidueMessageBead is one bd message bead's residue-sweep view: its id,
+// lifecycle state, and creation clock (the mixed-version grace input).
+type ResidueMessageBead struct {
+	ID        string
+	Open      bool
+	CreatedAt time.Time
+}
+
+// ExportResidueMessageBeads enumerates EVERY bd message bead (open and
+// closed, both tiers) for the messaging-class residue sweep.
+func ExportResidueMessageBeads(store beads.MailStore) ([]ResidueMessageBead, error) {
+	items, err := store.List(beads.ListQuery{
+		Type:          messageBeadType,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		AllowScan:     true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing residue message beads: %w", err)
+	}
+	out := make([]ResidueMessageBead, 0, len(items))
+	for _, b := range items {
+		out = append(out, ResidueMessageBead{ID: b.ID, Open: b.Status != "closed", CreatedAt: b.CreatedAt})
+	}
+	return out, nil
+}
+
 // PurgeReadMessageWisps deletes read message beads in the wisp tier (open or
 // closed) created before cutoff — the wisp-GC retention sweep for consumed mail.
 // The candidate query and the delete loop live here because wisp-tier delete is

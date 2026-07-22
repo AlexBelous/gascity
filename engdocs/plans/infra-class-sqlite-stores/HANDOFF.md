@@ -298,7 +298,58 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   needs NO change (mail refs are observability counts); doctor bucket
   retirement stays P5.
 
-## P4 sessions+waits — slices 1–3 DONE (seam plan + store + shadow gate)
+## P4 sessions+waits — COMPLETE (all four slices)
+
+Slice 4 (2026-07-22, e634318bd + ad4c45c1f + ea2851e59) finished the class:
+
+- **Routing flip** (e634318bd): ratchet `sqliteCapableBeadClasses` +=
+  sessions (+acceptance test); `sessionsdb/routing.go` (marker-FIRST
+  `.gc/store/sessions.migrated`, ENOENT-only stat, config self-load w/
+  city.toml mtime+size cache, rollback = marker + bd knob);
+  `resolveSessionStore` routes at THE one seam every root already uses —
+  marked+configured city gets the process-shared class store; a marked
+  city whose routing/store fails gets `NewUnavailableStore` (every op
+  errors — fail CLOSED, never bd fallback). The five seam-plan bypass
+  gaps closed identity-pre-flip: doctor_session_model session legs
+  routed (work legs stay raw — two-store split in
+  loadSessionModelDoctorBeads), cmd_mail identity/recipient/target
+  funnels route via cliSessionStore (the storeless-provider raw leg
+  through openMailTargetStore stays on the mail DI pass — KNOWN
+  RESIDUAL), api handler_beads/handler_extmsg/handler_mail/
+  handler_status/agent-output switched to the SessionsBeadStore
+  accessor, and the retired-session repair splits work vs waits legs
+  explicitly. Retention primitives: `SweepClosedBefore` +
+  `StartRetentionSweeper` (7d TTL, 15m cadence).
+- **Migration** (ad4c45c1f): `cmd/gc/session_class_migrate.go` at boot
+  next to the P1–P3 ensure* calls — reset → FULL import (open rows
+  ALWAYS — the restart projection; closed rows ≤7d so recent closed
+  reads and closed-wait retries survive; work beads never cross via
+  Classify) → copy-verify → atomic marker → straggler;
+  abort-before-marker on ANY failure; `sweepLegacySessionResidue`
+  (import-then-sweep, 10m open grace, ownership-unprovable rows spared);
+  `startSessionsRetentionSweeper` (replaces reaper.sh's raw session SQL,
+  which now no-ops harmlessly — reaper.sh itself needs NO change, same
+  as P3). Upgrade tests: fresh-flip idempotence, bd-truth import w/
+  age-drop matrix, NO-RESURRECTION retry, abort-before-marker,
+  straggler import-then-clear + spare arm.
+- **gc session show + orphan-sweep rewrite** (ea2851e59): NEW
+  `gc session show <id-or-alias> [--json]` reads through the routed
+  store (json shape = the probe's bead fields; missing session exits
+  non-zero); orphan-sweep.sh's session liveness probe switched from
+  `gc bd show` to it (work-bead recheck stays bd show); the
+  maintenance_scripts_test stubs moved their session-probe arms to the
+  session) case; guard list gained cmd_session_show.go.
+- **Operational protocol**: run the shadow soak (shadow=true, watch
+  `gc doctor` sessions-shadow) clean on mc BEFORE flipping
+  backend="sqlite" anywhere. Shadow and backend=sqlite are mutually
+  exclusive by config validation — drop the shadow knob when flipping.
+- Known residuals for P5: mail storeless-provider raw leg; `gc doctor`
+  migration-state surface (all four classes' routing/marker state);
+  create-side `beadPolicyStore.createTarget` still identity (a stray
+  `gc bd create` of a session-typed bead post-flip lands in bd — the P5
+  write guard is the designed fix).
+
+## P4 sessions+waits — slices 1–3 (seam plan + store + shadow gate)
 
 - **Slice 1 DONE** (`docs(plans)` e77e493fb): P4-SESSIONS-SEAM-PLAN.md —
   evidence-grade inventory (full persistence-edge read + three repo-wide

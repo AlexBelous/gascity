@@ -597,6 +597,14 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath string, targets []wo
 	eventCh := make(chan workflowWatchResult, 1)
 	go pumpWorkflowEvents(done, watcher, eventCh)
 
+	// Identify this loop so it can ignore its own emissions (this diff makes the
+	// dispatcher's control-bead writes append bead.* events). eventActor's terminal
+	// fallback is "human" (main.go), which foreign CLI writers can share, so a
+	// self-filter keyed on it would suppress legitimate wakes — treat the identity
+	// as usable only when it is neither empty nor that ambiguous fallback.
+	selfActor := eventActor()
+	selfUsable := selfActor != "" && selfActor != "human"
+
 	idleSweeps := 0
 	var pendingWakeErr error
 	for {
@@ -636,7 +644,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath string, targets []wo
 			drainResult.processedAny,
 			drainResult.pendingAny,
 		)
-		eventWake, err := workflowServeWaitForWake(eventCh, sleepDur, idleSweeps)
+		eventWake, err := workflowServeWaitForWake(eventCh, sleepDur, idleSweeps, selfActor, selfUsable)
 		if err != nil {
 			if !eventWake {
 				// Fatal stream error with no relevant event observed: nothing to
@@ -683,10 +691,10 @@ func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh ch
 // path (so the caller can reset any idle-backoff counter), false when the
 // timer fires.
 func waitForRelevantWorkflowWake(eventCh <-chan workflowWatchResult, sleepDur time.Duration) (bool, error) {
-	return waitForRelevantWorkflowWakeWithTrace(eventCh, sleepDur, -1)
+	return waitForRelevantWorkflowWakeWithTrace(eventCh, sleepDur, -1, "", false)
 }
 
-func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int, selfActor string, selfUsable bool) (bool, error) {
 	timer := time.NewTimer(sleepDur)
 	defer timer.Stop()
 
@@ -696,31 +704,46 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 			if res.err != nil {
 				return false, res.err
 			}
-			if workflowEventRelevant(res.evt) {
-				if idleSweeps >= 0 {
-					workflowTracef("serve wake-event type=%s subject=%s idle_sweeps=%d sleep=%s", res.evt.Type, res.evt.Subject, idleSweeps, sleepDur)
-				} else {
-					workflowTracef("serve wake-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
-				}
-				// Coalesce a burst: keep draining buffered events for a short
-				// debounce window so N relevant events collapse into one drain.
-				// runWorkflowServeFollow does exactly one drain per return=true,
-				// so the trailing events are already covered by that single
-				// re-scan — no event is dropped, only batched.
-				coalesced, coalesceErr := coalesceWorkflowWakeBurst(eventCh)
-				if coalesced > 0 {
-					workflowTracef("serve wake-coalesce extra=%d debounce=%s", coalesced, workflowServeWakeDebounce)
-				}
-				// Report the wake even when a fatal stream error arrived during
-				// the coalescing window: a relevant event was already observed,
-				// so runWorkflowServeFollow must still perform the one re-scan it
-				// promised for that wake before terminating. Surfacing
-				// (true, err) lets the caller drain the observed wake and then
-				// exit on the error, instead of stranding newly-ready work until
-				// a dispatcher restart re-scans.
-				return true, coalesceErr
+			if !workflowEventRelevant(res.evt) {
+				workflowTracef("serve ignore-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
+				continue
 			}
-			workflowTracef("serve ignore-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
+			if selfUsable && res.evt.Actor == selfActor {
+				// Ignore our own emissions: since this diff makes the loop's own
+				// control-bead writes (through the emitting infra seam) append
+				// bead.* events, an un-filtered wake would buy an extra heavy ready
+				// re-scan and a controller Poke per dispatch burst. drainWorkflowServeWork
+				// already loops until no control bead is processed, so no work
+				// discoverable from our own writes can be missed by ignoring them;
+				// foreign bead.* events (worker closes — the latency win this
+				// emission exists for) still wake the loop. When the identity is
+				// unusable (selfUsable=false, the "human"/empty fallback) this
+				// branch never fires and behavior is unchanged.
+				workflowTracef("serve ignore-self-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
+				continue
+			}
+			if idleSweeps >= 0 {
+				workflowTracef("serve wake-event type=%s subject=%s idle_sweeps=%d sleep=%s", res.evt.Type, res.evt.Subject, idleSweeps, sleepDur)
+			} else {
+				workflowTracef("serve wake-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
+			}
+			// Coalesce a burst: keep draining buffered events for a short
+			// debounce window so N relevant events collapse into one drain.
+			// runWorkflowServeFollow does exactly one drain per return=true,
+			// so the trailing events are already covered by that single
+			// re-scan — no event is dropped, only batched.
+			coalesced, coalesceErr := coalesceWorkflowWakeBurst(eventCh)
+			if coalesced > 0 {
+				workflowTracef("serve wake-coalesce extra=%d debounce=%s", coalesced, workflowServeWakeDebounce)
+			}
+			// Report the wake even when a fatal stream error arrived during
+			// the coalescing window: a relevant event was already observed,
+			// so runWorkflowServeFollow must still perform the one re-scan it
+			// promised for that wake before terminating. Surfacing
+			// (true, err) lets the caller drain the observed wake and then
+			// exit on the error, instead of stranding newly-ready work until
+			// a dispatcher restart re-scans.
+			return true, coalesceErr
 		case <-timer.C:
 			if idleSweeps >= 0 {
 				workflowTracef("serve wake-sweep idle_sweeps=%d sleep=%s", idleSweeps, sleepDur)

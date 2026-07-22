@@ -893,7 +893,7 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
 	// failed load yields nil cfg, which the class resolvers treat as identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(store, cachedCityInfraStore(cityPath, cfg), cfg, cityPath, nil)
+	msgStore := cliMailStore(store, cfg, cityPath)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	return newMailProviderWithSessionStore(msgStore, sessStore), 0
 }

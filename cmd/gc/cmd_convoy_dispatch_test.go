@@ -5462,7 +5462,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 	var waitCalls []waitCall
 	stopErr := fmt.Errorf("stop after sequence")
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int, _ string, _ bool) (bool, error) {
 		waitCalls = append(waitCalls, waitCall{idleSweeps: idleSweeps, sleepDur: sleepDur})
 		switch len(waitCalls) {
 		case 1, 2, 3, 5:
@@ -5551,7 +5551,7 @@ func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *te
 
 	watcherErr := errors.New("event stream closed")
 	waitCalls := 0
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int, _ string, _ bool) (bool, error) {
 		waitCalls++
 		if waitCalls == 1 {
 			// A relevant event was observed, then a fatal watcher error arrived
@@ -5622,7 +5622,7 @@ func TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout(t *testing.T) {
 	})
 
 	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int, _ string, _ bool) (bool, error) {
 		return false, nil
 	}
 
@@ -5664,7 +5664,7 @@ func TestRunWorkflowServeFollowSurvivesDoltCircuitBreakerOutage(t *testing.T) {
 	})
 
 	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int, _ string, _ bool) (bool, error) {
 		return false, nil
 	}
 
@@ -6777,7 +6777,7 @@ func TestWaitForRelevantWorkflowWakeTraceIncludesBackoffState(t *testing.T) {
 
 	eventCh := make(chan workflowWatchResult) // never receives
 
-	eventWake, err := waitForRelevantWorkflowWakeWithTrace(eventCh, 5*time.Millisecond, 3)
+	eventWake, err := waitForRelevantWorkflowWakeWithTrace(eventCh, 5*time.Millisecond, 3, "", false)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -7063,7 +7063,7 @@ func TestRunWorkflowServeSweepsCityStoreForRigDispatcher(t *testing.T) {
 	var controlled []string
 	var controlledStores []string
 	served := false
-	workflowServeList = func(workQuery, dir string, env map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_, dir string, _ map[string]string) ([]hookBead, error) {
 		gotDirs = append(gotDirs, dir)
 		// The rig store is empty; the control bead lives in the CITY store.
 		if canonicalTestPath(dir) == canonicalTestPath(cityDir) && !served {

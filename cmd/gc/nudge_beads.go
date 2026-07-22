@@ -21,16 +21,18 @@ type nudgeReference = nudgequeue.Reference
 // cmd_nudge.go) so tests can substitute a fake store and assert that
 // per-tick poll helpers close every store they open. Tests that replace this
 // package variable must stay serial; do not use t.Parallel in those tests.
-// It routes the opened work store through resolveNudgesStore and returns the
-// strongly-typed beads.NudgesStore so the nudges class is statically visible to
-// every leaf nudge-bead helper; the wrapper carries the same underlying store
-// value (identity to the work store until the nudges class relocates).
+// It routes the opened work store through the emitting nudges CLI seam
+// (cliNudgesStore) and returns the strongly-typed beads.NudgesStore so the
+// nudges class is statically visible to every leaf nudge-bead helper; the
+// wrapper carries the same underlying store value (identity to the work store on
+// a single-store city, so byte-identical there) and emits bead.* events on a
+// split city, matching the other one-shot nudge seams.
 var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		return beads.NudgesStore{}
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(store, cachedCityInfraStore(cityPath, nil), nil, cityPath, nil)}
+	return beads.NudgesStore{Store: cliNudgesStore(store, nil, cityPath)}
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

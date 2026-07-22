@@ -285,25 +285,49 @@ func TestFindBeadAcrossStoresSkipsInfraOnLegacyCity(t *testing.T) {
 // dedup against a future non-comparable store type silently breaking it.
 func TestWorkflowDeleteGraphStoreDedupIsIdentitySafe(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	infra := wrapInfraStoreWithBeadPolicies(beads.NewMemStoreHonoringIDs(), cfg)
-	workA := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
-	workB := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
 
-	// Split city: two work views both resolve to the one infra store → 1 unique.
-	seen := make(map[beads.Store]bool)
-	for _, resolved := range []beads.Store{infra, infra} {
-		seen[resolved] = true
-	}
-	if len(seen) != 1 {
-		t.Fatalf("split-city dedup: got %d unique graph stores, want 1 (infra scanned once)", len(seen))
-	}
+	// Split city: cliGraphStore over two distinct work views both resolve to the
+	// one cached infra store. The emit augmentation is memoized per
+	// (infra store, cityPath), so both calls return the SAME instance — the
+	// map[beads.Store] membership scan in closeWorkflowMatches collapses to a
+	// single scan. A per-call clone would break this (2 keys → the infra store
+	// scanned twice); this exercises the real cliGraphStore path, not a stand-in.
+	t.Run("split city memoizes to one identity", func(t *testing.T) {
+		workA := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+		workB := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+		cityPath := t.TempDir()
+		withInjectedInfraStore(t, cityPath, wrapInfraStoreWithBeadPolicies(beads.NewMemStoreHonoringIDs(), cfg))
 
-	// Legacy city: cliGraphStore is identity, so distinct work stores stay distinct.
-	seen = make(map[beads.Store]bool)
-	for _, resolved := range []beads.Store{workA, workB} {
-		seen[resolved] = true
-	}
-	if len(seen) != 2 {
-		t.Fatalf("legacy dedup: got %d unique graph stores, want 2 (each work store scanned)", len(seen))
-	}
+		g1 := cliGraphStore(workA, cfg, cityPath)
+		g2 := cliGraphStore(workB, cfg, cityPath)
+		if g1 != g2 {
+			t.Fatalf("split-city dedup: cliGraphStore returned distinct instances; the membership scan would re-scan the infra store")
+		}
+		if seen := map[beads.Store]bool{g1: true, g2: true}; len(seen) != 1 {
+			t.Fatalf("split-city dedup: got %d unique graph stores, want 1 (infra scanned once)", len(seen))
+		}
+		// The memo must not regress to returning the pristine (un-augmented) store.
+		if e, ok := g1.(interface{ emitsClassStoreEvents() bool }); !ok || !e.emitsClassStoreEvents() {
+			t.Fatalf("split-city graph store lost its emit augmentation")
+		}
+	})
+
+	// Legacy single-store city: cliGraphStore is identity (infra nil), so distinct
+	// work stores stay distinct keys and each is scanned once.
+	t.Run("single-store city keeps distinct work stores", func(t *testing.T) {
+		workA := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+		workB := wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+		cityPath := t.TempDir()
+		clearInfraStoreCacheKey(cityPath)
+		restore := swapCachedInfraStoreOpen(func(string) (beads.Store, bool, error) { return nil, false, nil })
+		t.Cleanup(func() { restore(); clearInfraStoreCacheKey(cityPath) })
+
+		seen := map[beads.Store]bool{
+			cliGraphStore(workA, cfg, cityPath): true,
+			cliGraphStore(workB, cfg, cityPath): true,
+		}
+		if len(seen) != 2 {
+			t.Fatalf("legacy dedup: got %d unique graph stores, want 2 (each work store scanned)", len(seen))
+		}
+	})
 }

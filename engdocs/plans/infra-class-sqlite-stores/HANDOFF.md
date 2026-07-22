@@ -269,9 +269,39 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   pinned 2.9.0 built via `GOTOOLCHAIN=go1.26.5 go install` into
   ~/go/bin.
 
-## What remains (P3+ per the design work plan)
+- **Slices 6–8 DONE — P3 messaging COMPLETE** (addffe047 + c4d94c16e +
+  91bd32680): (6) dark plumbing — messagingdb/routing.go (marker-FIRST,
+  ENOENT-only, config cache, RoutedStoreFor fail-closed; one shared
+  handle per db = one extmsg lock pool per city), config ratchet +
+  acceptance test, extmsg *WithBackend repair twins (internals refactored
+  onto backend+locks; bd forms delegate byte-identically), beadmail
+  NewCachedWithBackend + Provider.CountReadMessages. (7) the wiring
+  flip — cmd/gc/messaging_class_store.go seam routes EVERY construction
+  root: controller boot/reload mail+extmsg (reload routing failure swaps
+  services to nil — fail closed), openCityMailProvider, gc handoff,
+  nudge-mail sweep mail leg (mixed nudges-bd/messaging-routed budget
+  handled), wisp GC arm (runWispGCRouted starves bd arm), extmsg
+  reapers, session-repair cascades via a pointer-identity store→city
+  registry (registered at controller boot/reload + CLI opener —
+  closeBead is 8 chains deep, threading was worse), internal/api
+  session-continuity repair; seam guard
+  TestMessagingSeamIsTheOnlyConstructionPoint. (8) the migration —
+  cmd/gc/messaging_class_migrate.go: reset→import(open mail minus 30d
+  unread/TTL-read drops + extmsg actives + per-conv generation-ceiling
+  ended binding)→copy-verify→atomic marker→straggler; residue sweep
+  import-then-sweep (closed ∪ owned ∪ open-past-10m-grace);
+  StartRetentionSweeper (unread 30d + extmsg 30d w/ ceiling spare +
+  transcript prune 10k default). Upgrade-flow tests pin: fresh-flip
+  idempotence, bd-truth import (gen ceiling → post-cutover gen 3;
+  allocator continues), NO-RESURRECTION retry, straggler
+  import-then-clear, abort-before-marker, age-drop matrix. reaper.sh
+  needs NO change (mail refs are observability counts); doctor bucket
+  retirement stays P5.
 
-- **P3 messaging, remaining**: (a) ONE wiring slice —
+## What remains (P4+ per the design work plan)
+
+- (superseded — P3 wiring/migration notes below are DONE, kept for
+  reference) (a) ONE wiring slice —
   ratchet flip + config acceptance test + `messaging.migrated` marker +
   routing at the construction roots (`newCityMailProvider`,
   `openCityMailProvider`, cmd_handoff.go:338's direct

@@ -2,7 +2,7 @@
 #
 # test-push-ownership-guard.sh — unit tests for the pre-push bead
 # ownership/staleness guard (bead ga-fip9ps.1; guards the race described in
-# ga-fip9ps). Three layers:
+# ga-fip9ps). Four layers:
 #
 #   1. assert_bead_still_claimed (scripts/push-ownership-guard.sh) exercised
 #      directly against real temp git repos with a fake `bd` on PATH: allow
@@ -14,8 +14,13 @@
 #      neither resolves (nothing to check — required for Layer A to be
 #      wired in unconditionally without blocking unrelated pushes). Also
 #      pins a known limitation of that fallback — see the KNOWN LIMITATION
-#      comment on _pog_resolve_bead_id in push-ownership-guard.sh.
-#   3. Hook wiring: a real .githooks/pre-push, installed into a real temp
+#      comment on _pog_assignee_bead_id in push-ownership-guard.sh.
+#   3. Fallback-to-assignee retry (ga-fip9ps.3, ga-hilw2y): when the
+#      branch-encoded bead has closed via a legitimate handoff rather than
+#      being reassigned/rerouted/held out from under this session, retries
+#      the full check against this session's own in-progress assignment
+#      before blocking.
+#   4. Hook wiring: a real .githooks/pre-push, installed into a real temp
 #      repo pushing to a real bare remote, actually rejects a stale-claim
 #      push, actually allows a clean one, and `--no-verify` actually
 #      bypasses the guard end to end.
@@ -82,8 +87,16 @@ remote_sha() {
 # Fake `bd`: behavior driven by state files, so each test writes exactly the
 # response it needs without a combinatorial helper signature.
 #
+#   <dir>/fake-bd-state/show-json-<id> -- `bd show <id> --json` echoes this
+#                                       verbatim (exit 0) when present —
+#                                       checked before the generic file below,
+#                                       so a test can give two different ids
+#                                       two different responses (needed for
+#                                       the branch-bead-closed/assignee-bead-
+#                                       fallback tests).
 #   <dir>/fake-bd-state/show-json   -- `bd show <any-id> --json` echoes this
-#                                       verbatim (exit 0).
+#                                       verbatim (exit 0) when no id-specific
+#                                       file matches.
 #   <dir>/fake-bd-state/show-exit   -- if present, `bd show` exits with this
 #                                       code instead (no output) — simulates
 #                                       bd/Dolt unreachable.
@@ -109,6 +122,10 @@ case "$1" in
     if [ -f "$state/show-exit" ]; then
       exit "$(cat "$state/show-exit")"
     fi
+    if [ -f "$state/show-json-$2" ]; then
+      cat "$state/show-json-$2"
+      exit 0
+    fi
     if [ -f "$state/show-json" ]; then
       cat "$state/show-json"
       exit 0
@@ -132,11 +149,20 @@ FAKE
 }
 
 # write_show_json <fake-bd-dir> <id> <status> <assignee> <routed_to> [labels-json-array]
+#
+# Writes both the generic show-json fallback AND an id-specific
+# show-json-<id> file, so tests that only ever query one id behave exactly
+# as before (last writer of the generic file, which is also the one
+# id-specific file that matters), while tests that query two distinct ids
+# (e.g. a closed branch-bead and a valid assignee-bead) can call this twice
+# with different ids and get independently correct responses.
 write_show_json() {
     local fbd="$1" id="$2" status="$3" assignee="$4" routed_to="$5" labels="${6:-[]}"
     mkdir -p "$fbd/fake-bd-state"
     printf '[{"id":"%s","status":"%s","assignee":"%s","metadata":{"gc.routed_to":"%s"},"labels":%s}]' \
         "$id" "$status" "$assignee" "$routed_to" "$labels" > "$fbd/fake-bd-state/show-json"
+    printf '[{"id":"%s","status":"%s","assignee":"%s","metadata":{"gc.routed_to":"%s"},"labels":%s}]' \
+        "$id" "$status" "$assignee" "$routed_to" "$labels" > "$fbd/fake-bd-state/show-json-$id"
 }
 
 # run_guard <repo> <fake-bd-dir> <gc-agent> <gc-template> [pog-timeout-seconds] [gc-session-id] [gc-session-name]
@@ -324,6 +350,55 @@ test_block_on_bd_timeout() {
 }
 
 # ---------------------------------------------------------------------------
+# Fallback to the assignee bead when the branch-encoded bead closed via a
+# legitimate handoff (ga-hilw2y: a builder's branch still names the bead
+# that originally spawned it — e.g. ga-zogqc1.1 — after that bead closed
+# normally into a separate deploy-tracking bead; the guard must not treat
+# that ordinary handoff as staleness when this session's own in-progress
+# assignment is a different, still-valid bead).
+# ---------------------------------------------------------------------------
+
+test_allow_fallback_when_branch_bead_closed_but_assignee_bead_valid() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    # Branch-encoded bead closed via a normal handoff...
+    write_show_json "$fbd" "ga-abc123.1" "closed" "agent-x" "tmpl-x" "[]"
+    # ...but this session's own in-progress assignment is a distinct,
+    # still-valid bead.
+    printf '[{"id":"ga-fallbk.3"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-fallbk.3" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-fallbk.3" <<<"$out"; then
+        record_pass "fallback/allow-when-branch-bead-closed-but-assignee-bead-valid (rc=0, names the fallback id)"
+    else
+        record_fail "fallback/allow-when-branch-bead-closed-but-assignee-bead-valid" "expected rc=0 naming ga-fallbk.3, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_block_when_branch_bead_closed_and_assignee_bead_also_invalid() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "closed" "agent-x" "tmpl-x" "[]"
+    printf '[{"id":"ga-fallbk.3"}]' > "$fbd/fake-bd-state/list-json"
+    # The fallback candidate is ALSO invalid (closed) — the fallback must be
+    # fully re-validated, not a blanket allow just because a distinct
+    # assignee id exists.
+    write_show_json "$fbd" "ga-fallbk.3" "closed" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "fallback/block-when-branch-bead-closed-and-assignee-bead-also-invalid (rc=$rc, still blocks)"
+    else
+        record_fail "fallback/block-when-branch-bead-closed-and-assignee-bead-also-invalid" "expected non-zero rc mentioning --no-verify, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ---------------------------------------------------------------------------
 # Bead-id resolution.
 # ---------------------------------------------------------------------------
 
@@ -380,7 +455,7 @@ test_allow_when_no_bead_id_resolvable() {
 # --status=in_progress, so it cannot find a bead that has already left that
 # status (e.g. closed by the exact mayor ruling this guard exists to catch)
 # by the time the fallback runs. See the KNOWN LIMITATION comment on
-# _pog_resolve_bead_id in push-ownership-guard.sh — this pins the current,
+# _pog_assignee_bead_id in push-ownership-guard.sh — this pins the current,
 # spec-compliant behavior so a change to the fallback algorithm is a
 # deliberate, visible decision, not a silent regression either direction.
 # Confirmed against a real bd via manual repro (ga-fip9ps.1 bead notes);
@@ -539,6 +614,8 @@ run_all() {
     test_block_on_hold_external
     test_block_on_bd_unreachable
     test_block_on_bd_timeout
+    test_allow_fallback_when_branch_bead_closed_but_assignee_bead_valid
+    test_block_when_branch_bead_closed_and_assignee_bead_also_invalid
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_fallback_used_when_branch_no_match
     test_allow_when_no_bead_id_resolvable

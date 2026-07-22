@@ -65,83 +65,66 @@ _pog_timeout() {
     fi
 }
 
-# _pog_resolve_bead_id: prints the bead id this push should be checked
-# against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)? —
-#      the bead's own id format, extended with an optional sub-bead suffix
-#      because this repo's real branch convention is
-#      builder/<bead-id>-<slug> and sub-beads (e.g. ga-fip9ps.1) are
-#      routine; the literal 6-char-only pattern would misresolve to the
-#      parent bead on a sub-bead's own branch.
-#   2. Falls back to this session's single in-progress assignment
-#      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
-#      the branch name doesn't match.
-# If both resolve and disagree, the branch match wins (it's the more
-# specific signal) and a warning goes to stderr — this is a best-effort
-# cross-check, not a hard failure, since branch-naming habits can
-# legitimately drift from bd's bookkeeping.
-#
-# KNOWN LIMITATION of path 2 (confirmed by manual repro, not yet filed as
-# its own bead): the fallback query itself filters on --status=in_progress,
-# so it cannot find a bead that has already left in_progress (e.g. closed
-# by the exact mayor ruling this guard exists to catch) by the time the
-# fallback runs. In that narrow intersection — branch name doesn't encode
-# the bead id AND the status flip lands before this resolves — no id
-# resolves at all, and assert_bead_still_claimed's "nothing to check"
-# branch below allows the push. This does NOT affect path 1: this repo's
-# real branch convention (builder/<bead-id>-<slug>) always encodes the
-# bead id, so the primary path is unaffected by a bead's status changing
-# out from under it — confirmed via manual repro, see
-# test_fallback_cannot_detect_staleness_after_status_leaves_in_progress in
-# scripts/test-push-ownership-guard.sh. The fallback query shape matches
-# ga-fip9ps.1's own spec verbatim; widening it (e.g. dropping the status
-# filter) trades this gap for ambiguous multi-match resolution against an
-# agent's whole bead history, which is a real design decision for whoever
-# owns that tradeoff, not a mechanical fix — left for a follow-up bead.
-# Prints nothing (not an error) when neither resolves — the caller treats
-# that as "nothing to check," which is what lets Layer A wire this in
-# unconditionally without blocking every push in the repo.
-_pog_resolve_bead_id() {
+# _pog_branch_bead_id: prints the bead id parsed from the current branch
+# name, matched against ga-[0-9a-z]{6}(\.[0-9]+)? — the bead's own id
+# format, extended with an optional sub-bead suffix because this repo's
+# real branch convention is builder/<bead-id>-<slug> and sub-beads (e.g.
+# ga-fip9ps.1) are routine; the literal 6-char-only pattern would
+# misresolve to the parent bead on a sub-bead's own branch. Prints nothing
+# if the branch doesn't match.
+_pog_branch_bead_id() {
     local branch=""
     branch="$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
-
-    local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)?' <<<"$branch" | head -1 || true)"
+        grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)?' <<<"$branch" | head -1 || true
     fi
+}
 
-    local assignee_id=""
+# _pog_assignee_bead_id: prints this session's single in-progress bd
+# assignment (bd list --assignee="$GC_AGENT" --status=in_progress --json).
+# Prints nothing if none resolves.
+#
+# KNOWN LIMITATION (confirmed by manual repro, not yet filed as its own
+# bead): this query filters on --status=in_progress, so it cannot find a
+# bead that has already left that status (e.g. closed by the exact mayor
+# ruling this guard exists to catch) by the time it runs. When
+# _pog_branch_bead_id also doesn't resolve, that means no id resolves at
+# all and assert_bead_still_claimed's "nothing to check" branch allows the
+# push — see test_fallback_cannot_detect_staleness_after_status_leaves_in_progress
+# in scripts/test-push-ownership-guard.sh. This does NOT affect the branch
+# path: this repo's real branch convention (builder/<bead-id>-<slug>)
+# always encodes the bead id. Widening this query (e.g. dropping the status
+# filter) trades this gap for ambiguous multi-match resolution against an
+# agent's whole bead history — a real design decision, not a mechanical
+# fix — left for a follow-up bead.
+_pog_assignee_bead_id() {
     if [[ -n "${GC_AGENT:-}" ]] && command -v bd >/dev/null 2>&1; then
         local list_json
         list_json="$(_pog_timeout "$POG_TIMEOUT_SECONDS" bd list --assignee="$GC_AGENT" --status=in_progress --json 2>/dev/null || true)"
         if [[ -n "$list_json" ]]; then
-            assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+            jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true
         fi
-    fi
-
-    if [[ -n "$branch_id" && -n "$assignee_id" && "$branch_id" != "$assignee_id" ]]; then
-        echo "push-ownership-guard: WARNING branch name resolves to $branch_id but this session's in-progress assignment is $assignee_id; using $branch_id (branch name wins)" >&2
-    fi
-
-    if [[ -n "$branch_id" ]]; then
-        printf '%s' "$branch_id"
-    else
-        printf '%s' "$assignee_id"
     fi
 }
 
-# assert_bead_still_claimed: the exported guard. Returns 0 to allow the
-# push, non-zero to block it. See file header for the full contract.
-assert_bead_still_claimed() {
-    if [[ "${POG_DISABLE:-0}" == "1" ]]; then
-        return 0
-    fi
-
-    local id
-    id="$(_pog_resolve_bead_id)"
-    if [[ -z "$id" ]]; then
-        return 0  # nothing to check
-    fi
+# _pog_check_bead_claimed <id>: the core ownership/staleness check against
+# one resolved bead id. Prints a BLOCKED explanation to stderr and returns
+# non-zero if the check fails, 0 if it passes.
+#   Return codes:
+#     0 — claim confirmed, still valid.
+#     2 — blocked because the bead's status is terminal (not
+#         in_progress/open). This is the ONLY failure mode
+#         assert_bead_still_claimed treats as retryable against a fallback
+#         id, since a branch-encoded bead closing via a normal handoff
+#         looks identical, from here, to one closed out from under this
+#         push — the caller distinguishes them by whether a separate,
+#         still-valid assignment exists.
+#     1 — blocked for any other reason (bd unreachable, timed out,
+#         unparseable, reassigned, rerouted, held). Not retryable: these
+#         mean this session's specific claim was actively superseded, which
+#         a fallback id must never paper over.
+_pog_check_bead_claimed() {
+    local id="$1"
 
     if ! command -v bd >/dev/null 2>&1; then
         echo "push-ownership-guard: BLOCKED — bd is not on PATH, cannot verify $id is still claimed. Bypass with: git push --no-verify" >&2
@@ -166,7 +149,7 @@ assert_bead_still_claimed() {
 
     if [[ "$status" != "in_progress" && "$status" != "open" ]]; then
         echo "push-ownership-guard: BLOCKED — $id status is '$status', not in_progress/open; the claim behind this push is stale. Bypass with: git push --no-verify" >&2
-        return 1
+        return 2
     fi
 
     # A session-run claim sets bead.assignee from the first non-empty of
@@ -207,4 +190,62 @@ assert_bead_still_claimed() {
     fi
 
     return 0
+}
+
+# assert_bead_still_claimed: the exported guard. Returns 0 to allow the
+# push, non-zero to block it. See file header for the full contract.
+#
+# Resolves branch_id and assignee_id separately (rather than collapsing to
+# one winner up front) because it needs both: branch_id is checked first
+# (it's the more specific signal — see _pog_branch_bead_id), but when
+# branch_id's bead has legitimately closed (e.g. ga-hilw2y — a builder's
+# branch still names the bead that originally spawned it after that bead
+# closed normally into a separate deploy-tracking bead), this retries the
+# full check against assignee_id rather than treating an ordinary handoff
+# as staleness. If both resolve and disagree, a warning goes to stderr
+# either way — a best-effort cross-check, not a hard failure, since
+# branch-naming habits can legitimately drift from bd's bookkeeping.
+assert_bead_still_claimed() {
+    if [[ "${POG_DISABLE:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    local branch_id assignee_id
+    branch_id="$(_pog_branch_bead_id)"
+    assignee_id="$(_pog_assignee_bead_id)"
+
+    if [[ -n "$branch_id" && -n "$assignee_id" && "$branch_id" != "$assignee_id" ]]; then
+        echo "push-ownership-guard: WARNING branch name resolves to $branch_id but this session's in-progress assignment is $assignee_id; using $branch_id (branch name wins)" >&2
+    fi
+
+    local id="$branch_id"
+    [[ -z "$id" ]] && id="$assignee_id"
+    if [[ -z "$id" ]]; then
+        return 0  # nothing to check
+    fi
+
+    _pog_check_bead_claimed "$id"
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        return 0
+    fi
+
+    # Retry against the assignee bead ONLY when the branch-encoded bead
+    # specifically failed on terminal status (rc=2) and a distinct
+    # assignee bead exists — e.g. ga-hilw2y, where the branch still names
+    # the bead that originally spawned it after that bead closed normally
+    # into a separate deploy-tracking bead. Any other block reason
+    # (reassigned/rerouted/held, rc=1) is NOT retried: those mean this
+    # session's specific claim was actively superseded, which must keep
+    # blocking exactly as before even though branch_id's bead is still
+    # in_progress/open.
+    if [[ $rc -eq 2 && "$id" == "$branch_id" && -n "$assignee_id" && "$assignee_id" != "$branch_id" ]]; then
+        echo "push-ownership-guard: $branch_id is closed but this session's own in-progress assignment is $assignee_id; retrying against it before blocking" >&2
+        if _pog_check_bead_claimed "$assignee_id"; then
+            return 0
+        fi
+        return 1
+    fi
+
+    return 1
 }

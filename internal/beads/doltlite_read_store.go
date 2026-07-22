@@ -21,17 +21,13 @@ import (
 // Writes and less common operations delegate to the normal bd CLI store.
 type DoltliteReadStore struct {
 	*BdStore
-	db              *sql.DB
-	orderRunMu      sync.Mutex
-	orderRunLastRun map[string]time.Time
-	orderRunOpen    map[string]bool
-	orderRunHash    string
-	sessionMu       sync.Mutex
-	sessionCache    []Bead
-	sessionHash     string
-	readyMu         sync.Mutex
-	readyCache      map[string][]Bead
-	readyHash       string
+	db           *sql.DB
+	sessionMu    sync.Mutex
+	sessionCache []Bead
+	sessionHash  string
+	readyMu      sync.Mutex
+	readyCache   map[string][]Bead
+	readyHash    string
 }
 
 func (s *DoltliteReadStore) NeedsSessionTypeFallback() bool { return true }
@@ -388,83 +384,6 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	return out, nil
 }
 
-func (s *DoltliteReadStore) LastOrderRun(name string) (time.Time, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return time.Time{}, nil
-	}
-	hash, err := s.currentDoltHash()
-	if err != nil {
-		return time.Time{}, err
-	}
-	s.orderRunMu.Lock()
-	defer s.orderRunMu.Unlock()
-	if s.orderRunLastRun == nil || hash == "" || hash != s.orderRunHash {
-		lastRun, openRuns, err := s.loadOrderRuns()
-		if err != nil {
-			return time.Time{}, err
-		}
-		s.orderRunLastRun = lastRun
-		s.orderRunOpen = openRuns
-		s.orderRunHash = hash
-	}
-	return s.orderRunLastRun[name], nil
-}
-
-func (s *DoltliteReadStore) loadOrderRuns() (map[string]time.Time, map[string]bool, error) {
-	rows, err := s.db.Query(`SELECT l.label, MAX(i.created_at), MAX(CASE WHEN i.status != 'closed' THEN 1 ELSE 0 END)
-		FROM labels l
-		JOIN issues i ON i.id = l.issue_id
-		WHERE l.label >= 'order-run:' AND l.label < 'order-run;'
-		GROUP BY l.label`)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	lastRun := make(map[string]time.Time)
-	openRuns := make(map[string]bool)
-	for rows.Next() {
-		var label string
-		var createdRaw any
-		var open int
-		if err := rows.Scan(&label, &createdRaw, &open); err != nil {
-			return nil, nil, err
-		}
-		name := strings.TrimPrefix(label, "order-run:")
-		if name != "" {
-			lastRun[name] = parseDBTime(createdRaw).Truncate(time.Second)
-			openRuns[name] = open > 0
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
-	return lastRun, openRuns, nil
-}
-
-func (s *DoltliteReadStore) HasOpenOrderRun(name string) (bool, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return false, nil
-	}
-	hash, err := s.currentDoltHash()
-	if err != nil {
-		return false, err
-	}
-	s.orderRunMu.Lock()
-	defer s.orderRunMu.Unlock()
-	if s.orderRunOpen == nil || hash == "" || hash != s.orderRunHash {
-		lastRun, openRuns, err := s.loadOrderRuns()
-		if err != nil {
-			return false, err
-		}
-		s.orderRunLastRun = lastRun
-		s.orderRunOpen = openRuns
-		s.orderRunHash = hash
-	}
-	return s.orderRunOpen[name], nil
-}
-
 func (s *DoltliteReadStore) currentDoltHash() (string, error) {
 	var dataVersion int64
 	if err := s.db.QueryRow("PRAGMA data_version").Scan(&dataVersion); err != nil {
@@ -532,12 +451,12 @@ func (s *DoltliteReadStore) tableCount(table string, required bool) (int64, erro
 	return count, nil
 }
 
-func (s *DoltliteReadStore) resetOrderRunCache() {
-	s.orderRunMu.Lock()
-	defer s.orderRunMu.Unlock()
-	s.orderRunLastRun = nil
-	s.orderRunOpen = nil
-	s.orderRunHash = ""
+// resetReadCaches drops the in-process session/ready read caches after a
+// same-process mutation, ahead of the per-read dolt-hash staleness check.
+// (The order-run cache this hook originally fed was retired with the orders
+// class relocation — engdocs/design/infra-class-sqlite-stores.md P5; the
+// class store owns order-run reads now.)
+func (s *DoltliteReadStore) resetReadCaches() {
 	s.sessionMu.Lock()
 	s.sessionCache = nil
 	s.sessionHash = ""
@@ -551,7 +470,7 @@ func (s *DoltliteReadStore) resetOrderRunCache() {
 func (s *DoltliteReadStore) Create(b Bead) (Bead, error) {
 	created, err := s.BdStore.Create(b)
 	if err == nil && hasOrderRunLabel(created.Labels) {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return created, err
 }
@@ -568,7 +487,7 @@ func hasOrderRunLabel(labels []string) bool {
 func (s *DoltliteReadStore) Update(id string, opts UpdateOpts) error {
 	err := s.BdStore.Update(id, opts)
 	if err == nil {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return err
 }
@@ -576,7 +495,7 @@ func (s *DoltliteReadStore) Update(id string, opts UpdateOpts) error {
 func (s *DoltliteReadStore) Close(id string) error {
 	err := s.BdStore.Close(id)
 	if err == nil {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return err
 }
@@ -584,7 +503,7 @@ func (s *DoltliteReadStore) Close(id string) error {
 func (s *DoltliteReadStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	n, err := s.BdStore.CloseAll(ids, metadata)
 	if err == nil && n > 0 {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return n, err
 }
@@ -592,7 +511,7 @@ func (s *DoltliteReadStore) CloseAll(ids []string, metadata map[string]string) (
 func (s *DoltliteReadStore) Reopen(id string) error {
 	err := s.BdStore.Reopen(id)
 	if err == nil {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return err
 }
@@ -600,7 +519,7 @@ func (s *DoltliteReadStore) Reopen(id string) error {
 func (s *DoltliteReadStore) Delete(id string) error {
 	err := s.BdStore.Delete(id)
 	if err == nil {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return err
 }
@@ -635,7 +554,7 @@ func (s *DoltliteReadStore) SetMetadataBatch(id string, kvs map[string]string) e
 	}
 	err = s.BdStore.SetMetadataBatch(id, changed)
 	if err == nil {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return err
 }
@@ -647,7 +566,7 @@ func (s *DoltliteReadStore) SetMetadata(id, key, value string) error {
 func (s *DoltliteReadStore) DepAdd(id, dep, depType string) error {
 	err := s.BdStore.DepAdd(id, dep, depType)
 	if err == nil {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return err
 }
@@ -655,7 +574,7 @@ func (s *DoltliteReadStore) DepAdd(id, dep, depType string) error {
 func (s *DoltliteReadStore) DepRemove(id, dep string) error {
 	err := s.BdStore.DepRemove(id, dep)
 	if err == nil {
-		s.resetOrderRunCache()
+		s.resetReadCaches()
 	}
 	return err
 }

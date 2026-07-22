@@ -537,35 +537,6 @@ func TestDoltliteReadStoreCachesInvalidateOnWorkingSetWrites(t *testing.T) {
 	}
 }
 
-func TestDoltliteReadStoreReadsOrderRunHotPaths(t *testing.T) {
-	store, closeStore := newTestDoltliteReadStore(t)
-	defer closeStore()
-
-	last, err := store.LastOrderRun("rig/sweep")
-	if err != nil {
-		t.Fatalf("LastOrderRun: %v", err)
-	}
-	if last.IsZero() {
-		t.Fatal("LastOrderRun returned zero time")
-	}
-
-	open, err := store.HasOpenOrderRun("rig/sweep")
-	if err != nil {
-		t.Fatalf("HasOpenOrderRun(open): %v", err)
-	}
-	if open {
-		t.Fatal("HasOpenOrderRun reported open for closed run")
-	}
-
-	open, err = store.HasOpenOrderRun("rig/active")
-	if err != nil {
-		t.Fatalf("HasOpenOrderRun(active): %v", err)
-	}
-	if !open {
-		t.Fatal("HasOpenOrderRun did not find active run")
-	}
-}
-
 func TestDoltliteReadStoreListsQueuedNudgeBeads(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

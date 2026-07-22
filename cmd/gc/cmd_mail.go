@@ -1339,12 +1339,25 @@ func isNoCityStoreError(err error) bool {
 
 var openMailTargetStore = tryOpenCityStore
 
+// tryOpenCityStore opens the city store for the storeless-provider mail
+// target funnel and routes it through the session coordination-class store
+// (resolveMailTargets only performs session/identity reads), so a
+// [beads.classes.sessions] relocation reaches this leg the same way it
+// reaches the other cmd_mail funnels. The no-refresh cfg loader matches
+// openCityMailProvider; a failed load yields nil cfg, and the sessions
+// routing self-loads on a marked city, so a routed city never silently
+// reads bd here.
 func tryOpenCityStore() (beads.Store, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nil, err
 	}
-	return openStoreAtForCity(cityPath, cityPath)
+	store, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	return cliSessionStore(store, cfg, cityPath), nil
 }
 
 func resolveMailAddressForCommand(identifier string, stderr io.Writer, cmdName string) (string, bool) {

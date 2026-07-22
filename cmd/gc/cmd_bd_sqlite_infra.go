@@ -39,15 +39,16 @@ func maybeDoBdSQLiteInfra(cityPath string, target execStoreTarget, args []string
 		return 0, false
 	}
 	scope := infraScopeRoot(cityPath)
-	st, err := beads.OpenSQLiteStore(
-		filepath.Join(scope, ".beads"),
-		beads.WithSQLiteStoreIDPrefix(readScopeIssuePrefix(scope)),
-	)
+	// Open through the policy-wrapped city opener (cached; do NOT close) and
+	// augment with the CLI emission seam so in-process close/update mutations
+	// append canonical bead.* events — raw store opens skipped emission, which
+	// froze event-sourced run projections at "Running" (Factory RCA).
+	st, err := openStoreAtForCity(scope, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: opening embedded sqlite infra store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
-	defer func() { _ = closeBeadStoreHandle(st) }()
+	st = classStoreWithCLIEmission(st, cityPath)
 
 	// Residence decides ownership: reserved-class ids always live here; a
 	// migrated legacy-prefix bead (ga-wisp-…, mc-wisp-…) is claimed by
@@ -72,7 +73,7 @@ func maybeDoBdSQLiteInfra(cityPath string, target execStoreTarget, args []string
 		fmt.Fprintln(stdout, string(out)) //nolint:errcheck // best-effort stdout
 		return 0, true
 	case "update":
-		return doBdSQLiteInfraUpdate(st, id, rest, stdout, stderr), true
+		return doBdSQLiteInfraUpdate(st, scope, id, rest, stdout, stderr), true
 	case "close":
 		return doBdSQLiteInfraClose(st, id, rest, stdout, stderr), true
 	default:
@@ -144,15 +145,12 @@ func maybeDoBdSQLiteInfraList(cityPath string, args []string, stdout, stderr io.
 		return 0, false
 	}
 	scope := infraScopeRoot(cityPath)
-	st, err := beads.OpenSQLiteStore(
-		filepath.Join(scope, ".beads"),
-		beads.WithSQLiteStoreIDPrefix(readScopeIssuePrefix(scope)),
-	)
+	st, err := openStoreAtForCity(scope, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd list: opening embedded sqlite infra store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
-	defer func() { _ = closeBeadStoreHandle(st) }()
+	st = classStoreWithCLIEmission(st, cityPath)
 	if !config.IsReservedClassBeadID(refID) {
 		if _, getErr := st.Get(refID); getErr != nil {
 			return 0, false
@@ -211,7 +209,7 @@ func splitBdByIDVerb(args []string) (verb, id string, rest []string) {
 	return v, args[positionals[1]], out
 }
 
-func doBdSQLiteInfraUpdate(st beads.Store, id string, flags []string, stdout, stderr io.Writer) int {
+func doBdSQLiteInfraUpdate(st beads.Store, scopeRoot, id string, flags []string, stdout, stderr io.Writer) int {
 	opts := beads.UpdateOpts{}
 	meta := map[string]string{}
 	claim := false
@@ -285,6 +283,20 @@ func doBdSQLiteInfraUpdate(st beads.Store, id string, flags []string, stdout, st
 		claimer, ok := st.(interface {
 			Claim(id, assignee string) (beads.Bead, bool, error)
 		})
+		if !ok {
+			// The policy/emission wrapper does not forward Claim; open the raw
+			// embedded store for the CAS only.
+			raw, rerr := beads.OpenSQLiteStore(
+				filepath.Join(scopeRoot, ".beads"),
+				beads.WithSQLiteStoreIDPrefix(readScopeIssuePrefix(scopeRoot)),
+			)
+			if rerr == nil {
+				defer func() { _ = closeBeadStoreHandle(raw) }()
+				claimer, ok = raw.(interface {
+					Claim(id, assignee string) (beads.Bead, bool, error)
+				})
+			}
+		}
 		if !ok {
 			fmt.Fprintln(stderr, "gc bd update --claim: store has no native claim") //nolint:errcheck // best-effort stderr
 			return 1

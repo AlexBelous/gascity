@@ -311,10 +311,12 @@ func (s *Shadow) DepList(id, direction string) ([]beads.Dep, error) {
 	return s.primary.DepList(id, direction)
 }
 
-// collectPrimarySessionRows gathers every sessions-class bead from the
-// primary store: the session Type+Label union legs plus the wait-typed
-// legs, classify-filtered (a graph gate or a work chore never crosses).
-func collectPrimarySessionRows(primary beads.Store, includeClosed bool) (map[string]beads.Bead, error) {
+// ExportSessionClassBeads gathers every sessions-class bead from a bd
+// store: the session Type+Label union legs plus the wait-typed legs,
+// classify-filtered (a graph gate or a work chore never crosses). Shared
+// by the shadow seed, the shadow diff, and cmd/gc's migration/residue
+// sweep — one collector, one selection rule.
+func ExportSessionClassBeads(primary beads.Store, includeClosed bool) (map[string]beads.Bead, error) {
 	legs := []beads.ListQuery{
 		{Type: session.BeadType, IncludeClosed: includeClosed},
 		{Label: session.LabelSession, IncludeClosed: includeClosed},
@@ -346,7 +348,7 @@ func collectPrimarySessionRows(primary beads.Store, includeClosed bool) (map[str
 // converged baseline instead of reporting every pre-existing session as
 // missing. Returns the number of rows imported.
 func (s *Store) SeedFromPrimary(primary beads.Store) (int, error) {
-	rows, err := collectPrimarySessionRows(primary, true)
+	rows, err := ExportSessionClassBeads(primary, true)
 	if err != nil {
 		return 0, err
 	}
@@ -394,7 +396,7 @@ func (d ShadowDiff) Clean() bool {
 // excluded (UpdatedAt advances independently). Callers on a live city
 // should re-diff discrepant ids once to filter in-flight write races.
 func (s *Store) DiffAgainstPrimary(primary beads.Store) (ShadowDiff, error) {
-	want, err := collectPrimarySessionRows(primary, false)
+	want, err := ExportSessionClassBeads(primary, false)
 	if err != nil {
 		return ShadowDiff{}, err
 	}

@@ -275,6 +275,15 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		startMessagingRetentionSweeper(p.CityPath, p.Stderr)
 	}
 
+	// Seamless sessions-class cutover, same shape: full import of open
+	// session beads + waits (ids preserved) plus retention-window closed
+	// rows, atomic marker, background residue sweep, and the class store's
+	// closed-row retention loop.
+	if ensureSessionsClassMigrated(p.CityPath, p.Cfg, p.Stderr) {
+		go sweepLegacySessionResidue(p.CityPath, p.Cfg, p.Stderr)
+		startSessionsRetentionSweeper(p.CityPath, p.Stderr)
+	}
+
 	// Sessions shadow-write gate (P4): re-seed the class store from the bd
 	// truth so the soak's zero-discrepancy diff starts converged.
 	seedSessionsShadowAtBoot(p.CityPath, p.Cfg, p.Stderr)

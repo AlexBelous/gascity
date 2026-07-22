@@ -265,9 +265,12 @@ func resolveNudgesStore(workStore beads.Store, cfg *config.City, cityPath string
 // resolveSessionStore returns the session-lifecycle store. Identity today: the
 // work store. Session-class beads are session lifecycle beads and durable
 // session waits; only those bead ops route here. When sessions relocate, the
-// class store plugs in at resolveClassStore.
+// class store plugs in at resolveClassStore. Until then the shadow-write gate
+// ([beads.classes.sessions] shadow=true) may wrap the resolved store in the
+// sessionsdb tee — bd stays authoritative; see session_class_store.go.
 func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassSessions, rec)
+	base := resolveClassStore(workStore, cfg, cityPath, config.BeadClassSessions, rec)
+	return maybeShadowSessionStore(base, cfg, cityPath)
 }
 
 // resolveGraphStore returns the beads.Store backing the GRAPH coordination

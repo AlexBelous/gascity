@@ -1474,6 +1474,13 @@ type BeadClassConfig struct {
 	// dedicated store has landed; requesting it elsewhere fails load rather
 	// than silently running on bd.
 	Backend string `toml:"backend,omitempty" jsonschema:"enum=bd,enum=sqlite"`
+	// Shadow tee-writes the class to its dedicated embedded store while the
+	// backend stays "bd": bd remains authoritative for every read and write,
+	// and each class write is replayed onto the embedded store so the two can
+	// be diffed before the backend flips (the design's shadow-write gate).
+	// Supported only for the sessions class; meaningless (and rejected)
+	// combined with backend="sqlite".
+	Shadow bool `toml:"shadow,omitempty"`
 }
 
 // Bead-class store backends for [beads.classes.<name>].backend.
@@ -1504,6 +1511,14 @@ var sqliteCapableBeadClasses = map[string]bool{
 	// migrated-marker (messagingdb.RoutedStoreFor). The class relocates
 	// atomically: one knob, one marker, both halves.
 	BeadClassMessaging: true,
+}
+
+// shadowCapableBeadClasses enumerates the classes that support the
+// shadow-write gate. Sessions only: it is the durability-critical class the
+// design gates behind a zero-discrepancy shadow soak before the backend
+// flips; the ephemeral classes cut over on their migrated marker alone.
+var shadowCapableBeadClasses = map[string]bool{
+	BeadClassSessions: true,
 }
 
 // beadClassConfigurable enumerates the class names accepted under
@@ -1551,8 +1566,24 @@ func validateBeadsClasses(b BeadsConfig) error {
 		default:
 			return fmt.Errorf("beads.classes.%s: unknown backend %q (known: %q, %q)", class, entry.Backend, BeadsClassBackendBD, BeadsClassBackendSQLite)
 		}
+		if entry.Shadow {
+			if !shadowCapableBeadClasses[class] {
+				return fmt.Errorf("beads.classes.%s: shadow is not supported for this class (only the sessions class shadow-writes)", class)
+			}
+			if strings.TrimSpace(entry.Backend) == BeadsClassBackendSQLite {
+				return fmt.Errorf("beads.classes.%s: shadow is meaningful only while backend is %q (backend %q already routes the class to its store)", class, BeadsClassBackendBD, BeadsClassBackendSQLite)
+			}
+		}
 	}
 	return nil
+}
+
+// ClassShadow reports whether the class shadow-writes to its dedicated
+// store while the backend stays bd. Validation guarantees the combination
+// (shadow only on capable classes, never with backend="sqlite"), so this is
+// a plain lookup.
+func (b BeadsConfig) ClassShadow(class string) bool {
+	return b.Classes[class].Shadow
 }
 
 // ValidateBeadsClassPrefixes hard-rejects an effective HQ or rig work-store

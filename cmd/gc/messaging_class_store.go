@@ -120,6 +120,12 @@ func storeIdentityKey(store beads.Store) string {
 	if store == nil {
 		return ""
 	}
+	// A sessions shadow wrapper keys as the bd store it fronts: the repair
+	// registry registered the base handle at the store-opening roots, and a
+	// per-resolve wrapper must resolve to the same city.
+	if shadowed, ok := store.(interface{ ShadowPrimary() beads.Store }); ok {
+		return storeIdentityKey(shadowed.ShadowPrimary())
+	}
 	value := reflect.ValueOf(store)
 	switch value.Kind() {
 	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:

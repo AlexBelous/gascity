@@ -275,6 +275,10 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		startMessagingRetentionSweeper(p.CityPath, p.Stderr)
 	}
 
+	// Sessions shadow-write gate (P4): re-seed the class store from the bd
+	// truth so the soak's zero-discrepancy diff starts converged.
+	seedSessionsShadowAtBoot(p.CityPath, p.Cfg, p.Stderr)
+
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).

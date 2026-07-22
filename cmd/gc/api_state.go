@@ -799,6 +799,11 @@ func closeBeadStoreHandle(store beads.Store) error {
 	if base, _, ok := unwrapBeadPolicyStore(store); ok {
 		return closeBeadStoreHandle(base)
 	}
+	if shadowed, ok := store.(interface{ ShadowPrimary() beads.Store }); ok {
+		// The sessions shadow wrapper: close the wrapped bd handle; the
+		// class-store side is the process-shared handle and stays open.
+		return closeBeadStoreHandle(shadowed.ShadowPrimary())
+	}
 	if cached, ok := store.(*beads.CachingStore); ok {
 		cached.StopReconciler()
 		return closeBeadStoreHandle(cached.Backing())

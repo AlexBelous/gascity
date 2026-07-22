@@ -183,6 +183,66 @@ backend = "sqlite"
 	}
 }
 
+// TestBeadsClassesSessionsShadowAccepted pins the sessions shadow-write
+// gate knob: [beads.classes.sessions] shadow=true parses while the backend
+// stays bd, and ClassShadow reports it.
+func TestBeadsClassesSessionsShadowAccepted(t *testing.T) {
+	cfg, err := Parse([]byte(`[workspace]
+name = "test"
+
+[beads.classes.sessions]
+shadow = true
+`))
+	if err != nil {
+		t.Fatalf("Parse rejected sessions shadow: %v", err)
+	}
+	if !cfg.Beads.ClassShadow(BeadClassSessions) {
+		t.Error("ClassShadow(sessions) = false, want true")
+	}
+	if got := cfg.Beads.ClassBackend(BeadClassSessions); got != BeadsClassBackendBD {
+		t.Errorf("ClassBackend(sessions) = %q, want %q (shadow keeps bd authoritative)", got, BeadsClassBackendBD)
+	}
+}
+
+// TestBeadsClassesShadowRejectedForOtherClasses pins that shadow is a
+// sessions-only stage: the ephemeral classes cut over on their migrated
+// marker alone and must not accept the knob.
+func TestBeadsClassesShadowRejectedForOtherClasses(t *testing.T) {
+	for _, class := range []string{BeadClassGraph, BeadClassMessaging, BeadClassOrders, BeadClassNudges} {
+		_, err := Parse([]byte(`[workspace]
+name = "test"
+
+[beads.classes.` + class + `]
+shadow = true
+`))
+		if err == nil {
+			t.Fatalf("Parse accepted shadow=true for class %q", class)
+		}
+		if !strings.Contains(err.Error(), "beads.classes."+class) {
+			t.Errorf("error %q does not name the offending class %q", err, class)
+		}
+	}
+}
+
+// TestBeadsClassesShadowWithSQLiteBackendRejected pins the contradictory
+// combination: once the backend routes the class to its store, shadow has
+// nothing to tee.
+func TestBeadsClassesShadowWithSQLiteBackendRejected(t *testing.T) {
+	_, err := Parse([]byte(`[workspace]
+name = "test"
+
+[beads.classes.sessions]
+backend = "sqlite"
+shadow = true
+`))
+	if err == nil {
+		t.Fatal("Parse accepted shadow=true with backend=sqlite")
+	}
+	if !strings.Contains(err.Error(), "beads.classes.sessions") {
+		t.Errorf("error %q does not name the sessions class", err)
+	}
+}
+
 // TestBeadsClassesMessagingSQLiteAccepted pins the messaging capability
 // flip: the internal/classdb/messaging store (mail messages + extmsg typed
 // tables, one file) has landed, so [beads.classes.messaging]

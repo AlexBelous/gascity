@@ -993,6 +993,10 @@
             "sqlite"
           ],
           "description": "Backend selects the class's store: \"bd\" (default; the class stays in\nthe city's bd-backed store) or \"sqlite\" (the class's dedicated embedded\nstore under .gc/store/). \"sqlite\" is accepted only for classes whose\ndedicated store has landed; requesting it elsewhere fails load rather\nthan silently running on bd."
+        },
+        "shadow": {
+          "type": "boolean",
+          "description": "Shadow tee-writes the class to its dedicated embedded store while the\nbackend stays \"bd\": bd remains authoritative for every read and write,\nand each class write is replayed onto the embedded store so the two can\nbe diffed before the backend flips (the design's shadow-write gate).\nSupported only for the sessions class; meaningless (and rejected)\ncombined with backend=\"sqlite\"."
         }
       },
       "additionalProperties": false,

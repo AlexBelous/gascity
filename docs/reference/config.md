@@ -272,6 +272,7 @@ BeadClassConfig configures one coordination class's store backend.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `backend` | string |  |  | Backend selects the class's store: "bd" (default; the class stays in the city's bd-backed store) or "sqlite" (the class's dedicated embedded store under .gc/store/). "sqlite" is accepted only for classes whose dedicated store has landed; requesting it elsewhere fails load rather than silently running on bd. Enum: `bd`, `sqlite` |
+| `shadow` | boolean |  |  | Shadow tee-writes the class to its dedicated embedded store while the backend stays "bd": bd remains authoritative for every read and write, and each class write is replayed onto the embedded store so the two can be diffed before the backend flips (the design's shadow-write gate). Supported only for the sessions class; meaningless (and rejected) combined with backend="sqlite". |
 
 ## BeadPolicyConfig
 

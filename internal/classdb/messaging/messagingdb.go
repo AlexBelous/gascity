@@ -33,10 +33,12 @@ import (
 // drifts from the config registry without importing internal/config here.
 const idPrefix = "gcm"
 
-// migrations is the version-gated messages schema, per the design's
-// Messaging section. id_seq is the id mint counter, advanced inside the
-// same transaction as each INSERT so minted ids are unique across
-// concurrent processes.
+// migrations is the version-gated messaging-class schema, per the design's
+// Messaging section: Version 1 is the mail messages table, Version 2 the
+// extmsg typed tables (extmsgdb.go) — the second half of the class, in the
+// SAME file so the class relocates atomically. id_seq is the shared id mint
+// counter, advanced inside the same transaction as each INSERT so minted ids
+// are unique across concurrent processes.
 func migrations() []core.Migration {
 	return []core.Migration{{
 		Version: 1,
@@ -66,6 +68,9 @@ func migrations() []core.Migration {
 			`CREATE TABLE IF NOT EXISTS id_seq (k INTEGER PRIMARY KEY CHECK (k = 1), next INTEGER NOT NULL)`,
 			`INSERT OR IGNORE INTO id_seq (k, next) VALUES (1, 0)`,
 		},
+	}, {
+		Version: 2,
+		DDL:     extmsgDDL(),
 	}}
 }
 

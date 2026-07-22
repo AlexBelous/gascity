@@ -35,7 +35,12 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
 		return r
 	}
-	all, err := loadSessionModelDoctorBeads(store)
+	// The session union legs read the ROUTED sessions-class store (on a
+	// migrated city the work store holds only residue); the work legs keep
+	// the raw city store. Identity pre-flip, so this is byte-identical
+	// until a city migrates.
+	sessStore := cliSessionStore(store, c.cfg, c.cityPath)
+	all, err := loadSessionModelDoctorBeads(sessStore, store)
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
@@ -124,7 +129,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	return r
 }
 
-func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
+func loadSessionModelDoctorBeads(sessionStore, store beads.Store) ([]beads.Bead, error) {
 	type listStep struct {
 		name  string
 		query beads.ListQuery
@@ -153,7 +158,7 @@ func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
 		{Type: session.BeadType, IncludeClosed: true, Sort: beads.SortCreatedAsc},
 		{Label: session.LabelSession, IncludeClosed: true, Sort: beads.SortCreatedAsc},
 	} {
-		items, err := store.List(q)
+		items, err := sessionStore.List(q)
 		if err != nil {
 			return nil, fmt.Errorf("session beads: %w", err)
 		}

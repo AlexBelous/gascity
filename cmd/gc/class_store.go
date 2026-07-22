@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionsdb "github.com/gastownhall/gascity/internal/classdb/sessions"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
@@ -262,14 +265,24 @@ func resolveNudgesStore(workStore beads.Store, cfg *config.City, cityPath string
 	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassNudges, rec)
 }
 
-// resolveSessionStore returns the session-lifecycle store. Identity today: the
-// work store. Session-class beads are session lifecycle beads and durable
-// session waits; only those bead ops route here. When sessions relocate, the
-// class store plugs in at resolveClassStore. Until then the shadow-write gate
-// ([beads.classes.sessions] shadow=true) may wrap the resolved store in the
-// sessionsdb tee — bd stays authoritative; see session_class_store.go.
+// resolveSessionStore returns the session-lifecycle store. Session-class
+// beads are session lifecycle beads and durable session waits; only those
+// bead ops route here.
+//
+// Routing (session_class_store.go): on a MIGRATED city whose config keeps
+// backend="sqlite", the embedded class store is returned — and a marked
+// city whose routing cannot be resolved or whose store cannot open gets a
+// fail-CLOSED erroring store, never a bd fallback (routed readers never
+// look at bd). Unrouted cities get the bd work store, optionally wrapped
+// in the shadow-write tee ([beads.classes.sessions] shadow=true; bd stays
+// authoritative there).
 func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	base := resolveClassStore(workStore, cfg, cityPath, config.BeadClassSessions, rec)
+	if class, routed, err := sessionsdb.RoutedStoreFor(cityPath, cfg); err != nil {
+		return sessionsdb.NewUnavailableStore(fmt.Errorf("sessions-class store unavailable: %w", err))
+	} else if routed {
+		return class
+	}
 	return maybeShadowSessionStore(base, cfg, cityPath)
 }
 

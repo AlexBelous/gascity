@@ -35,6 +35,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -136,7 +138,8 @@ const rowColumns = `id, title, bead_type, status, assignee, description, created
 // audited beads.Store subset for session and wait beads; resolveSessionStore
 // hands it out in place of the work store on migrated cities.
 type Store struct {
-	db *core.DB
+	db                   *core.DB
+	retentionSweeperOnce sync.Once
 }
 
 // Interface guard: the class store must satisfy the full beads.Store
@@ -782,6 +785,49 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 
 // Ping verifies the store is operational.
 func (s *Store) Ping() error { return s.db.Ping() }
+
+// SweepClosedBefore deletes closed session and wait rows whose last write
+// (updated_at) precedes cutoff — the design's net-new closed-session purge
+// (default 7d TTL), a DELETE path that cannot exist on bd. Open rows are
+// never touched. Returns the number of rows deleted.
+func (s *Store) SweepClosedBefore(ctx context.Context, cutoff time.Time) (int, error) {
+	deleted := 0
+	err := s.db.Write(ctx, func(tx *sql.Tx) error {
+		for _, table := range []string{"sessions", "waits"} {
+			res, err := tx.Exec(`DELETE FROM `+table+` WHERE status = 'closed' AND updated_at < ?`, cutoff.UnixNano())
+			if err != nil {
+				return fmt.Errorf("sweeping closed %s rows: %w", table, err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			deleted += int(n)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+// StartRetentionSweeper starts the store's own periodic closed-row
+// retention sweep (the design's "stores own retention": the only
+// pre-existing delete path was reaper.sh's raw Dolt SQL, which no-ops on a
+// routed city). Idempotent per handle — the first call starts the loop,
+// later calls no-op, so controller rebuilds over the process-shared handle
+// never stack tickers. The loop stops when the store closes; sweep
+// failures are reported to warn (nil discards them).
+func (s *Store) StartRetentionSweeper(interval, ttl time.Duration, warn io.Writer) {
+	s.retentionSweeperOnce.Do(func() {
+		s.db.StartSweeper(interval, func(ctx context.Context) {
+			if _, err := s.SweepClosedBefore(ctx, time.Now().Add(-ttl)); err != nil && warn != nil {
+				fmt.Fprintf(warn, "sessions retention sweep: %v\n", err) //nolint:errcheck // best-effort warning
+			}
+		})
+	})
+}
 
 // --- Outside the audited sessions-class surface: fail loud. ---
 

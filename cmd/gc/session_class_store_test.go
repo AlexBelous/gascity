@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -45,6 +46,80 @@ func TestMaybeShadowSessionStoreGate(t *testing.T) {
 	// The identity key unwraps to the base store for the repair registry.
 	if storeIdentityKey(wrapped) != storeIdentityKey(base) {
 		t.Fatal("storeIdentityKey does not unwrap the shadow wrapper")
+	}
+}
+
+func sqliteSessionsCityConfig() *config.City {
+	return &config.City{Beads: config.BeadsConfig{Classes: map[string]config.BeadClassConfig{
+		config.BeadClassSessions: {Backend: config.BeadsClassBackendSQLite},
+	}}}
+}
+
+func writeSessionsMigratedMarker(t *testing.T, city string) {
+	t.Helper()
+	if err := os.MkdirAll(sessionsdb.StoreDir(city), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionsdb.MigratedMarkerPath(city), []byte("migrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveSessionStoreRoutesOnMarkedCity(t *testing.T) {
+	base := beads.NewMemStore()
+	city := t.TempDir()
+	cfg := sqliteSessionsCityConfig()
+
+	// Unmarked: bd (the base store), regardless of the knob.
+	if got := resolveSessionStore(base, cfg, city, nil); got != beads.Store(base) {
+		t.Fatal("unmarked city must resolve to the bd store")
+	}
+
+	writeSessionsMigratedMarker(t, city)
+	routed := resolveSessionStore(base, cfg, city, nil)
+	class, ok := routed.(*sessionsdb.Store)
+	if !ok {
+		t.Fatalf("marked+configured city resolved %T, want *sessionsdb.Store", routed)
+	}
+	// End-to-end through the public front door against the routed store.
+	front := session.NewStore(beads.SessionStore{Store: routed})
+	info, err := front.CreateSessionInfo(session.CreateSpec{
+		Title: "r", AgentName: "r",
+		Metadata: map[string]string{"state": "awake"},
+	})
+	if err != nil {
+		t.Fatalf("routed create: %v", err)
+	}
+	if got, err := front.Get(info.ID); err != nil || got.MetadataState != "awake" {
+		t.Fatalf("routed get: %+v %v", got, err)
+	}
+	if _, err := base.Get(info.ID); err == nil {
+		t.Fatal("routed create leaked into the bd store")
+	}
+	if class.Path() != sessionsdb.StorePath(city) {
+		t.Fatalf("routed store path %q", class.Path())
+	}
+
+	// Rollback escape hatch: knob back to bd resolves the base store again.
+	if got := resolveSessionStore(base, &config.City{}, city, nil); got != beads.Store(base) {
+		t.Fatal("marked city with bd knob must resolve to the bd store")
+	}
+}
+
+func TestResolveSessionStoreFailsClosedOnUnresolvableMarkedCity(t *testing.T) {
+	base := beads.NewMemStore()
+	city := t.TempDir()
+	writeSessionsMigratedMarker(t, city)
+	// A directory squatting on the db path makes the class store unopenable.
+	if err := os.MkdirAll(sessionsdb.StorePath(city), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := resolveSessionStore(base, sqliteSessionsCityConfig(), city, nil)
+	if st == beads.Store(base) {
+		t.Fatal("marked-but-unopenable city must NOT fall back to bd")
+	}
+	if _, err := st.Get("gcs-1"); err == nil || !strings.Contains(err.Error(), "sessions-class store unavailable") {
+		t.Fatalf("want fail-closed erroring store, got err=%v", err)
 	}
 }
 

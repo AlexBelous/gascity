@@ -73,7 +73,9 @@ func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef
 // without materializing one. HandleOutbound uses it to authorize publishes on
 // agent-bound conversations.
 func (s *Server) extmsgResolveSessionSelector() func(ctx context.Context, selector string) (string, error) {
-	store := s.state.CityBeadStore()
+	// Session-selector resolution is a SESSIONS-class read: route it so a
+	// migrated city reads the class store, not bd residue. Identity pre-flip.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return nil
 	}

@@ -285,3 +285,51 @@ func TestSessionNameIndexedProbeShape(t *testing.T) {
 		t.Fatalf("absent probe: %v %v", ok, err)
 	}
 }
+
+func TestSweepClosedBefore(t *testing.T) {
+	st := openTestStore(t)
+	oldClosed, err := st.Create(beads.Bead{Title: "old", Type: session.BeadType})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(oldClosed.ID); err != nil {
+		t.Fatal(err)
+	}
+	open, err := st.Create(beads.Bead{Title: "open", Type: session.BeadType})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldWait, err := st.Create(beads.Bead{
+		Title: "w", Type: session.WaitBeadType,
+		Labels: []string{session.WaitBeadLabel},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(oldWait.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A cutoff in the future sweeps everything closed; open rows survive.
+	deleted, err := st.SweepClosedBefore(t.Context(), time.Now().Add(time.Hour))
+	if err != nil || deleted != 2 {
+		t.Fatalf("sweep deleted=%d err=%v, want 2", deleted, err)
+	}
+	if _, err := st.Get(open.ID); err != nil {
+		t.Fatalf("open row swept: %v", err)
+	}
+	if _, err := st.Get(oldClosed.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("closed session not swept: %v", err)
+	}
+	// A cutoff in the past deletes nothing.
+	fresh, err := st.Create(beads.Bead{Title: "fresh", Type: session.BeadType})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(fresh.ID); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err = st.SweepClosedBefore(t.Context(), time.Now().Add(-time.Hour))
+	if err != nil || deleted != 0 {
+		t.Fatalf("past-cutoff sweep deleted=%d err=%v", deleted, err)
+	}
+}

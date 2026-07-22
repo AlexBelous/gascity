@@ -183,6 +183,24 @@ backend = "sqlite"
 	}
 }
 
+// TestBeadsClassesSessionsSQLiteAccepted pins the sessions capability
+// flip: the internal/classdb/sessions store has landed, so
+// [beads.classes.sessions] backend="sqlite" parses.
+func TestBeadsClassesSessionsSQLiteAccepted(t *testing.T) {
+	cfg, err := Parse([]byte(`[workspace]
+name = "test"
+
+[beads.classes.sessions]
+backend = "sqlite"
+`))
+	if err != nil {
+		t.Fatalf("Parse rejected sessions sqlite backend: %v", err)
+	}
+	if got := cfg.Beads.ClassBackend(BeadClassSessions); got != BeadsClassBackendSQLite {
+		t.Errorf("ClassBackend(sessions) = %q, want %q", got, BeadsClassBackendSQLite)
+	}
+}
+
 // TestBeadsClassesSessionsShadowAccepted pins the sessions shadow-write
 // gate knob: [beads.classes.sessions] shadow=true parses while the backend
 // stays bd, and ClassShadow reports it.

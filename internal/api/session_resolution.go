@@ -178,10 +178,14 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 	}
 	now := time.Now().UTC()
 	for _, info := range retired {
-		if err := reassignOpenWorkAssignedToSession(store, info.ID, replacementID); err != nil {
+		// Two class-specific legs, resolved explicitly: the work reassign
+		// lists WORK beads by assignee (city store), while the wait reassign
+		// mutates SESSIONS-class wait beads (routed accessor). Identity
+		// pre-flip; post-flip the threaded store may be either class.
+		if err := reassignOpenWorkAssignedToSession(s.state.CityBeadStore(), info.ID, replacementID); err != nil {
 			return err
 		}
-		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
+		if err := session.NewStore(s.state.SessionsBeadStore()).ReassignWaits(info.ID, replacementID); err != nil {
 			return fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err)
 		}
 		// The extmsg records are MESSAGING-class: on a routed city the bd

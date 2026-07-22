@@ -475,7 +475,8 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
 	}
-	store := s.state.CityBeadStore()
+	// The session read-model is a SESSIONS-class read — routed accessor.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return snapshot
 	}

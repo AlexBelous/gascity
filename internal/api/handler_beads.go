@@ -52,7 +52,8 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	if assignee == "" {
 		return []string{""}
 	}
-	store := s.state.CityBeadStore()
+	// Assignee-term expansion resolves and reads SESSION beads — routed accessor.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return []string{assignee}
 	}
@@ -95,7 +96,8 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	if assignee == "" {
 		return "", nil
 	}
-	store := s.state.CityBeadStore()
+	// Assignee normalization resolves/materializes SESSION beads — routed accessor.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return assignee, nil
 	}

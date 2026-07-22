@@ -35,7 +35,7 @@ func TestLoadSessionModelDoctorBeadsAvoidsBroadOpenWorkScan(t *testing.T) {
 		t.Fatalf("Update(session closed): %v", err)
 	}
 
-	got, err := loadSessionModelDoctorBeads(store)
+	got, err := loadSessionModelDoctorBeads(store, store)
 	if err != nil {
 		t.Fatalf("loadSessionModelDoctorBeads: %v", err)
 	}

@@ -1511,6 +1511,12 @@ var sqliteCapableBeadClasses = map[string]bool{
 	// migrated-marker (messagingdb.RoutedStoreFor). The class relocates
 	// atomically: one knob, one marker, both halves.
 	BeadClassMessaging: true,
+	// internal/classdb/sessions (sessionsdb.Store) — session lifecycle rows
+	// + durable waits, wired through resolveSessionStore behind the sessions
+	// migrated-marker (sessionsdb.RoutedStoreFor); the seam is the audited
+	// beads.Store subset itself (P4-SESSIONS-SEAM-PLAN.md). The shadow-write
+	// soak (shadow=true) should run clean before a city flips this backend.
+	BeadClassSessions: true,
 }
 
 // shadowCapableBeadClasses enumerates the classes that support the

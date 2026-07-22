@@ -945,6 +945,13 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, stor
 	if sender, ok := reservedMailSenderIdentity(identifier); ok {
 		return sender, nil
 	}
+	// Every read below is a SESSION-class lookup (session-id resolution,
+	// mailbox identity, live named-target matching) — route it, so a
+	// migrated city reads the class store, not bd residue. Identity
+	// pre-flip.
+	if store != nil && cfg != nil {
+		store = cliSessionStore(store, cfg, cityPath)
+	}
 	if store != nil && cfg != nil {
 		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
 		if err == nil {
@@ -979,6 +986,10 @@ func resolveMailRecipientIdentity(cityPath string, cfg *config.City, store beads
 func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return "human", nil
+	}
+	// Session-class reads only below — route (see the identity funnel).
+	if store != nil && cfg != nil {
+		store = cliSessionStore(store, cfg, cityPath)
 	}
 	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
 		return "", targetErr
@@ -1156,13 +1167,13 @@ func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, store
 		// Route the session-ID resolve and the mailbox-identity bead read through
 		// the session coordination-class store so a [beads.classes.sessions]
 		// relocation reaches mail target resolution. Identity at the default
-		// backend. (Mirrors cmd_nudge's sessStore routing; the sibling resolvers
-		// resolveMailTargetsCached / resolveMailIdentityWithConfigCached carry the
-		// same pre-existing gap and are swept on the mail DI pass.)
-		sessStore := cliSessionStore(store, cfg, cityPath)
-		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identifier)
+		// backend. The routed store REPLACES the local so the cfg-less fallback
+		// at the bottom also reads routed. (The storeless-provider raw leg
+		// through openMailTargetStore stays on the mail DI pass.)
+		store = cliSessionStore(store, cfg, cityPath)
+		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
 		if err == nil {
-			b, err := sessStore.Get(sessionID)
+			b, err := store.Get(sessionID)
 			if err != nil {
 				return resolvedMailTarget{}, err
 			}

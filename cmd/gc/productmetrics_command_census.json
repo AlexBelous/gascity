@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 196,
+  "next_id": 197,
   "permanent_ids": [
     {
       "name": "help",
@@ -3657,6 +3657,21 @@
       "classification": "session-reset",
       "owner": "immediate",
       "id": 151
+    },
+    {
+      "path": "gc session show",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "session-show",
+      "owner": "immediate",
+      "id": 196
     },
     {
       "path": "gc session submit",

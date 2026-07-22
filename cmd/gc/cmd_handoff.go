@@ -14,7 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -329,13 +328,15 @@ func createHandoffMail(store, sessStore beads.Store, rec events.Recorder, sender
 	// Handoff intentionally constructs the concrete bead-backed provider rather
 	// than resolving the configured mail provider (GC_MAIL / city.toml): handoff
 	// needs the thread label and handoff-specific extra-labels that SendHandoff
-	// expresses, which aren't part of the generic provider surface. Built as a
-	// two-store provider (mirroring newCityMailProvider): message-bead persistence
-	// stays on the messaging-class store while beadmail's session addressing/identity
-	// reads follow the session-class store. beadmail.New(store) is defined as
-	// NewWithStores(store, store), so with sessStore==store this is byte-identical
-	// today and only diverges once sessions relocate.
-	provider := beadmail.NewWithStores(store, sessStore)
+	// expresses, which aren't part of the generic provider surface. The seam
+	// helper routes message persistence to the messaging-class store on a
+	// migrated city (bd two-store otherwise); session addressing/identity reads
+	// follow the session-class store on both legs.
+	provider, err := handoffMailProvider(store, sessStore)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: messaging-class routing: %v\n", err) //nolint:errcheck // best-effort stderr
+		return mail.Message{}, false
+	}
 	msg, err := provider.SendHandoff(mail.HandoffIntent{
 		From:        senderAddress,
 		To:          recipientAddress,

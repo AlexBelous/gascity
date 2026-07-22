@@ -212,6 +212,28 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 	return purged, deleteErr
 }
 
+// runWispGCRouted runs the wisp GC with the mail-retention arm routed to the
+// messaging class store when the city is migrated: the interface's bd arm is
+// starved (empty mail store) and the class-store purge runs beside it with
+// the same [mail] retention_ttl knob. Unrouted, it is byte-identical to
+// wg.runGC.
+func runWispGCRouted(wg wispGC, routing messagingRouting, cfg *config.City, graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error) {
+	if routing.class == nil {
+		return wg.runGC(graphStore, mailStore, now)
+	}
+	purged, err := wg.runGC(graphStore, beads.MailStore{}, now)
+	ttl, ttlErr := cfg.Mail.RetentionTTLDuration()
+	if ttlErr != nil || ttl <= 0 {
+		return purged, err
+	}
+	mailPurged, mailErr := retentionMailProvider(routing.class).PurgeReadMessages(now.Add(-ttl))
+	purged += mailPurged
+	if mailPurged > 0 {
+		log.Printf("wisp gc: purged %d read messages (routed, retention_ttl=%s)", mailPurged, gcRetentionTTLString(ttl))
+	}
+	return purged, errors.Join(err, mailErr)
+}
+
 // wispGCRootSelector pairs a List selector with a short label used for error
 // context. The selectors returned by wispGCRootSelectors, unioned, cover every
 // root class the wisp GC can close or collect.

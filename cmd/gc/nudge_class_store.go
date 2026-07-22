@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	messagingdb "github.com/gastownhall/gascity/internal/classdb/messaging"
 	nudgesdb "github.com/gastownhall/gascity/internal/classdb/nudges"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -74,29 +75,38 @@ func nudgeShadowReaderFor(cityPath string, cfg *config.City, nudges beads.Nudges
 	return routedNudgeShadowReader{class: class}, nil
 }
 
-// nudgeSweepRouting carries the nudge-mail sweep's nudge-leg backend
-// decision: a nil class means the bd shadow sweep (today's shape, the fixed
-// shape the unrouted helpers hand to tests); a non-nil class means the
-// merged-queue terminal-row retention.
+// nudgeSweepRouting carries the nudge-mail sweep's per-leg backend
+// decisions: a nil class means the bd shadow sweep for the nudge leg
+// (today's shape, the fixed shape the unrouted helpers hand to tests), and a
+// nil mailClass means the bd read-mail sweep for the mail leg; the non-nil
+// forms route each leg to its embedded class store.
 type nudgeSweepRouting struct {
-	class *nudgesdb.Store
+	class     *nudgesdb.Store
+	mailClass *messagingdb.Store
 }
 
-// nudgeSweepRoutingFor resolves a city's nudge-sweep routing. Inactive
-// routing costs one marker stat. Active routing opens the class store; the
-// error is returned rather than falling back to the bd sweep, because a bd
-// sweep on a migrated city would run against residue instead of the class.
+// nudgeSweepRoutingFor resolves a city's nudge-sweep routing for BOTH legs.
+// Inactive routing costs one marker stat per class. Active routing opens the
+// class store; the error is returned rather than falling back to the bd
+// sweep, because a bd sweep on a migrated city would run against residue
+// instead of the class.
 func nudgeSweepRoutingFor(cityPath string, cfg *config.City) (nudgeSweepRouting, error) {
+	routing := nudgeSweepRouting{}
 	routed, err := nudgesdb.Routed(cityPath, cfg)
 	if err != nil {
 		return nudgeSweepRouting{}, err
 	}
-	if !routed {
-		return nudgeSweepRouting{}, nil
+	if routed {
+		class, err := nudgesdb.SharedStoreFor(cityPath)
+		if err != nil {
+			return nudgeSweepRouting{}, err
+		}
+		routing.class = class
 	}
-	class, err := nudgesdb.SharedStoreFor(cityPath)
+	mailRouting, err := messagingRoutingFor(cityPath, cfg)
 	if err != nil {
 		return nudgeSweepRouting{}, err
 	}
-	return nudgeSweepRouting{class: class}, nil
+	routing.mailClass = mailRouting.class
+	return routing, nil
 }

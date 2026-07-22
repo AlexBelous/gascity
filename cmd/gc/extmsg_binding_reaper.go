@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	messagingdb "github.com/gastownhall/gascity/internal/classdb/messaging"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
@@ -26,14 +27,20 @@ import (
 // are MESSAGING-class beads (msgStore, mutated), while session liveness is
 // resolved from SESSION-class beads (sessionStore, read-only). Both collapse
 // to the work store on a single-store city.
-func reapStaleExtmsgBindings(ctx context.Context, msgStore beads.MailStore, sessionStore beads.SessionStore, now time.Time, stderr io.Writer) {
-	if msgStore.Store == nil {
-		return
-	}
+func reapStaleExtmsgBindings(ctx context.Context, class *messagingdb.Store, msgStore beads.MailStore, sessionStore beads.SessionStore, now time.Time, stderr io.Writer) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	stats, err := extmsg.ReapStaleBindings(ctx, msgStore.Store, sessionStore.Store, now)
+	var stats extmsg.BindingReapStats
+	var err error
+	if class != nil {
+		stats, err = extmsg.ReapStaleBindingsWithBackend(ctx, class, sessionStore.Store, now)
+	} else {
+		if msgStore.Store == nil {
+			return
+		}
+		stats, err = extmsg.ReapStaleBindings(ctx, msgStore.Store, sessionStore.Store, now)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg bindings: %v\n", err) //nolint:errcheck
 		return
@@ -57,14 +64,20 @@ func reapStaleExtmsgBindings(ctx context.Context, msgStore beads.MailStore, sess
 // Same two-class handle split as reapStaleExtmsgBindings: participant records
 // are MESSAGING-class (msgStore, mutated), liveness reads are SESSION-class
 // (sessionStore).
-func reapStaleExtmsgParticipants(ctx context.Context, msgStore beads.MailStore, sessionStore beads.SessionStore, stderr io.Writer) {
-	if msgStore.Store == nil {
-		return
-	}
+func reapStaleExtmsgParticipants(ctx context.Context, class *messagingdb.Store, msgStore beads.MailStore, sessionStore beads.SessionStore, stderr io.Writer) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	stats, err := extmsg.ReapStaleParticipants(ctx, msgStore.Store, sessionStore.Store)
+	var stats extmsg.ParticipantReapStats
+	var err error
+	if class != nil {
+		stats, err = extmsg.ReapStaleParticipantsWithBackend(ctx, class, sessionStore.Store)
+	} else {
+		if msgStore.Store == nil {
+			return
+		}
+		stats, err = extmsg.ReapStaleParticipants(ctx, msgStore.Store, sessionStore.Store)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reaping stale extmsg participants: %v\n", err) //nolint:errcheck
 		return

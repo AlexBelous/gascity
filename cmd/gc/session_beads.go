@@ -1272,6 +1272,24 @@ func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, 
 	if err := sessionFrontDoor(store).ReassignWaits(oldSessionID, newSessionID); err != nil {
 		fmt.Fprintf(stderr, "session beads: reassigning waits from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
 	}
+	// The extmsg records are MESSAGING-class: on a routed city they live in
+	// the class store, and the bd cascade below would silently no-op against
+	// residue. Fail closed on a routing error — the reconciler's routed
+	// reapers converge the reassign on a later tick.
+	class, classErr := messagingRepairClassFor(store)
+	if classErr != nil {
+		fmt.Fprintf(stderr, "session beads: resolving messaging-class routing for extmsg reassign from %s: %v (skipping)\n", oldSessionID, classErr) //nolint:errcheck
+		return
+	}
+	if class != nil {
+		if err := extmsg.ReassignSessionBindingsWithBackend(context.Background(), class, oldSessionID, newSessionID, now); err != nil {
+			fmt.Fprintf(stderr, "session beads: reassigning external message bindings from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
+		}
+		if err := extmsg.ReassignSessionParticipantsWithBackend(context.Background(), class, oldSessionID, newSessionID); err != nil {
+			fmt.Fprintf(stderr, "session beads: reassigning external message participants from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
+		}
+		return
+	}
 	if err := extmsg.ReassignSessionBindings(context.Background(), store, oldSessionID, newSessionID, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: reassigning external message bindings from retired session %s to %s: %v\n", oldSessionID, newSessionID, err) //nolint:errcheck
 	}
@@ -1298,6 +1316,19 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+	}
+	// Same messaging-class split as the reassign path: route the teardown
+	// to the class store on a migrated city, fail closed on routing errors.
+	class, classErr := messagingRepairClassFor(store)
+	if classErr != nil {
+		fmt.Fprintf(stderr, "session beads: resolving messaging-class routing for extmsg teardown of %s: %v (skipping)\n", sessionID, classErr) //nolint:errcheck
+		return
+	}
+	if class != nil {
+		if err := extmsg.CloseSessionBindingsWithBackend(context.Background(), class, store, sessionID, now); err != nil {
+			fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+		}
+		return
 	}
 	if err := extmsg.CloseSessionBindings(context.Background(), store, sessionID, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck

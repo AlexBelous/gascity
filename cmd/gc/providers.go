@@ -825,7 +825,7 @@ func mailProviderNameForCity(cityPath string) string {
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - default → beadmail (backed by beads.Store, no subprocess)
 func newMailProvider(store beads.Store) mail.Provider {
-	return newMailProviderNamed(mailProviderName(), store, true)
+	return newMailProviderNamed(mailProviderName(), store)
 }
 
 // newMailProviderWithSessionStore builds the configured mail provider with
@@ -835,22 +835,22 @@ func newMailProvider(store beads.Store) mail.Provider {
 // beads and its session reads follow their respective backends instead of
 // splitting off one generic store.
 func newMailProviderWithSessionStore(msgStore, sessStore beads.Store) mail.Provider {
-	return newMailProviderNamedWithSessionStore(mailProviderName(), msgStore, sessStore, true)
+	return newMailProviderNamedWithSessionStore(mailProviderName(), msgStore, sessStore)
 }
 
 func newCommandMailProvider(store beads.Store) mail.Provider {
-	return newMailProviderNamed(mailProviderName(), store, true)
+	return newMailProviderNamed(mailProviderName(), store)
 }
 
 func newCommandMailProviderNamed(v string, store beads.Store) mail.Provider {
-	return newMailProviderNamed(v, store, true)
+	return newMailProviderNamed(v, store)
 }
 
-func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provider {
-	return newMailProviderNamedWithSessionStore(v, store, store, cached)
+func newMailProviderNamed(v string, store beads.Store) mail.Provider {
+	return newMailProviderNamedWithSessionStore(v, store, store)
 }
 
-func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.Store, cached bool) mail.Provider {
+func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.Store) mail.Provider {
 	if strings.HasPrefix(v, "exec:") {
 		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
 	}
@@ -860,10 +860,7 @@ func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.St
 	case "fail":
 		return mail.NewFailFake()
 	default:
-		if cached {
-			return beadmail.NewCachedWithStores(msgStore, sessStore)
-		}
-		return beadmail.NewWithStores(msgStore, sessStore)
+		return beadmail.NewCachedWithStores(msgStore, sessStore)
 	}
 }
 
@@ -893,8 +890,16 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
 	// failed load yields nil cfg, which the class resolvers treat as identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	routing, err := messagingRoutingFor(cityPath, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: messaging-class routing: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	if routing.class != nil {
+		return beadmail.NewCachedWithBackend(routing.class, sessStore), 0
+	}
+	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
 	return newMailProviderWithSessionStore(msgStore, sessStore), 0
 }
 

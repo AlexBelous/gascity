@@ -157,35 +157,108 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 // budget. Unrouted, it is byte-identical to sweepStaleNudgeMail (which stays
 // the bd test surface).
 func sweepStaleNudgeMailRouted(routing nudgeSweepRouting, nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
-	if routing.class == nil {
+	if routing.class == nil && routing.mailClass == nil {
 		return sweepStaleNudgeMail(nudgeStore, mailStore, nudgeState, now, nudgeTTL, mailTTL, limit)
 	}
 	var result nudgeMailSweepResult
-	deleted, err := routing.class.SweepRetention(context.Background(), now, nudgeTerminalRetentionTTL)
-	result.NudgeClosed = deleted
-	if err != nil {
-		return result, fmt.Errorf("nudge-mail-sweep: sweeping routed nudge retention: %w", err)
+	var beadErrs []error
+	if routing.class != nil {
+		deleted, err := routing.class.SweepRetention(context.Background(), now, nudgeTerminalRetentionTTL)
+		result.NudgeClosed = deleted
+		if err != nil {
+			return result, fmt.Errorf("nudge-mail-sweep: sweeping routed nudge retention: %w", err)
+		}
+	} else {
+		// The mixed shape (messaging routed, nudges still bd): the bd nudge
+		// leg keeps sweepStaleNudgeMail's phase-1 body and budget share.
+		liveIDs := liveNudgeIDSet(nudgeState)
+		nq := nudgequeue.NewStore(nudgeStore)
+		nudgeShadows, err := nq.StaleShadowsBefore(now.Add(-nudgeTTL), limit, liveIDs)
+		if err != nil {
+			return result, fmt.Errorf("nudge-mail-sweep: listing stale nudge beads: %w", err)
+		}
+		for _, shadow := range nudgeShadows {
+			if limit > 0 && result.NudgeClosed >= limit {
+				break
+			}
+			if !shadow.Open {
+				continue
+			}
+			if err := nq.SweepStale(shadow.BeadID, nudgeMailSweepNudgeCloseReason, now); err != nil {
+				beadErrs = append(beadErrs, err)
+				continue
+			}
+			result.NudgeClosed++
+		}
 	}
-	mailClosed, mailCloseErrs, mailListErr := beadmail.SweepReadMessagesBefore(mailStore, now.Add(-mailTTL), limit, nudgeMailSweepMailCloseReason)
+	// The routed nudge leg is budget-exempt (one indexed DELETE); a bd
+	// nudge leg consumed its share of the combined close budget.
+	mailBudget := limit
+	if routing.class == nil && limit > 0 {
+		mailBudget = limit - result.NudgeClosed
+		if mailBudget <= 0 {
+			return result, errors.Join(beadErrs...)
+		}
+	}
+	var mailClosed int
+	var mailCloseErrs []error
+	var mailListErr error
+	if routing.mailClass != nil {
+		mailClosed, mailCloseErrs, mailListErr = retentionMailProvider(routing.mailClass).SweepReadMessages(now.Add(-mailTTL), mailBudget, nudgeMailSweepMailCloseReason)
+	} else {
+		mailClosed, mailCloseErrs, mailListErr = beadmail.SweepReadMessagesBefore(mailStore, now.Add(-mailTTL), mailBudget, nudgeMailSweepMailCloseReason)
+	}
 	if mailListErr != nil {
 		return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", mailListErr)
 	}
 	result.MailClosed = mailClosed
-	return result, errors.Join(mailCloseErrs...)
+	beadErrs = append(beadErrs, mailCloseErrs...)
+	return result, errors.Join(beadErrs...)
 }
 
 // countStaleNudgeMailRouted is the dry-run twin of sweepStaleNudgeMailRouted.
 func countStaleNudgeMailRouted(routing nudgeSweepRouting, nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
-	if routing.class == nil {
+	if routing.class == nil && routing.mailClass == nil {
 		return countStaleNudgeMail(nudgeStore, mailStore, nudgeState, now, nudgeTTL, mailTTL, limit)
 	}
 	var result nudgeMailSweepResult
-	count, err := routing.class.CountRetention(now, nudgeTerminalRetentionTTL)
-	result.NudgeClosed = count
-	if err != nil {
-		return result, fmt.Errorf("nudge-mail-sweep (dry-run): counting routed nudge retention: %w", err)
+	if routing.class != nil {
+		count, err := routing.class.CountRetention(now, nudgeTerminalRetentionTTL)
+		result.NudgeClosed = count
+		if err != nil {
+			return result, fmt.Errorf("nudge-mail-sweep (dry-run): counting routed nudge retention: %w", err)
+		}
+	} else {
+		liveIDs := liveNudgeIDSet(nudgeState)
+		nq := nudgequeue.NewStore(nudgeStore)
+		nudgeShadows, err := nq.StaleShadowsBefore(now.Add(-nudgeTTL), limit, liveIDs)
+		if err != nil {
+			return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing stale nudge beads: %w", err)
+		}
+		for _, shadow := range nudgeShadows {
+			if limit > 0 && result.NudgeClosed >= limit {
+				break
+			}
+			if !shadow.Open {
+				continue
+			}
+			result.NudgeClosed++
+		}
 	}
-	mailCount, err := beadmail.CountReadMessagesBefore(mailStore, now.Add(-mailTTL), limit)
+	mailBudget := limit
+	if routing.class == nil && limit > 0 {
+		mailBudget = limit - result.NudgeClosed
+		if mailBudget <= 0 {
+			return result, nil
+		}
+	}
+	var mailCount int
+	var err error
+	if routing.mailClass != nil {
+		mailCount, err = retentionMailProvider(routing.mailClass).CountReadMessages(now.Add(-mailTTL), mailBudget)
+	} else {
+		mailCount, err = beadmail.CountReadMessagesBefore(mailStore, now.Add(-mailTTL), mailBudget)
+	}
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
 	}

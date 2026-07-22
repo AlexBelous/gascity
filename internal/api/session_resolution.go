@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	messagingdb "github.com/gastownhall/gascity/internal/classdb/messaging"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
@@ -182,6 +183,22 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 		}
 		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
 			return fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err)
+		}
+		// The extmsg records are MESSAGING-class: on a routed city the bd
+		// cascade would no-op against residue, so resolve the class store
+		// and fail closed on a routing error.
+		class, routed, err := messagingdb.RoutedStoreFor(s.state.CityPath(), s.state.Config())
+		if err != nil {
+			return fmt.Errorf("resolving messaging-class routing for extmsg reassign from retired session %s: %w", info.ID, err)
+		}
+		if routed {
+			if err := extmsg.ReassignSessionBindingsWithBackend(ctx, class, info.ID, replacementID, now); err != nil {
+				return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", info.ID, replacementID, err)
+			}
+			if err := extmsg.ReassignSessionParticipantsWithBackend(ctx, class, info.ID, replacementID); err != nil {
+				return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", info.ID, replacementID, err)
+			}
+			continue
 		}
 		if err := extmsg.ReassignSessionBindings(ctx, store, info.ID, replacementID, now); err != nil {
 			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", info.ID, replacementID, err)

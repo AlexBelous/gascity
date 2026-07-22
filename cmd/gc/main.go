@@ -1245,6 +1245,9 @@ func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, strin
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return nil, "", 1
 	}
+	// Record the store→city association so the deep session-repair paths
+	// (which see only the store) can resolve messaging-class routing.
+	registerMessagingRepairCity(store, cityPath)
 	return store, cityPath, 0
 }
 

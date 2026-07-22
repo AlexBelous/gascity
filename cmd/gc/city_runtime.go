@@ -1244,16 +1244,24 @@ func (cr *CityRuntime) tick(
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_sync", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	// Re-point external-message bindings at respawned sessions (and clear
 	// bindings whose session is gone) now that replacement beads are visible.
+	// The record store is MESSAGING-class: routed to the class store on a
+	// migrated city; a routing failure skips both sweeps (fail closed) and
+	// the next tick retries.
 	phaseStart = time.Now()
-	reapStaleExtmsgBindings(ctx, cr.mailBeadStore(), cr.sessionsBeadStore(), time.Now(), cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
-	// Re-point group participants at respawned sessions and carry their
-	// group-owned transcript membership; the participant side has no read-time
-	// membership overlay, so this backstop is what converges binding-less
-	// participants the binding reaper never sees.
-	phaseStart = time.Now()
-	reapStaleExtmsgParticipants(ctx, cr.mailBeadStore(), cr.sessionsBeadStore(), cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
+	if extmsgRouting, extmsgRoutingErr := messagingRoutingFor(cr.cityPath, cr.cfg); extmsgRoutingErr != nil {
+		fmt.Fprintf(cr.stderr, "session reconciler: messaging-class routing: %v (extmsg reapers skipped)\n", extmsgRoutingErr) //nolint:errcheck
+		recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
+	} else {
+		reapStaleExtmsgBindings(ctx, extmsgRouting.class, cr.mailBeadStore(), cr.sessionsBeadStore(), time.Now(), cr.stderr)
+		recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
+		// Re-point group participants at respawned sessions and carry their
+		// group-owned transcript membership; the participant side has no
+		// read-time membership overlay, so this backstop is what converges
+		// binding-less participants the binding reaper never sees.
+		phaseStart = time.Now()
+		reapStaleExtmsgParticipants(ctx, extmsgRouting.class, cr.mailBeadStore(), cr.sessionsBeadStore(), cr.stderr)
+		recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
+	}
 	phaseStart = time.Now()
 	result = refreshDesiredStateWithSessionBeads(
 		result,
@@ -1289,8 +1297,17 @@ func (cr *CityRuntime) tick(
 	// arm through the typed messaging-class store. Both collapse to the city store
 	// today, so the GC is byte-identical.
 	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
+		wispMailStore := cr.mailBeadStore()
+		wispRouting, wispRoutingErr := messagingRoutingFor(cr.cityPath, cr.cfg)
+		if wispRoutingErr != nil {
+			// Fail closed: starve the bd mail arm rather than sweeping bd
+			// residue on a possibly-routed city; the graph arm still runs.
+			fmt.Fprintf(cr.stderr, "wisp gc: messaging-class routing: %v (mail retention arm skipped)\n", wispRoutingErr) //nolint:errcheck
+			wispMailStore = beads.MailStore{}
+			wispRouting = messagingRouting{}
+		}
 		phaseStart = time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
+		purged, gcErr := runWispGCRouted(cr.wg, wispRouting, cr.cfg, graphStore, wispMailStore, time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {

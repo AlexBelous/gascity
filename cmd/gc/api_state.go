@@ -210,11 +210,14 @@ func newControllerState(
 		store := opened.Store
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
-		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
-		svc := extmsg.NewServicesWithSessionStore(
-			resolveMailMessagesStore(cs.cityBeadStore, cfg, cityPath, ep),
-			resolveSessionStore(cs.cityBeadStore, cfg, cityPath, ep))
-		cs.extmsgSvc = &svc
+		registerMessagingRepairCity(cs.cityBeadStore, cityPath)
+		if routing, err := messagingRoutingFor(cityPath, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "api: messaging-class routing: %v (mail/extmsg endpoints disabled)\n", err)
+		} else {
+			cs.cityMailProv = newCityMailProviderRouted(routing, cs.cityBeadStore, cfg, cityPath, ep)
+			svc := newExtmsgServicesRouted(routing, cs.cityBeadStore, cfg, cityPath, ep)
+			cs.extmsgSvc = &svc
+		}
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
@@ -729,11 +732,14 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var extSvc *extmsg.Services
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
-		cityMailProv = newCityMailProvider(cityStore, cfg, cs.cityPath, cs.eventProv)
-		svc := extmsg.NewServicesWithSessionStore(
-			resolveMailMessagesStore(cityStore, cfg, cs.cityPath, cs.eventProv),
-			resolveSessionStore(cityStore, cfg, cs.cityPath, cs.eventProv))
-		extSvc = &svc
+		registerMessagingRepairCity(cityStore, cs.cityPath)
+		if routing, err := messagingRoutingFor(cs.cityPath, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "api: messaging-class routing reload: %v (mail/extmsg endpoints disabled)\n", err) //nolint:errcheck // best-effort stderr
+		} else {
+			cityMailProv = newCityMailProviderRouted(routing, cityStore, cfg, cs.cityPath, cs.eventProv)
+			svc := newExtmsgServicesRouted(routing, cityStore, cfg, cs.cityPath, cs.eventProv)
+			extSvc = &svc
+		}
 	}
 
 	// Swap under short critical section.
@@ -755,7 +761,11 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature
 	}
-	if extSvc != nil {
+	if cityStore != nil {
+		// Swap together with the store — including to nil on a routing
+		// failure (fail closed: stale bd-backed services on a routed city
+		// would write where routed readers never look). A store-reopen
+		// failure (cityStore == nil) keeps the prior services, as before.
 		cs.extmsgSvc = extSvc
 	}
 	// Keep prior non-nil store/provider if reopen fails.

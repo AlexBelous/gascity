@@ -540,6 +540,14 @@ func doBdReleaseIfCurrent(cityPath string, target execStoreTarget, id, expectedA
 		fmt.Fprintf(stderr, "gc bd release-if-current: opening store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A reserved-prefix release routes to the split city's infra scope, whose
+	// in-process mutations are otherwise event-silent. Augment ONLY the infra
+	// scope so a landed release emits bead.updated (the policy store's
+	// instrumented ReleaseIfCurrent); work/rig ids on a single-store city stay
+	// byte-identical.
+	if target.ScopeKind == "infra" {
+		store = classStoreWithCLIEmission(store, cityPath)
+	}
 	releaser, ok := store.(beads.ConditionalAssignmentReleaser)
 	if !ok {
 		fmt.Fprintf(stderr, "gc bd release-if-current: %v for %T\n", beads.ErrConditionalReleaseUnsupported, store) //nolint:errcheck // best-effort stderr

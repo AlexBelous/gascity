@@ -37,6 +37,15 @@ type beadPolicyStore struct {
 	// boundary invariant). The work store leaves this false and mints ordinary
 	// bd/Dolt ids under the scope's EffectivePrefix.
 	mintReservedClassIDs bool
+	// emitCityPath, when non-empty, makes this policy store emit a canonical
+	// bead.* event into <emitCityPath>/.gc/events.jsonl after each successful
+	// mutation — the one-shot CLI analog of the controller's CachingStore
+	// notifyChange. It is set only by the CLI coordination-class seam
+	// (classStoreWithCLIEmission, via the cliGraphStore/cliOrderStore/…
+	// helpers) on a split city, so single-store cities and the controller's own
+	// CachingStore-wrapped stores stay byte-identical (empty ⇒ no emission, no
+	// extra reads). See class_store_emit.go.
+	emitCityPath string
 }
 
 type beadPolicyGraphStore struct {
@@ -113,7 +122,9 @@ func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 	class := coordclass.Classify(b)
 	b = s.mintInfraBeadID(b)
 	_, storage := s.policyForCreate(b)
-	return createWithStoragePolicy(s.createTarget(class), b, storage)
+	created, err := createWithStoragePolicy(s.createTarget(class), b, storage)
+	s.emitCreatedBead(created, err)
+	return created, err
 }
 
 // mintInfraBeadID pre-fills b.ID with an infra-scope reserved-prefix id when this
@@ -191,7 +202,12 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 	if !ok {
 		return beads.ErrBatchDeleteUnsupported
 	}
-	return deleter.DeleteBatch(ids)
+	snapshots := s.snapshotForDelete(ids...)
+	if err := deleter.DeleteBatch(ids); err != nil {
+		return err
+	}
+	s.emitDeletedBeads(snapshots)
+	return nil
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
@@ -279,7 +295,11 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	if !ok {
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
-	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+	released, err := releaser.ReleaseIfCurrent(id, expectedAssignee)
+	if err == nil && released {
+		s.emitUpdatedBead(id)
+	}
+	return released, err
 }
 
 // DeleteAllOrphaning forwards the orphan-preserving batch delete to the inner
@@ -292,7 +312,12 @@ func (s *beadPolicyStore) DeleteAllOrphaning(ids []string) (int, error) {
 	if !ok {
 		return 0, fmt.Errorf("policy store: backing store %T does not support orphan-preserving batch delete", s.Store)
 	}
-	return deleter.DeleteAllOrphaning(ids)
+	snapshots := s.snapshotForDelete(ids...)
+	n, err := deleter.DeleteAllOrphaning(ids)
+	if err == nil {
+		s.emitDeletedBeads(snapshots)
+	}
+	return n, err
 }
 
 // CreateWithForeignID forwards a forced foreign-prefix create to the inner store
@@ -307,7 +332,9 @@ func (s *beadPolicyStore) CreateWithForeignID(b beads.Bead) (beads.Bead, error) 
 	if !ok {
 		return beads.Bead{}, fmt.Errorf("policy store: backing store %T does not support foreign-id create", s.Store)
 	}
-	return creator.CreateWithForeignID(b)
+	created, err := creator.CreateWithForeignID(b)
+	s.emitCreatedBead(created, err)
+	return created, err
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
@@ -336,6 +363,18 @@ func storageFromPersistedWispRoot(root beads.Bead) string {
 }
 
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	result, err := s.applyGraphPlanRouted(ctx, plan)
+	// A graph apply is a create path: it materializes the molecule root and step
+	// beads through the infra store, so the CLI seam emits bead.created for each
+	// (no-op when this store carries no emit target).
+	s.emitGraphApplyCreated(result, err)
+	return result, err
+}
+
+// applyGraphPlanRouted routes a graph-apply plan to the storage-tier-appropriate
+// applier. It is the pre-emission body of ApplyGraphPlan, split out so every
+// return path funnels through a single emit point in ApplyGraphPlan.
+func (s *beadPolicyGraphStore) applyGraphPlanRouted(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	if plan == nil {
 		return s.graphApplierFor(coordclass.ClassWork).ApplyGraphPlan(ctx, plan)
 	}

@@ -5,6 +5,11 @@ Continue the **infra-class SQLite stores** track in the existing worktree
 pushed as `origin/feat/infra-class-sqlite-stores`). Do NOT create a new
 worktree; run everything from that directory.
 
+**This session's job: fix the known residuals** — the P5 bd-surface work
+plus the deferred items P1–P4 recorded (the full residual inventory is
+in HANDOFF.md under "Known residuals for P5" and "Also outstanding").
+Work TDD, one commit per slice, and push before ending the session.
+
 **First, read (in this order):**
 1. `engdocs/plans/infra-class-sqlite-stores/HANDOFF.md` — state, next
    steps, gotchas. START HERE. **P1 orders + P2 nudges + P3 messaging +
@@ -61,5 +66,13 @@ add`ed first; never time.Sleep in tests; memstore does NOT honor
 explicit Create ids but bd and sessionsdb do; the identity-keyed
 messaging repair registry unwraps `ShadowPrimary()`; the doctor
 name-set golden (cmd/gc/testdata/doctor_check_names.golden) must gain
-any new check's name. Push to `origin/feat/infra-class-sqlite-stores`
-before ending the session.
+any new check's name. A NEW `gc` subcommand ripples through THREE more
+artifacts (bit the P4 session): add it to
+`cmd/gc/productmetrics_command_census.json` (strictly path-sorted; take
+`next_id`, bump it), regenerate via `go run ./cmd/gen-command-census`,
+and bump the catalog-size pin in
+`internal/productmetrics/event_test.go` (currently 192). A cmd/gc test
+using `t.Setenv` grows the environment ratchet — bump BOTH the Small and
+source scopes across census.go + test/test-resources.toml + TESTING.md
+(currently 4340/4346 calls, 206 files). Push to
+`origin/feat/infra-class-sqlite-stores` before ending the session.

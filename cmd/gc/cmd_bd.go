@@ -278,6 +278,17 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
 	}
+
+	// A split city's embedded-sqlite infra scope cannot be reached by exec'ing bd
+	// (bd 1.1.0 dropped its sqlite backend and silently resolves the city Dolt
+	// store instead). Handle the pack-used reserved-prefix write mutations
+	// (close / update --set-metadata|--status) in-process against the embedded
+	// store, emitting the bead event; every other subcommand falls through
+	// unchanged (single-store and Dolt-infra cities are byte-identical).
+	if code, handled := maybeRouteBdInfraSqliteMutation(cityPath, cfg, target, bdArgs, stdout, stderr); handled {
+		return code
+	}
+
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {

@@ -11,6 +11,7 @@ package main
 // two backends.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,13 +43,21 @@ func ordersMigratedMarkerPath(cityPath string) string {
 
 // ordersSQLiteRoutingActive reports whether orders tracking operations route
 // to the sqlite class store: the config selects the sqlite backend AND the
-// migrated marker exists.
-func ordersSQLiteRoutingActive(cityPath string, cfg *config.City) bool {
+// migrated marker exists. Only an ABSENT marker means "not migrated"; any
+// other stat failure (EACCES/EIO) is an error, not a bd fallback — guessing
+// "bd" there would land writes where a routed reader on a migrated city
+// never looks (the nudges-review ENOENT-only lesson).
+func ordersSQLiteRoutingActive(cityPath string, cfg *config.City) (bool, error) {
 	if cfg == nil || cfg.Beads.ClassBackend(config.BeadClassOrders) != config.BeadsClassBackendSQLite {
-		return false
+		return false, nil
 	}
-	_, err := os.Stat(ordersMigratedMarkerPath(cityPath))
-	return err == nil
+	if _, err := os.Stat(ordersMigratedMarkerPath(cityPath)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking orders migrated marker: %w", err)
+	}
+	return true, nil
 }
 
 // orderFrontResolver maps a resolved scope store to its orders front door.
@@ -124,7 +133,11 @@ func (cs *controllerState) OrderFrontDoor(scope beads.Store) (*orders.Store, err
 // silent bd fallback on a migrated city would split the class across two
 // backends (writes landing where reads no longer look).
 func orderClassRoutingFor(cityPath string, cfg *config.City) (orderClassRouting, error) {
-	if !ordersSQLiteRoutingActive(cityPath, cfg) {
+	active, err := ordersSQLiteRoutingActive(cityPath, cfg)
+	if err != nil {
+		return orderClassRouting{}, err
+	}
+	if !active {
 		return bdOrderClassRouting(), nil
 	}
 	class, err := ordersClassStoreFor(cityPath)

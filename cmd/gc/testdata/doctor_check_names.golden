@@ -66,6 +66,7 @@ backlog-depth
 order-tracking-retention
 session-model
 sessions-shadow
+infra-class-migration
 dolt-server
 fork-rate
 dolt-noms-size

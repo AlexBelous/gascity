@@ -223,7 +223,15 @@ func writeOrdersMigratedMarkerFile(cityPath string) error {
 // converges across boots (the redundancy principle), so a kill mid-sweep
 // costs nothing. Returns the number of beads deleted.
 func sweepLegacyOrderTrackingResidue(cityPath string, cfg *config.City, stderr io.Writer) int {
-	if !ordersSQLiteRoutingActive(cityPath, cfg) {
+	active, err := ordersSQLiteRoutingActive(cityPath, cfg)
+	if err != nil {
+		// Routing state unknowable (marker unstatable): deleting bd residue
+		// would be destructive on a city that may not be migrated. Skip; the
+		// sweep converges on a later boot.
+		fmt.Fprintf(stderr, "gc: orders legacy residue sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 0
+	}
+	if !active {
 		return 0
 	}
 	stores, closeStores, err := openOrderClassMigrationStores(cityPath, cfg)

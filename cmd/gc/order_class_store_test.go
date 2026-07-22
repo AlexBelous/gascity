@@ -42,22 +42,45 @@ func writeOrdersMigratedMarker(t *testing.T, cityPath string) {
 // back) both keep routing on bd — the marker, not the binary, decides.
 func TestOrdersSQLiteRoutingRequiresConfigAndMarker(t *testing.T) {
 	cityPath := t.TempDir()
-	if ordersSQLiteRoutingActive(cityPath, nil) {
-		t.Fatal("routing active with nil config")
+	if active, err := ordersSQLiteRoutingActive(cityPath, nil); active || err != nil {
+		t.Fatalf("routing with nil config = (%v, %v), want inactive", active, err)
 	}
-	if ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)) {
-		t.Fatal("routing active without the migrated marker")
+	if active, err := ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)); active || err != nil {
+		t.Fatalf("routing without the migrated marker = (%v, %v), want inactive", active, err)
 	}
 	writeOrdersMigratedMarker(t, cityPath)
-	if !ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)) {
-		t.Fatal("routing inactive with config + marker")
+	if active, err := ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)); !active || err != nil {
+		t.Fatalf("routing with config + marker = (%v, %v), want active", active, err)
 	}
 	bdCfg, err := config.Parse([]byte("[workspace]\nname = \"bd\"\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ordersSQLiteRoutingActive(cityPath, bdCfg) {
-		t.Fatal("routing active with marker but bd backend (config rollback must win)")
+	if active, err := ordersSQLiteRoutingActive(cityPath, bdCfg); active || err != nil {
+		t.Fatalf("routing with marker but bd backend = (%v, %v), want inactive (config rollback must win)", active, err)
+	}
+}
+
+// TestOrdersRoutingNonENOENTMarkerStatFailsClosed pins the ENOENT-only
+// discipline the nudges review established: only an ABSENT marker means
+// "not migrated". Any other stat failure (EACCES/EIO) must surface as an
+// error — silently reading it as "bd" would land writes where a routed
+// reader on a migrated city never looks.
+func TestOrdersRoutingNonENOENTMarkerStatFailsClosed(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission-based stat failures do not apply to root")
+	}
+	cityPath := t.TempDir()
+	writeOrdersMigratedMarker(t, cityPath)
+	if err := os.Chmod(ordersClassStoreDir(cityPath), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ordersClassStoreDir(cityPath), 0o755) })
+	if _, err := ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)); err == nil {
+		t.Fatal("EACCES on the marker stat must fail closed, not read as unmigrated")
+	}
+	if _, err := orderClassRoutingFor(cityPath, sqliteOrdersConfig(t)); err == nil {
+		t.Fatal("orderClassRoutingFor must propagate the marker stat failure")
 	}
 }
 

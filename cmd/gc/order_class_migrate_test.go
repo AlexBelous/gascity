@@ -140,8 +140,8 @@ func TestEnsureOrdersClassMigratedWritesMarkerAndResidueSweepClearsBD(t *testing
 	if _, err := os.Stat(ordersMigratedMarkerPath(cityPath)); err != nil {
 		t.Fatalf("migrated marker missing: %v", err)
 	}
-	if !ordersSQLiteRoutingActive(cityPath, cfg) {
-		t.Fatal("routing inactive after migration")
+	if active, err := ordersSQLiteRoutingActive(cityPath, cfg); !active || err != nil {
+		t.Fatalf("routing after migration = (%v, %v), want active", active, err)
 	}
 
 	// Second call short-circuits on the marker.
@@ -191,8 +191,8 @@ func TestEnsureOrdersClassMigratedFreshCity(t *testing.T) {
 	if !ensureOrdersClassMigrated(cityPath, sqliteOrdersConfig(t), &log) {
 		t.Fatalf("fresh-city migration failed; log: %s", log.String())
 	}
-	if !ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)) {
-		t.Fatal("fresh city not routed after first boot")
+	if active, err := ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)); !active || err != nil {
+		t.Fatalf("fresh-city routing = (%v, %v), want active", active, err)
 	}
 }
 
@@ -214,8 +214,8 @@ func TestEnsureOrdersClassMigratedAbortsWhenScopeUnopenable(t *testing.T) {
 	if _, err := os.Stat(ordersMigratedMarkerPath(cityPath)); err == nil {
 		t.Fatal("marker written despite aborted migration")
 	}
-	if ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)) {
-		t.Fatal("routing active despite aborted migration")
+	if active, err := ordersSQLiteRoutingActive(cityPath, sqliteOrdersConfig(t)); active || err != nil {
+		t.Fatalf("routing after aborted migration = (%v, %v), want inactive", active, err)
 	}
 }
 

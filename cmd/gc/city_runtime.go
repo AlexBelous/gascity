@@ -288,6 +288,10 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// truth so the soak's zero-discrepancy diff starts converged.
 	seedSessionsShadowAtBoot(p.CityPath, p.Cfg, p.Stderr)
 
+	// Per-file store maintenance (WAL checkpoint + periodic VACUUM) for every
+	// routed class store — only Dolt had a maintenance loop before.
+	startClassStoreMaintenance(p.CityPath, p.Cfg, p.Stderr)
+
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).

@@ -82,7 +82,7 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	// storeHealthCacheTTL cache bounds how often it runs. Plumbing
 	// context/timeout through WalkSize is deferred until it shows up
 	// in profiles.
-	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
+	size := storehealth.TotalSize(cityPath)
 	rows, err := countBeadStoreRows(ctx, s.state, s.state.CityBeadStore())
 	if err != nil {
 		return nil, err

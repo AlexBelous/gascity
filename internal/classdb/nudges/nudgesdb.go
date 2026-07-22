@@ -86,6 +86,7 @@ type Store struct {
 	db *core.DB
 
 	retentionSweeperOnce sync.Once
+	maintenanceOnce      sync.Once
 }
 
 // Open opens (creating and migrating if needed) the nudges store file at
@@ -686,6 +687,16 @@ func (s *Store) findRecord(id string, includeTerminal bool) (TerminalRecord, boo
 	rec.Item = item
 	rec.TerminalAt = fromNanos(terminalAt)
 	return rec, true, nil
+}
+
+// StartMaintenance starts the store file's periodic WAL checkpoint +
+// slow-cadence VACUUM (the design's maintenance-loop extension: only Dolt
+// had maintenance before). Idempotent per handle, same as
+// StartRetentionSweeper; the loop stops when the store closes.
+func (s *Store) StartMaintenance(checkpointInterval, vacuumInterval time.Duration, warn io.Writer) {
+	s.maintenanceOnce.Do(func() {
+		s.db.StartMaintenance(checkpointInterval, vacuumInterval, warn)
+	})
 }
 
 // StartRetentionSweeper starts the store's own periodic terminal-row

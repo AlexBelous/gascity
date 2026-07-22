@@ -140,6 +140,7 @@ const rowColumns = `id, title, bead_type, status, assignee, description, created
 type Store struct {
 	db                   *core.DB
 	retentionSweeperOnce sync.Once
+	maintenanceOnce      sync.Once
 }
 
 // Interface guard: the class store must satisfy the full beads.Store
@@ -810,6 +811,16 @@ func (s *Store) SweepClosedBefore(ctx context.Context, cutoff time.Time) (int, e
 		return 0, err
 	}
 	return deleted, nil
+}
+
+// StartMaintenance starts the store file's periodic WAL checkpoint +
+// slow-cadence VACUUM (the design's maintenance-loop extension: only Dolt
+// had maintenance before). Idempotent per handle, same as
+// StartRetentionSweeper; the loop stops when the store closes.
+func (s *Store) StartMaintenance(checkpointInterval, vacuumInterval time.Duration, warn io.Writer) {
+	s.maintenanceOnce.Do(func() {
+		s.db.StartMaintenance(checkpointInterval, vacuumInterval, warn)
+	})
 }
 
 // StartRetentionSweeper starts the store's own periodic closed-row

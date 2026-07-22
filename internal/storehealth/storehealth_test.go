@@ -185,3 +185,28 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
 	}
 }
+
+func TestTotalSizeIncludesClassStores(t *testing.T) {
+	city := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(city, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "dolt", "chunk"), make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := TotalSize(city); got != 100 {
+		t.Fatalf("TotalSize without class stores = %d, want 100", got)
+	}
+	if err := os.MkdirAll(ClassStoreDir(city), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ClassStoreDir(city), "sessions.db"), make([]byte, 40), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ClassStoreDir(city), "orders.db-wal"), make([]byte, 5), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := TotalSize(city); got != 145 {
+		t.Fatalf("TotalSize with class stores = %d, want 145 (dolt 100 + sessions 40 + wal 5)", got)
+	}
+}

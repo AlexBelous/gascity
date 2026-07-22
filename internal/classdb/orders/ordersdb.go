@@ -18,8 +18,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -80,6 +82,8 @@ const newestFirst = ` ORDER BY created_at DESC, id DESC`
 // graph store's, so the mixed orders+graph reads always union the graph leg.
 type Store struct {
 	db *core.DB
+
+	maintenanceOnce sync.Once
 }
 
 // Open opens (creating and migrating if needed) the orders store file at
@@ -618,4 +622,14 @@ func uniqueNonEmptyIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// StartMaintenance starts the store file's periodic WAL checkpoint +
+// slow-cadence VACUUM (the design's maintenance-loop extension: only Dolt
+// had maintenance before). Idempotent per handle, same as
+// StartRetentionSweeper; the loop stops when the store closes.
+func (s *Store) StartMaintenance(checkpointInterval, vacuumInterval time.Duration, warn io.Writer) {
+	s.maintenanceOnce.Do(func() {
+		s.db.StartMaintenance(checkpointInterval, vacuumInterval, warn)
+	})
 }

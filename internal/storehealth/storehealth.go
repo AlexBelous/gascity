@@ -51,6 +51,22 @@ func StorePath(cityPath string) string {
 	return filepath.Join(cityPath, ".beads", "dolt")
 }
 
+// ClassStoreDir returns the embedded per-class SQLite store directory
+// (.gc/store) for a city rooted at cityPath. The relocated coordination
+// classes (orders/nudges/messaging/sessions) live there as one file per
+// class (engdocs/design/infra-class-sqlite-stores.md).
+func ClassStoreDir(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "store")
+}
+
+// TotalSize returns the on-disk footprint of the city's bead storage: the
+// Dolt store plus the embedded class stores under .gc/store. Both walks
+// treat missing paths as zero bytes, so unmigrated and fresh cities read
+// identically to before the class stores existed.
+func TotalSize(cityPath string) int64 {
+	return WalkSize(StorePath(cityPath)) + WalkSize(ClassStoreDir(cityPath))
+}
+
 // Compute builds a Health from measured inputs. Pure function — all
 // I/O is performed by the caller via WalkSize and LastMaintenance.
 func Compute(cityPath string, sizeBytes int64, retainedRows int, lastGCAt time.Time, lastGCStatus string) Health {

@@ -45,7 +45,7 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 // liveRowCount provides the live row count; callers without a store pass
 // nil and LiveRows is reported as zero.
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
-	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
+	size := storehealth.TotalSize(cityPath)
 	rows := liveRowCount(store)
 	lastAt, lastStatus := storehealth.LastMaintenance(ep)
 	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)

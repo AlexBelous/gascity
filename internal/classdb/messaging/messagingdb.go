@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,7 @@ func migrations() []core.Migration {
 type Store struct {
 	db                   *core.DB
 	retentionSweeperOnce sync.Once
+	maintenanceOnce      sync.Once
 }
 
 // Open opens (creating and migrating if needed) the messaging store file at
@@ -441,4 +443,14 @@ func (s *Store) listRecords(query string, args ...any) ([]beadmail.Record, error
 		return nil, err
 	}
 	return out, nil
+}
+
+// StartMaintenance starts the store file's periodic WAL checkpoint +
+// slow-cadence VACUUM (the design's maintenance-loop extension: only Dolt
+// had maintenance before). Idempotent per handle, same as
+// StartRetentionSweeper; the loop stops when the store closes.
+func (s *Store) StartMaintenance(checkpointInterval, vacuumInterval time.Duration, warn io.Writer) {
+	s.maintenanceOnce.Do(func() {
+		s.db.StartMaintenance(checkpointInterval, vacuumInterval, warn)
+	})
 }

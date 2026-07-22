@@ -249,17 +249,29 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   micro-divergences: store-failure wrap texts unified at op level;
   GetBinding parses last_touched_at unconditionally.
 
+- **Slice 5 DONE** (`feat(classdb)` 7e6882577 — extmsg typed tables):
+  messagingdb migration Version 2 (same db, shared gcm mint/id_seq).
+  Seven tables; partial UNIQUE indexes carry the invariants
+  (active-binding violation → ErrBindingConflict); AppendTranscript is
+  ONE tx (bd crash window closed; crash gate proves allocator+entry
+  commit as a unit); participant retained-label ≡ pending_cleanup column
+  (ParticipantsBySession matches session_id OR owed cleanup;
+  DropParticipantSessionLabel = documented no-op); meta JSON column with
+  bd MERGE semantics (mergeMetaLocked). Import* primitives (OR IGNORE
+  resume; ended-binding import carries generation ceiling) +
+  SweepExtmsgRetention (spares max-(generation,id) binding row per conv)
+  + PruneTranscripts (earliest_available_sequence advances) — ALL
+  DORMANT. Conformance through public extmsg.Services over both
+  backends; repair-op sqlite semantics pinned at backend level in
+  extmsgdb_test.go (service-level repair conformance lands with the
+  wiring slice's routed twins). Census 534/165. NOTE: shared-host
+  golangci-lint was clobbered mid-session (2.12.0/go1.25); restored
+  pinned 2.9.0 built via `GOTOOLCHAIN=go1.26.5 go install` into
+  ~/go/bin.
+
 ## What remains (P3+ per the design work plan)
 
-- **P3 messaging, remaining**: (a) feat(classdb) extmsg typed tables —
-  messagingdb migration Version 2, seven tables + partial UNIQUE
-  constraints + meta JSON columns per the plan's Schema section;
-  implements fabricBackend structurally (exported names in
-  extmsg/backend.go are the contract); Import* primitives; dormant
-  retention; both-backend conformance through the public
-  extmsg.Services surface (bd leg `NewServicesWithSessionStore(mem,
-  mem)`, sqlite leg `NewServicesWithBackend(store, mem)`); crash gate +
-  census bump; (b) ONE wiring slice —
+- **P3 messaging, remaining**: (a) ONE wiring slice —
   ratchet flip + config acceptance test + `messaging.migrated` marker +
   routing at the construction roots (`newCityMailProvider`,
   `openCityMailProvider`, cmd_handoff.go:338's direct
@@ -270,7 +282,7 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   inventory in P3-EXTMSG-SEAM-PLAN.md) + seam-guard test + fail-closed
   erroring backend; the API
   needs no provider seam (it consumes state.MailProvider, which the
-  controller builds routed); (c) migration — import open mail + extmsg
+  controller builds routed); (b) migration — import open mail + extmsg
   actives (drop >30d unread, >TTL read), marker, residue, reaper.sh
   `mail_wisps` count + `issue_type='message'` filters, doctor/hook-claim
   raw-consumer touch-ups, and the store retention sweeper

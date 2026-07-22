@@ -228,6 +228,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// By-id read federation: a plain `show <id>` whose id lives in a relocated
+	// class store is served locally (bd no longer holds the row). Everything
+	// else — including every miss — falls through byte-identically.
+	if code, handled := maybeRouteBdShowLocal(cityPath, cfg, bdArgs, stdout, stderr); handled {
+		return code
+	}
+
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

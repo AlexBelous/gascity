@@ -53,6 +53,9 @@
 #
 # Required external commands: git, awk, cmp, mktemp.
 
+# shellcheck source=./push-ownership-guard.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/push-ownership-guard.sh"
+
 # is_additive_keepboth_path <path>
 #
 # Returns 0 when <path> is a test / doc / fixture file for which concatenating
@@ -360,6 +363,11 @@ attempt_trivial_conflict_resolution() {
 #        The local branch IS rebased but the remote is NOT updated. Caller
 #        falls back to route-to-builder; the next gate cycle re-fetches and
 #        retries from current state.
+#   14 — rebased cleanly, but the pre-push bead-ownership/staleness guard
+#        blocked the push (the bead was reassigned/closed/held/routed
+#        elsewhere since this attempt began). The local branch IS rebased
+#        but the remote is NOT updated. Caller falls back to
+#        route-to-builder; this is the race ga-fip9ps.1 guards against.
 attempt_bounded_self_rebase() {
     local branch="$1"
     local base_ref="${2:-main}"
@@ -426,6 +434,14 @@ attempt_bounded_self_rebase() {
     if git -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null | grep -q .; then
         git rebase --abort >/dev/null 2>&1 || true
         return 12
+    fi
+
+    # Bead ownership/staleness guard (ga-fip9ps.1): re-checks bd claim state
+    # immediately before this force-with-lease push executes. A mayor
+    # ruling (reassign/close/hold/reroute) that landed after this attempt
+    # began must not be clobbered by a stale push.
+    if ! assert_bead_still_claimed; then
+        return 14
     fi
 
     # Force-push the rebased branch. --force-with-lease (NOT --force) keeps

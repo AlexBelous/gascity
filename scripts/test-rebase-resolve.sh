@@ -40,6 +40,14 @@ record_fail() { echo "  FAIL $1 — $2"; fail=$((fail + 1)); }
 export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL="author@example.com"
 export GIT_COMMITTER_NAME="Test Deployer" GIT_COMMITTER_EMAIL="deployer@example.com"
 export GIT_CONFIG_NOSYSTEM=1
+
+# This suite tests rebase conflict resolution, not the pre-push bead
+# ownership/staleness guard (ga-fip9ps.1, its own suite:
+# test-push-ownership-guard.sh). attempt_bounded_self_rebase now calls that
+# guard immediately before its --force-with-lease push; disable it here so
+# these tests stay hermetic instead of making a live bd/network call against
+# this shell's real $GC_AGENT.
+export POG_DISABLE=1
 unset GIT_DIR GIT_WORK_TREE 2>/dev/null || true
 
 # new_repo: create an isolated git repo in a fresh tmpdir, print its path.

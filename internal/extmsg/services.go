@@ -28,13 +28,29 @@ func NewServices(store beads.Store, opts ...BindingServiceOption) Services {
 // [beads.classes.sessions] relocates a class, and no single-store handle is
 // then correct for extmsg as a whole. A nil sessionStore falls back to store.
 func NewServicesWithSessionStore(store, sessionStore beads.Store, opts ...BindingServiceOption) Services {
-	locks := sharedBindingLockPool(store)
-	transcript := newTranscriptService(store, locks)
-	delivery := newDeliveryContextService(store, locks, transcript)
+	if sessionStore == nil {
+		sessionStore = store
+	}
+	return newServices(newBeadBackend(store), sessionStore, sharedBindingLockPool(store), opts...)
+}
+
+// NewServicesWithBackend creates the fabric services over a fabricBackend
+// implementation (the embedded messaging-class store), with session-liveness
+// reads on sessionStore. Callers outside this package pass any structural
+// implementation of the backend seam; the lock pool is shared per backend
+// handle, so every Services built over the same handle serializes
+// conversation mutations against the same pool.
+func NewServicesWithBackend(backend fabricBackend, sessionStore beads.Store, opts ...BindingServiceOption) Services {
+	return newServices(backend, sessionStore, sharedBindingLockPoolForBackend(backend), opts...)
+}
+
+func newServices(backend fabricBackend, sessionStore beads.Store, locks *bindingLockPool, opts ...BindingServiceOption) Services {
+	transcript := newTranscriptServiceWithBackend(backend, locks)
+	delivery := newDeliveryContextService(backend, locks, transcript)
 	return Services{
-		Bindings:   newBindingService(store, sessionStore, delivery, transcript, locks, opts...),
+		Bindings:   newBindingServiceWithBackend(backend, sessionStore, delivery, transcript, locks, opts...),
 		Delivery:   delivery,
-		Groups:     newGroupService(store, sessionStore, locks, transcript),
+		Groups:     newGroupServiceWithBackend(backend, sessionStore, locks, transcript),
 		Transcript: transcript,
 	}
 }

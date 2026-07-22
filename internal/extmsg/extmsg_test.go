@@ -3100,7 +3100,7 @@ func (f *flakyTranscriptService) ensureMembershipLocked(input EnsureMembershipIn
 	return f.EnsureMembership(context.Background(), input)
 }
 
-func (f *flakyTranscriptService) ensureMembershipLockedWriter(_ membershipWriter, input EnsureMembershipInput) (ConversationMembershipRecord, error) {
+func (f *flakyTranscriptService) ensureMembershipLockedWriter(_ FabricWriter, input EnsureMembershipInput) (ConversationMembershipRecord, error) {
 	return f.EnsureMembership(context.Background(), input)
 }
 

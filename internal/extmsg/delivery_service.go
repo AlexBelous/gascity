@@ -3,25 +3,24 @@ package extmsg
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 type deliveryContextService struct {
-	store      beads.Store
+	backend    fabricBackend
 	locks      *bindingLockPool
 	transcript bindingMembershipEnsurer
 }
 
 type deliveryCleaner struct {
-	store beads.Store
-	locks *bindingLockPool
+	backend fabricBackend
+	locks   *bindingLockPool
 }
 
-func newDeliveryContextService(store beads.Store, locks *bindingLockPool, transcript bindingMembershipEnsurer) DeliveryContextService {
-	return &deliveryContextService{store: store, locks: locks, transcript: transcript}
+func newDeliveryContextService(backend fabricBackend, locks *bindingLockPool, transcript bindingMembershipEnsurer) DeliveryContextService {
+	return &deliveryContextService{backend: backend, locks: locks, transcript: transcript}
 }
 
 func (s *deliveryContextService) Record(ctx context.Context, caller Caller, input DeliveryContextRecord) error {
@@ -42,24 +41,18 @@ func (s *deliveryContextService) Record(ctx context.Context, caller Caller, inpu
 	if input.BindingGeneration <= 0 {
 		return fmt.Errorf("%w: binding_generation required", ErrInvalidInput)
 	}
+	fields := DeliveryFields{
+		Ref:               ref,
+		SessionID:         sessionID,
+		BindingGeneration: input.BindingGeneration,
+		LastPublishedAt:   input.LastPublishedAt,
+		LastMessageID:     input.LastMessageID,
+		SourceSessionID:   input.SourceSessionID,
+		Meta:              input.Metadata,
+	}
 	label := deliveryRouteLabel(ref, sessionID)
-	title := sessionID + " -> " + conversationTitle(ref)
-	fields := encodeMetadataFields(input.Metadata, map[string]string{
-		"schema_version":         strconv.Itoa(schemaVersion),
-		"session_id":             sessionID,
-		"scope_id":               ref.ScopeID,
-		"provider":               ref.Provider,
-		"account_id":             ref.AccountID,
-		"conversation_id":        ref.ConversationID,
-		"parent_conversation_id": ref.ParentConversationID,
-		"conversation_kind":      string(ref.Kind),
-		"binding_generation":     strconv.FormatInt(input.BindingGeneration, 10),
-		"last_published_at":      formatTime(input.LastPublishedAt),
-		"last_message_id":        strings.TrimSpace(input.LastMessageID),
-		"source_session_id":      strings.TrimSpace(input.SourceSessionID),
-	})
 	return withBindingLock(s.locks, ref, func() error {
-		activeBinding, err := resolveActiveBindingLocked(ctx, s.store, deliveryCleaner{s.store, s.locks}, s.transcript, ref, timeNow())
+		activeBinding, err := resolveActiveBindingLocked(ctx, s.backend, deliveryCleaner{s.backend, s.locks}, s.transcript, ref, timeNow())
 		if err != nil {
 			return err
 		}
@@ -67,42 +60,17 @@ func (s *deliveryContextService) Record(ctx context.Context, caller Caller, inpu
 			return ErrBindingMismatch
 		}
 		return withLockKey(s.locks, label, func() error {
-			items, err := s.store.List(beads.ListQuery{Label: label})
+			records, err := s.backend.OpenDeliveryContexts(ref, sessionID)
 			if err != nil {
-				return fmt.Errorf("list delivery contexts: %w", err)
+				return err
 			}
-			for _, item := range items {
+			if len(records) > 0 {
 				if err := checkContext(ctx); err != nil {
 					return err
 				}
-				if !hasLabel(item, "gc:extmsg-delivery") || item.Status == "closed" {
-					continue
-				}
-				record, err := decodeDeliveryBead(item)
-				if err != nil {
-					return err
-				}
-				if !sameConversationRef(record.Conversation, ref) || record.SessionID != sessionID {
-					continue
-				}
-				if err := s.store.Update(item.ID, beads.UpdateOpts{Title: &title}); err != nil {
-					return fmt.Errorf("update delivery title: %w", err)
-				}
-				if err := s.store.SetMetadataBatch(item.ID, fields); err != nil {
-					return fmt.Errorf("update delivery metadata: %w", err)
-				}
-				return nil
+				return s.backend.UpdateDeliveryContext(records[0].ID, fields)
 			}
-			_, err = s.store.Create(beads.Bead{
-				Title:    title,
-				Type:     "task",
-				Labels:   []string{"gc:extmsg-delivery", labelDeliveryBase, label, deliverySessionLabel(sessionID)},
-				Metadata: fields,
-			})
-			if err != nil {
-				return fmt.Errorf("create delivery context: %w", err)
-			}
-			return nil
+			return s.backend.CreateDeliveryContext(fields)
 		})
 	})
 }
@@ -122,28 +90,18 @@ func (s *deliveryContextService) Resolve(ctx context.Context, sessionID string, 
 	label := deliveryRouteLabel(ref, sessionID)
 	var out *DeliveryContextRecord
 	err = withBindingLock(s.locks, ref, func() error {
-		activeBinding, err := resolveActiveBindingLocked(ctx, s.store, deliveryCleaner{s.store, s.locks}, s.transcript, ref, timeNow())
+		activeBinding, err := resolveActiveBindingLocked(ctx, s.backend, deliveryCleaner{s.backend, s.locks}, s.transcript, ref, timeNow())
 		if err != nil {
 			return err
 		}
 		return withLockKey(s.locks, label, func() error {
-			items, err := s.store.List(beads.ListQuery{Label: label})
+			records, err := s.backend.OpenDeliveryContexts(ref, sessionID)
 			if err != nil {
-				return fmt.Errorf("list delivery contexts: %w", err)
+				return err
 			}
-			for _, item := range items {
+			for _, record := range records {
 				if err := checkContext(ctx); err != nil {
 					return err
-				}
-				if !hasLabel(item, "gc:extmsg-delivery") || item.Status == "closed" {
-					continue
-				}
-				record, err := decodeDeliveryBead(item)
-				if err != nil {
-					return err
-				}
-				if !sameConversationRef(record.Conversation, ref) || record.SessionID != sessionID {
-					continue
 				}
 				if activeBinding != nil &&
 					activeBinding.SessionID == sessionID &&
@@ -153,13 +111,13 @@ func (s *deliveryContextService) Resolve(ctx context.Context, sessionID string, 
 						out = &rec
 						continue
 					}
-					if err := s.store.Close(item.ID); err != nil {
-						return fmt.Errorf("close duplicate delivery context %s: %w", item.ID, err)
+					if err := s.backend.CloseDeliveryContext(record.ID); err != nil {
+						return fmt.Errorf("close duplicate delivery context %s: %w", record.ID, err)
 					}
 					continue
 				}
-				if err := s.store.Close(item.ID); err != nil {
-					return fmt.Errorf("close stale delivery context %s: %w", item.ID, err)
+				if err := s.backend.CloseDeliveryContext(record.ID); err != nil {
+					return fmt.Errorf("close stale delivery context %s: %w", record.ID, err)
 				}
 			}
 			return nil
@@ -172,7 +130,7 @@ func (s *deliveryContextService) Resolve(ctx context.Context, sessionID string, 
 }
 
 func (s *deliveryContextService) ClearForConversation(ctx context.Context, sessionID string, ref ConversationRef) error {
-	return deliveryCleaner{s.store, s.locks}.ClearForConversation(ctx, sessionID, ref)
+	return deliveryCleaner{s.backend, s.locks}.ClearForConversation(ctx, sessionID, ref)
 }
 
 func decodeDeliveryBead(b beads.Bead) (DeliveryContextRecord, error) {
@@ -211,26 +169,16 @@ func (c deliveryCleaner) ClearForConversation(ctx context.Context, sessionID str
 	}
 	label := deliveryRouteLabel(ref, sessionID)
 	return withLockKey(c.locks, label, func() error {
-		items, err := c.store.List(beads.ListQuery{Label: label})
+		records, err := c.backend.OpenDeliveryContexts(ref, sessionID)
 		if err != nil {
-			return fmt.Errorf("list delivery contexts: %w", err)
+			return err
 		}
-		for _, item := range items {
+		for _, record := range records {
 			if err := checkContext(ctx); err != nil {
 				return err
 			}
-			if !hasLabel(item, "gc:extmsg-delivery") || item.Status == "closed" {
-				continue
-			}
-			record, err := decodeDeliveryBead(item)
-			if err != nil {
-				return err
-			}
-			if !sameConversationRef(record.Conversation, ref) || record.SessionID != sessionID {
-				continue
-			}
-			if err := c.store.Close(item.ID); err != nil {
-				return fmt.Errorf("close delivery context %s: %w", item.ID, err)
+			if err := c.backend.CloseDeliveryContext(record.ID); err != nil {
+				return fmt.Errorf("close delivery context %s: %w", record.ID, err)
 			}
 		}
 		return nil

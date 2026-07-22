@@ -59,9 +59,9 @@ func ReapStaleBindings(ctx context.Context, store, sessionStore beads.Store, now
 	if sessionStore == nil {
 		sessionStore = store
 	}
-	items, err := store.List(beads.ListQuery{Label: labelBindingBase})
+	records, err := newBeadBackend(store).ActiveBindings()
 	if err != nil {
-		return stats, fmt.Errorf("list active bindings: %w", err)
+		return stats, err
 	}
 	svc := NewServicesWithSessionStore(store, sessionStore)
 	caller := Caller{Kind: CallerController, ID: "binding-reaper"}
@@ -70,13 +70,9 @@ func ReapStaleBindings(ctx context.Context, store, sessionStore beads.Store, now
 	// ReassignSessionBindings (which operates on all bindings for a session)
 	// more than once per session per sweep.
 	reassigned := make(map[string]struct{})
-	for _, item := range items {
+	for _, record := range records {
 		if err := checkContext(ctx); err != nil {
 			return stats, err
-		}
-		record, err := decodeBindingBead(item)
-		if err != nil {
-			return stats, fmt.Errorf("decode binding %s: %w", item.ID, err)
 		}
 		if record.Status != BindingActive {
 			continue
@@ -159,24 +155,17 @@ func ReapStaleParticipants(ctx context.Context, store, sessionStore beads.Store)
 	if sessionStore == nil {
 		sessionStore = store
 	}
-	items, err := store.List(beads.ListQuery{Label: labelGroupParticipantBase})
+	records, err := newBeadBackend(store).OpenParticipants()
 	if err != nil {
-		return stats, fmt.Errorf("list active group participants: %w", err)
+		return stats, err
 	}
 	// reassigned tracks retired session IDs already handed over so we don't call
 	// ReassignSessionParticipants (which migrates all participants for a session)
 	// more than once per session per sweep.
 	reassigned := make(map[string]struct{})
-	for _, item := range items {
+	for _, record := range records {
 		if err := checkContext(ctx); err != nil {
 			return stats, err
-		}
-		if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
-			continue
-		}
-		record, err := decodeParticipantBead(item)
-		if err != nil {
-			return stats, fmt.Errorf("decode participant %s: %w", item.ID, err)
 		}
 		stats.Scanned++
 		name := strings.TrimSpace(record.SessionName)
@@ -205,13 +194,13 @@ func ReapStaleParticipants(ctx context.Context, store, sessionStore beads.Store)
 		}
 		// session_id already names the live bead, but a prior handover may have
 		// committed the session_id swap and then failed mid-migration, leaving a
-		// retired session in previous_session_id_pending_cleanup with its
-		// transcript membership still stranded on the dead bead. The
-		// liveID == oldID fast path never retries those, so finish each pending
-		// handover by re-driving it to the live bead: participantReassignmentPending
+		// retired session in the pending-cleanup set with its transcript
+		// membership still stranded on the dead bead. The liveID == oldID fast
+		// path never retries those, so finish each pending handover by
+		// re-driving it to the live bead: participantReassignmentPending
 		// recognizes the already-swapped state and migrateParticipantGroupMembership
 		// completes the membership migration and clears the pending record.
-		for _, pendingOldID := range pendingCleanupSessionIDsFromMetadata(item.Metadata) {
+		for _, pendingOldID := range record.PendingCleanup {
 			if pendingOldID == "" || pendingOldID == oldID {
 				continue
 			}

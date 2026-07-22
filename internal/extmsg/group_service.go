@@ -5,18 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 type groupService struct {
-	store beads.Store
+	backend fabricBackend
 	// sessionStore holds session-class beads, read only for session-liveness
 	// resolution (sessionNameForSelector / overlayLiveParticipantSessionID).
-	// Identical to store on a single-store city; distinct once a class
-	// relocates. Record mutations never touch it.
+	// Identical to the record store on a single-store city; distinct once a
+	// class relocates. Record mutations never touch it.
 	sessionStore beads.Store
 	locks        *bindingLockPool
 	transcript   groupTranscriptSync
@@ -39,7 +38,11 @@ func newGroupService(store, sessionStore beads.Store, locks *bindingLockPool, tr
 	if sessionStore == nil {
 		sessionStore = store
 	}
-	return &groupService{store: store, sessionStore: sessionStore, locks: locks, transcript: transcript}
+	return newGroupServiceWithBackend(newBeadBackend(store), sessionStore, locks, transcript)
+}
+
+func newGroupServiceWithBackend(backend fabricBackend, sessionStore beads.Store, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
+	return &groupService{backend: backend, sessionStore: sessionStore, locks: locks, transcript: transcript}
 }
 
 func groupTranscriptCaller() Caller {
@@ -63,71 +66,31 @@ func (s *groupService) EnsureGroup(ctx context.Context, caller Caller, input Ens
 	default:
 		return ConversationGroupRecord{}, fmt.Errorf("%w: invalid group mode %q", ErrInvalidInput, input.Mode)
 	}
-	defaultHandle := normalizeHandle(input.DefaultHandle)
-	lastHandle := normalizeHandle(input.LastAddressedHandle)
-	title := conversationTitle(ref)
-	fields := encodeMetadataFields(input.Metadata, map[string]string{
-		"schema_version":                      strconv.Itoa(schemaVersion),
-		"scope_id":                            ref.ScopeID,
-		"provider":                            ref.Provider,
-		"account_id":                          ref.AccountID,
-		"conversation_id":                     ref.ConversationID,
-		"parent_conversation_id":              ref.ParentConversationID,
-		"conversation_kind":                   string(ref.Kind),
-		"mode":                                string(mode),
-		"default_handle":                      defaultHandle,
-		"last_addressed_handle":               lastHandle,
-		"fanout_enabled":                      strconv.FormatBool(input.FanoutPolicy.Enabled),
-		"fanout_allow_untargeted":             strconv.FormatBool(input.FanoutPolicy.AllowUntargetedPublication),
-		"fanout_max_peer_triggered_publishes": strconv.Itoa(input.FanoutPolicy.MaxPeerTriggeredPublishes),
-		"fanout_max_total_peer_deliveries":    strconv.Itoa(input.FanoutPolicy.MaxTotalPeerDeliveries),
-	})
-	if lastHandle == "" {
-		delete(fields, "last_addressed_handle")
+	fields := GroupFields{
+		Ref:                 ref,
+		Mode:                mode,
+		DefaultHandle:       normalizeHandle(input.DefaultHandle),
+		LastAddressedHandle: normalizeHandle(input.LastAddressedHandle),
+		Fanout:              input.FanoutPolicy,
+		Meta:                input.Metadata,
 	}
 	var out ConversationGroupRecord
 	err = withLockKey(s.locks, groupRootLabel(ref), func() error {
-		items, err := s.store.List(beads.ListQuery{Label: groupRootLabel(ref)})
+		groups, err := s.backend.OpenGroupsByRoot(ref)
 		if err != nil {
-			return fmt.Errorf("list groups by root label: %w", err)
+			return err
 		}
-		for _, item := range items {
+		if len(groups) > 0 {
 			if err := checkContext(ctx); err != nil {
 				return err
 			}
-			if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
-				continue
-			}
-			record, err := decodeGroupBead(item)
-			if err != nil {
+			if err := s.backend.UpdateGroup(groups[0].ID, fields); err != nil {
 				return err
 			}
-			if !sameConversationRef(record.RootConversation, ref) {
-				continue
-			}
-			if err := s.store.Update(item.ID, beads.UpdateOpts{Title: &title}); err != nil {
-				return fmt.Errorf("update group title: %w", err)
-			}
-			if err := s.store.SetMetadataBatch(item.ID, fields); err != nil {
-				return fmt.Errorf("update group metadata: %w", err)
-			}
-			updated, err := s.store.Get(item.ID)
-			if err != nil {
-				return fmt.Errorf("get group %s: %w", item.ID, err)
-			}
-			out, err = decodeGroupBead(updated)
+			out, err = s.backend.RefetchGroup(groups[0].ID)
 			return err
 		}
-		created, err := s.store.Create(beads.Bead{
-			Title:    title,
-			Type:     "task",
-			Labels:   []string{"gc:extmsg-group", labelGroupBase, groupRootLabel(ref)},
-			Metadata: fields,
-		})
-		if err != nil {
-			return fmt.Errorf("create group: %w", err)
-		}
-		out, err = decodeGroupBead(created)
+		out, err = s.backend.CreateGroup(fields)
 		return err
 	})
 	return out, err
@@ -159,85 +122,49 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 	// Capture the stable session name so the participant survives respawn.
 	// Best-effort: empty when the selector resolves to no session bead.
 	sessionName := sessionNameForSelector(s.sessionStore, sessionID)
-	title := groupID + "/" + handle
-	fields := encodeMetadataFields(input.Metadata, map[string]string{
-		"schema_version": strconv.Itoa(schemaVersion),
-		"group_id":       groupID,
-		"handle":         handle,
-		"session_id":     sessionID,
-		"session_name":   sessionName,
-		"public":         strconv.FormatBool(input.Public),
-	})
+	fields := ParticipantFields{
+		GroupID:     groupID,
+		Handle:      handle,
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Public:      input.Public,
+		Meta:        input.Metadata,
+	}
 	var out ConversationGroupParticipant
 	err = withLockKey(s.locks, groupParticipantsMutationLock(groupID), func() error {
-		items, err := s.store.List(beads.ListQuery{
-			Label:         groupParticipantLabel(groupID),
-			IncludeClosed: true,
-		})
+		records, err := s.backend.ParticipantsByGroup(groupID, true)
 		if err != nil {
-			return fmt.Errorf("list group participants: %w", err)
+			return err
 		}
-		for _, item := range items {
+		for _, record := range records {
 			if err := checkContext(ctx); err != nil {
 				return err
 			}
-			if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
+			if record.Closed {
 				continue
-			}
-			record, err := decodeParticipantBead(item)
-			if err != nil {
-				return err
 			}
 			if record.Handle != handle {
 				continue
 			}
-			pendingCleanup := pendingCleanupSessionIDsFromMetadata(item.Metadata)
+			pendingCleanup := record.PendingCleanup
 			if record.SessionID != "" && record.SessionID != sessionID {
 				pendingCleanup = append(pendingCleanup, record.SessionID)
 			}
 			pendingCleanup = removeSessionID(pendingCleanup, sessionID)
-			updateFields := mapsClone(fields)
-			updateFields["previous_session_id_pending_cleanup"] = encodePendingCleanupSessionIDs(pendingCleanup)
-			labelsToAdd, labelsToRemove := recordLabels(item.Labels,
-				participantSessionLabels(record.SessionID, record.SessionName),
-				participantSessionLabels(sessionID, sessionName))
-			if err := s.store.Update(item.ID, beads.UpdateOpts{
-				Title:        &title,
-				Labels:       labelsToAdd,
-				RemoveLabels: labelsToRemove,
-			}); err != nil {
-				return fmt.Errorf("update group participant: %w", err)
+			if err := s.backend.RetargetParticipant(record.ID, fields, record.SessionID, record.SessionName, pendingCleanup); err != nil {
+				return err
 			}
-			if err := s.store.SetMetadataBatch(item.ID, updateFields); err != nil {
-				return fmt.Errorf("update participant metadata: %w", err)
-			}
-			updated, err := s.store.Get(item.ID)
-			if err != nil {
-				return fmt.Errorf("get participant %s: %w", item.ID, err)
-			}
-			out, err = decodeParticipantBead(updated)
+			out, err = s.backend.RefetchParticipant(record.ID)
 			if err != nil {
 				return err
 			}
-			return s.migrateParticipantGroupMembership(ctx, group, item.ID, sessionID, pendingCleanup)
+			return s.migrateParticipantGroupMembership(ctx, group, record.ID, sessionID, pendingCleanup)
 		}
-		createLabels := []string{"gc:extmsg-participant", labelGroupParticipantBase, groupParticipantLabel(groupID), groupParticipantSessionLabel(sessionID)}
-		if sessionName != "" {
-			createLabels = append(createLabels, groupParticipantSessionNameLabel(sessionName))
-		}
-		created, err := s.store.Create(beads.Bead{
-			Title:    title,
-			Type:     "task",
-			Labels:   createLabels,
-			Metadata: fields,
-		})
-		if err != nil {
-			return fmt.Errorf("create group participant: %w", err)
-		}
-		out, err = decodeParticipantBead(created)
+		created, err := s.backend.CreateParticipant(fields)
 		if err != nil {
 			return err
 		}
+		out = created
 		return s.migrateParticipantGroupMembership(ctx, group, created.ID, sessionID, nil)
 	})
 	if err != nil {
@@ -268,22 +195,12 @@ func (s *groupService) RemoveParticipant(ctx context.Context, caller Caller, inp
 	var sessionIDs []string
 	var found bool
 	err = withLockKey(s.locks, groupParticipantsMutationLock(groupID), func() error {
-		items, err := s.store.List(beads.ListQuery{
-			Label:         groupParticipantLabel(groupID),
-			IncludeClosed: true,
-		})
+		records, err := s.backend.ParticipantsByGroup(groupID, true)
 		if err != nil {
-			return fmt.Errorf("list group participants: %w", err)
+			return err
 		}
 		seenSessionIDs := make(map[string]struct{})
-		for _, item := range items {
-			if !hasLabel(item, "gc:extmsg-participant") {
-				continue
-			}
-			record, err := decodeParticipantBead(item)
-			if err != nil {
-				return err
-			}
+		for _, record := range records {
 			if record.Handle != handle {
 				continue
 			}
@@ -294,7 +211,7 @@ func (s *groupService) RemoveParticipant(ctx context.Context, caller Caller, inp
 					sessionIDs = append(sessionIDs, record.SessionID)
 				}
 			}
-			for _, pendingSessionID := range pendingCleanupSessionIDsFromMetadata(item.Metadata) {
+			for _, pendingSessionID := range record.PendingCleanup {
 				if pendingSessionID == "" {
 					continue
 				}
@@ -304,11 +221,11 @@ func (s *groupService) RemoveParticipant(ctx context.Context, caller Caller, inp
 				seenSessionIDs[pendingSessionID] = struct{}{}
 				sessionIDs = append(sessionIDs, pendingSessionID)
 			}
-			if item.Status == "closed" {
+			if record.Closed {
 				continue
 			}
-			if err := s.store.Close(item.ID); err != nil {
-				return fmt.Errorf("close participant %s: %w", item.ID, err)
+			if err := s.backend.CloseParticipant(record.ID); err != nil {
+				return fmt.Errorf("close participant %s: %w", record.ID, err)
 			}
 		}
 		if s.transcript == nil {
@@ -461,7 +378,7 @@ func (s *groupService) UpdateCursor(ctx context.Context, caller Caller, input Up
 		return ErrGroupNotFound
 	}
 	if handle == "" {
-		return s.store.SetMetadata(group.ID, "last_addressed_handle", "")
+		return s.backend.SetGroupCursor(group.ID, "")
 	}
 	participants, err := s.listParticipants(group.ID)
 	if err != nil {
@@ -477,7 +394,7 @@ func (s *groupService) UpdateCursor(ctx context.Context, caller Caller, input Up
 	if !found {
 		return ErrGroupRouteNotFound
 	}
-	return s.store.SetMetadata(group.ID, "last_addressed_handle", handle)
+	return s.backend.SetGroupCursor(group.ID, handle)
 }
 
 // FindByConversation looks up an existing group by its root conversation.
@@ -493,22 +410,12 @@ func (s *groupService) FindByConversation(_ context.Context, _ Caller, ref Conve
 }
 
 func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: groupRootLabel(ref)})
+	groups, err := s.backend.OpenGroupsByRoot(ref)
 	if err != nil {
-		return nil, fmt.Errorf("list groups by root label: %w", err)
+		return nil, err
 	}
 	var out *ConversationGroupRecord
-	for _, item := range items {
-		if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
-			continue
-		}
-		record, err := decodeGroupBead(item)
-		if err != nil {
-			return nil, err
-		}
-		if !sameConversationRef(record.RootConversation, ref) {
-			continue
-		}
+	for _, record := range groups {
 		if out != nil {
 			return nil, fmt.Errorf("%w: multiple groups for %s", ErrInvariantViolation, conversationLockKey(ref))
 		}
@@ -519,56 +426,48 @@ func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupR
 }
 
 func (s *groupService) getGroupByID(groupID string) (ConversationGroupRecord, error) {
-	item, err := s.store.Get(groupID)
+	record, ok, err := s.backend.GetGroup(groupID)
 	if err != nil {
-		return ConversationGroupRecord{}, fmt.Errorf("get group %s: %w", groupID, err)
+		return ConversationGroupRecord{}, err
 	}
-	if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
+	if !ok {
 		return ConversationGroupRecord{}, ErrGroupNotFound
 	}
-	return decodeGroupBead(item)
+	return record, nil
 }
 
 func (s *groupService) listParticipants(groupID string) ([]ConversationGroupParticipant, error) {
-	items, err := s.store.List(beads.ListQuery{Label: groupParticipantLabel(groupID)})
+	records, err := s.backend.ParticipantsByGroup(groupID, false)
 	if err != nil {
-		return nil, fmt.Errorf("list group participants: %w", err)
+		return nil, err
 	}
-	out := make([]ConversationGroupParticipant, 0, len(items))
+	out := make([]ConversationGroupParticipant, 0, len(records))
 	seen := make(map[string]ConversationGroupParticipant)
-	for _, item := range items {
-		if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
+	for _, record := range records {
+		if record.Closed {
 			continue
-		}
-		record, err := decodeParticipantBead(item)
-		if err != nil {
-			return nil, err
 		}
 		if existing, ok := seen[record.Handle]; ok {
 			return nil, fmt.Errorf("%w: duplicate participants for handle %s (%s, %s)", ErrInvariantViolation, record.Handle, existing.ID, record.ID)
 		}
-		seen[record.Handle] = record
-		out = append(out, record)
+		seen[record.Handle] = record.ConversationGroupParticipant
+		out = append(out, record.ConversationGroupParticipant)
 	}
 	return out, nil
 }
 
 func (s *groupService) activeParticipantSessionCounts(ctx context.Context, groupID string) (map[string]int, error) {
-	items, err := s.store.List(beads.ListQuery{Label: groupParticipantLabel(groupID)})
+	records, err := s.backend.ParticipantsByGroup(groupID, false)
 	if err != nil {
-		return nil, fmt.Errorf("list group participants: %w", err)
+		return nil, err
 	}
 	counts := make(map[string]int)
-	for _, item := range items {
+	for _, record := range records {
 		if err := checkContext(ctx); err != nil {
 			return nil, err
 		}
-		if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
+		if record.Closed {
 			continue
-		}
-		record, err := decodeParticipantBead(item)
-		if err != nil {
-			return nil, err
 		}
 		if record.SessionID == "" {
 			continue
@@ -579,7 +478,7 @@ func (s *groupService) activeParticipantSessionCounts(ctx context.Context, group
 }
 
 func (s *groupService) setParticipantPendingCleanup(participantID string, sessionIDs []string) error {
-	if err := s.store.SetMetadata(participantID, "previous_session_id_pending_cleanup", encodePendingCleanupSessionIDs(sessionIDs)); err != nil {
+	if err := s.backend.SetParticipantPendingCleanup(participantID, sessionIDs); err != nil {
 		return fmt.Errorf("set participant pending cleanup: %w", err)
 	}
 	return nil
@@ -590,15 +489,15 @@ func (s *groupService) setParticipantPendingCleanup(participantID string, sessio
 // membership for any session in retiredSessionIDs that no active participant in
 // the group still references. A retired session whose membership cannot be
 // removed yet — a live participant still uses it, or the remove failed — is
-// written back onto the participant bead's previous_session_id_pending_cleanup
-// metadata so a later mutation retries it.
+// written back onto the participant record's pending-cleanup set so a later
+// mutation retries it.
 //
 // Both UpsertParticipant (when a handle's session changes) and
 // ReassignSessionParticipants (canonical respawn handover) move a group
 // participant to a new session, so both must carry the session-ID-keyed
 // membership with it; sharing this helper keeps those paths from drifting.
 // Callers must hold groupParticipantsMutationLock for the group and should have
-// already persisted retiredSessionIDs to that metadata so an ensure failure
+// already persisted retiredSessionIDs to that record so an ensure failure
 // still leaves a durable cleanup record.
 //
 // The ensure/remove writes timestamp with the package timeNow() clock rather
@@ -661,17 +560,6 @@ func groupParticipantsMutationLock(groupID string) string {
 	return groupParticipantLabel(groupID) + ":mutation"
 }
 
-func mapsClone(src map[string]string) map[string]string {
-	if len(src) == 0 {
-		return map[string]string{}
-	}
-	dst := make(map[string]string, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
-	return dst
-}
-
 func pendingCleanupSessionIDsFromMetadata(metadata map[string]string) []string {
 	raw := strings.TrimSpace(metadata["previous_session_id_pending_cleanup"])
 	if raw == "" {
@@ -732,45 +620,24 @@ func removeSessionID(sessionIDs []string, target string) []string {
 	return pendingCleanupSessionIDsFromMetadata(map[string]string{"previous_session_id_pending_cleanup": encodePendingCleanupSessionIDs(out)})
 }
 
-// participantReassignmentPending reports whether a group-participant bead still
-// needs its session reassigned from oldSessionID to newSessionID. It is true
-// when the bead still points at the retired session, or when a prior attempt
-// already swapped session_id to the replacement but left the retired session in
-// previous_session_id_pending_cleanup — meaning transcript membership migration
-// had not completed yet, so a retry must finish the handover. The retired-session
-// lookup label is retained until that point precisely so such a partially
-// migrated participant remains discoverable by ReassignSessionParticipants.
-func participantReassignmentPending(metadata map[string]string, oldSessionID, newSessionID string) bool {
-	switch strings.TrimSpace(metadata["session_id"]) {
+// participantReassignmentPending reports whether a group-participant record
+// still needs its session reassigned from oldSessionID to newSessionID. It is
+// true when the record still points at the retired session, or when a prior
+// attempt already swapped session_id to the replacement but left the retired
+// session in the pending-cleanup set — meaning transcript membership migration
+// had not completed yet, so a retry must finish the handover. The
+// retired-session lookup handle is retained until that point precisely so such
+// a partially migrated participant remains discoverable by
+// ReassignSessionParticipants.
+func participantReassignmentPending(record ParticipantRecord, oldSessionID, newSessionID string) bool {
+	switch record.SessionID {
 	case oldSessionID:
 		return true
 	case newSessionID:
-		return slices.Contains(pendingCleanupSessionIDsFromMetadata(metadata), oldSessionID)
+		return slices.Contains(record.PendingCleanup, oldSessionID)
 	default:
 		return false
 	}
-}
-
-func decodeGroupBead(b beads.Bead) (ConversationGroupRecord, error) {
-	ref, err := conversationRefFromMetadata(b.Metadata)
-	if err != nil {
-		return ConversationGroupRecord{}, err
-	}
-	return ConversationGroupRecord{
-		ID:                  b.ID,
-		SchemaVersion:       parseInt(b.Metadata, "schema_version"),
-		RootConversation:    ref,
-		Mode:                GroupMode(strings.TrimSpace(b.Metadata["mode"])),
-		DefaultHandle:       normalizeHandle(b.Metadata["default_handle"]),
-		LastAddressedHandle: normalizeHandle(b.Metadata["last_addressed_handle"]),
-		FanoutPolicy: FanoutPolicy{
-			Enabled:                    parseBool(b.Metadata, "fanout_enabled"),
-			AllowUntargetedPublication: parseBool(b.Metadata, "fanout_allow_untargeted"),
-			MaxPeerTriggeredPublishes:  parseInt(b.Metadata, "fanout_max_peer_triggered_publishes"),
-			MaxTotalPeerDeliveries:     parseInt(b.Metadata, "fanout_max_total_peer_deliveries"),
-		},
-		Metadata: decodePrefixedMetadata(b.Metadata),
-	}, nil
 }
 
 //nolint:unparam // error return reserved for future decoding failures

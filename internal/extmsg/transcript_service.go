@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -18,12 +17,16 @@ const (
 )
 
 type transcriptService struct {
-	store beads.Store
-	locks *bindingLockPool
+	backend fabricBackend
+	locks   *bindingLockPool
 }
 
 func newTranscriptService(store beads.Store, locks *bindingLockPool) *transcriptService {
-	return &transcriptService{store: store, locks: locks}
+	return newTranscriptServiceWithBackend(newBeadBackend(store), locks)
+}
+
+func newTranscriptServiceWithBackend(backend fabricBackend, locks *bindingLockPool) *transcriptService {
+	return &transcriptService{backend: backend, locks: locks}
 }
 
 func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptInput) (ConversationTranscriptRecord, error) {
@@ -86,54 +89,21 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 			return err
 		}
 		sequence := state.NextSequence
-		fields := encodeMetadataFields(input.Metadata, map[string]string{
-			"schema_version":         strconv.Itoa(schemaVersion),
-			"scope_id":               ref.ScopeID,
-			"provider":               ref.Provider,
-			"account_id":             ref.AccountID,
-			"conversation_id":        ref.ConversationID,
-			"parent_conversation_id": ref.ParentConversationID,
-			"conversation_kind":      string(ref.Kind),
-			"sequence":               strconv.FormatInt(sequence, 10),
-			"kind":                   string(kind),
-			"provenance":             string(provenance),
-			"provider_message_id":    providerMessageID,
-			"explicit_target":        normalizeHandle(input.ExplicitTarget),
-			"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
-			"source_session_id":      strings.TrimSpace(input.SourceSessionID),
-			"created_at":             formatTime(createdAt),
-			"actor_json":             actorJSON,
-			"attachments_json":       attachmentsJSON,
-		})
-		labels := []string{
-			labelTranscriptBase,
-			transcriptConversationLabel(ref),
-			transcriptBucketLabel(ref, transcriptBucket(sequence)),
-		}
-		if providerMessageID != "" {
-			labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
-		}
-		created, err := s.store.Create(beads.Bead{
-			Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
-			Type:        "task",
-			Description: text,
-			Labels:      append([]string{"gc:extmsg-transcript"}, labels...),
-			Metadata:    fields,
-		})
-		if err != nil {
-			return fmt.Errorf("create transcript entry: %w", err)
-		}
-		next := sequence + 1
-		updates := map[string]string{
-			"next_sequence": strconv.FormatInt(next, 10),
-		}
-		if state.EarliestAvailableSequence <= 0 {
-			updates["earliest_available_sequence"] = "1"
-		}
-		if err := s.store.SetMetadataBatch(state.ID, updates); err != nil {
-			return fmt.Errorf("update transcript state: %w", err)
-		}
-		out, err = decodeTranscriptBead(created)
+		out, err = s.backend.AppendTranscript(TranscriptEntryCreate{
+			Ref:               ref,
+			Sequence:          sequence,
+			Kind:              kind,
+			Provenance:        provenance,
+			ProviderMessageID: providerMessageID,
+			ExplicitTarget:    normalizeHandle(input.ExplicitTarget),
+			ReplyToMessageID:  strings.TrimSpace(input.ReplyToMessageID),
+			SourceSessionID:   strings.TrimSpace(input.SourceSessionID),
+			CreatedAt:         createdAt,
+			Text:              text,
+			ActorJSON:         actorJSON,
+			AttachmentsJSON:   attachmentsJSON,
+			Meta:              input.Metadata,
+		}, state.ID, sequence+1, state.EarliestAvailableSequence <= 0)
 		return err
 	})
 	return out, err
@@ -245,19 +215,19 @@ func (s *transcriptService) UpdateMembership(ctx context.Context, input UpdateMe
 			return ErrMembershipNotFound
 		}
 		owners, _ := addMembershipOwner(existing.Owners, MembershipOwnerManual)
-		fields := encodeMetadataFields(input.Metadata, map[string]string{
-			"membership_backfill_policy": string(effectiveMembershipBackfillPolicy(owners, policy)),
-			"manual_backfill_policy":     string(policy),
-			"membership_owner_kinds":     encodeMembershipOwners(owners),
-		})
-		if err := s.store.SetMetadataBatch(existing.ID, fields); err != nil {
+		patch := MembershipPatch{
+			Owners:      owners,
+			SetOwners:   true,
+			Manual:      string(policy),
+			SetManual:   true,
+			Backfill:    effectiveMembershipBackfillPolicy(owners, policy),
+			SetBackfill: true,
+			Meta:        input.Metadata,
+		}
+		if err := s.backend.Writer().PatchMembership(existing.ID, patch); err != nil {
 			return fmt.Errorf("update membership metadata: %w", err)
 		}
-		updated, err := s.store.Get(existing.ID)
-		if err != nil {
-			return fmt.Errorf("get membership %s: %w", existing.ID, err)
-		}
-		out, err = decodeMembershipBead(updated)
+		out, err = s.backend.RefetchMembership(existing.ID)
 		return err
 	})
 	return out, err
@@ -294,25 +264,26 @@ func (s *transcriptService) RemoveMembership(ctx context.Context, input RemoveMe
 	})
 }
 
-// membershipWriter is the write surface ensureMembershipLockedWriter needs.
-// Both beads.Store and beads.Tx satisfy it, so a caller can route the
-// membership writes through a coalescing transaction (one commit) or commit
-// them standalone.
+// membershipWriter is the raw write surface the bead backend's FabricWriter
+// persists through. Both beads.Store and beads.Tx satisfy it, so a caller
+// can route the membership writes through a coalescing transaction (one
+// commit) or commit them standalone.
 type membershipWriter interface {
 	Create(b beads.Bead) (beads.Bead, error)
 	SetMetadataBatch(id string, kvs map[string]string) error
 }
 
 func (s *transcriptService) ensureMembershipLocked(input EnsureMembershipInput) (ConversationMembershipRecord, error) {
-	return s.ensureMembershipLockedWriter(s.store, input)
+	return s.ensureMembershipLockedWriter(s.backend.Writer(), input)
 }
 
-// ensureMembershipLockedWriter is ensureMembershipLocked with its writes routed
-// through w. Reads stay on s.store. When w is a transaction, the post-write
-// re-fetch of an existing membership reads pre-commit state; callers that pass a
-// transaction must not depend on the returned record (the bind path discards
-// it). The committed writes are correct in either case.
-func (s *transcriptService) ensureMembershipLockedWriter(w membershipWriter, input EnsureMembershipInput) (ConversationMembershipRecord, error) {
+// ensureMembershipLockedWriter is ensureMembershipLocked with its writes
+// routed through w. Reads stay on the backend. When w is transactional, the
+// post-write re-fetch of an existing membership reads pre-commit state;
+// callers that pass a transactional writer must not depend on the returned
+// record (the bind path discards it). The committed writes are correct in
+// either case.
+func (s *transcriptService) ensureMembershipLockedWriter(w FabricWriter, input EnsureMembershipInput) (ConversationMembershipRecord, error) {
 	ref, err := validateConversationRef(input.Conversation)
 	if err != nil {
 		return ConversationMembershipRecord{}, err
@@ -348,55 +319,38 @@ func (s *transcriptService) ensureMembershipLockedWriter(w membershipWriter, inp
 		if !changed && effectivePolicy == existing.BackfillPolicy {
 			return *existing, nil
 		}
-		fields := map[string]string{}
+		patch := MembershipPatch{}
 		if changed {
-			fields["membership_owner_kinds"] = encodeMembershipOwners(owners)
+			patch.Owners = owners
+			patch.SetOwners = true
 		}
 		if owner == MembershipOwnerManual && manualPolicy != existing.ManualBackfill {
-			fields["manual_backfill_policy"] = string(manualPolicy)
+			patch.Manual = string(manualPolicy)
+			patch.SetManual = true
 		}
 		if effectivePolicy != existing.BackfillPolicy {
-			fields["membership_backfill_policy"] = string(effectivePolicy)
+			patch.Backfill = effectivePolicy
+			patch.SetBackfill = true
 		}
-		if err := w.SetMetadataBatch(existing.ID, fields); err != nil {
+		if err := w.PatchMembership(existing.ID, patch); err != nil {
 			return ConversationMembershipRecord{}, fmt.Errorf("update membership owners: %w", err)
 		}
-		updated, err := s.store.Get(existing.ID)
-		if err != nil {
-			return ConversationMembershipRecord{}, fmt.Errorf("get membership %s: %w", existing.ID, err)
-		}
-		return decodeMembershipBead(updated)
+		return s.backend.RefetchMembership(existing.ID)
 	}
 	joinedSequence := state.NextSequence - 1
 	if joinedSequence < 0 {
 		joinedSequence = 0
 	}
-	fields := encodeMetadataFields(input.Metadata, map[string]string{
-		"schema_version":             strconv.Itoa(schemaVersion),
-		"scope_id":                   ref.ScopeID,
-		"provider":                   ref.Provider,
-		"account_id":                 ref.AccountID,
-		"conversation_id":            ref.ConversationID,
-		"parent_conversation_id":     ref.ParentConversationID,
-		"conversation_kind":          string(ref.Kind),
-		"session_id":                 sessionID,
-		"joined_at":                  formatTime(now),
-		"joined_sequence":            strconv.FormatInt(joinedSequence, 10),
-		"last_read_sequence":         "0",
-		"membership_backfill_policy": string(effectiveMembershipBackfillPolicy([]MembershipOwner{owner}, policy)),
-		"manual_backfill_policy":     manualBackfillMetadataValue(owner, policy),
-		"membership_owner_kinds":     encodeMembershipOwners([]MembershipOwner{owner}),
+	return w.CreateMembership(MembershipCreate{
+		Ref:            ref,
+		SessionID:      sessionID,
+		JoinedAt:       now,
+		JoinedSequence: joinedSequence,
+		Backfill:       effectiveMembershipBackfillPolicy([]MembershipOwner{owner}, policy),
+		ManualBackfill: manualBackfillMetadataValue(owner, policy),
+		Owners:         []MembershipOwner{owner},
+		Meta:           input.Metadata,
 	})
-	created, err := w.Create(beads.Bead{
-		Title:    sessionID + " -> " + conversationTitle(ref),
-		Type:     "task",
-		Labels:   []string{"gc:extmsg-membership", labelMembershipBase, membershipConversationLabel(ref), membershipExactLabel(ref, sessionID), membershipSessionLabel(sessionID)},
-		Metadata: fields,
-	})
-	if err != nil {
-		return ConversationMembershipRecord{}, fmt.Errorf("create membership: %w", err)
-	}
-	return decodeMembershipBead(created)
 }
 
 func (s *transcriptService) removeMembershipLocked(input RemoveMembershipInput) error {
@@ -429,30 +383,27 @@ func (s *transcriptService) removeMembershipLocked(input RemoveMembershipInput) 
 		return nil
 	}
 	if len(nextOwners) > 0 {
-		fields := map[string]string{
-			"membership_owner_kinds": encodeMembershipOwners(nextOwners),
+		patch := MembershipPatch{
+			Owners:    nextOwners,
+			SetOwners: true,
 		}
 		nextManualPolicy := existing.ManualBackfill
 		if owner == MembershipOwnerManual {
 			nextManualPolicy = ""
-			fields["manual_backfill_policy"] = ""
+			patch.Manual = ""
+			patch.SetManual = true
 		}
 		nextPolicy := effectiveMembershipBackfillPolicy(nextOwners, nextManualPolicy)
 		if nextPolicy != existing.BackfillPolicy {
-			fields["membership_backfill_policy"] = string(nextPolicy)
+			patch.Backfill = nextPolicy
+			patch.SetBackfill = true
 		}
-		if err := s.store.SetMetadataBatch(existing.ID, fields); err != nil {
+		if err := s.backend.Writer().PatchMembership(existing.ID, patch); err != nil {
 			return fmt.Errorf("update membership owners: %w", err)
 		}
 		return nil
 	}
-	if err := s.store.SetMetadata(existing.ID, "closed_at", formatTime(now)); err != nil {
-		return fmt.Errorf("set membership closed_at: %w", err)
-	}
-	if err := s.store.Close(existing.ID); err != nil {
-		return fmt.Errorf("close membership %s: %w", existing.ID, err)
-	}
-	return nil
+	return s.backend.CloseMembership(existing.ID, now)
 }
 
 func (s *transcriptService) ListMemberships(ctx context.Context, caller Caller, ref ConversationRef) ([]ConversationMembershipRecord, error) {
@@ -466,23 +417,13 @@ func (s *transcriptService) ListMemberships(ctx context.Context, caller Caller, 
 	if err != nil {
 		return nil, err
 	}
-	items, err := s.store.List(beads.ListQuery{Label: membershipConversationLabel(ref)})
+	records, err := s.backend.OpenMembershipsByConversation(ref)
 	if err != nil {
-		return nil, fmt.Errorf("list memberships by conversation label: %w", err)
+		return nil, err
 	}
-	out := make([]ConversationMembershipRecord, 0, len(items))
+	out := make([]ConversationMembershipRecord, 0, len(records))
 	seen := make(map[string]ConversationMembershipRecord)
-	for _, item := range items {
-		if !hasLabel(item, "gc:extmsg-membership") || item.Status == "closed" {
-			continue
-		}
-		record, err := decodeMembershipBead(item)
-		if err != nil {
-			return nil, err
-		}
-		if !sameConversationRef(record.Conversation, ref) {
-			continue
-		}
+	for _, record := range records {
 		if existing, ok := seen[record.SessionID]; ok {
 			return nil, fmt.Errorf("%w: duplicate memberships for session %s (%s, %s)", ErrInvariantViolation, record.SessionID, existing.ID, record.ID)
 		}
@@ -506,23 +447,13 @@ func (s *transcriptService) ListConversationsBySession(ctx context.Context, call
 	if sessionID == "" {
 		return nil, nil
 	}
-	items, err := s.store.List(beads.ListQuery{Label: membershipSessionLabel(sessionID)})
+	records, err := s.backend.OpenMembershipsBySession(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("list memberships by session label: %w", err)
+		return nil, err
 	}
-	out := make([]ConversationMembershipRecord, 0, len(items))
+	out := make([]ConversationMembershipRecord, 0, len(records))
 	seen := make(map[string]bool)
-	for _, item := range items {
-		if !hasLabel(item, "gc:extmsg-membership") || item.Status == "closed" {
-			continue
-		}
-		record, err := decodeMembershipBead(item)
-		if err != nil {
-			return nil, err
-		}
-		if record.SessionID != sessionID {
-			continue
-		}
+	for _, record := range records {
 		key := conversationLockKey(record.Conversation)
 		if seen[key] {
 			continue
@@ -613,7 +544,7 @@ func (s *transcriptService) Ack(ctx context.Context, input AckMembershipInput) e
 		if input.Sequence <= membership.LastReadSequence {
 			return nil
 		}
-		return s.store.SetMetadata(membership.ID, "last_read_sequence", strconv.FormatInt(input.Sequence, 10))
+		return s.backend.SetMembershipLastRead(membership.ID, input.Sequence)
 	})
 }
 
@@ -637,17 +568,14 @@ func (s *transcriptService) BeginHydration(ctx context.Context, caller Caller, r
 		if state.NextSequence > 1 && state.HydrationStatus != HydrationPending {
 			return fmt.Errorf("%w: cannot begin hydration after live traffic", ErrInvalidInput)
 		}
-		fields := encodeMetadataFields(metadata, map[string]string{
-			"hydration_status": string(HydrationPending),
-		})
-		if err := s.store.SetMetadataBatch(state.ID, fields); err != nil {
+		pending := HydrationPending
+		if err := s.backend.PatchTranscriptState(state.ID, StatePatch{
+			Hydration: &pending,
+			Meta:      metadata,
+		}); err != nil {
 			return fmt.Errorf("update hydration state: %w", err)
 		}
-		updated, err := s.store.Get(state.ID)
-		if err != nil {
-			return fmt.Errorf("get state %s: %w", state.ID, err)
-		}
-		out, err = decodeTranscriptStateBead(updated)
+		out, err = s.backend.RefetchTranscriptState(state.ID)
 		return err
 	})
 	return out, err
@@ -712,30 +640,26 @@ func (s *transcriptService) updateHydrationState(ctx context.Context, caller Cal
 		if state.HydrationStatus != HydrationPending {
 			return fmt.Errorf("%w: hydration transition requires pending status", ErrInvalidInput)
 		}
-		fields := encodeMetadataFields(metadata, map[string]string{
-			"hydration_status": string(status),
-		})
-		if err := s.store.SetMetadataBatch(state.ID, fields); err != nil {
+		if err := s.backend.PatchTranscriptState(state.ID, StatePatch{
+			Hydration: &status,
+			Meta:      metadata,
+		}); err != nil {
 			return fmt.Errorf("update hydration state: %w", err)
 		}
-		updated, err := s.store.Get(state.ID)
-		if err != nil {
-			return fmt.Errorf("get state %s: %w", state.ID, err)
-		}
-		out, err = decodeTranscriptStateBead(updated)
+		out, err = s.backend.RefetchTranscriptState(state.ID)
 		return err
 	})
 	return out, err
 }
 
 func (s *transcriptService) ensureStateLocked(ref ConversationRef) (ConversationTranscriptStateRecord, error) {
-	return s.ensureStateLockedWriter(s.store, ref)
+	return s.ensureStateLockedWriter(s.backend.Writer(), ref)
 }
 
-// ensureStateLockedWriter is ensureStateLocked with its create routed through w,
-// so a first-touch transcript-state bead can be created inside the same
-// transaction as the membership and binding writes it accompanies.
-func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref ConversationRef) (ConversationTranscriptStateRecord, error) {
+// ensureStateLockedWriter is ensureStateLocked with its create routed through
+// w, so a first-touch transcript-state record can be created inside the same
+// commit as the membership and binding writes it accompanies.
+func (s *transcriptService) ensureStateLockedWriter(w FabricWriter, ref ConversationRef) (ConversationTranscriptStateRecord, error) {
 	state, err := s.findStateLocked(ref)
 	if err != nil {
 		return ConversationTranscriptStateRecord{}, err
@@ -743,48 +667,16 @@ func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref Conv
 	if state != nil {
 		return *state, nil
 	}
-	fields := map[string]string{
-		"schema_version":              strconv.Itoa(schemaVersion),
-		"scope_id":                    ref.ScopeID,
-		"provider":                    ref.Provider,
-		"account_id":                  ref.AccountID,
-		"conversation_id":             ref.ConversationID,
-		"parent_conversation_id":      ref.ParentConversationID,
-		"conversation_kind":           string(ref.Kind),
-		"next_sequence":               "1",
-		"earliest_available_sequence": "1",
-		"hydration_status":            string(HydrationLiveOnly),
-		"max_retained_entries":        "0",
-	}
-	created, err := w.Create(beads.Bead{
-		Title:    conversationTitle(ref) + "/state",
-		Type:     "task",
-		Labels:   []string{"gc:extmsg-transcript-state", labelTranscriptStateBase, transcriptStateLabel(ref)},
-		Metadata: fields,
-	})
-	if err != nil {
-		return ConversationTranscriptStateRecord{}, fmt.Errorf("create transcript state: %w", err)
-	}
-	return decodeTranscriptStateBead(created)
+	return w.CreateTranscriptState(ref)
 }
 
 func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationTranscriptStateRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: transcriptStateLabel(ref)})
+	records, err := s.backend.OpenTranscriptStates(ref)
 	if err != nil {
-		return nil, fmt.Errorf("list transcript state: %w", err)
+		return nil, err
 	}
 	var out *ConversationTranscriptStateRecord
-	for _, item := range items {
-		if !hasLabel(item, "gc:extmsg-transcript-state") || item.Status == "closed" {
-			continue
-		}
-		record, err := decodeTranscriptStateBead(item)
-		if err != nil {
-			return nil, err
-		}
-		if !sameConversationRef(record.Conversation, ref) {
-			continue
-		}
+	for _, record := range records {
 		if out != nil {
 			return nil, fmt.Errorf("%w: multiple transcript states for %s", ErrInvariantViolation, conversationLockKey(ref))
 		}
@@ -795,22 +687,12 @@ func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationT
 }
 
 func (s *transcriptService) findTranscriptByProviderMessageLocked(ref ConversationRef, providerMessageID string) (*ConversationTranscriptRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: transcriptProviderMessageLabel(ref, providerMessageID)})
+	records, err := s.backend.OpenTranscriptsByProviderMessage(ref, providerMessageID)
 	if err != nil {
-		return nil, fmt.Errorf("list transcript by provider message label: %w", err)
+		return nil, err
 	}
 	var out *ConversationTranscriptRecord
-	for _, item := range items {
-		if !hasLabel(item, "gc:extmsg-transcript") || item.Status == "closed" {
-			continue
-		}
-		record, err := decodeTranscriptBead(item)
-		if err != nil {
-			return nil, err
-		}
-		if !sameConversationRef(record.Conversation, ref) || record.ProviderMessageID != providerMessageID {
-			continue
-		}
+	for _, record := range records {
 		if out != nil {
 			return nil, fmt.Errorf("%w: duplicate transcript provider message %q", ErrInvariantViolation, providerMessageID)
 		}
@@ -821,22 +703,12 @@ func (s *transcriptService) findTranscriptByProviderMessageLocked(ref Conversati
 }
 
 func (s *transcriptService) findActiveMembershipLocked(ref ConversationRef, sessionID string) (*ConversationMembershipRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: membershipExactLabel(ref, sessionID)})
+	records, err := s.backend.OpenMembershipsExact(ref, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("list membership by exact label: %w", err)
+		return nil, err
 	}
 	var out *ConversationMembershipRecord
-	for _, item := range items {
-		if !hasLabel(item, "gc:extmsg-membership") || item.Status == "closed" {
-			continue
-		}
-		record, err := decodeMembershipBead(item)
-		if err != nil {
-			return nil, err
-		}
-		if !sameConversationRef(record.Conversation, ref) || record.SessionID != sessionID {
-			continue
-		}
+	for _, record := range records {
 		if out != nil {
 			return nil, fmt.Errorf("%w: duplicate memberships for session %s", ErrInvariantViolation, sessionID)
 		}
@@ -862,54 +734,7 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 	if startSeq > endSeq {
 		return nil, nil
 	}
-	startBucket := transcriptBucket(startSeq)
-	endBucket := transcriptBucket(endSeq)
-	descending := order == TranscriptOrderDesc
-	records := make([]ConversationTranscriptRecord, 0, limit)
-	appendBucket := func(bucket int64) error {
-		items, err := s.store.List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
-		if err != nil {
-			return fmt.Errorf("list transcript bucket %d: %w", bucket, err)
-		}
-		bucketRecords := make([]ConversationTranscriptRecord, 0, len(items))
-		for _, item := range items {
-			if !hasLabel(item, "gc:extmsg-transcript") || item.Status == "closed" {
-				continue
-			}
-			record, err := decodeTranscriptBead(item)
-			if err != nil {
-				return err
-			}
-			if !sameConversationRef(record.Conversation, ref) || record.Sequence <= after {
-				continue
-			}
-			bucketRecords = append(bucketRecords, record)
-		}
-		sortTranscriptRecords(bucketRecords, descending)
-		for _, record := range bucketRecords {
-			if len(records) >= limit {
-				break
-			}
-			records = append(records, record)
-		}
-		return nil
-	}
-	// Descending walks newest bucket first so the most recent entries are
-	// collected without scanning the entire stream on busy conversations.
-	if descending {
-		for bucket := endBucket; bucket >= startBucket && len(records) < limit; bucket-- {
-			if err := appendBucket(bucket); err != nil {
-				return nil, err
-			}
-		}
-	} else {
-		for bucket := startBucket; bucket <= endBucket && len(records) < limit; bucket++ {
-			if err := appendBucket(bucket); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return records, nil
+	return s.backend.ListTranscript(ref, after, startSeq, endSeq, limit, order == TranscriptOrderDesc)
 }
 
 // sortTranscriptRecords orders records by sequence (ID as tiebreaker),

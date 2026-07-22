@@ -60,7 +60,7 @@ func startClassStoreMaintenance(cityPath string, cfg *config.City, stderr io.Wri
 		{
 			config.BeadClassMessaging,
 			func() (bool, error) { return messagingdb.Routed(cityPath, cfg) },
-			func() (maintainableClassStore, error) { return messagingdb.SharedStoreFor(cityPath) },
+			func() (maintainableClassStore, error) { return messagingClassStoreHandle(cityPath) },
 		},
 		{
 			config.BeadClassSessions,

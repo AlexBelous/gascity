@@ -53,6 +53,16 @@ func messagingRoutingFor(cityPath string, cfg *config.City) (messagingRouting, e
 	return messagingRouting{class: class}, nil
 }
 
+// messagingClassStoreHandle returns the process-shared messaging class
+// store handle without consulting routing. It exists for the read-only
+// consumers that must reach the store even when routing is off — the
+// gc bd show federation (a rollback city's reserved gcm ids still live
+// only here) and the maintenance loop — and lives in this file so the
+// seam guard keeps every construction point centralized.
+func messagingClassStoreHandle(cityPath string) (*messagingdb.Store, error) {
+	return messagingdb.SharedStoreFor(cityPath)
+}
+
 // newCityMailProviderRouted is the routed form of newCityMailProvider: the
 // controller's cached-addressing mail provider over the class store when
 // messaging routes, the bd two-store provider otherwise. The [mail]

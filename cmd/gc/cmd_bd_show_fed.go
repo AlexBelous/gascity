@@ -188,7 +188,7 @@ func classStoreShowBead(cityPath, class, id string) (beads.Bead, bool, error) {
 		}
 		return nudgeShowBead(rec), true, nil
 	case config.BeadClassMessaging:
-		st, err := messagingdb.SharedStoreFor(cityPath)
+		st, err := messagingClassStoreHandle(cityPath)
 		if err != nil {
 			return beads.Bead{}, false, err
 		}

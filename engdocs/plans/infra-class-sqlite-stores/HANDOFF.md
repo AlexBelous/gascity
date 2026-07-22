@@ -3,6 +3,82 @@
 **Design (authoritative):** `engdocs/design/infra-class-sqlite-stores.md`
 **Branch:** `feat/infra-class-sqlite-stores` (worktree `worktree-sqlit`), based on `origin/main` @ `5131e3b57`.
 
+## P5 bd surface + cleanup — DONE (2026-07-22, five slices)
+
+1. **`gc doctor` migration-state surface** (`feat(doctor)`):
+   `infra-class-migration` check (cmd/gc/doctor_class_migration.go) reports
+   backend/marker/routing (+sessions shadow flag) for all four classes in
+   cutover order; advisory in every healthy shape, WARNING on
+   marker-present+backend=bd (escape hatch active), blocking ERROR on an
+   unstatable marker (routing fails closed). Registered after
+   sessions-shadow; doctor_check_names.golden gained the name. The same
+   slice ported the ENOENT-only discipline to
+   `ordersSQLiteRoutingActive` — signature grew an error; the residue
+   sweep SKIPS (never deletes) when routing state is unknowable.
+2. **`gc bd` write guard** (`feat(bd)` — cmd/gc/cmd_bd_guard.go):
+   `doBd` refuses mutations (update/close/reopen/delete +
+   release-if-current) whose positional ids carry a reserved class prefix,
+   and creates whose declared --type/--labels (or --wisp-type) classify
+   off ClassWork via coordclass — message names the gc replacement.
+   Static over args, fires before any store/subprocess work. Verified: no
+   pack/script creates infra-typed beads via bd (design inventory holds).
+3. **Generalized read federation** (`feat(bd)` — cmd/gc/cmd_bd_show_fed.go):
+   `maybeRouteBdShowLocal` in doBd after config load. Reserved-prefix ids
+   are served from their class store (absent file/row = bd's "no issue
+   found"; store failure surfaces distinctly — 404-vs-error preserved);
+   legacy ids probe the ROUTED classes in cutover order before the
+   byte-identical bd passthrough (covers migrated gc-*/mc-* ids); gcg
+   falls through (graph not relocated in this tree). Per-class renders:
+   sessionsdb.Get verbatim, messagingdb.Get→mail-codec bead,
+   ordersdb.Get→tracking-label bead, nudges
+   FindRecordIncludingTerminal→shadow bead. NOTE: gcm ids minted by
+   extmsg tables are NOT readable by messagingdb.Get (messages table
+   only) — they render "no issue found"; acceptable (no consumer reads
+   extmsg by id via bd), flagged here for honesty.
+4. **Maintenance + storehealth** (`feat(classdb)`):
+   core.DB.Checkpoint (wal_checkpoint(TRUNCATE); busy = skip, not error) /
+   Vacuum / StartMaintenance (sweeper-scaffold loop, checkpoint every
+   tick + slow VACUUM); per-store once-guarded StartMaintenance
+   delegators; controller starts loops for ROUTED classes at boot
+   (cmd/gc/class_store_maintenance.go, 15m/24h) next to the retention
+   sweepers — unrouted cities pay nothing (no file even created).
+   storehealth.ClassStoreDir + TotalSize (Dolt walk + .gc/store walk);
+   gc status and /v0/status size consumers switched.
+5. **Cleanup** (`refactor(cleanup)`): doltlite order-run cache DELETED
+   (LastOrderRun/HasOpenOrderRun/loadOrderRuns + fields — zero callers in
+   tree AND in all history, git log --all -G verified; mutator hook
+   survives as resetReadCaches for the still-live session/ready caches).
+   openMailTargetStore/tryOpenCityStore (the mail storeless-provider raw
+   leg, P4's known residual) now routes through cliSessionStore with the
+   no-refresh cfg loader (openCityMailProvider's exact shape).
+
+**Design retirement list — verified LIVE, blocked on bd-leg removal**
+(re-audited 2026-07-22; do NOT delete while unmigrated cities exist):
+close-verify retries + close_reason constants (internal/orders
+tracking_beads.go bd backend), UpdateMetadataInfo (production caller
+build_desired_state.go:2892), doctor_backlog_depth
+control-plane/notification predicates (report 0 on migrated cities;
+retire when every city migrates), nudge two-tier file machinery (the
+LIVE backend for unmigrated cities behind QueueForCity).
+
+## P5 residuals — deferred with evidence
+
+- **splittest topology port**: the feat/split-store-conformance harness
+  (internal/beads/splittest ~1.3k lines + cmd/gc
+  split_topology_conformance_test.go 665 lines + split_topology_env_test
+  fixture) is built for the work/INFRA-GRAPH split topology
+  (config.InfraScopePrefix, ready/claim/residence-sweep federation
+  invariants). Per-class stores are a different shape — sessions fails
+  loud on Ready, nudges/orders/messaging aren't beads.Stores at all — so
+  "adapt to per-class backends" is a design task (which of the 11
+  invariants apply?), not a mechanical port. Its gate is GA-default
+  flips; nothing defaults to sqlite on this branch, so not yet blocking.
+- **Chaos gates beyond the crash tests** (every-prompt drain soak,
+  at-most-one-extra-fire, acked-write survival multi-process) — same
+  GA-gate bucket.
+- **Final census** — re-measure per-class volumes on mc before freezing
+  retention/index choices (operational, needs a live city).
+
 ## Done (all committed, hooks green, affected packages tested)
 
 - **Design doc** incl. ratified decisions (multi-process WAL access; one file

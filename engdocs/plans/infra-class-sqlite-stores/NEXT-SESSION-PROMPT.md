@@ -5,56 +5,38 @@ Continue the **infra-class SQLite stores** track in the existing worktree
 pushed as `origin/feat/infra-class-sqlite-stores`). Do NOT create a new
 worktree; run everything from that directory.
 
-**This session's job: fix the known residuals** — the P5 bd-surface work
-plus the deferred items P1–P4 recorded (the full residual inventory is
-in HANDOFF.md under "Known residuals for P5" and "Also outstanding").
-Work TDD, one commit per slice, and push before ending the session.
+**P5 bd surface + cleanup is COMPLETE** (write guard, gc bd show
+federation, infra-class-migration doctor check + orders ENOENT fix,
+class-store maintenance loop + storehealth TotalSize, doltlite order-run
+cache retired, mail storeless leg routed). Read HANDOFF.md "P5 bd surface
++ cleanup — DONE" first.
 
-**First, read (in this order):**
-1. `engdocs/plans/infra-class-sqlite-stores/HANDOFF.md` — state, next
-   steps, gotchas. START HERE. **P1 orders + P2 nudges + P3 messaging +
-   P4 sessions+waits are ALL COMPLETE** (seam → store + conformance +
-   crash gate → shadow-write gate → marker-gated fail-closed routing +
-   bulletproof boot migration + gc session show + orphan-sweep rewrite +
-   closed-row retention).
-2. `engdocs/design/infra-class-sqlite-stores.md` — the P5 section ("The
-   bd / raw-prompt story" + "Doctor / storehealth / maintenance") is the
-   spec for what remains.
+**What remains on this track (in order):**
 
-**Operational gate before any real city flips sessions:** run the shadow
-soak on mc — `[beads.classes.sessions] shadow = true`, watch `gc doctor`
-check `sessions-shadow` for zero discrepancy 24–48h — THEN swap the knob
-to `backend = "sqlite"` (drop shadow; the combination is rejected).
-
-**Then execute P5 — bd surface + cleanup (per the design work plan):**
-
-1. **`gc bd` write guard**: `doBd` refuses create/update/close targeting
-   infra classes (reserved-prefix id, or a create carrying an infra
-   type/label) with a message naming the `gc` replacement.
-2. **Generalized read federation**: port `cmd_bd_show_fed.go`
-   (`124bca8c3`) and widen from BeadClassGraph to a loop over
-   `config.ReservedClassPrefixes()`, backed by per-class by-id reads;
-   preserve the 404-vs-error discipline. Note: MIGRATED legacy ids
-   (gc-*/mc-*) don't match reserved prefixes — the probe-all fallback
-   (storeref.Resolve) is what covers them.
-3. **`gc doctor` migration-state surface**: routing/marker state for all
-   four classes (ordersSQLiteRoutingActive's ENOENT conflation at
-   cmd/gc/order_class_store.go:50 gets fixed as part of this — port the
-   sessions/nudges ENOENT-only discipline; the bool signature grows an
-   error).
-4. **storehealth** StorePath/WalkSize extension to `.gc/store/*.db`;
-   **maintenance loop** per-file wal_checkpoint(TRUNCATE) + periodic
-   VACUUM.
-5. **Retire dead code** (design list): close-verify retries,
-   close_reason floors, `UpdateMetadataInfo` (sqlite batches are
-   atomic), doctor_backlog_depth notification/control-plane buckets,
-   doltlite order-run cache, nudge two-tier machinery residue. Also the
-   mail storeless-provider raw leg (openMailTargetStore — the deferred
-   "mail DI pass").
-6. **splittest topology port** before any class backend defaults to
-   sqlite (GA); the design's every-prompt drain soak + chaos gates;
-   final census. Create-side guard: beadPolicyStore.createTarget is
-   still identity — the write guard (item 1) is the designed cover.
+1. **Operational: the mc shadow soak** — `[beads.classes.sessions]
+   shadow = true` on mc, watch `gc doctor` checks `sessions-shadow` AND
+   the new `infra-class-migration` for 24–48h of zero discrepancy, THEN
+   flip `backend = "sqlite"` per class (drop shadow; the combination is
+   rejected). The ephemeral classes (orders/nudges/messaging) can flip
+   without a soak. This is the gate for everything below.
+2. **splittest topology port — needs a design pass first.** The
+   feat/split-store-conformance harness targets the work/infra-graph
+   split (config.InfraScopePrefix; ready/claim/residence federation).
+   Per-class stores are a different shape (sessions fails loud on Ready;
+   the other three aren't beads.Stores). Decide which of the 11
+   invariants translate, then port the smallest proven slice. Gate: GA
+   backend-default flips, not per-city opt-in.
+3. **Chaos gates**: orders at-most-one-extra-fire, nudges acked-write
+   survival under multi-process writers, the every-prompt drain soak —
+   the design's "Testing & proof" section beyond the existing per-class
+   crash tests.
+4. **Final census** on a live migrated city before freezing retention +
+   index choices.
+5. **bd-leg retirement (one release cycle after GA)**: the verified-LIVE
+   list in HANDOFF.md (close-verify retries, close_reason constants,
+   UpdateMetadataInfo, doctor_backlog_depth infra predicates, nudge
+   two-tier file machinery) becomes deletable only when the bd arm for
+   infra classes is removed.
 
 **Discipline / gotchas (all recorded in HANDOFF.md):** sharded test
 targets only; long git-commit/push timeouts (pre-commit vets + lint +
@@ -63,14 +45,12 @@ collisions — wait and retry; pinned 2.9.0 built with the repo
 toolchain); umask 022 for suites+push; new subprocess tests need
 integration tag + THREE census artifacts (535/166 now) with files `git
 add`ed first; never time.Sleep in tests; memstore does NOT honor
-explicit Create ids but bd and sessionsdb do; the identity-keyed
-messaging repair registry unwraps `ShadowPrimary()`; the doctor
-name-set golden (cmd/gc/testdata/doctor_check_names.golden) must gain
-any new check's name. A NEW `gc` subcommand ripples through THREE more
-artifacts (bit the P4 session): add it to
-`cmd/gc/productmetrics_command_census.json` (strictly path-sorted; take
-`next_id`, bump it), regenerate via `go run ./cmd/gen-command-census`,
-and bump the catalog-size pin in
+explicit Create ids but bd and sessionsdb do; the doctor name-set golden
+(cmd/gc/testdata/doctor_check_names.golden) must gain any new check's
+name. A NEW `gc` subcommand ripples through THREE more artifacts: add it
+to `cmd/gc/productmetrics_command_census.json` (strictly path-sorted;
+take `next_id`, bump it), regenerate via `go run
+./cmd/gen-command-census`, and bump the catalog-size pin in
 `internal/productmetrics/event_test.go` (currently 192). A cmd/gc test
 using `t.Setenv` grows the environment ratchet — bump BOTH the Small and
 source scopes across census.go + test/test-resources.toml + TESTING.md

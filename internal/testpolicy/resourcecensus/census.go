@@ -129,8 +129,11 @@ var bootstrapPolicy = Ledger{
 			// 534/165: +1 call (same file) for the extmsg acked-write crash
 			// gate (acked bind + append survive SIGKILL; the entry insert
 			// and sequence bump commit as one transaction).
-			BaselineCalls:   534,
-			BaselineFiles:   165,
+			// 535/166: +1 call/file for
+			// internal/classdb/sessions/crash_integration_test.go, the
+			// sessions-class restart-projection crash gate (same pattern).
+			BaselineCalls:   535,
+			BaselineFiles:   166,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",

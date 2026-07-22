@@ -1498,6 +1498,12 @@ var sqliteCapableBeadClasses = map[string]bool{
 	// nudgequeue.Queue front door behind the nudges migrated-marker
 	// (nudgesdb.QueueForCity).
 	BeadClassNudges: true,
+	// internal/classdb/messaging (messagingdb.Store) — mail messages AND
+	// all extmsg records in one file, wired through the beadmail
+	// messagesBackend + extmsg fabricBackend seams behind the messaging
+	// migrated-marker (messagingdb.RoutedStoreFor). The class relocates
+	// atomically: one knob, one marker, both halves.
+	BeadClassMessaging: true,
 }
 
 // beadClassConfigurable enumerates the class names accepted under

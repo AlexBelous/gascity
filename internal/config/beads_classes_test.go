@@ -182,3 +182,22 @@ backend = "sqlite"
 		t.Errorf("ClassBackend(nudges) = %q, want %q", got, BeadsClassBackendSQLite)
 	}
 }
+
+// TestBeadsClassesMessagingSQLiteAccepted pins the messaging capability
+// flip: the internal/classdb/messaging store (mail messages + extmsg typed
+// tables, one file) has landed, so [beads.classes.messaging]
+// backend="sqlite" parses.
+func TestBeadsClassesMessagingSQLiteAccepted(t *testing.T) {
+	cfg, err := Parse([]byte(`[workspace]
+name = "test"
+
+[beads.classes.messaging]
+backend = "sqlite"
+`))
+	if err != nil {
+		t.Fatalf("Parse rejected messaging sqlite backend: %v", err)
+	}
+	if got := cfg.Beads.ClassBackend(BeadClassMessaging); got != BeadsClassBackendSQLite {
+		t.Errorf("ClassBackend(messaging) = %q, want %q", got, BeadsClassBackendSQLite)
+	}
+}

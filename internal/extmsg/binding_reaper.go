@@ -49,21 +49,36 @@ type BindingReapStats struct {
 // after session beads have been synced for the tick so a respawned session's
 // replacement bead is already visible.
 func ReapStaleBindings(ctx context.Context, store, sessionStore beads.Store, now time.Time) (BindingReapStats, error) {
-	var stats BindingReapStats
-	if err := checkContext(ctx); err != nil {
-		return stats, err
-	}
 	if store == nil {
-		return stats, nil
+		return BindingReapStats{}, nil
 	}
 	if sessionStore == nil {
 		sessionStore = store
 	}
-	records, err := newBeadBackend(store).ActiveBindings()
+	return reapStaleBindings(ctx, newBeadBackend(store), sharedBindingLockPool(store),
+		NewServicesWithSessionStore(store, sessionStore), sessionStore, now)
+}
+
+// ReapStaleBindingsWithBackend is ReapStaleBindings over a routed
+// messaging-class backend; session liveness still reads sessionStore (the
+// SESSION-class store).
+func ReapStaleBindingsWithBackend(ctx context.Context, backend fabricBackend, sessionStore beads.Store, now time.Time) (BindingReapStats, error) {
+	if backend == nil {
+		return BindingReapStats{}, nil
+	}
+	return reapStaleBindings(ctx, backend, sharedBindingLockPoolForBackend(backend),
+		NewServicesWithBackend(backend, sessionStore), sessionStore, now)
+}
+
+func reapStaleBindings(ctx context.Context, backend fabricBackend, locks *bindingLockPool, svc Services, sessionStore beads.Store, now time.Time) (BindingReapStats, error) {
+	var stats BindingReapStats
+	if err := checkContext(ctx); err != nil {
+		return stats, err
+	}
+	records, err := backend.ActiveBindings()
 	if err != nil {
 		return stats, err
 	}
-	svc := NewServicesWithSessionStore(store, sessionStore)
 	caller := Caller{Kind: CallerController, ID: "binding-reaper"}
 	now = zeroNow(now)
 	// reassigned tracks stale session IDs already processed so we don't call
@@ -93,7 +108,7 @@ func ReapStaleBindings(ctx context.Context, store, sessionStore beads.Store, now
 			if _, ok := reassigned[record.SessionID]; ok {
 				break
 			}
-			if err := ReassignSessionBindings(ctx, store, record.SessionID, liveID, now); err != nil {
+			if err := reassignSessionBindings(ctx, backend, locks, record.SessionID, liveID, now); err != nil {
 				return stats, fmt.Errorf("reassign session %s to live bead %s: %w", record.SessionID, liveID, err)
 			}
 			reassigned[record.SessionID] = struct{}{}
@@ -145,17 +160,35 @@ type ParticipantReapStats struct {
 // after session beads have been synced for the tick so a respawned session's
 // replacement bead is already visible.
 func ReapStaleParticipants(ctx context.Context, store, sessionStore beads.Store) (ParticipantReapStats, error) {
-	var stats ParticipantReapStats
-	if err := checkContext(ctx); err != nil {
-		return stats, err
-	}
 	if store == nil {
-		return stats, nil
+		return ParticipantReapStats{}, nil
 	}
 	if sessionStore == nil {
 		sessionStore = store
 	}
-	records, err := newBeadBackend(store).OpenParticipants()
+	return reapStaleParticipants(ctx, newBeadBackend(store), sessionStore, func(ctx context.Context, oldID, newID string) error {
+		return ReassignSessionParticipants(ctx, store, oldID, newID)
+	})
+}
+
+// ReapStaleParticipantsWithBackend is ReapStaleParticipants over a routed
+// messaging-class backend; session liveness still reads sessionStore (the
+// SESSION-class store).
+func ReapStaleParticipantsWithBackend(ctx context.Context, backend fabricBackend, sessionStore beads.Store) (ParticipantReapStats, error) {
+	if backend == nil {
+		return ParticipantReapStats{}, nil
+	}
+	return reapStaleParticipants(ctx, backend, sessionStore, func(ctx context.Context, oldID, newID string) error {
+		return ReassignSessionParticipantsWithBackend(ctx, backend, oldID, newID)
+	})
+}
+
+func reapStaleParticipants(ctx context.Context, backend fabricBackend, sessionStore beads.Store, reassign func(ctx context.Context, oldID, newID string) error) (ParticipantReapStats, error) {
+	var stats ParticipantReapStats
+	if err := checkContext(ctx); err != nil {
+		return stats, err
+	}
+	records, err := backend.OpenParticipants()
 	if err != nil {
 		return stats, err
 	}
@@ -185,7 +218,7 @@ func ReapStaleParticipants(ctx context.Context, store, sessionStore beads.Store)
 			if _, done := reassigned[oldID]; done {
 				continue
 			}
-			if err := ReassignSessionParticipants(ctx, store, oldID, liveID); err != nil {
+			if err := reassign(ctx, oldID, liveID); err != nil {
 				return stats, fmt.Errorf("reassign participants for retired session %s to live bead %s: %w", oldID, liveID, err)
 			}
 			reassigned[oldID] = struct{}{}
@@ -207,7 +240,7 @@ func ReapStaleParticipants(ctx context.Context, store, sessionStore beads.Store)
 			if _, done := reassigned[pendingOldID]; done {
 				continue
 			}
-			if err := ReassignSessionParticipants(ctx, store, pendingOldID, oldID); err != nil {
+			if err := reassign(ctx, pendingOldID, oldID); err != nil {
 				return stats, fmt.Errorf("finish pending participant cleanup from retired session %s to live bead %s: %w", pendingOldID, oldID, err)
 			}
 			reassigned[pendingOldID] = struct{}{}

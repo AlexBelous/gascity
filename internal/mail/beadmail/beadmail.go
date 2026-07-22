@@ -106,6 +106,19 @@ func NewCachedWithStores(msgStore, sessionStore beads.Store) *Provider {
 	}
 }
 
+// NewCachedWithBackend is the backend form of [NewCachedWithStores]: message
+// persistence on a non-bead messages backend (the embedded class store),
+// session addressing on sessionStore with the provider-local session
+// enumeration cache. The long-lived controller mail provider uses this on a
+// routed city.
+func NewCachedWithBackend(backend messagesBackend, sessionStore beads.Store) *Provider {
+	return &Provider{
+		backend:      backend,
+		sessionStore: sessionStore,
+		sessionCache: &sessionBeadCache{refreshInterval: cachedSessionBeadRefreshInterval},
+	}
+}
+
 // cachedSessionBeads returns the full set of session beads (open + closed).
 // Cached providers reuse a single enumeration; stateless providers fetch
 // fresh results on every call.
@@ -818,7 +831,17 @@ func sweepReadMessages(backend messagesBackend, cutoff time.Time, limit int, clo
 // dry-run twin of the sweep and shares its candidate query and limit semantics so
 // the two stay in lockstep.
 func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int) (int, error) {
-	candidates, err := beadStore{store: store.Store}.ListReadCreatedBefore(cutoff, limit)
+	return countReadMessages(beadStore{store: store.Store}, cutoff, limit)
+}
+
+// CountReadMessages is the backend-routed form of [CountReadMessagesBefore]:
+// the sweep's dry-run twin through the provider's own messages backend.
+func (p *Provider) CountReadMessages(cutoff time.Time, limit int) (int, error) {
+	return countReadMessages(p.backend, cutoff, limit)
+}
+
+func countReadMessages(backend messagesBackend, cutoff time.Time, limit int) (int, error) {
+	candidates, err := backend.ListReadCreatedBefore(cutoff, limit)
 	if err != nil {
 		return 0, err
 	}

@@ -536,25 +536,37 @@ func (s *bindingService) Unbind(ctx context.Context, caller Caller, input Unbind
 }
 
 // ReassignSessionBindings moves active bindings from one session bead ID to
-// another during canonical session repair.
+// another during canonical session repair, over a bd record store.
 func ReassignSessionBindings(ctx context.Context, store beads.Store, oldSessionID, newSessionID string, now time.Time) error {
-	if err := checkContext(ctx); err != nil {
-		return err
-	}
 	if store == nil {
 		return nil
+	}
+	return reassignSessionBindings(ctx, newBeadBackend(store), sharedBindingLockPool(store), oldSessionID, newSessionID, now)
+}
+
+// ReassignSessionBindingsWithBackend is ReassignSessionBindings over a
+// routed messaging-class backend (the wiring for relocated cities — the
+// bd-store form would silently no-op there, the record labels being empty).
+func ReassignSessionBindingsWithBackend(ctx context.Context, backend fabricBackend, oldSessionID, newSessionID string, now time.Time) error {
+	if backend == nil {
+		return nil
+	}
+	return reassignSessionBindings(ctx, backend, sharedBindingLockPoolForBackend(backend), oldSessionID, newSessionID, now)
+}
+
+func reassignSessionBindings(ctx context.Context, backend fabricBackend, locks *bindingLockPool, oldSessionID, newSessionID string, now time.Time) error {
+	if err := checkContext(ctx); err != nil {
+		return err
 	}
 	oldSessionID = strings.TrimSpace(oldSessionID)
 	newSessionID = strings.TrimSpace(newSessionID)
 	if oldSessionID == "" || newSessionID == "" || oldSessionID == newSessionID {
 		return nil
 	}
-	backend := newBeadBackend(store)
 	seeds, err := backend.ActiveBindingsBySession(oldSessionID)
 	if err != nil {
 		return fmt.Errorf("list bindings by retired session label: %w", err)
 	}
-	locks := sharedBindingLockPool(store)
 	transcript := newTranscriptServiceWithBackend(backend, locks)
 	delivery := deliveryCleaner{backend: backend, locks: locks}
 	caller := Caller{Kind: CallerController, ID: "session-retirement"}
@@ -661,24 +673,37 @@ var newReassignmentTranscript = func(store beads.Store, locks *bindingLockPool) 
 // ReassignSessionParticipants call (or the participant reaper) finishes the
 // handover instead of stranding the group-owned membership on the dead session.
 func ReassignSessionParticipants(ctx context.Context, store beads.Store, oldSessionID, newSessionID string) error {
-	if err := checkContext(ctx); err != nil {
-		return err
-	}
 	if store == nil {
 		return nil
+	}
+	locks := sharedBindingLockPool(store)
+	return reassignSessionParticipants(ctx, newBeadBackend(store), locks, newReassignmentTranscript(store, locks), oldSessionID, newSessionID)
+}
+
+// ReassignSessionParticipantsWithBackend is ReassignSessionParticipants over
+// a routed messaging-class backend.
+func ReassignSessionParticipantsWithBackend(ctx context.Context, backend fabricBackend, oldSessionID, newSessionID string) error {
+	if backend == nil {
+		return nil
+	}
+	locks := sharedBindingLockPoolForBackend(backend)
+	return reassignSessionParticipants(ctx, backend, locks, newTranscriptServiceWithBackend(backend, locks), oldSessionID, newSessionID)
+}
+
+func reassignSessionParticipants(ctx context.Context, backend fabricBackend, locks *bindingLockPool, transcript groupTranscriptSync, oldSessionID, newSessionID string) error {
+	if err := checkContext(ctx); err != nil {
+		return err
 	}
 	oldSessionID = strings.TrimSpace(oldSessionID)
 	newSessionID = strings.TrimSpace(newSessionID)
 	if oldSessionID == "" || newSessionID == "" || oldSessionID == newSessionID {
 		return nil
 	}
-	backend := newBeadBackend(store)
 	seeds, err := backend.ParticipantsBySession(oldSessionID)
 	if err != nil {
 		return fmt.Errorf("list participants by retired session label: %w", err)
 	}
-	locks := sharedBindingLockPool(store)
-	svc := &groupService{backend: backend, locks: locks, transcript: newReassignmentTranscript(store, locks)}
+	svc := &groupService{backend: backend, locks: locks, transcript: transcript}
 	for _, seed := range seeds {
 		if err := checkContext(ctx); err != nil {
 			return err
@@ -742,25 +767,39 @@ func ReassignSessionParticipants(ctx context.Context, store beads.Store, oldSess
 // ResolveInbound / ResolveOutbound, so group routing can still target the
 // dead session. Sweep both explicitly.
 func CloseSessionBindings(ctx context.Context, store beads.Store, sessionID string, now time.Time) error {
-	if err := checkContext(ctx); err != nil {
-		return err
-	}
 	if store == nil {
 		return nil
+	}
+	return closeSessionBindingsOver(ctx, newBeadBackend(store), NewServices(store), sessionID, now)
+}
+
+// CloseSessionBindingsWithBackend is CloseSessionBindings over a routed
+// messaging-class backend; sessionStore carries the session-class liveness
+// reads (unused by the teardown flows themselves, but required by the
+// services construction).
+func CloseSessionBindingsWithBackend(ctx context.Context, backend fabricBackend, sessionStore beads.Store, sessionID string, now time.Time) error {
+	if backend == nil {
+		return nil
+	}
+	return closeSessionBindingsOver(ctx, backend, NewServicesWithBackend(backend, sessionStore), sessionID, now)
+}
+
+func closeSessionBindingsOver(ctx context.Context, backend fabricBackend, svc Services, sessionID string, now time.Time) error {
+	if err := checkContext(ctx); err != nil {
+		return err
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil
 	}
 	caller := Caller{Kind: CallerController, ID: "session-retirement"}
-	svc := NewServices(store)
 	if _, err := svc.Bindings.Unbind(ctx, caller, UnbindInput{
 		SessionID: sessionID,
 		Now:       now,
 	}); err != nil {
 		return err
 	}
-	if err := closeSessionParticipants(ctx, newBeadBackend(store), svc, caller, sessionID); err != nil {
+	if err := closeSessionParticipants(ctx, backend, svc, caller, sessionID); err != nil {
 		return err
 	}
 	return closeSessionMemberships(ctx, svc, caller, sessionID, now)

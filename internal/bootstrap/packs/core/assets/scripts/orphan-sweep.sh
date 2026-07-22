@@ -226,7 +226,11 @@ session_bead_shows_live_assignment() {
 
     while IFS= read -r session_id; do
         [ -n "$session_id" ] || continue
-        if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
+        # The session liveness probe reads through the session-class store
+        # (gc session show), so it sees sessions whether the city keeps them
+        # on bd or has migrated them to the embedded sessions store — `gc bd
+        # show` only sees the bd side.
+        if ! session_json=$(gc session show "$session_id" --json 2>/dev/null); then
             if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
                 probe_failed=1
             fi

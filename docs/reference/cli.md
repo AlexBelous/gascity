@@ -3746,6 +3746,7 @@ gc session
 | [gc session prune](#gc-session-prune) | Close old dormant sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
 | [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
+| [gc session show](#gc-session-show) | Show a session's persisted state |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
 | [gc session unpin](#gc-session-unpin) | Remove a session awake pin |
@@ -3992,6 +3993,23 @@ gc session reset <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+
+## gc session show
+
+Show the persisted state of a session bead: id, status, lifecycle state,
+and the identity fields (session_name, alias, agent_name, template).
+
+Reads through the session-class store, so it works identically whether the
+city keeps sessions on the bd store or has migrated them to the embedded
+sessions store.
+
+```
+gc session show <session-id-or-alias> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON |
 
 ## gc session submit
 

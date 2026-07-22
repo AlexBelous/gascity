@@ -1036,6 +1036,12 @@ EOF
       printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
+    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-raced" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+{"id":"mc-wisp-raced","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
+EOF
+      exit 0
+    fi
     ;;
   bd)
     if [ "$2" = "list" ]; then
@@ -1050,14 +1056,6 @@ EOF
       cat <<'EOF'
 [
   {"id":"ga-raced-after-show","status":"in_progress","assignee":"project__worker-gc-mc-wisp-raced","metadata":{}}
-]
-EOF
-      exit 0
-    fi
-    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-raced" ] && [ "$4" = "--json" ]; then
-      cat <<'EOF'
-[
-  {"id":"mc-wisp-raced","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
 ]
 EOF
       exit 0
@@ -1136,6 +1134,12 @@ EOF
       printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
+    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-live123" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+{"id":"mc-wisp-live123","status":"open","issue_type":"session","metadata":{"state":"start-pending","session_name":"project__worker-gc-mc-wisp-live123"}}
+EOF
+      exit 0
+    fi
     ;;
   bd)
     if [ "$2" = "list" ]; then
@@ -1150,14 +1154,6 @@ EOF
       cat <<'EOF'
 [
   {"id":"ga-session-lag","status":"in_progress","assignee":"project__worker-gc-mc-wisp-live123","metadata":{"gc.session_name":"project__worker-gc-mc-wisp-live123"}}
-]
-EOF
-      exit 0
-    fi
-    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-live123" ] && [ "$4" = "--json" ]; then
-      cat <<'EOF'
-[
-  {"id":"mc-wisp-live123","status":"open","issue_type":"session","metadata":{"state":"start-pending","session_name":"project__worker-gc-mc-wisp-live123"}}
 ]
 EOF
       exit 0
@@ -1195,7 +1191,7 @@ exit 1
 	log := string(logData)
 	for _, want := range []string{
 		"bd show ga-session-lag --json",
-		"bd show mc-wisp-live123 --json",
+		"session show mc-wisp-live123 --json",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("missing required gc call %q:\n%s", want, log)
@@ -1234,6 +1230,10 @@ EOF
       printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
+    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-live123" ] && [ "$4" = "--json" ]; then
+      printf 'transient read failure\n' >&2
+      exit 2
+    fi
     ;;
   bd)
     if [ "$2" = "list" ]; then
@@ -1251,10 +1251,6 @@ EOF
 ]
 EOF
       exit 0
-    fi
-    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-live123" ] && [ "$4" = "--json" ]; then
-      printf 'transient read failure\n' >&2
-      exit 2
     fi
     if [ "$2" = "release-if-current" ]; then
       printf 'released\n'
@@ -1288,7 +1284,7 @@ exit 1
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "bd show mc-wisp-live123 --json") {
+	if !strings.Contains(log, "session show mc-wisp-live123 --json") {
 		t.Fatalf("session bead candidate was not probed:\n%s", log)
 	}
 	if strings.Contains(log, "bd release-if-current ga-session-probe-error ") {
@@ -1346,6 +1342,12 @@ EOF
       printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
       exit 0
     fi
+    if [ "$2" = "show" ] && [ "$3" = %q ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+{"id":%q,"status":"open","issue_type":"session","metadata":{"state":"active","session_name":%q}}
+EOF
+      exit 0
+    fi
     ;;
   bd)
     if [ "$2" = "list" ]; then
@@ -1364,21 +1366,13 @@ EOF
 EOF
       exit 0
     fi
-    if [ "$2" = "show" ] && [ "$3" = %q ] && [ "$4" = "--json" ]; then
-      cat <<'EOF'
-[
-  {"id":%q,"status":"open","issue_type":"session","metadata":{"state":"active","session_name":%q}}
-]
-EOF
-      exit 0
-    fi
     if [ "$2" = "update" ]; then
       exit 0
     fi
     ;;
 esac
 exit 1
-`, tt.workID, tt.assignee, tt.workID, tt.workID, tt.assignee, tt.sessionID, tt.sessionID, tt.assignee))
+`, tt.sessionID, tt.sessionID, tt.assignee, tt.workID, tt.assignee, tt.workID, tt.workID, tt.assignee))
 
 			env := map[string]string{
 				"GC_CITY":      cityDir,
@@ -1405,7 +1399,7 @@ exit 1
 			log := string(logData)
 			for _, want := range []string{
 				"bd show " + tt.workID + " --json",
-				"bd show " + tt.sessionID + " --json",
+				"session show " + tt.sessionID + " --json",
 			} {
 				if !strings.Contains(log, want) {
 					t.Fatalf("missing required gc call %q:\n%s", want, log)
@@ -2004,7 +1998,7 @@ if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ID --json" ]; then
   printf '[{"id":"%s","status":"in_progress","assignee":"%s","metadata":{}}]\n' "$ORPHAN_SWEEP_ORPHAN_ID" "$ORPHAN_SWEEP_ORPHAN_ASSIGNEE"
   exit 0
 fi
-if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
+if [ "$*" = "session show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
   exit 1
 fi
 printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"

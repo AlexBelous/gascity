@@ -382,6 +382,7 @@ var sessionRelocationRoutedFiles = []string{
 	"cmd_runtime_heartbeat.go",
 	"cmd_wait.go",
 	"cmd_nudge.go",
+	"cmd_session_show.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

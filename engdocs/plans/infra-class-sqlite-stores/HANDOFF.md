@@ -298,8 +298,85 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   needs NO change (mail refs are observability counts); doctor bucket
   retirement stays P5.
 
+## P4 sessions+waits — slices 1–3 DONE (seam plan + store + shadow gate)
+
+- **Slice 1 DONE** (`docs(plans)` e77e493fb): P4-SESSIONS-SEAM-PLAN.md —
+  evidence-grade inventory (full persistence-edge read + three repo-wide
+  sweeps) + THE structural ratification: the sessions backend seam is the
+  audited `beads.Store` subset ITSELF (codec already confined to
+  internal/session; `SetFingerprint` hashes ALL metadata keys incl.
+  non-codec ones, so the store must round-trip an open vocabulary;
+  Manager/api/worker all thread beads.Store handles; `resolveSessionStore`
+  + guard tests already exist). Records the ~18 hot keys with citations,
+  the five routing bypass gaps (doctor_session_model raw open, cmd_mail
+  mailbox lookups, api session.NewStore(raw) sites, messaging-seam
+  session legs, agent-output managers), that `gc session show` does NOT
+  exist (orphan-sweep.sh uses `gc bd show`), and that NO Go delete path
+  exists for closed sessions (only reaper.sh raw SQL).
+- **Slice 2 DONE** (`feat(classdb)` fc08566b1): internal/classdb/sessions
+  (package sessionsdb) — two tables (sessions, waits; dispatch invariant:
+  waits table holds exactly IsWaitBeadType rows, Update Type-crossing
+  reclassifies) of bead-shaped rows; meta JSON column AUTHORITATIVE for
+  the full metadata map (empty-string values kept PRESENT — fingerprint/
+  empty-clear fidelity), hot columns are derived mirrors recomputed in
+  the same tx via the single writeRow chokepoint; `gcs-<n>` mint in-tx,
+  explicit ids honored (bd parity — memstore does NOT honor them, a
+  known cross-backend delta); List = SQL narrowing + beads.ApplyListQuery
+  (canonical semantics by construction); Ready/deps/Tx/tiers/Priority/
+  ParentID fail LOUD (ErrUnsupported); ImportBead (verbatim OR IGNORE) +
+  DeleteAllRows = the migration primitives. DEVIATION: session_circuit
+  sidecar folded into meta (recorded). Conformance: one behavioral suite
+  over memstore AND sessionsdb through the PUBLIC session.Store surface
+  (union traps, fingerprint-over-all-metadata, wait lifecycle incl.
+  retry-clone/reassign/cancel-collect, WakeSession, probe, close/reopen,
+  Manager-shape creates). Crash gate (integration): restart-projection
+  survival under SIGKILL. Census 535/166.
+- **Slice 3 DONE** (`feat(sessions)` 51375b2a3 — shadow-write gate):
+  `[beads.classes.sessions] shadow = true` (validated sessions-only,
+  rejected with backend=sqlite; `BeadsConfig.ClassShadow`).
+  `resolveSessionStore` wraps the resolved bd store in `sessionsdb.Shadow`
+  (cmd/gc/session_class_store.go): bd authoritative for ALL reads/writes;
+  Create tees the primary's ECHO verbatim via ImportBead (bd ids
+  preserved — the ids the flip migration keeps); id-keyed ops replay when
+  the shadow holds the row, else on-miss import of post-op state; only
+  Classify==ClassSessions rows cross; tee failures log, never fail the
+  primary (fail-OPEN — opposite of the slice-4 flip). Identity
+  discipline: wrapper cached per (base, city) so resolves return ONE
+  value; `storeIdentityKey` + `closeBeadStoreHandle` unwrap
+  `ShadowPrimary()` (the messaging repair-city registry keeps working);
+  CachedList forwarded when the primary has it (dashboard read-model tier
+  survives the soak). Boot: `seedSessionsShadowAtBoot` (reset +
+  re-import bd truth, city_runtime.go after the messaging block).
+  `gc doctor` check `sessions-shadow`: DiffAgainstPrimary over OPEN rows,
+  diffed TWICE with intersection to filter in-flight-write races;
+  divergence warns "do not flip the backend" with per-row Details.
+
+### P4 slice 4 — REMAINS (wiring flip + migration; the last slice)
+
+Per the seam plan (P4-SESSIONS-SEAM-PLAN.md, read it first):
+ratchet flip (`sqliteCapableBeadClasses` += sessions) + config acceptance
+test; routing (marker-FIRST `.gc/store/sessions.migrated`, ENOENT-only,
+config cache, fail-CLOSED at every root — plug into `resolveSessionStore`
+next to the shadow arm; shadow and routing are mutually exclusive by
+config validation); close the five bypass gaps; `gc session show [--json]`
+(NEW — must expose the fields orphan-sweep.sh's jq probe reads:
+issue_type/status/metadata.state/closed + id/session_name/alias/
+agent_name); orphan-sweep.sh rewrite + embed-guard needles; closed-session
+purge TTL (7d default) via core.StartSweeper + `gc session prune`
+extension; reaper.sh session-SQL leg replacement;
+`ensureSessionsClassMigrated` (reset→FULL import of open session beads +
+open/recent waits with ids preserved→copy-verify→atomic marker→straggler
+import-then-sweep; abort-before-marker on ANY failure); doctor lockstep
+(doctor_session_model routed + migration-state surface); upgrade-flow
+tests (fresh-flip idempotence, bd-truth import, no-resurrection retry,
+straggler, abort-before-marker, closed-TTL drop matrix). The operational
+protocol: mc runs the shadow soak (knob on, watch `gc doctor`
+sessions-shadow) BEFORE any city flips backend=sqlite.
+
 ## What remains (P4+ per the design work plan)
 
+- **P4 sessions+waits**: slices 1–3 DONE (above); slice 4 (flip +
+  migration) remains — see the P4 section.
 - (superseded — P3 wiring/migration notes below are DONE, kept for
   reference) (a) ONE wiring slice —
   ratchet flip + config acceptance test + `messaging.migrated` marker +
@@ -317,8 +394,6 @@ is unaffected. Not ours. Run suites and `git push` under `(umask 022 && …)`.
   `mail_wisps` count + `issue_type='message'` filters, doctor/hook-claim
   raw-consumer touch-ups, and the store retention sweeper
   (read close→purge + unread TTL) on the controller.
-- **P4 sessions+waits**: store + shadow-write gate + reconciler/doctor
-  lockstep + `gc session show/prune` + orphan-sweep.sh rewrite.
 - Also outstanding from the design: splittest topology port before any
   class flips by default (GA); storehealth `StorePath`/`WalkSize` extension
   to `.gc/store/*.db`; maintenance-loop `wal_checkpoint(TRUNCATE)`/`VACUUM`;

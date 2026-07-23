@@ -39,6 +39,13 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
+	// AttachedWorkflowRootMetadataKey marks a work-store source bead as
+	// blocked by an attached workflow root that lives in the graph class
+	// store. bd cannot express a cross-store blocks edge (it degrades to a
+	// non-blocking depends_on_external row, letting the parent double-
+	// execute mid-DAG), so the graph-federated ready reads enforce this
+	// marker instead: the parent is not claimable while the root is open.
+	AttachedWorkflowRootMetadataKey      = "gc.attached_workflow_root"
 	AttemptLogMetadataKey                = "gc.attempt_log"
 	AttemptMetadataKey                   = "gc.attempt"
 	BondMetadataKey                      = "gc.bond"
@@ -292,6 +299,7 @@ const OptionMetadataPrefix = "opt_"
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
 var KnownMetadataKeys = []string{
+	AttachedWorkflowRootMetadataKey,
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
 	BondMetadataKey,

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -68,8 +69,9 @@ func mergeGraphReadyIntoWorkQueryOutput(out string, st *beads.SQLiteStore) (stri
 	if err != nil {
 		return "", fmt.Errorf("graph-class ready: %w", err)
 	}
-	if len(graphRows) == 0 {
-		return out, nil
+	rows, err = filterAttachBlockedByGraphRoot(rows, st)
+	if err != nil {
+		return "", err
 	}
 	seen := make(map[string]bool, len(rows))
 	for _, b := range rows {
@@ -85,4 +87,28 @@ func mergeGraphReadyIntoWorkQueryOutput(out string, st *beads.SQLiteStore) (stri
 		return "", fmt.Errorf("graph-class ready merge: %w", err)
 	}
 	return string(buf), nil
+}
+
+// filterAttachBlockedByGraphRoot withholds work-store candidates whose
+// gc.attached_workflow_root names a still-open root in the graph store —
+// the cross-store attach block bd cannot express as a dep edge. A dangling
+// marker (root missing from its owning store) fails LOUD, matching the
+// federation's fail-loud contract; unmarked beads pass untouched.
+func filterAttachBlockedByGraphRoot(rows []beads.Bead, st *beads.SQLiteStore) ([]beads.Bead, error) {
+	out := rows[:0]
+	for _, b := range rows {
+		rootID := strings.TrimSpace(b.Metadata[beadmeta.AttachedWorkflowRootMetadataKey])
+		if rootID == "" || !config.IsReservedClassBeadID(rootID) {
+			out = append(out, b)
+			continue
+		}
+		root, err := st.Get(rootID)
+		if err != nil {
+			return nil, fmt.Errorf("resolving attached workflow root %s for %s: %w", rootID, b.ID, err)
+		}
+		if root.Status == "closed" {
+			out = append(out, b)
+		}
+	}
+	return out, nil
 }

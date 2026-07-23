@@ -15,10 +15,12 @@ cache retired, mail storeless leg routed). Read HANDOFF.md "P5 bd surface
 dispatch, doBd mutation arm + show federation, hook ready/claim
 federation, control-dispatcher routing, boot migration, and the ratchet
 flip all landed (HANDOFF.md "P6 GRAPH class — COMPLETE"). All five
-infra classes are off bd/Dolt once a city migrates. Before mc flips
-graph: port the splittest invariants (they now genuinely apply to this
-topology), run the graph ADR's bench/census gates, and note the
-pool-demand count-form queries are not yet graph-federated.
+infra classes are off bd/Dolt once a city migrates. The pre-flip gates
+are DONE (HANDOFF.md "Pre-flip gates"): pool-demand federation,
+ADR bench gates measured + recorded, topology invariant suite, and the
+landmine-#4 attach linkage. What remains is purely operational: the mc
+soak (sessions shadow + infra-class-migration doctor watch, 24-48h
+clean), then per-class backend flips on mc.
 
 **What remains on this track (after graph, in order):**
 

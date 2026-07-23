@@ -94,11 +94,39 @@ The five remaining slices landed after G1+G2:
   beads never cross. sqliteCapableBeadClasses[BeadClassGraph] flipped
   LAST; config accepts backend=sqlite; the dormant API arms are live.
 
-Known follow-ups (recorded, not blocking): pool-demand COUNT-form
-queries pass through unfederated (routed-pool wakes ride the federated
-dispatch path); port the splittest invariants (they now genuinely apply
-to this topology) and run the graph ADR's bench/census gates before mc
-flips graph. INCIDENT NOTE 2026-07-23: the sqlit worktree directory +
+**Pre-flip gates — ALL DONE (2026-07-23, follow-up session):**
+
+1. **Pool-demand federation** (graph_scale_demand.go): every pool/named
+   template gains a graph-store probe target in buildDesiredState's two
+   demand passes (appendGraphScaleTargets); counted-bead dedup guards
+   unions; routing failure = per-template partial, never silent zero.
+   The controller demand pass is the authoritative counter; worker-side
+   count shells remain bd-only, shadowed by it.
+2. **ADR bench gates** (internal/beads/sqlite_store_bench_test.go; run
+   `go test ./internal/beads/ -run '^$' -bench BenchmarkSQLiteStore
+   -benchtime 2s`). Measured 2026-07-23, AMD EPYC 9654, 5k-row seed:
+   PointGet 27.8µs (gate ≤1ms PASS), FilterList/label 4.45ms (≤10ms
+   PASS), Write 640µs (≤5ms PASS), Claim 616µs (PASS).
+   Ready(TierBoth, 3.3k open rows, NO limit) 48.4ms — a ~14.5µs/row
+   bead_json decode slope, no N+1; the ≤10ms bar holds for ready sets
+   ≤~600 rows, and production ready surfaces (post readyExcludeTypes,
+   usually limit-bearing) are far smaller. Recorded as the slope to
+   watch, not a failure.
+3. **Topology invariants** (graph_topology_conformance_test.go): the
+   split-branch 11-invariant suite re-expressed against this branch's
+   seams — new pins for wisp-id claim routing, cross-store attach
+   linkage, attach-block-at-ready, wake/ownership fast path, read-path
+   tier consistency; the rest map to the per-slice tests named in the
+   file header. LANDMINE #4 CLOSED as part of this:
+   ensureFormulaCookAttachDep on a gcg root now stamps
+   gc.attached_workflow_root metadata (beadmeta key added) instead of a
+   cross-store dep bd would degrade to non-blocking, and the federated
+   worker ready union withholds marked parents while the root is open
+   (dangling marker fails LOUD).
+
+Remaining before a production city flips graph: the operational mc soak
+protocol only (sessions shadow soak + infra-class-migration doctor
+watch), which needs the live city. INCIDENT NOTE 2026-07-23: the sqlit worktree directory +
 worktree-sqlit branch ref were deleted EXTERNALLY mid-session; the tip
 (b483e45c9) was recovered from dangling objects via git fsck and the
 worktree recreated — if it happens again, fsck --lost-found first.

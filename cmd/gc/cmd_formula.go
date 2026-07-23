@@ -941,6 +941,18 @@ func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) 
 	if store == nil || strings.TrimSpace(attachBeadID) == "" || strings.TrimSpace(rootID) == "" {
 		return nil
 	}
+	// A graph-class root lives in the embedded graph store; bd cannot express
+	// a cross-store blocks edge (it degrades to a NON-blocking
+	// depends_on_external row and the parent double-executes mid-DAG —
+	// landmine #4 of the split design). The ratified replacement is metadata
+	// linkage: stamp the root on the work parent; the graph-federated ready
+	// reads withhold the parent while the root is open.
+	if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && strings.HasPrefix(rootID, prefix+"-") {
+		if err := store.SetMetadata(attachBeadID, beadmeta.AttachedWorkflowRootMetadataKey, rootID); err != nil {
+			return fmt.Errorf("stamping attach linkage %s -> %s: %w", attachBeadID, rootID, err)
+		}
+		return nil
+	}
 	deps, err := store.DepList(attachBeadID, "down")
 	if err != nil {
 		return fmt.Errorf("checking attach dependency %s -> %s: %w", attachBeadID, rootID, err)

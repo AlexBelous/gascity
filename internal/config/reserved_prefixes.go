@@ -63,3 +63,17 @@ func reservedClassPrefixListText() string {
 	sort.Strings(prefixes)
 	return strings.Join(prefixes, ", ")
 }
+
+// IsReservedClassBeadID reports whether id lives in a reserved class-prefix
+// namespace (gcg-/gcm-/gcs-/gco-/gcn-…, including compound forms like
+// gcg-wisp-…). Reserved-prefix ids are minted only by the embedded class
+// stores, so this is the by-id ownership predicate the read and write
+// federation share.
+func IsReservedClassBeadID(id string) bool {
+	for _, prefix := range reservedClassPrefixes {
+		if strings.HasPrefix(id, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}

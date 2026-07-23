@@ -378,9 +378,39 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 		}
 	}
 
+	// Graph-routed city: the bd fallback cannot see the embedded graph
+	// store, so the batched ready read runs in-process. Fail loud on a
+	// marked city whose routing/store cannot resolve.
+	if st, routed, rerr := routedGraphStoreFor(cityPath, cfg); rerr != nil {
+		return nil, true, fmt.Errorf("control-ready fallback: %w", rerr)
+	} else if routed {
+		tier := beads.TierIssues
+		if parsed.includeEphemeral {
+			tier = beads.TierBoth
+		}
+		ready, rerr := st.Ready(beads.ReadyQuery{TierMode: tier, Limit: controlReadyFallbackLimit})
+		if rerr != nil {
+			return nil, true, fmt.Errorf("control-ready fallback (graph store): %w", rerr)
+		}
+		return beadsToHookBeads(evaluateControlReady(filterControlReadyExcludeType(ready), parsed, envList)), true, nil
+	}
+
 	ready, err := controlReadyFallbackReady(dir, env, parsed.includeEphemeral)
 	if err != nil {
 		return nil, true, err
 	}
 	return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
+}
+
+// filterControlReadyExcludeType drops the bd-fallback's --exclude-type rows
+// (convoys) from an in-process ready read, keeping the two fallbacks
+// row-for-row equivalent.
+func filterControlReadyExcludeType(items []beads.Bead) []beads.Bead {
+	out := items[:0]
+	for _, b := range items {
+		if b.Type != controlReadyExcludeType {
+			out = append(out, b)
+		}
+	}
+	return out
 }

@@ -434,6 +434,16 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 }
 
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	// Graph-routed city: control beads, molecule steps, and wisp roots are
+	// all graph-class and live in the ONE city-level embedded graph store,
+	// regardless of the requesting scope. Fail closed on a marked city
+	// whose routing/store cannot resolve — a bd fallback would read a store
+	// the class no longer lives in.
+	if st, routed, err := routedGraphStoreFor(cityPath, controlGraphRoutingCfg(cityPath, cfg)); err != nil {
+		return nil, fmt.Errorf("control store: %w", err)
+	} else if routed {
+		return st, nil
+	}
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
 	if provider == "file" || strings.HasPrefix(provider, "exec:") {
@@ -467,6 +477,18 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 // findBeadAcrossStores tries the city store first, then all rig stores,
 // returning the store and bead on first match.
 func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (beads.Store, beads.Bead, string, error) {
+	// Graph-class ids live only in the routed graph store.
+	if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && strings.HasPrefix(beadID, prefix+"-") {
+		if st, routed, err := routedGraphStoreFor(cityPath, controlGraphRoutingCfg(cityPath, nil)); err != nil {
+			return nil, beads.Bead{}, "", fmt.Errorf("graph store: %w", err)
+		} else if routed {
+			b, err := st.Get(beadID)
+			if err != nil {
+				return nil, beads.Bead{}, "", err
+			}
+			return st, b, cityPath, nil
+		}
+	}
 	// Try city store first.
 	cityStore, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
@@ -2052,4 +2074,15 @@ func workflowBeadIDs(bb []beads.Bead) []string {
 		ids[i] = b.ID
 	}
 	return ids
+}
+
+// controlGraphRoutingCfg supplies the config for the dispatcher-side graph
+// routing decision: the caller's cfg when it has one, else a no-refresh load
+// (nil on failure keeps routing off, matching the class resolvers).
+func controlGraphRoutingCfg(cityPath string, cfg *config.City) *config.City {
+	if cfg != nil {
+		return cfg
+	}
+	loaded, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	return loaded
 }

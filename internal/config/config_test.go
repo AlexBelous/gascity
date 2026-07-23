@@ -3015,6 +3015,38 @@ func TestAgentUsesCanonicalSingletonPoolIdentity(t *testing.T) {
 	}
 }
 
+func TestIsPoolShapedNamedSession(t *testing.T) {
+	singleton := &Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1)}
+	pool := &Agent{Name: "worker", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
+	unbounded := &Agent{Name: "worker"}
+	namepool := &Agent{Name: "worker", MaxActiveSessions: ptrInt(1), NamepoolNames: []string{"alpha"}}
+
+	tests := []struct {
+		name string
+		a    *Agent
+		ns   *NamedSession
+		want bool
+	}{
+		{name: "nil agent", a: nil, ns: &NamedSession{Mode: "on_demand"}},
+		{name: "nil named session", a: singleton, ns: nil},
+		{name: "always mode singleton capacity", a: singleton, ns: &NamedSession{Mode: "always"}},
+		{name: "always mode pool capacity mode wins", a: pool, ns: &NamedSession{Mode: "always"}},
+		{name: "on_demand singleton capacity", a: singleton, ns: &NamedSession{Mode: "on_demand"}},
+		{name: "default mode singleton capacity", a: singleton, ns: &NamedSession{}},
+		{name: "on_demand pool capacity", a: pool, ns: &NamedSession{Mode: "on_demand"}, want: true},
+		{name: "default mode pool capacity", a: pool, ns: &NamedSession{}, want: true},
+		{name: "on_demand unbounded capacity", a: unbounded, ns: &NamedSession{Mode: "on_demand"}, want: true},
+		{name: "on_demand namepool capacity", a: namepool, ns: &NamedSession{Mode: "on_demand"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPoolShapedNamedSession(tt.a, tt.ns); got != tt.want {
+				t.Fatalf("IsPoolShapedNamedSession() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAgentSupportsExpandedSessionIdentities(t *testing.T) {
 	tests := []struct {
 		name string

@@ -74,6 +74,23 @@ func (a *Agent) UsesCanonicalSingletonPoolIdentity() bool {
 	return maxSessions != nil && *maxSessions == 1
 }
 
+// IsPoolShapedNamedSession reports whether a configured named session's
+// backing agent should be routed and addressed as a numbered pool instance
+// ("{base}-N") rather than only by the named session's own canonical
+// identity. mode="always" named sessions keep a single controller-managed
+// canonical session regardless of the backing agent's capacity, so they are
+// never pool-shaped; everything else follows the backing agent's own
+// singleton-vs-pool capacity shape.
+func IsPoolShapedNamedSession(a *Agent, ns *NamedSession) bool {
+	if a == nil || ns == nil {
+		return false
+	}
+	if ns.ModeOrDefault() == "always" {
+		return false
+	}
+	return !a.UsesCanonicalSingletonPoolIdentity()
+}
+
 // SupportsExpandedSessionIdentities reports whether callers should expose or
 // discover concrete member identities instead of only the configured identity.
 func (a *Agent) SupportsExpandedSessionIdentities() bool {

@@ -630,6 +630,9 @@ func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (conf
 				return a, true
 			}
 		}
+		if spec, ok, _ := resolvePoolShapedNamedSessionInstance(cfg, "", input); ok {
+			return *spec.Agent, true
+		}
 		return config.Agent{}, false
 	}
 
@@ -648,6 +651,9 @@ func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (conf
 				return a, true
 			}
 		}
+	}
+	if spec, ok, _ := resolvePoolShapedNamedSessionInstance(cfg, "", input); ok {
+		return *spec.Agent, true
 	}
 	return config.Agent{}, false
 }

@@ -1,6 +1,11 @@
 package main
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -133,4 +138,86 @@ func findNamedSessionConflictInfo(sessionBeads *sessionBeadSnapshot, spec namedS
 
 func findConflictingNamedSessionSpecForBead(cfg *config.City, cityName string, b beads.Bead) (namedSessionSpec, bool, error) {
 	return session.FindConflictingNamedSessionSpecForBead(cfg, cityName, b)
+}
+
+// resolvePoolShapedNamedSessionInstance checks whether target names a numbered
+// pool instance ("<identity>-N") of a pool-shaped configured named session —
+// one whose backing agent has pool (not singleton) capacity and mode !=
+// "always" (config.IsPoolShapedNamedSession). It mirrors
+// ResolveNamedSessionSpecForConfigTarget's qualified and bare-leaf match
+// shapes, then delegates slot-range validation to the existing pool-instance
+// resolver family via agentutil.ResolveAgent so no second range-check parser
+// is introduced.
+//
+// A structural match ("<identity>-<suffix>") whose suffix fails to parse or
+// falls out of range returns ok=false with a non-nil error naming the bad
+// target, so callers can surface a clear error instead of silently falling
+// through to an unrelated resolution path. A target that doesn't structurally
+// match any pool-shaped named session returns ok=false, err=nil.
+func resolvePoolShapedNamedSessionInstance(cfg *config.City, cityName, target string) (namedSessionSpec, bool, error) {
+	target = normalizeNamedSessionTarget(target)
+	if cfg == nil || target == "" {
+		return namedSessionSpec{}, false, nil
+	}
+
+	qualified := strings.ContainsAny(target, "/.")
+	rigContext := currentRigContext(cfg)
+
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		identity := ns.QualifiedName()
+		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+		if !ok || !config.IsPoolShapedNamedSession(spec.Agent, spec.Named) {
+			continue
+		}
+
+		suffix, matched := strings.CutPrefix(target, identity+"-")
+		if !matched && !qualified && (ns.Dir == "" || (rigContext != "" && ns.Dir == rigContext)) {
+			suffix, matched = strings.CutPrefix(target, ns.IdentityName()+"-")
+		}
+		if !matched {
+			continue
+		}
+
+		n, err := strconv.Atoi(suffix)
+		if err != nil || n < 1 {
+			return namedSessionSpec{}, false, fmt.Errorf("%w: %q is not a valid pool instance slot for named session %q", session.ErrSessionNotFound, target, identity)
+		}
+
+		instanceTarget := spec.Agent.QualifiedName() + "-" + suffix
+		instanceAgent, ok := agentutil.ResolveAgent(cfg, instanceTarget, agentutil.ResolveOpts{AllowPoolMembers: true})
+		if !ok {
+			return namedSessionSpec{}, false, fmt.Errorf("%w: %q is out of range for pool-shaped named session %q", session.ErrSessionNotFound, target, identity)
+		}
+
+		// Re-stamp the synthesized instance's identity fields onto the named
+		// session's own identity rather than the backing template's: when
+		// NamedSession.Name is set and differs from Template (its documented
+		// purpose), agentutil.ResolveAgent above validated the slot against
+		// the template's QualifiedName() and so returns an agent identified
+		// by "<template>-N", not "<name>-N". Downstream materialization
+		// (materializeSessionForAgentConfig) creates the session under
+		// whatever identity this Agent carries, so leaving it template-keyed
+		// would create/address the session under the wrong name. Only the
+		// identity fields are overridden; capacity/provider/start-command
+		// fields stay as resolved from the backing template.
+		bareIdentity := ns.Name
+		if bareIdentity == "" {
+			bareIdentity = ns.Template
+		}
+		instanceAgent.BindingName = ns.BindingName
+		instanceAgent.Name = bareIdentity + "-" + suffix
+		instanceAgent.Dir = ns.Dir
+
+		instanceIdentity := identity + "-" + suffix
+		return namedSessionSpec{
+			Named:       spec.Named,
+			Agent:       &instanceAgent,
+			Identity:    instanceIdentity,
+			SessionName: config.NamedSessionRuntimeName(cityName, cfg.Workspace, instanceIdentity),
+			Mode:        spec.Mode,
+		}, true, nil
+	}
+
+	return namedSessionSpec{}, false, nil
 }

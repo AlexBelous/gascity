@@ -55,7 +55,7 @@ func resolveConfiguredNamedSessionID(
 		return "", false, err
 	}
 	if !ok {
-		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+		return resolvePoolShapedNamedSessionInstanceID(cityPath, cfg, store, cityName, identifier, opts)
 	}
 	lookup, err := session.LookupConfiguredNamedSession(store, spec)
 	if err != nil {
@@ -80,6 +80,49 @@ func resolveConfiguredNamedSessionID(
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, io.Discard, ensureSessionForTemplateOptions{
+		materializeMetadata: opts.materializeMetadata,
+	})
+	return id, true, err
+}
+
+// resolvePoolShapedNamedSessionInstanceID handles targets that name a
+// numbered pool instance of a pool-shaped configured named session (e.g.
+// "builder-2" for a named session whose backing agent has pool capacity).
+// findNamedSessionSpecForTarget only matches a named session's own canonical
+// identity, so this is the FR-4 fallthrough that lets wake/sling reach an
+// already-materialized instance, or materialize a new one, via the same
+// pool-instance resolver family agentutil.ResolveAgent already uses — no
+// second range-check parser.
+//
+// A materialized instance's session bead carries pool-instance metadata
+// (alias/session_name keyed by the synthesized "<identity>-N" name), not the
+// configured_named_identity/session_name shapes session.LookupConfiguredNamedSession
+// queries for, so the already-materialized fast path below goes through
+// session.ResolveSessionID (alias-based) instead.
+func resolvePoolShapedNamedSessionInstanceID(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	cityName string,
+	identifier string,
+	opts namedSessionResolveOptions,
+) (string, bool, error) {
+	poolSpec, poolOK, poolErr := resolvePoolShapedNamedSessionInstance(cfg, cityName, identifier)
+	if poolErr != nil {
+		return "", true, poolErr
+	}
+	if !poolOK {
+		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	if id, err := session.ResolveSessionID(store, poolSpec.Identity); err == nil {
+		return id, true, nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return "", true, err
+	}
+	if !opts.materialize {
+		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, poolSpec.Identity, io.Discard, ensureSessionForTemplateOptions{
 		materializeMetadata: opts.materializeMetadata,
 	})
 	return id, true, err

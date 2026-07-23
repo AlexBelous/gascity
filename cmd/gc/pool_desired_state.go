@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -174,7 +175,7 @@ func computePoolDesiredStates(
 					routedTo = cfg.Agents[0].QualifiedName()
 				}
 			}
-			routedTo = normalizeAgentTemplateIdentity(cfg, routedTo)
+			routedTo = normalizeAgentTemplateIdentity(cfg, agentutil.NormalizePoolRouteTarget(cfg, routedTo))
 			if sessionBeadID != "" {
 				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
 				if sessionTemplate != "" && routedTo != "" && !agentTemplateIdentitiesEquivalent(cfg, routedTo, sessionTemplate) {

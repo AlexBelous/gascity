@@ -202,15 +202,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Fail-closed infra-class write guard: bd never holds infra-class beads
-	// (reserved-prefix ids are minted only by the embedded class stores), so
-	// a write targeting one is always a mistake — refuse it before any store
-	// or subprocess work, naming the gc replacement.
-	if msg, refuse := bdInfraWriteRefusal(bdArgs); refuse {
-		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -225,6 +216,24 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// In-process graph mutation arm (BEFORE the write guard): on a
+	// graph-routed city, workers legitimately close/update gcg beads
+	// (molecule steps), and bd cannot reach the embedded store — the
+	// mutation applies in-process. Unrouted cities fall through to the
+	// guard below, which refuses.
+	if code, handled := maybeRouteBdGraphSqliteMutation(cityPath, cfg, bdArgs, stdout, stderr); handled {
+		return code
+	}
+
+	// Fail-closed infra-class write guard: bd never holds infra-class beads
+	// (reserved-prefix ids are minted only by the embedded class stores), so
+	// a write targeting one is always a mistake — refuse it before any store
+	// or subprocess work, naming the gc replacement.
+	if msg, refuse := bdInfraWriteRefusal(bdArgs); refuse {
+		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

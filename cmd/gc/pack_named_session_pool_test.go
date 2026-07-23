@@ -104,7 +104,7 @@ func TestComputePoolDesiredStatesPoolShapedNamedSessionCountsBaseResumeTowardMax
 	states := ComputePoolDesiredStates(
 		fixture.cfg,
 		work,
-		[]beads.Bead{base, slot},
+		sessionInfosFromBeads([]beads.Bead{base, slot}),
 		map[string]int{fixture.identity: 3},
 	)
 	state, ok := findPoolDesiredState(states, fixture.identity)
@@ -149,13 +149,13 @@ session_template = "{{.City}}--{{.Agent}}"
 [[rigs]]
 name = %q
 path = %q
-includes = ["packs/workflow"]
+includes = [%q]
 
 [[rigs.patches]]
 agent = %q
 min_active_sessions = %d
 max_active_sessions = %d
-`, rigName, rigPath, agentName, minActive, maxActive))
+`, rigName, rigPath, packPath, agentName, minActive, maxActive))
 
 	writeFixtureFile(t, filepath.Join(packPath, "pack.toml"), fmt.Sprintf(`
 [pack]

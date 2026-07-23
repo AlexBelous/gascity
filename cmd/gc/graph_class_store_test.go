@@ -190,3 +190,16 @@ func TestPolicyStoreCreateSideRoutesGraphClass(t *testing.T) {
 		t.Fatalf("unrouted wisp create left the work store: %v", err)
 	}
 }
+
+// TestGraphSqliteBackendAcceptedByConfig pins the ratchet flip: the parsed
+// config now accepts [beads.classes.graph] backend="sqlite" (it was a hard
+// load failure while the wiring landed).
+func TestGraphSqliteBackendAcceptedByConfig(t *testing.T) {
+	cfg, err := config.Parse([]byte("[workspace]\nname = \"g\"\n\n[beads.classes.graph]\nbackend = \"sqlite\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Beads.ClassBackend(config.BeadClassGraph) != config.BeadsClassBackendSQLite {
+		t.Fatal("graph backend did not resolve to sqlite")
+	}
+}

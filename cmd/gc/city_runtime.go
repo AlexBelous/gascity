@@ -284,6 +284,14 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		startSessionsRetentionSweeper(p.CityPath, p.Stderr)
 	}
 
+	// Seamless graph-class cutover, same shape: full import of open graph
+	// beads + within-graph dep edges (ids preserved), atomic marker,
+	// background residue sweep. The store's own retention sweeper starts
+	// with the handle.
+	if ensureGraphClassMigrated(p.CityPath, p.Cfg, p.Stderr) {
+		go sweepLegacyGraphResidue(p.CityPath, p.Cfg, p.Stderr)
+	}
+
 	// Sessions shadow-write gate (P4): re-seed the class store from the bd
 	// truth so the soak's zero-discrepancy diff starts converged.
 	seedSessionsShadowAtBoot(p.CityPath, p.Cfg, p.Stderr)

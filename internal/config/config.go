@@ -1517,6 +1517,13 @@ var sqliteCapableBeadClasses = map[string]bool{
 	// beads.Store subset itself (P4-SESSIONS-SEAM-PLAN.md). The shadow-write
 	// soak (shadow=true) should run clean before a city flips this backend.
 	BeadClassSessions: true,
+	// internal/beads SQLiteStore (the recovered win3-hardened graph store) —
+	// wired through resolveGraphStore + the create-side policy dispatch +
+	// the doBd mutation arm + the hook ready/claim federation + the control
+	// dispatcher routing, all behind the graph migrated-marker
+	// (cmd/gc/graph_class_store.go). The biggest class: molecule roots,
+	// steps, wisps, and their dep topology.
+	BeadClassGraph: true,
 }
 
 // shadowCapableBeadClasses enumerates the classes that support the

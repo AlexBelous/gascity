@@ -11,7 +11,17 @@ class-store maintenance loop + storehealth TotalSize, doltlite order-run
 cache retired, mail storeless leg routed). Read HANDOFF.md "P5 bd surface
 + cleanup — DONE" first.
 
-**What remains on this track (in order):**
+**The GRAPH class (P6) is now the active front** — G1 (store port) +
+G2 (dark routing + gcg show federation) are DONE; the remaining wiring
+slices are enumerated in HANDOFF.md "P6 GRAPH class" with their proven
+port sources (integ/cli-class-store-event-emission @2c74f8747,
+feat/split-store-conformance). Execute them in order: create-side
+dispatch -> doBd mutation arm (reconcile with the write guard) ->
+ready/claim federation -> operator-gated migration -> ratchet flip
+LAST. Do not flip sqliteCapableBeadClasses[graph] before every root
+routes.
+
+**What remains on this track (after graph, in order):**
 
 1. **Operational: the mc shadow soak** — `[beads.classes.sessions]
    shadow = true` on mc, watch `gc doctor` checks `sessions-shadow` AND

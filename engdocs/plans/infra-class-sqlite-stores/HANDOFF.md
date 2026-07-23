@@ -61,6 +61,85 @@ control-plane/notification predicates (report 0 on migrated cities;
 retire when every city migrates), nudge two-tier file machinery (the
 LIVE backend for unmigrated cities behind QueueForCity).
 
+## P6 GRAPH class — G1+G2 DONE (2026-07-23), wiring slices REMAIN
+
+Graph is the fifth and last infra class (after it + migration, bd/Dolt
+holds only work beads). Authoritative design:
+`git show 09830032e:engdocs/design/graph-store-backend-selection.md`
+(the graph ADR) + the main design's "Relationship to the graph class"
+section. Strategy ratified this session: PORT THE WIN3-PROVEN LINEAGE,
+don't rebuild — `integ/cli-class-store-event-emission` @2c74f8747 and
+`deploy/sqlite-b36-probe-attribution` carry the live deploy wiring
+window 3 has been debugging on mc.
+
+- **G1 DONE** (`feat(beads)` — the store): internal/beads/sqlite_store
+  {,_storage,_claim,_graph_apply}.go + tests ported VERBATIM from integ
+  @2c74f8747 (the recovered ga-aec8q store + graph extensions:
+  ApplyGraphPlan/WithStorage, CreateWithStorage, CreateWithForeignID,
+  CAS claim, main/wisp tier column, deps + Ready blocking subquery,
+  retention sweeper). Two fixes vs the ported code: dep edges keyed one
+  per (issue,depends_on) with type updatable (beadstest
+  DepAddUpdatesType — deploy schema allowed contradictory duplicates),
+  and per-conn PRAGMAs moved to the modernc `_pragma=` DSN form (the
+  deploy `?_busy_timeout=` was silently ignored — the G0 finding; its
+  read pool ran WITHOUT the busy timeout its comments assume).
+  Conformance = this tree's beadstest suites (b36's shim rode the
+  deploy-only coordtest pkg). ForeignIDCreator interface added
+  (new file internal/beads/foreign_id_creator.go).
+- **G2 DONE** (`feat(graph)` — routing, DARK): cmd/gc/
+  graph_class_store.go — two-key activation (backend=sqlite +
+  .gc/store/graph.migrated marker, ENOENT-only), store at
+  .gc/store/graph/beads.sqlite (OpenSQLiteStore takes a dir) minting
+  gcg via WithSQLiteStoreIDPrefix, process-shared handle, fail-closed
+  resolveGraphStoreRouted wired into resolveGraphStore (returns the
+  store ITSELF, never a wrapper — capability assertions survive).
+  gc bd show federation serves gcg (reserved arm + legacy probe);
+  doctor infra-class-migration reports all five classes.
+  **sqliteCapableBeadClasses has NO graph entry yet — deliberately.**
+  Routing cannot activate on any real city until the ratchet flips in
+  the final wiring slice. Tests construct config.City directly.
+
+**Remaining graph slices (in order; each has a proven source to port):**
+
+1. **Create-side dispatch**: beadPolicyStore.createTarget(ClassGraph) +
+   beadPolicyGraphStore.graphApplierFor(ClassGraph) route to the graph
+   store on a routed city (bead_policy_store.go + class_store.go —
+   both identity today, documented as THE seam). Molecule pours
+   (ClassifyGraphPlan routes wholesale) then land in the graph store.
+   Thread routing via construction (cityPath+cfg at policy-store build
+   sites), NEVER by wrapping (the routed-wrapper hazard).
+2. **doBd in-process mutation arm**: port cmd_bd_infra_sqlite.go from
+   integ @2c74f8747 (maybeRouteBdInfraSqliteMutation — close +
+   update --set-metadata/--status applied in-process because bd 1.1.0
+   cannot read the store), adapted to gate on graphSQLiteRoutingActive
+   instead of the infra-scope metadata.json probe. MUST reconcile with
+   cmd_bd_guard.go: the arm intercepts gcg mutations BEFORE the guard
+   (workers legitimately claim/update/close graph steps); the guard
+   keeps refusing on UNROUTED cities. Also the read side: integ's
+   execStoreTargetForBd routes reserved-prefix ids + runBdStoreBridge
+   serves list/ready/dep-list in-process (bridge already in this tree).
+3. **Ready/claim federation**: port claimableStore (composite work ∪
+   graph Ready in canonical (priority,created_at,id) order, claim
+   routed by reserved prefix) + gc ready + workquery.go re-route —
+   split-branch commits 63235fe0a (#2a), 2ed2fc961 (#2b), #2c,
+   c224a9792 (#13). Without this a flipped city's molecule steps are
+   invisible to workers. Cross-store dep replacement (landmine #4,
+   eae511422): gc.attached_workflow_root metadata linkage.
+4. **Migration**: adapt cmd_migrate_infra_store.go /
+   infra_store_migrate.go from feat/split-store-conformance (839
+   lines; owner-gated stop-the-world, idempotent, no status file,
+   copy-verify-delete, ids preserved via CreateWithForeignID) to
+   graph-only + the marker write. Graph is deliberately NOT
+   boot-auto-migrated (live molecules mid-flight — operator-gated,
+   unlike the four ephemeral classes).
+5. **Ratchet flip + events audit + API arms**: flip
+   sqliteCapableBeadClasses[BeadClassGraph] LAST; the dormant API
+   federation arms (handler_beads gcg arm, handler_convoys,
+   handler_convoy_dispatch workflowStores) go live automatically;
+   verify runBeadCloseAutoclose / bead.*-keyed watchers per the
+   design's events note; splittest invariants NOW apply (the harness
+   targets exactly this work/graph split — the P5 deferral unblocks).
+
 ## P5 residuals — deferred with evidence
 
 - **splittest topology port**: the feat/split-store-conformance harness

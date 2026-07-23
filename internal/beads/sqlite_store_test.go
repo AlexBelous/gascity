@@ -222,13 +222,23 @@ func TestSQLiteStoreReadyHonorsTierMode(t *testing.T) {
 }
 
 func TestSQLiteStoreCloseStore(t *testing.T) {
-	settle := func() {
-		runtime.GC()
-		time.Sleep(50 * time.Millisecond)
-		runtime.GC()
+	// settleBelow yields until the goroutine count drops to at most target
+	// (CloseStore joins the sweeper synchronously; only database/sql's
+	// internal closer goroutines need a beat), bounded so a real leak still
+	// fails. No fixed sleep — the fixed_sleep census ratchet is hard.
+	settleBelow := func(target int) int {
+		n := runtime.NumGoroutine()
+		for i := 0; i < 200_000 && n > target; i++ {
+			runtime.Gosched()
+			if i%1000 == 0 {
+				runtime.GC()
+			}
+			n = runtime.NumGoroutine()
+		}
+		return n
 	}
 
-	settle()
+	settleBelow(0)
 	base := runtime.NumGoroutine()
 
 	s, err := OpenSQLiteStore(t.TempDir(),
@@ -249,8 +259,7 @@ func TestSQLiteStoreCloseStore(t *testing.T) {
 		t.Fatalf("second CloseStore: %v", err)
 	}
 
-	settle()
-	residual := runtime.NumGoroutine() - base
+	residual := settleBelow(base+5) - base
 	if residual > 5 {
 		t.Fatalf("CloseStore leaked goroutines: residual=%d after open+close (want <=5)", residual)
 	}
@@ -264,13 +273,23 @@ func TestSQLiteStoreCloseStore(t *testing.T) {
 func TestSQLiteStoreNoLeakOnDiscard(t *testing.T) {
 	const n = 25
 
-	settle := func() {
-		runtime.GC()
-		time.Sleep(50 * time.Millisecond)
-		runtime.GC()
+	// settleBelow yields until the goroutine count drops to at most target
+	// (CloseStore joins the sweeper synchronously; only database/sql's
+	// internal closer goroutines need a beat), bounded so a real leak still
+	// fails. No fixed sleep — the fixed_sleep census ratchet is hard.
+	settleBelow := func(target int) int {
+		n := runtime.NumGoroutine()
+		for i := 0; i < 200_000 && n > target; i++ {
+			runtime.Gosched()
+			if i%1000 == 0 {
+				runtime.GC()
+			}
+			n = runtime.NumGoroutine()
+		}
+		return n
 	}
 
-	settle()
+	settleBelow(0)
 	base := runtime.NumGoroutine()
 
 	for i := 0; i < n; i++ {
@@ -288,8 +307,7 @@ func TestSQLiteStoreNoLeakOnDiscard(t *testing.T) {
 		}
 	}
 
-	settle()
-	residual := runtime.NumGoroutine() - base
+	residual := settleBelow(base+5) - base
 	t.Logf("goroutines: base=%d after=%d residual=%d (opened+closed %d stores)",
 		base, base+residual, residual, n)
 

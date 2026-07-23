@@ -454,7 +454,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			JSON:         opts.JSON,
 		}
 		return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts,
-			graphRoutedHookClaimOps(cityPath, cfg), shellWorkQueryWithEnv, emitQueryFailure, stdout, stderr)
+			graphRoutedHookClaimOps(cityPath, cfg), graphFederatedWorkQueryRunner(cityPath, cfg), emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }

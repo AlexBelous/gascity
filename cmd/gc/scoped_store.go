@@ -118,7 +118,7 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 		return nil, err
 	}
 	if policyWrapped {
-		scoped = wrapStoreWithBeadPolicies(scoped, policyCfg)
+		scoped = wrapStoreWithBeadPoliciesAt(scoped, policyCfg, cityPath)
 	}
 	return scoped, nil
 }

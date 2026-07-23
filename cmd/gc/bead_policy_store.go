@@ -28,6 +28,11 @@ const (
 type beadPolicyStore struct {
 	beads.Store
 	cfg *config.City
+	// cityPath roots the per-class store routing (the graph class's
+	// migrated-marker lives under it). Empty on wrap sites that never
+	// route (tests, legacy callers) — every class then stays on the
+	// wrapped store, byte-identical to the pre-routing behavior.
+	cityPath string
 }
 
 type beadPolicyGraphStore struct {
@@ -56,12 +61,22 @@ var (
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesAt(store, cfg, "")
+}
+
+// wrapStoreWithBeadPoliciesAt is the routing-aware wrap: cityPath roots the
+// per-class create/apply dispatch (createTarget / graphApplierFor), so a
+// graph-routed city's pours and wisp creates land in the embedded graph
+// store. Production open paths use this form; the cityPath-less wrap keeps
+// every class on the wrapped store.
+func wrapStoreWithBeadPoliciesAt(store beads.Store, cfg *config.City, cityPath string) beads.Store {
 	if store == nil {
 		return nil
 	}
 	policyStore := &beadPolicyStore{
-		Store: store,
-		cfg:   cfg,
+		Store:    store,
+		cfg:      cfg,
+		cityPath: cityPath,
 	}
 	if applier, ok := beads.GraphApplyFor(store); ok {
 		return &beadPolicyGraphStore{

@@ -1434,7 +1434,7 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
-	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
+	result.Store = wrapStoreWithBeadPoliciesAt(result.Store, cfg, runtimeCityPath)
 	return result, nil
 }
 

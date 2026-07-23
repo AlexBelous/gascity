@@ -18,6 +18,7 @@ package main
 // landed classes; graph just has more roots.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -55,7 +56,7 @@ func graphMigratedMarkerPath(cityPath string) string {
 // marker exists. ENOENT-only marker discipline, same as the other classes:
 // any other stat failure is an error, never a silent bd fallback.
 func graphSQLiteRoutingActive(cityPath string, cfg *config.City) (bool, error) {
-	if cfg == nil || cfg.Beads.ClassBackend(config.BeadClassGraph) != config.BeadsClassBackendSQLite {
+	if cityPath == "" || cfg == nil || cfg.Beads.ClassBackend(config.BeadClassGraph) != config.BeadsClassBackendSQLite {
 		return false, nil
 	}
 	if _, err := os.Stat(graphMigratedMarkerPath(cityPath)); err != nil {
@@ -132,4 +133,14 @@ func resolveGraphStoreRouted(workStore beads.Store, cfg *config.City, cityPath s
 		return class
 	}
 	return workStore
+}
+
+// unavailableGraphApplier is the fail-closed graph-apply arm: a marked city
+// whose graph routing or store cannot resolve must fail the pour rather
+// than apply it to the work store, which routed readers never see.
+type unavailableGraphApplier struct{ err error }
+
+// ApplyGraphPlan fails with the routing error.
+func (u unavailableGraphApplier) ApplyGraphPlan(context.Context, *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	return nil, u.err
 }

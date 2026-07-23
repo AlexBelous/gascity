@@ -202,7 +202,14 @@ func unwrapWorkStores(stores map[string]beads.WorkStore) map[string]beads.Store 
 // returns the exact store the create chokepoint already used, preserving the
 // StorageCreateStore / GraphApplyStore optional-capability assertions that the
 // create path relies on.
-func (s *beadPolicyStore) createTarget(_ coordclass.Class) beads.Store {
+func (s *beadPolicyStore) createTarget(class coordclass.Class) beads.Store {
+	if class == coordclass.ClassGraph && s.cityPath != "" {
+		if store, routed, err := routedGraphStoreFor(s.cityPath, s.cfg); err != nil {
+			return sessionsdb.NewUnavailableStore(fmt.Errorf("graph-class store unavailable: %w", err))
+		} else if routed {
+			return store
+		}
+	}
 	return s.Store
 }
 
@@ -215,7 +222,14 @@ func (s *beadPolicyStore) createTarget(_ coordclass.Class) beads.Store {
 // path already used, preserving the StorageGraphApplyStore optional-capability
 // assertion. A future per-class split derives the applier from
 // createTarget(class) here.
-func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphApplyStore {
+func (s *beadPolicyGraphStore) graphApplierFor(class coordclass.Class) beads.GraphApplyStore {
+	if class == coordclass.ClassGraph && s.cityPath != "" {
+		if store, routed, err := routedGraphStoreFor(s.cityPath, s.cfg); err != nil {
+			return unavailableGraphApplier{err: fmt.Errorf("graph-class store unavailable: %w", err)}
+		} else if routed {
+			return store
+		}
+	}
 	return s.applier
 }
 

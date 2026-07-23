@@ -673,6 +673,7 @@ func buildDesiredStateWithSessionBeads(
 		})
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
+			defaultScaleTargets = appendGraphScaleTargets(defaultScaleTargets, cityPath, cfg)
 			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(defaultScaleTargets, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
@@ -724,6 +725,7 @@ func buildDesiredStateWithSessionBeads(
 			var namedErrs []error
 			var partialTemplates map[string]bool
 			subPhaseStart = time.Now()
+			defaultNamedScaleTargets = appendGraphScaleTargets(defaultNamedScaleTargets, cityPath, cfg)
 			namedDefaultDemand, partialTemplates, namedErrs = defaultNamedSessionDemand(defaultNamedScaleTargets, cfg, cityName, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.named_session_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultNamedScaleTargets),

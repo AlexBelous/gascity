@@ -28,7 +28,7 @@
    found"; store failure surfaces distinctly — 404-vs-error preserved);
    legacy ids probe the ROUTED classes in cutover order before the
    byte-identical bd passthrough (covers migrated gc-*/mc-* ids); gcg
-   falls through (graph not relocated in this tree). Per-class renders:
+   was fall-through until P6 landed the graph arm. Per-class renders:
    sessionsdb.Get verbatim, messagingdb.Get→mail-codec bead,
    ordersdb.Get→tracking-label bead, nudges
    FindRecordIncludingTerminal→shadow bead. NOTE: gcm ids minted by
@@ -61,7 +61,49 @@ control-plane/notification predicates (report 0 on migrated cities;
 retire when every city migrates), nudge two-tier file machinery (the
 LIVE backend for unmigrated cities behind QueueForCity).
 
-## P6 GRAPH class — G1+G2 DONE (2026-07-23), wiring slices REMAIN
+## P6 GRAPH class — COMPLETE (2026-07-23): all wiring + migration + ratchet flip landed
+
+The five remaining slices landed after G1+G2:
+
+- **G3 create-side dispatch**: beadPolicyStore carries cityPath
+  (wrapStoreWithBeadPoliciesAt; six production wrap sites thread it; the
+  cityPath-less form stays inert for tests). createTarget(ClassGraph) +
+  graphApplierFor(ClassGraph) resolve the routed store — pours and wisp
+  creates land in .gc/store/graph; fail-closed erroring target/applier
+  on unresolvable marked cities.
+- **G4 doBd mutation arm** (cmd_bd_graph_sqlite.go, ported from integ
+  cmd_bd_infra_sqlite.go): close [--reason] + update --set-metadata/
+  --status/--assignee on gcg ids apply in-process on routed cities; runs
+  BEFORE the write guard in doBd; mixed id sets and unsupported flags
+  error loudly; unrouted cities fall to the guard's refusal.
+- **G5 hook claim + ready federation** (graph_hook_claim.go,
+  graph_hook_ready.go): claim/continuation/stamp seams route gcg ids to
+  the store's CAS Claim/Update in-process; the work-query runner unions
+  the store's TierBoth ready rows into the shell's JSON candidate list
+  (fail-loud; count forms pass through) — the split-branch gc-ready
+  composite folded into the existing runner seam, no new subcommand.
+- **G6 control dispatcher**: openControlStoreAtForCity returns the graph
+  store on routed cities (control lane is graph-class wholesale);
+  findBeadAcrossStores resolves gcg directly; the control-ready bd
+  fallback runs in-process (tier-matched, convoy-excluded); the cache
+  tier federates via the same open.
+- **G7 migration + flip** (graph_class_migrate.go): boot template —
+  reset -> open-bead import (both tiers, ids preserved, within-graph
+  deps re-added) -> copy-verify -> atomic marker -> straggler
+  merge-import -> residue import-then-sweep w/ 10m grace. Closed graph
+  beads never cross. sqliteCapableBeadClasses[BeadClassGraph] flipped
+  LAST; config accepts backend=sqlite; the dormant API arms are live.
+
+Known follow-ups (recorded, not blocking): pool-demand COUNT-form
+queries pass through unfederated (routed-pool wakes ride the federated
+dispatch path); port the splittest invariants (they now genuinely apply
+to this topology) and run the graph ADR's bench/census gates before mc
+flips graph. INCIDENT NOTE 2026-07-23: the sqlit worktree directory +
+worktree-sqlit branch ref were deleted EXTERNALLY mid-session; the tip
+(b483e45c9) was recovered from dangling objects via git fsck and the
+worktree recreated — if it happens again, fsck --lost-found first.
+
+## P6 GRAPH class — G1+G2 (superseded by the section above)
 
 Graph is the fifth and last infra class (after it + migration, bd/Dolt
 holds only work beads). Authoritative design:

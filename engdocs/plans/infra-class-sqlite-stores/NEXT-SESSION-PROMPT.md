@@ -11,15 +11,14 @@ class-store maintenance loop + storehealth TotalSize, doltlite order-run
 cache retired, mail storeless leg routed). Read HANDOFF.md "P5 bd surface
 + cleanup — DONE" first.
 
-**The GRAPH class (P6) is now the active front** — G1 (store port) +
-G2 (dark routing + gcg show federation) are DONE; the remaining wiring
-slices are enumerated in HANDOFF.md "P6 GRAPH class" with their proven
-port sources (integ/cli-class-store-event-emission @2c74f8747,
-feat/split-store-conformance). Execute them in order: create-side
-dispatch -> doBd mutation arm (reconcile with the write guard) ->
-ready/claim federation -> operator-gated migration -> ratchet flip
-LAST. Do not flip sqliteCapableBeadClasses[graph] before every root
-routes.
+**The GRAPH class (P6) is COMPLETE** — store port, routing, create-side
+dispatch, doBd mutation arm + show federation, hook ready/claim
+federation, control-dispatcher routing, boot migration, and the ratchet
+flip all landed (HANDOFF.md "P6 GRAPH class — COMPLETE"). All five
+infra classes are off bd/Dolt once a city migrates. Before mc flips
+graph: port the splittest invariants (they now genuinely apply to this
+topology), run the graph ADR's bench/census gates, and note the
+pool-demand count-form queries are not yet graph-federated.
 
 **What remains on this track (after graph, in order):**
 

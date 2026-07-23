@@ -41,6 +41,7 @@ func classMigrationStates(cityPath string, cfg *config.City) []classMigrationSta
 		{config.BeadClassNudges, nudgesdb.MigratedMarkerPath(cityPath)},
 		{config.BeadClassMessaging, messagingdb.MigratedMarkerPath(cityPath)},
 		{config.BeadClassSessions, sessionsdb.MigratedMarkerPath(cityPath)},
+		{config.BeadClassGraph, graphMigratedMarkerPath(cityPath)},
 	}
 	states := make([]classMigrationState, 0, len(classes))
 	for _, cl := range classes {

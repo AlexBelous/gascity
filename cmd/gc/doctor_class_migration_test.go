@@ -36,7 +36,7 @@ func TestClassMigrationCheckAllBD(t *testing.T) {
 	if !strings.Contains(r.Message, "all infra classes on bd") {
 		t.Fatalf("message %q", r.Message)
 	}
-	if len(r.Details) != 4 {
+	if len(r.Details) != 5 {
 		t.Fatalf("details = %d lines, want one per class: %v", len(r.Details), r.Details)
 	}
 	if r.Details[0] != "orders: backend=bd marker=absent routing=bd" {

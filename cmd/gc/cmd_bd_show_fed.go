@@ -10,7 +10,7 @@ package main
 //
 // Two arms:
 //
-//   - A reserved-prefix id (gco-/gcn-/gcm-/gcs-) can live ONLY in its class
+//   - A reserved-prefix id (gco-/gcn-/gcm-/gcs-/gcg-) can live ONLY in its class
 //     store, so it is served from there — an absent store file or row is
 //     genuine absence ("no issue found", bd's shape), while a store failure
 //     surfaces distinctly. The 404-vs-error discipline is the root-loss
@@ -21,8 +21,7 @@ package main
 //     class stores are probed by id — the storeref.Resolve probe-all shape.
 //     A hit renders locally (bd swept its copy); a clean miss falls through
 //     to the byte-identical bd passthrough. Unrouted classes are never
-//     probed (bd is still their truth). Graph is not relocated in this tree
-//     and always falls through.
+//     probed (bd is still their truth).
 //
 // Reads only; writes stay guarded (cmd_bd_guard.go).
 
@@ -52,9 +51,6 @@ func maybeRouteBdShowLocal(cityPath string, cfg *config.City, bdArgs []string, s
 		return 0, false
 	}
 	if class, reserved := reservedClassForBeadID(id); reserved {
-		if class == config.BeadClassGraph {
-			return 0, false // graph is not relocated in this tree; bd owns it
-		}
 		exists, err := classStoreFileExists(cityPath, class)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: show %q: %v\n", id, err) //nolint:errcheck // best-effort stderr
@@ -70,7 +66,7 @@ func maybeRouteBdShowLocal(cityPath string, cfg *config.City, bdArgs []string, s
 	}
 
 	// Legacy-id probe over the routed classes, in cutover order.
-	for _, class := range []string{config.BeadClassOrders, config.BeadClassNudges, config.BeadClassMessaging, config.BeadClassSessions} {
+	for _, class := range []string{config.BeadClassOrders, config.BeadClassNudges, config.BeadClassMessaging, config.BeadClassSessions, config.BeadClassGraph} {
 		routed, err := classShowRouted(cityPath, cfg, class)
 		if err != nil {
 			// Routing state unknowable: falling through to bd could read a
@@ -131,6 +127,8 @@ func classShowRouted(cityPath string, cfg *config.City, class string) (bool, err
 		return messagingdb.Routed(cityPath, cfg)
 	case config.BeadClassSessions:
 		return sessionsdb.Routed(cityPath, cfg)
+	case config.BeadClassGraph:
+		return graphSQLiteRoutingActive(cityPath, cfg)
 	}
 	return false, nil
 }
@@ -149,6 +147,8 @@ func classStoreFileExists(cityPath, class string) (bool, error) {
 		path = messagingdb.StorePath(cityPath)
 	case config.BeadClassSessions:
 		path = sessionsdb.StorePath(cityPath)
+	case config.BeadClassGraph:
+		path = graphClassStorePath(cityPath)
 	}
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -199,6 +199,19 @@ func classStoreShowBead(cityPath, class, id string) (beads.Bead, bool, error) {
 		return mailShowBead(rec), true, nil
 	case config.BeadClassSessions:
 		st, err := sessionsdb.SharedStoreFor(cityPath)
+		if err != nil {
+			return beads.Bead{}, false, err
+		}
+		b, err := st.Get(id)
+		if errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, false, nil
+		}
+		if err != nil {
+			return beads.Bead{}, false, err
+		}
+		return b, true, nil
+	case config.BeadClassGraph:
+		st, err := graphClassStoreFor(cityPath)
 		if err != nil {
 			return beads.Bead{}, false, err
 		}

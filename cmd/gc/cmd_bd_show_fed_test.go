@@ -53,12 +53,38 @@ func TestBdShowFedReservedIDAbsentStore(t *testing.T) {
 	}
 }
 
-// TestBdShowFedGraphFallsThrough pins that gcg ids keep the byte-identical
-// passthrough: graph is not relocated in this tree.
-func TestBdShowFedGraphFallsThrough(t *testing.T) {
+// TestBdShowFedGraphReservedID pins the graph arm: a gcg id with no graph
+// store is genuine absence (gcg ids are minted only by the graph store, so
+// bd could never answer differently), and a graph-store-resident id is
+// served locally — the root-loss liveness read.
+func TestBdShowFedGraphReservedID(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if _, handled := maybeRouteBdShowLocal(t.TempDir(), nil, []string{"show", "gcg-wisp-1"}, &stdout, &stderr); handled {
-		t.Fatal("gcg id was federated; graph must fall through to bd")
+	code, handled := maybeRouteBdShowLocal(t.TempDir(), nil, []string{"show", "gcg-wisp-1"}, &stdout, &stderr)
+	if !handled || code != 1 || !strings.Contains(stderr.String(), "no issue found matching") {
+		t.Fatalf("absent store = (%d, %v, %q), want handled not-found", code, handled, stderr.String())
+	}
+
+	cityPath := t.TempDir()
+	st, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := st.Create(beads.Bead{Title: "molecule root", Type: "molecule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code, handled = maybeRouteBdShowLocal(cityPath, nil, []string{"show", created.ID, "--json"}, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("graph show = (%d, %v); stderr=%s", code, handled, stderr.String())
+	}
+	var arr []beads.Bead
+	if err := json.Unmarshal(stdout.Bytes(), &arr); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(arr) != 1 || arr[0].ID != created.ID || arr[0].Title != "molecule root" {
+		t.Fatalf("bead %+v", arr)
 	}
 }
 

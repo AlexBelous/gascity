@@ -287,12 +287,17 @@ func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath strin
 }
 
 // resolveGraphStore returns the beads.Store backing the GRAPH coordination
-// class. Identity today: the work store. When graph relocates, the dedicated
-// graph-store dispatch plugs in at resolveClassStore (graph uses its own legacy
-// .gc/ location and is event-silent by design, so rec is accepted for signature
-// parity with the other resolve*Store helpers and ignored here).
+// class: the embedded SQLiteStore (graph_class_store.go) on a city whose
+// [beads.classes.graph] backend is sqlite AND whose graph.migrated marker
+// exists; the work store otherwise; a fail-closed erroring store when a
+// marked city's routing or store cannot resolve. Graph is event-silent by
+// design, so rec is accepted for signature parity and ignored. NOTE: the
+// config ratchet still rejects backend="sqlite" for graph, so the routed
+// arm is DARK until the wiring slices (create-side dispatch, doBd mutation
+// arm, ready/claim federation) complete and flip it.
 func resolveGraphStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
+	base := resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
+	return resolveGraphStoreRouted(base, cfg, cityPath)
 }
 
 // newCityMailProvider builds the controller's mail provider as a two-store mail

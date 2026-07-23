@@ -235,10 +235,14 @@ func TestBuildDesiredState_WarmRigPoolMissingRigStoreStaysPartialNoCityProbe(t *
 // named-session-backing branch has its own copy of the city probe with the
 // same warm-blindness: an on_demand named-backing rig pool that was WARM
 // stopped counting city-store routed demand, dropping to zero between city
-// beads and getting orphan-drained (amplitude clamped to 1 by the
-// namedOnDemandTemplates clamp, but the same spawn/drain treadmill). The
-// clamp keeps the counted demand at 1 regardless of queue depth; the point
-// pinned here is nonzero-ness while WARM.
+// beads and getting orphan-drained. warmCrossStoreCfg's max_active_sessions=5
+// makes this named session pool-shaped (ga-3prlpb.4:
+// config.IsPoolShapedNamedSession), so it is routed through the identical
+// generic pool-agent cross-store probe as its unnamed sibling
+// (TestBuildDesiredState_WarmRigPoolSeesCityStoreRoutedDemand) rather than the
+// singleton named-session branch — the namedOnDemandTemplates clamp-to-1 is
+// singleton-only and correctly does not apply here. The point pinned here is
+// the full unclamped union count while WARM.
 func TestBuildDesiredState_WarmNamedBackingRigPoolSeesCityStoreRoutedDemand(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := warmCrossStoreCfg(t, cityPath)
@@ -263,9 +267,9 @@ func TestBuildDesiredState_WarmNamedBackingRigPoolSeesCityStoreRoutedDemand(t *t
 		cityStore, rigStores, nil, nil, io.Discard,
 	)
 
-	if got := dsResult.ScaleCheckCounts["gascity/worker"]; got != 1 {
-		t.Fatalf("ScaleCheckCounts[gascity/worker] = %d, want 1 (namedOnDemandTemplates clamp): a WARM "+
-			"named-backing rig pool must still count city-store routed demand or it churns at "+
-			"the warm/cold boundary (full=%v)", got, dsResult.ScaleCheckCounts)
+	if got := dsResult.ScaleCheckCounts["gascity/worker"]; got != 3 {
+		t.Fatalf("ScaleCheckCounts[gascity/worker] = %d, want 3: a WARM pool-shaped named-backing rig pool "+
+			"must still count city-store routed demand or it churns at the warm/cold boundary, unclamped "+
+			"since max_active_sessions=5 makes it a real pool, not a singleton (full=%v)", got, dsResult.ScaleCheckCounts)
 	}
 }

@@ -396,13 +396,22 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 		namedSessionMode := ""
+		var namedSessionForAgent *config.NamedSession
 		for j := range cfg.NamedSessions {
 			if cfg.NamedSessions[j].TemplateQualifiedName() == cfg.Agents[i].QualifiedName() {
 				namedSessionMode = cfg.NamedSessions[j].ModeOrDefault()
+				namedSessionForAgent = &cfg.NamedSessions[j]
 				break
 			}
 		}
 		backsNamedSession := namedSessionMode != ""
+		// ga-3prlpb.4 (FR-2): a named session whose backing agent has been
+		// rig-patched away from singleton shape (namepool, or max != 1) is a
+		// pool, full stop. Route it through the identical fallthrough ordinary
+		// pool agents use below instead of the named-session special case,
+		// which unconditionally discards the min floor (continue a few lines
+		// down) and clamps elastic demand to 1 (namedOnDemandTemplates below).
+		poolShapedNamedSession := backsNamedSession && config.IsPoolShapedNamedSession(&cfg.Agents[i], namedSessionForAgent)
 
 		sp := scaleParamsForBeads(&cfg.Agents[i], cfg.Beads)
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
@@ -445,7 +454,7 @@ func buildDesiredStateWithSessionBeads(
 		// zero/partial), so they need no cold-specific handling.
 		isCold := runningSessions == 0 && cfg.Agents[i].EffectiveMinActiveSessions() == 0
 
-		if backsNamedSession {
+		if backsNamedSession && !poolShapedNamedSession {
 			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
 				continue
@@ -1109,6 +1118,7 @@ func collectAssignedWorkBeadsWithStores(
 		stores    []beads.Store
 		storeRefs []string
 		readyIDs  map[string]bool
+		seen      map[string]struct{} // bead IDs already captured for this store candidate
 		errs      []error
 	}
 	results := make([]storeAssignedWorkResult, len(stores))
@@ -1156,7 +1166,7 @@ func collectAssignedWorkBeadsWithStores(
 					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				}
 			}
-			results[idx] = storeAssignedWorkResult{ref: source.ref, beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
+			results[idx] = storeAssignedWorkResult{ref: source.ref, beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, seen: seen, errs: errs}
 		}()
 	}
 	wg.Wait()
@@ -1224,7 +1234,16 @@ func collectAssignedWorkBeadsWithStores(
 			var readyStores []beads.Store
 			var readyStoreRefs []string
 			readyIDs := make(map[string]bool)
-			seen := make(map[string]struct{})
+			// Seed with phase 1's per-store seen set (safe: wg.Wait above already
+			// synchronized every phase 1 write into results). A bead already
+			// captured for this store by the in-progress/open-routed pass (e.g.
+			// an open, assigned, routed bead that also independently satisfies
+			// Ready(assignee=...)) must not be re-appended here — that would
+			// double-count one work bead as two resume-tier SessionRequests.
+			seen := make(map[string]struct{}, len(results[idx].seen))
+			for id := range results[idx].seen {
+				seen[id] = struct{}{}
+			}
 			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref)
 			readyResults[idx] = storeAssignedWorkResult{ref: source.ref, beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
@@ -2099,9 +2118,18 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
-		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
-		}
+		// List-append and readiness are orthogonal: this pass's seen set is
+		// pre-seeded with phase 1's captures (collectAssignedWorkBeadsWithStores)
+		// so a bead phase 1 already listed is correctly skipped here to avoid a
+		// duplicate list entry. But when that bead's only phase 1 capture came
+		// from appendOpenRoutedWorkUnique (no readiness verdict established —
+		// see readyCapturedAssigneeSet), THIS Ready() pass is the sole place its
+		// readiness gets recorded. Gating markReadyAssigned on appendWorkUnique's
+		// append-happened return would silently drop that verdict once the bead
+		// is a list-dedup no-op, breaking named-session/pool demand for any
+		// bead this pass's Ready() query genuinely confirmed as ready.
+		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
+		markReadyAssigned(readyIDs, b)
 	}
 }
 
@@ -2601,6 +2629,25 @@ func realizePoolDesiredSessions(
 	used := make(map[string]bool)
 	usedSlots := make(map[int]bool)
 
+	// ga-3prlpb.4 (FR-2/FR-6): computePoolDesiredStates deliberately includes
+	// a pool-shaped named session's base bead in resume requests (it must
+	// count toward the pool's own min/max like any other pool session). The
+	// defense-in-depth refusal below exists for the singleton case, where a
+	// resume request pointing at the canonical named session would otherwise
+	// slip through and get renamed into a phantom "{name}-N" sibling; it must
+	// not fire for the pool-shaped case, which has no such canonical identity
+	// to protect.
+	var namedSessionForAgent *config.NamedSession
+	if bp.city != nil {
+		for j := range bp.city.NamedSessions {
+			if bp.city.NamedSessions[j].TemplateQualifiedName() == qualifiedName {
+				namedSessionForAgent = &bp.city.NamedSessions[j]
+				break
+			}
+		}
+	}
+	poolShapedNamedSession := config.IsPoolShapedNamedSession(cfgAgent, namedSessionForAgent)
+
 	// Phase A (serial, fast): select an existing session bead to reuse OR
 	// reserve an (alias, slot) for a fresh create. Mutates used/usedSlots
 	// under serial control so dedup and slot allocation remain deterministic.
@@ -2614,11 +2661,13 @@ func realizePoolDesiredSessions(
 			var prefer *session.Info
 			if request.SessionBeadID != "" {
 				if candidate, ok := bp.sessionBeads.FindInfoByID(request.SessionBeadID); ok {
-					// Defense in depth: ComputePoolDesiredStates filters out
-					// named-session beads from pool resume requests. If one
-					// slipped through, materializing it here would create a
-					// phantom "{name}-N" sibling to the canonical named session.
-					if isNamedSessionInfo(candidate) {
+					// Defense in depth: ComputePoolDesiredStates filters
+					// singleton named-session beads out of pool resume
+					// requests. If one slipped through, materializing it here
+					// would create a phantom "{name}-N" sibling to the
+					// canonical named session. Pool-shaped named sessions are
+					// the intentional exception (see above).
+					if isNamedSessionInfo(candidate) && !poolShapedNamedSession {
 						fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, candidate.ID, cfgAgent.Name) //nolint:errcheck
 						item.skip = true
 						return item
@@ -3593,6 +3642,18 @@ func selectOrPlanPoolSessionBead(
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
+		if isNamedSessionInfo(*preferred) {
+			// A named session's base identity is addressed by its bare
+			// configured name, never a numbered "{name}-N" slot. Even when
+			// pool-shaped (ga-3prlpb.4) it occupies pool capacity but must
+			// not consume slot-numbering space, or the next genuinely new
+			// pool instance would be pushed to slot 2 instead of slot 1.
+			if isManualSessionInfoForAgent(*preferred, cfgAgent) {
+				return *preferred, 0, nil, nil
+			}
+			info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, *preferred)
+			return info, 0, nil, err
+		}
 		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, *preferred, usedSlots)
 		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 			return session.Info{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)

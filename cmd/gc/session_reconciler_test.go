@@ -10494,7 +10494,33 @@ func reconcileConfiguredSessionsOnce(
 ) (DesiredStateResult, []beads.Bead, int) {
 	t.Helper()
 
-	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, stderr)
+	// Production always threads a real per-rig store map into
+	// buildDesiredStateWithSessionBeads (city_runtime.go's rigBeadStores,
+	// cmd_start.go's buildStandaloneRigStores); the buildDesiredState
+	// convenience wrapper hardcodes rigStores=nil, which is only safe for
+	// fixtures with no configured rigs. A rig-scoped agent with no custom
+	// scale_check falls to defaultScaleCheckTargetForAgent, which reports the
+	// rig's demand read as unavailable/partial when its store is missing and
+	// that explicitly blocks fresh pool-session creation — so any test with a
+	// configured rig needs a real (if empty) store per rig here, matching
+	// production shape. A fresh MemStore rather than aliasing to the city
+	// store: collectAllOpenSessionInfos/coordClassStoreCandidates fan out
+	// across city + every rig store with no de-dup, so an aliased store would
+	// double-count every open session bead.
+	rigStores := make(map[string]beads.Store, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		rigStores[rig.Name] = beads.NewMemStore()
+	}
+
+	var sessionBeads *sessionBeadSnapshot
+	if store != nil {
+		var err error
+		sessionBeads, err = loadSessionBeadSnapshot(store)
+		if err != nil {
+			t.Fatalf("loadSessionBeadSnapshot: %v", err)
+		}
+	}
+	dsResult := buildDesiredStateWithSessionBeads(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, rigStores, sessionBeads, nil, stderr)
 	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
 	syncSessionBeads(cityPath, store, dsResult.State, sp, cfgNames, cfg, clk, stderr, true)
 

@@ -7953,8 +7953,15 @@ func TestBuildDesiredState_NamedBackedPoolPartialRetainsGenericPoolSession(t *te
 	if !result.PoolScaleCheckPartialTemplates["worker"] {
 		t.Fatalf("PoolScaleCheckPartialTemplates[worker] = false, want true for template pool partial; templates=%v", result.PoolScaleCheckPartialTemplates)
 	}
-	if !result.NamedScaleCheckPartialTemplates["worker"] {
-		t.Fatalf("NamedScaleCheckPartialTemplates[worker] = false, want true; templates=%v", result.NamedScaleCheckPartialTemplates)
+	// worker's max_active_sessions=3 makes it pool-shaped (ga-3prlpb.4):
+	// config.IsPoolShapedNamedSession routes it through the generic pool-agent
+	// bookkeeping instead of the singleton named-session branch, so it never
+	// populates defaultNamedScaleTargets/NamedScaleCheckPartialTemplates.
+	// PoolScaleCheckPartialTemplates alone drives retention here (see the OR in
+	// discoverSessionBeadsWithRoots), so this is a bookkeeping shift, not a
+	// coverage gap.
+	if result.NamedScaleCheckPartialTemplates["worker"] {
+		t.Fatalf("NamedScaleCheckPartialTemplates[worker] = true, want false: worker is pool-shaped (max_active_sessions=3), so it never enters the singleton named-session bookkeeping; templates=%v", result.NamedScaleCheckPartialTemplates)
 	}
 	if _, ok := result.State["worker-bd-123"]; !ok {
 		t.Fatalf("generic pool session was not retained by template pool partial: keys=%v stderr=%s", mapKeys(result.State), stderr.String())

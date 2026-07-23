@@ -124,6 +124,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 	}
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
+	poolShapedNamedSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
@@ -138,16 +139,29 @@ func filterAssignedWorkBeadsForPoolDemand(
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			assigneeToSessionBeadID[id] = sb.ID
 		}
+		if isNamedSessionInfo(sb) && template != "" {
+			if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
+				var namedSessionForAgent *config.NamedSession
+				for j := range cfg.NamedSessions {
+					if cfg.NamedSessions[j].TemplateQualifiedName() == template {
+						namedSessionForAgent = &cfg.NamedSessions[j]
+						break
+					}
+				}
+				if config.IsPoolShapedNamedSession(agentCfg, namedSessionForAgent) {
+					poolShapedNamedSessionBeadIDs[sb.ID] = true
+				}
+			}
+		}
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
+		sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]
 		template := routedToOrLegacyWorkflowTarget(wb)
-		if template == "" {
-			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
-				template = sessionBeadTemplate[sessionBeadID]
-				if template == "" && len(cfg.Agents) == 1 {
-					template = cfg.Agents[0].QualifiedName()
-				}
+		if template == "" && sessionBeadID != "" {
+			template = sessionBeadTemplate[sessionBeadID]
+			if template == "" && len(cfg.Agents) == 1 {
+				template = cfg.Agents[0].QualifiedName()
 			}
 		}
 		if template == "" {
@@ -155,6 +169,16 @@ func filterAssignedWorkBeadsForPoolDemand(
 		}
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil {
+			continue
+		}
+		// ga-3prlpb.4 (FR-6): a pool-shaped named session's base identity is
+		// addressed and discovered city-wide by name, so work assigned to it
+		// may legitimately live outside the backing agent's own rig store.
+		// Gating it on the agent's rig store-ref would drop its resume
+		// demand from pool accounting, undercounting occupancy and
+		// over-spawning past the configured minimum.
+		if poolShapedNamedSessionBeadIDs[sessionBeadID] {
+			filtered = append(filtered, wb)
 			continue
 		}
 		if assignedWorkIndexReachableFromAgent(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i) {

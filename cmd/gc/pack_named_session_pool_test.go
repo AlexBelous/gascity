@@ -196,7 +196,10 @@ mode = "on_demand"
 		t.Fatalf("fixture named session %s not found", identity)
 	}
 
-	return packNamedPoolFixture{cityPath: cityPath, cfg: cfg, identity: identity}
+	// reconcileConfiguredSessionsOnce/resolveSessionIDWithConfig expect the
+	// city root directory (e.g. citylayout.SessionNameLocksDir(cityRoot)),
+	// not the city.toml file path used to load the config above.
+	return packNamedPoolFixture{cityPath: root, cfg: cfg, identity: identity}
 }
 
 func createPackNamedBaseSessionBead(t *testing.T, store beads.Store, cfg *config.City, identity string) beads.Bead {

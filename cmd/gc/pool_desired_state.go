@@ -155,6 +155,17 @@ func computePoolDesiredStates(
 			continue
 		}
 		template := agent.QualifiedName()
+		var namedSessionForAgent *config.NamedSession
+		for j := range cfg.NamedSessions {
+			if cfg.NamedSessions[j].TemplateQualifiedName() == template {
+				namedSessionForAgent = &cfg.NamedSessions[j]
+				break
+			}
+		}
+		// ga-3prlpb.4 (FR-6): a pool-shaped named session's base bead must
+		// count toward its own agent's resume tier like any other pool
+		// session — see the namedSessionBeadIDs skip below.
+		poolShapedNamedSession := config.IsPoolShapedNamedSession(agent, namedSessionForAgent)
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
@@ -190,8 +201,11 @@ func computePoolDesiredStates(
 				// here prevents realizePoolDesiredSessions from renaming the
 				// canonical named identity to a phantom "{name}-1" pool
 				// instance — which would create two desired sessions for the
-				// same agent even when max_active_sessions=1.
-				if namedSessionBeadIDs[sessionBeadID] {
+				// same agent even when max_active_sessions=1. A pool-shaped
+				// named session (ga-3prlpb.4) has no such canonical identity
+				// to protect, and must count its base session as occupied
+				// pool capacity or the reconciler over-spawns past max.
+				if namedSessionBeadIDs[sessionBeadID] && !poolShapedNamedSession {
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{

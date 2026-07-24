@@ -138,7 +138,13 @@ func orderClassRoutingFor(cityPath string, cfg *config.City) (orderClassRouting,
 		return orderClassRouting{}, err
 	}
 	if !active {
-		return bdOrderClassRouting(), nil
+		// bd tracking shape — but the GRAPH leg (wisp-root order-run
+		// evidence) still routes when the graph class is relocated, else
+		// LastRun/Cursor lose the evidence the poured roots now carry in
+		// the embedded graph store (gap G18).
+		return orderClassRouting{front: func(scope beads.Store) *orders.Store {
+			return orders.NewStoreWithGraph(beads.OrdersStore{Store: scope}, beads.GraphStore{Store: resolveGraphStoreRouted(scope, cfg, cityPath)})
+		}}, nil
 	}
 	class, err := ordersClassStoreFor(cityPath)
 	if err != nil {
@@ -146,7 +152,7 @@ func orderClassRoutingFor(cityPath string, cfg *config.City) (orderClassRouting,
 	}
 	return orderClassRouting{
 		front: func(scope beads.Store) *orders.Store {
-			return orders.NewStoreWithTracking(class, beads.GraphStore{Store: scope})
+			return orders.NewStoreWithTracking(class, beads.GraphStore{Store: resolveGraphStoreRouted(scope, cfg, cityPath)})
 		},
 		routed: true,
 	}, nil

@@ -1558,7 +1558,10 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
-	if err := store.Update(rootID, update); err != nil {
+	// The poured wisp root is graph-class: on a routed city it lives in the
+	// embedded graph store, not the dispatch scope store (gap G18 — a
+	// scope-store stamp NotFounds, breaking order dedup/cursor evidence).
+	if err := graphStoreForID(m.cityPath, m.cfg, store, rootID).Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
 		// Log and emit an event so operators can investigate.
 		logDispatchError(m.stderr, "gc: order %s: failed to label wisp %s: %v", scoped, rootID, err)

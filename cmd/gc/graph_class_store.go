@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -189,4 +190,23 @@ func routedGraphStoreOrWarn(cityPath string, cfg *config.City, stderr io.Writer)
 		return nil
 	}
 	return st
+}
+
+// graphStoreForID returns the store that owns id for a by-id mutation on a
+// graph-routed city: the embedded graph store when it holds the row (or the
+// id carries the reserved prefix), else fallback. Routing errors fall back
+// too — the caller's own write then fails loud on the missing row rather
+// than silently landing in the wrong store.
+func graphStoreForID(cityPath string, cfg *config.City, fallback beads.Store, id string) beads.Store {
+	st, routed, err := routedGraphStoreFor(cityPath, cfg)
+	if err != nil || !routed {
+		return fallback
+	}
+	if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && strings.HasPrefix(id, prefix+"-") {
+		return st
+	}
+	if _, gerr := st.Get(id); gerr == nil {
+		return st
+	}
+	return fallback
 }

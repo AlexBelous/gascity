@@ -127,7 +127,14 @@ func (cr *CityRuntime) rebuildConvergenceHandler() {
 // single bead store. Each rig scope resolves formulas through that rig's
 // formula search paths so rig-local formulas are honored.
 func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string) *convergenceScope {
-	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths)
+	// Convergence roots and their wisps classify ClassGraph, so on a
+	// graph-routed city the ADAPTER's bead ops run against the embedded
+	// graph store (read-your-writes with the create-side policy dispatch,
+	// which already lands the roots there); a marked city whose routing
+	// cannot resolve gets a fail-closed erroring store. The scope's own
+	// store stays policy-wrapped for the pour path (sweep-addendum gap
+	// N01/N03 — the split-brained convergence engine).
+	adapter := newConvergenceStoreAdapter(resolveGraphStoreRouted(store, cr.cfg, cr.cityPath), formulaSearchPaths)
 	return &convergenceScope{
 		rig:       rig,
 		storePath: storePath,

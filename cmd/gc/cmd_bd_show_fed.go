@@ -59,7 +59,7 @@ func maybeRouteBdShowLocal(cityPath string, cfg *config.City, bdArgs []string, s
 		if !exists {
 			// No class store file: a reserved-prefix id has nowhere else to
 			// live, so this is genuine absence.
-			printBdShowNotFound(stderr, id)
+			printBdShowNotFoundExact(stderr, id)
 			return 1, true
 		}
 		return renderClassShow(cityPath, class, id, jsonOut, stdout, stderr), true
@@ -236,7 +236,7 @@ func renderClassShow(cityPath, class, id string, jsonOut bool, stdout, stderr io
 		return 1
 	}
 	if !found {
-		printBdShowNotFound(stderr, id)
+		printBdShowNotFoundExact(stderr, id)
 		return 1
 	}
 	return printBdShowBead(b, jsonOut, stdout, stderr)
@@ -247,6 +247,17 @@ func renderClassShow(cityPath, class, id string, jsonOut bool, stdout, stderr io
 // passthrough would produce.
 func printBdShowNotFound(stderr io.Writer, id string) {
 	fmt.Fprintf(stderr, "Error fetching %s: no issue found matching %q\n", id, id) //nolint:errcheck // best-effort stderr
+}
+
+// printBdShowNotFoundExact renders absence for a reserved-prefix id, which is
+// served by an EXACT point read against the class store. bd's own reader
+// substring-resolves a truncated id, so without this hint a shortened id
+// pasted from a log reads as a deleted bead (gap G32 — the cheap fix; a real
+// fuzzy resolver across five heterogeneous class stores is not worth it for a
+// read-only convenience, and the write guard is deliberately exact-id).
+func printBdShowNotFoundExact(stderr io.Writer, id string) {
+	printBdShowNotFound(stderr, id)
+	fmt.Fprintf(stderr, "gc bd: %s is a class-store id; class stores resolve ids exactly (no substring match) — pass the full id\n", id) //nolint:errcheck // best-effort stderr
 }
 
 // printBdShowBead renders a bead in bd's show output shape: `--json` emits a

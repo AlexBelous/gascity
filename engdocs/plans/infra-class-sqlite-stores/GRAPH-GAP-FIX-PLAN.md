@@ -73,5 +73,15 @@ DONE / IN-PROGRESS / TODO / DESCOPED(reason).
         not graph beads; order-tracking-retention is orders-class; the
         routed_to/session-model legs are follow-ups (specs in /tmp not
         committed — re-derive from the spec workflow if wanted).
-26. [ ] G32 substring show resolution (low); G33 bd v1.1.x ephemeral
-        probe repair (low); G34 per-store-ref partial gating (low)
+26. [x] G32 exact-id hint on class-store misses (the fuzzy-resolver fix
+        is DESCOPED: five heterogeneous class stores, read-only
+        convenience, and the write guard is deliberately exact-id).
+    [x] G33 bd v1.1.x ephemeral probe repair (status-only predicate on
+        non-open statuses; 24 goldens + 6 fixtures regenerated).
+    [ ] G34 per-store-ref partial gating — DEFERRED: needs the
+        collectAssignedWork return-struct refactor + release-gate
+        rework; spec in the workflow output. Failure mode is a flapping
+        rig store suspending orphan release city-wide, which predates
+        the graph work.
+    [ ] N23 spawn-storm reset-loop discovery — DEFERRED with N17: the
+        controller-side recovery paths now cover the same population.

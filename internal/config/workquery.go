@@ -63,6 +63,17 @@ func poolDemandMigrationFilterJQ(limit int) string {
 }
 
 func bdQueryEphemeralStatusShell(status string) string {
+	// bd v1.1.x returns zero rows for the compound `ephemeral=true AND
+	// status=<s>` on any non-open status, which blinds the recovery probes to
+	// no_history wisps (their wisp row carries ephemeral=0) — gap G33. Query
+	// by status alone there; every consumer re-filters by assignee or by
+	// empty-assignee+route in jq, and the `bd list` arm beside it already
+	// covers the same non-wisp population, so the union grows by exactly the
+	// wisp rows it was missing. The open-status pool-demand probes keep the
+	// bounded compound.
+	if status != "open" {
+		return `bd query --json ` + shellquote.Quote("status="+status) + ` --limit=0`
+	}
 	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -188,7 +189,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
 		graphLeg = true
 		for _, assignee := range assigneeTerms {
-			query := beads.ListQuery{
+			queries := []beads.ListQuery{{
 				Status:        input.Status,
 				Type:          input.Type,
 				Label:         input.Label,
@@ -196,29 +197,42 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				IncludeClosed: input.All,
 				Sort:          beads.SortCreatedDesc,
 				TierMode:      beads.TierBoth,
+			}}
+			if input.Type == "molecule" {
+				// graph.v2 run roots are issue_type=task tagged
+				// gc.kind=workflow, not issue_type=molecule — surface them
+				// under the same type=molecule read the runs view uses
+				// (win3 gap G36, the b36 augment scoped to the graph leg
+				// where relocated roots live).
+				queries = append(queries, beads.ListQuery{
+					Status:        input.Status,
+					Label:         input.Label,
+					Assignee:      assignee,
+					IncludeClosed: input.All,
+					Sort:          beads.SortCreatedDesc,
+					TierMode:      beads.TierBoth,
+					Metadata:      map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+				})
 			}
-			if !query.HasFilter() {
-				query.AllowScan = true
-			}
-			pa.attempt()
-			list, err := graph.List(query)
-			if err != nil && (!beads.IsPartialResult(err) || len(list) == 0) {
-				pa.record("graph", err)
-				continue
-			}
-			if err != nil {
-				pa.record("graph", err)
-			}
-			pa.success()
-			for _, b := range list {
-				dedupeKey := "graph\x00" + b.ID
-				if dedupe && seen[dedupeKey] {
+			for _, query := range queries {
+				pa.attempt()
+				list, err := graph.List(query)
+				if err != nil && (!beads.IsPartialResult(err) || len(list) == 0) {
+					pa.record("graph", err)
 					continue
 				}
-				if dedupe {
-					seen[dedupeKey] = true
+				if err != nil {
+					pa.record("graph", err)
 				}
-				all = append(all, b)
+				pa.success()
+				for _, b := range list {
+					dedupeKey := "graph\x00" + b.ID
+					if seen[dedupeKey] {
+						continue
+					}
+					seen[dedupeKey] = true
+					all = append(all, b)
+				}
 			}
 		}
 	}

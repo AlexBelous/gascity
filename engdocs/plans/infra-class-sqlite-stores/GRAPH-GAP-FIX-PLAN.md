@@ -32,23 +32,27 @@ DONE / IN-PROGRESS / TODO / DESCOPED(reason).
 8.  [x] G19 control-dispatcher pack-custom queries: wrap shell fallback
         in graphFederatedWorkQueryRunner (dispatch_runtime.go ~883)
 9.  [x] G12 drain MemberStores work-store tail (+retry/retry-eval/ralph)
-10. [ ] G25 retry-eval required-artifact source read (port ebeba2a55)
+10. [x] G25 retry-eval required-artifact source read (port ebeba2a55)
 11. [x] G35 findBeadAcrossStores gcg arm: fall through to city/rig scan
         on ErrNotFound (manual recovery of misplaced control beads)
 12. [x] G14/G15/G21/G30 API GET /beads list + ready graph legs
         (fail-loud 503 shape from integ)
-13. [ ] G31 memberStoreComplement for /beads/graph cross-class members
-14. [ ] G28 /status work counts graph leg; G36 type=molecule augment
-15. [ ] G16 bead.* emission wrapper for graph store (controller +
-        CLI mutation arm + hook claim); G17 BFF fetchRunGraph merge
-        (port B36 db9d6302c)
+13. [x] G31 memberStoreComplement for /beads/graph cross-class members
+14. [x] G28 /status work counts graph leg; [x] G36 type=molecule augment (graph leg)
+15. [x] G16 bead.* emission wrapper (controller seam + policy-dispatch
+        reuse; CLI one-shot emission = follow-up). G17 BFF fetchRunGraph:
+        B36 db9d6302c does NOT apply — b36's RunDetailOptions/scope-hint
+        refactor diverges from local BuildRunDetailWithSessionsAndFormula;
+        needs a NATIVE port (loopback GET /v0/.../beads/graph/{rootID} in
+        runtailer.detail() + graph-wins merge + graph_fetch_failed partial
+        reason threaded through local runproj). Follow-up session.
 16. [ ] N05/N19/N21 convoy: gc convoy status synthetic-convoy graph
         arm; convoys list lane; controller-down fallback candidate
 17. [ ] N06 CAS fencing on graph plane: decide implement-ConditionalWriter
         vs loud-fail (control epochs / drain reservations / attach fences)
 18. [ ] N14 prime/nudge wisp-step injection graph arm
 19. [ ] N15 API ActiveBead fan-out graph leg
-20. [ ] N16 non-claim gc hook runner federation (same wrapper as claim)
+20. [x] N16 non-claim gc hook runner federation (same wrapper as claim)
 21. [ ] N17 on_death/on_boot recovery hook shells (rewrite to gc-native
         or wrap); N23 spawn-storm reset-loop discovery
 22. [ ] N18 wisp retention: graph-store closed-wisp purge path (wisp-

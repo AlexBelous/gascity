@@ -417,7 +417,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := firstStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		// Non-claim discovery federates the graph store the same way the
+		// claim path does — bare `gc hook` (check-for-work) was graph-blind
+		// (sweep gap N16).
+		out, _, err := firstStoreWithWork(command, stores, stores[0], graphFederatedWorkQueryRunner(cityPath, cfg))
 		emitQueryFailure(command, err)
 		return out, err
 	}

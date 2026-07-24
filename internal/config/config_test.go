@@ -3656,6 +3656,29 @@ func TestDaemonAutoReapClosedBeadWorktreesExplicitFalse(t *testing.T) {
 	}
 }
 
+func TestDaemonAutoReapClosedBeadWorktreesDryRunDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (default)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if !d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (kill switch)")
+	}
+}
+
 func TestDaemonRestartWindowDefault(t *testing.T) {
 	d := DaemonConfig{}
 	got := d.RestartWindowDuration()

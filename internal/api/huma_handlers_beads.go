@@ -178,6 +178,50 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			}
 		}
 	}
+	// Graph leg (win3 gap G14/G30): relocated graph beads (molecule roots,
+	// steps, wisps, control beads) are reachable by none of the rig stores.
+	// Additive federate with the same filters, TierBoth so wisp-tier rows
+	// surface; a hard leg failure is recorded (degraded, never silently
+	// complete). Excluded from the bounded-count fast path — its rows are
+	// additive to the page.
+	graphLeg := false
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		graphLeg = true
+		for _, assignee := range assigneeTerms {
+			query := beads.ListQuery{
+				Status:        input.Status,
+				Type:          input.Type,
+				Label:         input.Label,
+				Assignee:      assignee,
+				IncludeClosed: input.All,
+				Sort:          beads.SortCreatedDesc,
+				TierMode:      beads.TierBoth,
+			}
+			if !query.HasFilter() {
+				query.AllowScan = true
+			}
+			pa.attempt()
+			list, err := graph.List(query)
+			if err != nil && (!beads.IsPartialResult(err) || len(list) == 0) {
+				pa.record("graph", err)
+				continue
+			}
+			if err != nil {
+				pa.record("graph", err)
+			}
+			pa.success()
+			for _, b := range list {
+				dedupeKey := "graph\x00" + b.ID
+				if dedupe && seen[dedupeKey] {
+					continue
+				}
+				if dedupe {
+					seen[dedupeKey] = true
+				}
+				all = append(all, b)
+			}
+		}
+	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
 	}
@@ -190,7 +234,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	// merged set has one global total order and a bounded read is a
 	// deterministic prefix of it (#3208). A single (rig, assignee) source is
 	// already in canonical order — skip the redundant hot-path sort.
-	if len(rigNames)*len(assigneeTerms) > 1 {
+	if len(rigNames)*len(assigneeTerms) > 1 || graphLeg {
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
@@ -404,6 +448,27 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
 		}
 		federate("rig "+rigName, stores[rigName])
+	}
+	// Graph leg (win3 gap G15/G21): relocated ready graph work — molecule
+	// steps surface as wisps, so the leg reads TierBoth explicitly rather
+	// than riding the no-arg federate.
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		pa.attempt()
+		ready, err := graph.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		if err != nil && (!beads.IsPartialResult(err) || len(ready) == 0) {
+			pa.record("graph", err)
+		} else {
+			if err != nil {
+				pa.record("graph", err)
+			}
+			pa.success()
+			for _, b := range ready {
+				if !seen[b.ID] {
+					seen[b.ID] = true
+					all = append(all, b)
+				}
+			}
+		}
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()

@@ -211,6 +211,22 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			return fmt.Errorf("loading city config for %s: unavailable after warning-only load", cityPath)
 		}
 		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
+		// Cross-store member tail (gap G12): on a graph-routed city the
+		// control store IS the graph store, but user input convoys and
+		// source beads are work-resident — drain manifests, retry
+		// artifact walks, and finalize member reads need the work-class
+		// tail. Probed only on primary-store miss; empty on unrouted
+		// cities (single-store collapse).
+		if _, graphRouted, graphErr := routedGraphStoreFor(cityPath, cfg); graphErr != nil {
+			return fmt.Errorf("control dispatch: graph-class routing: %w", graphErr)
+		} else if graphRouted {
+			tail, closeTail, tailErr := openGraphClassMigrationStores(cityPath, cfg)
+			defer closeTail()
+			if tailErr != nil {
+				return fmt.Errorf("control dispatch: opening work-store member tail: %w", tailErr)
+			}
+			opts.MemberStores = tail
+		}
 		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 			sourceWorkflowCtx, cancelSourceWorkflowCtx := sourceWorkflowCommandContext()
 			defer cancelSourceWorkflowCtx()

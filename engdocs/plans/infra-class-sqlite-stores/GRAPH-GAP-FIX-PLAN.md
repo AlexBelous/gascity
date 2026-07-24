@@ -39,13 +39,20 @@ DONE / IN-PROGRESS / TODO / DESCOPED(reason).
         (fail-loud 503 shape from integ)
 13. [x] G31 memberStoreComplement for /beads/graph cross-class members
 14. [x] G28 /status work counts graph leg; [x] G36 type=molecule augment (graph leg)
-15. [x] G16 bead.* emission wrapper (controller seam + policy-dispatch
-        reuse; CLI one-shot emission = follow-up). G17 BFF fetchRunGraph:
-        B36 db9d6302c does NOT apply — b36's RunDetailOptions/scope-hint
-        refactor diverges from local BuildRunDetailWithSessionsAndFormula;
-        needs a NATIVE port (loopback GET /v0/.../beads/graph/{rootID} in
-        runtailer.detail() + graph-wins merge + graph_fetch_failed partial
-        reason threaded through local runproj). Follow-up session.
+15. [x] G16 bead.* emission — COMPLETE on both sides: the controller
+        CachingStore wrapper is now inherited by EVERY routed-store seam
+        (resolveGraphStoreRouted / graphStoreForID / routedGraphStoreOrWarn /
+        appendRoutedGraphStore / policy dispatch), and one-shot CLI writes
+        (gc bd close/update on gcg ids, gc hook --claim) append bead.*
+        to the city log directly via emitGraphBeadLifecycle.
+    [x] G17 ADDRESSED AT THE ROOT rather than in one consumer: the BFF's
+        run-detail fold was empty because graph lifecycle emitted NO
+        events; with emission closed on both the controller and CLI sides
+        the existing fold sees graph transitions. The b36 loopback
+        fetchRunGraph remains a possible belt-and-braces follow-up (it
+        would also cover a lost/rotated event log) but is no longer the
+        fix for the reported symptom. b36 db9d6302c still does not apply
+        (RunDetailOptions refactor diverges from local runproj).
 16. [x] N05/N19/N21 convoy: gc convoy status synthetic-convoy graph
         arm; convoys list lane; controller-down fallback candidate
 17. [x] N06 CAS fencing on graph plane: decide implement-ConditionalWriter

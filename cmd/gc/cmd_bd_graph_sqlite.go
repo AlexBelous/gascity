@@ -113,6 +113,9 @@ func doBdGraphSqliteClose(cityPath string, args []string, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "gc bd: close %s (embedded graph store): %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		if closed, gerr := store.Get(id); gerr == nil {
+			emitGraphBeadLifecycle(cityPath, "bead.closed", closed, stderr)
+		}
 		fmt.Fprintf(stdout, "closed %s\n", id) //nolint:errcheck // best-effort stdout
 	}
 	return 0
@@ -140,6 +143,9 @@ func doBdGraphSqliteUpdate(cityPath string, args []string, stdout, stderr io.Wri
 	if err := store.Update(id, opts); err != nil {
 		fmt.Fprintf(stderr, "gc bd: update %s (embedded graph store): %v\n", id, err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if updated, gerr := store.Get(id); gerr == nil {
+		emitGraphBeadLifecycle(cityPath, "bead.updated", updated, stderr)
 	}
 	fmt.Fprintf(stdout, "updated %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0

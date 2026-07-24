@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -46,7 +47,14 @@ func graphRoutedHookClaimOps(cityPath string, cfg *config.City) hookClaimOps {
 	return hookClaimOps{
 		Claim: func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 			if st, ok := graphHookClaimStore(cityPath, cfg, beadID); ok {
-				return st.Claim(beadID, assignee)
+				claimed, won, err := st.Claim(beadID, assignee)
+				if err == nil && won {
+					// One-shot CLI emission: the worker process has no
+					// CachingStore, so the claim would otherwise be invisible
+					// to every event-fold read model (the runs views).
+					emitGraphBeadLifecycle(cityPath, "bead.updated", claimed, io.Discard)
+				}
+				return claimed, won, err
 			}
 			return hookClaimWithBdStore(ctx, dir, env, beadID, assignee)
 		},

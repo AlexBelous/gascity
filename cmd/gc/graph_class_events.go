@@ -13,8 +13,11 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -68,4 +71,35 @@ func graphStoreMaybeWithEvents(store beads.Store, cityPath string) beads.Store {
 		return wrapped
 	}
 	return store
+}
+
+// emitGraphBeadLifecycle records a bead.* lifecycle event for an in-process
+// graph-store mutation made by a ONE-SHOT CLI process (gc bd close/update on
+// gcg ids, gc hook --claim). Controller writes ride the CachingStore wrapper
+// above; a CLI process has no cache, so it appends to the city event log
+// directly — the same shape and the same log the bd on_close hook writes for
+// work beads. Without this the runs views and every event-fold read model
+// miss worker-driven graph transitions entirely (win3 gap G17's root cause).
+// Best-effort: a recorder failure never fails the mutation.
+func emitGraphBeadLifecycle(cityPath, eventType string, b beads.Bead, stderr io.Writer) {
+	if strings.TrimSpace(cityPath) == "" || strings.TrimSpace(b.ID) == "" {
+		return
+	}
+	rec := openCityRecorderAt(cityPath, stderr)
+	if rec == nil {
+		return
+	}
+	payload, err := json.Marshal(b)
+	if err != nil {
+		return
+	}
+	rec.Record(events.Event{
+		Type:      eventType,
+		Actor:     "gc-cli",
+		Subject:   b.ID,
+		RunID:     beadmeta.ResolveRunID(b.Metadata, b.ID, ""),
+		SessionID: b.Metadata[beadmeta.SessionIDMetadataKey],
+		StepID:    b.Metadata[beadmeta.StepIDMetadataKey],
+		Payload:   payload,
+	})
 }

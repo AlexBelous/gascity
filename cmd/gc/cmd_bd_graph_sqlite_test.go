@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -182,5 +184,52 @@ func TestBdGraphMutationLegacyIDRouting(t *testing.T) {
 	ops := graphRoutedHookClaimOps(cityPath, cfg)
 	if _, ok, err := ops.Claim(context.Background(), t.TempDir(), nil, legacy.ID, "w1"); err != nil || !ok {
 		t.Fatalf("legacy-id claim = (%v, %v)", ok, err)
+	}
+}
+
+// TestBdGraphMutationEmitsLifecycleEvents pins the CLI-side arm of gap G17's
+// root cause: a one-shot gc bd close/update on a graph bead appends the
+// bead.* lifecycle event to the city log, so the runs views and every
+// event-fold read model see worker-driven graph transitions (a CLI process
+// has no CachingStore, so the controller wrapper cannot cover it).
+func TestBdGraphMutationEmitsLifecycleEvents(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
+		[]byte("[workspace]\nname = \"emit\"\n\n[beads.classes.graph]\nbackend = \"sqlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeGraphMigratedMarker(t, cityPath)
+	cfg := sqliteGraphConfig()
+	st, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.Create(beads.Bead{Title: "step", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code, handled := maybeRouteBdGraphSqliteMutation(cityPath, cfg,
+		[]string{"update", b.ID, "--set-metadata", "review.verdict=pass"}, &stdout, &stderr); !handled || code != 0 {
+		t.Fatalf("update = (%d, %v) stderr=%s", code, handled, stderr.String())
+	}
+	if code, handled := maybeRouteBdGraphSqliteMutation(cityPath, cfg,
+		[]string{"close", b.ID, "--reason", "step finished cleanly today"}, &stdout, &stderr); !handled || code != 0 {
+		t.Fatalf("close = (%d, %v) stderr=%s", code, handled, stderr.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("no event log written: %v", err)
+	}
+	log := string(raw)
+	for _, want := range []string{"bead.updated", "bead.closed", b.ID} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("event log missing %q:\n%s", want, log)
+		}
 	}
 }

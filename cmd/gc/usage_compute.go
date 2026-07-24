@@ -197,6 +197,16 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	if store == nil {
 		return
 	}
+	// Session-class beads live in the INFRA store on a split city; reading them
+	// through the city work store returns not-found for every session id, which
+	// killed usage compute entirely after the infra-store migration (zero facts,
+	// factory token views all-zero). Resolve the class store once — every
+	// session-bead operation in this tick (Get, sweep-marker write, the sweep
+	// factory's cursor persist, and the compute commit) flows through it. On a
+	// single-store city cachedCityInfraStore is nil and behavior is unchanged.
+	if infra := cachedCityInfraStore(cr.cityPath, cr.cfg); infra != nil {
+		store = infra
+	}
 	runtimeKind := ""
 	if cr.cfg != nil {
 		runtimeKind = cr.cfg.Session.Provider

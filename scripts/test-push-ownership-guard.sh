@@ -344,6 +344,30 @@ test_bead_id_branch_wins_and_warns_on_disagreement() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression: a branch encoding a multi-level sub-bead id (a grandchild bead,
+# e.g. ga-o3ko1j.4.3) must resolve to the FULL id, not truncate after the
+# first dotted segment. Caught live: builder/ga-o3ko1j.4.3's push resolved to
+# ga-o3ko1j.4 (a different, already-closed parent bead), blocking a healthy
+# in-progress push as "stale". Forces the assignee-fallback to disagree so
+# the resolver's warning names the id it actually picked — the only
+# observable signal for resolution output (see the sibling
+# branch-wins-warns-on-disagreement test above for the same technique).
+test_bead_id_branch_resolves_multi_level_subbead_id() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-o3ko1j.4.3-dead-assignee-fallback")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01.9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-o3ko1j.4.3" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-o3ko1j.4.3" <<<"$out"; then
+        record_pass "resolve/branch-resolves-full-multi-level-subbead-id (rc=0, full id ga-o3ko1j.4.3 named, not truncated to ga-o3ko1j.4)"
+    else
+        record_fail "resolve/branch-resolves-full-multi-level-subbead-id" "expected rc=0 with full id ga-o3ko1j.4.3 in the resolver's warning, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_bead_id_fallback_used_when_branch_no_match() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
@@ -543,6 +567,7 @@ run_all() {
     test_block_on_bd_unreachable
     test_block_on_bd_timeout
     test_bead_id_branch_wins_and_warns_on_disagreement
+    test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_fallback_used_when_branch_no_match
     test_allow_when_no_bead_id_resolvable
     test_fallback_cannot_detect_staleness_after_status_leaves_in_progress

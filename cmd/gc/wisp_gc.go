@@ -130,7 +130,22 @@ func newWispGC(interval, ttl, mailRetentionTTL time.Duration) wispGC {
 	}
 }
 
-func newWispGCForConfig(cfg *config.City) wispGC {
+const (
+	// graphRoutedWispGCInterval / graphRoutedWispTTL are the retention
+	// defaults a GRAPH-ROUTED city gets when [daemon] leaves
+	// wisp_gc_interval / wisp_ttl unset. No shipped pack sets them, so on bd
+	// cities retention came entirely from reaper.sh and wisp-compact.sh —
+	// both bd/Dolt-SQL surfaces that cannot see the embedded graph store. A
+	// routed city with unset knobs therefore had NO wisp retention at all
+	// (sweep gap N18), growing .gc/store/graph forever. The purge itself is
+	// keyed on ROOT lifecycle (closed roots and their closures), never on row
+	// age of live work, so a generous TTL is safe: closed steps stay readable
+	// for finalize votes and drain re-counts well past any run's lifetime.
+	graphRoutedWispGCInterval = time.Hour
+	graphRoutedWispTTL        = 7 * 24 * time.Hour
+)
+
+func newWispGCForConfig(cfg *config.City, cityPath string) wispGC {
 	if cfg == nil {
 		return nil
 	}
@@ -138,7 +153,19 @@ func newWispGCForConfig(cfg *config.City) wispGC {
 	if err != nil {
 		mailRetentionTTL = 0
 	}
-	return newWispGC(cfg.Daemon.WispGCIntervalDuration(), cfg.Daemon.WispTTLDuration(), mailRetentionTTL)
+	interval, ttl := cfg.Daemon.WispGCIntervalDuration(), cfg.Daemon.WispTTLDuration()
+	if routed, rerr := graphSQLiteRoutingActive(cityPath, cfg); rerr == nil && routed {
+		// Explicit config always wins; only UNSET knobs take the routed
+		// defaults, so an operator who disabled GC on purpose keeps it off
+		// by setting them to something non-zero-but-large.
+		if interval <= 0 {
+			interval = graphRoutedWispGCInterval
+		}
+		if ttl <= 0 {
+			ttl = graphRoutedWispTTL
+		}
+	}
+	return newWispGC(interval, ttl, mailRetentionTTL)
 }
 
 func (m *memoryWispGC) shouldRun(now time.Time) bool {

@@ -51,8 +51,10 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	// (city) cwd/env, so resolve the store that actually owns the bead across
 	// the city and every rig, so rig-store closes autoclose their attached
 	// wisps instead of silently no-op'ing (#3411).
+	// Graph arm (gap G37): attached wisps are graph-class post-flip.
+	graphStore := autocloseGraphStore(cityPath)
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doWispAutocloseWith(store, beadID, stdout)
+		doWispAutocloseWith(store, beadID, stdout, graphStore)
 		return
 	}
 
@@ -60,7 +62,7 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	if err != nil {
 		return
 	}
-	doWispAutocloseWith(store, beadID, stdout)
+	doWispAutocloseWith(store, beadID, stdout, graphStore)
 }
 
 // doWispAutocloseWith closes any open attached molecule/workflow roots and

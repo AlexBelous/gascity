@@ -216,3 +216,21 @@ func graphStoreForID(cityPath string, cfg *config.City, fallback beads.Store, id
 	}
 	return fallback
 }
+
+// graphStoreForIDIfOwned returns the routed graph store when it owns id
+// (reserved gcg- prefix, or a migrated legacy id resident in the store), else
+// nil. It is the read-side twin of graphStoreForID for callers that need to
+// know whether to route at all rather than pick between two stores.
+func graphStoreForIDIfOwned(cityPath string, cfg *config.City, id string) beads.Store {
+	st, routed, err := routedGraphStoreFor(cityPath, cfg)
+	if err != nil || !routed {
+		return nil
+	}
+	if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && strings.HasPrefix(id, prefix+"-") {
+		return graphStoreMaybeWithEvents(st, cityPath)
+	}
+	if _, gerr := st.Get(id); gerr == nil {
+		return graphStoreMaybeWithEvents(st, cityPath)
+	}
+	return nil
+}

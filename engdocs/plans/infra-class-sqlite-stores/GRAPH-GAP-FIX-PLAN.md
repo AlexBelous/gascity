@@ -56,10 +56,10 @@ DONE / IN-PROGRESS / TODO / DESCOPED(reason).
 21. [x] N17 DESCOPED (already covered: controller orphan release G10 +
         worker self-re-adoption G13 both landed — the shells are a
         redundant third path); [ ] N23 spawn-storm reset-loop discovery
-22. [ ] N18 wisp retention: graph-store closed-wisp purge path (wisp-
+22. [x] N18 wisp retention: graph-store closed-wisp purge path (wisp-
         compact.sh/reaper are bd-only); depends on decision in item 1
 23. [ ] G05/G24/G27 gc bd mol current/progress federation
-24. [ ] G29 gc graph reserved-id arm; G37 autoclose cliGraphStore arms
+24. [x] G29 gc graph reserved-id arm; G37 autoclose graph-store arms
 25. [ ] G38/N20 doctor scans graph legs; N24 wisp-GC BatchDeleter comment
 26. [ ] G32 substring show resolution (low); G33 bd v1.1.x ephemeral
         probe repair (low); G34 per-store-ref partial gating (low)

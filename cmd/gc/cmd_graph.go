@@ -97,10 +97,17 @@ func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 		return nil, 1
 	}
 
-	// Try to resolve rig from the first bead arg's prefix.
+	// Try to resolve the graph-class / rig store from the first bead arg.
 	if len(args) > 0 {
 		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr == nil {
+			// Graph arm (gap G29): a reserved gcg- id, or a MIGRATED legacy
+			// id the graph store owns, lives only in the embedded store —
+			// no rig/HQ prefix route reaches it, so `gc graph <id>` read the
+			// wrong store and rendered an empty graph.
+			if graph := graphStoreForIDIfOwned(cityPath, cfg, args[0]); graph != nil {
+				return graph, 0
+			}
 			if storeDir := slingDirForBead(cfg, cityPath, args[0]); storeDir != cityPath {
 				store, err := openStoreAtForCity(storeDir, cityPath)
 				if err != nil {

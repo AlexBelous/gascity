@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 
@@ -327,5 +328,33 @@ func TestWispStepInjectionReadsGraphStore(t *testing.T) {
 	got := wispStepInjectionContent(cityPath)
 	if !strings.Contains(got, "do the thing carefully") {
 		t.Fatalf("graph-resident step not injected: %q", got)
+	}
+}
+
+// TestWispGCDefaultsOnRoutedCity pins sweep gap N18: a graph-routed city
+// with unset [daemon] knobs gets working wisp retention (bd cities relied on
+// reaper.sh / wisp-compact.sh, which cannot see the embedded store), while
+// explicit config still wins and unrouted cities stay disabled-by-default.
+func TestWispGCDefaultsOnRoutedCity(t *testing.T) {
+	// Unrouted + unset knobs: GC stays disabled (newWispGC returns nil), the
+	// pre-existing bd behavior where reaper.sh/wisp-compact.sh own retention.
+	if plain := newWispGCForConfig(classMigrationConfig(t, ""), t.TempDir()); plain != nil {
+		t.Fatalf("unrouted city gained retention defaults: %+v", plain)
+	}
+
+	cityPath := t.TempDir()
+	writeGraphMigratedMarker(t, cityPath)
+	routed := newWispGCForConfig(sqliteGraphConfig(), cityPath)
+	m, ok := routed.(*memoryWispGC)
+	if !ok || m.ttl != graphRoutedWispTTL || m.interval != graphRoutedWispGCInterval {
+		t.Fatalf("routed city missing retention defaults: %+v", routed)
+	}
+
+	explicit := sqliteGraphConfig()
+	explicit.Daemon.WispTTL = "48h"
+	explicit.Daemon.WispGCInterval = "30m"
+	got := newWispGCForConfig(explicit, cityPath)
+	if m, ok := got.(*memoryWispGC); !ok || m.ttl != 48*time.Hour || m.interval != 30*time.Minute {
+		t.Fatalf("explicit config did not win: %+v", got)
 	}
 }

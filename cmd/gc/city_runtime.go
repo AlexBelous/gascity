@@ -232,7 +232,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
 
-	wg := newWispGCForConfig(p.Cfg)
+	wg := newWispGCForConfig(p.Cfg, p.CityPath)
 
 	managedDoltHealth := p.ManagedDoltHealth
 	if managedDoltHealth == nil {
@@ -2099,7 +2099,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 
-	cr.wg = newWispGCForConfig(nextCfg)
+	cr.wg = newWispGCForConfig(nextCfg, cr.cityPath)
 
 	// Drain the outgoing dispatcher before replacing it so in-flight
 	// dispatchOne goroutines persist their tracking-bead outcomes against

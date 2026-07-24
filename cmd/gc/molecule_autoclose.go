@@ -76,8 +76,12 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	// the city and every rig, and derive the store-ref from that store, so
 	// rig-store closes autoclose their molecule roots instead of silently
 	// no-op'ing (#3411).
+	// Graph arm (gap G37): the molecule root attached to a just-closed work
+	// bead is graph-class and lives in the embedded store post-flip, so the
+	// autoclose walk needs it as an explicit second store.
+	graphStore := autocloseGraphStore(cityPath)
 	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout)
+		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, graphStore)
 		return
 	}
 
@@ -85,7 +89,7 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout)
+	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout, graphStore)
 }
 
 // autocloseStoreRef resolves the store-ref label ("city:<name>" / "rig:<name>")
@@ -305,4 +309,16 @@ func closeMoleculeWithReason(store beads.Store, id, reason string) error {
 		return closer.CloseWithReason(id, reason)
 	}
 	return store.Close(id)
+}
+
+// autocloseGraphStore resolves the routed graph store for the bd on_close
+// hook's autoclose walks. nil on an unrouted city (the walks then run
+// exactly as before) and on any routing failure — best-effort, matching the
+// hook's swallow-all contract.
+func autocloseGraphStore(cityPath string) beads.Store {
+	if strings.TrimSpace(cityPath) == "" {
+		return nil
+	}
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	return routedGraphStoreOrWarn(cityPath, cfg, io.Discard)
 }

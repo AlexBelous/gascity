@@ -30,17 +30,62 @@ type retiredKey struct {
 // classifier (classifyUndecoded), and IsRetiredKeyWarning keeps it non-fatal +
 // surfaced on the two downstream deciders that re-classify config warnings —
 // strict mode (cmd/gc/strict_warnings.go) and the agent warning-emit path
-// (cmd/gc/cmd_agent.go). It is intentionally empty until the first consumer:
-// S5-T7 retires daemon.graph_workflows (today still a live formula_v2 alias).
+// (cmd/gc/cmd_agent.go).
 //
-// S5-T7 INTEGRATION NOTES (deferred to the change that adds the first entry):
+// INTEGRATION NOTES:
 //   - Whole-table retirement needs BOTH the parent-table key and each leaf key
-//     registered, because toml.MetaData.Undecoded() reports both.
+//     registered, because toml.MetaData.Undecoded() reports both. A single
+//     leaf under a still-decoded table (like beads.graph_store below) needs
+//     only the leaf key.
 //   - The struct-round-trip rewrite guard (GuardRewriteKeyLoss in
 //     site_binding.go) and `gc migrate` still refuse a file carrying a retired
-//     key (the rewrite would drop it). S5-T7 must decide whether to exempt
-//     retired keys there or reword the "upgrade gc" guidance.
-var retiredKeys = map[string]retiredKey{}
+//     key (the rewrite would drop it); the upgrade runbook must state the
+//     new-knob setting to add before removing the retired key.
+var retiredKeys = map[string]retiredKey{
+	// The b36/deploy-lineage single-infra-scope key ([beads] graph_store =
+	// "sqlite" | "dolt"). Superseded by the work-bead topology axes: relocate
+	// the graph class with [beads.classes.graph] backend="sqlite" (fine-grained)
+	// or [beads] infra="local" (all relocatable classes at once).
+	"beads.graph_store": {
+		RemovedIn: "the work-bead topology migration",
+		Note:      `set [beads.classes.graph] backend="sqlite" (or [beads] infra="local") instead`,
+	},
+}
+
+// foldRetiredBeadsGraphStore honors the retired [beads] graph_store key by
+// mapping graph_store="sqlite" onto the replacement [beads.classes.graph]
+// backend="sqlite". Without this a b36/deploy-lineage city.toml whose only
+// routing knob is graph_store would upgrade, warn, and then boot graph-blind on
+// bd while all molecule/step/wisp data sits in the sqlite graph store (a
+// recorded destructive-restart incident class). The retired-key WARNING still
+// fires via the undecoded classifier — this only applies the value. An explicit
+// [beads.classes.graph] backend in the same file wins (no override). Only the
+// "sqlite" value folds; graph_store="dolt" (graph stays on bd) is left alone.
+func foldRetiredBeadsGraphStore(data []byte, md toml.MetaData, cfg *City) {
+	if cfg == nil || !md.IsDefined("beads", "graph_store") {
+		return
+	}
+	if entry, ok := cfg.Beads.Classes[BeadClassGraph]; ok && strings.TrimSpace(entry.Backend) != "" {
+		return // explicit per-class backend wins
+	}
+	var probe struct {
+		Beads struct {
+			GraphStore string `toml:"graph_store"`
+		} `toml:"beads"`
+	}
+	if _, err := toml.Decode(string(data), &probe); err != nil {
+		return
+	}
+	if strings.TrimSpace(probe.Beads.GraphStore) != BeadsClassBackendSQLite {
+		return
+	}
+	if cfg.Beads.Classes == nil {
+		cfg.Beads.Classes = map[string]BeadClassConfig{}
+	}
+	entry := cfg.Beads.Classes[BeadClassGraph]
+	entry.Backend = BeadsClassBackendSQLite
+	cfg.Beads.Classes[BeadClassGraph] = entry
+}
 
 // retiredKeyWarning renders the migration warning for a retired key.
 func retiredKeyWarning(source, key string, rk retiredKey) string {
@@ -260,6 +305,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(AgentPatch{}),
 		reflect.TypeOf(AgentOverride{}),
 		reflect.TypeOf(BeadsConfig{}),
+		reflect.TypeOf(BeadsWorkConfig{}),
 		reflect.TypeOf(BeadPolicyConfig{}),
 		reflect.TypeOf(BeadClassConfig{}),
 		reflect.TypeOf(SessionConfig{}),

@@ -297,6 +297,17 @@ BeadsConfig holds bead store settings.
 | `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 | `classes` | map[string]BeadClassConfig |  |  | Classes selects the store backend per coordination class ([beads.classes.&lt;name&gt;], names from the BeadClass* constants). Unknown class names and unknown backends fail load; the work class is not configurable (work beads stay on the bd store). Absent entries default to "bd". |
+| `infra` | string |  |  | Infra is aggregate sugar that resolves every relocatable coordination class (graph, messaging, sessions, orders, nudges) to backend="sqlite". Admitted values: "" (the default, which IS bd) or "local"; there is no "bd" value. Explicit [beads.classes.&lt;name&gt;] settings still win over the aggregate (see ClassBackend). Any other value fails config load. Enum: `local` |
+| `work` | BeadsWorkConfig |  |  | Work configures the task-DB topology for work beads: whether each rig keeps its own database or all rigs unify into the city database, and where that database lives. |
+
+## BeadsWorkConfig
+
+BeadsWorkConfig configures the work class's task-DB topology: whether each rig keeps its own database (scoped) or all rigs merge into the city database (unified), and where that database lives (the local managed Dolt or a remote dolt:// endpoint).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `scope` | string |  |  | Scope selects the task-DB layout: "scoped" (default; one Dolt DB per rig plus one for the city) or "unified" (every rig's work beads merge into the city scope's database, each scope keeping its own issue prefix). Empty defaults to "scoped". Any other value fails config load. Enum: `scoped`, `unified` |
+| `target` | string |  |  | Target selects where the unified task DB lives: "managed" (default; the city's local managed Dolt) or a remote endpoint of the form dolt://host:port/database (all three parts required, port numeric). Empty defaults to "managed". A remote target requires scope="unified" and is one-way (managed is rejected once remote). Any other value fails config load. |
 
 ## ChatSessionsConfig
 

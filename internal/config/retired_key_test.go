@@ -42,13 +42,11 @@ func TestClassifyUndecodedRetiredKey(t *testing.T) {
 	}
 }
 
-// TestUndecodedPathsWithEmptyRetiredRegistry proves the SHIPPED registry (empty
-// until S5-T7) leaves unknown-key fatality intact end-to-end through both paths.
-func TestUndecodedPathsWithEmptyRetiredRegistry(t *testing.T) {
+// TestUndecodedPathsPreserveUnknownKeyFatality proves the SHIPPED registry
+// leaves unknown-key fatality intact end-to-end through both paths — a genuinely
+// unknown key stays fatal even though the registry now carries retired entries.
+func TestUndecodedPathsPreserveUnknownKeyFatality(t *testing.T) {
 	t.Parallel()
-	if len(retiredKeys) != 0 {
-		t.Fatalf("retiredKeys ships empty (S5-T7 adds the first entry); got %v", retiredKeys)
-	}
 	var cfg City
 	md, err := toml.Decode("[daemon]\ntotally_unknown_key = true\n", &cfg)
 	if err != nil {
@@ -59,6 +57,28 @@ func TestUndecodedPathsWithEmptyRetiredRegistry(t *testing.T) {
 	}
 	if joined := strings.Join(CheckUndecodedKeys(md, "city.toml"), "; "); !strings.Contains(joined, "totally_unknown_key") {
 		t.Errorf("CheckUndecodedKeys should warn about the unknown key, got %q", joined)
+	}
+}
+
+// TestRetiredGraphStoreWarnsNotFatal pins deliverable F: a b36 city.toml
+// carrying [beads] graph_store loads with a migration WARNING, never a fatal
+// unknown-field error, and the warning points at the replacement knob.
+func TestRetiredGraphStoreWarnsNotFatal(t *testing.T) {
+	t.Parallel()
+	var cfg City
+	md, err := toml.Decode("[beads]\ngraph_store = \"sqlite\"\n", &cfg)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if fatal := fatalUndecodedWarnings(md, "city.toml"); len(fatal) != 0 {
+		t.Errorf("beads.graph_store must not be fatal, got %v", fatal)
+	}
+	joined := strings.Join(CheckUndecodedKeys(md, "city.toml"), "; ")
+	if !strings.Contains(joined, "graph_store") || !strings.Contains(joined, "was retired in") {
+		t.Errorf("expected a retired-key warning for graph_store, got %q", joined)
+	}
+	if !strings.Contains(joined, `backend="sqlite"`) {
+		t.Errorf("retired warning should point at the replacement knob, got %q", joined)
 	}
 }
 

@@ -1078,11 +1078,42 @@
           },
           "type": "object",
           "description": "Classes selects the store backend per coordination class\n([beads.classes.\u003cname\u003e], names from the BeadClass* constants). Unknown\nclass names and unknown backends fail load; the work class is not\nconfigurable (work beads stay on the bd store). Absent entries default\nto \"bd\"."
+        },
+        "infra": {
+          "type": "string",
+          "enum": [
+            "local"
+          ],
+          "description": "Infra is aggregate sugar that resolves every relocatable coordination\nclass (graph, messaging, sessions, orders, nudges) to backend=\"sqlite\".\nAdmitted values: \"\" (the default, which IS bd) or \"local\"; there is no\n\"bd\" value. Explicit [beads.classes.\u003cname\u003e] settings still win over the\naggregate (see ClassBackend). Any other value fails config load."
+        },
+        "work": {
+          "$ref": "#/$defs/BeadsWorkConfig",
+          "description": "Work configures the task-DB topology for work beads: whether each rig\nkeeps its own database or all rigs unify into the city database, and\nwhere that database lives."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "BeadsConfig holds bead store settings."
+    },
+    "BeadsWorkConfig": {
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scoped",
+            "unified"
+          ],
+          "description": "Scope selects the task-DB layout: \"scoped\" (default; one Dolt DB per\nrig plus one for the city) or \"unified\" (every rig's work beads merge\ninto the city scope's database, each scope keeping its own issue\nprefix). Empty defaults to \"scoped\". Any other value fails config load."
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^(|managed|dolt://[^/]+:[0-9]+/[^/?#]+)$",
+          "description": "Target selects where the unified task DB lives: \"managed\" (default; the\ncity's local managed Dolt) or a remote endpoint of the form\ndolt://host:port/database (all three parts required, port numeric).\nEmpty defaults to \"managed\". A remote target requires scope=\"unified\"\nand is one-way (managed is rejected once remote). Any other value fails\nconfig load."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadsWorkConfig configures the work class's task-DB topology: whether each rig keeps its own database (scoped) or all rigs merge into the city database (unified), and where that database lives (the local managed Dolt or a remote dolt:// endpoint)."
     },
     "ChatSessionsConfig": {
       "properties": {

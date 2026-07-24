@@ -702,6 +702,22 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, err
 	}
 
+	// Bead-store topology validations. These run on the fully-merged root so the
+	// layered load path (which most of cmd/gc uses) enforces the same load-error
+	// contract as Parse — an out-of-enum infra/scope/target, a remote target
+	// without unified, an explicit-bd-under-shared-DB / shadow-vs-effective-sqlite
+	// combination, and a reserved/duplicate work prefix all fail load here, not
+	// just through Parse.
+	if err := validateBeadsTopology(root.Beads); err != nil {
+		return nil, nil, err
+	}
+	if err := validateBeadsClasses(root.Beads); err != nil {
+		return nil, nil, err
+	}
+	if err := ValidateBeadsClassPrefixes(root); err != nil {
+		return nil, nil, err
+	}
+
 	// Validate cross-entity semantic constraints.
 	if !opts.AllowMissingProviderReferences {
 		if err := ValidateProviderReferences(root); err != nil {
@@ -1036,12 +1052,24 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		// field still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
+		infra := base.Beads.Infra
+		work := base.Beads.Work
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
 		}
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
+		}
+		// Preserve the work-bead topology aggregates the fragment did not set:
+		// dropping infra/work would silently revert migrated class stores back to
+		// bd while live data sits in the sqlite stores (routing requires
+		// marker AND effective backend==sqlite).
+		if !fragMeta.IsDefined("beads", "infra") {
+			base.Beads.Infra = infra
+		}
+		if !fragMeta.IsDefined("beads", "work") {
+			base.Beads.Work = work
 		}
 	}
 	if fragMeta.IsDefined("dolt") {
@@ -1493,6 +1521,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
 	applyDaemonFormulaV2Default(&cfg, md)
+	foldRetiredBeadsGraphStore(data, md, &cfg)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)

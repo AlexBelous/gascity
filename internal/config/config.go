@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1410,6 +1411,144 @@ type BeadsConfig struct {
 	// configurable (work beads stay on the bd store). Absent entries default
 	// to "bd".
 	Classes map[string]BeadClassConfig `toml:"classes,omitempty"`
+	// Infra is aggregate sugar that resolves every relocatable coordination
+	// class (graph, messaging, sessions, orders, nudges) to backend="sqlite".
+	// Admitted values: "" (the default, which IS bd) or "local"; there is no
+	// "bd" value. Explicit [beads.classes.<name>] settings still win over the
+	// aggregate (see ClassBackend). Any other value fails config load.
+	Infra string `toml:"infra,omitempty" jsonschema:"enum=local"`
+	// Work configures the task-DB topology for work beads: whether each rig
+	// keeps its own database or all rigs unify into the city database, and
+	// where that database lives.
+	Work BeadsWorkConfig `toml:"work,omitempty"`
+}
+
+// BeadsWorkConfig configures the work class's task-DB topology: whether each
+// rig keeps its own database (scoped) or all rigs merge into the city database
+// (unified), and where that database lives (the local managed Dolt or a remote
+// dolt:// endpoint). It is the two non-class axes of the work-bead topology;
+// the work class itself is never relocated to an embedded SQLite store.
+type BeadsWorkConfig struct {
+	// Scope selects the task-DB layout: "scoped" (default; one Dolt DB per
+	// rig plus one for the city) or "unified" (every rig's work beads merge
+	// into the city scope's database, each scope keeping its own issue
+	// prefix). Empty defaults to "scoped". Any other value fails config load.
+	Scope string `toml:"scope,omitempty" jsonschema:"enum=scoped,enum=unified"`
+	// Target selects where the unified task DB lives: "managed" (default; the
+	// city's local managed Dolt) or a remote endpoint of the form
+	// dolt://host:port/database (all three parts required, port numeric).
+	// Empty defaults to "managed". A remote target requires scope="unified"
+	// and is one-way (managed is rejected once remote). Any other value fails
+	// config load.
+	Target string `toml:"target,omitempty" jsonschema:"pattern=^(|managed|dolt://[^/]+:[0-9]+/[^/?#]+)$"`
+}
+
+// Work-topology values for [beads] infra and [beads.work] scope/target.
+const (
+	// BeadsInfraLocal resolves every relocatable coordination class to its
+	// embedded SQLite store (the [beads] infra aggregate). "" (the default)
+	// keeps the classes on the bd store.
+	BeadsInfraLocal = "local"
+
+	// BeadsWorkScopeScoped keeps one task DB per rig plus one for the city
+	// (the default topology).
+	BeadsWorkScopeScoped = "scoped"
+	// BeadsWorkScopeUnified merges every rig's work beads into the city
+	// scope's database.
+	BeadsWorkScopeUnified = "unified"
+
+	// BeadsWorkTargetManaged keeps the unified task DB in the city's local
+	// managed Dolt (the default).
+	BeadsWorkTargetManaged = "managed"
+	// beadsWorkTargetRemoteScheme is the required URL scheme for a remote
+	// task-DB target (dolt://host:port/database).
+	beadsWorkTargetRemoteScheme = "dolt://"
+)
+
+// EffectiveScope returns the configured work scope, mapping the empty/unset
+// state to the "scoped" default. Values are validated at load, so callers can
+// switch on the two scope constants.
+func (w BeadsWorkConfig) EffectiveScope() string {
+	if strings.TrimSpace(w.Scope) == "" {
+		return BeadsWorkScopeScoped
+	}
+	return strings.TrimSpace(w.Scope)
+}
+
+// EffectiveTarget returns the configured work target, mapping the empty/unset
+// state to the "managed" default.
+func (w BeadsWorkConfig) EffectiveTarget() string {
+	if strings.TrimSpace(w.Target) == "" {
+		return BeadsWorkTargetManaged
+	}
+	return strings.TrimSpace(w.Target)
+}
+
+// IsUnified reports whether the work scope is unified (every rig's work beads
+// merged into the city database).
+func (w BeadsWorkConfig) IsUnified() bool {
+	return w.EffectiveScope() == BeadsWorkScopeUnified
+}
+
+// IsRemote reports whether the work target is a well-formed remote endpoint.
+// A "managed" (or empty) target, and any malformed remote value, return false;
+// malformed remote values are rejected at load, so past load this is exact.
+func (w BeadsWorkConfig) IsRemote() bool {
+	_, _, _, ok := w.RemoteTarget()
+	return ok
+}
+
+// RemoteTarget parses a remote work target of the form
+// dolt://host:port/database, returning the host, numeric port, database, and
+// ok=true only when the effective target is a well-formed remote endpoint. A
+// "managed" (or empty) target — or a malformed remote value — returns ok=false
+// with zero values, so later slices route on the parsed parts without
+// re-parsing the URL.
+func (w BeadsWorkConfig) RemoteTarget() (host string, port int, database string, ok bool) {
+	return parseWorkRemoteTarget(w.EffectiveTarget())
+}
+
+// parseWorkRemoteTarget strictly parses dolt://host:port/database. Every part
+// is required: the dolt:// scheme, a non-empty host, a numeric in-range port,
+// and a single non-empty database segment. Anything else returns ok=false.
+func parseWorkRemoteTarget(target string) (host string, port int, database string, ok bool) {
+	target = strings.TrimSpace(target)
+	if !strings.HasPrefix(target, beadsWorkTargetRemoteScheme) {
+		return "", 0, "", false
+	}
+	rest := target[len(beadsWorkTargetRemoteScheme):]
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return "", 0, "", false
+	}
+	hostPort, database := rest[:slash], rest[slash+1:]
+	if database == "" || strings.ContainsAny(database, "/?#") {
+		return "", 0, "", false
+	}
+	h, p, err := net.SplitHostPort(hostPort)
+	if err != nil || h == "" || p == "" {
+		return "", 0, "", false
+	}
+	// ParseUint (not Atoi) rejects a sign prefix like "+3306"/"-1" and bounds
+	// the port to 16 bits, matching the published jsonschema pattern exactly.
+	portNum, err := strconv.ParseUint(p, 10, 16)
+	if err != nil || portNum == 0 {
+		return "", 0, "", false
+	}
+	return h, int(portNum), database, true
+}
+
+// sharedWorkDBKnob returns the quoted config knob that routes work beads to a
+// shared task DB, or "" when neither is set. A remote target is checked first
+// so a remote+unified config names the most specific knob (the target URL).
+func (w BeadsWorkConfig) sharedWorkDBKnob() string {
+	if w.IsRemote() {
+		return fmt.Sprintf("[beads.work] target=%q", w.EffectiveTarget())
+	}
+	if w.IsUnified() {
+		return `[beads.work] scope="unified"`
+	}
+	return ""
 }
 
 // EventHooksEnabled reports whether bead event hooks should be installed.
@@ -1545,16 +1684,62 @@ var beadClassConfigurable = map[string]bool{
 	BeadClassNudges:    true,
 }
 
-// ClassBackend returns the configured store backend for a coordination class,
-// mapping the absent/empty state to the "bd" default. Values are validated at
-// load (validateBeadsClasses), so callers can switch on the two backend
-// constants without a default arm for typos.
-func (b BeadsConfig) ClassBackend(class string) string {
-	entry, ok := b.Classes[class]
-	if !ok || strings.TrimSpace(entry.Backend) == "" {
-		return BeadsClassBackendBD
+// EffectiveInfraLocal reports whether the aggregate infra-local resolution is
+// in effect: an explicit [beads] infra="local", OR a unified work scope, OR a
+// remote work target. Each requires every relocatable coordination class to run
+// on its embedded SQLite store. Explicit per-class backends still win over the
+// aggregate (see ClassBackend); the work class is never relocated.
+func (b BeadsConfig) EffectiveInfraLocal() bool {
+	if strings.TrimSpace(b.Infra) == BeadsInfraLocal {
+		return true
 	}
-	return entry.Backend
+	return b.Work.IsUnified() || b.Work.IsRemote()
+}
+
+// ClassBackend returns the effective store backend for a coordination class:
+// an explicit per-class value wins; otherwise "sqlite" when EffectiveInfraLocal
+// resolves configurable classes to their embedded stores; otherwise "bd".
+// Values are validated at load (validateBeadsClasses), so callers can switch on
+// the two backend constants without a default arm for typos.
+func (b BeadsConfig) ClassBackend(class string) string {
+	if entry, ok := b.Classes[class]; ok && strings.TrimSpace(entry.Backend) != "" {
+		return strings.TrimSpace(entry.Backend)
+	}
+	if b.EffectiveInfraLocal() && beadClassConfigurable[class] {
+		return BeadsClassBackendSQLite
+	}
+	return BeadsClassBackendBD
+}
+
+// sqliteImplyingKnob returns the quoted config knob responsible for a class's
+// effective SQLite backend — an explicit backend="sqlite", or the aggregate
+// that implies it ([beads.work] scope/target, or [beads] infra). Used to name
+// the offending knob in the shadow/sqlite mutual-exclusion error.
+func (b BeadsConfig) sqliteImplyingKnob(class string) string {
+	if entry, ok := b.Classes[class]; ok && strings.TrimSpace(entry.Backend) == BeadsClassBackendSQLite {
+		return `backend="sqlite"`
+	}
+	if knob := b.Work.sharedWorkDBKnob(); knob != "" {
+		return knob
+	}
+	if strings.TrimSpace(b.Infra) == BeadsInfraLocal {
+		return `[beads] infra="local"`
+	}
+	return ""
+}
+
+// reservedPrefixActivationClause renders the "while X … remediation" tail of the
+// reserved-prefix rejection so it names what an operator can actually act on:
+// the implying aggregate knob (infra/scope/target) when activation is implied,
+// or the generic explicit-class wording when a [beads.classes] backend is set.
+func (b BeadsConfig) reservedPrefixActivationClause() string {
+	if knob := b.Work.sharedWorkDBKnob(); knob != "" {
+		return fmt.Sprintf("while %s routes coordination classes to their stores; rename the prefix or remove %s", knob, knob)
+	}
+	if strings.TrimSpace(b.Infra) == BeadsInfraLocal {
+		return `while [beads] infra="local" routes coordination classes to their stores; rename the prefix or remove [beads] infra="local"`
+	}
+	return fmt.Sprintf("while a [beads.classes] backend is active; rename the prefix or revert the class backend to %q", BeadsClassBackendBD)
 }
 
 // validateBeadsClasses rejects unknown class names, the non-configurable work
@@ -1571,7 +1756,11 @@ func validateBeadsClasses(b BeadsConfig) error {
 			return fmt.Errorf("beads.classes.%s: unknown coordination class (known: graph, messaging, sessions, orders, nudges)", class)
 		}
 		switch strings.TrimSpace(entry.Backend) {
-		case "", BeadsClassBackendBD:
+		case "":
+		case BeadsClassBackendBD:
+			if knob := b.Work.sharedWorkDBKnob(); knob != "" {
+				return fmt.Errorf("beads.classes.%s: backend %q is incompatible with %s, which routes work beads to a shared task DB and requires every infra class to stay local; remove the backend override", class, entry.Backend, knob)
+			}
 		case BeadsClassBackendSQLite:
 			if !sqliteCapableBeadClasses[class] {
 				return fmt.Errorf("beads.classes.%s: backend %q is not supported by this build (the %s store has not landed); remove the setting or use %q", class, entry.Backend, class, BeadsClassBackendBD)
@@ -1583,9 +1772,30 @@ func validateBeadsClasses(b BeadsConfig) error {
 			if !shadowCapableBeadClasses[class] {
 				return fmt.Errorf("beads.classes.%s: shadow is not supported for this class (only the sessions class shadow-writes)", class)
 			}
-			if strings.TrimSpace(entry.Backend) == BeadsClassBackendSQLite {
-				return fmt.Errorf("beads.classes.%s: shadow is meaningful only while backend is %q (backend %q already routes the class to its store)", class, BeadsClassBackendBD, BeadsClassBackendSQLite)
+			if b.ClassBackend(class) == BeadsClassBackendSQLite {
+				return fmt.Errorf("beads.classes.%s: shadow is a pre-flip soak knob, but %s makes the effective backend %q; drop shadow before the class routes to its store", class, b.sqliteImplyingKnob(class), BeadsClassBackendSQLite)
 			}
+		}
+	}
+	return validateInfraLocalClassCapability(b, sqliteCapableBeadClasses)
+}
+
+// validateInfraLocalClassCapability enforces the build ratchet on the AGGREGATE
+// path: when EffectiveInfraLocal implies sqlite for a configurable class (no
+// explicit backend), that class's store must have landed in this build. The
+// per-entry switch above only checks explicit [beads.classes.<name>] backends,
+// so without this an infra/scope/target aggregate could request a store the
+// build cannot provide (latent today — all five configurable classes are
+// capable — but this repo lands classes in beadClassConfigurable before their
+// store ships). The capability map is a parameter so tests can narrow it
+// without mutating the package global.
+func validateInfraLocalClassCapability(b BeadsConfig, capable map[string]bool) error {
+	if !b.EffectiveInfraLocal() {
+		return nil
+	}
+	for class := range beadClassConfigurable {
+		if b.ClassBackend(class) == BeadsClassBackendSQLite && !capable[class] {
+			return fmt.Errorf("beads.classes.%s: %s implies backend=%q but the %s store has not landed in this build; pin %q backend=%q to opt it out, or remove the aggregate", class, b.sqliteImplyingKnob(class), BeadsClassBackendSQLite, class, class, BeadsClassBackendBD)
 		}
 	}
 	return nil
@@ -1611,22 +1821,59 @@ func ValidateBeadsClassPrefixes(cfg *City) error {
 	if cfg == nil {
 		return nil
 	}
-	active := false
-	for class := range cfg.Beads.Classes {
-		if cfg.Beads.ClassBackend(class) != BeadsClassBackendBD {
-			active = true
-			break
+	active := cfg.Beads.EffectiveInfraLocal()
+	if !active {
+		for class := range beadClassConfigurable {
+			if cfg.Beads.ClassBackend(class) != BeadsClassBackendBD {
+				active = true
+				break
+			}
 		}
 	}
 	if !active {
 		return nil
 	}
+	clause := cfg.Beads.reservedPrefixActivationClause()
 	if hq := EffectiveHQPrefix(cfg); IsReservedClassPrefix(hq) {
-		return fmt.Errorf("HQ prefix %q shadows a reserved coordination-class id-prefix (%s) while a [beads.classes] backend is active; rename the prefix or revert the class backend to %q", strings.ToLower(strings.TrimSpace(hq)), reservedClassPrefixListText(), BeadsClassBackendBD)
+		return fmt.Errorf("HQ prefix %q shadows a reserved coordination-class id-prefix (%s) %s", strings.ToLower(strings.TrimSpace(hq)), reservedClassPrefixListText(), clause)
 	}
 	for _, r := range cfg.Rigs {
 		if prefix := strings.ToLower(r.EffectivePrefix()); IsReservedClassPrefix(prefix) {
-			return fmt.Errorf("rig %q prefix %q shadows a reserved coordination-class id-prefix (%s) while a [beads.classes] backend is active; rename the prefix or revert the class backend to %q", r.Name, prefix, reservedClassPrefixListText(), BeadsClassBackendBD)
+			return fmt.Errorf("rig %q prefix %q shadows a reserved coordination-class id-prefix (%s) %s", r.Name, prefix, reservedClassPrefixListText(), clause)
+		}
+	}
+	return validateUnifiedWorkPrefixes(cfg)
+}
+
+// validateUnifiedWorkPrefixes rejects a unified work scope whose effective
+// work-store prefixes are not pairwise distinct. Under scope="unified" every
+// rig's work beads merge into the city database, so the HQ prefix and each rig
+// prefix must stay disjoint (case-insensitive) to keep minted ids attributable
+// to their originating scope. Reserved-class-prefix collisions are already
+// rejected by the reserved-prefix checks above (unified implies infra-local, so
+// they are active), so this focuses on scope-vs-scope duplication.
+func validateUnifiedWorkPrefixes(cfg *City) error {
+	if cfg == nil || !cfg.Beads.Work.IsUnified() {
+		return nil
+	}
+	owners := make(map[string]string)
+	claim := func(prefix, owner string) error {
+		key := strings.ToLower(strings.TrimSpace(prefix))
+		if key == "" {
+			return nil
+		}
+		if prior, ok := owners[key]; ok {
+			return fmt.Errorf("beads.work scope=%q requires pairwise-distinct work prefixes, but %s and %s both resolve to prefix %q; give each scope its own issue_prefix", BeadsWorkScopeUnified, prior, owner, key)
+		}
+		owners[key] = owner
+		return nil
+	}
+	if err := claim(EffectiveHQPrefix(cfg), "the HQ scope"); err != nil {
+		return err
+	}
+	for _, r := range cfg.Rigs {
+		if err := claim(r.EffectivePrefix(), fmt.Sprintf("rig %q", r.Name)); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -4624,6 +4871,10 @@ func Parse(data []byte) (*City, error) {
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
 		return nil, err
 	}
+	foldRetiredBeadsGraphStore(data, md, &cfg)
+	if err := validateBeadsTopology(cfg.Beads); err != nil {
+		return nil, err
+	}
 	if err := validateBeadsClasses(cfg.Beads); err != nil {
 		return nil, err
 	}
@@ -4660,6 +4911,34 @@ func validateGuardedRelease(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.guarded_release: %w", err)
+	}
+	return nil
+}
+
+// validateBeadsTopology rejects out-of-enum work-topology settings at load: an
+// unknown [beads] infra value, an unknown [beads.work] scope, a malformed
+// [beads.work] target, and the illegal remote-without-unified combination. Like
+// conditional_writes, a typo must fail loudly rather than silently collapse to a
+// default the operator did not intend (e.g. "bd" silently meaning the aggregate
+// is off, or a fat-fingered remote URL silently meaning "managed").
+func validateBeadsTopology(b BeadsConfig) error {
+	switch strings.TrimSpace(b.Infra) {
+	case "", BeadsInfraLocal:
+	default:
+		return fmt.Errorf("beads.infra: unknown value %q (known: %q, or omit for the default bd)", b.Infra, BeadsInfraLocal)
+	}
+	switch strings.TrimSpace(b.Work.Scope) {
+	case "", BeadsWorkScopeScoped, BeadsWorkScopeUnified:
+	default:
+		return fmt.Errorf("beads.work.scope: unknown value %q (known: %q, %q)", b.Work.Scope, BeadsWorkScopeScoped, BeadsWorkScopeUnified)
+	}
+	if target := strings.TrimSpace(b.Work.Target); target != "" && target != BeadsWorkTargetManaged {
+		if _, _, _, ok := parseWorkRemoteTarget(target); !ok {
+			return fmt.Errorf("beads.work.target: invalid value %q (want %q or dolt://host:port/database)", b.Work.Target, BeadsWorkTargetManaged)
+		}
+	}
+	if b.Work.IsRemote() && b.Work.EffectiveScope() != BeadsWorkScopeUnified {
+		return fmt.Errorf("beads.work.target %q requires beads.work.scope=%q (a remote task DB is shared only in the unified topology)", b.Work.Target, BeadsWorkScopeUnified)
 	}
 	return nil
 }

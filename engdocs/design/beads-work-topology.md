@@ -465,8 +465,12 @@ The b36 config key `[beads] graph_store` is registered in `retiredKeys`
 (`internal/config/undecoded.go`) pointing at the replacement
 (`[beads.classes.graph] backend="sqlite"` or `[beads] infra="local"`), so
 a b36 city.toml loads with a warning instead of a fatal unknown-field
-error; the deploy-lineage upgrade runbook states the new-knob setting to
-add before removing the retired key.
+error — and the value is HONORED, not merely ignored: `graph_store =
+"sqlite"` folds into the effective graph class backend at load (an
+explicit `[beads.classes.graph]` entry wins), because warn-and-ignore
+would boot a b36 city graph-blind on bd, a recorded incident class. The
+deploy-lineage upgrade runbook states the new-knob setting to add before
+removing the retired key.
 
 ## Red-team pins (tests that gate shipping)
 

@@ -485,6 +485,11 @@ func convoyStoreCandidatesWithProvider(cfg *config.City, cityPath, beadID string
 type convoyStoreView struct {
 	path  string
 	store beads.Store
+	// graph marks the routed graph-class store view. It is the
+	// authoritative owner of every graph-class bead it holds, so by-id
+	// resolution pins it instead of treating a same-id work-store row as
+	// an ambiguity (that row is migration residue the boot sweep clears).
+	graph bool
 }
 
 func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, error) {
@@ -502,13 +507,23 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 		}
 		stores = append(stores, convoyStoreView{path: dir, store: store})
 	}
-	if len(stores) > 0 {
-		return stores, nil
+	if len(stores) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("no convoy stores available")
 	}
-	if firstErr != nil {
-		return nil, firstErr
+	// Graph arm (sweep gaps N05/N19/N21): on a graph-routed city every
+	// graph-class bead — synthetic input and drain-unit convoys, molecule
+	// roots/steps, wisps, control beads, migrated legacy ids — lives in the
+	// embedded graph store, which no candidate DIRECTORY addresses. Prepend
+	// it so by-id resolution and every fan-out lane probe the authoritative
+	// copy first. Routing errors are non-fatal here: the work lanes still
+	// answer, and a routed miss surfaces as the usual not-found.
+	if graph := routedGraphStoreOrWarn(cityPath, cfg, io.Discard); graph != nil {
+		stores = append([]convoyStoreView{{path: graphClassStoreDir(cityPath), store: graph, graph: true}}, stores...)
 	}
-	return nil, fmt.Errorf("no convoy stores available")
+	return stores, nil
 }
 
 func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, error) {
@@ -548,6 +563,13 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 				continue
 			}
 			return nil, "", err
+		}
+		if candidate.graph {
+			// The routed graph store OWNS every graph-class bead it holds; a
+			// same-id work-store row is un-swept migration residue, not an
+			// ambiguity. The graph view is probed first, so returning here
+			// pins the authoritative copy.
+			return candidate.store, candidate.path, nil
 		}
 		if foundStore != nil {
 			return nil, "", fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, foundDir, candidate.path)
@@ -656,12 +678,22 @@ type convoyStatusResultJSON struct {
 
 func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
 	convoys := make([]convoyWithStore, 0)
+	// Graph-owned ids are reported once, from the graph store: a same-id row
+	// in a work store is un-swept migration residue. Work stores can legitimately
+	// share ids with EACH OTHER (independent id sequences per store), so this
+	// dedupe is deliberately graph-vs-work only, never work-vs-work.
+	graphOwned := make(map[string]bool)
 	for _, candidate := range stores {
 		all, err := candidate.store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
 			return nil, err
 		}
 		for _, b := range all {
+			if candidate.graph {
+				graphOwned[b.ID] = true
+			} else if graphOwned[b.ID] {
+				continue
+			}
 			convoys = append(convoys, convoyWithStore{store: candidate.store, bead: b})
 		}
 	}

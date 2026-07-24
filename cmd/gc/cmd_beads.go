@@ -290,12 +290,23 @@ func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]
 		AllowScan:     true,
 	}
 	all := make([]beads.Bead, 0)
+	// Graph-owned ids list once, from the graph store (a same-id work-store
+	// row is un-swept migration residue). Work-vs-work ids are NOT deduped:
+	// independent stores mint independent sequences and both rows are real.
+	graphOwned := make(map[string]bool)
 	for _, candidate := range stores {
 		list, err := candidate.store.List(q)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, list...)
+		for _, b := range list {
+			if candidate.graph {
+				graphOwned[b.ID] = true
+			} else if graphOwned[b.ID] {
+				continue
+			}
+			all = append(all, b)
+		}
 	}
 	return all, nil
 }

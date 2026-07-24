@@ -141,7 +141,13 @@ func resolveGraphStoreRouted(workStore beads.Store, cfg *config.City, cityPath s
 		return sessionsdb.NewUnavailableStore(fmt.Errorf("graph-class store unavailable: %w", err))
 	}
 	if routed {
-		return class
+		// Inherit the controller's emission wrapper when it exists: EVERY
+		// routed-store seam must emit bead.* on lifecycle writes, not just
+		// the one resolve path. Convergence's adapter (SetMetadata/Close/
+		// Delete on step beads) and the order-dispatch by-id update reach
+		// the store through here; without the wrapper their writes were
+		// silent and the runs views froze steps at creation status.
+		return graphStoreMaybeWithEvents(class, cityPath)
 	}
 	return workStore
 }
@@ -168,7 +174,7 @@ func appendRoutedGraphStore(stores []beads.Store, cityPath string, cfg *config.C
 		return nil, fmt.Errorf("graph-class store for assigned-work fan-out: %w", err)
 	}
 	if routed {
-		return append(stores, st), nil
+		return append(stores, graphStoreMaybeWithEvents(st, cityPath)), nil
 	}
 	return stores, nil
 }
@@ -189,7 +195,7 @@ func routedGraphStoreOrWarn(cityPath string, cfg *config.City, stderr io.Writer)
 	if !routed {
 		return nil
 	}
-	return st
+	return graphStoreMaybeWithEvents(st, cityPath)
 }
 
 // graphStoreForID returns the store that owns id for a by-id mutation on a
@@ -203,10 +209,10 @@ func graphStoreForID(cityPath string, cfg *config.City, fallback beads.Store, id
 		return fallback
 	}
 	if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && strings.HasPrefix(id, prefix+"-") {
-		return st
+		return graphStoreMaybeWithEvents(st, cityPath)
 	}
 	if _, gerr := st.Get(id); gerr == nil {
-		return st
+		return graphStoreMaybeWithEvents(st, cityPath)
 	}
 	return fallback
 }

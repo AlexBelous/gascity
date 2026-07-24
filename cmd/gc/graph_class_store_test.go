@@ -251,3 +251,47 @@ func TestWaitDependencyReadsReachGraphStore(t *testing.T) {
 		t.Fatalf("dep store set missed the graph root: (%+v, %v)", got, err)
 	}
 }
+
+// TestConvoyStoresIncludeRoutedGraphStore pins sweep gaps N05/N19/N21: the
+// convoy/beads store fan-out prepends the routed graph store, by-id
+// resolution pins it as the owner (an un-swept bd residue row is not an
+// ambiguity), and list lanes dedupe.
+func TestConvoyStoresIncludeRoutedGraphStore(t *testing.T) {
+	cityPath := t.TempDir()
+	writeGraphMigratedMarker(t, cityPath)
+	cfg := sqliteGraphConfig()
+	graph, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syn, err := graph.Create(beads.Bead{Title: "input convoy", Type: "convoy", Metadata: map[string]string{"gc.synthetic": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	work := beads.NewMemStore()
+	views, err := openConvoyStores(cfg, cityPath, syn.ID, func(string) (beads.Store, error) { return work, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) == 0 || !views[0].graph {
+		t.Fatalf("graph view not prepended: %+v", views)
+	}
+	got, dir, err := resolveOwningStoreDir(syn.ID, cfg, cityPath, func(string) (beads.Store, error) { return work, nil })
+	if err != nil || got == nil {
+		t.Fatalf("resolveOwningStoreDir = (%v, %q, %v)", got, dir, err)
+	}
+	convoys, err := collectOpenConvoys(views)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range convoys {
+		if c.bead.ID == syn.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("synthetic graph convoy missing from the fan-out: %+v", convoys)
+	}
+}

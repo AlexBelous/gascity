@@ -98,6 +98,34 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		pa.success()
 		convoys = append(convoys, list...)
 	}
+	// Graph leg (sweep gap N19): synthetic convoys (graph.v2 input convoys,
+	// drain units) are graph-class and live only in the relocated store.
+	// Deduped by id so an un-swept bd residue row lists once.
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		pa.attempt()
+		list, err := graph.List(beads.ListQuery{Type: "convoy", Sort: beads.SortCreatedDesc, TierMode: beads.TierBoth})
+		if err != nil {
+			pa.record("graph", err)
+		} else {
+			pa.success()
+			// Graph rows are authoritative for their ids; a same-id work row
+			// is un-swept residue. Work-vs-work aliasing is left alone (the
+			// rig loop above deliberately does not dedupe).
+			graphIDs := make(map[string]bool, len(list))
+			for _, b := range list {
+				graphIDs[b.ID] = true
+			}
+			merged := make([]beads.Bead, 0, len(convoys)+len(list))
+			for _, b := range convoys {
+				if !graphIDs[b.ID] {
+					merged = append(merged, b)
+				}
+			}
+			merged = append(merged, list...)
+			convoys = merged
+			beads.SortBeads(convoys, beads.SortCreatedDesc)
+		}
+	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
 	}
@@ -160,8 +188,22 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 	}
 
 	stores := s.state.BeadStores()
+	// Graph arm (sweep gap N19): synthetic convoys — graph.v2 input convoys
+	// and drain-unit convoys, ClassGraph via gc.synthetic — are NOT workflow
+	// roots, so the isGraphConvoyID divert above skips them, and post-flip
+	// they live only in the relocated graph store. Probe it first: it owns
+	// every graph-class bead it holds.
+	probes := make([]beads.Store, 0, len(stores)+1)
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		probes = append(probes, graph)
+	}
 	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+		probes = append(probes, stores[rigName])
+	}
+	for _, store := range probes {
+		if store == nil {
+			continue
+		}
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -261,8 +303,22 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (*OKResponse, error) {
 	id := input.ID
 	stores := s.state.BeadStores()
+	// Graph arm (sweep gap N19): synthetic convoys — graph.v2 input convoys
+	// and drain-unit convoys, ClassGraph via gc.synthetic — are NOT workflow
+	// roots, so the isGraphConvoyID divert above skips them, and post-flip
+	// they live only in the relocated graph store. Probe it first: it owns
+	// every graph-class bead it holds.
+	probes := make([]beads.Store, 0, len(stores)+1)
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		probes = append(probes, graph)
+	}
 	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+		probes = append(probes, stores[rigName])
+	}
+	for _, store := range probes {
+		if store == nil {
+			continue
+		}
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -298,8 +354,22 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveInput) (*OKResponse, error) {
 	id := input.ID
 	stores := s.state.BeadStores()
+	// Graph arm (sweep gap N19): synthetic convoys — graph.v2 input convoys
+	// and drain-unit convoys, ClassGraph via gc.synthetic — are NOT workflow
+	// roots, so the isGraphConvoyID divert above skips them, and post-flip
+	// they live only in the relocated graph store. Probe it first: it owns
+	// every graph-class bead it holds.
+	probes := make([]beads.Store, 0, len(stores)+1)
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		probes = append(probes, graph)
+	}
 	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+		probes = append(probes, stores[rigName])
+	}
+	for _, store := range probes {
+		if store == nil {
+			continue
+		}
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -486,8 +556,22 @@ func (s *Server) humaHandleConvoyDelete(_ context.Context, input *ConvoyDeleteIn
 	}
 
 	stores := s.state.BeadStores()
+	// Graph arm (sweep gap N19): synthetic convoys — graph.v2 input convoys
+	// and drain-unit convoys, ClassGraph via gc.synthetic — are NOT workflow
+	// roots, so the isGraphConvoyID divert above skips them, and post-flip
+	// they live only in the relocated graph store. Probe it first: it owns
+	// every graph-class bead it holds.
+	probes := make([]beads.Store, 0, len(stores)+1)
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		probes = append(probes, graph)
+	}
 	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
+		probes = append(probes, stores[rigName])
+	}
+	for _, store := range probes {
+		if store == nil {
+			continue
+		}
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {

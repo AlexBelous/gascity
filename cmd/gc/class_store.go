@@ -207,7 +207,7 @@ func (s *beadPolicyStore) createTarget(class coordclass.Class) beads.Store {
 		if store, routed, err := routedGraphStoreFor(s.cityPath, s.cfg); err != nil {
 			return sessionsdb.NewUnavailableStore(fmt.Errorf("graph-class store unavailable: %w", err))
 		} else if routed {
-			return store
+			return graphStoreMaybeWithEvents(store, s.cityPath)
 		}
 	}
 	return s.Store
@@ -227,6 +227,9 @@ func (s *beadPolicyGraphStore) graphApplierFor(class coordclass.Class) beads.Gra
 		if store, routed, err := routedGraphStoreFor(s.cityPath, s.cfg); err != nil {
 			return unavailableGraphApplier{err: fmt.Errorf("graph-class store unavailable: %w", err)}
 		} else if routed {
+			if applier, ok := beads.GraphApplyFor(graphStoreMaybeWithEvents(store, s.cityPath)); ok {
+				return applier
+			}
 			return store
 		}
 	}
@@ -311,7 +314,13 @@ func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath strin
 // arm, ready/claim federation) complete and flip it.
 func resolveGraphStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	base := resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
-	return resolveGraphStoreRouted(base, cfg, cityPath)
+	routed := resolveGraphStoreRouted(base, cfg, cityPath)
+	if routed != base {
+		// Controller resolves (rec != nil) wrap the routed store for bead.*
+		// emission + cache tiers; CLI one-shots get the raw store.
+		return graphStoreWithEvents(routed, cityPath, rec)
+	}
+	return routed
 }
 
 // newCityMailProvider builds the controller's mail provider as a two-store mail

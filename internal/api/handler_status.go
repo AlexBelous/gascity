@@ -606,6 +606,17 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 			includeReady:  rigName != cityName,
 		})
 	}
+	// Graph leg (win3 gap G28): relocated graph beads (open molecule
+	// roots/steps, control beads) are part of the city's work plane; a
+	// graph-blind count under-reports open/in_progress/ready post-flip.
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		queries = append(queries, workQuery{
+			label:         "graph",
+			store:         graph,
+			includeStored: true,
+			includeReady:  true,
+		})
+	}
 
 	results := make([]statusWorkResult, len(queries))
 	var wg sync.WaitGroup

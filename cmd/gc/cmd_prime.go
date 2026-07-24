@@ -182,7 +182,16 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		hookContext = readPrimeHookContext()
 		suppressHookPrompt = managedSessionHookPromptAlreadyDelivered(hookContext)
 	}
-	// In non-strict mode, hook side effects fire eagerly (existing behavior).
+	// In non-strict mode, hook side effects fire eagerly for EVERY hook
+	// event, including SessionStart. The live-session gate below (#4010)
+	// governs hook OUTPUT only — it must not gate the provider resume-key
+	// persist, which carries its own guards (session-bead lookup through the
+	// session front door, no-overwrite, id-collision rejection, hook-stdin
+	// family allowlist). Deferring the SessionStart persist behind that gate
+	// silently dropped codex/claude resume keys whenever the gate missed
+	// (GC_SESSION_NAME absent or mismatched, unreadable or closed session
+	// bead): the early return skipped both the session_key write and the
+	// GC_PROVIDER_SESSION_ID_REQUIRED warn.
 	// In strict mode, we defer them until after strict checks pass so that a
 	// failing --strict invocation does not update provider resume metadata for
 	// failed agent resolution or template validation.
@@ -192,7 +201,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		}
 		persistPrimeHookProviderSessionKey(hookContext.ProviderSessionID, stderr)
 	}
-	if !strictMode && !primeHookSessionStart(hookContext) {
+	if !strictMode {
 		runHookSideEffects()
 	}
 
@@ -216,9 +225,6 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
 		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "")
 		return 0
-	}
-	if !strictMode && primeHookSessionStart(hookContext) {
-		runHookSideEffects()
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {

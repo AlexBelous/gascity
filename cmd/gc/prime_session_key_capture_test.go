@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -198,6 +200,53 @@ func TestPersistPrimeHookProviderSessionKey_RejectsIDEqualToGCSessionID(t *testi
 
 	if got := reloadSessionKey(t, cityDir, id); got != "" {
 		t.Fatalf("session_key = %q, want empty (provider id equal to GC_SESSION_ID must be rejected)", got)
+	}
+}
+
+// TestDoPrimeWithHook_ManagedCodexSessionStartPersistsEnvProviderSessionKey is
+// the live-shape regression guard for the eaten SessionStart persist: a managed
+// codex SessionStart hook invocation (GC_MANAGED_SESSION_HOOK=1,
+// GC_HOOK_EVENT_NAME=SessionStart, --hook --hook-format codex) with an
+// env-provided provider session id must persist the resume key even when the
+// live-session output gate (#4010) does not match — here GC_SESSION_NAME is
+// absent. The gate governs hook OUTPUT only; before the fix this shape hit the
+// gate's early return ahead of runHookSideEffects and exited 0 with EMPTY
+// stderr: no session_key write and no GC_PROVIDER_SESSION_ID_REQUIRED warn
+// (maintainer-city codex sessions silently lost every resume key this way).
+func TestDoPrimeWithHook_ManagedCodexSessionStartPersistsEnvProviderSessionKey(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir, store := primeCaptureTestStore(t)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"capture-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	id := createCaptureSessionBead(t, store, "codex")
+	t.Setenv("GC_SESSION_ID", id)
+	t.Setenv("GEMINI_SESSION_ID", "")
+	t.Setenv("GC_PROVIDER_SESSION_ID_REQUIRED", "1")
+	const envSessionID = "0199aaaa-bbbb-7000-8000-c0ffee000042"
+	t.Setenv("GC_PROVIDER_SESSION_ID", envSessionID)
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	if got := reloadSessionKey(t, cityDir, id); got != envSessionID {
+		t.Fatalf("session_key = %q, want %q (the SessionStart live-session output gate must not eat the resume-key persist; stderr=%q)", got, envSessionID, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "persisted resume session_key") {
+		t.Errorf("successful capture must be observable on stderr, got %q", stderr.String())
+	}
+	// The #4010 output gate itself must hold: with no live managed-session
+	// match, SessionStart injects no hook context.
+	if strings.Contains(stdout.String(), "Gas City Agent") {
+		t.Errorf("gated SessionStart hook must not emit the fallback prompt, got stdout=%q", stdout.String())
 	}
 }
 

@@ -311,20 +311,30 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	// and the 2h window comfortably beats both the tick cadence and the 4h
 	// terminal-wisp retention purge. Single-store cities skip (nil infra store).
 	if cachedCityInfraStore(cr.cityPath, cr.cfg) != nil {
-		closedRows, lerr := store.List(beads.ListQuery{
+		// TierBoth + all statuses: the reconcile snapshot lists MAIN-tier session
+		// beads only (ListAllSessionBeads never sets TierMode), so the wisp-tier
+		// half of a split city's session population — precisely the churn-heavy
+		// wisp operators that mint usage — never reaches the open-infos loop
+		// above. The per-bead gates (terminal state, interval markers) and the
+		// processed set keep this pass idempotent with the snapshot arm.
+		rows, lerr := store.List(beads.ListQuery{
 			Type:          "session",
-			Status:        "closed",
 			IncludeClosed: true,
 			TierMode:      beads.TierBoth,
 			AllowScan:     true,
 		})
 		if lerr != nil {
-			logf("usage: listing closed sessions for compute sweep failed: %v", lerr)
+			logf("usage: listing sessions for compute sweep failed: %v", lerr)
 			return
 		}
 		cutoff := now.Add(-2 * time.Hour)
-		for _, b := range closedRows {
-			if processed[b.ID] || b.UpdatedAt.Before(cutoff) {
+		for _, b := range rows {
+			if processed[b.ID] {
+				continue
+			}
+			// Closed rows only within the retention-safe window; open terminal
+			// rows (e.g. a drained wisp awaiting retire) have no window.
+			if b.Status == "closed" && b.UpdatedAt.Before(cutoff) {
 				continue
 			}
 			processSessionBead(b)

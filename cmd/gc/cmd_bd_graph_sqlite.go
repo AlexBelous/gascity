@@ -35,7 +35,7 @@ func maybeRouteBdGraphSqliteMutation(cityPath string, cfg *config.City, bdArgs [
 		return 0, false
 	}
 	switch bdArgs[0] {
-	case "close", "update":
+	case "close", "update", "release-if-current":
 	default:
 		return 0, false
 	}
@@ -67,6 +67,8 @@ func maybeRouteBdGraphSqliteMutation(cityPath string, cfg *config.City, bdArgs [
 		return doBdGraphSqliteClose(cityPath, bdArgs[1:], stdout, stderr), true
 	case "update":
 		return doBdGraphSqliteUpdate(cityPath, bdArgs[1:], stdout, stderr), true
+	case "release-if-current":
+		return doBdGraphSqliteReleaseIfCurrent(cityPath, bdArgs, stdout, stderr), true
 	default:
 		// Reads (show/list/…) and other subcommands keep current behavior. bd
 		// cannot reach the embedded store, but the pack-used writes are the two
@@ -254,4 +256,67 @@ func requireAllGraphIDs(ids []string) error {
 		}
 	}
 	return nil
+}
+
+// doBdGraphSqliteReleaseIfCurrent is the routed arm of the gc-only
+// conditional release: the CAS release runs against the embedded graph
+// store (the exec/bd form cannot reach it), matching doBdReleaseIfCurrent's
+// output contract so orphan-recovery scripts keep working on gcg ids.
+func doBdGraphSqliteReleaseIfCurrent(cityPath string, bdArgs []string, stdout, stderr io.Writer) int {
+	id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs)
+	if err != nil || !ok {
+		fmt.Fprintln(stderr, "gc bd: usage: release-if-current <issue-id> <assignee>") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := requireAllGraphIDs([]string{id}); err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: opening embedded graph store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	released, err := store.ReleaseIfCurrent(id, expectedAssignee)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd release-if-current: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if released {
+		fmt.Fprintln(stdout, "released") //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	fmt.Fprintln(stdout, "skipped") //nolint:errcheck // best-effort stdout
+	return 0
+}
+
+// bdGraphReadRefusal fails closed on gcg reads the federation does not
+// serve: any bd invocation mentioning a graph-class id that was not handled
+// upstream (the plain-show federation or the mutation arm) would exec bd
+// against the work store and print a false 'no issue found' / empty list —
+// the root-loss shape. A loud refusal naming the covered surfaces is
+// strictly safer than a silent wrong-store read. Fires only on ROUTED
+// cities; the reserved-prefix guard covers unrouted ones.
+func bdGraphReadRefusal(cityPath string, cfg *config.City, bdArgs []string, stderr io.Writer) (int, bool) {
+	prefix, _ := config.ReservedClassPrefix(config.BeadClassGraph)
+	mentions := false
+	for _, a := range bdArgs {
+		if strings.Contains(a, prefix+"-") {
+			mentions = true
+			break
+		}
+	}
+	if !mentions {
+		return 0, false
+	}
+	routed, err := graphSQLiteRoutingActive(cityPath, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	if !routed {
+		return 0, false
+	}
+	fmt.Fprintf(stderr, "gc bd: %q mentions a graph-class (%s-) id, which lives in the embedded graph store bd cannot read; federated forms: `gc bd show <id> [--json]`, `gc bd close/update/release-if-current <id>`, or the controller API /beads endpoints\n", strings.Join(bdArgs, " "), prefix) //nolint:errcheck // best-effort stderr
+	return 1, true
 }

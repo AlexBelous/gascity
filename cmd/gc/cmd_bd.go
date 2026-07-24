@@ -244,6 +244,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
+	// Fail-closed backstop for graph-class reads the federation does not
+	// serve (multi-id show, extra flags, dep list, parent-filtered list):
+	// exec'ing bd would read the wrong store and report false absence.
+	if code, handled := bdGraphReadRefusal(cityPath, cfg, bdArgs, stderr); handled {
+		return code
+	}
+
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

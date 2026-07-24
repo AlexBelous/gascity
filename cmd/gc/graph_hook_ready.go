@@ -44,8 +44,83 @@ func graphFederatedWorkQueryRunner(cityPath string, cfg *config.City) hookStoreR
 		if mergeErr != nil {
 			return "", mergeErr
 		}
+		merged, mergeErr = mergeGraphAssignedInProgressIntoWorkQueryOutput(merged, st, env)
+		if mergeErr != nil {
+			return "", mergeErr
+		}
 		return merged, nil
 	}
+}
+
+// mergeGraphAssignedInProgressIntoWorkQueryOutput unions the worker's OWN
+// assigned in_progress graph rows into the candidate list — the
+// crash-recovery tier. The shell's tier-1 probe (bd list --status
+// in_progress --assignee=$id) reads only the work store, and Ready excludes
+// assigned rows, so without this a worker respawning after a crash never
+// re-adopts the gcg step it was holding and the molecule wedges. Identity
+// candidates come from the query env (the same GC_SESSION_ID /
+// GC_SESSION_NAME / GC_ALIAS the shells interpolate).
+func mergeGraphAssignedInProgressIntoWorkQueryOutput(out string, st *beads.SQLiteStore, env []string) (string, error) {
+	identities := workQueryEnvIdentities(env)
+	if len(identities) == 0 {
+		return out, nil
+	}
+	normalized := strings.TrimSpace(normalizeWorkQueryOutput(strings.TrimSpace(out)))
+	var rows []beads.Bead
+	if normalized != "" {
+		if !strings.HasPrefix(normalized, "[") {
+			return out, nil // count form / prose: not a candidate list
+		}
+		if err := json.Unmarshal([]byte(normalized), &rows); err != nil {
+			return out, nil //nolint:nilerr // non-bead JSON output: pass through
+		}
+	}
+	seen := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		seen[b.ID] = true
+	}
+	added := false
+	for _, id := range identities {
+		// TierBoth: molecule steps materialize as wisps; the default tier
+		// would hide exactly the rows this recovery tier exists to find.
+		assigned, err := st.List(beads.ListQuery{Assignee: id, Status: "in_progress", TierMode: beads.TierBoth})
+		if err != nil {
+			return "", fmt.Errorf("graph-class assigned in_progress: %w", err)
+		}
+		for _, b := range assigned {
+			if !seen[b.ID] {
+				seen[b.ID] = true
+				rows = append(rows, b)
+				added = true
+			}
+		}
+	}
+	if !added {
+		return out, nil
+	}
+	buf, err := json.Marshal(rows)
+	if err != nil {
+		return "", fmt.Errorf("graph-class in_progress merge: %w", err)
+	}
+	return string(buf), nil
+}
+
+// workQueryEnvIdentities extracts the worker identity candidates the
+// discovery shells interpolate, from the runner's env slice.
+func workQueryEnvIdentities(env []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, kv := range env {
+		for _, key := range []string{"GC_SESSION_ID=", "GC_SESSION_NAME=", "GC_ALIAS="} {
+			if strings.HasPrefix(kv, key) {
+				if v := strings.TrimSpace(strings.TrimPrefix(kv, key)); v != "" && !seen[v] {
+					seen[v] = true
+					out = append(out, v)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // mergeGraphReadyIntoWorkQueryOutput unions the graph store's ready rows

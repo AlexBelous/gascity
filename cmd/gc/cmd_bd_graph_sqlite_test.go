@@ -81,3 +81,66 @@ func TestBdGraphSqliteMutationArm(t *testing.T) {
 		t.Fatalf("unsupported flag = (%d, %v, %q)", code, handled, stderr.String())
 	}
 }
+
+// TestBdGraphReleaseIfCurrentRouted pins the routed CAS release: released
+// when held by the expected assignee, skipped otherwise.
+func TestBdGraphReleaseIfCurrentRouted(t *testing.T) {
+	cityPath := t.TempDir()
+	writeGraphMigratedMarker(t, cityPath)
+	cfg := sqliteGraphConfig()
+	st, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.Create(beads.Bead{Title: "held", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.Claim(b.ID, "w1"); err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdGraphSqliteMutation(cityPath, cfg, []string{"release-if-current", b.ID, "w2"}, &stdout, &stderr)
+	if !handled || code != 0 || !strings.Contains(stdout.String(), "skipped") {
+		t.Fatalf("wrong-assignee release = (%d, %v, %q)", code, handled, stdout.String())
+	}
+	stdout.Reset()
+	code, handled = maybeRouteBdGraphSqliteMutation(cityPath, cfg, []string{"release-if-current", b.ID, "w1"}, &stdout, &stderr)
+	if !handled || code != 0 || !strings.Contains(stdout.String(), "released") {
+		t.Fatalf("release = (%d, %v, %q) stderr=%s", code, handled, stdout.String(), stderr.String())
+	}
+	if got, _ := st.Get(b.ID); got.Assignee != "" {
+		t.Fatalf("assignee not cleared: %+v", got)
+	}
+}
+
+// TestBdGraphReadRefusal pins the fail-closed backstop: unfederated read
+// shapes mentioning gcg ids refuse loudly on a routed city instead of
+// exec'ing bd into false absence; unrouted cities and non-graph commands
+// fall through.
+func TestBdGraphReadRefusal(t *testing.T) {
+	var stderr bytes.Buffer
+	cityPath := t.TempDir()
+	// Unrouted: fall through.
+	if _, handled := bdGraphReadRefusal(cityPath, nil, []string{"dep", "list", "gcg-1"}, &stderr); handled {
+		t.Fatal("unrouted city must fall through")
+	}
+	writeGraphMigratedMarker(t, cityPath)
+	cfg := sqliteGraphConfig()
+	for _, args := range [][]string{
+		{"dep", "list", "gcg-1"},
+		{"show", "gcg-1", "gcg-2"},
+		{"show", "gcg-1", "--verbose"},
+		{"list", "--parent", "gcg-9"},
+	} {
+		stderr.Reset()
+		code, handled := bdGraphReadRefusal(cityPath, cfg, args, &stderr)
+		if !handled || code != 1 || !strings.Contains(stderr.String(), "embedded graph store") {
+			t.Fatalf("%v = (%d, %v, %q), want loud refusal", args, code, handled, stderr.String())
+		}
+	}
+	if _, handled := bdGraphReadRefusal(cityPath, cfg, []string{"list", "--status", "open"}, &stderr); handled {
+		t.Fatal("non-graph command must fall through")
+	}
+}

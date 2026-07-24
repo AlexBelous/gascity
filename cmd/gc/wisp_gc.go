@@ -628,10 +628,12 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 
 func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
 	// The closure is deleted as one batch: a store that supports
-	// beads.BatchDeleter (the sqlite/Dolt graph store) removes the collected
-	// ownership tree with a single `bd delete … --force`, which deletes exactly
-	// those ids and lets ON DELETE CASCADE drop their edges while orphaning any
-	// external dependents; other stores fall back to per-bead deletion. Because
+	// beads.BatchDeleter removes the collected ownership tree in one backend
+	// operation — one `bd delete … --force` per chunk on the bd/Dolt work
+	// store, one DELETE transaction per chunk on the embedded graph SQLite
+	// store — deleting exactly those ids and dropping their edges while
+	// ORPHANING external dependents; other stores fall back to per-bead
+	// deletion. Because
 	// the delete is not dependent-recursive, collectExpiredBeadClosure must (and
 	// does) gather only the ownership closure so live work outside it is never
 	// reached.

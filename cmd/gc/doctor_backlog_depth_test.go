@@ -80,7 +80,7 @@ func TestBacklogDepthCheckRunReportsTrueDepth(t *testing.T) {
 		{IssueID: "B-1", DependsOnID: "R-1", Type: "blocks"},
 	})
 
-	check := newBacklogDepthCheck("/city", func(string) (beads.Store, error) { return store, nil })
+	check := newBacklogDepthCheck(nil, "/city", func(string) (beads.Store, error) { return store, nil })
 
 	res := check.Run(&doctor.CheckContext{})
 	if res.Status != doctor.StatusOK {
@@ -111,7 +111,7 @@ func TestBacklogDepthCheckRunReportsTrueDepth(t *testing.T) {
 }
 
 func TestBacklogDepthCheckStoreErrorIsGraceful(t *testing.T) {
-	check := newBacklogDepthCheck("/city", func(string) (beads.Store, error) {
+	check := newBacklogDepthCheck(nil, "/city", func(string) (beads.Store, error) {
 		return nil, fmt.Errorf("store unreachable")
 	})
 	res := check.Run(&doctor.CheckContext{})

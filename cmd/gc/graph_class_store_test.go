@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	nudgesdb "github.com/gastownhall/gascity/internal/classdb/nudges"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 // sqliteGraphConfig builds a config selecting the sqlite graph backend by
@@ -356,5 +357,40 @@ func TestWispGCDefaultsOnRoutedCity(t *testing.T) {
 	got := newWispGCForConfig(explicit, cityPath)
 	if m, ok := got.(*memoryWispGC); !ok || m.ttl != 48*time.Hour || m.interval != 30*time.Minute {
 		t.Fatalf("explicit config did not win: %+v", got)
+	}
+}
+
+// TestBacklogDepthIncludesGraphStore pins gaps G38/N20: the backlog census
+// counts the relocated plane on a routed city, and fails loud rather than
+// reporting a confident work-store-only number when the graph store cannot
+// be read.
+func TestBacklogDepthIncludesGraphStore(t *testing.T) {
+	cityPath := t.TempDir()
+	writeGraphMigratedMarker(t, cityPath)
+	graph, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graph.Create(beads.Bead{Title: "graph step", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	work := beads.NewMemStore()
+	if _, err := work.Create(beads.Bead{Title: "work item", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+
+	check := newBacklogDepthCheck(sqliteGraphConfig(), cityPath, func(string) (beads.Store, error) { return work, nil })
+	r := check.Run(&doctor.CheckContext{CityPath: cityPath})
+	if r.Status != doctor.StatusOK {
+		t.Fatalf("status = %v: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "+ graph store: 1 open") {
+		t.Fatalf("graph plane missing from the census: %s", r.Message)
+	}
+
+	// Unrouted city: byte-identical message, no suffix.
+	plain := newBacklogDepthCheck(nil, t.TempDir(), func(string) (beads.Store, error) { return work, nil })
+	if got := plain.Run(&doctor.CheckContext{}); strings.Contains(got.Message, "graph store") {
+		t.Fatalf("unrouted city gained a graph suffix: %s", got.Message)
 	}
 }

@@ -22,7 +22,7 @@ func (s backlogDepthReadyErrorStore) Ready(...beads.ReadyQuery) ([]beads.Bead, e
 }
 
 func TestBacklogDepthCheckReadyErrorIsGraceful(t *testing.T) {
-	check := newBacklogDepthCheck("/city", func(string) (beads.Store, error) {
+	check := newBacklogDepthCheck(nil, "/city", func(string) (beads.Store, error) {
 		return backlogDepthReadyErrorStore{}, nil
 	})
 

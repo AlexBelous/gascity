@@ -7,15 +7,6 @@ package main
 // reads and writes route to the embedded SQLiteStore at
 // .gc/store/graph/beads.sqlite, minting the reserved gcg prefix. Until both
 // hold, routing is the byte-identical work-store shape.
-//
-// DARK UNTIL THE WIRING COMPLETES: config validation still rejects
-// backend="sqlite" for graph (sqliteCapableBeadClasses has no graph entry),
-// so this routing cannot activate on any real city. The ratchet flips only
-// in the final wiring slice, after the create-side dispatch
-// (beadPolicyStore.createTarget / graphApplierFor), the doBd in-process
-// mutation arm, and the ready/claim federation all route — flipping earlier
-// would split the class across two backends. Same discipline as the four
-// landed classes; graph just has more roots.
 
 import (
 	"context"

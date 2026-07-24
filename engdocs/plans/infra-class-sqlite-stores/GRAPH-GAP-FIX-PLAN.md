@@ -60,6 +60,11 @@ DONE / IN-PROGRESS / TODO / DESCOPED(reason).
         compact.sh/reaper are bd-only); depends on decision in item 1
 23. [ ] G05/G24/G27 gc bd mol current/progress federation
 24. [x] G29 gc graph reserved-id arm; G37 autoclose graph-store arms
-25. [ ] G38/N20 doctor scans graph legs; N24 wisp-GC BatchDeleter comment
+25. [x] G38/N20 backlog-depth graph leg (fail-loud); N24 BatchDeleter
+        IMPLEMENTED on SQLiteStore + comments corrected. Remaining doctor
+        checks DESCOPED with evidence: hold-label/custom-types read config
+        not graph beads; order-tracking-retention is orders-class; the
+        routed_to/session-model legs are follow-ups (specs in /tmp not
+        committed — re-derive from the spec workflow if wanted).
 26. [ ] G32 substring show resolution (low); G33 bd v1.1.x ephemeral
         probe repair (low); G34 per-store-ref partial gating (low)

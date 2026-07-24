@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -132,4 +133,68 @@ func updateOptsEmpty(opts UpdateOpts) bool {
 		opts.Priority == nil && opts.Description == nil && opts.ParentID == nil &&
 		opts.Assignee == nil && len(opts.Metadata) == 0 &&
 		len(opts.Labels) == 0 && len(opts.RemoveLabels) == 0
+}
+
+// sqliteDeleteBatchChunk bounds how many ids ride on one DELETE statement,
+// staying well under SQLite's bound-parameter limit.
+const sqliteDeleteBatchChunk = 256
+
+var _ BatchDeleter = (*SQLiteStore)(nil)
+
+// DeleteBatch removes exactly the given beads and every dependency row that
+// touches them, ORPHANING external dependents rather than rewriting them —
+// the BatchDeleter contract (sweep gap N24: the wisp GC's comments claimed
+// this store had it; it did not, so closure purges fell back to per-bead
+// deletes). Idempotent over ids that are already gone, chunked so a large
+// closure cannot exceed the parameter limit. Each chunk is one transaction;
+// a mid-run failure reports the already-committed ids so a caching layer can
+// reconcile.
+func (s *SQLiteStore) DeleteBatch(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	var deleted []string
+	for start := 0; start < len(ids); start += sqliteDeleteBatchChunk {
+		end := start + sqliteDeleteBatchChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		if err := s.deleteBatchChunk(chunk); err != nil {
+			if len(deleted) > 0 {
+				return &BatchDeleteError{Committed: deleted, Err: err}
+			}
+			return err
+		}
+		deleted = append(deleted, chunk...)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) deleteBatchChunk(chunk []string) error {
+	return retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite delete batch: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		args := make([]any, 0, len(chunk))
+		placeholders := make([]string, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+			placeholders = append(placeholders, "?")
+		}
+		in := "(" + strings.Join(placeholders, ",") + ")"
+		// Deps first, both directions: external dependents are orphaned (their
+		// own rows survive, only the edge goes), never text-rewritten.
+		depArgs := append(append([]any{}, args...), args...)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM deps WHERE issue_id IN `+in+` OR depends_on_id IN `+in, depArgs...); err != nil {
+			return fmt.Errorf("deleting batch deps: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM beads WHERE id IN `+in, args...); err != nil {
+			return fmt.Errorf("deleting batch beads: %w", err)
+		}
+		return tx.Commit()
+	})
 }

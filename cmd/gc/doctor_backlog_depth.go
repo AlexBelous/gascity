@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
@@ -24,12 +25,13 @@ import (
 // queries already filter this noise via the Ready-tier contract; the gap it
 // closes is the operator/dashboard view.
 type backlogDepthCheck struct {
+	cfg      *config.City
 	cityPath string
 	newStore func(string) (beads.Store, error)
 }
 
-func newBacklogDepthCheck(cityPath string, newStore func(string) (beads.Store, error)) *backlogDepthCheck {
-	return &backlogDepthCheck{cityPath: cityPath, newStore: newStore}
+func newBacklogDepthCheck(cfg *config.City, cityPath string, newStore func(string) (beads.Store, error)) *backlogDepthCheck {
+	return &backlogDepthCheck{cfg: cfg, cityPath: cityPath, newStore: newStore}
 }
 
 func (c *backlogDepthCheck) Name() string { return "backlog-depth" }
@@ -119,6 +121,34 @@ func (c *backlogDepthCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		return res
 	}
 
+	// Graph leg (gaps G38/N20): on a routed city molecule roots, steps and
+	// control beads left the work store, so a work-only census silently
+	// under-reports the real backlog. Fail LOUD when a marked city's graph
+	// store cannot be read — a confident work-only number is worse than an
+	// admitted gap.
+	graphSuffix := ""
+	if graph, routed, gerr := routedGraphStoreFor(c.cityPath, c.cfg); gerr != nil {
+		res.Status = doctor.StatusWarning
+		res.Message = fmt.Sprintf("backlog depth partial: graph-class routing: %v", gerr)
+		return res
+	} else if routed {
+		graphOpen, gerr := graph.List(beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth})
+		if gerr != nil {
+			res.Status = doctor.StatusWarning
+			res.Message = fmt.Sprintf("backlog depth partial: listing graph-store beads: %v", gerr)
+			return res
+		}
+		graphReady, gerr := graph.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		if gerr != nil {
+			res.Status = doctor.StatusWarning
+			res.Message = fmt.Sprintf("backlog depth partial: listing graph-store ready beads: %v", gerr)
+			return res
+		}
+		graphSuffix = fmt.Sprintf(" + graph store: %d open", len(graphOpen))
+		open = append(open, graphOpen...)
+		ready = append(ready, graphReady...)
+	}
+
 	readyIDs := make(map[string]bool, len(ready))
 	for _, r := range ready {
 		readyIDs[r.ID] = true
@@ -127,8 +157,8 @@ func (c *backlogDepthCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 
 	res.Status = doctor.StatusOK
 	res.Message = fmt.Sprintf(
-		"city store: %d claimable (of %d open — %d control-plane, %d notification, %d epic, %d other)",
-		len(b.real), b.total, b.controlPlane, b.notification, b.epic, b.other)
+		"city store: %d claimable (of %d open — %d control-plane, %d notification, %d epic, %d other)%s",
+		len(b.real), b.total, b.controlPlane, b.notification, b.epic, b.other, graphSuffix)
 
 	details := make([]string, 0, len(b.real))
 	for _, bead := range b.real {

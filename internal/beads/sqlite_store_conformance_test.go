@@ -42,3 +42,72 @@ func TestSQLiteStoreConditionalWriterConformance(t *testing.T) {
 		return newSQLiteForConformance(t)
 	})
 }
+
+// TestSQLiteStoreDeleteBatch pins the BatchDeleter contract the wisp-GC
+// closure purge relies on (sweep gap N24): batched removal, edges to
+// external dependents dropped while the dependents themselves survive
+// (orphaned, never rewritten), tolerance of already-gone ids, and chunking
+// past the bound-parameter limit.
+func TestSQLiteStoreDeleteBatch(t *testing.T) {
+	st := newSQLiteForConformance(t)
+	var _ beads.BatchDeleter = st
+
+	a, err := st.Create(beads.Bead{Title: "root", Type: "molecule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.Create(beads.Bead{Title: "step", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext, err := st.Create(beads.Bead{Title: "external dependent", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DepAdd(b.ID, a.ID, "parent-child"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DepAdd(ext.ID, a.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteBatch([]string{a.ID, b.ID}); err != nil {
+		t.Fatalf("DeleteBatch: %v", err)
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		if _, err := st.Get(id); err == nil {
+			t.Fatalf("%s survived the batch delete", id)
+		}
+	}
+	if _, err := st.Get(ext.ID); err != nil {
+		t.Fatalf("external dependent was deleted, want orphaned: %v", err)
+	}
+	deps, err := st.DepList(ext.ID, "down")
+	if err != nil || len(deps) != 0 {
+		t.Fatalf("external dependent's edge not scrubbed: (%+v, %v)", deps, err)
+	}
+
+	// Idempotent over missing ids, and nil is a no-op.
+	if err := st.DeleteBatch([]string{"gcg-nope"}); err != nil {
+		t.Fatalf("DeleteBatch(missing): %v", err)
+	}
+	if err := st.DeleteBatch(nil); err != nil {
+		t.Fatalf("DeleteBatch(nil): %v", err)
+	}
+
+	// Chunking: more ids than one statement carries.
+	ids := make([]string, 0, 600)
+	for i := 0; i < 600; i++ {
+		created, err := st.Create(beads.Bead{Title: "bulk", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, created.ID)
+	}
+	if err := st.DeleteBatch(ids); err != nil {
+		t.Fatalf("DeleteBatch(600): %v", err)
+	}
+	if _, err := st.Get(ids[len(ids)-1]); err == nil {
+		t.Fatal("chunked batch left rows behind")
+	}
+}

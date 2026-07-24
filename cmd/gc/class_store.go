@@ -308,10 +308,7 @@ func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath strin
 // [beads.classes.graph] backend is sqlite AND whose graph.migrated marker
 // exists; the work store otherwise; a fail-closed erroring store when a
 // marked city's routing or store cannot resolve. Graph is event-silent by
-// design, so rec is accepted for signature parity and ignored. NOTE: the
-// config ratchet still rejects backend="sqlite" for graph, so the routed
-// arm is DARK until the wiring slices (create-side dispatch, doBd mutation
-// arm, ready/claim federation) complete and flip it.
+// design, so rec is accepted for signature parity and ignored.
 func resolveGraphStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	base := resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
 	routed := resolveGraphStoreRouted(base, cfg, cityPath)

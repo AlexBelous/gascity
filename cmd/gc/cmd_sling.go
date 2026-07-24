@@ -491,14 +491,27 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		}
 	}
 	sourceWorkflowScanWarnings := make(map[string]struct{})
+	// nil on an unrouted city: the graph class collapses onto Store. Routed:
+	// graphv2 root-key dedup / failed-root cleanup / workflow reads run
+	// against the store the pour writes (win3 gap G22 — re-slings
+	// double-poured without this). Typed-nil guard: only assign the
+	// interface when the store exists.
+	var slingGraphStore beads.Store
+	if graphStore, graphRouted, graphRoutingErr := routedGraphStoreFor(cityPath, cfg); graphRoutingErr != nil {
+		fmt.Fprintf(stderr, "gc sling: graph-class routing: %v\n", graphRoutingErr) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if graphRouted {
+		slingGraphStore = graphStore
+	}
 	deps := slingDeps{
-		CityName: cityName,
-		CityPath: cityPath,
-		Cfg:      cfg,
-		SP:       sp,
-		Runner:   runner,
-		Store:    store,
-		StoreRef: storeRef,
+		CityName:   cityName,
+		CityPath:   cityPath,
+		Cfg:        cfg,
+		SP:         sp,
+		Runner:     runner,
+		Store:      store,
+		StoreRef:   storeRef,
+		GraphStore: slingGraphStore,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
 				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)

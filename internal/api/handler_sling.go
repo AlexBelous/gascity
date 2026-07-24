@@ -116,12 +116,13 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	sourceWorkflowScanWarnings := make(map[string]struct{})
 	var sourceWorkflowScanMessages []string
 	deps := sling.SlingDeps{
-		CityName: s.state.CityName(),
-		CityPath: s.state.CityPath(),
-		Cfg:      s.state.Config(),
-		SP:       s.state.SessionProvider(),
-		Store:    store,
-		StoreRef: storeRef,
+		CityName:   s.state.CityName(),
+		CityPath:   s.state.CityPath(),
+		Cfg:        s.state.Config(),
+		SP:         s.state.SessionProvider(),
+		Store:      store,
+		StoreRef:   storeRef,
+		GraphStore: apiSlingGraphStore(s.state),
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},
@@ -512,4 +513,16 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
+}
+
+// apiSlingGraphStore threads the relocated graph store into sling deps so
+// graphv2 root-key dedup, failed-root cleanup, and workflow reads run
+// against the store the pour actually writes (win3 gap G22). nil on a
+// single-store city keeps the collapse-onto-Store default.
+func apiSlingGraphStore(state State) beads.Store {
+	graph := state.GraphBeadStore().Store
+	if graph == nil || graph == state.CityBeadStore() {
+		return nil
+	}
+	return graph
 }

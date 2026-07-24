@@ -884,6 +884,23 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if err != nil {
 		return nil, err
 	}
+	// Pack-custom control work queries (bd shells the built-in parser does
+	// not recognize) are graph-blind on a routed city: union the graph
+	// store's ready rows into JSON-array outputs, fail-loud on graph read
+	// errors (gap G19 — mc's workflows pack overrides the dispatcher
+	// query, and its raw bd shell reads an empty control lane post-flip).
+	if cityPath := cityForStoreDir(dir); cityPath != "" {
+		cfg, _ := loadCityConfig(cityPath, io.Discard)
+		if st, routed, rerr := routedGraphStoreFor(cityPath, cfg); rerr != nil {
+			return nil, fmt.Errorf("control work query: graph-class routing: %w", rerr)
+		} else if routed {
+			merged, mergeErr := mergeGraphReadyIntoWorkQueryOutput(output, st)
+			if mergeErr != nil {
+				return nil, fmt.Errorf("control work query: %w", mergeErr)
+			}
+			output = merged
+		}
+	}
 	trimmed := strings.TrimSpace(output)
 	if !workQueryHasReadyWork(trimmed) {
 		return nil, nil

@@ -477,16 +477,22 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 // findBeadAcrossStores tries the city store first, then all rig stores,
 // returning the store and bead on first match.
 func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (beads.Store, beads.Bead, string, error) {
-	// Graph-class ids live only in the routed graph store.
+	// Graph-class ids live in the routed graph store. A clean NotFound
+	// falls THROUGH to the city/rig scan: an out-of-lineage writer (old
+	// binary, explicit-id bd write) can strand a gcg bead in a work store,
+	// and manual recovery must still find it (gap G35). Hard store
+	// failures surface — never read as absence.
 	if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && strings.HasPrefix(beadID, prefix+"-") {
 		if st, routed, err := routedGraphStoreFor(cityPath, controlGraphRoutingCfg(cityPath, nil)); err != nil {
 			return nil, beads.Bead{}, "", fmt.Errorf("graph store: %w", err)
 		} else if routed {
 			b, err := st.Get(beadID)
-			if err != nil {
+			if err == nil {
+				return st, b, cityPath, nil
+			}
+			if !errors.Is(err, beads.ErrNotFound) {
 				return nil, beads.Bead{}, "", err
 			}
-			return st, b, cityPath, nil
 		}
 	}
 	// Try city store first.

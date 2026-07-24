@@ -67,12 +67,17 @@ _pog_timeout() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)? —
-#      the bead's own id format, extended with an optional sub-bead suffix
-#      because this repo's real branch convention is
-#      builder/<bead-id>-<slug> and sub-beads (e.g. ga-fip9ps.1) are
-#      routine; the literal 6-char-only pattern would misresolve to the
-#      parent bead on a sub-bead's own branch.
+#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
+#      the bead's own id format, extended with zero or more repeated
+#      sub-bead suffixes because this repo's real branch convention is
+#      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
+#      depth: a single-level sub-bead (e.g. ga-fip9ps.1) as well as a
+#      grandchild (e.g. ga-o3ko1j.4.3). The suffix group must repeat (`*`),
+#      not just appear once (`?`) — a single optional group truncates a
+#      grandchild id after its first dotted segment, misresolving to the
+#      wrong (and possibly closed) parent/child bead instead of the actual
+#      grandchild bead the branch is for. The literal 6-char-only pattern
+#      would misresolve to the root bead on any sub-bead's own branch.
 #   2. Falls back to this session's single in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
 #      the branch name doesn't match.
@@ -107,7 +112,7 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)?' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
     fi
 
     local assignee_id=""

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestEnsureGraphClassMigrated pins the boot cutover: open graph beads
@@ -14,9 +15,12 @@ import (
 // clears bd copies while sparing fresh unknown open beads.
 func TestEnsureGraphClassMigrated(t *testing.T) {
 	store := beads.NewMemStore()
-	prevOpen := openGraphClassMigrationStore
-	openGraphClassMigrationStore = func(_ string) (beads.Store, error) { return store, nil }
-	t.Cleanup(func() { openGraphClassMigrationStore = prevOpen })
+	rigStore := beads.NewMemStore()
+	prevOpen := openGraphClassMigrationStores
+	openGraphClassMigrationStores = func(_ string, _ *config.City) ([]beads.Store, func(), error) {
+		return []beads.Store{store, rigStore}, func() {}, nil
+	}
+	t.Cleanup(func() { openGraphClassMigrationStores = prevOpen })
 
 	root, err := store.Create(beads.Bead{Title: "wisp: run", Type: "molecule", Labels: []string{"gc:wisp"}})
 	if err != nil {
@@ -37,6 +41,10 @@ func TestEnsureGraphClassMigrated(t *testing.T) {
 		t.Fatal(err)
 	}
 	work, err := store.Create(beads.Bead{Title: "plain work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rigWisp, err := rigStore.Create(beads.Bead{Title: "rig molecule", Type: "molecule", Labels: []string{"gc:wisp"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +71,9 @@ func TestEnsureGraphClassMigrated(t *testing.T) {
 			t.Fatalf("imported %s missing: %v", id, err)
 		}
 	}
+	if _, err := class.Get(rigWisp.ID); err != nil {
+		t.Fatalf("rig-store graph bead did not migrate (gap N00/N09): %v", err)
+	}
 	if _, err := class.Get(closedBead.ID); err == nil {
 		t.Fatal("closed graph bead crossed; it must not")
 	}
@@ -76,8 +87,11 @@ func TestEnsureGraphClassMigrated(t *testing.T) {
 
 	// Residue sweep: class-owned open + closed bd copies deleted; work spared.
 	deleted := sweepLegacyGraphResidue(cityPath, cfg, &log)
-	if deleted != 3 {
-		t.Fatalf("residue deleted = %d, want 3 (root, step, closed); log: %s", deleted, log.String())
+	if deleted != 4 {
+		t.Fatalf("residue deleted = %d, want 4 (root, step, closed, rig wisp); log: %s", deleted, log.String())
+	}
+	if _, err := rigStore.Get(rigWisp.ID); err == nil {
+		t.Fatal("rig-store graph residue survived the sweep")
 	}
 	if _, err := store.Get(work.ID); err != nil {
 		t.Fatalf("work bead deleted by graph sweep: %v", err)
@@ -100,9 +114,11 @@ func TestEnsureGraphClassMigrated(t *testing.T) {
 // TestEnsureGraphClassMigratedAbortsBeforeMarker proves an unopenable bd
 // store aborts with no marker.
 func TestEnsureGraphClassMigratedAbortsBeforeMarker(t *testing.T) {
-	prevOpen := openGraphClassMigrationStore
-	openGraphClassMigrationStore = func(_ string) (beads.Store, error) { return nil, os.ErrPermission }
-	t.Cleanup(func() { openGraphClassMigrationStore = prevOpen })
+	prevOpen := openGraphClassMigrationStores
+	openGraphClassMigrationStores = func(_ string, _ *config.City) ([]beads.Store, func(), error) {
+		return nil, func() {}, os.ErrPermission
+	}
+	t.Cleanup(func() { openGraphClassMigrationStores = prevOpen })
 	cityPath := t.TempDir()
 	var log bytes.Buffer
 	if ensureGraphClassMigrated(cityPath, sqliteGraphConfig(), &log) {

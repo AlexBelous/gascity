@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -31,10 +32,38 @@ const (
 	legacyGraphResidueOpenGrace = 10 * time.Minute
 )
 
-// openGraphClassMigrationStore is the bd-store open seam for the migration
-// and residue sweep (overridden by tests, mirroring the other classes).
-var openGraphClassMigrationStore func(cityPath string) (beads.Store, error) = func(cityPath string) (beads.Store, error) {
-	return openStoreAtForCity(cityPath, cityPath)
+// openGraphClassMigrationStores is the bd-store open seam for the
+// migration and residue sweep: the CITY scope store plus every bound RIG
+// scope store (rig-scoped molecule pours live in rig bd stores pre-flip; a
+// city-only import would orphan in-flight rig workflows and the residue
+// sweep would never clear their bd copies — sweep-addendum gap N00/N09).
+// Overridden by tests, mirroring openOrderClassMigrationStores.
+var openGraphClassMigrationStores func(cityPath string, cfg *config.City) ([]beads.Store, func(), error) = func(cityPath string, cfg *config.City) ([]beads.Store, func(), error) {
+	var stores []beads.Store
+	closeAll := func() {
+		for _, st := range stores {
+			closeBeadStoreHandle(st) //nolint:errcheck // best-effort close
+		}
+	}
+	city, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		return stores, closeAll, fmt.Errorf("opening city store: %w", err)
+	}
+	stores = append(stores, city)
+	if cfg != nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			st, err := openStoreAtForCity(rig.Path, cityPath)
+			if err != nil {
+				return stores, closeAll, fmt.Errorf("opening rig %q store: %w", rig.Name, err)
+			}
+			stores = append(stores, st)
+		}
+	}
+	return stores, closeAll, nil
 }
 
 // ensureGraphClassMigrated performs the seamless graph-class cutover on
@@ -53,14 +82,17 @@ func ensureGraphClassMigrated(cityPath string, cfg *config.City, stderr io.Write
 		fmt.Fprintf(stderr, "gc start: graph class migration: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
 	}
-	store, err := openGraphClassMigrationStore(cityPath)
+	stores, closeStores, err := openGraphClassMigrationStores(cityPath, cfg)
+	defer closeStores()
 	if err != nil {
+		// Abort BEFORE the marker on ANY scope-store open failure: a partial
+		// import would strand the unopened scope's in-flight molecules once
+		// routing flips and the residue sweep runs.
 		fmt.Fprintf(stderr, "gc start: graph class migration: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
 	}
-	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
 
-	imported, err := migrateGraphIntoClassStore(class, store)
+	imported, err := migrateGraphIntoClassStore(class, stores)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: graph class migration: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
@@ -71,9 +103,12 @@ func ensureGraphClassMigrated(cityPath string, cfg *config.City, stderr io.Write
 	}
 	// Straggler pass: a pour racing the marker flip merge-imports here;
 	// anything still missed converges on a later boot's residue sweep.
-	if stragglers, err := importGraphSnapshot(class, store, false); err == nil {
-		imported += stragglers
+	for _, st := range stores {
+		if stragglers, err := importGraphSnapshot(class, st, false); err == nil {
+			imported += stragglers
+		}
 	}
+
 	fmt.Fprintf(stderr, "gc start: graph class migrated to %s (%d open graph beads imported)\n", //nolint:errcheck // best-effort stderr
 		graphClassStorePath(cityPath), imported)
 	return true
@@ -84,7 +119,7 @@ func ensureGraphClassMigrated(cityPath string, cfg *config.City, stderr io.Write
 // must never resurrect state the still-bd city has since progressed), then
 // imports with copy-verify. Runs strictly before the marker, so the bd
 // store is still the authority being copied.
-func migrateGraphIntoClassStore(class *beads.SQLiteStore, store beads.Store) (int, error) {
+func migrateGraphIntoClassStore(class *beads.SQLiteStore, stores []beads.Store) (int, error) {
 	existing, err := class.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
 		return 0, fmt.Errorf("listing class store for reset: %w", err)
@@ -94,7 +129,15 @@ func migrateGraphIntoClassStore(class *beads.SQLiteStore, store beads.Store) (in
 			return 0, fmt.Errorf("resetting class store row %s: %w", b.ID, err)
 		}
 	}
-	return importGraphSnapshot(class, store, true)
+	imported := 0
+	for _, st := range stores {
+		n, err := importGraphSnapshot(class, st, true)
+		imported += n
+		if err != nil {
+			return imported, err
+		}
+	}
+	return imported, nil
 }
 
 // importGraphSnapshot copies the bd store's open graph-class beads (both
@@ -197,38 +240,39 @@ func sweepLegacyGraphResidue(cityPath string, cfg *config.City, stderr io.Writer
 		fmt.Fprintf(stderr, "gc: graph legacy residue sweep: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 0
 	}
-	store, err := openGraphClassMigrationStore(cityPath)
+	stores, closeStores, err := openGraphClassMigrationStores(cityPath, cfg)
+	defer closeStores()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: graph legacy residue sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 0
-	}
-	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
-
-	if _, err := importGraphSnapshot(class, store, false); err != nil {
-		fmt.Fprintf(stderr, "gc: graph legacy residue sweep: import: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 0                                                                 // never delete what we could not first converge
-	}
-	rows, err := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-	if err != nil {
-		fmt.Fprintf(stderr, "gc: graph legacy residue sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 0
+		// Sweep whatever opened; the failed scope converges on a later boot.
 	}
 	now := time.Now()
 	deleted := 0
-	for _, b := range rows {
-		if coordclass.Classify(b) != coordclass.ClassGraph {
+	for _, store := range stores {
+		if _, err := importGraphSnapshot(class, store, false); err != nil {
+			fmt.Fprintf(stderr, "gc: graph legacy residue sweep: import: %v\n", err) //nolint:errcheck // best-effort stderr
+			continue                                                                 // never delete what we could not first converge
+		}
+		rows, err := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+		if err != nil {
+			fmt.Fprintf(stderr, "gc: graph legacy residue sweep: %v\n", err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if b.Status != "closed" {
-			if _, err := class.Get(b.ID); err != nil && now.Sub(b.CreatedAt) < legacyGraphResidueOpenGrace {
-				continue // fresh unknown open bead: spared for the next boot
+		for _, b := range rows {
+			if coordclass.Classify(b) != coordclass.ClassGraph {
+				continue
 			}
+			if b.Status != "closed" {
+				if _, err := class.Get(b.ID); err != nil && now.Sub(b.CreatedAt) < legacyGraphResidueOpenGrace {
+					continue // fresh unknown open bead: spared for the next boot
+				}
+			}
+			if err := store.Delete(b.ID); err != nil {
+				fmt.Fprintf(stderr, "gc: graph legacy residue sweep: deleting %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+				continue
+			}
+			deleted++
 		}
-		if err := store.Delete(b.ID); err != nil {
-			fmt.Fprintf(stderr, "gc: graph legacy residue sweep: deleting %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
-			continue
-		}
-		deleted++
 	}
 	return deleted
 }

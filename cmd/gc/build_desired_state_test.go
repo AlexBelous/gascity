@@ -2018,7 +2018,7 @@ func TestCollectAssignedWorkBeads_PreservesPartialInProgressSurvivors(t *testing
 		t.Fatalf("reload work bead: %v", err)
 	}
 
-	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil)
+	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil, nil)
 	if !partial {
 		t.Fatal("partial = false, want true")
 	}
@@ -2049,7 +2049,7 @@ func TestCollectAssignedWorkBeads_PreservesPartialReadySurvivors(t *testing.T) {
 		t.Fatalf("create work bead: %v", err)
 	}
 
-	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil)
+	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil, nil)
 	if !partial {
 		t.Fatal("partial = false, want true")
 	}
@@ -2096,7 +2096,7 @@ func TestCollectAssignedWorkBeads_SkipsReadyProbeForInProgressAssignee(t *testin
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{session})
 
-	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -2144,6 +2144,7 @@ func TestCollectAssignedWorkBeads_SkipsCityReadyProbeForRigInProgressAssignee(t 
 	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "repo"}}},
 		cityStore,
+		nil,
 		map[string]beads.Store{"repo": rigStore},
 		nil,
 		snapshot,
@@ -2213,7 +2214,7 @@ func TestCollectAssignedWorkBeads_ReadyProbeStillRunsForOtherAssignees(t *testin
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession, readySession})
 
-	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -2277,7 +2278,7 @@ func TestCollectAssignedWorkBeads_ReadyProbeIncludesActiveSessionAssignees(t *te
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession, sleepySession})
 
-	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -2350,6 +2351,7 @@ func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAss
 	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(
 		cfg,
 		cityStore,
+		nil,
 		map[string]beads.Store{"repo": rigStore},
 		nil,
 		nil,
@@ -2401,6 +2403,7 @@ func TestCollectAssignedWorkBeadsWithStores_TracksRigStore(t *testing.T) {
 	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
+		nil,
 		map[string]beads.Store{"repo": rigStore},
 		nil,
 		nil,
@@ -2461,6 +2464,7 @@ func TestCollectAssignedWorkBeadsWithStores_PreservesCrossStoreIDCollisions(t *t
 	got, stores, storeRefs, _, partial := collectAssignedWorkBeadsWithStores(
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
+		nil,
 		map[string]beads.Store{"repo": rigStore},
 		nil,
 		nil,
@@ -2546,6 +2550,7 @@ func TestCollectAssignedWorkBeadsWithStores_ReadinessIsStoreScoped(t *testing.T)
 	got, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores(
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
+		nil,
 		map[string]beads.Store{"repo": rigStore},
 		nil,
 		nil,
@@ -2637,6 +2642,7 @@ func TestCollectAssignedWorkBeadsWithStores_SkipSetIsStoreScopedAcrossSameID(t *
 	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(
 		&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
 		cityStore,
+		nil,
 		map[string]beads.Store{"repo": rigStore},
 		nil,
 		snapshot,

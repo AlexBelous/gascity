@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -143,4 +144,40 @@ type unavailableGraphApplier struct{ err error }
 // ApplyGraphPlan fails with the routing error.
 func (u unavailableGraphApplier) ApplyGraphPlan(context.Context, *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	return nil, u.err
+}
+
+// appendRoutedGraphStore appends the routed graph store to a work-store
+// fan-out on a graph-routed city. Fail-closed: a marked city whose routing
+// or store cannot resolve returns the error so liveness gates treat the
+// probe as unanswerable (callers already fail safe to "has work" on error)
+// rather than reading graph-assigned work as absent and destroying a live
+// session.
+func appendRoutedGraphStore(stores []beads.Store, cityPath string, cfg *config.City) ([]beads.Store, error) {
+	st, routed, err := routedGraphStoreFor(cityPath, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("graph-class store for assigned-work fan-out: %w", err)
+	}
+	if routed {
+		return append(stores, st), nil
+	}
+	return stores, nil
+}
+
+// routedGraphStoreOrWarn resolves the routed graph store best-effort for
+// recovery/release scans: nil on an unrouted city, nil WITH a logged warning
+// when a marked city's routing cannot resolve (the scan then skips the graph
+// leg — the affected steps stay assigned, which is the pre-existing state,
+// rather than blocking the whole recovery pass).
+func routedGraphStoreOrWarn(cityPath string, cfg *config.City, stderr io.Writer) beads.Store {
+	st, routed, err := routedGraphStoreFor(cityPath, cfg)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc: graph-class store unavailable for assigned-work scan: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return nil
+	}
+	if !routed {
+		return nil
+	}
+	return st
 }

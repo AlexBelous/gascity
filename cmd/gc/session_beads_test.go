@@ -1847,7 +1847,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	indexBySessionName := map[string]int{sessionName: 1}
 
 	retired := retireDuplicateConfiguredNamedSessionBeads(
-		store, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+		store, nil, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
 	)
 
 	if !sp.IsRunning(sessionName) {
@@ -1974,7 +1974,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_StopFailureKeepsRuntimeOwner
 	}
 
 	retired := retireDuplicateConfiguredNamedSessionBeads(
-		store, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+		store, nil, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
 	)
 
 	if !sp.IsRunning(loserSessionName) {
@@ -2032,7 +2032,7 @@ func TestRetireRemovedConfiguredNamedSessionBead_StopFailureKeepsRuntimeOwner(t 
 	}
 
 	var stderr bytes.Buffer
-	retired := retireRemovedConfiguredNamedSessionBead(store, nil, sp, b, now, &stderr)
+	retired := retireRemovedConfiguredNamedSessionBead(store, nil, nil, sp, b, now, &stderr)
 
 	if retired {
 		t.Fatal("retireRemovedConfiguredNamedSessionBead returned true after runtime stop failed")
@@ -7758,7 +7758,7 @@ func TestUnclaimResetsInProgressStatus(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead(store, nil, sessionBead, "myrig/codex-max", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead(store, nil, nil, sessionBead, "myrig/codex-max", &stderr)
 
 	gotInProgress, err := store.Get(work.ID)
 	if err != nil {
@@ -7814,7 +7814,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadPreservesRunTargetRoute(t *testi
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead(store, nil, sessionBead, "fallback/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead(store, nil, nil, sessionBead, "fallback/worker", &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -7874,7 +7874,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadClearsSessionAffinity(t *testing
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead(store, nil, sessionBead, "fallback/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead(store, nil, nil, sessionBead, "fallback/worker", &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -8282,6 +8282,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadClearsRigStoreSessionIdentifiers
 	unclaimWorkAssignedToRetiredSessionBead(
 		store,
 		map[string]beads.Store{"frontend": rigStore},
+		nil,
 		sessionBead,
 		"frontend/codex-max",
 		&stderr,
@@ -8367,6 +8368,7 @@ func TestReassignWorkAssignedToRetiredSessionBeadReassignsRigStoreSessionIdentif
 	reassignWorkAssignedToRetiredSessionBead(
 		store,
 		map[string]beads.Store{"frontend": rigStore},
+		nil,
 		retired,
 		successor.ID,
 		&stderr,

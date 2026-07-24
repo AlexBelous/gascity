@@ -510,6 +510,7 @@ func reopenClosedConfiguredNamedSessionBead(
 func retireDuplicateConfiguredNamedSessionBeads(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	graphStore beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	cityName string,
@@ -570,7 +571,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", b.ID, err) //nolint:errcheck
 				continue
 			}
-			reassignWorkAssignedToRetiredSessionBead(store, rigStores, b, openBeads[winner].ID, stderr)
+			reassignWorkAssignedToRetiredSessionBead(store, rigStores, graphStore, b, openBeads[winner].ID, stderr)
 			reassignStateAssignedToRetiredSessionBead(store, b.ID, openBeads[winner].ID, now, stderr)
 			if b.Metadata == nil {
 				b.Metadata = make(map[string]string, len(batch))
@@ -609,6 +610,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 func retireDuplicateConfiguredNamedSessionRows(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	graphStore beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	cityName string,
@@ -671,7 +673,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 				fmt.Fprintf(stderr, "session beads: archiving duplicate named session %s: %v\n", info.ID, err) //nolint:errcheck
 				continue
 			}
-			reassignWorkAssignedToRetiredSessionInfo(store, rigStores, info, rows[winner].Info.ID, stderr)
+			reassignWorkAssignedToRetiredSessionInfo(store, rigStores, graphStore, info, rows[winner].Info.ID, stderr)
 			reassignStateAssignedToRetiredSessionBead(store, info.ID, rows[winner].Info.ID, now, stderr)
 			rows[idx].Info = rows[idx].Info.ApplyPatch(batch)
 		}
@@ -733,6 +735,7 @@ func namedSessionWinsCanonicalRepairInfo(candidate, incumbent session.Info, cano
 func retireRemovedConfiguredNamedSessionBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	graphStore beads.Store,
 	sp runtime.Provider,
 	b beads.Bead,
 	now time.Time,
@@ -756,7 +759,7 @@ func retireRemovedConfiguredNamedSessionBead(
 		fmt.Fprintf(stderr, "session beads: archiving removed named session %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, b, retiredSessionFallbackRoute(b), stderr)
+	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, graphStore, b, retiredSessionFallbackRoute(b), stderr)
 	cancelStateAssignedToRetiredSessionBead(store, b.ID, now, stderr)
 	return true
 }
@@ -943,12 +946,20 @@ func coordClassStoreCandidates(cfg *config.City, cityStore beads.Store, rigStore
 // without touching the call sites. Unlike coordClassStoreCandidates it has no
 // cfg/suspended context (the retirement scans run per session bead without a
 // suspension frame), so it fans out across all live rig stores by name.
-func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) []beads.Store {
+func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, extra ...beads.Store) []beads.Store {
 	if store == nil {
 		return nil
 	}
 	stores := []beads.Store{store}
+	appendExtras := func() {
+		for _, e := range extra {
+			if e != nil {
+				stores = append(stores, e)
+			}
+		}
+	}
 	if len(rigStores) == 0 {
+		appendExtras()
 		return stores
 	}
 	names := make([]string, 0, len(rigStores))
@@ -962,6 +973,7 @@ func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) [
 	for _, name := range names {
 		stores = append(stores, rigStores[name])
 	}
+	appendExtras()
 	return stores
 }
 
@@ -980,6 +992,7 @@ type unclaimResult struct {
 func unclaimWorkAssignedToRetiredSessionBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	graphStore beads.Store,
 	sessionBead beads.Bead,
 	fallbackRoute string,
 	stderr io.Writer,
@@ -992,7 +1005,7 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	}
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
-	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, graphStore) {
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
@@ -1031,6 +1044,7 @@ func unclaimWorkAssignedToRetiredSessionBead(
 func reassignWorkAssignedToRetiredSessionBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	graphStore beads.Store,
 	retiredSession beads.Bead,
 	newSessionID string,
 	stderr io.Writer,
@@ -1043,7 +1057,7 @@ func reassignWorkAssignedToRetiredSessionBead(
 	}
 	identifiers := sessionAssignmentIdentifiers(retiredSession)
 	seen := make(map[string]struct{})
-	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, graphStore) {
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
@@ -1078,6 +1092,7 @@ func reassignWorkAssignedToRetiredSessionBead(
 func reassignWorkAssignedToRetiredSessionInfo(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	graphStore beads.Store,
 	retiredSession session.Info,
 	newSessionID string,
 	stderr io.Writer,
@@ -1090,7 +1105,7 @@ func reassignWorkAssignedToRetiredSessionInfo(
 	}
 	identifiers := sessionAssignmentIdentifiersInfo(retiredSession)
 	seen := make(map[string]struct{})
-	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, graphStore) {
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
@@ -1126,6 +1141,7 @@ func reassignWorkAssignedToRetiredSessionInfo(
 func unclaimWorkAssignedToRetiredSessionInfo(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	graphStore beads.Store,
 	retiredSession session.Info,
 	fallbackRoute string,
 	stderr io.Writer,
@@ -1139,7 +1155,7 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 	}
 	identifiers := sessionAssignmentIdentifiersInfo(retiredSession)
 	seen := make(map[string]struct{})
-	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, graphStore) {
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
@@ -1230,6 +1246,7 @@ const strandedRepairCloseReason = "stranded-repair"
 func repairStrandedPoolWorkerBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	graphStore beads.Store,
 	info session.Info,
 	fallbackRoute string,
 	clk clock.Clock,
@@ -1250,7 +1267,7 @@ func repairStrandedPoolWorkerBead(
 	if first.IsZero() || now.Sub(first) < strandedRepairConfirmGrace {
 		return false // inside the confirmation window — defer the destructive clear
 	}
-	res := unclaimWorkAssignedToRetiredSessionInfo(store, rigStores, info, fallbackRoute, stderr)
+	res := unclaimWorkAssignedToRetiredSessionInfo(store, rigStores, graphStore, info, fallbackRoute, stderr)
 	if res.Failed > 0 {
 		// At least one unassign did not land. Do NOT close the session bead or
 		// report a repair: closing now would strand the still-assigned work
@@ -1542,7 +1559,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			openBeads[i].Status = "closed"
 		}
 		openBeads = retireDuplicateConfiguredNamedSessionBeads(
-			store, rigStores, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
+			store, rigStores, routedGraphStoreOrWarn(cityPath, cfg, stderr), sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
 		)
 	}
 
@@ -2134,7 +2151,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if isNamedSessionBead(b) {
 				identity := namedSessionIdentity(b)
 				if identity != "" && (cfg == nil || config.FindNamedSession(cfg, identity) == nil) {
-					if retireRemovedConfiguredNamedSessionBead(store, rigStores, sp, b, now, stderr) {
+					if retireRemovedConfiguredNamedSessionBead(store, rigStores, routedGraphStoreOrWarn(cityPath, cfg, stderr), sp, b, now, stderr) {
 						if idx, ok := indexBySessionName[sn]; ok {
 							openBeads[idx].Status = "open"
 							if openBeads[idx].Metadata == nil {

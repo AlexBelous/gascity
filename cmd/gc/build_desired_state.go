@@ -614,7 +614,8 @@ func buildDesiredStateWithSessionBeads(
 	assignedReadyCache := newReadyDemandCache()
 	if store != nil {
 		subPhaseStart = time.Now()
-		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
+		assignedGraphStore := routedGraphStoreOrWarn(cityPath, cfg, stderr)
+		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cfg, store, assignedGraphStore, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_assigned_work", subPhaseStart, map[string]any{
 			"beads":   len(assignedWorkBeads),
 			"partial": storePartial,
@@ -1074,7 +1075,7 @@ func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
 ) ([]beads.Bead, bool) {
-	result, _, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil, nil)
+	result, _, _, _, partial := collectAssignedWorkBeadsWithStores(cfg, cityStore, nil, nil, nil, nil)
 	return result, partial
 }
 
@@ -1090,6 +1091,7 @@ func collectAssignedWorkBeads(
 func collectAssignedWorkBeadsWithStores(
 	cfg *config.City,
 	cityStore beads.Store,
+	graphStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 	sessionBeads *sessionBeadSnapshot,
@@ -1104,6 +1106,15 @@ func collectAssignedWorkBeadsWithStores(
 	// dolt. On a single-store city this is the same store the sessions arm
 	// iterates (identity).
 	stores := coordClassStoreCandidates(cfg, cityStore, rigStores, suspendedRigPaths, "")
+	// Graph-routed city: claimed molecule steps (in_progress, and open pool
+	// work still carrying a dead session's assignee) live ONLY in the
+	// embedded graph store — without this leg the reconciler's assigned-work
+	// snapshot never sees them, orphan release never fires, and the workflow
+	// wedges (win3 gap analysis). The empty ref aligns the graph leg with
+	// the city store for the ref-aware writers.
+	if graphStore != nil {
+		stores = append(stores, classStoreCandidate{store: graphStore, ref: ""})
+	}
 
 	type storeAssignedWorkResult struct {
 		ref       string // store ref these beads came from (empty = city store)

@@ -1814,7 +1814,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr)
+	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, routedGraphStoreOrWarn(cityPath, cfg, stderr), closedSessionBead, "", stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{

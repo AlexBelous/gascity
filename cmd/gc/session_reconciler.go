@@ -1383,7 +1383,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// rows, returning the folded row set (retired losers carry their retire batch).
 	if cfg != nil {
 		rows = retireDuplicateConfiguredNamedSessionRows(
-			store, rigStores, sp, cfg, cityName, rows, clk.Now().UTC(), stderr,
+			store, rigStores, routedGraphStoreOrWarn(cityPath, cfg, stderr), sp, cfg, cityName, rows, clk.Now().UTC(), stderr,
 		)
 	}
 	recordPhase(TraceSiteSessionReconcileHealRetire, "session_reconcile.heal_and_retire_duplicates", phaseStart, map[string]any{
@@ -3662,7 +3662,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// unclaimWorkAssignedToRetiredSessionInfo, the Info form of the same detach primitive
 			// named-session retirement uses.
 			if !storeQueryPartial &&
-				repairStrandedPoolWorkerBead(store, rigStores, infoByID[target.info.ID], retiredSessionFallbackRouteInfo(infoByID[target.info.ID]), clk, stderr) {
+				repairStrandedPoolWorkerBead(store, rigStores, routedGraphStoreOrWarn(cityPath, cfg, stderr), infoByID[target.info.ID], retiredSessionFallbackRouteInfo(infoByID[target.info.ID]), clk, stderr) {
 				tick.markClosed(target.info.ID)
 				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
 			}
@@ -3913,18 +3913,21 @@ func reachableStoresForSession(cityPath string, cfg *config.City, store beads.St
 		// primary work store plus every rig work store. The downstream
 		// List{Assignee,Status} probes are work queries, so this is the work
 		// arm; on a single-store city it collapses to the same store the
-		// session probes use (identity).
-		return workAssignmentStores(store, rigStores), nil
+		// session probes use (identity). On a graph-routed city the embedded
+		// graph store joins every branch: a claimed molecule step lives ONLY
+		// there, and a graph-blind probe reads a live worker as idle — the
+		// destructive drain/close class of bug (win3 gap analysis).
+		return appendRoutedGraphStore(workAssignmentStores(store, rigStores), cityPath, cfg)
 	}
 	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 	if storeRef == "" {
-		return []beads.Store{store}, nil
+		return appendRoutedGraphStore([]beads.Store{store}, cityPath, cfg)
 	}
 	rigStore, ok := rigStores[storeRef]
 	if !ok || rigStore == nil {
 		return nil, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
 	}
-	return []beads.Store{rigStore}, nil
+	return appendRoutedGraphStore([]beads.Store{rigStore}, cityPath, cfg)
 }
 
 // reachableStoresForSessionInfo is the session.Info form of
@@ -3934,17 +3937,17 @@ func reachableStoresForSession(cityPath string, cfg *config.City, store beads.St
 func reachableStoresForSessionInfo(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) ([]beads.Store, error) {
 	agentCfg := sessionAgentConfigInfo(cfg, info)
 	if agentCfg == nil || agentIsCrossStoreEligible(agentCfg) {
-		return workAssignmentStores(store, rigStores), nil
+		return appendRoutedGraphStore(workAssignmentStores(store, rigStores), cityPath, cfg)
 	}
 	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 	if storeRef == "" {
-		return []beads.Store{store}, nil
+		return appendRoutedGraphStore([]beads.Store{store}, cityPath, cfg)
 	}
 	rigStore, ok := rigStores[storeRef]
 	if !ok || rigStore == nil {
 		return nil, fmt.Errorf("rig store %q unavailable for session %q", storeRef, info.SessionNameMetadata)
 	}
-	return []beads.Store{rigStore}, nil
+	return appendRoutedGraphStore([]beads.Store{rigStore}, cityPath, cfg)
 }
 
 // firstOpenAssignedWorkBeadForReachableStore returns the first open or

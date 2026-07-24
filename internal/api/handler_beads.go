@@ -377,7 +377,31 @@ type BeadGraphResponse struct {
 	Deps  []workflowDepResponse `json:"deps"`
 }
 
-func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, error) {
+// memberStoreComplement returns the cross-class store tail for member walks
+// rooted in store: on a graph-split city, work-store roots gain the graph
+// store (drain/synthetic members live there) and graph-store roots gain the
+// city + rig work stores (user convoy members live there). Empty on a
+// single-store city — byte-identical collapse (win3 gap G31).
+func (s *Server) memberStoreComplement(primary beads.Store) []beads.Store {
+	graph := s.state.GraphBeadStore().Store
+	city := s.state.CityBeadStore()
+	if graph == nil || city == nil || graph == city {
+		return nil
+	}
+	if primary == graph {
+		complement := []beads.Store{city}
+		stores := s.state.BeadStores()
+		for _, rigName := range sortedRigNames(stores) {
+			if st := stores[rigName]; st != nil && st != city {
+				complement = append(complement, st)
+			}
+		}
+		return complement
+	}
+	return []beads.Store{graph}
+}
+
+func collectBeadGraph(store beads.Store, root beads.Bead, memberStores ...beads.Store) ([]beads.Bead, []workflowDepResponse, error) {
 	graphBeads := make([]beads.Bead, 0, 1)
 	beadIndex := make(map[string]beads.Bead)
 
@@ -415,7 +439,7 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	}
 
 	if root.Type == "convoy" {
-		members, err := convoycore.Members(store, root.ID, true)
+		members, err := convoycore.Members(store, root.ID, true, memberStores...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
 		}

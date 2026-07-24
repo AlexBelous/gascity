@@ -310,7 +310,7 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	if result.Outcome != "pass" {
 		return result, nil
 	}
-	reason, err := validateRequiredArtifacts(store, subject, opts.RequiredArtifactStat)
+	reason, err := validateRequiredArtifacts(store, subject, opts.RequiredArtifactStat, opts.MemberStores...)
 	if err != nil {
 		return retryEvalResult{}, err
 	}
@@ -320,12 +320,12 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	return result, nil
 }
 
-func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(string) (os.FileInfo, error)) (string, error) {
+func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(string) (os.FileInfo, error), memberStores ...beads.Store) (string, error) {
 	if stat == nil {
 		stat = os.Stat
 	}
 	for _, rawPath := range requiredArtifactTemplates(subject.Metadata) {
-		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath)
+		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath, memberStores...)
 		if err != nil {
 			return "", err
 		}
@@ -374,13 +374,13 @@ func requiredArtifactTemplates(metadata map[string]string) []string {
 	return result
 }
 
-func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string) (string, string, string, error) {
+func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string, memberStores ...beads.Store) (string, string, string, error) {
 	rootID := strings.TrimSpace(subject.Metadata[beadmeta.RootBeadIDMetadataKey])
 	attempt := strings.TrimSpace(subject.Metadata[beadmeta.AttemptMetadataKey])
 	worktree := strings.TrimSpace(subject.Metadata["work_dir"])
 
 	if worktree == "" {
-		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID)
+		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID, memberStores...)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -442,7 +442,7 @@ func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
 	return requiredArtifactPathInWorktree(resolvedWorktree, resolvedPath)
 }
 
-func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, string, error) {
+func resolveRequiredArtifactWorktree(store beads.Store, rootID string, memberStores ...beads.Store) (string, string, error) {
 	if rootID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
@@ -470,9 +470,28 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 	}
 	source, err := store.Get(sourceID)
 	if errors.Is(err, beads.ErrNotFound) {
-		return "", "missing_required_artifact_context", nil
-	}
-	if err != nil {
+		// Cross-store source: on a split city the workflow root lives in the
+		// graph store while its source bead is work-resident — probe the
+		// member tail before classifying the context missing (a false miss
+		// misclassified PASSING attempts; win3 gap G25 / landmine #14).
+		found := false
+		for _, member := range memberStores {
+			if member == nil || member == store {
+				continue
+			}
+			memberSource, memberErr := member.Get(sourceID)
+			if memberErr == nil {
+				source, found = memberSource, true
+				break
+			}
+			if !errors.Is(memberErr, beads.ErrNotFound) {
+				return "", "", fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(memberErr))
+			}
+		}
+		if !found {
+			return "", "missing_required_artifact_context", nil
+		}
+	} else if err != nil {
 		return "", "", fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
 	}
 	worktree := strings.TrimSpace(source.Metadata["work_dir"])

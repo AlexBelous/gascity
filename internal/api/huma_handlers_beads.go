@@ -518,7 +518,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
 	}
 
-	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
+	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root, s.memberStoreComplement(foundStore)...)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}

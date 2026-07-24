@@ -247,21 +247,15 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		return sweepFactory
 	}
 	now := time.Now().UTC()
-	for _, info := range sessions {
-		if !computeFactGetCandidate(info) {
-			continue
-		}
-		b, err := store.Get(info.ID)
-		if err != nil {
-			logf("usage: loading session %s for compute fact failed: %v", info.ID, err)
-			continue
-		}
+	processed := make(map[string]bool)
+	processSessionBead := func(b beads.Bead) {
+		processed[b.ID] = true
 		// Re-check the terminal state from the FRESH bead: a session that re-awoke in
 		// the window since the snapshot was taken must not mint a tiny-wall fact for its
 		// just-STARTED interval and suppress the real end-of-interval emission. Best-
 		// effort accounting, the same NDI class as the sync-tail re-list delta.
 		if b.Metadata == nil || !isComputeTerminalState(b.Metadata["state"]) {
-			continue
+			return
 		}
 		awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
 		// Model-usage lane FIRST, symmetric to and beside the compute fact: recover the
@@ -296,5 +290,44 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		// recorded (idempotent), so wall-time accounting is never delayed by a pending
 		// sweep.
 		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
+	}
+	for _, info := range sessions {
+		if !computeFactGetCandidate(info) {
+			continue
+		}
+		b, err := store.Get(info.ID)
+		if err != nil {
+			logf("usage: loading session %s for compute fact failed: %v", info.ID, err)
+			continue
+		}
+		processSessionBead(b)
+	}
+	// Wisp-lifecycle sessions (split cities) close AT retirement, so they never
+	// appear in the open-only snapshot above — during activity this zeroed usage
+	// facts entirely on maintainer-city while classic cities (whose terminal
+	// sessions linger open in "drained") kept accounting. Sweep recently-closed,
+	// still-unmarked session beads from the class store through the same path;
+	// the usage_compute_emitted_at and model-sweep markers keep this idempotent,
+	// and the 2h window comfortably beats both the tick cadence and the 4h
+	// terminal-wisp retention purge. Single-store cities skip (nil infra store).
+	if cachedCityInfraStore(cr.cityPath, cr.cfg) != nil {
+		closedRows, lerr := store.List(beads.ListQuery{
+			Type:          "session",
+			Status:        "closed",
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
+			AllowScan:     true,
+		})
+		if lerr != nil {
+			logf("usage: listing closed sessions for compute sweep failed: %v", lerr)
+			return
+		}
+		cutoff := now.Add(-2 * time.Hour)
+		for _, b := range closedRows {
+			if processed[b.ID] || b.UpdatedAt.Before(cutoff) {
+				continue
+			}
+			processSessionBead(b)
+		}
 	}
 }

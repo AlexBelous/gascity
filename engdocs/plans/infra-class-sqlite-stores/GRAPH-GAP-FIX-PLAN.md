@@ -12,30 +12,30 @@ DONE / IN-PROGRESS / TODO / DESCOPED(reason).
 - [x] G06(part) fail-closed bd read backstop for unfederated gcg shapes
 
 ## Priority order for the remainder
-1.  [ ] N07/N10/N11 retention: DISABLE the 4h terminal sweeper on the
+1.  [x] N07/N10/N11 retention: DISABLE the 4h terminal sweeper on the
         graph class store (closed steps must outlive running workflows;
         workflow GC owns tree cleanup) + test
-2.  [ ] N08 legacy-id routing: widen graphHookClaimStore + the doBd
+2.  [x] N08 legacy-id routing: widen graphHookClaimStore + the doBd
         mutation arm + show-fed reserved arm gating from gcg-prefix to
         "routed AND graph store owns id" (Get probe) + test
-3.  [ ] N00/N09 migration+residue must iterate RIG bd stores too
+3.  [x] N00/N09 migration+residue must iterate RIG bd stores too
         (openGraphClassMigrationStores plural, orders pattern) + test
-4.  [ ] N02/N22 wait-dep graph leg (newWaitDependencyStoreSet +
+4.  [x] N02/N22 wait-dep graph leg (newWaitDependencyStoreSet +
         loadWaitDependencyBead) + FailWait only after graph consulted
-5.  [ ] N01/N03 convergence adapter routed arm (newConvergenceScope)
-6.  [ ] G18 order dispatch: wisp-root label stamp + order-run evidence
+5.  [x] N01/N03 convergence adapter routed arm (newConvergenceScope)
+6.  [x] G18 order dispatch: wisp-root label stamp + order-run evidence
         + stale-wisp sweep routed (by-id graph mutation arm on policy
         store Update/SetMetadata* or explicit routing at the 3 sites)
-7.  [ ] G22/N04/N13 sling: deps.GraphStore threading (cmd_sling + api
+7.  [x] G22/N04/N13 sling: deps.GraphStore threading (cmd_sling + api
         handler_sling) + sourceWorkflowStores graph arm (re-sling
         double-pour; cook --attach idempotency)
-8.  [ ] G19 control-dispatcher pack-custom queries: wrap shell fallback
+8.  [x] G19 control-dispatcher pack-custom queries: wrap shell fallback
         in graphFederatedWorkQueryRunner (dispatch_runtime.go ~883)
-9.  [ ] G12 drain MemberStores work-store tail (+retry/retry-eval/ralph)
+9.  [x] G12 drain MemberStores work-store tail (+retry/retry-eval/ralph)
 10. [ ] G25 retry-eval required-artifact source read (port ebeba2a55)
-11. [ ] G35 findBeadAcrossStores gcg arm: fall through to city/rig scan
+11. [x] G35 findBeadAcrossStores gcg arm: fall through to city/rig scan
         on ErrNotFound (manual recovery of misplaced control beads)
-12. [ ] G14/G15/G21/G30 API GET /beads list + ready graph legs
+12. [x] G14/G15/G21/G30 API GET /beads list + ready graph legs
         (fail-loud 503 shape from integ)
 13. [ ] G31 memberStoreComplement for /beads/graph cross-class members
 14. [ ] G28 /status work counts graph leg; G36 type=molecule augment

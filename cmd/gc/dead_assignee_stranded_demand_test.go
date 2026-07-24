@@ -15,8 +15,15 @@ func TestBuildDesiredStateDeadAssigneeCountsAsPoolDemand(t *testing.T) {
 	cfg := deadAssigneeDemandConfig(1)
 	template := cfg.Agents[0].QualifiedName()
 	closed := deadAssigneeSessionBead("session-dead", "worker-dead", template, "closed")
-	if _, err := store.Create(closed); err != nil {
+	createdClosed, err := store.Create(closed)
+	if err != nil {
 		t.Fatalf("create closed session bead: %v", err)
+	}
+	// MemStore.Create always creates beads open (in production, closing a
+	// session happens through the runtime lifecycle, not the create call);
+	// Close is how a test puts one into the closed state Create can't set.
+	if err := store.Close(createdClosed.ID); err != nil {
+		t.Fatalf("close session bead: %v", err)
 	}
 	if _, err := store.Create(beads.Bead{
 		ID:       "ga-dead-assignee",
@@ -121,7 +128,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandSkipsAmbiguousDeadAssignee(t *testi
 		Assignee: "shared-dead",
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", sessionInfosFromBeads(sessions), work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", sessionInfosFromBeads(sessions), work, []string{""}, nil)
 
 	if len(got) != 0 {
 		t.Fatalf("filtered work = %#v, want empty because ambiguous dead-session identity is uncertain, not confirmed-dead demand", got)
@@ -139,7 +146,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandUsesClosedSessionTemplateFallback(t
 		Metadata: map[string]string{},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", sessionInfosFromBeads([]beads.Bead{closed}), work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", sessionInfosFromBeads([]beads.Bead{closed}), work, []string{""}, nil)
 
 	if len(got) != 1 || got[0].ID != "ga-assignee-only" {
 		t.Fatalf("filtered work = %#v, want assignee-only work mapped through the confirmed-dead session template", got)
@@ -156,7 +163,7 @@ func TestDeadAssigneeDemandMapsAssigneeTemplateBeforeClosedSessionTemplate(t *te
 		Assignee: "worker",
 	}}
 
-	states := ComputePoolDesiredStates(cfg, filterAssignedWorkBeadsForPoolDemand(cfg, "", sessionInfosFromBeads([]beads.Bead{closed}), work, []string{""}), sessionInfosFromBeads([]beads.Bead{closed}), nil)
+	states := ComputePoolDesiredStates(cfg, filterAssignedWorkBeadsForPoolDemand(cfg, "", sessionInfosFromBeads([]beads.Bead{closed}), work, []string{""}, nil), sessionInfosFromBeads([]beads.Bead{closed}), nil)
 	counts := PoolDesiredCounts(states)
 
 	if got := counts["worker"]; got != 1 {
@@ -178,7 +185,7 @@ func TestDeadAssigneeDemandPreservesRouteTemplatePrecedence(t *testing.T) {
 		Metadata: map[string]string{"gc.routed_to": "preferred"},
 	}}
 
-	states := ComputePoolDesiredStates(cfg, filterAssignedWorkBeadsForPoolDemand(cfg, "", sessionInfosFromBeads([]beads.Bead{closed}), work, []string{""}), sessionInfosFromBeads([]beads.Bead{closed}), nil)
+	states := ComputePoolDesiredStates(cfg, filterAssignedWorkBeadsForPoolDemand(cfg, "", sessionInfosFromBeads([]beads.Bead{closed}), work, []string{""}, nil), sessionInfosFromBeads([]beads.Bead{closed}), nil)
 	counts := PoolDesiredCounts(states)
 
 	if got := counts["preferred"]; got != 1 {
@@ -244,8 +251,12 @@ func TestDeadAssigneeDemandHonorsReadyExcludeTypesAndBlockingDependencies(t *tes
 			store := beads.NewMemStore()
 			cfg := deadAssigneeDemandConfig(1)
 			template := cfg.Agents[0].QualifiedName()
-			if _, err := store.Create(deadAssigneeSessionBead("session-dead", "worker-dead", template, "closed")); err != nil {
+			createdClosed, err := store.Create(deadAssigneeSessionBead("session-dead", "worker-dead", template, "closed"))
+			if err != nil {
 				t.Fatalf("create closed session bead: %v", err)
+			}
+			if err := store.Close(createdClosed.ID); err != nil {
+				t.Fatalf("close session bead: %v", err)
 			}
 			tc.setup(t, store, template)
 

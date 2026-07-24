@@ -142,6 +142,11 @@ func computePoolDesiredStates(
 	}
 
 	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionInfos)
+	// deadAssigneeTemplates resolves stranded assigned work whose owning
+	// session has confirmed-exited (FR-1) to the pool template it should
+	// wake (FR-2). Computed once: the same map must produce identical
+	// routing decisions across every agent's iteration of the bead below.
+	deadAssigneeTemplates := confirmedDeadAssigneeTemplates(cfg, sessionInfos)
 
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
@@ -168,11 +173,15 @@ func computePoolDesiredStates(
 				continue
 			}
 			sessionBeadID := assigneeToSessionBeadID[assignee]
+			deadTemplate, confirmedDead := deadAssigneeTemplates[assignee]
 			if routedTo == "" && sessionBeadID != "" {
 				routedTo = sessionBeadTemplate[sessionBeadID]
 				if routedTo == "" && len(cfg.Agents) == 1 {
 					routedTo = cfg.Agents[0].QualifiedName()
 				}
+			}
+			if routedTo == "" && sessionBeadID == "" && confirmedDead {
+				routedTo = deadTemplate
 			}
 			routedTo = normalizeAgentTemplateIdentity(cfg, routedTo)
 			if sessionBeadID != "" {
@@ -207,13 +216,15 @@ func computePoolDesiredStates(
 				})
 				continue
 			}
-			if !agentTemplateIdentitiesEquivalent(cfg, assignee, template) || !isKnownPoolTemplate(assignee, cfg) {
+			if !confirmedDead && (!agentTemplateIdentitiesEquivalent(cfg, assignee, template) || !isKnownPoolTemplate(assignee, cfg)) {
 				// Assignee set but session closed/unknown and not a configured
 				// pool template — orphaned work, not our job to respawn. The
 				// identity-equivalence compare keeps work assigned under a
 				// legacy bound form of this template eligible for the
 				// wake-known-identity tier; the emitted request carries the
-				// canonical template.
+				// canonical template. A confirmed-dead assignee (FR-1) bypasses
+				// this gate: deadAssigneeTemplates already resolved which
+				// template its stranded work maps to (FR-2).
 				continue
 			}
 			if _, ok := wakeRequestedTemplates[template]; ok {

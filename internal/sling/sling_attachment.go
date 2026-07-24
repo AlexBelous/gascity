@@ -448,7 +448,8 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	if IsCustomSlingQuery(a) {
-		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+		warnings, _ := routedStateWarnings(b, beadID)
+		return BeadCheckResult{Warnings: warnings}
 	}
 
 	target := a.QualifiedName()
@@ -466,7 +467,8 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		if b.Assignee == target {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
-		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+		warnings, _ := routedStateWarnings(b, beadID)
+		return BeadCheckResult{Warnings: warnings}
 	}
 
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
@@ -477,14 +479,19 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 			}
 		}
 	}
-	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+	warnings, _ := routedStateWarnings(b, beadID)
+	return BeadCheckResult{Warnings: warnings}
 }
 
 // routedStateWarnings reports human-readable warnings describing any existing
 // routing state on b (assignee, gc.routed_to metadata, and pool: labels) that
-// would collide with a fresh sling of beadID. It returns nil when b carries no
-// such state.
-func routedStateWarnings(b beads.Bead, beadID string) []string {
+// would collide with a fresh sling of beadID. It returns nil warnings when b
+// carries no such state.
+//
+// The error return will report a routing conflict (an existing gc.routed_to
+// that names a different target) starting in the GREEN step (ga-l3qg8t);
+// this RED-step stub always returns a nil error.
+func routedStateWarnings(b beads.Bead, beadID string) ([]string, error) { //nolint:unparam // error becomes meaningful in the GREEN step (ga-l3qg8t); this RED-step stub always returns nil
 	var warnings []string
 	if b.Assignee != "" {
 		warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
@@ -497,5 +504,5 @@ func routedStateWarnings(b beads.Bead, beadID string) []string {
 			warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
 		}
 	}
-	return warnings
+	return warnings, nil
 }

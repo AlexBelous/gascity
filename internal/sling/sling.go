@@ -1634,6 +1634,10 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+	// Conflict is populated in the GREEN step (ga-l3qg8t) when the bead's
+	// gc.routed_to metadata already names a different target. RED-step
+	// stub: always nil.
+	Conflict error
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

@@ -1,0 +1,60 @@
+# Graph gap fix plan — execution checklist
+
+Source inventories: GRAPH-READ-GAP-ANALYSIS.md (G00-G38) +
+GRAPH-READ-GAP-ANALYSIS-ADDENDUM.md (N00-N24). Status legend:
+DONE / IN-PROGRESS / TODO / DESCOPED(reason).
+
+## Done this pass (commits on feat/infra-class-sqlite-stores)
+- [x] G00-G04 + G07/G10/G20 reconciler assigned-work frame (reachable
+      fan-outs + collectAssignedWork graph leg + retirement family)
+- [x] G08/G13 crash-recovery in_progress union (runner env identities)
+- [x] G23 release-if-current routed arm
+- [x] G06(part) fail-closed bd read backstop for unfederated gcg shapes
+
+## Priority order for the remainder
+1.  [ ] N07/N10/N11 retention: DISABLE the 4h terminal sweeper on the
+        graph class store (closed steps must outlive running workflows;
+        workflow GC owns tree cleanup) + test
+2.  [ ] N08 legacy-id routing: widen graphHookClaimStore + the doBd
+        mutation arm + show-fed reserved arm gating from gcg-prefix to
+        "routed AND graph store owns id" (Get probe) + test
+3.  [ ] N00/N09 migration+residue must iterate RIG bd stores too
+        (openGraphClassMigrationStores plural, orders pattern) + test
+4.  [ ] N02/N22 wait-dep graph leg (newWaitDependencyStoreSet +
+        loadWaitDependencyBead) + FailWait only after graph consulted
+5.  [ ] N01/N03 convergence adapter routed arm (newConvergenceScope)
+6.  [ ] G18 order dispatch: wisp-root label stamp + order-run evidence
+        + stale-wisp sweep routed (by-id graph mutation arm on policy
+        store Update/SetMetadata* or explicit routing at the 3 sites)
+7.  [ ] G22/N04/N13 sling: deps.GraphStore threading (cmd_sling + api
+        handler_sling) + sourceWorkflowStores graph arm (re-sling
+        double-pour; cook --attach idempotency)
+8.  [ ] G19 control-dispatcher pack-custom queries: wrap shell fallback
+        in graphFederatedWorkQueryRunner (dispatch_runtime.go ~883)
+9.  [ ] G12 drain MemberStores work-store tail (+retry/retry-eval/ralph)
+10. [ ] G25 retry-eval required-artifact source read (port ebeba2a55)
+11. [ ] G35 findBeadAcrossStores gcg arm: fall through to city/rig scan
+        on ErrNotFound (manual recovery of misplaced control beads)
+12. [ ] G14/G15/G21/G30 API GET /beads list + ready graph legs
+        (fail-loud 503 shape from integ)
+13. [ ] G31 memberStoreComplement for /beads/graph cross-class members
+14. [ ] G28 /status work counts graph leg; G36 type=molecule augment
+15. [ ] G16 bead.* emission wrapper for graph store (controller +
+        CLI mutation arm + hook claim); G17 BFF fetchRunGraph merge
+        (port B36 db9d6302c)
+16. [ ] N05/N19/N21 convoy: gc convoy status synthetic-convoy graph
+        arm; convoys list lane; controller-down fallback candidate
+17. [ ] N06 CAS fencing on graph plane: decide implement-ConditionalWriter
+        vs loud-fail (control epochs / drain reservations / attach fences)
+18. [ ] N14 prime/nudge wisp-step injection graph arm
+19. [ ] N15 API ActiveBead fan-out graph leg
+20. [ ] N16 non-claim gc hook runner federation (same wrapper as claim)
+21. [ ] N17 on_death/on_boot recovery hook shells (rewrite to gc-native
+        or wrap); N23 spawn-storm reset-loop discovery
+22. [ ] N18 wisp retention: graph-store closed-wisp purge path (wisp-
+        compact.sh/reaper are bd-only); depends on decision in item 1
+23. [ ] G05/G24/G27 gc bd mol current/progress federation
+24. [ ] G29 gc graph reserved-id arm; G37 autoclose cliGraphStore arms
+25. [ ] G38/N20 doctor scans graph legs; N24 wisp-GC BatchDeleter comment
+26. [ ] G32 substring show resolution (low); G33 bd v1.1.x ephemeral
+        probe repair (low); G34 per-store-ref partial gating (low)

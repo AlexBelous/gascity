@@ -1684,7 +1684,16 @@ func (cr *CityRuntime) prepareWaitWakeStateForTick(sessStore beads.SessionStore,
 	if err != nil {
 		return nil, err
 	}
-	return prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), nudgeReader, time.Now(), sessionBeads)
+	// Graph leg: dependency beads can be graph-resident post-flip (waits on
+	// workflow roots / migrated legacy ids). A graph-blind dep read here is
+	// DESTRUCTIVE — an all-mode miss FailWaits the wait and releases the
+	// sleeping session's hold — so a routed city fails LOUD on routing
+	// errors instead of dep-checking against an incomplete store set.
+	depStores, err := appendRoutedGraphStore(newWaitDependencyStoreSet(store, rigStores), cr.cityPath, cr.cfg)
+	if err != nil {
+		return nil, err
+	}
+	return prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), waitDependencyStoreSet(depStores), nudgeReader, time.Now(), sessionBeads)
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it

@@ -226,3 +226,28 @@ func TestGraphStoreRetentionDisabled(t *testing.T) {
 		t.Fatalf("closed step unreadable: %+v %v", got, err)
 	}
 }
+
+// TestWaitDependencyReadsReachGraphStore pins gap N02/N22: wait-dependency
+// resolution (create-time loader and the tick's dep store set) sees
+// graph-resident beads on a routed city.
+func TestWaitDependencyReadsReachGraphStore(t *testing.T) {
+	cityPath := t.TempDir()
+	writeGraphMigratedMarker(t, cityPath)
+	cfg := sqliteGraphConfig()
+	st, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := st.Create(beads.Bead{Title: "workflow root", Type: "molecule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	depStores, err := appendRoutedGraphStore(newWaitDependencyStoreSet(beads.NewMemStore(), nil), cityPath, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := waitDependencyStoreSet(depStores).Get(root.ID)
+	if err != nil || got.ID != root.ID {
+		t.Fatalf("dep store set missed the graph root: (%+v, %v)", got, err)
+	}
+}

@@ -958,6 +958,19 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 	if err != nil {
 		return beads.Bead{}, err
 	}
+	// Graph-resident dependencies (workflow roots, migrated legacy ids)
+	// resolve from the embedded graph store; the scope-candidate loop below
+	// only reaches work stores. Routing errors surface — refusing the wait
+	// loudly beats registering one that can never wake.
+	if st, routed, gerr := routedGraphStoreFor(cityPath, cfg); gerr != nil {
+		return beads.Bead{}, fmt.Errorf("graph-class store: %w", gerr)
+	} else if routed {
+		if dep, gerr := st.Get(depID); gerr == nil {
+			return dep, nil
+		} else if !errors.Is(gerr, beads.ErrNotFound) {
+			return beads.Bead{}, gerr
+		}
+	}
 	cityRoot := filepath.Clean(cityPath)
 	for _, scopeRoot := range convoyStoreCandidates(cfg, cityPath, depID) {
 		scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)

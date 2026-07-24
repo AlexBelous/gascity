@@ -321,7 +321,27 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		seen[assignee] = true
 		unique = append(unique, assignee)
 	}
+	// Graph leg (sweep gap N15): a claimed molecule step is the agent's
+	// active bead and lives only in the relocated graph store — without it
+	// the agent/session views show no active work on a routed city. Probed
+	// after the rig stores per assignee, TierBoth since steps are wisps.
+	var graphStore beads.Store
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+		graphStore = graph
+	}
 	for _, assignee := range unique {
+		if graphStore != nil {
+			matches, err := graphStore.List(beads.ListQuery{
+				Assignee: assignee,
+				Status:   "in_progress",
+				Limit:    1,
+				Sort:     beads.SortCreatedDesc,
+				TierMode: beads.TierBoth,
+			})
+			if err == nil && len(matches) > 0 {
+				return matches[0].ID
+			}
+		}
 		for _, rn := range rigNames {
 			query := beads.ListQuery{
 				Assignee: assignee,

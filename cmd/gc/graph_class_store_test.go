@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -293,5 +295,37 @@ func TestConvoyStoresIncludeRoutedGraphStore(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("synthetic graph convoy missing from the fan-out: %+v", convoys)
+	}
+}
+
+// TestWispStepInjectionReadsGraphStore pins sweep gap N14: on a routed city
+// the agent's active molecule step is resolved from the graph store, so a
+// routed-pool agent gets step context in its prompt.
+func TestWispStepInjectionReadsGraphStore(t *testing.T) {
+	cityPath := t.TempDir()
+	writeGraphMigratedMarker(t, cityPath)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
+		[]byte("[workspace]\nname = \"inject\"\n\n[beads.classes.graph]\nbackend = \"sqlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := graph.Create(beads.Bead{Title: "wisp: run", Type: "molecule", Assignee: "gc-city-w1", Status: "in_progress"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graph.Create(beads.Bead{
+		Title: "step one", Type: "step", ParentID: root.ID, Status: "in_progress",
+		Description: "do the thing carefully",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_SESSION_NAME", "gc-city-w1")
+	t.Setenv("GC_RIG_ROOT", "")
+	got := wispStepInjectionContent(cityPath)
+	if !strings.Contains(got, "do the thing carefully") {
+		t.Fatalf("graph-resident step not injected: %q", got)
 	}
 }

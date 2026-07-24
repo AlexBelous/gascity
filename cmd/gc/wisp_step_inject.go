@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -24,19 +25,42 @@ func wispStepInjectionContent(cityPath string) string {
 	if effective == "" {
 		effective = strings.TrimSpace(os.Getenv("GC_CITY"))
 	}
-	store := openWispStepStore(effective)
-	if store == nil {
-		return ""
-	}
 	assignees := wispStepAssignees()
 	if len(assignees) == 0 {
 		return ""
 	}
-	b, err := resolveActiveWispStep(store, assignees)
-	if err != nil || b == nil {
-		return ""
+	// Graph leg FIRST (sweep gap N14): on a routed city every molecule root,
+	// graph.v2 node and their step children live in the embedded graph
+	// store, so a work-store-only probe hands a routed-pool agent no step
+	// context at all. A molecule and its steps always co-reside (pours and
+	// the migration move whole trees), so resolving per store — rather than
+	// threading a second store through every helper — is both simpler and
+	// correct. Best-effort: routing failures fall through to the work leg.
+	for _, store := range wispStepStores(effective) {
+		b, err := resolveActiveWispStep(store, assignees)
+		if err != nil || b == nil {
+			continue
+		}
+		return formatWispStepReminder(b)
 	}
-	return formatWispStepReminder(b)
+	return ""
+}
+
+// wispStepStores returns the stores to probe for the agent's active step:
+// the routed graph store (when the city routes graph) followed by the
+// work/rig store. Nil entries are dropped.
+func wispStepStores(cityPath string) []beads.Store {
+	var stores []beads.Store
+	if cityPath != "" {
+		cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+		if graph := routedGraphStoreOrWarn(cityPath, cfg, io.Discard); graph != nil {
+			stores = append(stores, graph)
+		}
+	}
+	if work := openWispStepStore(cityPath); work != nil {
+		stores = append(stores, work)
+	}
+	return stores
 }
 
 // openWispStepStore opens the bead store to query for active wisp steps.

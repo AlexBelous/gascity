@@ -46,15 +46,16 @@ DONE / IN-PROGRESS / TODO / DESCOPED(reason).
         needs a NATIVE port (loopback GET /v0/.../beads/graph/{rootID} in
         runtailer.detail() + graph-wins merge + graph_fetch_failed partial
         reason threaded through local runproj). Follow-up session.
-16. [ ] N05/N19/N21 convoy: gc convoy status synthetic-convoy graph
+16. [x] N05/N19/N21 convoy: gc convoy status synthetic-convoy graph
         arm; convoys list lane; controller-down fallback candidate
-17. [ ] N06 CAS fencing on graph plane: decide implement-ConditionalWriter
+17. [x] N06 CAS fencing on graph plane: decide implement-ConditionalWriter
         vs loud-fail (control epochs / drain reservations / attach fences)
-18. [ ] N14 prime/nudge wisp-step injection graph arm
-19. [ ] N15 API ActiveBead fan-out graph leg
+18. [x] N14 prime/nudge wisp-step injection graph arm
+19. [x] N15 API ActiveBead fan-out graph leg
 20. [x] N16 non-claim gc hook runner federation (same wrapper as claim)
-21. [ ] N17 on_death/on_boot recovery hook shells (rewrite to gc-native
-        or wrap); N23 spawn-storm reset-loop discovery
+21. [x] N17 DESCOPED (already covered: controller orphan release G10 +
+        worker self-re-adoption G13 both landed — the shells are a
+        redundant third path); [ ] N23 spawn-storm reset-loop discovery
 22. [ ] N18 wisp retention: graph-store closed-wisp purge path (wisp-
         compact.sh/reaper are bd-only); depends on decision in item 1
 23. [ ] G05/G24/G27 gc bd mol current/progress federation

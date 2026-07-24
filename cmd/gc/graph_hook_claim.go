@@ -21,15 +21,22 @@ import (
 // graph-class and the city routes graph to sqlite. ok=false means "not this
 // router's business" — the caller uses the bd default.
 func graphHookClaimStore(cityPath string, cfg *config.City, beadID string) (*beads.SQLiteStore, bool) {
-	prefix, _ := config.ReservedClassPrefix(config.BeadClassGraph)
-	if !strings.HasPrefix(beadID, prefix+"-") {
-		return nil, false
-	}
 	st, routed, err := routedGraphStoreFor(cityPath, cfg)
 	if err != nil || !routed {
 		return nil, false
 	}
-	return st, true
+	prefix, _ := config.ReservedClassPrefix(config.BeadClassGraph)
+	if strings.HasPrefix(beadID, prefix+"-") {
+		return st, true
+	}
+	// MIGRATED legacy ids (gc-*/rig-prefixed, imported with ids preserved)
+	// carry no reserved prefix but are graph-store-resident: ownership is
+	// the probe, mirroring the show federation's legacy arm (gap N08 — a
+	// prefix-only gate made migrated steps unclaimable).
+	if _, gerr := st.Get(beadID); gerr == nil {
+		return st, true
+	}
+	return nil, false
 }
 
 // graphRoutedHookClaimOps returns claim ops whose mutation seams route gcg-

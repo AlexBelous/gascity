@@ -203,3 +203,26 @@ func TestGraphSqliteBackendAcceptedByConfig(t *testing.T) {
 		t.Fatal("graph backend did not resolve to sqlite")
 	}
 }
+
+// TestGraphStoreRetentionDisabled pins gap N07/N10/N11: the graph store
+// must NOT run the ported 4h terminal sweeper — closed steps of running
+// workflows are read by finalize votes and drain re-counts. A closed bead
+// must survive a sweep-interval-scale wait trivially (no sweeper started).
+func TestGraphStoreRetentionDisabled(t *testing.T) {
+	cityPath := t.TempDir()
+	st, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.Create(beads.Bead{Title: "failed step", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(b.ID)
+	if err != nil || got.Status != "closed" {
+		t.Fatalf("closed step unreadable: %+v %v", got, err)
+	}
+}

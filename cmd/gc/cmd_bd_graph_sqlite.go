@@ -39,10 +39,15 @@ func maybeRouteBdGraphSqliteMutation(cityPath string, cfg *config.City, bdArgs [
 	default:
 		return 0, false
 	}
-	// Cheap gate: only commands mentioning a gcg-prefixed arg are this arm's
-	// business (a flag VALUE cannot be told from a positional without the
-	// parse below, so the precise all-ids-are-graph check happens after
-	// parsing, where a mixed id set errors loudly rather than splitting).
+	routed, err := graphSQLiteRoutingActive(cityPath, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	// Gate: reserved-prefix mention is always this arm's business on a
+	// routed city; otherwise a best-effort parse decides by store OWNERSHIP
+	// (migrated legacy ids carry no reserved prefix — gap N08). A parse
+	// failure without a gcg mention falls through to the exec path.
 	prefix, _ := config.ReservedClassPrefix(config.BeadClassGraph)
 	sawGraphID := false
 	for _, a := range bdArgs[1:] {
@@ -51,16 +56,14 @@ func maybeRouteBdGraphSqliteMutation(cityPath string, cfg *config.City, bdArgs [
 			break
 		}
 	}
-	if !sawGraphID {
+	if !routed {
+		if sawGraphID {
+			return 0, false // unrouted: the write guard downstream refuses
+		}
 		return 0, false
 	}
-	routed, err := graphSQLiteRoutingActive(cityPath, cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1, true
-	}
-	if !routed {
-		return 0, false // unrouted: the write guard downstream refuses
+	if !sawGraphID && !bdGraphMutationTargetsGraphStore(cityPath, bdArgs) {
+		return 0, false
 	}
 	switch bdArgs[0] {
 	case "close":
@@ -90,13 +93,13 @@ func doBdGraphSqliteClose(cityPath string, args []string, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, "gc bd: usage: close <id> [<id>...]") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := requireAllGraphIDs(ids); err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	store, err := graphClassStoreFor(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: opening embedded graph store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := requireAllGraphOwnedIDs(store, ids); err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	for _, id := range ids {
@@ -130,7 +133,7 @@ func doBdGraphSqliteUpdate(cityPath string, args []string, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc bd: opening embedded graph store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := requireAllGraphIDs([]string{id}); err != nil {
+	if err := requireAllGraphOwnedIDs(store, []string{id}); err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -245,14 +248,17 @@ func parseBdGraphUpdateArgs(args []string) (string, beads.UpdateOpts, error) {
 	return ids[0], opts, nil
 }
 
-// requireAllGraphIDs rejects a graph-arm mutation whose id set mixes graph
-// and non-graph ids: splitting one command across two stores can never be
-// right, and silently dropping the foreign ids would be worse.
-func requireAllGraphIDs(ids []string) error {
+// requireAllGraphOwnedIDs is the ownership form of requireAllGraphIDs for
+// the migrated-legacy-id arm: every id must be reserved-prefixed OR
+// resident in the graph store.
+func requireAllGraphOwnedIDs(st *beads.SQLiteStore, ids []string) error {
 	prefix, _ := config.ReservedClassPrefix(config.BeadClassGraph)
 	for _, id := range ids {
-		if !strings.HasPrefix(id, prefix+"-") {
-			return fmt.Errorf("mixed id set: %q is not a graph-class (%s-) id; split the command per store", id, prefix)
+		if strings.HasPrefix(id, prefix+"-") {
+			continue
+		}
+		if _, err := st.Get(id); err != nil {
+			return fmt.Errorf("mixed id set: %q is not graph-store-resident; split the command per store", id)
 		}
 	}
 	return nil
@@ -268,13 +274,13 @@ func doBdGraphSqliteReleaseIfCurrent(cityPath string, bdArgs []string, stdout, s
 		fmt.Fprintln(stderr, "gc bd: usage: release-if-current <issue-id> <assignee>") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := requireAllGraphIDs([]string{id}); err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	store, err := graphClassStoreFor(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: opening embedded graph store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := requireAllGraphOwnedIDs(store, []string{id}); err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	released, err := store.ReleaseIfCurrent(id, expectedAssignee)
@@ -319,4 +325,45 @@ func bdGraphReadRefusal(cityPath string, cfg *config.City, bdArgs []string, stde
 	}
 	fmt.Fprintf(stderr, "gc bd: %q mentions a graph-class (%s-) id, which lives in the embedded graph store bd cannot read; federated forms: `gc bd show <id> [--json]`, `gc bd close/update/release-if-current <id>`, or the controller API /beads endpoints\n", strings.Join(bdArgs, " "), prefix) //nolint:errcheck // best-effort stderr
 	return 1, true
+}
+
+// bdGraphMutationTargetsGraphStore reports whether a routed city's
+// close/update/release-if-current args resolve (via a best-effort parse) to
+// ids the graph store OWNS — the migrated-legacy-id arm of the gate. Parse
+// failures and non-resident ids fall through to the exec path.
+func bdGraphMutationTargetsGraphStore(cityPath string, bdArgs []string) bool {
+	var ids []string
+	switch bdArgs[0] {
+	case "close":
+		parsed, _, err := parseBdGraphCloseArgs(bdArgs[1:])
+		if err != nil {
+			return false
+		}
+		ids = parsed
+	case "update":
+		id, _, err := parseBdGraphUpdateArgs(bdArgs[1:])
+		if err != nil {
+			return false
+		}
+		ids = []string{id}
+	case "release-if-current":
+		id, _, ok, err := parseBdReleaseIfCurrentArgs(bdArgs)
+		if err != nil || !ok {
+			return false
+		}
+		ids = []string{id}
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	st, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		return false
+	}
+	for _, id := range ids {
+		if _, err := st.Get(id); err != nil {
+			return false
+		}
+	}
+	return true
 }

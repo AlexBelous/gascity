@@ -89,7 +89,16 @@ func graphClassStoreFor(cityPath string) (*beads.SQLiteStore, error) {
 		return st, nil
 	}
 	prefix, _ := config.ReservedClassPrefix(config.BeadClassGraph)
-	st, err := beads.OpenSQLiteStore(dir, beads.WithSQLiteStoreIDPrefix(prefix))
+	// Terminal retention is DISABLED on the graph class store: the ported
+	// store's 4h purgeTerminal default would delete closed steps out from
+	// under still-running workflows — drains re-count their manifests, and
+	// workflow-finalize's outcome vote reads closed step results, so a
+	// purged failed step silently flips the vote to PASS (gap N07/N10/N11).
+	// Whole-tree cleanup belongs to workflow GC, which reasons about the
+	// root's lifecycle, not row age.
+	st, err := beads.OpenSQLiteStore(dir,
+		beads.WithSQLiteStoreIDPrefix(prefix),
+		beads.WithSQLiteStoreRetention(0, 0))
 	if err != nil {
 		return nil, fmt.Errorf("opening graph class store: %w", err)
 	}

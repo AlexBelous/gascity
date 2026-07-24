@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -142,5 +143,44 @@ func TestBdGraphReadRefusal(t *testing.T) {
 	}
 	if _, handled := bdGraphReadRefusal(cityPath, cfg, []string{"list", "--status", "open"}, &stderr); handled {
 		t.Fatal("non-graph command must fall through")
+	}
+}
+
+// TestBdGraphMutationLegacyIDRouting pins gap N08: a MIGRATED legacy-id
+// graph bead (no gcg prefix, imported with its bd id preserved) routes
+// through the in-process mutation arm by store ownership.
+func TestBdGraphMutationLegacyIDRouting(t *testing.T) {
+	cityPath := t.TempDir()
+	writeGraphMigratedMarker(t, cityPath)
+	cfg := sqliteGraphConfig()
+	st, err := graphClassStoreFor(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := st.CreateWithForeignID(beads.Bead{ID: "gc-legacy-step-7", Title: "migrated step", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdGraphSqliteMutation(cityPath, cfg,
+		[]string{"update", legacy.ID, "--set-metadata", "review.verdict=pass"}, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("legacy update = (%d, %v); stderr=%s", code, handled, stderr.String())
+	}
+	if got, _ := st.Get(legacy.ID); got.Metadata["review.verdict"] != "pass" {
+		t.Fatalf("legacy update did not land: %+v", got)
+	}
+
+	// A work-store id (not graph-resident) still falls through to exec.
+	if _, handled := maybeRouteBdGraphSqliteMutation(cityPath, cfg,
+		[]string{"update", "gc-not-in-graph", "--status", "open"}, &stdout, &stderr); handled {
+		t.Fatal("non-resident legacy id must fall through to the exec path")
+	}
+
+	// Claim seam honors ownership too.
+	ops := graphRoutedHookClaimOps(cityPath, cfg)
+	if _, ok, err := ops.Claim(context.Background(), t.TempDir(), nil, legacy.ID, "w1"); err != nil || !ok {
+		t.Fatalf("legacy-id claim = (%v, %v)", ok, err)
 	}
 }

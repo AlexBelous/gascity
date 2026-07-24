@@ -32,3 +32,13 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
 }
+
+// TestSQLiteStoreConditionalWriterConformance runs the shared fenced-write
+// suite against the embedded store (win3 gap N06): before this the graph
+// plane's control epochs, drain reservations, and attach fences silently
+// degraded to unconditional writes on a routed city.
+func TestSQLiteStoreConditionalWriterConformance(t *testing.T) {
+	beadstest.RunConditionalWriterConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
+		return newSQLiteForConformance(t)
+	})
+}

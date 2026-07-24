@@ -1,0 +1,135 @@
+package beads
+
+// SQLiteStore's ConditionalWriter implementation (win3 sweep gap N06): the
+// graph plane's fenced writes — control epochs, drain reservations, attach
+// fences — silently degraded to UNFENCED writes on a routed city because the
+// embedded store did not implement the capability and the resolver's
+// fallback is a legacy unconditional write.
+//
+// Each verb is a transactional read-check-write. The fence is evaluated
+// inside the same BeginTx that performs the write, and the write handle is
+// capped at one connection (OpenSQLiteStore: db.SetMaxOpenConns(1)), so
+// in-process racers serialize through the transaction exactly as
+// SQLiteStore.Claim documents; cross-process racers hit WAL's conflict and
+// retryOnBusy re-runs from a fresh read. Never a lost update.
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+)
+
+var _ ConditionalWriter = (*SQLiteStore)(nil)
+
+// UpdateIfMatch applies opts only when the stored revision matches.
+func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if updateOptsEmpty(opts) {
+		return ErrEmptyConditionalUpdate
+	}
+	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		next := applySQLiteUpdateOpts(b, opts)
+		next.UpdatedAt = time.Now()
+		return s.upsertBeadTx(ctx, tx, next)
+	})
+}
+
+// CloseIfMatch closes the bead only when the stored revision matches.
+func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
+	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		b.Status = "closed"
+		b.UpdatedAt = time.Now()
+		return s.upsertBeadTx(ctx, tx, b)
+	})
+}
+
+// DeleteIfMatch deletes the bead only when the stored revision matches.
+func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	return s.conditionalWrite(id, expectedRevision, func(_ context.Context, tx *sql.Tx, _ Bead) error {
+		if _, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id); err != nil {
+			return fmt.Errorf("deleting bead %q: %w", id, err)
+		}
+		if _, err := tx.Exec(`DELETE FROM deps WHERE issue_id=? OR depends_on_id=?`, id, id); err != nil {
+			return fmt.Errorf("deleting bead %q deps: %w", id, err)
+		}
+		return nil
+	})
+}
+
+// CompareAndSetMetadataKey swaps metadata[key] iff its current value equals
+// expected. A genuine mismatch is (false, nil) — the caller lost the race —
+// distinct from an error.
+func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	swapped := false
+	err := retryOnBusy(func() error {
+		swapped = false
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite compare-and-set: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		b, err := s.getTx(ctx, tx, id)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("compare-and-set metadata on %q: %w", id, ErrNotFound)
+			}
+			return err
+		}
+		if b.Metadata[key] != expected {
+			return tx.Commit() // genuine mismatch: caller lost, not an error
+		}
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, 1)
+		}
+		b.Metadata[key] = next
+		b.UpdatedAt = time.Now()
+		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		swapped = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return swapped, nil
+}
+
+// conditionalWrite is the shared fenced read-check-write body: load the bead
+// inside the write transaction, compare its revision, apply, commit.
+func (s *SQLiteStore) conditionalWrite(id string, expectedRevision int64, apply func(context.Context, *sql.Tx, Bead) error) error {
+	return retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite conditional write: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		b, err := s.getTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if b.Revision != expectedRevision {
+			return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: b.Revision}
+		}
+		if err := apply(ctx, tx, b); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
+// updateOptsEmpty reports whether opts would apply no field at all — the
+// ErrEmptyConditionalUpdate contract (a fenced no-op must not consume the
+// caller's revision).
+func updateOptsEmpty(opts UpdateOpts) bool {
+	return opts.Title == nil && opts.Status == nil && opts.Type == nil &&
+		opts.Priority == nil && opts.Description == nil && opts.ParentID == nil &&
+		opts.Assignee == nil && len(opts.Metadata) == 0 &&
+		len(opts.Labels) == 0 && len(opts.RemoveLabels) == 0
+}

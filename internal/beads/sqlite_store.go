@@ -200,7 +200,8 @@ func (s *SQLiteStore) applySchema(ctx context.Context) error {
 			parent_id TEXT NOT NULL DEFAULT '',
 			ref TEXT NOT NULL DEFAULT '',
 			description TEXT NOT NULL DEFAULT '',
-			bead_json TEXT NOT NULL
+			bead_json TEXT NOT NULL,
+			revision INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS labels (
 			bead_id TEXT NOT NULL,
@@ -236,6 +237,41 @@ func (s *SQLiteStore) applySchema(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("applying sqlite schema: %w", err)
 		}
+	}
+	return s.ensureRevisionColumn(ctx)
+}
+
+// ensureRevisionColumn adds the optimistic-concurrency column to a database
+// created before ConditionalWriter support landed. CREATE TABLE IF NOT EXISTS
+// cannot add it, and PRAGMA table_info is used instead of tolerating ALTER's
+// "duplicate column name" error so the check is deterministic.
+func (s *SQLiteStore) ensureRevisionColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(beads)`)
+	if err != nil {
+		return fmt.Errorf("inspecting sqlite schema: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultVal, &pk); err != nil {
+			return fmt.Errorf("inspecting sqlite schema: %w", err)
+		}
+		if name == "revision" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspecting sqlite schema: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE beads ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("adding revision column: %w", err)
 	}
 	return nil
 }
@@ -529,7 +565,7 @@ func (s *SQLiteStore) upsertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) erro
 			parent_id=excluded.parent_id,
 			ref=excluded.ref,
 			description=excluded.description,
-			bead_json=excluded.bead_json`,
+			bead_json=excluded.bead_json, revision=beads.revision+1`,
 		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
 		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload))
 	if err != nil {
@@ -571,7 +607,7 @@ func (s *SQLiteStore) IDPrefix() string {
 
 // Get retrieves a bead by ID.
 func (s *SQLiteStore) Get(id string) (Bead, error) {
-	row := s.readDB.QueryRowContext(context.Background(), `SELECT bead_json FROM beads WHERE id=?`, id)
+	row := s.readDB.QueryRowContext(context.Background(), `SELECT bead_json, revision FROM beads WHERE id=?`, id)
 	b, err := scanSQLiteBead(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -587,15 +623,74 @@ type sqliteScanner interface {
 }
 
 func scanSQLiteBead(row sqliteScanner) (Bead, error) {
-	var raw string
-	if err := row.Scan(&raw); err != nil {
+	var (
+		raw      string
+		revision int64
+	)
+	if err := row.Scan(&raw, &revision); err != nil {
 		return Bead{}, err
 	}
 	var b Bead
 	if err := json.Unmarshal([]byte(raw), &b); err != nil {
 		return Bead{}, err
 	}
+	// Bead.Revision is json:"-" so it never rides bead_json; the column is
+	// the only carrier and every SELECT feeding this scanner projects it.
+	b.Revision = revision
 	return cloneBead(b), nil
+}
+
+// applySQLiteUpdateOpts applies opts to b with SQLiteStore.Update's exact
+// field semantics (nil pointers skipped, Labels appended, RemoveLabels
+// filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
+// and unfenced paths cannot drift.
+func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
+	if opts.Title != nil {
+		b.Title = *opts.Title
+	}
+	if opts.Status != nil {
+		b.Status = *opts.Status
+	}
+	if opts.Type != nil {
+		b.Type = *opts.Type
+	}
+	if opts.Priority != nil {
+		b.Priority = cloneIntPtr(opts.Priority)
+	}
+	if opts.Description != nil {
+		b.Description = *opts.Description
+	}
+	if opts.ParentID != nil {
+		b.ParentID = *opts.ParentID
+	}
+	if opts.Assignee != nil {
+		b.Assignee = *opts.Assignee
+	}
+	if len(opts.Metadata) > 0 {
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, len(opts.Metadata))
+		}
+		for k, v := range opts.Metadata {
+			b.Metadata[k] = v
+		}
+	}
+	if len(opts.Labels) > 0 {
+		b.Labels = append(b.Labels, opts.Labels...)
+	}
+	if len(opts.RemoveLabels) > 0 {
+		remove := make(map[string]bool, len(opts.RemoveLabels))
+		for _, label := range opts.RemoveLabels {
+			remove[label] = true
+		}
+		filtered := b.Labels[:0]
+		for _, label := range b.Labels {
+			if !remove[label] {
+				filtered = append(filtered, label)
+			}
+		}
+		b.Labels = filtered
+	}
+	return b
 }
 
 // Update modifies fields of an existing bead.
@@ -611,51 +706,7 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 		if err != nil {
 			return err
 		}
-		if opts.Title != nil {
-			b.Title = *opts.Title
-		}
-		if opts.Status != nil {
-			b.Status = *opts.Status
-		}
-		if opts.Type != nil {
-			b.Type = *opts.Type
-		}
-		if opts.Priority != nil {
-			b.Priority = cloneIntPtr(opts.Priority)
-		}
-		if opts.Description != nil {
-			b.Description = *opts.Description
-		}
-		if opts.ParentID != nil {
-			b.ParentID = *opts.ParentID
-		}
-		if opts.Assignee != nil {
-			b.Assignee = *opts.Assignee
-		}
-		if len(opts.Metadata) > 0 {
-			if b.Metadata == nil {
-				b.Metadata = make(map[string]string, len(opts.Metadata))
-			}
-			for k, v := range opts.Metadata {
-				b.Metadata[k] = v
-			}
-		}
-		if len(opts.Labels) > 0 {
-			b.Labels = append(b.Labels, opts.Labels...)
-		}
-		if len(opts.RemoveLabels) > 0 {
-			remove := make(map[string]bool, len(opts.RemoveLabels))
-			for _, label := range opts.RemoveLabels {
-				remove[label] = true
-			}
-			filtered := b.Labels[:0]
-			for _, label := range b.Labels {
-				if !remove[label] {
-					filtered = append(filtered, label)
-				}
-			}
-			b.Labels = filtered
-		}
+		b = applySQLiteUpdateOpts(b, opts)
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
@@ -701,7 +752,7 @@ func (s *SQLiteStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error
 }
 
 func (s *SQLiteStore) getTx(ctx context.Context, tx *sql.Tx, id string) (Bead, error) {
-	row := tx.QueryRowContext(ctx, `SELECT bead_json FROM beads WHERE id=?`, id)
+	row := tx.QueryRowContext(ctx, `SELECT bead_json, revision FROM beads WHERE id=?`, id)
 	b, err := scanSQLiteBead(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -849,7 +900,7 @@ func sqliteListSQL(q ListQuery) (string, []any) {
 		where = append(where, "beads.id IN (SELECT m.bead_id FROM metadata m WHERE m.meta_key=? AND m.meta_value=?)")
 		args = append(args, k, v)
 	}
-	sqlText := "SELECT bead_json FROM beads"
+	sqlText := "SELECT bead_json, revision FROM beads"
 	if len(where) > 0 {
 		sqlText += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -897,7 +948,7 @@ func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	default:
 		where = append(where, "b.tier='main'")
 	}
-	sqlText := `SELECT b.bead_json FROM beads b WHERE ` + strings.Join(where, " AND ")
+	sqlText := `SELECT b.bead_json, b.revision FROM beads b WHERE ` + strings.Join(where, " AND ")
 	if q.Assignee != "" {
 		sqlText += " AND b.assignee=?"
 		args = append(args, q.Assignee)

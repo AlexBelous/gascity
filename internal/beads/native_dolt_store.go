@@ -1285,6 +1285,17 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 				return err
 			}
 			for _, issue := range issues {
+				// The StatusDeferred branch exists so an expired time-bound
+				// deferral (defer_until in the past) can resurface. An issue
+				// with no defer_until at all was never time-bound — it's bd
+				// defer's status-based indefinite deferral — and must stay
+				// hidden. mapBdStatus collapses status to "open" and
+				// IsDeferred only inspects DeferUntil, so both would
+				// otherwise look identical to an ordinary open bead once
+				// beadFromNativeIssue erases the raw status.
+				if status == beadslib.StatusDeferred && issue.DeferUntil == nil {
+					continue
+				}
 				bead, err := beadFromNativeIssue(issue)
 				if err != nil {
 					return err

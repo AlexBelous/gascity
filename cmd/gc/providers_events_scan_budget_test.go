@@ -16,13 +16,17 @@ import (
 // struct decodes (that's covered in internal/config).
 func TestOpenCityEventsProviderAppliesScanBudgetConfig(t *testing.T) {
 	cityDir := t.TempDir()
-	t.Setenv("GC_EVENTS", "")
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_CITY_PATH", "")
-	t.Setenv("GC_CITY_ROOT", "")
-	t.Setenv("GC_RIG", "")
+	clearGCEnv(t)
+	// Resolve via the --city flag rather than GC_CITY: flags win at the
+	// highest priority tier (resolveContextFromFlags, step 1), ahead of every
+	// env var, so this is immune to whatever GC_CITY/GC_RIG/GC_DIR the host
+	// gc-rig session has ambiently set (see resolveContextAllowRemote's
+	// documented priority chain). It's also census-free — a plain package
+	// variable assignment isn't a tracked os/testing env or cwd mutation,
+	// unlike t.Setenv/t.Chdir, so it doesn't grow the zero-headroom
+	// ResourceEnvironment/ResourceCWD ledgers in internal/testpolicy/resourcecensus.
 	oldCityFlag, oldRigFlag := cityFlag, rigFlag
-	cityFlag, rigFlag = "", ""
+	cityFlag, rigFlag = cityDir, ""
 	t.Cleanup(func() {
 		cityFlag = oldCityFlag
 		rigFlag = oldRigFlag

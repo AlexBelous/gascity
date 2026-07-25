@@ -277,10 +277,19 @@ converging on topology-aware desired state:
   local Dolt lifecycle for WORK stays ENABLED until every residue source
   recorded in the marker payload is verified drained and recorded as such
   — the recorded local identities ARE that server's host/port, and the
-  straggler/residue passes need it running. The residue pass treats
-  "local server not running" as a launch-and-retry condition, not a
-  skip. Only after all sources are drained does boot stop launching the
-  local server.
+  straggler/residue passes need it running. This keep-alive is REAL on
+  both edges: the boot lifecycle runs the managed-LOCAL start/health/
+  recover arm (loopback env, local data dir — never the projected remote
+  endpoint) even though the city resolves external, and the drained edge
+  actually stops the local server. The keep-alive decision fails CLOSED
+  (keep the server) on a marker read fault. Drained itself requires two
+  consecutive clean checks (one-extra-tick confirm) so a write racing
+  the drain check is not stranded. The residue pass treats "local server
+  not running" as a launch-and-retry condition, not a skip. Only after
+  all sources are drained does boot stop launching the local server.
+  Migration/doctor temp scopes are per-use (random suffix, age-swept) —
+  a deterministic shared path lets a cron doctor delete a boot-blocking
+  migration's scope mid-copy, crash-looping the city.
 
 ## Unify migration (cmd/gc, boot)
 
@@ -411,22 +420,41 @@ after the five ensure*ClassMigrated calls.
   city's prefixes are still present and re-append when absent
   (convergent self-heal), so an eviction is detected and repaired
   instead of silently degrading mints to the org prefix.
+- The city's org-DB identity stamp is an IDENTITY, not a derivation:
+  minted ONCE (random, never hostname-derived — hostnames change on
+  container reschedule and a re-derived stamp makes the city's own rows
+  look foreign) and PERSISTED before first use. The persistence vehicle
+  is a STARTED-state `work.remote` marker written via the locked writer
+  BEFORE any org-DB write (the allowed_prefixes step included),
+  carrying {Target, Stamp}; the migration finalizes it to complete
+  after copy+verify. A started marker whose Target differs from the
+  configured target refuses boot with an actionable message — a crashed
+  partial copy is never silently stranded in a retargeted org DB.
 - Copy — collision discrimination is TWO-armed and pre-destructive,
   because the guarded upsert would otherwise overwrite a foreign city's
   same-id bead whenever OUR row is newer (reported only in
   `UpdatedIssues`) and install our own stamp over the evidence:
-  1. Pre-probe: before the FIRST import stream, Get the entire copy-set
-     id list on the remote in batches (`bd show` accepts multiple ids;
-     `GetIssuesByIDs` on the native store). Any id present WITHOUT our
-     `gc.topology_source` stamp is a PREFIX COLLISION → abort before any
-     write, naming the id and the foreign source.
+  1. Pre-probe: before EVERY import stream — first copy AND resume
+     passes — Get the incoming id set on the remote in batches (`bd
+     show` accepts multiple ids; `GetIssuesByIDs` on the native store).
+     Any id present WITHOUT our persisted stamp is a PREFIX COLLISION →
+     abort before any write, naming the id and the foreign source.
   2. First copy runs INSERT-IF-NEW (expose `ImportOptions.ConflictSkip`
      as `bd import --conflict-skip`; the native equivalent), so nothing
      existing is overwritten even if the probe raced a concurrent
-     writer; every conflicted id is stamped-checked as in (1).
-  3. Resume passes (after a recorded partial copy) run the plain guarded
-     upsert but stamp-check ALL report arms — `UpdatedIssues` included,
-     not just kept-local/stale-skipped.
+     writer; every conflicted id is stamped-checked as in (1). The
+     first-copy rows carry the `gc.topology_migrating` quarantine label
+     (cleared by a convergent, stamp-scoped sweep after the marker
+     finalizes — never sweeping other cities' rows).
+  3. Resume passes run the plain guarded upsert after the pre-probe;
+     the post-import check covers the kept-local/stale-skipped/
+     conflict-skipped arms (where a surviving foreign stamp is
+     observable).
+- Residue protocol selection is by DESTINATION, not marker kind: once
+  the remote marker exists, unified-marker residue sources drain via
+  the REMOTE protocol (persisted stamp + pre-probe + stamp-checked
+  import) — the re-pointed city scope IS the org DB, and the local
+  protocol would restamp shared rows and manufacture false collisions.
   Whole-prefix discovery of foreign beads we do not hold locally is OUT
   of v1: no prefix-filtered list exists on any bd surface, and a full
   org-DB scan is not a "probe". Cross-org prefix governance is operator

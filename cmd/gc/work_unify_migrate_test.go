@@ -914,6 +914,10 @@ func TestConvergeWorkUnifiedResidueMarksDrained(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Two synchronous passes: the first provisionally pends the drain (F11), the
+	// second consecutive clean check flips it drained. (No loop is running here, so
+	// the self-kick is a no-op — the test drives both passes directly.)
+	convergeWorkUnifiedResidue(city, unifiedCityConfig(), &strings.Builder{})
 	convergeWorkUnifiedResidue(city, unifiedCityConfig(), &strings.Builder{})
 
 	m, ok, err := readWorkTopologyMarker(workUnifiedMarkerPath(city))
@@ -921,7 +925,7 @@ func TestConvergeWorkUnifiedResidueMarksDrained(t *testing.T) {
 		t.Fatalf("marker read: ok=%v err=%v", ok, err)
 	}
 	if m.undrainedResidueCount() != 0 {
-		t.Fatalf("expected source drained after convergence, undrained=%d", m.undrainedResidueCount())
+		t.Fatalf("expected source drained after two convergence passes, undrained=%d", m.undrainedResidueCount())
 	}
 	if _, err := cityStore.Get("al-1"); err != nil {
 		t.Fatalf("residue row must be imported into the unified store: %v", err)

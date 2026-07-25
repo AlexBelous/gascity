@@ -328,9 +328,25 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			stderr:          p.Stderr,
 		}
 	}
+	// Work-remote migration (deliverable A): AFTER unify, relocate the unified city
+	// work DB to the configured remote org endpoint when the city is remote and the
+	// remote marker is absent. Same boot-blocking discipline as unify — a failed or
+	// aborted remote migration refuses the controller start.
+	if err := ensureWorkRemote(p.CityPath, p.Cfg, p.Stderr); err != nil {
+		return &CityRuntime{
+			bootBlockingErr: err,
+			cityPath:        p.CityPath,
+			cityName:        p.CityName,
+			cfg:             p.Cfg,
+			sp:              p.SP,
+			stdout:          p.Stdout,
+			stderr:          p.Stderr,
+		}
+	}
 	// The ctx-bound residue-convergence loop (re-armed by residue-source appends,
 	// retried on the order-rescan cadence) is started from cr.run so the runtime
-	// context stops it — see run().
+	// context stops it — see run(). It now drains both the unified and remote
+	// markers' sources and self-heals the org DB allowed_prefixes.
 
 	// Sessions shadow-write gate (P4): re-seed the class store from the bd
 	// truth so the soak's zero-discrepancy diff starts converged.
@@ -3216,6 +3232,12 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 }
 
 func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
+	// F.4: on a completed remote-work city the managed-LOCAL Dolt lifecycle is
+	// driven by residue-drain state with the managed-local env — launch while
+	// undrained, stop once drained — not by the remote-endpoint publisher below.
+	if cr.cityPath != "" && reconcileWorkRemoteKeepAliveTick(cr.cityPath, cr.stderr) {
+		return
+	}
 	healthFn := cr.managedDoltHealth
 	if healthFn == nil {
 		healthFn = healthBeadsProvider

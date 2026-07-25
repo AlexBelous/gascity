@@ -74,12 +74,17 @@ type workTopologyTarget struct {
 // reads until Drained flips true. Host is stored already-canonicalized (loopback
 // aliases folded) so the same physical database is never recorded twice.
 type workResidueSource struct {
-	Scope      string    `json:"scope"` // "hq" for the city, else the rig name
-	Host       string    `json:"host"`
-	Port       string    `json:"port"`
-	Database   string    `json:"database"`
-	Drained    bool      `json:"drained"`
-	RecordedAt time.Time `json:"recorded_at"`
+	Scope    string `json:"scope"` // "hq" for the city, else the rig name
+	Host     string `json:"host"`
+	Port     string `json:"port"`
+	Database string `json:"database"`
+	Drained  bool   `json:"drained"`
+	// DrainPending records that ONE drain check passed; the source flips to
+	// Drained only on a SECOND consecutive clean check a tick later (F11), so a
+	// local write landing between a drain check's source export and the flip is
+	// re-examined instead of stranded. Cleared when a later check fails.
+	DrainPending bool      `json:"drain_pending,omitempty"`
+	RecordedAt   time.Time `json:"recorded_at"`
 }
 
 // workTopologyCounts carries import/verify tallies the migration slices fill.
@@ -89,12 +94,37 @@ type workTopologyCounts struct {
 	Verified int `json:"verified,omitempty"`
 }
 
+// workTopologyMarkerPhase discriminates an in-flight remote migration (an
+// INTENT record written before the first org-DB write) from a completed one.
+type workTopologyMarkerPhase string
+
+const (
+	// workMarkerPhaseComplete is a finalized marker (the empty/unset default, so
+	// a unified marker — which has no phase — reads as complete).
+	workMarkerPhaseComplete workTopologyMarkerPhase = ""
+	// workMarkerPhaseStarted is a remote intent record written BEFORE any org-DB
+	// write (allowed_prefixes append, first copy). It pins {Target, Stamp} so a
+	// crash mid-copy is resumed against the SAME endpoint and stamp, and a retarget
+	// is refused. It does NOT activate the topology (no re-point / keep-alive /
+	// one-way remote-vs-managed physical relocation) until finalized to complete.
+	workMarkerPhaseStarted workTopologyMarkerPhase = "started"
+)
+
 // workTopologyMarker is the JSON payload persisted at work.unified /
 // work.remote. Every field beyond Kind/RecordedAt is filled progressively by
 // the migration slices; this slice reads and appends residue sources.
 type workTopologyMarker struct {
 	Kind       workTopologyMarkerKind `json:"kind"`
 	RecordedAt time.Time              `json:"recorded_at"`
+	// Phase distinguishes a started (intent) remote marker from a complete one.
+	// Empty = complete (the unified marker never sets it).
+	Phase workTopologyMarkerPhase `json:"phase,omitempty"`
+	// Stamp is the DURABLE collision discriminator minted once at the start of a
+	// remote migration ("gc-city:" + random hex) and reused by every consumer
+	// (first copy, resume, residue loop, future prefix filtering). Persisting it
+	// makes the identity stable across host reschedules — an identity, not a
+	// per-boot derivation.
+	Stamp string `json:"stamp,omitempty"`
 	// Target is the recorded remote endpoint (remote marker only).
 	Target *workTopologyTarget `json:"target,omitempty"`
 	// ResidueSources lists the old per-source database identities the
@@ -106,6 +136,11 @@ type workTopologyMarker struct {
 	SkippedDependencies []beads.DepPair `json:"skipped_dependencies,omitempty"`
 	// Counts carries import/verify tallies the migration slices fill.
 	Counts workTopologyCounts `json:"counts,omitempty"`
+}
+
+// isComplete reports whether the marker is finalized (the default phase).
+func (m *workTopologyMarker) isComplete() bool {
+	return m != nil && m.Phase == workMarkerPhaseComplete
 }
 
 // undrainedResidueCount returns the number of residue sources not yet drained.

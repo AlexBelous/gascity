@@ -211,12 +211,25 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 		clearCityDoltConfig(cityPath)
 	}
 	skipLocalDolt := false
+	keepAliveLocalDolt := false
 	switch {
 	case isExternalDolt(cityPath):
 		// An externally-pinned dolt endpoint (city_canonical / explicit, e.g. a
 		// hosted beads-gateway) is not a gc-managed local lifecycle: connect to
 		// the external server, never spawn or adopt a local managed Dolt for it.
-		skipLocalDolt = true
+		// EXCEPTION (F.4): a re-pointed remote-work city keeps its managed-LOCAL
+		// Dolt alive until residue drains — the straggler/residue passes read the
+		// OLD local DB through it — so run the managed-local lifecycle instead of
+		// only connecting to the remote endpoint. Checked BEFORE the short-circuit.
+		keep, err := workTopologyManagedDoltKeepAlive(cityPath)
+		if err != nil {
+			return err
+		}
+		if keep {
+			keepAliveLocalDolt = true
+		} else {
+			skipLocalDolt = true
+		}
 	case cityUsesManagedDoltBeadsLifecycle(cityPath):
 		owned, err := managedDoltLifecycleOwned(cityPath)
 		if err != nil {
@@ -226,7 +239,11 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	case cityUsesDoltliteBeadsBackend(cityPath):
 		skipLocalDolt = true
 	}
-	if !skipLocalDolt {
+	if keepAliveLocalDolt {
+		// Launch-and-retry with the managed-LOCAL env (never the remote projection);
+		// best-effort so a shell edge case never bricks an otherwise-migrated boot.
+		ensureManagedLocalDoltForKeepAlive(cityPath, stderr)
+	} else if !skipLocalDolt {
 		if err := ensureBeadsProvider(cityPath); err != nil {
 			return fmt.Errorf("bead store: %w", err)
 		}
@@ -871,6 +888,13 @@ func shutdownBeadsProvider(cityPath string) error {
 	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+	}
+	// F.4: a re-pointed remote-work city runs its managed-LOCAL Dolt under the
+	// managed-local env (not the remote projection). gc stop must stop THAT server
+	// with the same local env — the normal path below would resolve the remote
+	// endpoint (is_remote → op_stop no-op), leaking the local process. Best-effort.
+	if reconcileWorkRemoteShutdown(cityPath) {
+		return nil
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {

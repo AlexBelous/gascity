@@ -459,6 +459,14 @@ func idHasPrefix(id, prefix string) bool {
 // (lowercase, matching bd's id-prefix convention). Needed for both explicit-id
 // writes and per-rig prefix-override minting after unify.
 func configStepAllowedPrefixes(cityStore beads.Store, cfg *config.City) error {
+	return workUnifyConfigAddPrefixes(cityStore, "allowed_prefixes", cityScopePrefixes(cfg))
+}
+
+// cityScopePrefixes returns the sorted, minted-id-cased (lowercase) set of this
+// city's work prefixes: the HQ prefix plus every bound rig's prefix. Shared by
+// the unify and remote config steps so both union the same set into a shared
+// database's allowed_prefixes.
+func cityScopePrefixes(cfg *config.City) []string {
 	set := map[string]bool{}
 	var prefixes []string
 	add := func(p string) {
@@ -477,7 +485,7 @@ func configStepAllowedPrefixes(cityStore beads.Store, cfg *config.City) error {
 		add(cfg.Rigs[i].EffectivePrefix())
 	}
 	sort.Strings(prefixes)
-	return workUnifyConfigAddPrefixes(cityStore, "allowed_prefixes", prefixes)
+	return prefixes
 }
 
 // ── the copy ─────────────────────────────────────────────────────────────────
@@ -953,42 +961,103 @@ func filterCreatedAtConflicts(ctx context.Context, dest beads.Store, snaps []bea
 	return kept, conflicts, nil
 }
 
-// convergeWorkUnifiedResidue is the later-boot background residue pass
-// (deliverable F): for each undrained recorded source it re-imports (import
-// only) and runs the drain check — all source WORK rows present-or-older in the
-// unified DB with their dep/label sets present — recording Drained=true via the
-// locked marker writer once it passes. Nothing is ever deleted from the old
-// databases (cold backup). Launched as a goroutine after boot, mirroring the
-// class residue sweeps.
-func convergeWorkUnifiedResidue(cityPath string, cfg *config.City, stderr io.Writer) {
-	marker, ok, err := readWorkTopologyMarker(workUnifiedMarkerPath(cityPath))
-	if err != nil || !ok || marker == nil {
+// residueMarkerEntry pairs a discovered residue marker with its on-disk path so
+// the convergence loop can drain sources from BOTH the unified and remote
+// markers and flip each source's Drained flag on the correct marker.
+type residueMarkerEntry struct {
+	path   string
+	marker *workTopologyMarker
+}
+
+// discoverResidueMarkers reads the unified and remote markers (ENOENT-only) and
+// returns those present. It is how the convergence loop generalizes to the
+// remote leg: the remote marker records the LOCAL unified database as its drain
+// source, so the same loop drains it into the (now remote-resolved) city store.
+func discoverResidueMarkers(cityPath string, stderr io.Writer) []residueMarkerEntry {
+	var out []residueMarkerEntry
+	for _, path := range []string{workUnifiedMarkerPath(cityPath), workRemoteMarkerPath(cityPath)} {
+		m, ok, err := readWorkTopologyMarker(path)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc: work unify residue: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc: work residue: %v\n", err) //nolint:errcheck // best-effort stderr
+			continue
 		}
+		if !ok || m == nil {
+			continue
+		}
+		out = append(out, residueMarkerEntry{path: path, marker: m})
+	}
+	return out
+}
+
+// convergeWorkUnifiedResidue is the later-boot background residue pass
+// (deliverable F): for each undrained recorded source in EITHER the unified or
+// the remote marker it re-imports (import only) and runs the drain check — all
+// source WORK rows present-or-older in the shared DB with their dep/label sets
+// present — recording Drained=true via the locked marker writer once it passes.
+// Nothing is ever deleted from the old databases (cold backup). On a remote
+// city it also convergently self-heals the org DB's allowed_prefixes (D).
+// Launched as a goroutine after boot, mirroring the class residue sweeps.
+func convergeWorkUnifiedResidue(cityPath string, cfg *config.City, stderr io.Writer) {
+	markers := discoverResidueMarkers(cityPath, stderr)
+	if len(markers) == 0 {
 		return
+	}
+	undrained := 0
+	remoteComplete := false
+	for _, e := range markers {
+		undrained += e.marker.undrainedResidueCount()
+		if e.marker.Kind == workMarkerKindRemote && e.marker.isComplete() {
+			remoteComplete = true
+		}
 	}
 	// Cheap early-out (marker read only) once every source is drained: the
 	// convergent quarantine clear is handled by the two boot paths (the
 	// marker-present early-return arm and the end-of-success sweep), which run on
 	// EVERY unified boot before this loop starts, so the ticker need not re-open
-	// the city store on a fully-drained city.
-	if marker.undrainedResidueCount() == 0 {
+	// the city store on a fully-drained city. A remote city still opens the store
+	// to self-heal allowed_prefixes on the slow ticker (an evicted prefix must be
+	// re-appended even after residue drains).
+	if undrained == 0 && !remoteComplete {
 		return
+	}
+	// DESTINATION-based protocol + stamp (F2/F4): once the remote marker is
+	// complete, the city store IS the shared org DB, so EVERY source (old-rig unified
+	// sources AND the local source) drains via the REMOTE protocol carrying the
+	// PERSISTED discriminator — never the path-only local stamp, which would flip the
+	// org rows' stamp and wedge the drain with a false foreign collision. The org DB
+	// is only ever written by the remote protocol.
+	var stamp string
+	if remoteComplete {
+		s, ok, err := readPersistedRemoteStamp(cityPath)
+		if err != nil || !ok {
+			fmt.Fprintf(stderr, "gc: work residue: remote stamp unavailable: %v\n", err) //nolint:errcheck // best-effort stderr
+			return
+		}
+		stamp = s
+	} else {
+		stamp = workTopologyCityIdentityStamp(cityPath)
 	}
 	cityStore, closeCity, err := openWorkUnifyScopeStore(cityPath, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc: work unify residue: opening city store: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc: work residue: opening city store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
 	defer closeCity()
-	source := workTopologyCityIdentityStamp(cityPath)
-	for _, src := range marker.ResidueSources {
-		if src.Drained {
-			continue
+	for _, e := range markers {
+		for _, src := range e.marker.ResidueSources {
+			if src.Drained {
+				continue
+			}
+			if err := convergeOneResidueSource(cityPath, cfg, cityStore, src, stamp, stderr, e.path, e.marker.Kind, remoteComplete); err != nil {
+				fmt.Fprintf(stderr, "gc: work residue: source %s not yet drained: %v\n", src.Database, err) //nolint:errcheck // best-effort stderr
+			}
 		}
-		if err := convergeOneResidueSource(cityPath, cfg, cityStore, src, source, stderr); err != nil {
-			fmt.Fprintf(stderr, "gc: work unify residue: source %s not yet drained: %v\n", src.Database, err) //nolint:errcheck // best-effort stderr
+	}
+	// Remote allowed_prefixes self-heal (D): the city store now resolves to the
+	// org DB, so re-append this city's prefixes if a concurrent city evicted them.
+	if remoteComplete {
+		if err := reconcileRemoteAllowedPrefixes(cityStore, cfg, stderr); err != nil {
+			fmt.Fprintf(stderr, "gc: work remote: allowed_prefixes self-heal: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
 }
@@ -1056,29 +1125,61 @@ func cityPathFromWorkMarkerPath(markerPath string) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(markerPath)))
 }
 
-// convergeOneResidueSource imports WORK and infra-class residue from one recorded
-// source and, when the drain check passes, records it drained.
-func convergeOneResidueSource(cityPath string, cfg *config.City, cityStore beads.Store, src workResidueSource, source string, stderr io.Writer) error {
+// convergeOneResidueSource imports residue from one recorded source and, when the
+// drain check passes TWICE in a row (F11), records it drained on markerPath. The
+// WORK-import protocol is DESTINATION-selected (F2/F4): when remoteDestination the
+// city store is the shared org DB, so the source drains via the remote protocol
+// (pre-probe + guarded upsert) carrying the persisted remote stamp; otherwise the
+// local guarded upsert. Infra-class residue always flows to the LOCAL sqlite class
+// stores and only for old-RIG (unified-marker) sources — the org DB never receives
+// infra beads, and the local city source has none.
+func convergeOneResidueSource(cityPath string, cfg *config.City, cityStore beads.Store, src workResidueSource, source string, stderr io.Writer, markerPath string, kind workTopologyMarkerKind, remoteDestination bool) error {
 	oldStore, closeFn, err := openWorkUnifyStragglerStore(cityPath, src)
 	if err != nil {
 		return fmt.Errorf("opening old database: %w", err)
 	}
 	defer closeFn()
-	// Infra-class residue too (F12): the drain check requires it reflected.
-	if err := workUnifyImportRigClassResidue(cityPath, cfg, oldStore, stderr); err != nil {
-		return fmt.Errorf("infra-class residue: %w", err)
+	if kind == workMarkerKindUnified {
+		// Infra-class residue (F12): the drain check requires it reflected. Always
+		// into the LOCAL sqlite class stores, never the org DB.
+		if err := workUnifyImportRigClassResidue(cityPath, cfg, oldStore, stderr); err != nil {
+			return fmt.Errorf("infra-class residue: %w", err)
+		}
 	}
-	if err := importResidueFromSource(cityStore, oldStore, source, stderr); err != nil {
-		return err
+	if remoteDestination {
+		if err := importRemoteResidueFromSource(cityStore, oldStore, source, stderr); err != nil {
+			return err
+		}
+	} else {
+		if err := importResidueFromSource(cityStore, oldStore, source, stderr); err != nil {
+			return err
+		}
 	}
 	drained, err := residueSourceDrained(context.Background(), cityStore, oldStore)
 	if err != nil {
 		return err
 	}
 	if !drained {
+		// A later check failed: clear any provisional pending flag so a future clean
+		// run starts the two-check confirm fresh.
+		if src.DrainPending {
+			if perr := markResidueSourceDrainPending(markerPath, src, false); perr != nil {
+				return perr
+			}
+		}
 		return fmt.Errorf("drain check incomplete")
 	}
-	return markResidueSourceDrained(workUnifiedMarkerPath(cityPath), src)
+	if !src.DrainPending {
+		// First clean check: provisionally pending. Flip to drained only on the next
+		// pass's second consecutive clean check (F11) — no locking. Self-kick so the
+		// confirming pass runs promptly instead of waiting a full slow tick.
+		if err := markResidueSourceDrainPending(markerPath, src, true); err != nil {
+			return err
+		}
+		kickWorkUnifyResidueConvergence(cityPath)
+		return nil
+	}
+	return markResidueSourceDrained(markerPath, src)
 }
 
 // residueSourceDrained reports whether every source WORK row is present in the
@@ -1144,7 +1245,8 @@ func linkDiffDrained(diff beads.LinkDiff) bool {
 }
 
 // markResidueSourceDrained flips a residue source's Drained flag under the
-// cross-process marker lock, preserving every other field.
+// cross-process marker lock, preserving every other field. It also clears the
+// provisional DrainPending flag (the two-check confirm has completed).
 func markResidueSourceDrained(markerPath string, src workResidueSource) error {
 	return withWorkMarkerLock(markerPath, func() error {
 		m, ok, err := readWorkTopologyMarker(markerPath)
@@ -1158,6 +1260,34 @@ func markResidueSourceDrained(markerPath string, src workResidueSource) error {
 		for i := range m.ResidueSources {
 			if sameWorkResidueIdentity(m.ResidueSources[i], src) && !m.ResidueSources[i].Drained {
 				m.ResidueSources[i].Drained = true
+				m.ResidueSources[i].DrainPending = false
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		return writeWorkTopologyMarker(markerPath, m)
+	})
+}
+
+// markResidueSourceDrainPending sets or clears a residue source's provisional
+// DrainPending flag under the marker lock — the first leg of the two-check drain
+// confirm (F11). Setting it records that one drain check passed; the source flips
+// to Drained only on the next tick's second consecutive clean check.
+func markResidueSourceDrainPending(markerPath string, src workResidueSource, pending bool) error {
+	return withWorkMarkerLock(markerPath, func() error {
+		m, ok, err := readWorkTopologyMarker(markerPath)
+		if err != nil {
+			return err
+		}
+		if !ok || m == nil {
+			return fmt.Errorf("marking residue drain-pending: marker %s absent", markerPath)
+		}
+		changed := false
+		for i := range m.ResidueSources {
+			if sameWorkResidueIdentity(m.ResidueSources[i], src) && m.ResidueSources[i].DrainPending != pending && !m.ResidueSources[i].Drained {
+				m.ResidueSources[i].DrainPending = pending
 				changed = true
 			}
 		}

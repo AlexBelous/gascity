@@ -273,6 +273,96 @@ func (s *BdStore) ConfigAddToSet(key, value string) error {
 	return nil
 }
 
+// ConfigGet reads the database config-table value at key via `bd config get`,
+// through the store's scoped runner (so the child sees the same
+// BEADS_DIR/credentials). The remote migration's allowed_prefixes self-heal
+// reads the current set with it to detect a concurrent-city eviction. The
+// returned value is the raw stdout, trimmed; an unset key surfaces bd's own
+// "(not set)" text, which the caller treats as an empty set.
+func (s *BdStore) ConfigGet(key string) (string, error) {
+	out, err := s.runner(s.dir, "bd", "config", "get", key)
+	if err != nil {
+		return "", fmt.Errorf("bd config get %s: %w", key, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// CredentialPreflight runs one authenticated, BOUNDED probe through the store's
+// scoped env so credentials reach the child. It is the remote migration's
+// pre-copy auth gate: `bd list --json --limit 1` opens an authenticated
+// connection and reads at most one row — proving the endpoint is reachable and
+// the credentials resolve — WITHOUT the full org-DB pull Ping's `--limit 0`
+// performs. When ctx carries a deadline it is ENFORCED on the subprocess
+// (exec.CommandContext kills it), so an unreachable remote degrades in the ctx's
+// window (the doctor path) rather than bd's flat 120s read timeout. A failure is
+// returned verbatim so the caller can name the required credential env
+// (BEADS_DOLT_CREDENTIAL_COMMAND / GC_DOLT_PASSWORD).
+func (s *BdStore) CredentialPreflight(ctx context.Context) error {
+	if _, err := s.runBoundedRead(ctx, "list", "--json", "--limit", "1"); err != nil {
+		return fmt.Errorf("bd list --limit 1: %w", err)
+	}
+	return nil
+}
+
+// ConfigGetContext reads the database config-table value at key with a ctx
+// deadline enforced on the subprocess (the doctor's bounded allowed_prefixes
+// read). See ConfigGet for the unbounded background variant.
+func (s *BdStore) ConfigGetContext(ctx context.Context, key string) (string, error) {
+	out, err := s.runBoundedRead(ctx, "config", "get", key)
+	if err != nil {
+		return "", fmt.Errorf("bd config get %s: %w", key, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// runBoundedRead runs a read-only bd command with the store's scoped env. A ctx
+// WITH a deadline is enforced on the subprocess via exec.CommandContext (real
+// cancellation for the doctor path); WITHOUT a deadline it falls back to the
+// retrying, fake-able scoped runner (the boot path, unit-testable via s.runner).
+func (s *BdStore) runBoundedRead(ctx context.Context, args ...string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		return s.runBDTransientRead(args...)
+	}
+	return execBDRead(ctx, s.dir, bdImportChildEnv(s.env), args...)
+}
+
+// execBDRead runs a read-only `bd` command (no stdin) under ctx via
+// exec.CommandContext, so a ctx deadline actually kills the subprocess.
+func execBDRead(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	start := time.Now()
+	runErr := cmd.Run()
+	TraceBDCall("go:bdstore.execBDRead", dir, args, start, bdExitCode(runErr), runErr)
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("timed out")
+	}
+	if runErr != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = bdStdoutErrorDetail(stdout.Bytes())
+		}
+		if detail != "" {
+			return nil, fmt.Errorf("%w: %s", runErr, detail)
+		}
+		return nil, runErr
+	}
+	return stdout.Bytes(), nil
+}
+
 // hasWorkspacePrefixMintCapability probes `bd version --json` for the
 // workspace-prefix-mint capability. The probe is fork-proof (a capabilities key,
 // never a version-number comparison) because this fleet pins forked bd builds.

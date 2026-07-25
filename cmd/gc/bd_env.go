@@ -986,6 +986,10 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	// failure (e.g., write permission error, post-publish re-validation failure)
 	// while the server is still accessible.
 	if allowRecovery {
+		// Discarding the error is intentional and SAFE: managedDoltLifecycleOwned
+		// (via workTopologyManagedDoltKeepAlive) fails CLOSED — a marker read fault
+		// on an external city with residue returns owned=true — so the swallowed
+		// error still yields the keep-alive-preserving answer here (F12).
 		if owned, _ := managedDoltLifecycleOwned(cityPath); owned {
 			if port := currentResolvableManagedDoltPort(cityPath); port != "" {
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil

@@ -82,7 +82,16 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 		if invalid {
 			return false, fmt.Errorf("invalid canonical city endpoint state")
 		}
-		return !ok, nil
+		if !ok {
+			return true, nil
+		}
+		// The city resolves to an EXTERNAL endpoint, so it would normally stop
+		// launching the managed-local Dolt. But a remote work migration (F.4)
+		// records the OLD LOCAL unified database as a residue source; the
+		// straggler/residue passes read it through the managed-local server, so the
+		// lifecycle must stay ENABLED until every recorded source drains. "Local
+		// server not running" is then a launch-and-retry condition, not a skip.
+		return workTopologyManagedDoltKeepAlive(cityPath)
 	}
 
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))

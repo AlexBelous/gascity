@@ -101,6 +101,34 @@ func workTopologyDoctorState(cityPath string, cfg *config.City) (string, error) 
 		markers = strings.Join(present, ",")
 	}
 	detail := fmt.Sprintf("work: scope=%s target=%s markers=%s residue=%d", scope, target, markers, residue)
+	// Surface the F.4 managed-local keep-alive linkage so a forever-undrained source
+	// is diagnosable beyond per-tick stderr: a remote city keeps its managed-LOCAL
+	// Dolt alive until residue drains.
+	if keep, kerr := workTopologyManagedDoltKeepAlive(cityPath); kerr == nil && keep {
+		detail += " local-dolt=kept-alive"
+	}
+	// On a remote-target city, surface remote-auth reachability and the org DB
+	// allowed_prefixes presence check (deliverable G) — cached/rate-limited so the
+	// doctor line never becomes a hot-path org-DB scan.
+	if cfg.Beads.Work.IsRemote() {
+		st := workRemoteDoctorProbe(cityPath, cfg)
+		auth := "unreachable"
+		if st.reachable {
+			auth = "ok"
+		}
+		detail += fmt.Sprintf(" remote-auth=%s", auth)
+		if !st.reachable && strings.TrimSpace(st.authDetail) != "" {
+			detail += fmt.Sprintf(" (%s)", st.authDetail)
+		}
+		prefixes := "present"
+		if !st.prefixesPresent {
+			prefixes = "missing"
+			if len(st.missing) > 0 {
+				prefixes += ":" + strings.Join(st.missing, ",")
+			}
+		}
+		detail += fmt.Sprintf(" prefixes=%s", prefixes)
+	}
 	if statErr != nil {
 		detail += fmt.Sprintf(" (marker stat: %v)", statErr)
 	}

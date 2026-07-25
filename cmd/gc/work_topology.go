@@ -57,7 +57,12 @@ func loadWorkTopology(cityPath string) (workTopology, error) {
 	if err != nil {
 		return workTopology{}, err
 	}
-	if ok {
+	// A STARTED (intent) remote marker does NOT activate the topology: the physical
+	// re-point, keep-alive, and residue machinery must not fire until the migration
+	// finalizes to complete. It is read directly by ensureWorkRemote (resume +
+	// retarget guard) and by checkWorkTopologyMarkers (one-way intent enforcement),
+	// but the canonicalizer keeps the city managed-local until complete.
+	if ok && m.isComplete() {
 		if m.Target == nil || strings.TrimSpace(m.Target.Host) == "" || strings.TrimSpace(m.Target.Port) == "" || strings.TrimSpace(m.Target.Database) == "" {
 			return workTopology{}, errWorkRemoteMarkerMalformed
 		}

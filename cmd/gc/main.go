@@ -1367,6 +1367,16 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
 	cfg, _ := loadCityConfig(runtimeCityPath, io.Discard)
+	// Fail-closed one-way enforcement on the shared work-store resolution seam
+	// (spec surface c): every one-shot that opens a work store — gc hook, sling,
+	// convoy, mail — routes through here, so a city whose durable markers/stamps
+	// contradict the loaded config errors at routing resolution instead of
+	// opening a store a routed reader never reads. Cached (keyed on marker stat
+	// signatures) so the DARK common case is a map lookup plus two stats; the
+	// controller only reaches here after boot already validated the config.
+	if err := checkWorkTopologyMarkersCached(runtimeCityPath, cfg); err != nil {
+		return beads.StoreOpenResult{}, err
+	}
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if authoritative {

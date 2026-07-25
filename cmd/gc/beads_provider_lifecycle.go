@@ -189,6 +189,17 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	if err := validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
 		return err
 	}
+	// One-way work-topology enforcement (deliverable E, surfaces a + b). This
+	// is the shared boot lifecycle every entry routes through — gc start,
+	// prepareCityForSupervisor, and the reconciler/supervisor config reload —
+	// so a single check refuses to start (or, at reload, is treated as
+	// "keeping old config" by the caller) when the loaded config contradicts
+	// the durable unify/remote markers. Runs before any canonicalization write
+	// so a contradicting reload never mutates a scope file. DARK (nil) on a
+	// marker-less city.
+	if err := checkWorkTopologyMarkers(cityPath, cfg); err != nil {
+		return err
+	}
 	// Register per-city dolt config so env builders and isExternalDolt can
 	// read it without process-global env vars. This is the single
 	// registration point — supervisor, standalone, and reload all flow
@@ -436,6 +447,19 @@ func seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase string) err
 	} else if usesPostgres {
 		return nil
 	}
+	// Resolve topology once up front (F7/F12): a marker fault aborts before any
+	// deferred write, never persisting a degraded value.
+	topo, err := loadWorkTopology(cityPath)
+	if err != nil {
+		return err
+	}
+	label := workScopeResidueLabel(cityPath, dir)
+	// Never-silently-discard (deliverable C): a rig added or restored onto an
+	// already-unified/remote city carries legacy .beads state; record it before
+	// re-pointing so the residue pass can drain it. No-op on a marker-less city.
+	if err := recordWorkTopologyResidueForScopeWithTopology(topo, cityPath, dir, label); err != nil {
+		return err
+	}
 	if state, ok, err := desiredScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
 		return err
 	} else if ok {
@@ -444,9 +468,16 @@ func seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase string) err
 		}
 	}
 	if strings.TrimSpace(doltDatabase) == "" {
-		doltDatabase = readDeferredManagedDoltDatabase(filepath.Join(dir, ".beads", "metadata.json"), defaultScopeDoltDatabase(cityPath, dir, prefix))
+		// scopeDoltDatabaseForTopology re-points a fresh/late-bound rig onto the
+		// shared city/remote database when a work marker is present, and is
+		// byte-identical to the legacy on-disk-first resolution otherwise, so a
+		// rig provisioned after the marker is born pointing at the city database.
+		doltDatabase = scopeDoltDatabaseForTopology(topo, cityPath, dir, prefix)
 	}
-	return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+		return err
+	}
+	return stampWorkTopologyScope(topo, cityPath, dir, label)
 }
 
 func readDeferredManagedDoltDatabase(path, fallback string) string {
@@ -465,11 +496,27 @@ func readDeferredManagedDoltDatabase(path, fallback string) string {
 	return fallback
 }
 
-func defaultScopeDoltDatabase(cityPath, dir, prefix string) string {
+// legacyDefaultScopeDoltDatabase is the pre-work-topology scope database name:
+// "hq" for the city, the issue prefix for a rig. Kept separate so the
+// topology-aware defaultScopeDoltDatabase can fall back to it and
+// workTopologyScopeDatabase can name the city database without recursing.
+func legacyDefaultScopeDoltDatabase(cityPath, dir, prefix string) string {
 	if samePath(cityPath, dir) {
 		return "hq"
 	}
 	return prefix
+}
+
+// defaultScopeDoltDatabase returns the database name a scope's metadata.json
+// should carry. It consults the work-topology markers (deliverable B): under a
+// unified/remote topology a rig's work beads live in the city database, and a
+// remote city (and its rigs) live in the remote target's database. Marker-less
+// cities resolve to the legacy per-scope name, byte-for-byte as before.
+func defaultScopeDoltDatabase(cityPath, dir, prefix string) string {
+	if db, ok := workTopologyScopeDatabase(cityPath, dir); ok {
+		return db
+	}
+	return legacyDefaultScopeDoltDatabase(cityPath, dir, prefix)
 }
 
 func isReservedManagedDoltDatabase(name string) bool {
@@ -478,6 +525,14 @@ func isReservedManagedDoltDatabase(name string) bool {
 }
 
 func canonicalScopeDoltDatabase(cityPath, dir, prefix string) string {
+	// Under a work-topology marker the desired database WINS over any stale
+	// on-disk metadata: that override is the re-point that converges a
+	// legacy per-rig scope onto the shared city/remote database. Marker-less
+	// cities keep the on-disk-first behavior (preserve an imported
+	// dolt_database that differs from the prefix).
+	if db, ok := workTopologyScopeDatabase(cityPath, dir); ok {
+		return db
+	}
 	return readDeferredManagedDoltDatabase(filepath.Join(dir, ".beads", "metadata.json"), defaultScopeDoltDatabase(cityPath, dir, prefix))
 }
 
@@ -490,6 +545,22 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 	} else if usesPostgres {
 		return nil
 	}
+	// Resolve the work topology ONCE up front via the error-returning reader
+	// (F7/F12): a transient marker fault aborts the whole pass before any write,
+	// so a degraded (scoped) value is never persisted. The value is threaded
+	// into the database resolution and the stamp/verify below.
+	topo, err := loadWorkTopology(cityPath)
+	if err != nil {
+		return err
+	}
+	label := workScopeResidueLabel(cityPath, dir)
+	// Never-silently-discard (deliverable C): before we rewrite a scope's
+	// files toward the topology target, record any differing legacy identity
+	// in the work marker's residue list so the (future) residue-convergence
+	// pass can drain it. No-op on a marker-less city.
+	if err := recordWorkTopologyResidueForScopeWithTopology(topo, cityPath, dir, label); err != nil {
+		return err
+	}
 	if state, ok, err := desiredScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
 		return err
 	} else if ok {
@@ -498,15 +569,33 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 		}
 	}
 	if strings.TrimSpace(doltDatabase) == "" {
-		doltDatabase = canonicalScopeDoltDatabase(cityPath, dir, prefix)
+		doltDatabase = scopeDoltDatabaseForTopology(topo, cityPath, dir, prefix)
 	}
 	if isReservedManagedDoltDatabase(doltDatabase) {
 		// Preserve legacy probe metadata during startup normalization so old
 		// scopes can still boot and migrate deliberately. New init paths still
 		// reject this reserved name when it is not already pinned in metadata.
-		return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+			return err
+		}
+	} else if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+		return err
 	}
-	return enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+	// Provenance stamp + post-write verify (deliverables B/D): stamp the scope
+	// as topology-managed (positive evidence the one-way guard keys on) and
+	// confirm it resolves to the intended target. No-op on a marker-less city
+	// or a scope the topology does not relocate.
+	return stampWorkTopologyScope(topo, cityPath, dir, label)
+}
+
+// workScopeResidueLabel returns the residue/verify scope label: "hq" for the
+// city, the scope directory base for a rig (a stable human label; the residue
+// identity's host/port/database is the physical drain key).
+func workScopeResidueLabel(cityPath, dir string) string {
+	if samePath(cityPath, dir) {
+		return "hq"
+	}
+	return filepath.Base(dir)
 }
 
 // initAndHookDir is the atomic unit of bead store initialization:
@@ -977,6 +1066,13 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 }
 
 func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) error {
+	// Resolve the topology up front via the error-returning reader (F12): a
+	// marker fault aborts before any write, so this post-init force-write never
+	// reverts a remote/unified scope to managed on a transient fault.
+	topo, err := loadWorkTopology(cityPath)
+	if err != nil {
+		return err
+	}
 	if state, ok, err := forcedScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
 		return err
 	} else if ok {
@@ -985,13 +1081,16 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 		}
 	}
 	if strings.TrimSpace(doltDatabase) == "" {
-		doltDatabase = defaultScopeDoltDatabase(cityPath, dir, prefix)
+		doltDatabase = scopeDoltDatabaseForTopology(topo, cityPath, dir, prefix)
 	}
 	if isReservedManagedDoltDatabase(doltDatabase) {
 		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
 			return err
 		}
 	} else if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+		return err
+	}
+	if err := stampWorkTopologyScope(topo, cityPath, dir, workScopeResidueLabel(cityPath, dir)); err != nil {
 		return err
 	}
 	store, err := openStoreAtForCity(dir, cityPath)
@@ -1023,6 +1122,12 @@ func forcedScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.C
 		return contract.ConfigState{}, false, nil
 	}
 	cityPath = normalizePathForCompare(cityPath)
+	// Surface a marker fault (F12): the desiredCity/RigDoltConfigState resolvers
+	// below consult the topology best-effort, so guard the read here so a
+	// forced write never lands a degraded (scoped) endpoint on a fault.
+	if _, err := loadWorkTopology(cityPath); err != nil {
+		return contract.ConfigState{}, false, err
+	}
 	cityDolt := config.DoltConfig{}
 	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
@@ -1586,17 +1691,33 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		warn = io.Discard
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+	// Resolve the work topology ONCE up front (F7/F12). A transient marker fault
+	// aborts before any metadata write, so this path — reachable during rig
+	// provisioning even when initAndHookDir was skipped — never seeds a degraded
+	// (scoped) database over a remote/unified scope.
+	topo, err := loadWorkTopology(cityPath)
+	if err != nil {
+		return err
+	}
 	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath); err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
 		} else if !usesPostgres {
-			doltDatabase := defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))
+			doltDatabase := scopeDoltDatabaseForTopology(topo, cityPath, cityPath, config.EffectiveHQPrefix(cfg))
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
 					return fmt.Errorf("canonicalizing city doltlite metadata: %w", err)
 				}
-			} else if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
-				return fmt.Errorf("canonicalizing city metadata: %w", err)
+			} else {
+				if err := recordWorkTopologyResidueForScopeWithTopology(topo, cityPath, cityPath, "hq"); err != nil {
+					return fmt.Errorf("recording city work-topology residue: %w", err)
+				}
+				if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
+					return fmt.Errorf("canonicalizing city metadata: %w", err)
+				}
+				if err := stampWorkTopologyScope(topo, cityPath, cityPath, "hq"); err != nil {
+					return fmt.Errorf("stamping city work topology: %w", err)
+				}
 			}
 		}
 	}
@@ -1607,13 +1728,21 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cfg.Rigs[i].Path); err != nil {
 			return fmt.Errorf("classifying rig %q backend: %w", cfg.Rigs[i].Name, err)
 		} else if !usesPostgres {
-			doltDatabase := defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())
+			doltDatabase := scopeDoltDatabaseForTopology(topo, cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, doltDatabase); err != nil {
 					return fmt.Errorf("canonicalizing rig %q doltlite metadata: %w", cfg.Rigs[i].Name, err)
 				}
-			} else if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, doltDatabase); err != nil {
-				return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
+			} else {
+				if err := recordWorkTopologyResidueForScopeWithTopology(topo, cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].Name); err != nil {
+					return fmt.Errorf("recording rig %q work-topology residue: %w", cfg.Rigs[i].Name, err)
+				}
+				if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, doltDatabase); err != nil {
+					return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
+				}
+				if err := stampWorkTopologyScope(topo, cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].Name); err != nil {
+					return fmt.Errorf("stamping rig %q work topology: %w", cfg.Rigs[i].Name, err)
+				}
 			}
 		}
 	}
@@ -1734,6 +1863,12 @@ func normalizedRigConfig(cityPath string, rig config.Rig) config.Rig {
 }
 
 func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cityPrefix string) contract.ConfigState {
+	// A remote work target relocates the city endpoint to the recorded remote
+	// server (deliverable B); inherited rigs then mirror it through the
+	// existing city_canonical inheritance path.
+	if state, ok := workTopologyDesiredCityState(cityPath, cityPrefix); ok {
+		return state
+	}
 	cityHost, cityPort := configuredExternalDoltTargetForCity(cityDolt)
 	if cityHost != "" || cityPort != "" {
 		state := contract.ConfigState{
@@ -1756,6 +1891,14 @@ func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cit
 
 func desiredRigDoltConfigState(cityPath string, rig config.Rig, cityState contract.ConfigState) contract.ConfigState {
 	rig = normalizedRigConfig(cityPath, rig)
+	// Under a unified/remote work marker a rig's work beads live in the city
+	// database; its endpoint is inherited_city (never explicit), so a private
+	// per-rig endpoint cannot survive (F11). Best-effort here is safe: every
+	// writer that consumes this resolves the topology up front with the
+	// error-returning reader and aborts on a marker fault before this runs.
+	if loadWorkTopologyBestEffort(cityPath).sharesCityDatabase() {
+		return inheritedRigDoltConfigState(rig.Path, rig.EffectivePrefix(), cityState)
+	}
 	if rig.DoltHost != "" || rig.DoltPort != "" {
 		state := contract.ConfigState{
 			IssuePrefix:    rig.EffectivePrefix(),

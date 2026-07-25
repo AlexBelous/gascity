@@ -280,6 +280,13 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
 	}
+	// Fail closed before provisioning: a city whose work-topology markers
+	// contradict the loaded config (or a rig declaring a private dolt endpoint
+	// under a unify/remote marker) must not run the full canonicalization pass.
+	if err := checkWorkTopologyMarkers(cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	}
 	// Register the city dolt config for the duration of provisioning so the
 	// beads-init path can read the process-global lifecycle fields. The
 	// register/clear pair must stay in one lexical scope wrapping the whole

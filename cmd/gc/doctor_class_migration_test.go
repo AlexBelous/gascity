@@ -36,11 +36,52 @@ func TestClassMigrationCheckAllBD(t *testing.T) {
 	if !strings.Contains(r.Message, "all infra classes on bd") {
 		t.Fatalf("message %q", r.Message)
 	}
-	if len(r.Details) != 5 {
-		t.Fatalf("details = %d lines, want one per class: %v", len(r.Details), r.Details)
+	if len(r.Details) != 6 {
+		t.Fatalf("details = %d lines, want one per class plus the work line: %v", len(r.Details), r.Details)
 	}
 	if r.Details[0] != "orders: backend=bd marker=absent routing=bd" {
 		t.Fatalf("orders detail %q", r.Details[0])
+	}
+	if r.Details[5] != "work: scope=scoped target=managed markers=absent residue=0" {
+		t.Fatalf("work detail %q", r.Details[5])
+	}
+}
+
+func TestClassMigrationCheckWorkTopologyLine(t *testing.T) {
+	cityPath := t.TempDir()
+	// Unified marker with one undrained residue source.
+	if err := writeWorkTopologyMarker(workUnifiedMarkerPath(cityPath), &workTopologyMarker{
+		Kind: workMarkerKindUnified,
+		ResidueSources: []workResidueSource{
+			{Scope: "fe", Database: "fe"},
+			{Scope: "be", Database: "be", Drained: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := runClassMigrationCheck(t, cityPath, classMigrationConfig(t, `
+[beads.work]
+scope = "unified"
+`))
+	joined := strings.Join(r.Details, "\n")
+	if !strings.Contains(joined, "work: scope=unified target=managed markers=work.unified residue=1") {
+		t.Fatalf("work topology line missing/incorrect:\n%s", joined)
+	}
+}
+
+func TestClassMigrationCheckWorkMarkerUnstatableIsError(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(nudgesdb.StoreDir(cityPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An unparseable work marker fails closed, same discipline as the class
+	// markers.
+	if err := os.WriteFile(workRemoteMarkerPath(cityPath), []byte("{bad"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := runClassMigrationCheck(t, cityPath, classMigrationConfig(t, ""))
+	if r.Status != doctor.StatusError || r.Severity != doctor.SeverityBlocking {
+		t.Fatalf("unstatable work marker = (%v, %v), want blocking error: %s", r.Status, r.Severity, r.Message)
 	}
 }
 

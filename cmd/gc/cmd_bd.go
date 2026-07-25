@@ -219,6 +219,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// One-way work-topology enforcement (deliverable E, surface c): on a city
+	// whose durable unify/remote markers or per-scope stamps contradict the
+	// loaded config, fail closed — never resolve a bd scope target that would
+	// route this write to a database a routed reader never looks at. Cached
+	// (F15) so the marker-less common path is a map lookup plus two stats.
+	if err := checkWorkTopologyMarkersCached(cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	// In-process graph mutation arm (BEFORE the write guard): on a
 	// graph-routed city, workers legitimately close/update gcg beads
 	// (molecule steps), and bd cannot reach the embedded store — the

@@ -117,12 +117,27 @@ never a version-number comparison (this fleet pins forked bd builds).
   returns an ERROR (fail closed), never the bd fallback. The guard keys on
   observed state, not only the marker: re-pointed scopes + `scope=scoped`,
   or a scope resolving to the recorded remote endpoint + `target=managed`,
-  refuse even if a marker file was lost. Live-resolved-target evidence
+  refuse even if a marker file was lost. Observed state means POSITIVE
+  PROVENANCE, never name coincidence: every topology-driven
+  canonicalization write stamps the scope's `.beads` state with a
+  work-topology provenance mark, and the marker-less observed arms fire
+  only on that stamp — a legacy rig whose metadata happens to name the
+  city database (a real, preserved state) must stay DARK, while stamps
+  survive marker loss, which is the arm's whole purpose. A unified
+  marker present suppresses the reverted-remote inference (the durable
+  marker beats endpoint inference), and a city whose external endpoint
+  is corroborated by hosted project identity (`.beads/identity.toml`)
+  is external-from-birth, exempt. Live-resolved-target evidence
   triggers refusal ONLY for those enumerated reverted-config cases:
   marker-present scopes still resolving to their recorded LEGACY
   identities with config matching the marker are the self-heal window,
   and the boot check runs after (or tolerates) the canonicalization pass
-  that converges them.
+  that converges them. Marker writes and residue-source appends hold a
+  cross-process file lock (concurrent `gc rig add` vs controller
+  canonicalization must never lose a recorded residue source), residue
+  identities are stored host-canonicalized, and the unified desired rig
+  database is the city's RESOLVED database (its metadata may carry an
+  imported name), never the legacy default constant.
 
 ## The copy primitive: snapshot import with a guarded upsert
 

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	messagingdb "github.com/gastownhall/gascity/internal/classdb/messaging"
 	nudgesdb "github.com/gastownhall/gascity/internal/classdb/nudges"
@@ -66,6 +67,46 @@ func classMigrationStates(cityPath string, cfg *config.City) []classMigrationSta
 	return states
 }
 
+// workTopologyDoctorState returns the work-scope topology line for the
+// infra-class-migration check (deliverable F): the configured scope/target,
+// which durable work markers are present, and how many recorded residue
+// sources are still undrained. An unstatable marker is a blocking error — the
+// same ENOENT-only discipline as the class markers, because routing fails
+// closed until the stat error is fixed.
+func workTopologyDoctorState(cityPath string, cfg *config.City) (string, error) {
+	scope := cfg.Beads.Work.EffectiveScope()
+	target := "managed"
+	if cfg.Beads.Work.IsRemote() {
+		target = "remote"
+	}
+	var present []string
+	residue := 0
+	var statErr error
+	if m, ok, err := readWorkTopologyMarker(workUnifiedMarkerPath(cityPath)); err != nil {
+		statErr = err
+	} else if ok {
+		present = append(present, "work.unified")
+		residue += m.undrainedResidueCount()
+	}
+	if m, ok, err := readWorkTopologyMarker(workRemoteMarkerPath(cityPath)); err != nil {
+		if statErr == nil {
+			statErr = err
+		}
+	} else if ok {
+		present = append(present, "work.remote")
+		residue += m.undrainedResidueCount()
+	}
+	markers := "absent"
+	if len(present) > 0 {
+		markers = strings.Join(present, ",")
+	}
+	detail := fmt.Sprintf("work: scope=%s target=%s markers=%s residue=%d", scope, target, markers, residue)
+	if statErr != nil {
+		detail += fmt.Sprintf(" (marker stat: %v)", statErr)
+	}
+	return detail, statErr
+}
+
 // classMigrationDoctorCheck reports the migration/routing state of the four
 // relocatable infra classes. Advisory in the healthy shapes (fully bd, fully
 // routed, migration pending first boot, deliberate rollback), error when a
@@ -107,6 +148,11 @@ func (c *classMigrationDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 		case st.backend != config.BeadsClassBackendSQLite && st.marker == "present":
 			rollback++
 		}
+	}
+	workDetail, workStatErr := workTopologyDoctorState(c.cityPath, c.cfg)
+	r.Details = append(r.Details, workDetail)
+	if workStatErr != nil {
+		broken++
 	}
 	switch {
 	case broken > 0:

@@ -13,14 +13,29 @@
 # closes that gap by re-reading bd's live state at the last possible moment
 # before the push leaves the machine.
 #
-# THE EXPORTED FUNCTION: assert_bead_still_claimed. Re-resolves which bead
-# this push is for (branch name, falling back to this session's in-progress
-# assignment), re-reads its live state from bd, and returns non-zero
-# (blocking the push) unless the bead is still open/in_progress, still
-# assigned to one of this session's identities (any of GC_SESSION_NAME,
-# GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path), still
-# routed to this session's config identity, and not held by the mayor or an
-# external actor.
+# THE EXPORTED FUNCTION: assert_bead_still_claimed. Resolves two candidate
+# bead ids — branch_id (parsed from the branch name, _pog_branch_bead_id)
+# and assignee_id (this session's own in-progress bd assignment,
+# _pog_assignee_bead_id) — and checks branch_id first when present, since
+# it's the more specific signal. Returns non-zero (blocking the push)
+# unless the checked bead is still open/in_progress, still assigned to one
+# of this session's identities (any of GC_SESSION_NAME, GC_SESSION_ID,
+# GC_ALIAS, GC_AGENT — mirroring the claim path), still routed to this
+# session's config identity, and not held by the mayor or an external
+# actor (see _pog_check_bead_claimed for the per-bead check and its
+# return-code contract).
+#
+# RETRY: if branch_id's bead fails ONLY because its status is terminal
+# (rc=2 — e.g. it closed normally into a separate follow-on bead, as with
+# ga-hilw2y) and a distinct assignee_id exists, the same check retries
+# against assignee_id before blocking, so an ordinary handoff isn't
+# mistaken for staleness. Every other block reason (reassigned, rerouted,
+# held, bd unreachable — rc=1) is never retried against a fallback id:
+# those mean this session's specific claim was actively superseded, which
+# a fallback must not paper over. The retry has no relatedness check
+# between branch_id and assignee_id today — any distinct in-progress
+# assignment qualifies. Whether it should require one is an open
+# authorization-semantics question tracked in ga-1hc9k3, not decided here.
 #
 # TWO CALL SITES (defense in depth — see ga-fip9ps.1 bead notes):
 #   Layer A — .githooks/pre-push calls this unconditionally for every

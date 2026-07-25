@@ -229,50 +229,6 @@ export type RunExecutionPath =
   | { kind: 'known'; path: string }
   | { kind: 'unavailable'; reason: 'missing_cwd_and_rig_root' };
 
-/**
- * The run-diff POST body. executionPath is OPTIONAL: omit it (send `{}`) to have
- * the server resolve the run's git cwd from the run id via its own run-detail
- * projection — the default the SPA now uses, so the browser never sends a
- * filesystem path (and the read-only shield can scrub executionPath from the
- * projected detail). A supplied executionPath is still honored for back-compat.
- */
-export interface RunDiffRequest {
-  executionPath?: RunExecutionPath;
-}
-
 export type RunSnapshotSequence =
   | { kind: 'known'; seq: number }
   | { kind: 'unavailable'; reason: 'supervisor_omitted' };
-
-export type RunDiffKind = 'ok' | 'not_git' | 'path_unknown' | 'error';
-
-export type RunChangedFileKind = 'code' | 'test' | 'docs' | 'config' | 'other';
-
-export interface RunChangedFile {
-  path: string;
-  status: string;
-  kind: RunChangedFileKind;
-}
-
-export type RunDiffComparison =
-  | { kind: 'upstream'; ref: string; mergeBase: string }
-  | { kind: 'head'; reason: 'no_upstream' | 'upstream_lookup_failed' }
-  | { kind: 'unavailable'; reason: 'path_unknown' | 'not_git' | 'error' };
-
-interface RunDiffBase {
-  rootPath: RunDiffRootPath;
-  comparison: RunDiffComparison;
-  status: string[];
-  changedFiles: RunChangedFile[];
-  patch: string;
-  truncated: boolean;
-}
-
-export type RunDiffResponse =
-  | (RunDiffBase & { kind: 'ok' })
-  | (RunDiffBase & { kind: 'not_git' | 'path_unknown' })
-  | (RunDiffBase & { kind: 'error'; error: string });
-
-export type RunDiffRootPath =
-  | { kind: 'known'; path: string }
-  | { kind: 'unavailable'; reason: 'path_unknown' | 'not_git' | 'error' };

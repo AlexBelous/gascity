@@ -2,6 +2,7 @@ package testenv_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -464,6 +465,113 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 			if tc.wantPanic {
 				if err == nil {
 					t.Fatalf("child succeeded but should have refused the prod Dolt port; output:\n%s", out)
+				}
+				stderr := exitStderr(err)
+				for _, want := range []string{"production Dolt server", "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"} {
+					if !strings.Contains(stderr, want) {
+						t.Errorf("panic message missing %q; stderr:\n%s", want, stderr)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("re-exec: %v\nstderr: %s", err, exitStderr(err))
+			}
+			for _, want := range tc.wantOutput {
+				if !strings.Contains(string(out), want) {
+					t.Errorf("child output missing %q; got:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// buildSyntheticCity creates a t.TempDir() city tree — a city.toml marker at
+// the root and a managed-Dolt runtime state file recording port — and
+// returns a directory nested three levels below the root, so pointing
+// cmd.Dir at it exercises the ambient arm's upward walk rather than a
+// same-directory check. The synthetic root is a fresh temp dir, so the walk
+// finds this city.toml before it could ever reach any real ambient city
+// further up the real filesystem tree.
+func buildSyntheticCity(t *testing.T, port int) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("# synthetic city\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	stateDir := filepath.Join(root, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir dolt state dir: %v", err)
+	}
+	state := fmt.Sprintf(`{"running":true,"pid":1,"port":%d,"data_dir":"x"}`, port)
+	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
+		t.Fatalf("write dolt-state.json: %v", err)
+	}
+	nested := filepath.Join(root, "a", "b", "c")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested dir: %v", err)
+	}
+	return nested
+}
+
+// TestInitRefusesAmbientCityDoltPort proves the ambient-city detection arm in
+// refuseProdDoltPort is actually wired into init() end-to-end — not just
+// correct as a pure function, which TestAmbientCityDoltPort in
+// testenv_internal_test.go already covers against synthetic trees directly.
+// The child's cmd.Dir is pointed at a synthetic city tree whose port is
+// deliberately far from the hardcoded ProdDoltPort (3307), so a panic here
+// can only be caused by the ambient arm consulting that city's own state.
+func TestInitRefusesAmbientCityDoltPort(t *testing.T) {
+	if os.Getenv("GC_TESTENV_CHILD") == "1" {
+		os.Stdout.WriteString("BEADS_DOLT_SERVER_PORT=" + os.Getenv("BEADS_DOLT_SERVER_PORT") + "\n") //nolint:errcheck
+		os.Exit(0)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	const ambientPort = 28231 // far from ProdDoltPort (3307) — isolates this arm
+
+	cases := []struct {
+		name       string
+		port       string
+		extraEnv   []string
+		wantPanic  bool
+		wantOutput []string
+	}{
+		{
+			name:      "surviving port matching ambient city port panics",
+			port:      "28231",
+			wantPanic: true,
+		},
+		{
+			name:       "surviving port not matching ambient city port survives",
+			port:       "28232",
+			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=28232\n"},
+		},
+		{
+			name:       "opt-out allows ambient-matching port through",
+			port:       "28231",
+			extraEnv:   []string{"GC_ALLOW_PROD_DOLT_PORT_IN_TESTS=1"},
+			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=28231\n"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := buildSyntheticCity(t, ambientPort)
+			cmd := exec.Command(exe, "-test.run=^TestInitRefusesAmbientCityDoltPort$", "-test.v")
+			cmd.Dir = dir
+			cmd.Env = append([]string{
+				"GC_TESTENV_CHILD=1",
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_PORT",
+				"BEADS_DOLT_SERVER_PORT=" + tc.port,
+			}, tc.extraEnv...)
+			out, err := cmd.Output()
+			if tc.wantPanic {
+				if err == nil {
+					t.Fatalf("child succeeded but should have refused the ambient city's Dolt port; output:\n%s", out)
 				}
 				stderr := exitStderr(err)
 				for _, want := range []string{"production Dolt server", "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"} {

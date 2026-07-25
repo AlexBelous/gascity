@@ -2725,11 +2725,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
-			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", false)
+			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", false, routeLabelFilter{})
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
 			}
-			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", false)
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", false, routeLabelFilter{})
 			if !strings.Contains(wq, migrationWorkPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
 			}
@@ -2738,11 +2738,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 					t.Errorf("EffectiveWorkQuery() missing migration filter fragment %q in %q", want, wq)
 				}
 			}
-			countPredicate := bdReadyPoolDemandShell("--limit 0", false)
+			countPredicate := bdReadyPoolDemandShell("--limit 0", false, routeLabelFilter{})
 			if !strings.Contains(demand, countPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
 			}
-			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", false)
+			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", false, routeLabelFilter{})
 			if !strings.Contains(demand, migrationCountPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared migration predicate %q in %q", migrationCountPredicate, demand)
 			}

@@ -45,6 +45,21 @@ func isComputeTerminalState(state string) bool {
 	return false
 }
 
+// isLiveModelSweepState reports whether a session state marks a live, still-running
+// session that may be actively making model calls — active, or its awake alias —
+// as opposed to a compute-terminal endpoint (isComputeTerminalState) or a
+// transitional pre-run state (creating / start-pending / draining / failed-create)
+// that has no stable transcript to sweep yet. It is the live counterpart to
+// isComputeTerminalState; the two are disjoint, so processSessionBead routes a bead
+// down at most one of the terminal-or-live arms per tick.
+func isLiveModelSweepState(state string) bool {
+	switch session.State(strings.TrimSpace(state)) {
+	case session.StateActive, session.StateAwake:
+		return true
+	}
+	return false
+}
+
 // emitComputeFactForBead records one compute Fact for a session bead's
 // completed awake interval, exactly once per awake_started_at epoch. Returns
 // true when a fact was recorded. It is a no-op when the sink is discard/nil,
@@ -176,6 +191,25 @@ func computeFactGetCandidate(info session.Info) bool {
 	return strings.TrimSpace(info.UsageComputeEmittedAt) != start
 }
 
+// liveModelSweepCandidate reports whether a still-running session should have its
+// transcript swept for NEW model usage this tick, decided purely from its Info
+// projection — BEFORE any Get. A session qualifies when it is in a live, awake state
+// (isLiveModelSweepState) AND has a confirmed awake interval (awake_started_at set):
+// that timestamp anchors the codex discovery window, and requiring it keeps the
+// keyless (cwd, wake-window) and keyed lookups from widening their scan for a session
+// that never recorded a wake. Unlike computeFactGetCandidate there is no
+// "already-emitted" short-circuit — a live session is swept EVERY tick, and the
+// persisted invocation-usage cursor is what makes that idempotent (only transcript
+// content beyond the cursor is counted). It is the main-tier snapshot arm's pre-Get
+// gate; the split-city all-tier arm reaches wisp-tier live sessions through
+// processSessionBead directly.
+func liveModelSweepCandidate(info session.Info) bool {
+	if !isLiveModelSweepState(info.MetadataState) {
+		return false
+	}
+	return strings.TrimSpace(info.AwakeStartedAt) != ""
+}
+
 // emitDueComputeFacts emits a compute Fact for any of the given open sessions whose
 // awake interval has ended (terminal state) and has not yet been recorded. It reuses the
 // reconcile tick's already-loaded Info snapshot for the cheap candidate filter
@@ -250,11 +284,25 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	processed := make(map[string]bool)
 	processSessionBead := func(b beads.Bead) {
 		processed[b.ID] = true
+		if b.Metadata == nil {
+			return
+		}
+		state := b.Metadata["state"]
+		// Live, still-running sessions: sweep NEW transcript content incrementally so
+		// the "model calls today" / token counters advance in near-real-time (long-lived
+		// control dispatchers and wisp operators otherwise mint nothing until they
+		// retire). No compute fact and no per-interval marker here — the awake interval
+		// is still open; the shared invocation-usage cursor dedupes across ticks AND
+		// across the eventual retirement sweep, which advances the same cursor.
+		if isLiveModelSweepState(state) {
+			cr.sweepLiveSessionModelUsage(ctx, b, now, logf, modelSweepFactory)
+			return
+		}
 		// Re-check the terminal state from the FRESH bead: a session that re-awoke in
 		// the window since the snapshot was taken must not mint a tiny-wall fact for its
 		// just-STARTED interval and suppress the real end-of-interval emission. Best-
 		// effort accounting, the same NDI class as the sync-tail re-list delta.
-		if b.Metadata == nil || !isComputeTerminalState(b.Metadata["state"]) {
+		if !isComputeTerminalState(state) {
 			return
 		}
 		awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
@@ -292,12 +340,15 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
 	}
 	for _, info := range sessions {
-		if !computeFactGetCandidate(info) {
+		// Terminal sessions get their end-of-interval compute+model sweep; live
+		// (still-awake) sessions get the incremental model sweep. Everything else is
+		// skipped before any Get — the two candidate classes are disjoint.
+		if !computeFactGetCandidate(info) && !liveModelSweepCandidate(info) {
 			continue
 		}
 		b, err := store.Get(info.ID)
 		if err != nil {
-			logf("usage: loading session %s for compute fact failed: %v", info.ID, err)
+			logf("usage: loading session %s for usage facts failed: %v", info.ID, err)
 			continue
 		}
 		processSessionBead(b)
@@ -340,4 +391,73 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			processSessionBead(b)
 		}
 	}
+}
+
+// sweepLiveSessionModelUsage sweeps a still-running (awake) session's transcript for
+// model usage that appeared since the shared invocation-usage cursor, so the "model
+// calls today" / token counters advance in near-real-time for long-lived sessions
+// (control dispatchers, wisp operators) instead of only jumping when a session
+// retires.
+//
+// It reuses the same cursor-guarded, 64KB-tail-bounded, idempotent sweep the
+// end-of-interval arm runs — via DiscoverSweepTranscript (which preserves BOTH the
+// keyed rollout lookup and the ambiguity-guarded keyless (cwd, wake-window) workdir
+// fallback, so a KEYLESS codex wisp still resolves its rollout) and
+// SweepSessionModelUsageAtPath — but deliberately bills NO compute fact and stamps NO
+// per-interval marker (usageModelSweptAtKey): the awake interval is still open, so the
+// session must stay a candidate on every tick, and the persisted cursor is what
+// prevents double-counting — across ticks AND across the eventual retirement sweep,
+// since both arms advance the same cursor and usage.ModelIdempotencyKey collapses any
+// residual overlap at read time. Catch-up on a long-unswept transcript is bounded by
+// the extractor's fixed tail window, so a multi-day session cannot blow memory or
+// stall the tick on its first live sweep.
+//
+// Transcript discovery is memoized per session bead id (cr.liveSweepTranscriptPaths):
+// a live session is swept every tick, and re-running the O(awake-days) codex rollout
+// scan each time would dominate the cost, so the resolved path is cached for the
+// process lifetime (a rollout path never changes). Best-effort: a nil factory or an
+// as-yet-unresolvable transcript is a no-op this tick (retried next), and a sweep
+// error is logged and retried (the cursor advances only through entries that reached
+// the sink).
+func (cr *CityRuntime) sweepLiveSessionModelUsage(ctx context.Context, b beads.Bead, now time.Time, logf func(string, ...any), modelSweepFactory func() *worker.Factory) {
+	if b.Metadata == nil || !isLiveModelSweepState(b.Metadata["state"]) {
+		return
+	}
+	factory := modelSweepFactory()
+	if factory == nil {
+		return
+	}
+	path, cached := cr.cachedLiveTranscriptPath(b.ID)
+	if !cached {
+		path = factory.DiscoverSweepTranscript(b.ID, b.Metadata, now)
+		if path != "" {
+			cr.rememberLiveTranscriptPath(b.ID, path)
+		}
+	}
+	if path == "" {
+		// Not resolvable yet (rollout not flushed, out of window, or an ambiguous /
+		// clouded keyless workdir scan): nothing to sweep this tick; retry next tick.
+		return
+	}
+	if _, _, err := factory.SweepSessionModelUsageAtPath(ctx, b.ID, b.Metadata, path, now); err != nil {
+		logf("usage: live model-usage sweep for session %s failed; will retry: %v", b.ID, err)
+	}
+}
+
+// cachedLiveTranscriptPath returns the memoized transcript rollout path for a live
+// session bead id, reporting whether an entry was present. A present entry short-
+// circuits per-tick discovery.
+func (cr *CityRuntime) cachedLiveTranscriptPath(id string) (string, bool) {
+	if v, ok := cr.liveSweepTranscriptPaths.Load(id); ok {
+		p, _ := v.(string)
+		return p, true
+	}
+	return "", false
+}
+
+// rememberLiveTranscriptPath records the resolved transcript rollout path for a live
+// session bead id so later ticks skip discovery. Only non-empty paths are cached; an
+// unresolved ("") result is retried next tick.
+func (cr *CityRuntime) rememberLiveTranscriptPath(id, path string) {
+	cr.liveSweepTranscriptPaths.Store(id, path)
 }

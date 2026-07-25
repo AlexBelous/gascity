@@ -108,6 +108,16 @@ type CityRuntime struct {
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
 
+	// liveSweepTranscriptPaths memoizes the resolved transcript rollout path per
+	// live session bead id for the controller process lifetime, so the per-tick
+	// live model-usage sweep resolves each session's transcript at most once instead
+	// of re-running codex rollout discovery (an O(awake-days) day-dir scan) on every
+	// ~30s reconcile tick — the sweep Factory is rebuilt per tick, so the memo cannot
+	// live on it. A rollout path never changes once written (resumed sessions append
+	// to the original), so a process-lifetime cache is safe. In-memory only — no
+	// on-disk status file, consistent with the query-live-state rule.
+	liveSweepTranscriptPaths sync.Map // session bead id -> resolved transcript path (string)
+
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 

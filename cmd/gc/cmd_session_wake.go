@@ -104,7 +104,8 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	}
 	nudgeIDs := res.NudgeIDs
 	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
-	if !hasRunnableTemplate && sessionWakeRequestedCreateInfo(res.Info) {
+	switch {
+	case !hasRunnableTemplate && sessionWakeRequestedCreateInfo(res.Info):
 		if err := sessFront.ApplyPatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
@@ -116,6 +117,9 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}
+	case hasRunnableTemplate && sessionWakeStuckInFlightInfo(res.Info):
+		fmt.Fprintf(stderr, "gc session wake: session %s is in state %q with no live runtime; wake cannot act on it. Use `gc session close` to release the slot.\n", id, res.Info.MetadataState) //nolint:errcheck
+		return 1
 	}
 	if deps.cityResolved {
 		if err := deps.withdrawQueuedWaitNudges(deps.cityPath, nudgeIDs); err != nil {
@@ -157,5 +161,18 @@ func sessionWakeHasRunnableTemplateInfo(info session.Info, cfg *config.City) boo
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {
 	state := session.State(strings.TrimSpace(info.MetadataState))
-	return state == session.StateSuspended || state == session.StateDrained
+	return state == session.StateSuspended ||
+		state == session.StateDrained ||
+		state == session.StateCreating ||
+		state == session.StateStartPending
+}
+
+// sessionWakeStuckInFlightInfo reports whether info was already mid-create
+// (creating or start-pending) before this wake call. Unlike
+// sessionWakeRequestedCreateInfo, it deliberately excludes suspended/drained:
+// those are the normal, successful wake path when a runnable template exists,
+// and must not be treated as stuck.
+func sessionWakeStuckInFlightInfo(info session.Info) bool {
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	return state == session.StateCreating || state == session.StateStartPending
 }

@@ -48,14 +48,35 @@ func TestCreatingWedgesWhenRuntimeUnobserved(t *testing.T) {
 		t.Logf("observed=false -> RuntimeProjection=%q ReconciledState=%q CountsAgainstCap=%v",
 			got.RuntimeProjection, got.ReconciledState, got.CountsAgainstCap)
 
-		// This is the assertion that SHOULD hold once ga-pofwv9 is fixed: a
-		// 12-day-old creating bead must not still be projected as creating,
-		// and must not keep occupying a pool slot.
-		if got.ReconciledState == StateCreating {
-			t.Errorf("BUG ga-pofwv9: 12-day-old creating bead still projects ReconciledState=%q "+
-				"(RuntimeProjection=%q, CountsAgainstCap=%v) — staleness never evaluated because "+
-				"Runtime.Observed=false short-circuits projectRuntimeProjection",
-				got.ReconciledState, got.RuntimeProjection, got.CountsAgainstCap)
+		// ga-pofwv9 fixed: a 12-day-old creating bead with an unobserved
+		// runtime must heal to asleep, not stay creating forever.
+		if got.ReconciledState != StateAsleep {
+			t.Errorf("ReconciledState = %q, want %q", got.ReconciledState, StateAsleep)
+		}
+		if got.RuntimeProjection != RuntimeProjectionStaleCreating {
+			t.Errorf("RuntimeProjection = %q, want %q", got.RuntimeProjection, RuntimeProjectionStaleCreating)
+		}
+	})
+
+	t.Run("young unobserved runtime still projects creating", func(t *testing.T) {
+		recent := now.Add(-time.Minute)
+		got := ProjectLifecycle(LifecycleInput{
+			Status:                 "open",
+			StoredState:            string(StateCreating),
+			PendingCreateStartedAt: recent.Format(time.RFC3339),
+			CreatedAt:              recent,
+			StaleCreatingAfter:     time.Minute,
+			Now:                    now,
+			Runtime:                RuntimeFacts{Observed: false, Alive: false},
+		})
+		t.Logf("observed=false, age=1m -> RuntimeProjection=%q ReconciledState=%q CountsAgainstCap=%v",
+			got.RuntimeProjection, got.ReconciledState, got.CountsAgainstCap)
+
+		// Guard against overcorrection: a transient probe failure over a
+		// live, recently-started session must not be marked asleep.
+		if got.ReconciledState != StateCreating {
+			t.Errorf("ReconciledState = %q, want %q (young unobserved creating bead must not be healed away)",
+				got.ReconciledState, StateCreating)
 		}
 	})
 }
@@ -117,9 +138,13 @@ func TestStaleCreatingAfterUnsetNeverGoesStale(t *testing.T) {
 	t.Logf("StaleCreatingAfter=0, observed=true -> RuntimeProjection=%q ReconciledState=%q CountsAgainstCap=%v",
 		got.RuntimeProjection, got.ReconciledState, got.CountsAgainstCap)
 
-	if got.ReconciledState == StateCreating {
-		t.Errorf("BUG ga-pofwv9 (second gap): with StaleCreatingAfter unset, a 12-day-old creating "+
-			"bead projects ReconciledState=%q even though the runtime was observed dead",
-			got.ReconciledState)
+	// ga-pofwv9 (second gap) fixed: StaleCreatingAfter unset must not mean
+	// "never stale" — a 12-day-old bead with an observed-dead runtime must
+	// still heal to asleep.
+	if got.ReconciledState != StateAsleep {
+		t.Errorf("ReconciledState = %q, want %q", got.ReconciledState, StateAsleep)
+	}
+	if got.RuntimeProjection != RuntimeProjectionStaleCreating {
+		t.Errorf("RuntimeProjection = %q, want %q", got.RuntimeProjection, RuntimeProjectionStaleCreating)
 	}
 }

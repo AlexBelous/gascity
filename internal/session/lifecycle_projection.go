@@ -740,8 +740,18 @@ func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identi
 	return blockers, heldUntil, quarantinedUntil
 }
 
+// unobservedCreatingTimeout bounds how long a creating bead may sit when the
+// runtime could not be observed at all. Deliberately much longer than
+// StaleCreatingAfter: an unobserved runtime may simply be a transient probe
+// failure over a live session, so this must not fire on a normal hiccup —
+// only on a create that is definitively abandoned (ga-pofwv9).
+const unobservedCreatingTimeout = 15 * time.Minute
+
 func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) (RuntimeProjection, State, bool) {
 	if !input.Runtime.Observed {
+		if base == BaseStateCreating && creatingUnobservedExpired(input) {
+			return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)
+		}
 		return RuntimeProjectionUnknown, compat, false
 	}
 	if input.Runtime.Alive {
@@ -781,7 +791,12 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 
 func creatingStateIsStale(input LifecycleInput) bool {
 	if input.StaleCreatingAfter <= 0 {
-		return false
+		// StaleCreatingAfter is assigned in exactly one construction path
+		// (cmd/gc/session_reconcile.go). Every other path — including
+		// LifecycleInputFromMetadata, used by the wake path — leaves it
+		// unset, which must not mean "never stale" (ga-pofwv9, second gap).
+		// Fall back to the same bound used when the runtime is unobservable.
+		return creatingUnobservedExpired(input)
 	}
 	now := input.Now
 	if now.IsZero() {
@@ -797,6 +812,32 @@ func creatingStateIsStale(input LifecycleInput) bool {
 		return true
 	}
 	return !now.Before(startedAt.Add(input.StaleCreatingAfter))
+}
+
+// creatingUnobservedExpired reports whether a creating bead has aged past
+// unobservedCreatingTimeout, independent of StaleCreatingAfter. It anchors on
+// PendingCreateStartedAt, then CreatedAt, matching creatingStateIsStale.
+//
+// A zero input.Now means the caller has no clock at all (e.g.
+// healStatePatchWithRollbackInfo with clk == nil) — that must mean "cannot
+// assess staleness," not "assume the current wall-clock time," or a
+// deliberately clockless caller would see old-but-otherwise-fine creating
+// beads reported as expired against whatever moment the test happens to run.
+func creatingUnobservedExpired(input LifecycleInput) bool {
+	if input.Now.IsZero() {
+		return false
+	}
+	now := input.Now
+	startedAt := input.CreatedAt
+	if v := strings.TrimSpace(input.PendingCreateStartedAt); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil && !t.IsZero() {
+			startedAt = t
+		}
+	}
+	if startedAt.IsZero() {
+		return true
+	}
+	return !now.Before(startedAt.Add(unobservedCreatingTimeout))
 }
 
 func shouldResetContinuation(base BaseState, input LifecycleInput, sleepReason string) bool {

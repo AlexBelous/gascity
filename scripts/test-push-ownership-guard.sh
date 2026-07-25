@@ -398,6 +398,63 @@ test_block_when_branch_bead_closed_and_assignee_bead_also_invalid() {
     rm -rf "$repo" "$fbd"
 }
 
+test_block_reassigned_branch_bead_despite_valid_assignee_fallback() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    # The branch bead was reassigned, while bd list resolves a distinct
+    # fallback that would pass every ownership check if retried.
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "someone-else" "tmpl-x" "[]"
+    printf '[{"id":"ga-fallbk.3"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-fallbk.3" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "assignee" <<<"$out" && grep -q "ga-fallbk.3" <<<"$out"; then
+        record_pass "fallback/block-reassigned-branch-bead-despite-valid-assignee-fallback (rc=$rc)"
+    else
+        record_fail "fallback/block-reassigned-branch-bead-despite-valid-assignee-fallback" "expected non-zero rc naming the reassignment and fallback id, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_block_rerouted_branch_bead_despite_valid_assignee_fallback() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    # The branch bead was rerouted, while bd list resolves a distinct
+    # fallback that would pass every ownership check if retried.
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "agent-x" "other-tmpl" "[]"
+    printf '[{"id":"ga-fallbk.3"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-fallbk.3" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "routed_to" <<<"$out" && grep -q "ga-fallbk.3" <<<"$out"; then
+        record_pass "fallback/block-rerouted-branch-bead-despite-valid-assignee-fallback (rc=$rc)"
+    else
+        record_fail "fallback/block-rerouted-branch-bead-despite-valid-assignee-fallback" "expected non-zero rc naming the reroute and fallback id, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_block_held_branch_bead_despite_valid_assignee_fallback() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    # The branch bead is held, while bd list resolves a distinct fallback
+    # that would pass every ownership check if retried.
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "agent-x" "tmpl-x" '["hold:mayor"]'
+    printf '[{"id":"ga-fallbk.3"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-fallbk.3" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "hold:mayor" <<<"$out" && grep -q "ga-fallbk.3" <<<"$out"; then
+        record_pass "fallback/block-held-branch-bead-despite-valid-assignee-fallback (rc=$rc)"
+    else
+        record_fail "fallback/block-held-branch-bead-despite-valid-assignee-fallback" "expected non-zero rc naming the hold and fallback id, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Bead-id resolution.
 # ---------------------------------------------------------------------------
@@ -643,6 +700,9 @@ run_all() {
     test_block_on_bd_timeout
     test_allow_fallback_when_branch_bead_closed_but_assignee_bead_valid
     test_block_when_branch_bead_closed_and_assignee_bead_also_invalid
+    test_block_reassigned_branch_bead_despite_valid_assignee_fallback
+    test_block_rerouted_branch_bead_despite_valid_assignee_fallback
+    test_block_held_branch_bead_despite_valid_assignee_fallback
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_fallback_used_when_branch_no_match

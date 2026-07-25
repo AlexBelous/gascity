@@ -169,9 +169,33 @@ the store boundary:
   every reported tie-kept/kept-local id while the SOURCE is still
   authoritative (pre-re-point, and straggler/residue passes from a
   recorded identity), the migration re-imports exactly those ids with the
-  stale-guard override (`bd import --allow-stale`; the native store's
-  per-id equivalent) — source truth overwrites the destination for the
-  bounded flagged set.
+  stale-guard override — and the override is CONDITIONAL, not absolute:
+  it overwrites only when the incoming clock is >= the destination's
+  (native: in the upsert arm; bd leg: a bounded per-id pre-probe filters
+  ids whose destination has advanced), so a destination write landing
+  between the tie report and the re-import is never clobbered. The
+  source-is-authoritative precondition is part of the API contract.
+  ConflictSkip and the stale override are mutually exclusive (validation
+  error), mirroring bd's own flag exclusion.
+- Leg realities (both migrations depend on these): the bd-leg import
+  subprocess inherits the SAME scoped env every other bd call on that
+  store gets (BEADS_DIR, auto-start/auto-export suppression, routing
+  opt-outs, credentials) — a bare env import can land in a different
+  database than export read; import deadlines scale with batch size on
+  both legs; the bd leg parses `conflict_skipped_ids` from the capable
+  bd's JSON result (the remote stamp-check needs it); the bd leg
+  preflights `export.exclude_owners` and refuses export while it is set
+  (silently thinned streams are invisible to copy-verify); per-id raw
+  snapshot fetch (`bd show <ids...> --json` / native bulk read) is the
+  copy-verify and stamp-check read path — never a full destination
+  export.
+- The EPHEMERAL (wisp) tier CROSSES: the export surface takes an
+  include-ephemeral option (native drops its filter; bd leg exports the
+  full set and re-filters infra/templates/memories at decode) and the
+  unify snapshot step uses it — TierBoth means both tiers, and an
+  in-flight wisp molecule stranded in an abandoned rig database would
+  otherwise never complete. A label-stamp sibling of the metadata stamp
+  carries the `gc.topology_migrating` quarantine label on copied rows.
 - Dep edges attached to stale-skipped/tie-kept rows never enter the
   import batch and are NOT reported in `SkippedDependencies` (and dep
   adds don't bump `updated_at`). So for every id the report lists as

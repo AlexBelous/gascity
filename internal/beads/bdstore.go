@@ -292,10 +292,12 @@ type PurgeResult struct {
 // BdStore implements Store by shelling out to the bd CLI (beads v0.55.1+).
 // It delegates all persistence to bd's embedded Dolt database.
 type BdStore struct {
-	dir         string          // city root directory (where .beads/ lives)
-	runner      CommandRunner   // injectable for testing
-	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
-	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+	dir          string             // city root directory (where .beads/ lives)
+	runner       CommandRunner      // injectable for testing
+	purgeRunner  PurgeRunnerFunc    // injectable for testing; nil uses exec default
+	importRunner BDImportRunnerFunc // injectable for testing; nil uses exec default (bd import stdin)
+	env          map[string]string  // scoped env overrides for the stdin-capable bd import path
+	idPrefix     string             // bead ID prefix owned by this store, without trailing "-"
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
@@ -338,6 +340,27 @@ type BdStoreOption func(*BdStore)
 func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
+	}
+}
+
+// WithBdStoreEnv records the scoped environment overrides this store's
+// CommandRunner was built with, so the stdin-capable `bd import` path
+// (ImportBeadSnapshots) inherits exactly the env every other bd call on this
+// store gets — BEADS_DIR, dolt-server suppression, backend selection,
+// contributor-routing opt-out, and credentials — rather than defaulting to bd's
+// auto-routing/auto-start. Production BdStores built with an env-scoped runner
+// pass the same map here.
+func WithBdStoreEnv(env map[string]string) BdStoreOption {
+	return func(s *BdStore) {
+		if len(env) == 0 {
+			s.env = nil
+			return
+		}
+		cloned := make(map[string]string, len(env))
+		for k, v := range env {
+			cloned[k] = v
+		}
+		s.env = cloned
 	}
 }
 

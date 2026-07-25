@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	latestLumenUpstreamCommit = "44da8a985688568ba04a07d350028e0ef9b1b3e6"
+	latestLumenUpstreamCommit = "62b2904d3504e7d0ff630cd15b9ed3df9cde505b"
 	reviewQuorumIRSHA256      = "ff20c581e915e43b0addc143d6f6fda7df21f3c07c3f57c62edb59b71738158a"
 )
 

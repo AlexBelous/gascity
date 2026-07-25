@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -77,7 +78,19 @@ type ListQuery struct {
 	// batched form of ParentID for graph/subtree walks. Backends that do not
 	// recognize it should ignore it (returning a superset); callers that need
 	// exact results must filter the returned beads by parent in memory.
-	ParentIDs     []string
+	ParentIDs []string
+	// IDPrefixes constrains results to beads whose id begins with any of the
+	// listed issue prefixes (matched as "<prefix>-", case-insensitive). It is
+	// the remote read-plane scoping filter: on an org-shared work DB a city
+	// must see only its own prefixes (EffectiveHQPrefix + rig EffectivePrefix),
+	// because cross-city isolation on a shared DB IS prefix filtering
+	// (engdocs/design/beads-work-topology.md, "Remote read-plane prefix
+	// scoping"). Empty means no prefix constraint — the DARK default that keeps
+	// scoped/unified/managed cities on today's paths untouched. Backends that
+	// cannot push the predicate down (BdStore) apply it as a fold-time
+	// post-filter, which is safe for keyset pagination because the page is cut
+	// in memory after the fetch.
+	IDPrefixes    []string
 	Metadata      map[string]string
 	CreatedBefore time.Time
 	// UpdatedBefore matches beads whose UpdatedAt is before this timestamp.
@@ -180,6 +193,7 @@ func (q ListQuery) HasFilter() bool {
 		q.Assignee != "" ||
 		len(q.Assignees) > 0 ||
 		q.ParentID != "" ||
+		len(q.IDPrefixes) > 0 ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
 		!q.UpdatedBefore.IsZero() ||
@@ -241,6 +255,9 @@ func (q ListQuery) Matches(b Bead) bool {
 	if q.ParentID != "" && b.ParentID != q.ParentID {
 		return false
 	}
+	if len(q.IDPrefixes) > 0 && !idHasAnyPrefix(b.ID, q.IDPrefixes) {
+		return false
+	}
 	if len(q.Metadata) > 0 && !matchesMetadata(b, q.Metadata) {
 		return false
 	}
@@ -284,6 +301,56 @@ func beadUpdatedReferenceTime(b Bead) time.Time {
 		return b.UpdatedAt
 	}
 	return b.CreatedAt
+}
+
+// IDHasAnyPrefix reports whether a bead id belongs to any of the given issue
+// prefixes ("<prefix>-…", case-insensitive). It is the exported form of the
+// ListQuery.IDPrefixes matcher, for callers that must post-filter rows a store
+// returned without a ListQuery (e.g. Ready projections) to the remote read-plane
+// prefix set. An empty prefix set matches nothing.
+func IDHasAnyPrefix(id string, prefixes []string) bool {
+	return idHasAnyPrefix(id, prefixes)
+}
+
+// idHasAnyPrefix reports whether id begins with "<prefix>-" for any of the
+// listed prefixes, comparing case-insensitively through NormalizeIDFilterPrefix.
+// An empty/whitespace or non-conforming prefix never matches, so a misconfigured
+// entry cannot silently widen the filter.
+func idHasAnyPrefix(id string, prefixes []string) bool {
+	nid := strings.ToLower(strings.TrimSpace(id))
+	for _, p := range prefixes {
+		np, ok := NormalizeIDFilterPrefix(p)
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(nid, np+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeIDFilterPrefix normalizes an IDPrefixes entry (lowercase, trim, strip
+// the id separator) and reports whether it is usable as a prefix filter: the
+// result must be non-empty and strictly [a-z0-9] — the character set bd issue
+// prefixes use. Restricting to that set keeps the Go HasPrefix matcher and the
+// SQL `id LIKE '<p>-%'` predicate byte-identical: no LIKE metacharacter (_ % \)
+// can reach SQL to over-match a foreign city's beads while Go treats it
+// literally. A non-conforming entry is dropped (matches nothing) on BOTH legs by
+// construction, so the two paths can never disagree. Exported so the native
+// (SQL) predicate reuses the exact same gate.
+func NormalizeIDFilterPrefix(p string) (string, bool) {
+	np := normalizeIDPrefix(p)
+	if np == "" {
+		return "", false
+	}
+	for i := 0; i < len(np); i++ {
+		c := np[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+			return "", false
+		}
+	}
+	return np, true
 }
 
 func beadHasLabel(b Bead, want string) bool {

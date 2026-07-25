@@ -203,7 +203,45 @@ func doltliteCountWhere(query ListQuery, tables doltliteTableSet) ([]string, []a
 		where = append(where, "EXISTS (SELECT 1 FROM "+tables.labels+" l WHERE l.issue_id = i.id AND l.label = ?)")
 		args = append(args, query.Label)
 	}
+	if len(query.IDPrefixes) > 0 {
+		if prefixWhere, prefixArgs := doltliteIDPrefixPredicate(query.IDPrefixes); prefixWhere != "" {
+			where = append(where, prefixWhere)
+			args = append(args, prefixArgs...)
+		} else {
+			// An all-empty prefix set selects nothing (Matches drops every row),
+			// so match it with a predicate that selects nothing rather than
+			// silently widening the count to the whole table.
+			where = append(where, "1 = 0")
+		}
+	}
 	return where, args
+}
+
+// doltliteIDPrefixPredicate builds the prefix-aware predicate for the remote
+// read-plane filter: an OR of `id LIKE '<prefix>-%'` over the usable prefixes, so
+// a shared org DB read/count constrains to the city's own prefixes exactly as
+// Matches does Go-side (engdocs/design/beads-work-topology.md, "Remote read-plane
+// prefix scoping"). It gates each prefix through the SAME NormalizeIDFilterPrefix
+// the Go matcher uses, so only strictly [a-z0-9] prefixes reach LIKE — no LIKE
+// metacharacter (_ % \) can slip in to over-match a foreign city's beads, and the
+// SQL and Go paths agree by construction (no ESCAPE clause needed). Returns
+// ("", nil) when no prefix is usable so the caller can encode the match-nothing
+// case explicitly.
+func doltliteIDPrefixPredicate(prefixes []string) (string, []any) {
+	ors := make([]string, 0, len(prefixes))
+	args := make([]any, 0, len(prefixes))
+	for _, p := range prefixes {
+		np, ok := NormalizeIDFilterPrefix(p)
+		if !ok {
+			continue
+		}
+		ors = append(ors, "i.id LIKE ?")
+		args = append(args, np+"-%")
+	}
+	if len(ors) == 0 {
+		return "", nil
+	}
+	return "(" + strings.Join(ors, " OR ") + ")", args
 }
 
 // doltliteExcludeTypesPredicate builds the "issue_type NOT IN (...)" filter that

@@ -449,6 +449,8 @@ func TestStatusStoreWorkCountsWaitsForReadyResolutionCleanup(t *testing.T) {
 			&legacyReadyStore{Store: beads.NewMemStore()},
 			false,
 			true,
+			false,
+			nil,
 		)
 	}()
 

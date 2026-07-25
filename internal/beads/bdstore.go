@@ -2361,6 +2361,13 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
+	// bd list exposes no --prefix flag, so IDPrefixes is applied only Go-side by
+	// applyListQuery; a bd-side limit would cut page rows before the prefix
+	// filter runs. Fetch unbounded and let applyListQuery filter then limit (an
+	// upstream `bd list --prefix` is the recorded optimization).
+	if len(query.IDPrefixes) > 0 {
+		return true
+	}
 	return false
 }
 
@@ -2508,10 +2515,13 @@ func canApplyWispsServerLimit(query ListQuery) bool {
 	// (identical tie-break to the in-memory sort), not via a bd query flag, so
 	// a bd-side limit would cut rows before that filter runs — same class as
 	// CreatedBefore.
+	// IDPrefixes has no bd query flag either, so it too is a Go-side-only filter
+	// that a bd-side limit would cut short.
 	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0 &&
+		len(query.IDPrefixes) == 0 &&
 		query.SeekAfter == nil
 }
 

@@ -1325,6 +1325,19 @@ func (cs *controllerState) CityPath() string {
 	return cs.cityPath
 }
 
+// WorkReadPrefixes implements api.WorkReadPrefixer: on a remote-target city it
+// returns the city's own work-bead prefix set so the API read surfaces
+// (statusWorkCounts, listings) constrain to it and bypass the Counter fast path.
+// DARK (nil, false) on scoped/unified/managed cities.
+func (cs *controllerState) WorkReadPrefixes() ([]string, bool) {
+	cs.mu.RLock()
+	cityPath, cfg := cs.cityPath, cs.cfg
+	cs.mu.RUnlock()
+	return remoteWorkReadPrefixes(cityPath, cfg)
+}
+
+var _ api.WorkReadPrefixer = (*controllerState)(nil)
+
 // Version returns the GC binary version string.
 func (cs *controllerState) Version() string {
 	return cs.version

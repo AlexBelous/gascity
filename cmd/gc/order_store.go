@@ -597,6 +597,13 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 			if strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
+			// Deliverable E: once a work marker shares the city database, a
+			// re-pointed rig resolves to that shared/org DB — sourcing it here
+			// would re-scan the shared DB with deletion authority (over WAN once
+			// remote). Skip it; the recorded residue sources drain any legacy rows.
+			if workTopologyElidesClassSweepScope(cityPath, rig.Path) {
+				continue
+			}
 			targets = append(targets, orderTrackingSweepTarget{
 				target: execStoreTarget{
 					ScopeRoot: rig.Path,

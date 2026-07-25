@@ -579,6 +579,11 @@ type statusWorkResult struct {
 // layer counts matches in memory when its cache is clean (#1896). Stores are
 // queried concurrently; results aggregate in deterministic city/rig order.
 func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
+	// Resolve the remote read-plane prefix set ONCE per request and thread the
+	// scoping decision per LEG below — never per-state inside the leg workers,
+	// which would wrongly prefix-filter the LOCAL graph store and drop its
+	// reserved-prefix beads (win3 gap G28).
+	prefixes, remoteScoped := workReadPrefixesFor(s.state)
 	stores := s.state.BeadStores()
 	// sortedRigNames deduplicates rigs sharing one store instance, so each
 	// store's persisted statuses are counted exactly once.
@@ -588,28 +593,55 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 		store         beads.Store
 		includeStored bool
 		includeReady  bool
+		// scoped constrains this leg to the city's own prefixes — true ONLY for
+		// the remote org-DB work leg. It is FALSE for the local graph leg and
+		// every scoped-city leg, so their (reserved-prefix) beads are counted.
+		scoped bool
 	}
 	queries := make([]workQuery, 0, len(rigNames)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		queries = append(queries, workQuery{
-			label:        "city",
-			store:        cityStore,
-			includeReady: true,
-		})
-	}
-	cityName := s.state.CityName()
-	for _, rigName := range rigNames {
-		queries = append(queries, workQuery{
-			label:         "rig " + rigName,
-			store:         stores[rigName],
-			includeStored: true,
-			includeReady:  rigName != cityName,
-		})
+	cityStore := s.state.CityBeadStore()
+	if remoteScoped {
+		// Remote read-plane: every rig work scope aliases the shared org DB
+		// (= the city work store), so a per-rig fan-out would tally the same
+		// shared rows once per alias. Collapse to a single prefix-scoped city
+		// leg that counts the city's OWN work exactly once — the endpoint-identity
+		// collapse the runtime aftermath requires (deliverable D's remote
+		// application). The graph leg below is a SEPARATE local store
+		// (infra=local under a remote work topology), counted UNSCOPED.
+		if cityStore != nil {
+			queries = append(queries, workQuery{
+				label:         "city",
+				store:         cityStore,
+				includeStored: true,
+				includeReady:  true,
+				scoped:        true,
+			})
+		}
+	} else {
+		if cityStore != nil {
+			queries = append(queries, workQuery{
+				label:        "city",
+				store:        cityStore,
+				includeReady: true,
+			})
+		}
+		cityName := s.state.CityName()
+		for _, rigName := range rigNames {
+			queries = append(queries, workQuery{
+				label:         "rig " + rigName,
+				store:         stores[rigName],
+				includeStored: true,
+				includeReady:  rigName != cityName,
+			})
+		}
 	}
 	// Graph leg (win3 gap G28): relocated graph beads (open molecule
 	// roots/steps, control beads) are part of the city's work plane; a
-	// graph-blind count under-reports open/in_progress/ready post-flip.
-	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != s.state.CityBeadStore() {
+	// graph-blind count under-reports open/in_progress/ready post-flip. This is
+	// a SEPARATE local sqlite store even on a remote city, so it is NEVER
+	// prefix-scoped (scoped stays false) — its gcg-/gco-/gcn- reserved-prefix
+	// beads must be counted, not filtered to the city's work prefixes.
+	if graph := s.state.GraphBeadStore().Store; graph != nil && graph != cityStore {
 		queries = append(queries, workQuery{
 			label:         "graph",
 			store:         graph,
@@ -624,6 +656,10 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 		wg.Add(1)
 		go func(i int, query workQuery) {
 			defer wg.Done()
+			legPrefixes := prefixes
+			if !query.scoped {
+				legPrefixes = nil
+			}
 			results[i] = statusStoreWorkCountsFor(
 				ctx,
 				s.state,
@@ -631,6 +667,8 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 				query.store,
 				query.includeStored,
 				query.includeReady,
+				query.scoped,
+				legPrefixes,
 			)
 		}(i, query)
 	}
@@ -660,9 +698,14 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 // failures report a partial error without retrying via List — the List scan
 // would hit the same backend — but do not discard a successful Ready result.
 func statusStoreWorkCounts(ctx context.Context, state State, rigName string, store beads.Store) statusWorkResult {
-	return statusStoreWorkCountsFor(ctx, state, "rig "+rigName, store, true, true)
+	return statusStoreWorkCountsFor(ctx, state, "rig "+rigName, store, true, true, false, nil)
 }
 
+// statusStoreWorkCountsFor counts one leg. scoped/prefixes are decided by the
+// CALLER per leg (the remote org-DB work leg is scoped; the local graph leg and
+// every scoped-city leg are not), never re-derived from state here — deriving it
+// per-store would prefix-filter the local graph store and drop its
+// reserved-prefix beads (win3 gap G28).
 func statusStoreWorkCountsFor(
 	ctx context.Context,
 	state State,
@@ -670,6 +713,8 @@ func statusStoreWorkCountsFor(
 	store beads.Store,
 	includeStored bool,
 	includeReady bool,
+	scoped bool,
+	prefixes []string,
 ) statusWorkResult {
 	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
@@ -687,7 +732,7 @@ func statusStoreWorkCountsFor(
 	if includeStored {
 		stored = nil
 		go func() {
-			wc, err := statusStoredWorkCounts(ctx, state, store)
+			wc, err := statusStoredWorkCounts(ctx, state, store, scoped, prefixes)
 			storedDone <- storedResult{wc: wc, err: err}
 		}()
 	}
@@ -735,11 +780,18 @@ func statusStoreWorkCountsFor(
 		result.errs = append(result.errs, fmt.Sprintf("%s work ready: %v", label, ready.err))
 	}
 	if ready.err == nil || (beads.IsPartialResult(ready.err) && len(ready.rows) > 0) {
-		result.wc.Ready = len(ready.rows)
+		// Remote read-plane: Ready has no IDPrefixes hook, so scope its projection
+		// to the city's own prefixes here — but ONLY when the CALLER marked this
+		// leg scoped (the remote org-DB work leg). The local graph leg is unscoped,
+		// so its reserved-prefix ready beads survive (win3 gap G28). DARK otherwise.
 		result.readyIDs = make([]string, 0, len(ready.rows))
 		for _, row := range ready.rows {
+			if scoped && !beads.IDHasAnyPrefix(row.ID, prefixes) {
+				continue
+			}
 			result.readyIDs = append(result.readyIDs, row.ID)
 		}
+		result.wc.Ready = len(result.readyIDs)
 	}
 	return result
 }
@@ -747,21 +799,39 @@ func statusStoreWorkCountsFor(
 // statusStoredWorkCounts counts the persisted open/in-progress buckets,
 // preferring the hydration-free Counter path and falling back to List only
 // when Count explicitly reports that the query shape is unsupported.
-func statusStoredWorkCounts(ctx context.Context, state State, store beads.Store) (workCounts, error) {
-	if counter, ok := store.(beads.Counter); ok {
-		wc, err := statusCountWork(ctx, counter)
-		if err == nil || !errors.Is(err, beads.ErrCountUnsupported) {
-			return wc, err
+//
+// When the caller marks the leg scoped (the remote org-DB work leg) the store is
+// a shared org DB, so the Counter fast path is BYPASSED — an org-wide COUNT would
+// tally other cities' work — and the persisted buckets come from a prefix-scoped
+// List re-filtered to the city's own prefixes (deliverable D, "Remote read-plane
+// prefix scoping"). scoped is a per-LEG decision from the caller, never derived
+// from state here (that would filter the local graph leg — win3 gap G28).
+func statusStoredWorkCounts(ctx context.Context, state State, store beads.Store, scoped bool, prefixes []string) (workCounts, error) {
+	if !scoped {
+		if counter, ok := store.(beads.Counter); ok {
+			wc, err := statusCountWork(ctx, counter)
+			if err == nil || !errors.Is(err, beads.ErrCountUnsupported) {
+				return wc, err
+			}
 		}
 	}
 
-	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true})
+	query := beads.ListQuery{AllowScan: true}
+	if scoped {
+		query.IDPrefixes = prefixes
+	}
+	list, err := statusListStoreWithTimeout(ctx, state, store, query)
 	var wc workCounts
 	if err != nil && (!beads.IsPartialResult(err) || len(list) == 0) {
 		return wc, err
 	}
 	for _, b := range list {
 		if slices.Contains(statusWorkExcludedTypes, b.Type) {
+			continue
+		}
+		// Belt-and-braces: a store that ignores IDPrefixes must not leak a foreign
+		// city's rows into the count.
+		if scoped && !beads.IDHasAnyPrefix(b.ID, prefixes) {
 			continue
 		}
 		switch b.Status {
@@ -772,6 +842,16 @@ func statusStoredWorkCounts(ctx context.Context, state State, store beads.Store)
 		}
 	}
 	return wc, err
+}
+
+// workReadPrefixesFor returns the remote read-plane prefix set when the state is
+// a remote-target city (WorkReadPrefixer), else (nil, false) — the DARK default
+// that keeps scoped/unified/managed cities on today's Counter fast path.
+func workReadPrefixesFor(state State) ([]string, bool) {
+	if p, ok := state.(WorkReadPrefixer); ok {
+		return p.WorkReadPrefixes()
+	}
+	return nil, false
 }
 
 // statusCountWork fills the persisted work-count buckets via beads.Counter.

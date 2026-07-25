@@ -56,6 +56,13 @@ var openGraphClassMigrationStores func(cityPath string, cfg *config.City) ([]bea
 			if strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
+			// Deliverable E: skip a rig re-pointed at the shared/org work DB — its
+			// graph beads were migrated from its legacy DB before the re-point, and
+			// re-sourcing it here would re-scan (and, in the sweep, delete against)
+			// the shared DB over WAN. DARK on a marker-less city.
+			if workTopologyElidesClassSweepScope(cityPath, rig.Path) {
+				continue
+			}
 			st, err := openStoreAtForCity(rig.Path, cityPath)
 			if err != nil {
 				return stores, closeAll, fmt.Errorf("opening rig %q store: %w", rig.Name, err)

@@ -1187,6 +1187,37 @@ func (r *Rig) EffectiveSuspendedOnStart() bool {
 	return r.Suspended || r.SuspendedOnStart
 }
 
+// CityWorkPrefixes returns the city's own work-bead ID prefixes: the HQ prefix
+// plus every rig's effective prefix, deduplicated case-insensitively and in a
+// stable order (HQ first, then rigs in config order). On a shared org work DB
+// these are the ONLY prefixes the city may read — cross-city isolation on a
+// shared DB is prefix filtering (engdocs/design/beads-work-topology.md, "Remote
+// read-plane prefix scoping"). Returns nil for a nil config.
+func CityWorkPrefixes(cfg *City) []string {
+	if cfg == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		key := strings.ToLower(strings.Trim(p, "-"))
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, p)
+	}
+	add(EffectiveHQPrefix(cfg))
+	for i := range cfg.Rigs {
+		add(cfg.Rigs[i].EffectivePrefix())
+	}
+	return out
+}
+
 // EffectiveHQPrefix returns the bead ID prefix for the city's HQ store.
 // Uses the effective site-bound prefix first, then the declared workspace
 // Prefix, then derives one from the effective city name.

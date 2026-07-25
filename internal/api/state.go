@@ -284,6 +284,19 @@ type AgentVisibilityWaiter interface {
 	WaitForAgentVisibility(ctx context.Context, qualifiedName string) error
 }
 
+// WorkReadPrefixer is an optional capability for states on a REMOTE-target work
+// topology (a shared org work DB). It returns the city's own work-bead ID prefix
+// set (EffectiveHQPrefix + every rig EffectivePrefix) that every aggregate /
+// list / count surface must constrain reads to, because on a shared org DB
+// cross-city read isolation IS prefix filtering — a query scoped only by
+// labels/type would count another city's work. ok is false on
+// scoped/unified/managed cities (DARK: today's paths, including the beads.Counter
+// fast path, stay untouched). Modeled on RawConfigProvider so test fakes are not
+// forced to grow it.
+type WorkReadPrefixer interface {
+	WorkReadPrefixes() (prefixes []string, ok bool)
+}
+
 // StateMutator extends State with write operations for mutation endpoints.
 type StateMutator interface {
 	State

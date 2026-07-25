@@ -1216,6 +1216,16 @@ func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables dolt
 		where = append(where, "EXISTS (SELECT 1 FROM "+tables.labels+" l WHERE l.issue_id = i.id AND l.label = ?)")
 		args = append(args, query.Label)
 	}
+	if len(query.IDPrefixes) > 0 {
+		if prefixWhere, prefixArgs := doltliteIDPrefixPredicate(query.IDPrefixes); prefixWhere != "" {
+			where = append(where, prefixWhere)
+			args = append(args, prefixArgs...)
+		} else {
+			// An all-empty prefix set matches nothing (mirrors the empty-assignee
+			// arm above), so this table contributes no rows.
+			return doltliteTableQuery{skipTable: true}, nil
+		}
+	}
 	if len(query.Metadata) > 0 {
 		metadataWhere, metadataArgs := doltliteMetadataFilterPredicates(query.Metadata)
 		where = append(where, metadataWhere...)

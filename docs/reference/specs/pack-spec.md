@@ -399,6 +399,20 @@ The normative authoring rules are specified here.
 | `resume_command` | string | Provider resume command template. |
 | `wake_mode` | string | `resume` or `fresh`. |
 
+> **Unified/remote work topology:** On a city with `[beads.work] scope =
+> "unified"` (or a remote `target`), every rig's work beads live in ONE shared
+> database, so the store boundary no longer scopes anything — work routing is
+> carried exclusively by bead metadata and labels (`gc.routed_to`,
+> `gc.run_target`, rig-qualified hook labels). A `work_query` command that is
+> meant to discover only one rig's work MUST carry an explicit rig-scoping
+> filter (e.g. `--metadata-field gc.run_target=<rig>` or a rig-qualified label
+> selector); a query scoped only by type/labels-without-a-rig-selector will
+> return every rig's work on a unified city. On a scoped (default) city the
+> store boundary still isolates each rig, so an unqualified `work_query` keeps
+> its old single-rig behavior — but writing the rig-scoping filter is
+> forward-compatible and recommended for any pack that may later be deployed on
+> a unified city.
+
 > **Compatibility:** The current runtime still parses agent-level `skills` and
 > `mcp` arrays as compatibility tombstones, but active materialization ignores
 > them. New packs should use the pack-level `skills/` and `mcp/` directories.

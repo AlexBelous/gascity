@@ -302,6 +302,59 @@ func TestComputePoolDesiredStates_ResumeUsesLegacyWorkflowRunTarget(t *testing.T
 	}
 }
 
+func TestComputePoolDesiredStates_ResumesInstanceSuffixedRouteTarget(t *testing.T) {
+	// A writer that stamps gc.routed_to with a live instance suffix directly
+	// (e.g. `bd update --set-metadata gc.routed_to=rig/claude-1`), bypassing gc
+	// sling's write-side normalization (agentutil.NormalizePoolRouteTarget,
+	// applied in doSling), must not strand the resume-tier match: the raw
+	// instance name has to resolve back to the base template before comparing
+	// against `template`, or the live session backing this work looks
+	// unrouted and never resumes.
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(3), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude-1", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 resume for instance-suffixed route target", len(reqs))
+	}
+	if reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "sess-1" {
+		t.Fatalf("request = %+v, want resume for sess-1", reqs[0])
+	}
+}
+
+func TestComputePoolDesiredStates_LeavesUnmatchedInstanceSuffixAlone(t *testing.T) {
+	// Guard against over-normalization: an instance number outside the
+	// agent's configured capacity is not a pool instance identity and must
+	// not be rewritten or matched against the base template.
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(3), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude-99", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0 (out-of-range instance suffix must not resolve to the base template)", total)
+	}
+}
+
 func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAliasHistory(t *testing.T) {
 	// Regression: alias rotation preserves prior aliases in alias_history.
 	// Work assigned under a prior alias must still resolve to its owning

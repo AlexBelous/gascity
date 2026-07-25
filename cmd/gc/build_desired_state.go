@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -687,7 +688,7 @@ func buildDesiredStateWithSessionBeads(
 		})
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(defaultScaleTargets, demandReadyCache)
+			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})
@@ -1397,13 +1398,17 @@ func defaultScaleCheckTargetForAgent(
 
 // defaultScaleCheckCounts reports ready, unassigned, routed work as fresh
 // generic pool demand. Assigned beads are handled by assigned-work collection
-// and named-session demand so they are intentionally excluded here.
+// and named-session demand so they are intentionally excluded here. It has no
+// production caller that needs gc.routed_to instance-suffix normalization, so
+// it passes a nil cfg through to defaultScaleCheckCountsAndDemand; callers
+// that need normalization should call defaultScaleCheckCountsAndDemand
+// directly with a real *config.City.
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {
-	counts, _, partialTemplates, errs := defaultScaleCheckCountsAndDemand(targets)
+	counts, _, partialTemplates, errs := defaultScaleCheckCountsAndDemand(nil, targets)
 	return counts, partialTemplates, errs
 }
 
-func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	cache := optionalReadyDemandCache(caches)
 	counts := make(map[string]int, len(targets))
 	demand := make(map[string]scaleCheckDemand, len(targets))
@@ -1476,7 +1481,7 @@ func defaultScaleCheckCountsAndDemand(targets []defaultScaleCheckTarget, caches 
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			template := controllerDemandRouteTarget(b, group.templates)
+			template := controllerDemandRouteTarget(cfg, b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
@@ -1636,10 +1641,22 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 	return demand, partialTemplates, errs
 }
 
-func controllerDemandRouteTarget(b beads.Bead, templates map[string]struct{}) string {
+// controllerDemandRouteTarget matches a work bead's routed-to candidates
+// against the pool's template set. Candidates are normalized through
+// agentutil.NormalizePoolRouteTarget before the membership check so a
+// gc.routed_to value stamped with a live instance suffix (e.g.
+// "hello-world/polecat-1") — whether written by gc sling's own write-side
+// normalization or by any other writer, such as a direct
+// `bd update --set-metadata` — still counts as demand for the base template.
+// Without this, an unnormalized instance-suffixed candidate never matches
+// group.templates (keyed by base template names) and the demand is silently
+// dropped, so the pool never scales up. The returned value is the normalized
+// template name, since callers use it as the counts/demand map key.
+func controllerDemandRouteTarget(cfg *config.City, b beads.Bead, templates map[string]struct{}) string {
 	for _, candidate := range controllerDemandRouteCandidates(b) {
-		if _, ok := templates[candidate]; ok {
-			return candidate
+		normalized := agentutil.NormalizePoolRouteTarget(cfg, candidate)
+		if _, ok := templates[normalized]; ok {
+			return normalized
 		}
 	}
 	return ""

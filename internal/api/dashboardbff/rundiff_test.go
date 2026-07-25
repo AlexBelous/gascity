@@ -267,7 +267,9 @@ func TestRunDiffReachableInReadOnlyMode(t *testing.T) {
 	}
 }
 
-// A missing/empty execution path is a malformed body, rejected at parse time.
+// A client that DOES supply an executionPath must supply a real one: an explicit
+// "known" kind with a blank path is rejected (kind "" — a genuinely omitted path
+// — instead resolves server-side, covered in rundiff_resolve_test.go).
 func TestRunDiffMissingExecutionPath400(t *testing.T) {
 	p := New(Deps{Resolver: mapResolver{"alpha": "/srv/alpha"}})
 	rec := postRunDiff(t, p, "/api/city/alpha/runs/gc-run-1/diff",

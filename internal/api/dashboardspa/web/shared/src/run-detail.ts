@@ -229,8 +229,15 @@ export type RunExecutionPath =
   | { kind: 'known'; path: string }
   | { kind: 'unavailable'; reason: 'missing_cwd_and_rig_root' };
 
+/**
+ * The run-diff POST body. executionPath is OPTIONAL: omit it (send `{}`) to have
+ * the server resolve the run's git cwd from the run id via its own run-detail
+ * projection — the default the SPA now uses, so the browser never sends a
+ * filesystem path (and the read-only shield can scrub executionPath from the
+ * projected detail). A supplied executionPath is still honored for back-compat.
+ */
 export interface RunDiffRequest {
-  executionPath: RunExecutionPath;
+  executionPath?: RunExecutionPath;
 }
 
 export type RunSnapshotSequence =

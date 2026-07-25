@@ -4014,9 +4014,13 @@ func ValidateAgents(agents []Agent) error {
 			return fmt.Errorf("agent %q: min_active_sessions (%d) must be <= max_active_sessions (%d)",
 				a.Name, *a.MinActiveSessions, *a.MaxActiveSessions)
 		}
-		// RouteLabel/RouteLabelAny + raw WorkQuery/ScaleCheck exclusivity
-		// (FR-03) is a RED-step stub; the real check lands in the GREEN step
-		// (ga-0av489).
+		// RouteLabel/RouteLabelAny narrow the shared routed-pool predicate in
+		// place; a raw WorkQuery or ScaleCheck override replaces it wholesale.
+		// Combining both leaves it ambiguous which mechanism governs, so this
+		// is a hard load-time error rather than a silent precedence rule.
+		if (len(a.RouteLabel) > 0 || len(a.RouteLabelAny) > 0) && (a.WorkQuery != "" || a.ScaleCheck != "") {
+			return fmt.Errorf("agent %q: route_label/route_label_any cannot be combined with a raw work_query or scale_check override — choose one mechanism", a.QualifiedName())
+		}
 	}
 
 	// Validate depends_on references and detect cycles.

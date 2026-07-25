@@ -52,7 +52,7 @@ func TestResolveFormulaScope_RigFlagWins(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = "my-project"
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestResolveFormulaScope_CwdInsideRig(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = ""
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestResolveFormulaScope_CityScopeWhenNoRig(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = ""
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestResolveFormulaScope_UnknownRigErrors(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = "ghost"
 
-	_, err := resolveFormulaScope(cfg, cityPath)
+	_, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err == nil {
 		t.Fatal("expected error for unknown rig, got nil")
 	}
@@ -167,7 +167,7 @@ func TestResolveFormulaScope_UnboundRigErrors(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = "unbound"
 
-	_, err := resolveFormulaScope(cfg, cityPath)
+	_, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err == nil {
 		t.Fatal("expected error for unbound rig, got nil")
 	}
@@ -259,7 +259,7 @@ func TestResolveFormulaScope_RigFallsBackToCityLayers(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = "bare-rig"
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}

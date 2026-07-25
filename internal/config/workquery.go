@@ -57,9 +57,15 @@ type routeLabelFilter struct {
 // renders to "", so an agent that sets neither RouteLabel nor
 // RouteLabelAny produces byte-identical shell output to before this field
 // existed (NFR-03).
-// RED-step stub; real rendering lands in the GREEN step (ga-0av489).
 func (f routeLabelFilter) shellArgs() string {
-	return ""
+	var b strings.Builder
+	if len(f.label) > 0 {
+		b.WriteString(" --label=" + shellquote.Quote(strings.Join(f.label, ",")))
+	}
+	if len(f.labelAny) > 0 {
+		b.WriteString(" --label-any=" + shellquote.Quote(strings.Join(f.labelAny, ",")))
+	}
+	return b.String()
 }
 
 func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool, filter routeLabelFilter) string {

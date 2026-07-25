@@ -121,8 +121,8 @@ func TestAmbientCityDoltPort(t *testing.T) {
 	}{
 		{
 			name:     "finds port through a city several levels up",
-			dir:      newSyntheticCity(t, `{"running":true,"pid":1,"port":28231,"data_dir":"x"}`),
-			wantPort: "28231",
+			dir:      newSyntheticCity(t, `{"running":true,"pid":1,"port":19999,"data_dir":"x"}`),
+			wantPort: "19999",
 			wantOK:   true,
 		},
 		{

@@ -535,9 +535,11 @@ func buildSyntheticCity(t *testing.T, port int) string {
 // refuseProdDoltPort is actually wired into init() end-to-end — not just
 // correct as a pure function, which TestAmbientCityDoltPort in
 // testenv_internal_test.go already covers against synthetic trees directly.
-// The child's cmd.Dir is pointed at a synthetic city tree whose port is
-// deliberately far from the hardcoded ProdDoltPort (3307), so a panic here
-// can only be caused by the ambient arm consulting that city's own state.
+// The child's cmd.Dir is pointed at a synthetic city tree whose port is a
+// neutral synthetic value — neither the hardcoded ProdDoltPort (3307) nor
+// the fleet's real managed ambient port (28231) — so a panic here can only
+// be caused by the ambient arm consulting that synthetic city's own state,
+// never by a coincidental match against this process's real environment.
 func TestInitRefusesAmbientCityDoltPort(t *testing.T) {
 	if os.Getenv("GC_TESTENV_CHILD") == "1" {
 		os.Stdout.WriteString("BEADS_DOLT_SERVER_PORT=" + os.Getenv("BEADS_DOLT_SERVER_PORT") + "\n") //nolint:errcheck
@@ -548,7 +550,7 @@ func TestInitRefusesAmbientCityDoltPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Executable: %v", err)
 	}
-	const ambientPort = 28231 // far from ProdDoltPort (3307) — isolates this arm
+	const ambientPort = 19999 // neither ProdDoltPort (3307) nor the fleet's real ambient port (28231)
 
 	cases := []struct {
 		name       string
@@ -559,19 +561,19 @@ func TestInitRefusesAmbientCityDoltPort(t *testing.T) {
 	}{
 		{
 			name:      "surviving port matching ambient city port panics",
-			port:      "28231",
+			port:      "19999",
 			wantPanic: true,
 		},
 		{
 			name:       "surviving port not matching ambient city port survives",
-			port:       "28232",
-			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=28232\n"},
+			port:       "20000",
+			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=20000\n"},
 		},
 		{
 			name:       "opt-out allows ambient-matching port through",
-			port:       "28231",
+			port:       "19999",
 			extraEnv:   []string{"GC_ALLOW_PROD_DOLT_PORT_IN_TESTS=1"},
-			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=28231\n"},
+			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=19999\n"},
 		},
 	}
 

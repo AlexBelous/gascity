@@ -440,9 +440,9 @@ func TestTimeoutFoldIgnoresDuration(t *testing.T) {
 	if baseState.StateHash() != altState.StateHash() {
 		t.Fatalf("StateHash changed when the wrapper duration changed 5m→999h; the advisory field must NOT fold")
 	}
-	// reducerVersion STAYS 4 — TNK adds no folded field.
-	if v := r.ReducerVersion(); v != 4 {
-		t.Fatalf("ReducerVersion() = %d, want 4 (TNK adds no fold state)", v)
+	// TNK adds no folded field beyond the current reducer version.
+	if v := r.ReducerVersion(); v != 5 {
+		t.Fatalf("ReducerVersion() = %d, want 5 (TNK adds no fold state)", v)
 	}
 }
 

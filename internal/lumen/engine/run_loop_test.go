@@ -108,7 +108,7 @@ func TestAdvanceRepeatRunBodyExecOnlyPoolSeals(t *testing.T) {
 // failed → the cond re-mints attempt 1 under stage/1/ with a FRESH bead → it passes →
 // the aggregate settles pass → the cond exits and the loop settles pass → seal. Both
 // attempts' sub-dos are distinct activations (stage/0/hello:0 vs stage/1/hello:0), and
-// the live projection drop+refolds byte-identically (no hidden reducer state, v4).
+// the live projection drop+refolds byte-identically (no hidden reducer state).
 func TestAdvanceRepeatRunBodyFailThenPassReMints(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)

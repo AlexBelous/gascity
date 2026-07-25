@@ -32,13 +32,12 @@ func applyRunStartedDriver(t *testing.T, driver string) *lumenState {
 	return next.(*lumenState)
 }
 
-// TestRunStartedDriverFoldTransparent is the reducerVersion-stays-4 pin for the v1
-// stepper's Driver discriminator: the run.started `driver` field is payload-only
-// (the DefaultRoute precedent). A run.started stamped Driver="self" and the SAME
-// run.started with no driver must fold to a byte-identical lumenState — identical
-// StateHash — because applyRunStarted never reads it. Mutation (ii) — folding Driver
-// into lumenState/nodeState — diverges the two hashes and turns this pin RED, which
-// is exactly when reducerVersion would need a bump.
+// TestRunStartedDriverFoldTransparent pins that the v1 stepper's run.started
+// `driver` field is payload-only (the DefaultRoute precedent). A run.started stamped
+// Driver="self" and the SAME run.started with no driver must fold to a byte-identical
+// lumenState — identical StateHash — because applyRunStarted never reads it. Mutation
+// (ii) — folding Driver into lumenState/nodeState — diverges the two hashes and turns
+// this pin RED, which is exactly when reducerVersion would need a bump.
 func TestRunStartedDriverFoldTransparent(t *testing.T) {
 	self := applyRunStartedDriver(t, "self")
 	pool := applyRunStartedDriver(t, "")
@@ -46,7 +45,7 @@ func TestRunStartedDriverFoldTransparent(t *testing.T) {
 	if self.StateHash() != pool.StateHash() {
 		t.Fatalf("reducer folded run.started driver: StateHash diverged (self != pool) — reducerVersion would need a bump")
 	}
-	if got := Reducer().ReducerVersion(); got != 4 {
-		t.Fatalf("ReducerVersion() = %d, want 4 (Driver discriminator is payload-only, unfolded)", got)
+	if got := Reducer().ReducerVersion(); got != 5 {
+		t.Fatalf("ReducerVersion() = %d, want 5 (semantic dialect is folded; Driver remains payload-only)", got)
 	}
 }

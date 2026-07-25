@@ -11,19 +11,31 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
 
-// lumenState is the reducer v4 carried-forward state (blueprint §2.1): the run
+// lumenState is the reducer v5 carried-forward state (blueprint §2.1): the run
 // identity (all timestamps sourced from payloads, keeping the fold clock-free)
 // plus the DAG of activations. Nodes is keyed by activation; every map walk is
 // in canonical (sorted) key order so the fold is deterministic (R-PURE).
 type lumenState struct {
-	RootID    string                `json:"root_id"`
-	Name      string                `json:"name"`
-	CreatedAt string                `json:"created_at"`
-	IRHash    string                `json:"ir_hash,omitempty"`
-	InputHash string                `json:"input_hash,omitempty"`
-	Closed    bool                  `json:"closed"`
-	Outcome   string                `json:"outcome,omitempty"`
-	Nodes     map[string]*nodeState `json:"nodes,omitempty"`
+	RootID          string                `json:"root_id"`
+	Name            string                `json:"name"`
+	CreatedAt       string                `json:"created_at"`
+	IRHash          string                `json:"ir_hash,omitempty"`
+	InputHash       string                `json:"input_hash,omitempty"`
+	SemanticDialect string                `json:"dialect,omitempty"`
+	Closed          bool                  `json:"closed"`
+	Outcome         string                `json:"outcome,omitempty"`
+	Nodes           map[string]*nodeState `json:"nodes,omitempty"`
+}
+
+func normalizeSemanticDialect(stamped string) (string, error) {
+	switch stamped {
+	case "":
+		return SemanticDialectLegacy, nil
+	case SemanticDialectLegacy, SemanticDialectCurrent:
+		return stamped, nil
+	default:
+		return "", fmt.Errorf("unsupported semantic dialect %q", stamped)
+	}
 }
 
 // nodeState is one activation's fold state: its identity, its dependency edges

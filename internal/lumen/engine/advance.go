@@ -182,11 +182,12 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
 		if err := d.append(EventRunStarted, streamID+":run:started", runStartedPayload{
-			RootID:    streamID,
-			Name:      doc.Name,
-			IRHash:    irHash(doc),
-			InputHash: inputHash(input),
-			CreatedAt: createdAt,
+			RootID:          streamID,
+			Name:            doc.Name,
+			IRHash:          irHash(doc),
+			InputHash:       inputHash(input),
+			SemanticDialect: SemanticDialectCurrent,
+			CreatedAt:       createdAt,
 		}); err != nil {
 			return AdvanceResult{}, err
 		}

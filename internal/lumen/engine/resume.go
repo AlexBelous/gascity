@@ -270,6 +270,11 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 		if err := crossCheckAnchor(stored, snap); err != nil {
 			return nil, nil, nil, fmt.Errorf("lumen: resume %q: %w", streamID, err)
 		}
+		resumeSnapshot, err := snapshotForCurrentReducer(snap)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("lumen: resume %q: migrate snapshot@%d: %w", streamID, snap.CoveredSeq, err)
+		}
+		snapPtr = &resumeSnapshot
 	}
 	tail := make([]fold.Event, len(stored))
 	for i, e := range stored {
@@ -365,6 +370,41 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 		return nil, nil, nil, err
 	}
 	return d, scope, nodeOutputs, nil
+}
+
+// snapshotForCurrentReducer performs the one supported Lumen snapshot migration:
+// reducer/format v4 predates semantic-dialect stamping, so its verified state is
+// decoded as legacy and re-serialized in memory as v5. The durable v4 row and its
+// chain-anchored hash remain untouched; rebuildDriver verifies both before calling
+// this function. Every other version is returned unchanged so fold.Fold's normal
+// version/format gates reject unsupported skew loudly.
+func snapshotForCurrentReducer(snap fold.Snapshot) (fold.Snapshot, error) {
+	if snap.Engine != Engine || snap.ReducerVersion != 4 {
+		return snap, nil
+	}
+	if snap.SnapshotFormatVersion != 4 {
+		return fold.Snapshot{}, fmt.Errorf(
+			"lumen: reducer v4 snapshot has format %d, want 4", snap.SnapshotFormatVersion)
+	}
+
+	var state lumenState
+	if err := json.Unmarshal(snap.State, &state); err != nil {
+		return fold.Snapshot{}, fmt.Errorf("decode v4 state: %w", err)
+	}
+	if state.SemanticDialect != "" {
+		return fold.Snapshot{}, fmt.Errorf("v4 state unexpectedly carries dialect %q", state.SemanticDialect)
+	}
+	state.SemanticDialect = SemanticDialectLegacy
+	blob, err := state.MarshalSnapshot()
+	if err != nil {
+		return fold.Snapshot{}, fmt.Errorf("encode v5 state: %w", err)
+	}
+
+	snap.ReducerVersion = reducerVersion
+	snap.SnapshotFormatVersion = snapshotFormatVersion
+	snap.State = blob
+	snap.StateHash = canon.Hash(blob)
+	return snap, nil
 }
 
 // reapplyDeltas re-projects a run's folded tail deltas to Tier-A in one

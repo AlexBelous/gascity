@@ -567,11 +567,11 @@ func TestSharedLaneRootGuardLengthDrives(t *testing.T) {
 	}
 }
 
-// TestReducerVersionStaysFour pins §2.11: the SLX slice adds no folded field, so the
-// reducer version is unchanged at 4 (the failed settle reuses the existing Detail fold).
-func TestReducerVersionStaysFour(t *testing.T) {
-	if v := engine.Reducer().ReducerVersion(); v != 4 {
-		t.Fatalf("ReducerVersion() = %d, want 4 (SLX adds no fold state)", v)
+// TestReducerVersionStaysFive pins §2.11: the SLX slice adds no folded field, so the
+// reducer stays at the current version (the failed settle reuses the existing Detail fold).
+func TestReducerVersionStaysFive(t *testing.T) {
+	if v := engine.Reducer().ReducerVersion(); v != 5 {
+		t.Fatalf("ReducerVersion() = %d, want 5 (SLX adds no fold state)", v)
 	}
 }
 

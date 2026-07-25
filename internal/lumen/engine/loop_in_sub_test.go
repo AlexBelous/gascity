@@ -197,7 +197,7 @@ func TestAdvanceRunBodyLoopInSubReMintsAtDepth(t *testing.T) {
 	if fake.dispatchCount() != 2 {
 		t.Errorf("DispatchWork calls = %d, want 2 (one sub-do per attempt)", fake.dispatchCount())
 	}
-	// The live projection drop+refolds byte-identically (no hidden reducer state, v4).
+	// The live projection drop+refolds byte-identically (no hidden reducer state).
 	assertProjectionEqualsRefold(t, store, streamID)
 }
 

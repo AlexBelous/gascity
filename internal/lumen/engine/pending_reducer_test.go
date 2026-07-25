@@ -6,13 +6,13 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
 
-// TestPendingFlowsThroughReducerDefaults is the reducerVersion-STAYS-4 pin for the
-// pending outcome: `pending` is a new VALUE in the already-folded nodeState.Outcome
-// string, NOT a new folded field, so every reducer predicate must hit its EXISTING
-// default arm for "pending" — identical to what an old v4 reducer would do folding a
-// pending journal. Mutation (iii) — making ranOutcome true for pending — turns the
-// pool nodeOutputs-pollution behavioral pin RED; this test locks the predicate defaults
-// that make the determinism argument hold.
+// TestPendingFlowsThroughReducerDefaults pins that the pending-outcome slice adds no
+// folded state beyond the current reducer version: `pending` is a new VALUE in the
+// already-folded nodeState.Outcome string, NOT a new folded field, so every reducer
+// predicate must hit its EXISTING default arm for "pending" — identical to what the
+// current reducer does folding a pending journal. Mutation (iii) — making ranOutcome
+// true for pending — turns the pool nodeOutputs-pollution behavioral pin RED; this
+// test locks the predicate defaults that make the determinism argument hold.
 func TestPendingFlowsThroughReducerDefaults(t *testing.T) {
 	if isBlocking(OutcomePending) {
 		t.Error("isBlocking(pending) = true, want false (a pending poll is non-blocking)")
@@ -26,8 +26,8 @@ func TestPendingFlowsThroughReducerDefaults(t *testing.T) {
 	if got := statusForOutcome(OutcomePending); got != "done" {
 		t.Errorf("statusForOutcome(pending) = %q, want done (default projection arm, StateHash-transparent)", got)
 	}
-	if got := Reducer().ReducerVersion(); got != 4 {
-		t.Fatalf("ReducerVersion() = %d, want 4 (pending is a new outcome VALUE, not a new folded field)", got)
+	if got := Reducer().ReducerVersion(); got != 5 {
+		t.Fatalf("ReducerVersion() = %d, want 5 (semantic dialect is folded; pending adds no field)", got)
 	}
 }
 

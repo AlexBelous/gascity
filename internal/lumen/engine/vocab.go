@@ -151,6 +151,17 @@ const (
 	OutcomePending  = "pending"
 )
 
+const (
+	// SemanticDialectLegacy identifies journals written before Gas City stamped
+	// an upstream semantic dialect. Those runs retain the historical Gas behavior
+	// when resumed, even after current-upstream semantics change.
+	SemanticDialectLegacy = "gas.lumen/legacy-v1"
+	// SemanticDialectCurrent identifies the exact upstream runtime semantics new
+	// runs use. The IR contract remains lumen.ir/0.2.5, so the upstream commit is
+	// part of the dialect identity rather than being inferred from the IR version.
+	SemanticDialectCurrent = "lumen.runtime/0.2.5@be7fa4ba17df249b96fd83b0cdba7333563768cb"
+)
+
 // node.decision decision kinds.
 const (
 	DecisionArm      = "arm"
@@ -229,19 +240,25 @@ const (
 	// takes the honest bump. It is free: no persisted v3 Lumen snapshot exists on any
 	// real deployment (this branch is unpushed local dev), and fold.Fold's version gate
 	// strands any (nonexistent) v3 snapshot LOUDLY (ErrReducerVersionSkew, resume.go).
-	reducerVersion = 4
-	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped 2 → 3 with
-	// reducerVersion for the additive nodeState.BeadID field, then 3 → 4 with the
-	// nodeState.Detail field (the recover error binding); no v3 snapshot ever persisted
-	// (unpushed branch), so there is no fixture debt.
-	snapshotFormatVersion = 4
+	//
+	// UPSTREAM SEMANTIC DIALECT — v5. run.started now folds its explicit dialect
+	// into lumenState. Missing dialects normalize to SemanticDialectLegacy, while
+	// new runs stamp SemanticDialectCurrent. The field changes snapshot bytes and
+	// controls runtime behavior, so this is an honest reducer-version bump. Resume
+	// has one narrow, integrity-checked v4/v4 → v5/v5 migration; older snapshots
+	// remain loudly stranded.
+	reducerVersion = 5
+	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped 4 → 5 with
+	// the folded semantic dialect.
+	snapshotFormatVersion = 5
 )
 
 // ---- Typed event payloads (R-CANON) ----
 
 // runStartedPayload is the body of EventRunStarted. ir_hash pins the IR
 // provenance (resume refuses a differing IR); formula_ref / input_hash are
-// provenance fields the P1 upcast leaves empty.
+// provenance fields the P1 upcast leaves empty. SemanticDialect selects the
+// runtime semantics and is folded into lumenState.
 //
 // DefaultRoute is the L2 controller-loop provenance field: the run's default pool
 // route for do nodes with no agentRef, stamped by EnqueueRun so a controller
@@ -253,12 +270,13 @@ const (
 // stays byte-identical. That is why it needs no reducerVersion bump (the same
 // additive-omitempty precedent as input_hash in P4.3).
 type runStartedPayload struct {
-	RootID       string `json:"root_id"`
-	Name         string `json:"name"`
-	IRHash       string `json:"ir_hash,omitempty"`
-	FormulaRef   string `json:"formula_ref,omitempty"`
-	InputHash    string `json:"input_hash,omitempty"`
-	DefaultRoute string `json:"default_route,omitempty"`
+	RootID          string `json:"root_id"`
+	Name            string `json:"name"`
+	IRHash          string `json:"ir_hash,omitempty"`
+	FormulaRef      string `json:"formula_ref,omitempty"`
+	InputHash       string `json:"input_hash,omitempty"`
+	DefaultRoute    string `json:"default_route,omitempty"`
+	SemanticDialect string `json:"dialect,omitempty"`
 	// Driver is the run's dispatch discriminator (default "" = the controller's pool
 	// loop drives it; "self" = the v1 agent-driven stepper drives it turn-by-turn in
 	// its own session). It rides ALONGSIDE DefaultRoute as a payload-only field: NO

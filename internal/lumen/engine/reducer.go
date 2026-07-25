@@ -8,7 +8,7 @@ import (
 )
 
 // lumenReducer is the pure, total fold from the Lumen event stream to the
-// graph projection (nodes / edges / frontier) — reducer v4 (blueprint §2). It
+// graph projection (nodes / edges / frontier) — reducer v5 (blueprint §2). It
 // performs no I/O and reads no clock: every timestamp it projects comes from an
 // event payload (run.started carries created_at, threaded onto every node row).
 //
@@ -22,14 +22,14 @@ type lumenReducer struct{}
 
 var _ fold.Reducer = lumenReducer{}
 
-// Reducer returns the Lumen fold reducer (v4). It is the reducer a store uses to
+// Reducer returns the Lumen fold reducer (v5). It is the reducer a store uses to
 // rebuild or resume a lumen stream, and the one tests fold goldens through.
 func Reducer() fold.Reducer { return lumenReducer{} }
 
 // Engine reports the engine tag.
 func (lumenReducer) Engine() string { return Engine }
 
-// ReducerVersion reports the stamped reducer version (v4).
+// ReducerVersion reports the stamped reducer version (v5).
 func (lumenReducer) ReducerVersion() int { return reducerVersion }
 
 // Zero returns the empty fold state. The stream id is read from each event
@@ -45,6 +45,14 @@ func (lumenReducer) UnmarshalSnapshot(formatVersion int, b []byte) (fold.State, 
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("lumen: unmarshal snapshot: %w", err)
 	}
+	if s.SemanticDialect == "" {
+		return nil, fmt.Errorf("lumen: snapshot format %d missing dialect", formatVersion)
+	}
+	dialect, err := normalizeSemanticDialect(s.SemanticDialect)
+	if err != nil {
+		return nil, fmt.Errorf("lumen: snapshot format %d: %w", formatVersion, err)
+	}
+	s.SemanticDialect = dialect
 	return &s, nil
 }
 
@@ -108,6 +116,11 @@ func applyRunStarted(next *lumenState, e fold.Event) (fold.State, fold.Delta, er
 	next.CreatedAt = p.CreatedAt
 	next.IRHash = p.IRHash
 	next.InputHash = p.InputHash
+	dialect, err := normalizeSemanticDialect(p.SemanticDialect)
+	if err != nil {
+		return nil, fold.Delta{}, fmt.Errorf("lumen: run.started at seq %d: %w", e.Seq, err)
+	}
+	next.SemanticDialect = dialect
 	delta := fold.Delta{
 		NodeUpserts: []fold.NodeRow{{
 			ID:          p.RootID,

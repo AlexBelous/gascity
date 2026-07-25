@@ -161,7 +161,7 @@ func TestReducerWorkBeadDispatchTotality(t *testing.T) {
 
 // TestReducerVersionBumpStrandsOldSnapshot pins that a stale-version snapshot is
 // stranded LOUDLY through the fold version gate (never a silent best-effort fold) —
-// the property that makes each bump (2→3 BeadID, 3→4 Detail) free on this branch.
+// the property that makes each bump (2→3 BeadID, 3→4 Detail, 4→5 dialect) explicit.
 func TestReducerVersionBumpStrandsOldSnapshot(t *testing.T) {
 	stale := &fold.Snapshot{
 		StreamID:              "gcg-run-wb",
@@ -173,9 +173,9 @@ func TestReducerVersionBumpStrandsOldSnapshot(t *testing.T) {
 	}
 	_, _, err := fold.Fold(Reducer(), stale, nil)
 	if !errors.Is(err, fold.ErrReducerVersionSkew) {
-		t.Fatalf("Fold of a v3 snapshot under the v4 reducer = %v, want ErrReducerVersionSkew", err)
+		t.Fatalf("Fold of a v3 snapshot under the v5 reducer = %v, want ErrReducerVersionSkew", err)
 	}
-	if got := Reducer().ReducerVersion(); got != 4 {
-		t.Fatalf("ReducerVersion() = %d, want 4", got)
+	if got := Reducer().ReducerVersion(); got != 5 {
+		t.Fatalf("ReducerVersion() = %d, want 5", got)
 	}
 }

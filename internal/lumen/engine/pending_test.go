@@ -287,7 +287,7 @@ func TestRepeatExecInlinePendingGenesisResumeParity(t *testing.T) {
 // gascity case): a repeat over a pool `do` whose worker closes gc.outcome=pending twice
 // (CI still running) then pass exits pass in exactly THREE physical attempts, and the
 // consuming iteration never exceeds 1 before the pass. The live projection drop+refolds
-// byte-identically (v4 unchanged). Determinism pin included.
+// byte-identically without adding hidden reducer state. Determinism pin included.
 func TestRepeatPoolPendingThenPassNonConsuming(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -344,7 +344,7 @@ func TestRepeatPoolPendingThenPassNonConsuming(t *testing.T) {
 	assertProjectionEqualsRefold(t, store, streamID)
 
 	// Determinism: a fresh fold of the pending stream matches the live StateHash, and a
-	// mid-split snapshot + tail reproduces genesis (pending folds deterministically, v4).
+	// mid-split snapshot + tail reproduces genesis (pending folds deterministically).
 	assertStreamSplitFoldDeterministic(t, store, streamID)
 }
 
@@ -655,7 +655,7 @@ func assertStreamSplitFoldDeterministic(t *testing.T, store *graphstore.Store, s
 			}
 			snap = &fold.Snapshot{
 				StreamID: streamID, CoveredSeq: all[k-1].Seq, Engine: "lumen",
-				ReducerVersion: r.ReducerVersion(), SnapshotFormatVersion: 4,
+				ReducerVersion: r.ReducerVersion(), SnapshotFormatVersion: 5,
 				StateHash: prefix.StateHash(), State: blob,
 			}
 		}

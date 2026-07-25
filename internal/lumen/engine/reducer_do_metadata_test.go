@@ -41,7 +41,7 @@ func applyActivatedMeta(t *testing.T, meta map[string]string) *lumenState {
 	return next.(*lumenState)
 }
 
-// TestNodeActivatedMetadataFoldTransparent is the reducerVersion-stays-4 pin: the
+// TestNodeActivatedMetadataFoldTransparent pins that the metadata slice adds no folded
 // node.activated metadata field is payload-only (the Duration precedent). A metadata-
 // bearing activation and the SAME activation with no metadata must fold to a
 // byte-identical lumenState — identical StateHash — because applyNodeActivated never
@@ -55,7 +55,7 @@ func TestNodeActivatedMetadataFoldTransparent(t *testing.T) {
 	if withMeta.StateHash() != without.StateHash() {
 		t.Fatalf("reducer folded node.activated metadata: StateHash diverged (with != without) — reducerVersion would need a bump")
 	}
-	if got := Reducer().ReducerVersion(); got != 4 {
-		t.Fatalf("ReducerVersion() = %d, want 4 (metadata passthrough is payload-only, unfolded)", got)
+	if got := Reducer().ReducerVersion(); got != 5 {
+		t.Fatalf("ReducerVersion() = %d, want 5 (semantic dialect is folded; metadata remains payload-only)", got)
 	}
 }

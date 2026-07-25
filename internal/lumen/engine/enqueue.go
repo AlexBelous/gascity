@@ -108,14 +108,15 @@ func EnqueueRunWithDriver(ctx context.Context, store *graphstore.Store, doc *ir.
 	}
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := d.append(EventRunStarted, streamID+":run:started", runStartedPayload{
-		RootID:       streamID,
-		Name:         doc.Name,
-		IRHash:       irHash(doc),
-		InputHash:    inputHash(input),
-		FormulaRef:   formulaRef,
-		DefaultRoute: defaultRoute,
-		Driver:       driverKind,
-		CreatedAt:    createdAt,
+		RootID:          streamID,
+		Name:            doc.Name,
+		IRHash:          irHash(doc),
+		InputHash:       inputHash(input),
+		FormulaRef:      formulaRef,
+		DefaultRoute:    defaultRoute,
+		SemanticDialect: SemanticDialectCurrent,
+		Driver:          driverKind,
+		CreatedAt:       createdAt,
 	}); err != nil {
 		return "", fmt.Errorf("lumen: enqueue: seed run.started %q: %w", streamID, err)
 	}
@@ -140,11 +141,12 @@ func InputHash(input map[string]any) string { return inputHash(input) }
 // RunManifest is the provenance a run.started pins: the controller loop loads the
 // IR/input blobs by these hashes and routes the run's do work by DefaultRoute.
 type RunManifest struct {
-	Name         string
-	IRHash       string
-	InputHash    string
-	FormulaRef   string
-	DefaultRoute string
+	Name            string
+	IRHash          string
+	InputHash       string
+	FormulaRef      string
+	DefaultRoute    string
+	SemanticDialect string
 	// Driver is the run's dispatch discriminator ("" = pool controller, "self" = the
 	// v1 agent-driven stepper). lumenRunsTick reads it and skips a "self" run.
 	Driver    string
@@ -177,13 +179,18 @@ func ReadRunManifest(ctx context.Context, store *graphstore.Store, streamID stri
 	if err := json.Unmarshal(events[0].Payload, &p); err != nil {
 		return RunManifest{}, fmt.Errorf("lumen: run manifest %q: decode run.started: %w", streamID, err)
 	}
+	dialect, err := normalizeSemanticDialect(p.SemanticDialect)
+	if err != nil {
+		return RunManifest{}, fmt.Errorf("lumen: run manifest %q: %w", streamID, err)
+	}
 	return RunManifest{
-		Name:         p.Name,
-		IRHash:       p.IRHash,
-		InputHash:    p.InputHash,
-		FormulaRef:   p.FormulaRef,
-		DefaultRoute: p.DefaultRoute,
-		Driver:       p.Driver,
-		CreatedAt:    p.CreatedAt,
+		Name:            p.Name,
+		IRHash:          p.IRHash,
+		InputHash:       p.InputHash,
+		FormulaRef:      p.FormulaRef,
+		DefaultRoute:    p.DefaultRoute,
+		SemanticDialect: dialect,
+		Driver:          p.Driver,
+		CreatedAt:       p.CreatedAt,
 	}, nil
 }

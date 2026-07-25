@@ -1,14 +1,15 @@
 // Package engine is the Lumen executor: a single-writer driver that runs a
 // compiled Lumen formula end-to-end on the graphstore journal substrate. It
 // repeats a decide -> persist -> act -> persist cycle: it appends a typed
-// journal event, folds it through the pure lumenReducer (v2), and applies the
+// journal event, folds it through the pure lumenReducer, and applies the
 // resulting Tier-A delta so the node/edge/frontier projection advances in
 // lockstep with the log.
 //
 // P4.2 folds a real DAG. The plan (internal/lumen/engine/plan.go) lowers a
 // formula to activations carrying dependency edges; the reducer builds the
-// frontier as deps-settled readiness with skip-cascade (a node whose upstream
-// failed is settled `skipped`, not run). The DAG arms scatter(members) and
+// frontier as deps-settled readiness with edge-sensitive outcome policy (a
+// halted node settles `skipped`, while benign ordering/completion edges remain
+// live). The DAG arms scatter(members) and
 // gather(authored) are implemented; the remaining node kinds are refused with
 // ErrUnsupportedNode before any effect runs (blueprint §7 pressure valve).
 package engine
@@ -474,11 +475,27 @@ func (d *driver) effectiveMemberDeps(u planUnit) []string {
 	return d.effectiveDeps(u, u.memberDeps)
 }
 
+func (d *driver) effectiveSkipDeps(u planUnit) []string {
+	return d.effectiveDeps(u, u.skipDeps)
+}
+
+func (d *driver) effectiveCompletionDeps(u planUnit) []string {
+	return d.effectiveDeps(u, u.completionDeps)
+}
+
+func inheritDependencyPolicy(parent planUnit, units []planUnit, aggregate *planUnit) {
+	for i := range units {
+		units[i].skipDeps = appendMissing(units[i].skipDeps, parent.skipDeps)
+		units[i].completionDeps = appendMissing(units[i].completionDeps, parent.completionDeps)
+	}
+	aggregate.skipDeps = appendMissing(aggregate.skipDeps, parent.skipDeps)
+	aggregate.completionDeps = appendMissing(aggregate.completionDeps, parent.completionDeps)
+}
+
 // runUnit drives one plan unit through the decide -> persist -> act -> persist
 // cycle. A silent (pure lit/interp) unit only computes its scope value. Every
-// other unit emits node.activated, then — if a leaf's dependency settled with a
-// blocking outcome — settles `skipped` (the skip-cascade), otherwise runs and
-// settles its real outcome.
+// other unit emits node.activated, then either settles `skipped` when its
+// edge-sensitive dependency policy halts it or runs and settles its real outcome.
 func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error {
 	if d.outcomeScopeTerminated(u) {
 		return nil
@@ -539,9 +556,10 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 	// Drain-aggregate skip-cascade (N-1): a scatter aggregate or gather whose
 	// every drain member settled skipped/canceled did no work at all. It must
 	// itself SKIP — its combine / authored body must NOT run (no side effects) —
-	// and the skip cascades to its dependents, exactly like a failed `after` gate.
-	// A single member that RAN (succeeded/degraded/failed) makes it drain instead. This
-	// runs BEFORE runScatter/runGather so an all-skip aggregate never executes.
+	// A real value dependent also skips; ordering-only successors remain live in
+	// the current dialect. A single member that RAN (succeeded/degraded/failed)
+	// makes it drain instead. This runs BEFORE runScatter/runGather so an all-skip
+	// aggregate never executes.
 	if d.aggregateAllSkipped(u) {
 		if err := d.appendSettled(u.activation, OutcomeSkipped, "", "skipped: every drain member skipped (nothing ran)"); err != nil {
 			return err
@@ -590,15 +608,20 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 	return d.crashAt(crashAfterSettle, u.activation)
 }
 
-// blocked reports whether any of a unit's blocking `after` deps settled with a
-// blocking outcome (failed / canceled / skipped) — the trigger for the
-// skip-cascade. Drain member deps are deliberately excluded (a failed member
-// drains into its aggregate, it does not skip it).
+// blocked reports whether any `after` dependency halts this unit under the
+// active semantic dialect and the edge's value/completion classification.
+// Drain member deps are excluded because every member outcome drains.
 func (d *driver) blocked(u planUnit) bool {
 	st := d.st()
+	policy := &nodeState{
+		SkipDeps:       d.effectiveSkipDeps(u),
+		CompletionDeps: d.effectiveCompletionDeps(u),
+	}
 	for _, dep := range d.effectiveAfterDeps(u) {
-		if outcome, settled := st.outcomeOf(dep); settled && isBlocking(outcome) {
-			return true
+		if outcome, settled := st.outcomeOf(dep); settled {
+			if st.dependencyBlocks(policy, dep, outcome) {
+				return true
+			}
 		}
 	}
 	return false
@@ -845,7 +868,7 @@ func (d *driver) settleIndexRenderFailed(u planUnit, detail string) error {
 // failed/canceled member fails the scatter. Otherwise the outcome reflects the
 // degree of success (M1): if NO member succeeded and at least one failed, the
 // honest outcome is `failed` (a total loss, not a partial success); a mix of
-// succeeded and non-succeeded is `degraded`; all-succeeded is `succeeded`.
+// succeeded and failed is `degraded`; skipped members are benign.
 func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
 	outcome := scatterDrainOutcome(d.st(), u.members, u.onFail)
 	if err := d.appendSettled(u.activation, outcome, "", ""); err != nil {
@@ -859,14 +882,18 @@ func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
 // activations (M1): with on_fail "stop", any failed/canceled member fails the
 // aggregate; otherwise the outcome reflects the degree of success — no success with at
 // least one blocking failure is `failed` (a total loss), a mix of successful and
-// non-successful members is `degraded`, and all-successful is successful. It is the
+// failed members is `degraded`, and skipped members do not impair the result. It is the
 // single source of the scatter(members)
 // and for-each fan outcome rule, so the static and dynamic fans agree.
 func scatterDrainOutcome(st *lumenState, memberActs []string, onFail string) string {
-	anyPass, anyNonPass, anyBlocking := false, false, false
+	anyPass, anyNonPass, anyBlocking, anySkipped := false, false, false, false
 	for _, m := range memberActs {
 		o, settled := st.outcomeOf(m)
 		if !settled {
+			continue
+		}
+		if o == OutcomeSkipped {
+			anySkipped = true
 			continue
 		}
 		if IsSucceededOutcome(o) {
@@ -885,6 +912,8 @@ func scatterDrainOutcome(st *lumenState, memberActs []string, onFail string) str
 		return OutcomeFailed
 	case anyNonPass:
 		return OutcomeDegraded
+	case anySkipped && !anyPass && st.SemanticDialect == SemanticDialectCurrent:
+		return OutcomeSkipped
 	}
 	return st.succeededOutcome()
 }
@@ -974,16 +1003,18 @@ func (d *driver) forEachMemberUnit(u planUnit, index int) planUnit {
 	memberID := forEachMemberNodeID(u.nodeID, index)
 	idx := index
 	return planUnit{
-		kind:        unitLeaf,
-		activation:  activationFor(memberID),
-		nodeID:      memberID,
-		irKind:      spec.bodyIRKind,
-		parent:      u.activation,
-		memberIndex: &idx,
-		ns:          u.ns,
-		afterDeps:   u.afterDeps,
-		rawAfter:    u.rawAfter,
-		leaf:        spec.body,
+		kind:           unitLeaf,
+		activation:     activationFor(memberID),
+		nodeID:         memberID,
+		irKind:         spec.bodyIRKind,
+		parent:         u.activation,
+		memberIndex:    &idx,
+		ns:             u.ns,
+		afterDeps:      u.afterDeps,
+		skipDeps:       u.skipDeps,
+		completionDeps: u.completionDeps,
+		rawAfter:       u.rawAfter,
+		leaf:           spec.body,
 	}
 }
 
@@ -1004,8 +1035,13 @@ func forEachMemberNodeID(forEachID string, index int) string {
 func (d *driver) forEachRunMember(u planUnit, index int) ([]planUnit, planUnit, error) {
 	memberID := forEachMemberNodeID(u.nodeID, index)
 	idx := index
-	return mintRunBody(u.forEach.runBodyStash, u.forEach.bodyRun, memberID, memberID+"/", activationFor(memberID),
+	units, aggregate, err := mintRunBody(u.forEach.runBodyStash, u.forEach.bodyRun, memberID, memberID+"/", activationFor(memberID),
 		u.activation, u.ns, u.afterDeps, u.rawAfter, &idx)
+	if err != nil {
+		return nil, planUnit{}, err
+	}
+	inheritDependencyPolicy(u, units, &aggregate)
+	return units, aggregate, nil
 }
 
 // registerForEachRunMemberEnv wires for-each run-member `index`'s env seam into scopeFor
@@ -1432,11 +1468,9 @@ func (d *driver) runCleanupGuarded(u planUnit, nodeOutputs map[string]string) er
 
 // runGuard drives a guard's decision arm inline (Run, and Advance for an exec then):
 // it evaluates the closed condition over the folded scope; a FALSE condition settles
-// the guard `pass` with no side effect (a conditional step that legitimately did not
-// run — it does NOT skip-cascade dependents); a TRUE condition runs the synthesized
-// `then` leaf and settles the guard transparently from it, recording its output for a
-// downstream {{guardID}}. The condition is a pure function of the fold, so a resume
-// re-evaluates it identically.
+// the guard skipped with no side effect, while a TRUE condition runs the synthesized
+// `then` leaf and settles the guard transparently from it. The condition is a pure
+// function of the fold, so a resume re-evaluates it identically.
 func (d *driver) runGuard(u planUnit, scope, nodeOutputs map[string]string) error {
 	spec := u.guard
 	cs, err := d.condScope(u.ns, scope, nodeOutputs)
@@ -1448,7 +1482,7 @@ func (d *driver) runGuard(u planUnit, scope, nodeOutputs map[string]string) erro
 		return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
 	}
 	if !truthy {
-		return d.settleDecisionSkipped(u, scope, nodeOutputs)
+		return d.settleGuardSkipped(u, scope, nodeOutputs)
 	}
 	tu := d.guardThenUnit(u)
 	if err := d.runUnit(tu, scope, nodeOutputs); err != nil {
@@ -1460,9 +1494,9 @@ func (d *driver) runGuard(u planUnit, scope, nodeOutputs map[string]string) erro
 // runDispatch drives a dispatch (multi-way branch) inline: it evaluates the subject
 // to a string and runs the FIRST arm whose match equals it, settling the dispatch
 // transparently from that arm's body — a leaf arm runs one synthesized leaf, a RUN arm
-// mints its whole sub-graph (runDispatchRunArm); no matching arm settles the dispatch PASS
-// with an empty result (a no-op that does not skip-cascade). The subject is a pure function
-// of the fold, so a resume re-selects the same arm.
+// mints its whole sub-graph (runDispatchRunArm); no matching arm settles the
+// dispatch successfully with an empty result. The subject is a pure function of
+// the fold, so a resume re-selects the same arm.
 func (d *driver) runDispatch(u planUnit, scope, nodeOutputs map[string]string) error {
 	arm, ok, err := d.matchingArm(u, scope)
 	if err != nil {
@@ -1521,8 +1555,13 @@ func (d *driver) runDispatchRunArm(u planUnit, arm *dispatchArm, scope, nodeOutp
 // function of (arm stash, arm coordinates), so genesis, re-Advance, and resume mint
 // byte-identically.
 func (d *driver) dispatchArmRunBody(u planUnit, arm *dispatchArm) ([]planUnit, planUnit, error) {
-	return mintRunBody(arm.runBodyStash, arm.bodyRun, arm.bodyNodeID, arm.bodyNodeID+"/", activationFor(arm.bodyNodeID),
+	units, aggregate, err := mintRunBody(arm.runBodyStash, arm.bodyRun, arm.bodyNodeID, arm.bodyNodeID+"/", activationFor(arm.bodyNodeID),
 		u.activation, u.ns, u.afterDeps, u.rawAfter, nil)
+	if err != nil {
+		return nil, planUnit{}, err
+	}
+	inheritDependencyPolicy(u, units, &aggregate)
+	return units, aggregate, nil
 }
 
 // registerDispatchArmRunEnv wires a matched run arm's env seam into scopeFor (⚑B1),
@@ -1589,9 +1628,19 @@ func (d *driver) chosenArm(u planUnit) (*dispatchArm, bool) {
 	return nil, false
 }
 
-// settleDecisionSkipped settles a decision arm (guard/dispatch) that took no branch:
-// success with an empty result (no side effect, no skip-cascade). It records the empty
-// output so a downstream {{id}} resolves to "" and genesis matches a resume.
+// settleGuardSkipped records a false guard. Current semantics expose the honest
+// skipped outcome and seed no value; legacy journals retain the historical
+// successful empty result.
+func (d *driver) settleGuardSkipped(u planUnit, scope, nodeOutputs map[string]string) error {
+	if d.st().SemanticDialect == SemanticDialectLegacy {
+		return d.settleDecisionSkipped(u, scope, nodeOutputs)
+	}
+	return d.appendSettled(u.activation, OutcomeSkipped, "", "")
+}
+
+// settleDecisionSkipped settles a dispatch that took no branch: success with
+// an empty result. It records the empty output so a downstream {{id}} resolves
+// to "" and genesis matches a resume.
 func (d *driver) settleDecisionSkipped(u planUnit, scope, nodeOutputs map[string]string) error {
 	if err := d.appendSettled(u.activation, d.succeededOutcome(), "", "no branch taken"); err != nil {
 		return err
@@ -1623,15 +1672,17 @@ func (d *driver) settleDecisionFromBody(u, bu planUnit, scope, nodeOutputs map[s
 // node, inheriting its `after` gates (already cleared) and namespace.
 func (d *driver) decisionBodyUnit(u planUnit, bodyNodeID string, bodyIRKind ir.NodeKind, body step) planUnit {
 	return planUnit{
-		kind:       unitLeaf,
-		activation: activationFor(bodyNodeID),
-		nodeID:     bodyNodeID,
-		irKind:     bodyIRKind,
-		parent:     u.activation,
-		ns:         u.ns,
-		afterDeps:  u.afterDeps,
-		rawAfter:   u.rawAfter,
-		leaf:       body,
+		kind:           unitLeaf,
+		activation:     activationFor(bodyNodeID),
+		nodeID:         bodyNodeID,
+		irKind:         bodyIRKind,
+		parent:         u.activation,
+		ns:             u.ns,
+		afterDeps:      u.afterDeps,
+		skipDeps:       u.skipDeps,
+		completionDeps: u.completionDeps,
+		rawAfter:       u.rawAfter,
+		leaf:           body,
 	}
 }
 
@@ -1970,18 +2021,22 @@ func retypeScalar(s string, t ir.Type) any {
 // skipped member contributes nothing (it did not run), so a sub-formula that
 // skip-cascaded a tail still reports the honest outcome of the steps that ran.
 func transparentOutcome(st *lumenState, members []string) string {
-	var anyFailed, anyDegraded, anySettled bool
+	var anyFailed, anyDegraded, anyRan, anySkipped bool
 	for _, m := range members {
 		n := st.Nodes[m]
 		if n == nil || !n.Settled {
 			continue
 		}
-		anySettled = true
 		switch n.Outcome {
 		case OutcomeFailed, OutcomeCanceled:
 			anyFailed = true
 		case OutcomeDegraded:
 			anyDegraded = true
+			anyRan = true
+		case OutcomeSkipped:
+			anySkipped = true
+		default:
+			anyRan = true
 		}
 	}
 	switch {
@@ -1989,8 +2044,10 @@ func transparentOutcome(st *lumenState, members []string) string {
 		return OutcomeFailed
 	case anyDegraded:
 		return OutcomeDegraded
-	case anySettled:
+	case anyRan:
 		return st.succeededOutcome()
+	case anySkipped && st.SemanticDialect == SemanticDialectCurrent:
+		return OutcomeSkipped
 	default:
 		return st.succeededOutcome()
 	}
@@ -2184,6 +2241,7 @@ func (d *driver) runRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs m
 	if err != nil {
 		return err
 	}
+	inheritDependencyPolicy(u, subUnits, &agg)
 	d.registerRunBodyEnv(spec, attempt, u.ns, subUnits)
 	if err := d.appendAttemptMinted(u.activation, attempt, repeatRemaining(attempt)); err != nil {
 		return err
@@ -2222,15 +2280,17 @@ func repeatRemaining(attempt int) int {
 func (d *driver) attemptUnit(u planUnit, attempt int) planUnit {
 	spec := u.loop
 	return planUnit{
-		kind:       unitLeaf,
-		activation: activationForAttempt(spec.bodyNodeID, attempt),
-		nodeID:     spec.bodyNodeID,
-		irKind:     spec.bodyIRKind,
-		parent:     u.activation, // loopID:0
-		ns:         u.ns,         // render the attempt in the loop's namespace (decisionBodyUnit precedent)
-		afterDeps:  u.afterDeps,
-		rawAfter:   u.rawAfter,
-		leaf:       spec.body,
+		kind:           unitLeaf,
+		activation:     activationForAttempt(spec.bodyNodeID, attempt),
+		nodeID:         spec.bodyNodeID,
+		irKind:         spec.bodyIRKind,
+		parent:         u.activation, // loopID:0
+		ns:             u.ns,         // render the attempt in the loop's namespace (decisionBodyUnit precedent)
+		afterDeps:      u.afterDeps,
+		skipDeps:       u.skipDeps,
+		completionDeps: u.completionDeps,
+		rawAfter:       u.rawAfter,
+		leaf:           spec.body,
 	}
 }
 
@@ -2407,11 +2467,12 @@ func evalCondTruthy(expr json.RawMessage, scope loopScope) (bool, error) {
 }
 
 // combineOutcome aggregates the settled outcomes of a gather's combine members:
-// a blocking outcome (failed/canceled/skipped) dominates to failed, then
-// degraded, else success. Silent members contribute nothing (they never settle).
+// failed/canceled dominates, then degraded, while skipped members are benign.
+// An all-skipped current-dialect combine is honestly skipped. Silent members
+// contribute nothing because they never settle.
 func (d *driver) combineOutcome(combine []planUnit) string {
 	st := d.st()
-	var anyFailed, anyDegraded bool
+	var anyFailed, anyDegraded, anyRan, anySkipped bool
 	for i := range combine {
 		if combine[i].silent {
 			continue
@@ -2420,11 +2481,16 @@ func (d *driver) combineOutcome(combine []planUnit) string {
 		if !settled {
 			continue
 		}
-		switch {
-		case isBlocking(o):
+		switch o {
+		case OutcomeFailed, OutcomeCanceled:
 			anyFailed = true
-		case o == OutcomeDegraded:
+		case OutcomeDegraded:
 			anyDegraded = true
+			anyRan = true
+		case OutcomeSkipped:
+			anySkipped = true
+		default:
+			anyRan = true
 		}
 	}
 	switch {
@@ -2432,6 +2498,10 @@ func (d *driver) combineOutcome(combine []planUnit) string {
 		return OutcomeFailed
 	case anyDegraded:
 		return OutcomeDegraded
+	case anyRan:
+		return d.succeededOutcome()
+	case anySkipped && st.SemanticDialect == SemanticDialectCurrent:
+		return OutcomeSkipped
 	default:
 		return d.succeededOutcome()
 	}
@@ -2610,6 +2680,8 @@ func (d *driver) appendActivated(u planUnit) error {
 		ParentActivation: u.parent,
 		MemberIndex:      u.memberIndex,
 		After:            d.effectiveAfterDeps(u),
+		SkipDeps:         d.effectiveSkipDeps(u),
+		CompletionDeps:   d.effectiveCompletionDeps(u),
 		Members:          d.effectiveMemberDeps(u),
 		Kind:             string(u.irKind),
 		Duration:         duration,

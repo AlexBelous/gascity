@@ -602,6 +602,8 @@ func (d *driver) appendPoolActivated(u planUnit, route, prompt string) error {
 		ParentActivation: u.parent,
 		MemberIndex:      u.memberIndex,
 		After:            d.effectiveAfterDeps(u),
+		SkipDeps:         d.effectiveSkipDeps(u),
+		CompletionDeps:   d.effectiveCompletionDeps(u),
 		Members:          d.effectiveMemberDeps(u),
 		Kind:             string(u.irKind),
 		DispatchMode:     DispatchModePool,
@@ -899,6 +901,7 @@ func (d *driver) driveRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs
 	if err != nil {
 		return false, err
 	}
+	inheritDependencyPolicy(u, subUnits, &agg)
 	d.registerRunBodyEnv(spec, attempt, u.ns, subUnits)
 	if err := d.appendAttemptMinted(u.activation, attempt, repeatRemaining(attempt)); err != nil {
 		return false, err
@@ -917,7 +920,7 @@ func (d *driver) driveRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs
 
 // advanceGuard drives a guard's decision arm in the parking model: it activates the
 // guard once, evaluates the closed condition over the fold, and either settles the
-// guard PASS (false cond — a no-op that does not skip-cascade) or runs the `then`. An
+// guard skipped (false cond) or runs the `then`. An
 // exec then runs inline in this pass; a pool-do then materializes as ordinary work and
 // PARKS, is observed on a later pass when its bead closes, and then the guard settles
 // transparently from it. The decision is a pure function of the fold (re-evaluated
@@ -943,7 +946,7 @@ func (d *driver) advanceGuard(u planUnit, scope, nodeOutputs map[string]string, 
 			return fmt.Errorf("lumen: guard %q cond: %w", u.nodeID, err)
 		}
 		if !truthy {
-			return d.settleDecisionSkipped(u, scope, nodeOutputs)
+			return d.settleGuardSkipped(u, scope, nodeOutputs)
 		}
 	}
 	if opts.PoolRouter != nil && spec.thenIRKind == ir.NodeDo {

@@ -73,10 +73,10 @@ func TestGuardInSubFormulaDefaultCondTrueRunsThen(t *testing.T) {
 	}
 }
 
-// TestGuardInSubFormulaEnvBoundCondFalseNoOp (§2.2) proves an env-bound FALSE branch:
-// `given { reuse: "seeded" }` -> cond FALSE -> the guard settles PASS "no branch
-// taken", its then never runs, and a downstream node still runs (no skip-cascade).
-func TestGuardInSubFormulaEnvBoundCondFalseNoOp(t *testing.T) {
+// TestGuardInSubFormulaEnvBoundCondFalseSkips (§2.2) proves an env-bound FALSE branch:
+// `given { reuse: "seeded" }` -> cond FALSE -> the guard settles skipped, its then
+// never runs, and an independent downstream node still runs.
+func TestGuardInSubFormulaEnvBoundCondFalseSkips(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	envFields := `[` +
@@ -94,11 +94,11 @@ func TestGuardInSubFormulaEnvBoundCondFalseNoOp(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	if res.Outcome != engine.OutcomePass {
-		t.Fatalf("outcome = %q, want pass (a false guard passes)", res.Outcome)
+		t.Fatalf("outcome = %q, want succeeded (the downstream step ran)", res.Outcome)
 	}
 	settled := settledOutcomeByID(t, res.Events)
-	if settled["stage/draft"] != engine.OutcomePass {
-		t.Errorf("guard stage/draft settled %q, want pass", settled["stage/draft"])
+	if settled["stage/draft"] != engine.OutcomeSkipped {
+		t.Errorf("guard stage/draft settled %q, want skipped", settled["stage/draft"])
 	}
 	if got := res.NodeOutputs["stage/draft.then"]; got != "" {
 		t.Errorf("then output = %q, want empty (false cond runs no then)", got)
@@ -209,7 +209,7 @@ func TestGuardInSubFormulaDropRefoldByteIdentity(t *testing.T) {
 }
 
 // TestAdvanceGuardInSubFormulaFalseSeals (§2.2 advance) proves the Advance write-once
-// arm settles a false guard-in-sub-formula PASS and seals with no then materialized.
+// arm settles a false guard-in-sub-formula skipped and seals with no then materialized.
 func TestAdvanceGuardInSubFormulaFalseSeals(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -227,8 +227,8 @@ func TestAdvanceGuardInSubFormulaFalseSeals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if !res.Sealed || res.Run.Outcome != engine.OutcomePass {
-		t.Fatalf("advance = %+v, want Sealed pass (false guard is a no-op)", res)
+	if !res.Sealed || res.Run.Outcome != engine.OutcomeSkipped {
+		t.Fatalf("advance = %+v, want Sealed skipped", res)
 	}
 	if fake.dispatchCount() != 0 {
 		t.Errorf("DispatchWork calls = %d, want 0 (false guard dispatches no then)", fake.dispatchCount())
@@ -264,17 +264,15 @@ func TestAdvanceGuardInSubFormulaTrueDoParks(t *testing.T) {
 	}
 }
 
-// TestGuardInScatterSiblingCondRefSkipCascadesRoot (§2.9b ⚑S6, root) proves a guard
-// scatter member whose cond reads a SIBLING member installs a gate edge (a sequenced
-// decision the code blesses), and a FAILED sibling skip-cascades the guard exactly like
-// any blocking `after` dep — the guard settles skipped, its then never runs.
-func TestGuardInScatterSiblingCondRefSkipCascadesRoot(t *testing.T) {
+// TestGuardInScatterReadsFailedSiblingOutcomeRoot proves a completion projection
+// stays live after the producer fails, so the guard can inspect bad.outcome.
+func TestGuardInScatterReadsFailedSiblingOutcomeRoot(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	doc := decodeIR(t, blockDoc("gsc",
 		scatterNode("lanes", nil, "continue",
 			execNode("bad", `exit 2`, nil),
-			guardExecAfter("g", nil, condOutcomePass("bad"), "gthen", `echo t`))))
+			guardExecAfter("g", nil, condOutcomeEq("bad", "failed"), "gthen", `echo t`))))
 	res, err := engine.Run(ctx, store, doc, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -283,33 +281,31 @@ func TestGuardInScatterSiblingCondRefSkipCascadesRoot(t *testing.T) {
 	if settled["bad"] != engine.OutcomeFailed {
 		t.Errorf("sibling bad = %q, want failed", settled["bad"])
 	}
-	if settled["g"] != engine.OutcomeSkipped {
-		t.Errorf("guard g = %q, want skipped (failed sibling skip-cascades the gated guard)", settled["g"])
+	if settled["g"] != engine.OutcomePass {
+		t.Errorf("guard g = %q detail=%q, want succeeded (failed outcome projection remains readable)",
+			settled["g"], settledDetailFor(t, res.Events, "g:0"))
 	}
-	if got := res.NodeOutputs["gthen"]; got != "" {
-		t.Errorf("guard then output = %q, want empty (skip-cascaded guard runs no then)", got)
+	if got := res.NodeOutputs["gthen"]; got != "t" {
+		t.Errorf("guard then output = %q, want t", got)
 	}
-	// The drain: a failed member dominates → the scatter aggregate settles failed
-	// (the skipped guard contributes nothing) and the run reports it.
-	if settled["lanes"] != engine.OutcomeFailed {
-		t.Errorf("scatter aggregate lanes = %q, want failed (failed member dominates the drain)", settled["lanes"])
+	// on_fail=continue reports the mixed failed/succeeded drain as degraded.
+	if settled["lanes"] != engine.OutcomeDegraded {
+		t.Errorf("scatter aggregate lanes = %q, want degraded", settled["lanes"])
 	}
-	if res.Outcome != engine.OutcomeFailed {
-		t.Errorf("run outcome = %q, want failed", res.Outcome)
+	if res.Outcome != engine.OutcomeDegraded {
+		t.Errorf("run outcome = %q, want degraded", res.Outcome)
 	}
 }
 
-// TestGuardInScatterSiblingCondRefSkipCascadesNS (§2.9b ⚑S6, ns) is the same sibling-ref
-// skip-cascade INSIDE a run sub-formula: a failed sub-scatter member skip-cascades the
-// guarded member at its qualified id (stage/g), and the run seals with the honest
-// transparent outcome of the members that ran.
-func TestGuardInScatterSiblingCondRefSkipCascadesNS(t *testing.T) {
+// TestGuardInScatterReadsFailedSiblingOutcomeNS is the namespace-local form of
+// the completion-projection contract.
+func TestGuardInScatterReadsFailedSiblingOutcomeNS(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	sub := subDoc("greeter", strField("note"),
 		scatterNode("lanes", nil, "continue",
 			execNode("bad", `exit 2`, nil),
-			guardExecAfter("g", nil, condOutcomePass("bad"), "gthen", `echo t`)))
+			guardExecAfter("g", nil, condOutcomeEq("bad", "failed"), "gthen", `echo t`)))
 	doc := decodeIR(t, bundleDoc(
 		strField("who"),
 		runNodeJSON("stage", nil, "greeter", "note", "who"),
@@ -322,22 +318,20 @@ func TestGuardInScatterSiblingCondRefSkipCascadesNS(t *testing.T) {
 	if settled["stage/bad"] != engine.OutcomeFailed {
 		t.Errorf("sub-sibling stage/bad = %q, want failed", settled["stage/bad"])
 	}
-	if settled["stage/g"] != engine.OutcomeSkipped {
-		t.Errorf("sub-guard stage/g = %q, want skipped (failed sub-sibling skip-cascades at ns)", settled["stage/g"])
+	if settled["stage/g"] != engine.OutcomePass {
+		t.Errorf("sub-guard stage/g = %q, want succeeded", settled["stage/g"])
 	}
-	if got := res.NodeOutputs["stage/gthen"]; got != "" {
-		t.Errorf("sub-guard then output = %q, want empty", got)
+	if got := res.NodeOutputs["stage/gthen"]; got != "t" {
+		t.Errorf("sub-guard then output = %q, want t", got)
 	}
-	// The drain + the transparent chain: failed member → sub-scatter failed → the run
-	// aggregate reports it transparently → run.closed failed.
-	if settled["stage/lanes"] != engine.OutcomeFailed {
-		t.Errorf("sub-scatter stage/lanes = %q, want failed (failed member dominates the drain)", settled["stage/lanes"])
+	if settled["stage/lanes"] != engine.OutcomeDegraded {
+		t.Errorf("sub-scatter stage/lanes = %q, want degraded", settled["stage/lanes"])
 	}
-	if settled["stage"] != engine.OutcomeFailed {
-		t.Errorf("run aggregate stage = %q, want failed (transparent from the failed drain)", settled["stage"])
+	if settled["stage"] != engine.OutcomeDegraded {
+		t.Errorf("run aggregate stage = %q, want degraded", settled["stage"])
 	}
-	if res.Outcome != engine.OutcomeFailed {
-		t.Errorf("run outcome = %q, want failed", res.Outcome)
+	if res.Outcome != engine.OutcomeDegraded {
+		t.Errorf("run outcome = %q, want degraded", res.Outcome)
 	}
 }
 

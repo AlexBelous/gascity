@@ -24,8 +24,8 @@ func guardDo(after []string, condRef, condLit, thenID, thenPrompt string) string
 		`,"cond":` + cond + `,"then":` + doNode(thenID, thenPrompt, nil) + `}`
 }
 
-// TestAdvanceGuardCondFalseSeals proves a guard whose cond is false settles pass and
-// the run seals in one Advance pass (no then materialized).
+// TestAdvanceGuardCondFalseSeals proves a guard whose cond is false settles
+// skipped and the all-skipped run seals in one Advance pass.
 func TestAdvanceGuardCondFalseSeals(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -35,8 +35,8 @@ func TestAdvanceGuardCondFalseSeals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if !res.Sealed || res.Run.Outcome != engine.OutcomePass {
-		t.Fatalf("advance = %+v, want Sealed pass (false guard is a no-op)", res)
+	if !res.Sealed || res.Run.Outcome != engine.OutcomeSkipped {
+		t.Fatalf("advance = %+v, want Sealed skipped", res)
 	}
 }
 
@@ -87,13 +87,42 @@ func TestGuardCondTrueRunsThen(t *testing.T) {
 	}
 }
 
-// TestGuardCondFalseIsPassNoOp proves a guard whose cond is falsy settles PASS
-// WITHOUT running its then and does NOT skip-cascade its dependents (a conditional
-// step that legitimately did not run — downstream proceeds).
-func TestGuardCondFalseIsPassNoOp(t *testing.T) {
+// TestGuardCondFalseIsBenignSequentialSkip proves a false guard settles skipped
+// without preventing an independent sequential successor from running.
+func TestGuardCondFalseIsBenignSequentialSkip(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	doc := decodeIR(t, blockDoc("gf",
+		guardExec(`echo "ran it"`),
+		execNode("done", `echo after`, []string{"g"}),
+	))
+	res, err := engine.Run(ctx, store, doc, map[string]any{"mode": "stop"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Outcome != engine.OutcomePass {
+		t.Fatalf("run outcome = %q, want succeeded (the later step ran)", res.Outcome)
+	}
+	settled := settledIDs(t, res.Events)
+	assertSettled(t, settled, "g", engine.OutcomeSkipped)
+	// The then never ran (no output) and never settled.
+	if got := res.NodeOutputs["gthen"]; got != "" {
+		t.Errorf("then output = %q, want empty (then must not run when cond is false)", got)
+	}
+	// The ordering-only successor ran: skipped is benign on a sequential edge.
+	assertSettled(t, settled, "done", engine.OutcomePass)
+	if got := res.NodeOutputs["done"]; got != "after" {
+		t.Errorf("downstream = %q, want %q", got, "after")
+	}
+}
+
+// TestGuardSkippedValueDependentDoesNotRun distinguishes a genuine value
+// dependency from an ordering-only edge: rendering the skipped guard's value
+// skip-cascades the consumer.
+func TestGuardSkippedValueDependentDoesNotRun(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	doc := decodeIR(t, blockDoc("gfd",
 		guardExec(`echo "ran it"`),
 		execNode("done", `echo "after: {{ g }}"`, []string{"g"}),
 	))
@@ -101,20 +130,9 @@ func TestGuardCondFalseIsPassNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if res.Outcome != engine.OutcomePass {
-		t.Fatalf("run outcome = %q, want pass (a false guard passes)", res.Outcome)
-	}
 	settled := settledIDs(t, res.Events)
-	assertSettled(t, settled, "g", engine.OutcomePass)
-	// The then never ran (no output) and never settled.
-	if got := res.NodeOutputs["gthen"]; got != "" {
-		t.Errorf("then output = %q, want empty (then must not run when cond is false)", got)
-	}
-	// Downstream ran (NOT skip-cascaded); the guard output is empty.
-	assertSettled(t, settled, "done", engine.OutcomePass)
-	if got := res.NodeOutputs["done"]; got != "after: " {
-		t.Errorf("downstream = %q, want %q (guard output empty, downstream still ran)", got, "after: ")
-	}
+	assertSettled(t, settled, "g", engine.OutcomeSkipped)
+	assertSettled(t, settled, "done", engine.OutcomeSkipped)
 }
 
 // TestGuardDropRefoldByteIdentity pins DET for a guard: the live projection (guard +

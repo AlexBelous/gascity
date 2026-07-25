@@ -319,8 +319,8 @@ func TestN1_ScatterAllMembersSkippedIsSkipped(t *testing.T) {
 // TestN1_ScatterPartialSkipStillDrains keeps the drain CORE intact under a
 // partial skip: one member runs (no gate) and one skip-cascades on an external
 // failure. The scatter still DRAINS on the ran member — the ran member's effect
-// fires, the skipped member's does not, and the aggregate settles degraded
-// (partial success), NOT skipped.
+// fires, the skipped member's does not, and the aggregate succeeds because skip
+// is benign.
 func TestN1_ScatterPartialSkipStillDrains(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -353,8 +353,8 @@ func TestN1_ScatterPartialSkipStillDrains(t *testing.T) {
 	if settled["m2"] != engine.OutcomeSkipped {
 		t.Errorf("m2 settled %q, want skipped (gated on failed A)", settled["m2"])
 	}
-	if settled["S"] != engine.OutcomeDegraded {
-		t.Errorf("scatter S settled %q, want degraded (partial: one ran, one skipped — still drains)", settled["S"])
+	if settled["S"] != engine.OutcomePass {
+		t.Errorf("scatter S settled %q, want succeeded (one ran and skip is benign)", settled["S"])
 	}
 	if err := store.Verify(ctx, res.StreamID); err != nil {
 		t.Errorf("Verify = %v", err)

@@ -270,13 +270,13 @@ func tnkHasActivation(t *testing.T, events []graphstore.StoredEvent, activation 
 	return false
 }
 
-// TestTimeoutBlockedWrapperSkipCascadesBothDrivers pins the blocked-wrapper/after-gate
+// TestTimeoutBlockedWrapperSkipIsBenignToSuccessor pins the blocked-wrapper/after-gate
 // cluster (red-team P1-1): a timeout gated on a FAILED upstream settles SKIPPED on BOTH
-// drivers — its body is NEVER activated (no exec side effect), the downstream cascades, and
-// the two journals agree BYTE-for-byte. Kills (a) dropping rawAfter at lowering (the gate
+// drivers — its body is NEVER activated (no exec side effect), an ordering-only successor
+// still runs, and the two journals agree BYTE-for-byte. Kills (a) dropping rawAfter at lowering (the gate
 // never resolves) and (b) dropping the !d.blocked(u) check in advanceUnit's timeout clause
 // (a blocked pool timeout would run its body despite the failed dep and diverge from inline).
-func TestTimeoutBlockedWrapperSkipCascadesBothDrivers(t *testing.T) {
+func TestTimeoutBlockedWrapperSkipIsBenignToSuccessor(t *testing.T) {
 	ctx := context.Background()
 	doc := decodeIR(t, blockDoc("root",
 		execNode("fail", `exit 1`, nil),
@@ -308,7 +308,7 @@ func TestTimeoutBlockedWrapperSkipCascadesBothDrivers(t *testing.T) {
 }
 
 // assertBlockedWrapper asserts the blocked-wrapper shape on one driver's journal: the wrapper
-// skipped, the body NEVER activated, the downstream skipped.
+// skipped, the body NEVER activated, and the ordering-only downstream ran.
 func assertBlockedWrapper(t *testing.T, events []graphstore.StoredEvent, driver string) {
 	t.Helper()
 	settled := settledOutcomeByID(t, events)
@@ -318,8 +318,8 @@ func assertBlockedWrapper(t *testing.T, events []graphstore.StoredEvent, driver 
 	if tnkHasActivation(t, events, "v:0") {
 		t.Errorf("[%s] body v:0 was ACTIVATED despite the failed gate — a blocked wrapper must never run its body", driver)
 	}
-	if settled["done"] != engine.OutcomeSkipped {
-		t.Errorf("[%s] downstream done = %q, want skipped (the cascade continues)", driver, settled["done"])
+	if settled["done"] != engine.OutcomePass {
+		t.Errorf("[%s] downstream done = %q, want succeeded (skipped ordering predecessor is benign)", driver, settled["done"])
 	}
 }
 
@@ -441,8 +441,8 @@ func TestTimeoutFoldIgnoresDuration(t *testing.T) {
 		t.Fatalf("StateHash changed when the wrapper duration changed 5m→999h; the advisory field must NOT fold")
 	}
 	// TNK adds no folded field beyond the current reducer version.
-	if v := r.ReducerVersion(); v != 5 {
-		t.Fatalf("ReducerVersion() = %d, want 5 (TNK adds no fold state)", v)
+	if v := r.ReducerVersion(); v != 6 {
+		t.Fatalf("ReducerVersion() = %d, want 6 (TNK adds no fold state beyond skip dependency classification)", v)
 	}
 }
 

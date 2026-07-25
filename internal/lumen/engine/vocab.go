@@ -124,8 +124,9 @@ const (
 	EffectResultInterrupted = "interrupted"
 )
 
-// Outcome vocabulary. pass and degraded are non-blocking (a dependent may run);
-// failed, canceled, and skipped are blocking (a dependent skip-cascades).
+// Outcome vocabulary. Dependency behavior is edge-sensitive in the current
+// dialect: failed completion projections and skipped ordering edges remain
+// live, while real failed/skipped value dependencies halt.
 //
 // OutcomePending is a repeat-scoped, NON-CONSUMING settle: it means "the check is not
 // finished yet (CI still running) — re-poll WITHOUT burning the author's repeat budget."
@@ -259,12 +260,18 @@ const (
 	// into lumenState. Missing dialects normalize to SemanticDialectLegacy, while
 	// new runs stamp SemanticDialectCurrent. The field changes snapshot bytes and
 	// controls runtime behavior, so this is an honest reducer-version bump. Resume
-	// has one narrow, integrity-checked v4/v4 → v5/v5 migration; older snapshots
-	// remain loudly stranded.
-	reducerVersion = 5
-	// snapshotFormatVersion pins the on-disk lumenState layout. Bumped 4 → 5 with
-	// the folded semantic dialect.
-	snapshotFormatVersion = 5
+	// migrates integrity-checked v4/v4 snapshots as legacy.
+	//
+	// DEPENDENCY OUTCOME POLICY — v6. node.activated folds SkipDeps, the subset
+	// of ordering edges that are also real value dependencies, and CompletionDeps,
+	// the subset observed only through outcome metadata. Current-dialect skipped
+	// outcomes block only real value reads, while failed completion-only edges stay
+	// live. Legacy journals keep treating every after edge as blocking. Resume
+	// migrates v5/v5 snapshots while preserving their stamped dialect. These fields
+	// change state bytes, so both versions bump.
+	reducerVersion = 6
+	// snapshotFormatVersion pins the on-disk lumenState layout.
+	snapshotFormatVersion = 6
 )
 
 // ---- Typed event payloads (R-CANON) ----
@@ -304,10 +311,10 @@ type runStartedPayload struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// nodeActivatedPayload is the body of EventNodeActivated. After carries the
-// resolved blocking dependency edges (a failed one skip-cascades this node);
-// Members carries drain dependencies (a scatter aggregate / gather waits for
-// them to settle with any outcome). Together they are THE DAG, in the journal.
+// nodeActivatedPayload is the body of EventNodeActivated. After carries resolved
+// ordering edges; SkipDeps and CompletionDeps refine their outcome policy.
+// Members carries drain dependencies that wait for settlement regardless of
+// outcome. Together they are THE DAG and its dependency policy in the journal.
 //
 // DispatchMode is the pool-dispatch knob (default "" = engine-driven; "pool" =
 // pool-dispatched). It is kind/label-keyed, never a role name: a ready pool node's
@@ -342,6 +349,8 @@ type nodeActivatedPayload struct {
 	ParentActivation string            `json:"parent_activation,omitempty"`
 	MemberIndex      *int              `json:"member_index,omitempty"`
 	After            []string          `json:"after,omitempty"`
+	SkipDeps         []string          `json:"skip_deps,omitempty"`
+	CompletionDeps   []string          `json:"completion_deps,omitempty"`
 	Members          []string          `json:"members,omitempty"`
 	Kind             string            `json:"kind"`
 	DispatchMode     string            `json:"dispatch_mode,omitempty"`

@@ -26,8 +26,116 @@ func TestPendingFlowsThroughReducerDefaults(t *testing.T) {
 	if got := statusForOutcome(OutcomePending); got != "done" {
 		t.Errorf("statusForOutcome(pending) = %q, want done (default projection arm, StateHash-transparent)", got)
 	}
-	if got := Reducer().ReducerVersion(); got != 5 {
-		t.Fatalf("ReducerVersion() = %d, want 5 (semantic dialect is folded; pending adds no field)", got)
+	if got := Reducer().ReducerVersion(); got != 6 {
+		t.Fatalf("ReducerVersion() = %d, want 6 (skip dependencies are folded; pending adds no field)", got)
+	}
+}
+
+func TestSkippedDependencyReadinessDependsOnDialectAndEdgeKind(t *testing.T) {
+	tests := []struct {
+		name     string
+		dialect  string
+		skipDeps []string
+		want     bool
+	}{
+		{
+			name:    "current ordering edge is benign",
+			dialect: SemanticDialectCurrent,
+			want:    true,
+		},
+		{
+			name:     "current value edge blocks",
+			dialect:  SemanticDialectCurrent,
+			skipDeps: []string{"guard:0"},
+			want:     false,
+		},
+		{
+			name:    "legacy ordering edge blocks",
+			dialect: SemanticDialectLegacy,
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &lumenState{
+				SemanticDialect: tt.dialect,
+				Nodes: map[string]*nodeState{
+					"guard:0": {
+						NodeID:  "guard",
+						Settled: true,
+						Outcome: OutcomeSkipped,
+					},
+				},
+			}
+			node := &nodeState{
+				NodeID:   "next",
+				After:    []string{"guard:0"},
+				SkipDeps: tt.skipDeps,
+			}
+			if got := state.ready(node); got != tt.want {
+				t.Fatalf("ready() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFailedCompletionProjectionRemainsReady(t *testing.T) {
+	tests := []struct {
+		name           string
+		dialect        string
+		skipDeps       []string
+		completionDeps []string
+		want           bool
+	}{
+		{
+			name:           "current completion-only edge",
+			dialect:        SemanticDialectCurrent,
+			completionDeps: []string{"work:0"},
+			want:           true,
+		},
+		{
+			name:           "current value read wins over completion read",
+			dialect:        SemanticDialectCurrent,
+			skipDeps:       []string{"work:0"},
+			completionDeps: []string{"work:0"},
+			want:           false,
+		},
+		{
+			name:    "current ordering-only edge",
+			dialect: SemanticDialectCurrent,
+			want:    false,
+		},
+		{
+			name:           "legacy completion edge",
+			dialect:        SemanticDialectLegacy,
+			completionDeps: []string{"work:0"},
+			want:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &lumenState{
+				SemanticDialect: tt.dialect,
+				Nodes: map[string]*nodeState{
+					"work:0": {
+						NodeID:  "work",
+						Settled: true,
+						Outcome: OutcomeFailed,
+					},
+				},
+			}
+			node := &nodeState{
+				NodeID:         "next",
+				After:          []string{"work:0"},
+				SkipDeps:       tt.skipDeps,
+				CompletionDeps: tt.completionDeps,
+			}
+			if got := state.ready(node); got != tt.want {
+				t.Fatalf("ready() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

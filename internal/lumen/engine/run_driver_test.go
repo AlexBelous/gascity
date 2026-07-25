@@ -305,8 +305,7 @@ func runValueDoc(t *testing.T) string {
 
 // TestRunDropRefoldByteIdentity proves a run-bearing journal's live Tier-A
 // projection equals a from-scratch drop+refold — the reducer folds no hidden state
-// from the inlined sub-graph or the transparent aggregate (DET-T-17), so
-// reducerVersion stays 3.
+// from the inlined sub-graph or the transparent aggregate (DET-T-17).
 func TestRunDropRefoldByteIdentity(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -317,8 +316,8 @@ func TestRunDropRefoldByteIdentity(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	assertProjectionEqualsRefold(t, store, res.StreamID)
-	if v := engine.Reducer().ReducerVersion(); v != 5 {
-		t.Fatalf("reducerVersion = %d, want 5 (semantic dialect is folded)", v)
+	if v := engine.Reducer().ReducerVersion(); v != 6 {
+		t.Fatalf("reducerVersion = %d, want 6 (skip dependencies are folded)", v)
 	}
 }
 

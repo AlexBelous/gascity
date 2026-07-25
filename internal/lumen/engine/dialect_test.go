@@ -161,7 +161,7 @@ func TestResumeMigratesV4SnapshotAsLegacy(t *testing.T) {
 	))
 	const streamID = "gcg-run-v4-snapshot"
 
-	seedHistoricalSnapshot(t, store, streamID, 4, 4)
+	seedHistoricalSnapshot(t, store, streamID, 4, 4, "")
 
 	result, err := engine.Resume(ctx, store, doc, streamID, nil, engine.Options{})
 	if err != nil {
@@ -182,6 +182,32 @@ func TestResumeMigratesV4SnapshotAsLegacy(t *testing.T) {
 	}
 }
 
+func TestResumeMigratesV5SnapshotRetainingDialect(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	doc := decodeIR(t, blockDoc("current-snapshot",
+		execNode("work", `echo resumed`, nil),
+	))
+	const streamID = "gcg-run-v5-snapshot"
+
+	seedHistoricalSnapshot(t, store, streamID, 5, 5, engine.SemanticDialectCurrent)
+
+	result, err := engine.Resume(ctx, store, doc, streamID, nil, engine.Options{})
+	if err != nil {
+		t.Fatalf("resume v5 snapshot: %v", err)
+	}
+	if result.Outcome != engine.OutcomeSucceeded {
+		t.Fatalf("current resumed outcome = %q, want succeeded", result.Outcome)
+	}
+	manifest, err := engine.ReadRunManifest(ctx, store, streamID)
+	if err != nil {
+		t.Fatalf("read current manifest: %v", err)
+	}
+	if manifest.SemanticDialect != engine.SemanticDialectCurrent {
+		t.Fatalf("v5 semantic dialect = %q, want %q", manifest.SemanticDialect, engine.SemanticDialectCurrent)
+	}
+}
+
 func TestResumeRejectsSnapshotOlderThanV4(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -190,7 +216,7 @@ func TestResumeRejectsSnapshotOlderThanV4(t *testing.T) {
 	))
 	const streamID = "gcg-run-v3-snapshot"
 
-	seedHistoricalSnapshot(t, store, streamID, 3, 3)
+	seedHistoricalSnapshot(t, store, streamID, 3, 3, "")
 
 	_, err := engine.Resume(ctx, store, doc, streamID, nil, engine.Options{})
 	if !errors.Is(err, fold.ErrReducerVersionSkew) {
@@ -198,16 +224,26 @@ func TestResumeRejectsSnapshotOlderThanV4(t *testing.T) {
 	}
 }
 
-func seedHistoricalSnapshot(t *testing.T, store *graphstore.Store, streamID string, reducerVersion, formatVersion int) {
+func seedHistoricalSnapshot(
+	t *testing.T,
+	store *graphstore.Store,
+	streamID string,
+	reducerVersion, formatVersion int,
+	dialect string,
+) {
 	t.Helper()
 	ctx := context.Background()
 	engine.RegisterVocabulary(store)
 	run := newManualRun(t, store, streamID)
-	run.append(engine.EventRunStarted, streamID+":run:started", map[string]any{
+	started := map[string]any{
 		"root_id":    streamID,
 		"name":       "historical",
 		"created_at": "2026-01-01T00:00:00Z",
-	})
+	}
+	if dialect != "" {
+		started["dialect"] = dialect
+	}
+	run.append(engine.EventRunStarted, streamID+":run:started", started)
 
 	// A historical snapshot presupposes that its covered projection was already
 	// committed. Rebuild it from the one-event journal before installing the
@@ -216,12 +252,16 @@ func seedHistoricalSnapshot(t *testing.T, store *graphstore.Store, streamID stri
 		t.Fatalf("project historical prefix: %v", err)
 	}
 
-	state, err := canonJSON(t, map[string]any{
+	stateFields := map[string]any{
 		"root_id":    streamID,
 		"name":       "historical",
 		"created_at": "2026-01-01T00:00:00Z",
 		"closed":     false,
-	})
+	}
+	if dialect != "" {
+		stateFields["dialect"] = dialect
+	}
+	state, err := canonJSON(t, stateFields)
 	if err != nil {
 		t.Fatalf("canonicalize historical state: %v", err)
 	}

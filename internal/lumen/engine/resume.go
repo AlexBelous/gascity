@@ -372,32 +372,44 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 	return d, scope, nodeOutputs, nil
 }
 
-// snapshotForCurrentReducer performs the one supported Lumen snapshot migration:
-// reducer/format v4 predates semantic-dialect stamping, so its verified state is
-// decoded as legacy and re-serialized in memory as v5. The durable v4 row and its
-// chain-anchored hash remain untouched; rebuildDriver verifies both before calling
-// this function. Every other version is returned unchanged so fold.Fold's normal
-// version/format gates reject unsupported skew loudly.
+// snapshotForCurrentReducer performs the supported Lumen snapshot migrations.
+// v4 predates semantic-dialect stamping and becomes legacy; v5 already carries
+// the dialect but predates skip-dependency classification. Both are verified
+// before this function and re-serialized only in memory as v6. Every other
+// version is returned unchanged for fold.Fold's normal skew rejection.
 func snapshotForCurrentReducer(snap fold.Snapshot) (fold.Snapshot, error) {
-	if snap.Engine != Engine || snap.ReducerVersion != 4 {
+	if snap.Engine != Engine ||
+		(snap.ReducerVersion != 4 && snap.ReducerVersion != 5) {
 		return snap, nil
 	}
-	if snap.SnapshotFormatVersion != 4 {
+	if snap.SnapshotFormatVersion != snap.ReducerVersion {
 		return fold.Snapshot{}, fmt.Errorf(
-			"lumen: reducer v4 snapshot has format %d, want 4", snap.SnapshotFormatVersion)
+			"lumen: reducer v%d snapshot has format %d, want %d",
+			snap.ReducerVersion,
+			snap.SnapshotFormatVersion,
+			snap.ReducerVersion,
+		)
 	}
 
 	var state lumenState
 	if err := json.Unmarshal(snap.State, &state); err != nil {
-		return fold.Snapshot{}, fmt.Errorf("decode v4 state: %w", err)
+		return fold.Snapshot{}, fmt.Errorf("decode v%d state: %w", snap.ReducerVersion, err)
 	}
-	if state.SemanticDialect != "" {
-		return fold.Snapshot{}, fmt.Errorf("v4 state unexpectedly carries dialect %q", state.SemanticDialect)
+	if snap.ReducerVersion == 4 {
+		if state.SemanticDialect != "" {
+			return fold.Snapshot{}, fmt.Errorf("v4 state unexpectedly carries dialect %q", state.SemanticDialect)
+		}
+		state.SemanticDialect = SemanticDialectLegacy
+	} else {
+		dialect, err := normalizeSemanticDialect(state.SemanticDialect)
+		if err != nil {
+			return fold.Snapshot{}, fmt.Errorf("v5 state: %w", err)
+		}
+		state.SemanticDialect = dialect
 	}
-	state.SemanticDialect = SemanticDialectLegacy
 	blob, err := state.MarshalSnapshot()
 	if err != nil {
-		return fold.Snapshot{}, fmt.Errorf("encode v5 state: %w", err)
+		return fold.Snapshot{}, fmt.Errorf("encode v6 state: %w", err)
 	}
 
 	snap.ReducerVersion = reducerVersion

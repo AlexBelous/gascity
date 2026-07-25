@@ -72,11 +72,9 @@ func TestDiamondAllPass(t *testing.T) {
 	}
 }
 
-// TestSkipCascade is the load-bearing correctness fix: A fails, so B (which
-// depends on A) is SKIPPED — a settled `skipped` outcome, never run — and the
-// run outcome reflects the failure. Transitivity: C depends on B, and a skipped
-// dependency is itself blocking, so C skip-cascades too.
-func TestSkipCascade(t *testing.T) {
+// TestSkippedOrderingDependencyIsBenign proves A's failure blocks B, while B's
+// resulting skipped outcome does not poison the ordering-only edge into C.
+func TestSkippedOrderingDependencyIsBenign(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 
@@ -100,8 +98,8 @@ func TestSkipCascade(t *testing.T) {
 	if settled["B"] != engine.OutcomeSkipped {
 		t.Errorf("B settled %q, want skipped", settled["B"])
 	}
-	if settled["C"] != engine.OutcomeSkipped {
-		t.Errorf("C settled %q, want skipped (transitive cascade)", settled["C"])
+	if settled["C"] != engine.OutcomePass {
+		t.Errorf("C settled %q, want succeeded (skipped ordering predecessor is benign)", settled["C"])
 	}
 	// A skipped node is never run: its output is empty and its status is skipped.
 	if got := res.NodeOutputs["B"]; got != "" {
@@ -290,7 +288,7 @@ func TestSplitPointEquivalence_DETT20(t *testing.T) {
 				CoveredSeq:            all[k-1].Seq,
 				Engine:                "lumen",
 				ReducerVersion:        r.ReducerVersion(),
-				SnapshotFormatVersion: 5,
+				SnapshotFormatVersion: r.ReducerVersion(),
 				StateHash:             prefixState.StateHash(),
 				State:                 blob,
 			}
@@ -402,7 +400,7 @@ func TestDETT20_ScatterGatherSplitPointEquivalence(t *testing.T) {
 				CoveredSeq:            all[k-1].Seq,
 				Engine:                "lumen",
 				ReducerVersion:        r.ReducerVersion(),
-				SnapshotFormatVersion: 5,
+				SnapshotFormatVersion: r.ReducerVersion(),
 				StateHash:             prefixState.StateHash(),
 				State:                 blob,
 			}

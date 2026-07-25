@@ -403,10 +403,8 @@ func TestDispatchRunArmDownstreamReads(t *testing.T) {
 
 // TestDispatchRunArmFailedTransparentPropagates (§2.5, the FAILED-arm clause) pins that a
 // FAILED transparent run arm propagates failure downstream: the arm's sub-exec fails → the
-// arm aggregate fails → the dispatch settles FAILED transparently, and BOTH downstream
-// consumers skip-cascade — a node gated `after:[d]` AND a sibling guard whose cond reads
-// d.outcome (a failed transparent decision is a step that ran and failed — sharply distinct
-// from a no-match PASS, which does not skip-cascade).
+// arm aggregate fails → the dispatch settles FAILED transparently. A value consumer
+// skip-cascades, while a sibling guard can inspect d.outcome as completion metadata.
 func TestDispatchRunArmFailedTransparentPropagates(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -430,18 +428,14 @@ func TestDispatchRunArmFailedTransparentPropagates(t *testing.T) {
 	if settled["after"] != engine.OutcomeSkipped {
 		t.Errorf("downstream after = %q, want skipped (a failed transparent dispatch skip-cascades its `after` dependents)", settled["after"])
 	}
-	// PINNED SEMANTIC (intended, surprising): a guard whose cond READS d.outcome never
-	// gets to evaluate it after a FAILED d — cond-ref gates are BLOCKING afterDeps
-	// (resolveDeps installs d:0 as the guard's gate to freeze the decision input), and a
-	// failed gate skip-cascades. So `g: guard (d.outcome == "failed") -> then` settles
-	// SKIPPED — the then NEVER runs even though the cond would have been true. Reading a
-	// failure outcome downstream requires a construct whose dep is a DRAIN (recover/cleanup),
-	// not a decision gate.
-	if settled["g"] != engine.OutcomeSkipped {
-		t.Errorf("sibling guard g = %q, want skipped (cond-ref gate on d is BLOCKING; the cond never evaluates)", settled["g"])
+	if settled["g"] != engine.OutcomePass {
+		t.Errorf("sibling guard g = %q, want succeeded (d.outcome remains readable)", settled["g"])
 	}
-	if _, ok := settled["gthen"]; ok {
-		t.Errorf("guard then gthen settled %q, want never-run (the guard was skip-cascaded before deciding)", settled["gthen"])
+	if settled["gthen"] != engine.OutcomePass {
+		t.Errorf("guard then gthen settled %q, want succeeded", settled["gthen"])
+	}
+	if got := res.NodeOutputs["gthen"]; got != "saw fail" {
+		t.Errorf("guard then output = %q, want saw fail", got)
 	}
 }
 

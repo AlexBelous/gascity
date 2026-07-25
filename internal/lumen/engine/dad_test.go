@@ -709,7 +709,7 @@ func TestDispatchAtDepthCrossArmSkipCascade(t *testing.T) {
 // FAILED transparent run arm at depth: the deep dispatch id `implement` settles FAILED (the
 // arm sub-exec fails → arm aggregate fails → dispatch fails transparently), and a deep sibling
 // gated `after:[implement]` reading {{implement}} skip-cascades. A sibling guard whose cond
-// reads implement.outcome is skip-cascaded too (cond-ref gates are blocking — the DAR pin).
+// reads implement.outcome remains live and observes the failure.
 func TestDispatchAtDepthFailedTransparentDownstreamRead(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -733,11 +733,14 @@ func TestDispatchAtDepthFailedTransparentDownstreamRead(t *testing.T) {
 	if settled[dadBase+"after"] != engine.OutcomeSkipped {
 		t.Errorf("deep after = %q, want skipped (a failed transparent dispatch skip-cascades its `after` dependents)", settled[dadBase+"after"])
 	}
-	if settled[dadBase+"g"] != engine.OutcomeSkipped {
-		t.Errorf("deep guard g = %q, want skipped (cond-ref gate on implement is blocking; the cond never evaluates)", settled[dadBase+"g"])
+	if settled[dadBase+"g"] != engine.OutcomePass {
+		t.Errorf("deep guard g = %q, want succeeded (completion projection remains readable)", settled[dadBase+"g"])
 	}
-	if _, ok := settled[dadBase+"gthen"]; ok {
-		t.Errorf("deep guard then gthen settled %q, want never-run", settled[dadBase+"gthen"])
+	if settled[dadBase+"gthen"] != engine.OutcomePass {
+		t.Errorf("deep guard then gthen settled %q, want succeeded", settled[dadBase+"gthen"])
+	}
+	if got := res.NodeOutputs[dadBase+"gthen"]; got != "saw fail" {
+		t.Errorf("deep guard then output = %q, want saw fail", got)
 	}
 }
 

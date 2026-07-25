@@ -655,7 +655,7 @@ func assertStreamSplitFoldDeterministic(t *testing.T, store *graphstore.Store, s
 			}
 			snap = &fold.Snapshot{
 				StreamID: streamID, CoveredSeq: all[k-1].Seq, Engine: "lumen",
-				ReducerVersion: r.ReducerVersion(), SnapshotFormatVersion: 5,
+				ReducerVersion: r.ReducerVersion(), SnapshotFormatVersion: r.ReducerVersion(),
 				StateHash: prefix.StateHash(), State: blob,
 			}
 		}

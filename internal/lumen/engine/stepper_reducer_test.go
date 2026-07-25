@@ -45,7 +45,7 @@ func TestRunStartedDriverFoldTransparent(t *testing.T) {
 	if self.StateHash() != pool.StateHash() {
 		t.Fatalf("reducer folded run.started driver: StateHash diverged (self != pool) — reducerVersion would need a bump")
 	}
-	if got := Reducer().ReducerVersion(); got != 5 {
-		t.Fatalf("ReducerVersion() = %d, want 5 (semantic dialect is folded; Driver remains payload-only)", got)
+	if got := Reducer().ReducerVersion(); got != 6 {
+		t.Fatalf("ReducerVersion() = %d, want 6 (skip dependencies are folded; Driver remains payload-only)", got)
 	}
 }

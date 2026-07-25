@@ -681,7 +681,7 @@ func TestCleanupBlockAllSkippedSuppressesFinally(t *testing.T) {
 		execNode("gate", `exit 1`, nil),
 		cleanupBlockNode("clean", nil, execNode("teardown", `echo T`, nil),
 			execNode("stepA", `echo A`, []string{"gate"}),
-			execNode("stepB", `echo B`, []string{"stepA"}),
+			execNode("stepB", `echo B`, []string{"gate"}),
 		),
 	))
 	res, err := engine.Run(ctx, store, doc, nil)
@@ -724,7 +724,7 @@ func TestCleanupBlockAllSkippedPoolInlineJournalParity(t *testing.T) {
 		execNode("gate", `exit 1`, nil),
 		cleanupBlockNode("clean", nil, doNode("teardown", "tear down", nil),
 			doNode("stepA", "do A", []string{"gate"}),
-			doNode("stepB", "do B", []string{"stepA"}),
+			doNode("stepB", "do B", []string{"gate"}),
 		),
 	))
 

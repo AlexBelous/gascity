@@ -567,11 +567,11 @@ func TestSharedLaneRootGuardLengthDrives(t *testing.T) {
 	}
 }
 
-// TestReducerVersionStaysFive pins §2.11: the SLX slice adds no folded field, so the
-// reducer stays at the current version (the failed settle reuses the existing Detail fold).
-func TestReducerVersionStaysFive(t *testing.T) {
-	if v := engine.Reducer().ReducerVersion(); v != 5 {
-		t.Fatalf("ReducerVersion() = %d, want 5 (SLX adds no fold state)", v)
+// TestSharedLaneDoesNotChangeReducerVersion pins §2.11: the SLX slice adds no
+// folded field beyond the current skip-dependency state.
+func TestSharedLaneDoesNotChangeReducerVersion(t *testing.T) {
+	if v := engine.Reducer().ReducerVersion(); v != 6 {
+		t.Fatalf("ReducerVersion() = %d, want 6 (SLX adds no fold state beyond skip dependencies)", v)
 	}
 }
 

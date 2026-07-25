@@ -69,6 +69,7 @@ type step struct {
 	outcome       string
 	reason        string
 	publicOutcome bool
+	refs          []refUse
 
 	// do fields.
 	agentRef string
@@ -104,6 +105,11 @@ type outcomeTransfer struct {
 	nonFailedOnly    bool
 }
 
+type refUse struct {
+	name  string
+	field string
+}
+
 // unitKind classifies a plan unit's execution shape.
 type unitKind int
 
@@ -113,7 +119,7 @@ const (
 	unitGather                         // gather: head-of-line drain + authored combine
 	unitLoop                           // retry / repeat: the attempt-loop over a leaf body
 	unitRun                            // run: transparent sub-formula call over an inlined sub-graph
-	unitGuard                          // guard: a conditional single-step arm (cond ? then : pass)
+	unitGuard                          // guard: a conditional single-step arm (cond ? then : skipped)
 	unitDispatch                       // dispatch: a multi-way branch (subject -> matching arm's body)
 	unitForEach                        // for-each: a dynamic scatter fanning a single-leaf or run-sub-formula body over a runtime array
 	unitCleanup                        // cleanup: try/finally — a guarded leaf, then an always-run body leaf
@@ -146,13 +152,13 @@ type planUnit struct {
 	haltOn        []outcomeTransfer
 	depHaltOn     map[string][]outcomeTransfer
 
-	// Dependencies are split by kind so the drain exception is scoped correctly
-	// (H1): afterDeps are blocking gates (a failed/skipped one skip-cascades this
-	// unit), memberDeps drain (a scatter aggregate / gather waits for them to
-	// settle but any outcome is fine — a member failure does not skip the
-	// aggregate).
-	afterDeps  []string // resolved blocking `after` gates
-	memberDeps []string // resolved drain dependencies (scatter members / gather over-scatter)
+	// Dependencies are split by kind so the drain exception is scoped correctly:
+	// afterDeps are ordering gates whose outcome policy is refined by skipDeps and
+	// completionDeps; memberDeps drain regardless of member outcome.
+	afterDeps      []string // resolved blocking `after` gates
+	memberDeps     []string // resolved drain dependencies (scatter members / gather over-scatter)
+	skipDeps       []string // after deps whose skipped outcome blocks a real value read
+	completionDeps []string // after deps observed only through outcome metadata
 
 	leaf step // unitLeaf payload
 
@@ -279,9 +285,9 @@ type forEachSpec struct {
 // to branch on, the node/input refs it reads (for the DET gate — the branch must be
 // decided over stable state), and the ordered arms. At run time the subject is
 // evaluated to a string and the FIRST arm whose match value equals it runs its body
-// (the dispatch settles transparently from it); no matching arm settles the dispatch
-// PASS with an empty result (a no-op that does not skip-cascade). Like guard, the
-// decision is a pure function of the fold.
+// (the dispatch settles transparently from it); no matching arm settles the
+// dispatch successfully with an empty result. Like guard, the decision is a pure
+// function of the fold.
 type dispatchSpec struct {
 	subject     json.RawMessage
 	subjectRefs []string
@@ -314,11 +320,11 @@ type dispatchArm struct {
 // guardSpec carries a guard node's decoded shape: the closed condition and the
 // single leaf `then` step to run when the condition is truthy. It is the decision
 // arm — cond true runs `then` and the guard settles with `then`'s outcome
-// (transparent); cond false settles the guard `pass` WITHOUT running `then` (a
-// conditional step that legitimately did not run, so it does NOT skip-cascade its
-// dependents). The condition is a closed expression over the run's settled node
-// outcomes/outputs + input — the same subset a repeat `until` evaluates — so the
-// decision is a pure function of the fold and re-evaluates identically on resume.
+// (transparent); cond false settles the guard `skipped` WITHOUT running `then`.
+// Ordering-only successors remain live under the current dialect. The condition
+// is a closed expression over the run's settled node outcomes/outputs + input —
+// the same subset a repeat `until` evaluates — so the decision is a pure function
+// of the fold and re-evaluates identically on resume.
 type guardSpec struct {
 	cond       json.RawMessage
 	condRefs   []string // node/input names the cond reads (for the DET gate — see resolveDeps)
@@ -2068,30 +2074,11 @@ func decodeRunEnv(n ir.Node, inputFields []ir.Field) ([]runEnvField, []string, e
 // value expression, at any nesting depth. It is used to derive the parent-scope
 // dependencies a run's environment reads.
 func collectRefs(raw json.RawMessage) []string {
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return nil
+	uses := collectRefUses(raw)
+	refs := make([]string, 0, len(uses))
+	for _, ref := range uses {
+		refs = append(refs, ref.name)
 	}
-	var refs []string
-	var walk func(x any)
-	walk = func(x any) {
-		switch t := x.(type) {
-		case map[string]any:
-			if t["kind"] == "ref" {
-				if name, ok := t["name"].(string); ok && name != "" {
-					refs = append(refs, name)
-				}
-			}
-			for _, mv := range t {
-				walk(mv)
-			}
-		case []any:
-			for _, e := range t {
-				walk(e)
-			}
-		}
-	}
-	walk(v)
 	return refs
 }
 
@@ -2594,6 +2581,8 @@ func (l *lowerer) resolveDeps() error {
 		}
 	}
 
+	l.wireReferenceDependencies(byNodeID, silent, rawDeps)
+
 	// A for-each `over` that reads a SILENT (lit/interp) node has no settleable gate to
 	// order the fan after the value is computed: a pure-constant silent node contributes
 	// an empty non-silent closure (no gate edge), so topo order would fall back to source
@@ -2615,6 +2604,208 @@ func (l *lowerer) resolveDeps() error {
 
 	l.wireOutcomeTransfers()
 	return nil
+}
+
+// wireReferenceDependencies classifies existing ordering edges that are also
+// real value dependencies. It never adds an edge: lowering already decides
+// when a reference must gate a unit, and undeclared references intentionally
+// remain ungated. Completion projections such as x.outcome are transparent to
+// the producer's outcome.
+func (l *lowerer) wireReferenceDependencies(
+	byNodeID map[string]string,
+	silent map[string]bool,
+	rawDeps map[string][]string,
+) {
+	for i := range l.units {
+		unit := &l.units[i]
+		valueDeps, completionDeps := referencedDependencies(unit, byNodeID, silent, rawDeps)
+		for _, dependency := range unit.afterDeps {
+			if valueDeps[dependency] {
+				unit.skipDeps = appendMissing(unit.skipDeps, []string{dependency})
+			}
+			if completionDeps[dependency] {
+				unit.completionDeps = appendMissing(unit.completionDeps, []string{dependency})
+			}
+		}
+
+		// A static run's environment gates its whole inlined subgraph. Classify
+		// those already-installed edges on the children as well as the aggregate.
+		if unit.kind != unitRun || unit.run == nil {
+			continue
+		}
+		prefix := unit.nodeID + "/"
+		for j := range l.units {
+			child := &l.units[j]
+			if !strings.HasPrefix(child.nodeID, prefix) {
+				continue
+			}
+			for _, dependency := range child.afterDeps {
+				if valueDeps[dependency] {
+					child.skipDeps = appendMissing(child.skipDeps, []string{dependency})
+				}
+				if completionDeps[dependency] {
+					child.completionDeps = appendMissing(child.completionDeps, []string{dependency})
+				}
+			}
+		}
+	}
+}
+
+func referencedDependencies(
+	unit *planUnit,
+	byNodeID map[string]string,
+	silent map[string]bool,
+	rawDeps map[string][]string,
+) (map[string]bool, map[string]bool) {
+	valueDeps := map[string]bool{}
+	completionDeps := map[string]bool{}
+	for _, ref := range unitRefUses(unit) {
+		if ref.name == "input" {
+			continue
+		}
+		activation, ok := byNodeID[unit.ns+ref.name]
+		if !ok || activation == unit.activation {
+			continue
+		}
+		for _, dependency := range nonSilentClosure(activation, silent, rawDeps) {
+			if dependency == unit.activation {
+				continue
+			}
+			if completionRefField(ref.field) {
+				completionDeps[dependency] = true
+			} else {
+				valueDeps[dependency] = true
+			}
+		}
+	}
+	return valueDeps, completionDeps
+}
+
+func unitRefUses(unit *planUnit) []refUse {
+	var refs []refUse
+	addStep := func(s step) {
+		refs = append(refs, s.refs...)
+	}
+	addRun := func(run *runSpec, excluded ...string) {
+		if run == nil {
+			return
+		}
+		for _, field := range run.env {
+			for _, ref := range collectRefUses(field.value) {
+				if !containsStr(excluded, ref.name) {
+					refs = append(refs, ref)
+				}
+			}
+		}
+	}
+
+	switch unit.kind {
+	case unitLeaf:
+		addStep(unit.leaf)
+	case unitRun:
+		addRun(unit.run)
+	case unitGuard:
+		if unit.guard != nil {
+			refs = append(refs, collectRefUses(unit.guard.cond)...)
+			addStep(unit.guard.then)
+		}
+	case unitDispatch:
+		if unit.dispatch != nil {
+			refs = append(refs, collectRefUses(unit.dispatch.subject)...)
+			for i := range unit.dispatch.arms {
+				addStep(unit.dispatch.arms[i].body)
+				addRun(unit.dispatch.arms[i].bodyRun)
+			}
+		}
+	case unitForEach:
+		if unit.forEach != nil {
+			refs = append(refs, collectRefUses(unit.forEach.overRaw)...)
+			for _, ref := range unit.forEach.body.refs {
+				if ref.name != unit.forEach.binder && ref.name != "index" {
+					refs = append(refs, ref)
+				}
+			}
+			addRun(unit.forEach.bodyRun, unit.forEach.binder, "index")
+		}
+	case unitLoop:
+		if unit.loop != nil {
+			addStep(unit.loop.body)
+			addRun(unit.loop.bodyRun)
+		}
+	case unitCleanup:
+		if unit.cleanup != nil {
+			addStep(unit.cleanup.guarded)
+			addStep(unit.cleanup.body)
+		}
+	case unitRecover:
+		if unit.recover != nil {
+			addStep(unit.recover.guarded)
+			for _, ref := range unit.recover.body.refs {
+				if ref.name != unit.recover.errorBinding {
+					refs = append(refs, ref)
+				}
+			}
+		}
+	case unitTimeout:
+		if unit.timeout != nil {
+			addStep(unit.timeout.body)
+		}
+	}
+	return refs
+}
+
+func completionRefField(field string) bool {
+	switch field {
+	case "outcome", "error", "kind", "result", "reason":
+		return true
+	default:
+		return false
+	}
+}
+
+func collectRefUses(raw json.RawMessage) []refUse {
+	if len(raw) == 0 {
+		return nil
+	}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	var refs []refUse
+	var walk func(any)
+	walk = func(current any) {
+		switch typed := current.(type) {
+		case map[string]any:
+			if typed["kind"] == "ref" {
+				name, _ := typed["name"].(string)
+				field, _ := typed["field"].(string)
+				if name != "" {
+					refs = append(refs, refUse{name: name, field: field})
+				}
+			}
+			for _, child := range typed {
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	return refs
+}
+
+func stepRefUses(raw map[string]json.RawMessage, rendered string) []refUse {
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	refs := collectRefUses(encoded)
+	for _, match := range interpRe.FindAllStringSubmatch(rendered, -1) {
+		refs = append(refs, refUse{name: match[1]})
+	}
+	return refs
 }
 
 // wireOutcomeTransfers connects each public author to only the later members of
@@ -2926,6 +3117,13 @@ func decodeDo(n ir.Node) (step, error) {
 		return step{}, err
 	}
 	s.metadata = meta
+	var body struct {
+		Raw string `json:"raw"`
+	}
+	if raw, ok := n.Raw["body"]; ok {
+		_ = json.Unmarshal(raw, &body)
+	}
+	s.refs = stepRefUses(n.Raw, body.Raw)
 	return s, nil
 }
 
@@ -3098,6 +3296,7 @@ func decodeExec(n ir.Node, allowPending bool) (step, error) {
 		}
 	}
 
+	s.refs = stepRefUses(n.Raw, s.script)
 	return s, nil
 }
 
@@ -3114,6 +3313,7 @@ func decodeSettle(n ir.Node) step {
 	if raw, ok := n.Raw["publicOutcome"]; ok {
 		_ = json.Unmarshal(raw, &s.publicOutcome)
 	}
+	s.refs = stepRefUses(n.Raw, "")
 	return s
 }
 

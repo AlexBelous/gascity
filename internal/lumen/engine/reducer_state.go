@@ -11,7 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore/fold"
 )
 
-// lumenState is the reducer v5 carried-forward state (blueprint §2.1): the run
+// lumenState is the reducer v6 carried-forward state (blueprint §2.1): the run
 // identity (all timestamps sourced from payloads, keeping the fold clock-free)
 // plus the DAG of activations. Nodes is keyed by activation; every map walk is
 // in canonical (sorted) key order so the fold is deterministic (R-PURE).
@@ -55,6 +55,8 @@ type nodeState struct {
 	ParentActivation string   `json:"parent,omitempty"`
 	MemberIndex      *int     `json:"member_index,omitempty"`
 	After            []string `json:"after,omitempty"`
+	SkipDeps         []string `json:"skip_deps,omitempty"`
+	CompletionDeps   []string `json:"completion_deps,omitempty"`
 	Members          []string `json:"members,omitempty"`
 	Settled          bool     `json:"settled"`
 	Outcome          string   `json:"outcome,omitempty"`
@@ -101,6 +103,12 @@ func (s *lumenState) clone() *lumenState {
 			if v.After != nil {
 				nv.After = append([]string(nil), v.After...)
 			}
+			if v.SkipDeps != nil {
+				nv.SkipDeps = append([]string(nil), v.SkipDeps...)
+			}
+			if v.CompletionDeps != nil {
+				nv.CompletionDeps = append([]string(nil), v.CompletionDeps...)
+			}
 			if v.Members != nil {
 				nv.Members = append([]string(nil), v.Members...)
 			}
@@ -132,14 +140,35 @@ func (s *lumenState) StateHash() [32]byte {
 	return canon.Hash(b)
 }
 
-// isBlocking reports whether an outcome blocks its dependents from running (and
-// triggers the skip-cascade). failed, canceled, and skipped are blocking;
-// succeeded and degraded drain through. Making skipped blocking is what makes the
-// skip-cascade transitive (A fails → B skipped → C skipped).
+// isBlocking reports the outcome's failed/skipped class independent of a
+// dependency edge. Call dependencyBlocks when edge policy matters.
 func isBlocking(outcome string) bool {
 	switch outcome {
 	case OutcomeFailed, OutcomeCanceled, OutcomeSkipped:
 		return true
+	default:
+		return false
+	}
+}
+
+// dependencyBlocks reports whether one settled `after` dependency prevents a
+// node from running. Failed-class outcomes always block. In the current dialect
+// skipped is benign on ordering-only edges and blocks only real value reads;
+// legacy journals preserve the historical transitive skip cascade.
+func (s *lumenState) dependencyBlocks(n *nodeState, dependency, outcome string) bool {
+	switch outcome {
+	case OutcomeFailed:
+		if s.SemanticDialect == SemanticDialectCurrent &&
+			containsStr(n.CompletionDeps, dependency) &&
+			!containsStr(n.SkipDeps, dependency) {
+			return false
+		}
+		return true
+	case OutcomeCanceled:
+		return true
+	case OutcomeSkipped:
+		return s.SemanticDialect == SemanticDialectLegacy ||
+			containsStr(n.SkipDeps, dependency)
 	default:
 		return false
 	}
@@ -169,14 +198,12 @@ func ranOutcome(outcome string) bool {
 	}
 }
 
-// ready reports whether an activation is frontier-ready: activated, not
-// settled, every blocking `after` gate settled with a non-blocking outcome, and
-// its drain members settled with AT LEAST ONE having actually run. The drain
-// exception (H1) is scoped to member dependencies only — a scatter/gather's
-// non-member `after` gate blocks (and skip-cascades) exactly like any other
-// node's. An aggregate whose every drain member settled skipped/canceled did no
-// work: it is NOT ready — it skip-cascades and settles `skipped` (N-1), it does
-// not drain-and-run its combine. A single ran member makes it ready to drain.
+// ready reports whether an activation is frontier-ready: activated, not settled,
+// every `after` edge settled without halting under its dependency policy, and
+// its drain members settled with AT LEAST ONE having actually run. An aggregate
+// whose every drain member settled skipped/canceled did no work: it is NOT ready
+// and settles `skipped` (N-1) rather than running its combine. A single ran
+// member makes it ready to drain.
 func (s *lumenState) ready(n *nodeState) bool {
 	if n.Settled {
 		return false
@@ -186,7 +213,7 @@ func (s *lumenState) ready(n *nodeState) bool {
 		if d == nil || !d.Settled {
 			return false
 		}
-		if isBlocking(d.Outcome) {
+		if s.dependencyBlocks(n, dep, d.Outcome) {
 			return false
 		}
 	}
@@ -257,18 +284,22 @@ func (s *lumenState) activationKeys() []string {
 // scatter or gather drain into their aggregate rather than the run. An empty
 // run succeeds.
 func (s *lumenState) runOutcome() string {
-	var anyFailed, anyDegraded, anySettled bool
+	var anyFailed, anyDegraded, anyRan, anySkipped bool
 	for _, k := range s.activationKeys() {
 		n := s.Nodes[k]
 		if n.ParentActivation != "" || !n.Settled {
 			continue
 		}
-		anySettled = true
 		switch n.Outcome {
 		case OutcomeFailed, OutcomeCanceled:
 			anyFailed = true
 		case OutcomeDegraded:
 			anyDegraded = true
+			anyRan = true
+		case OutcomeSkipped:
+			anySkipped = true
+		default:
+			anyRan = true
 		}
 	}
 	switch {
@@ -276,8 +307,10 @@ func (s *lumenState) runOutcome() string {
 		return OutcomeFailed
 	case anyDegraded:
 		return OutcomeDegraded
-	case anySettled:
+	case anyRan:
 		return s.succeededOutcome()
+	case anySkipped && s.SemanticDialect == SemanticDialectCurrent:
+		return OutcomeSkipped
 	default:
 		return s.succeededOutcome()
 	}

@@ -638,9 +638,9 @@ func TestForEachRunBodyResumeGuardReadsBinder(t *testing.T) {
 	if resumed.NodeOutputs["fan/0/gthen"] != "hit match" {
 		t.Errorf("member 0 gthen = %q, want %q (guard TRUE reading item=match)", resumed.NodeOutputs["fan/0/gthen"], "hit match")
 	}
-	// Member 1 (item=nomatch): the guard decided FALSE on the RESUME pass → pass, no branch.
-	if settled["fan/1/g"] != engine.OutcomePass {
-		t.Errorf("member 1 guard = %q, want pass (FALSE decided on resume, no branch)", settled["fan/1/g"])
+	// Member 1 (item=nomatch): the guard decided FALSE on the RESUME pass → skipped.
+	if settled["fan/1/g"] != engine.OutcomeSkipped {
+		t.Errorf("member 1 guard = %q, want skipped (FALSE decided on resume)", settled["fan/1/g"])
 	}
 	if _, ran := settled["fan/1/gthen"]; ran {
 		t.Errorf("member 1 gthen ran; the guard cond (item=nomatch) must decide FALSE on resume")

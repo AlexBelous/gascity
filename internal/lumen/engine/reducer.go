@@ -8,28 +8,28 @@ import (
 )
 
 // lumenReducer is the pure, total fold from the Lumen event stream to the
-// graph projection (nodes / edges / frontier) — reducer v5 (blueprint §2). It
+// graph projection (nodes / edges / frontier) — reducer v6 (blueprint §2). It
 // performs no I/O and reads no clock: every timestamp it projects comes from an
 // event payload (run.started carries created_at, threaded onto every node row).
 //
 // The DAG is carried IN the journal: node.activated events name their
 // dependency edges (as activation keys), so the fold builds readiness purely
-// from the log with no external IR lookup (D-P4-1). The frontier is deps-settled
-// readiness WITH skip-cascade: a node whose dependency settled with a blocking
-// outcome (failed / canceled / skipped) never becomes ready, and the executor
-// settles it `skipped` rather than running it.
+// from the log with no external IR lookup (D-P4-1). Frontier readiness applies
+// the folded edge policy: real failed/skipped value dependencies halt, while
+// current-dialect skipped ordering edges and failed completion-only edges remain
+// live.
 type lumenReducer struct{}
 
 var _ fold.Reducer = lumenReducer{}
 
-// Reducer returns the Lumen fold reducer (v5). It is the reducer a store uses to
+// Reducer returns the Lumen fold reducer (v6). It is the reducer a store uses to
 // rebuild or resume a lumen stream, and the one tests fold goldens through.
 func Reducer() fold.Reducer { return lumenReducer{} }
 
 // Engine reports the engine tag.
 func (lumenReducer) Engine() string { return Engine }
 
-// ReducerVersion reports the stamped reducer version (v5).
+// ReducerVersion reports the stamped reducer version (v6).
 func (lumenReducer) ReducerVersion() int { return reducerVersion }
 
 // Zero returns the empty fold state. The stream id is read from each event
@@ -162,6 +162,8 @@ func applyNodeActivated(next *lumenState, e fold.Event) (fold.State, fold.Delta,
 		ParentActivation: p.ParentActivation,
 		MemberIndex:      p.MemberIndex,
 		After:            append([]string(nil), p.After...),
+		SkipDeps:         append([]string(nil), p.SkipDeps...),
+		CompletionDeps:   append([]string(nil), p.CompletionDeps...),
 		Members:          append([]string(nil), p.Members...),
 		DispatchMode:     p.DispatchMode,
 		Route:            p.Route,

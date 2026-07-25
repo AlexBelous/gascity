@@ -108,12 +108,12 @@ func TestScatterRunMemberFailedOnFailStopFails(t *testing.T) {
 	}
 }
 
-// TestScatterRunMemberSkippedOnFailStopDegrades pins the ⚑ nuance: a run member that
+// TestScatterRunMemberSkippedOnFailStopIsBenign pins the ⚑ nuance: a run member that
 // SKIPS (its environment gates on a failed node OUTSIDE the scatter) is didNotRun, not
-// blocking — so under on_fail=stop the scatter DEGRADES rather than fails (a skipped
+// blocking — so under on_fail=stop the scatter succeeds rather than fails (a skipped
 // member ≠ a failed member). The env ref is to an outside NODE (an input ref would create
 // no gate), and that node is not a scatter member (so ⚑SF-1 does not refuse it).
-func TestScatterRunMemberSkippedOnFailStopDegrades(t *testing.T) {
+func TestScatterRunMemberSkippedOnFailStopIsBenign(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	doc := decodeIR(t, bundleDoc(
@@ -137,8 +137,8 @@ func TestScatterRunMemberSkippedOnFailStopDegrades(t *testing.T) {
 		t.Errorf("run member extra settled %q, want skipped (env gate on the failed outside node)", settled["extra"])
 	}
 	// THE pin: a skipped run member does NOT trip on_fail=stop's blocking path.
-	if settled["lanes"] != engine.OutcomeDegraded {
-		t.Errorf("scatter lanes settled %q, want degraded (skipped run member ≠ blocking under on_fail=stop)", settled["lanes"])
+	if settled["lanes"] != engine.OutcomePass {
+		t.Errorf("scatter lanes settled %q, want succeeded (skipped run member is benign)", settled["lanes"])
 	}
 	if err := store.Verify(ctx, res.StreamID); err != nil {
 		t.Errorf("Verify: %v", err)

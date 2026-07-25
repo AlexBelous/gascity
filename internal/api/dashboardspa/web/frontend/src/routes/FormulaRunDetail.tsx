@@ -60,9 +60,11 @@ export function FormulaRunDetailPage() {
   // signal and from a generic transport failure. We surface it as its own honest
   // "detail snapshot not found" state instead of mislabeling it as v1.
   const notFound = runDetail.kind === 'not_found';
+  // The diff requests by run id alone (the server resolves the execution path);
+  // it still waits for detail to load, since the Diff panel only renders once the
+  // run detail is ready and a non-run-view run has no diff to show.
   const runDiff = useRunDiff(
     routeError || detail === null ? undefined : runId,
-    detail?.executionPath,
     scope?.scopeKind,
     scope?.scopeRef,
   );

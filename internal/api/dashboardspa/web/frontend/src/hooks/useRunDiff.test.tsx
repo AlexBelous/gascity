@@ -27,7 +27,7 @@ afterEach(() => {
 
 describe('useRunDiff', () => {
   it('does not fetch or report when no run id is available', async () => {
-    const { result } = renderHook(() => useRunDiff(undefined, knownPath()));
+    const { result } = renderHook(() => useRunDiff(undefined));
 
     await waitFor(() => expect(result.current.kind).toBe('idle'));
 
@@ -35,58 +35,55 @@ describe('useRunDiff', () => {
     expect(mockReportClientError).not.toHaveBeenCalled();
   });
 
-  it('does not fetch before the supervisor detail resolves an execution path', async () => {
-    const { result } = renderHook(() => useRunDiff('wf-1', undefined));
-
-    await waitFor(() => expect(result.current.kind).toBe('idle'));
-
-    expect(mockRunDiff).not.toHaveBeenCalled();
-    expect(mockReportClientError).not.toHaveBeenCalled();
-  });
-
-  it('returns a real failed state and reports diff load failures', async () => {
-    mockRunDiff.mockRejectedValue(new Error('git unavailable'));
-
-    const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
-
-    await waitFor(() =>
-      expect(result.current).toMatchObject({
-        kind: 'failed',
-        error: 'git unavailable',
-      }),
-    );
-
-    expect(mockReportClientError).toHaveBeenCalledWith({
-      component: 'formula-run-detail',
-      operation: 'load diff',
-      message: 'wf-1: git unavailable',
-    });
-  });
-
-  it('returns the loaded diff independently of the run detail resource', async () => {
+  it('requests the diff by run id with NO execution path (the server resolves it)', async () => {
     const diff = okDiff();
     mockRunDiff.mockResolvedValue(diff);
 
-    const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
+    const { result } = renderHook(() => useRunDiff('wf-1'));
 
     await waitFor(() => expect(result.current.kind).toBe('ready'));
 
     if (result.current.kind !== 'ready') throw new Error('diff did not load');
     expect(result.current.diff).toBe(diff);
     expect(result.current.refreshState).toEqual({ kind: 'idle' });
-    expect(mockRunDiff).toHaveBeenCalledWith(
-      'wf-1',
-      {
-        executionPath: knownPath(),
-      },
-      {},
+    // The body carries no executionPath — just an empty object.
+    expect(mockRunDiff).toHaveBeenCalledWith('wf-1', {}, {});
+  });
+
+  it('renders the server 4xx/403 message verbatim on the failed state', async () => {
+    // The server returns a 403 on the read-only floor (or a 4xx no-known-path);
+    // the hook surfaces the message so the diff panel can render it verbatim.
+    mockRunDiff.mockRejectedValue(new Error("Run diff isn't available on this read-only dashboard."));
+
+    const { result } = renderHook(() => useRunDiff('wf-1'));
+
+    await waitFor(() =>
+      expect(result.current).toMatchObject({
+        kind: 'failed',
+        error: "Run diff isn't available on this read-only dashboard.",
+      }),
     );
+
+    expect(mockReportClientError).toHaveBeenCalledWith({
+      component: 'formula-run-detail',
+      operation: 'load diff',
+      message: "wf-1: Run diff isn't available on this read-only dashboard.",
+    });
+  });
+
+  it('passes the scope through to the request query', async () => {
+    mockRunDiff.mockResolvedValue(okDiff());
+
+    const { result } = renderHook(() => useRunDiff('wf-1', 'rig', 'demo'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+
+    expect(mockRunDiff).toHaveBeenCalledWith('wf-1', {}, { scopeKind: 'rig', scopeRef: 'demo' });
   });
 
   it('sends refresh=true on an explicit manual refresh (the bypass-lane client contract)', async () => {
     mockRunDiff.mockResolvedValue(okDiff());
 
-    const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
+    const { result } = renderHook(() => useRunDiff('wf-1'));
     await waitFor(() => expect(result.current.kind).toBe('ready'));
     if (result.current.kind !== 'ready') throw new Error('diff did not load');
     mockRunDiff.mockClear();
@@ -95,17 +92,13 @@ describe('useRunDiff', () => {
       await result.current.refresh();
     });
 
-    expect(mockRunDiff).toHaveBeenCalledWith(
-      'wf-1',
-      { executionPath: knownPath() },
-      { refresh: true },
-    );
+    expect(mockRunDiff).toHaveBeenCalledWith('wf-1', {}, { refresh: true });
   });
 
   it('omits refresh on cheapRefresh (the event-driven cheap-lane client contract)', async () => {
     mockRunDiff.mockResolvedValue(okDiff());
 
-    const { result } = renderHook(() => useRunDiff('wf-1', knownPath()));
+    const { result } = renderHook(() => useRunDiff('wf-1'));
     await waitFor(() => expect(result.current.kind).toBe('ready'));
     if (result.current.kind !== 'ready') throw new Error('diff did not load');
     mockRunDiff.mockClear();
@@ -118,13 +111,9 @@ describe('useRunDiff', () => {
     // future server-side diff cache. It is inert on the wire today (runQuery
     // drops the flag, no cache exists); the live burst protection is the
     // tab-gating + useGcEventRefresh coalescing, not this flag.
-    expect(mockRunDiff).toHaveBeenCalledWith('wf-1', { executionPath: knownPath() }, {});
+    expect(mockRunDiff).toHaveBeenCalledWith('wf-1', {}, {});
   });
 });
-
-function knownPath() {
-  return { kind: 'known' as const, path: '/tmp/run' };
-}
 
 function okDiff(): RunDiffResponse {
   return {

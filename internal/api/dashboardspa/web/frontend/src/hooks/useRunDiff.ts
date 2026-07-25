@@ -1,4 +1,4 @@
-import type { RunDiffResponse, RunExecutionPath, RunScopeKind } from 'gas-city-dashboard-shared';
+import type { RunDiffResponse, RunScopeKind } from 'gas-city-dashboard-shared';
 import { errorMessage } from 'gas-city-dashboard-shared';
 import { api } from '../api/client';
 import { reportClientError } from '../lib/clientErrorReporting';
@@ -40,16 +40,22 @@ export type RunDiffLoadState =
     })
   | (RunDiffState & { kind: 'failed'; error: string });
 
+/**
+ * The diff is requested by run id ALONE — the server resolves the run's git cwd
+ * from its own detail projection, so the browser no longer sends a filesystem
+ * executionPath (which the public read-only shield scrubbed, breaking the request).
+ * A run whose folder is outside the served roots, or a run with no known execution
+ * path, surfaces as a server 4xx/403 whose message the diff panel renders verbatim.
+ */
 export function useRunDiff(
   runId: string | undefined,
-  executionPath: RunExecutionPath | undefined,
   scopeKind?: RunScopeKind,
   scopeRef?: string,
 ): RunDiffLoadState {
-  const key = runDiffCacheKey(runId, executionPath, scopeKind, scopeRef);
+  const key = runDiffCacheKey(runId, scopeKind, scopeRef);
   const { data, loading, error, refresh, cheapRefresh } = useCachedData(
     key,
-    () => loadRunDiff(runId, executionPath, scopeKind, scopeRef),
+    () => loadRunDiff(runId, scopeKind, scopeRef),
     {
       // refresh=true/false is a forward-compat CLIENT contract for a future
       // server-side diff cache: the manual Refresh button takes the bypass lane
@@ -59,15 +65,15 @@ export function useRunDiff(
       // win is the tab-gating in FormulaRunDetail (the diff refetches only while
       // the Diff tab is open), not the flag. When a server diff cache lands, the
       // cheap lane already lets it absorb bursts with no client change.
-      refreshFetcher: () => loadRunDiff(runId, executionPath, scopeKind, scopeRef, true),
-      sseRefreshFetcher: () => loadRunDiff(runId, executionPath, scopeKind, scopeRef, false),
+      refreshFetcher: () => loadRunDiff(runId, scopeKind, scopeRef, true),
+      sseRefreshFetcher: () => loadRunDiff(runId, scopeKind, scopeRef, false),
       onError: (err) => {
         if (runId !== undefined) reportRunDiffError('load diff', runId, err);
       },
     },
   );
 
-  if (runId === undefined || executionPath === undefined) {
+  if (runId === undefined) {
     return { kind: 'idle', refresh: noopRefresh, cheapRefresh: noopRefresh };
   }
   if (data?.kind === 'loaded') {
@@ -85,17 +91,17 @@ export function useRunDiff(
 
 async function loadRunDiff(
   runId: string | undefined,
-  executionPath: RunExecutionPath | undefined,
   scopeKind?: RunScopeKind,
   scopeRef?: string,
   refresh?: boolean,
 ): Promise<RunDiffPayload> {
-  if (!runId || executionPath === undefined) return { kind: 'unrequested' };
+  if (!runId) return { kind: 'unrequested' };
   const params: { scopeKind?: RunScopeKind; scopeRef?: string; refresh?: boolean } = {};
   if (scopeKind !== undefined) params.scopeKind = scopeKind;
   if (scopeRef !== undefined) params.scopeRef = scopeRef;
   if (refresh) params.refresh = true;
-  const diff = await api.runDiff(runId, { executionPath }, params);
+  // No executionPath: the server resolves the run's git cwd from the run id.
+  const diff = await api.runDiff(runId, {}, params);
   return { kind: 'loaded', diff };
 }
 
@@ -116,22 +122,14 @@ function reportRunDiffError(operation: string, runId: string, err: unknown): voi
 
 function runDiffCacheKey(
   runId: string | undefined,
-  executionPath: RunExecutionPath | undefined,
   scopeKind?: RunScopeKind,
   scopeRef?: string,
 ): string {
   const parts = [
     'formula-run-diff',
     runId ?? 'missing',
-    executionPathCacheKey(executionPath),
     scopeKind ?? 'default',
     scopeRef ?? 'default',
   ];
   return parts.join(':');
-}
-
-function executionPathCacheKey(executionPath: RunExecutionPath | undefined): string {
-  if (executionPath === undefined) return 'path:missing';
-  if (executionPath.kind === 'known') return `path:${executionPath.path}`;
-  return `path:${executionPath.reason}`;
 }

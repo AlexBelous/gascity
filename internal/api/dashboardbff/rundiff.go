@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -60,11 +61,15 @@ type runChangedFile struct {
 }
 
 // runDiffRequest decodes the POST body. It mirrors RunDiffRequest:
-// { executionPath: RunExecutionPath }. The execution path (the git cwd) is
-// supplied by the browser from the run-detail it already loaded — there is NO
-// supervisor round-trip in this endpoint. The scope_kind/scope_ref query
-// params are validated for shape (matching the BFF route guard) but the cwd
-// comes solely from this body.
+// { executionPath?: RunExecutionPath }. executionPath is OPTIONAL: when it is
+// omitted (an empty body, {}, or a null/empty executionPath) the git cwd is
+// resolved SERVER-side from the run id via the same run-detail projection the
+// detail endpoint serves, so the browser never has to send a filesystem path
+// (and the public read-only shield, which scrubs executionPath from the projected
+// detail, can still diff). A client that DOES supply executionPath keeps the old
+// contract for back-compat. Either way the resolved cwd passes the same
+// isValidRunCwd/allowedRoots gate. The scope_kind/scope_ref query params are
+// validated for shape (matching the BFF route guard) but do not resolve the cwd.
 type runDiffRequest struct {
 	ExecutionPath runExecutionPath `json:"executionPath"`
 }
@@ -114,11 +119,14 @@ func (p *Plane) handleRunDiff(w http.ResponseWriter, r *http.Request) {
 
 	var body runDiffRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	if err := dec.Decode(&body); err != nil {
+	// An empty body (io.EOF) is a valid run-id-only request: it leaves body at its
+	// zero value (executionPath kind ""), which resolveRunDiffCwd resolves
+	// server-side. Any other decode failure is a malformed body.
+	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "request body must be a JSON object")
 		return
 	}
-	cwd, ferr := body.ExecutionPath.resolve()
+	cwd, ferr := p.resolveRunDiffCwd(r.Context(), cityName, runID, body.ExecutionPath)
 	if ferr != "" {
 		writeError(w, http.StatusBadRequest, ferr)
 		return
@@ -154,6 +162,46 @@ func (p *Plane) handleRunDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// resolveRunDiffCwd picks the git cwd for a run diff. A client-supplied
+// executionPath (kind "known"/"unavailable") is honored for back-compat; an
+// omitted path (the zero-value kind "") is resolved SERVER-side from the run's
+// own detail projection. Either way the returned cwd is still gated by
+// isValidRunCwd in readRunGitDiff — this only selects WHICH path, it never
+// bypasses the allowlist. Returns ("", msg) for a 400.
+func (p *Plane) resolveRunDiffCwd(ctx context.Context, cityName, runID string, ep runExecutionPath) (cwd string, errMsg string) {
+	if ep.Kind != "" {
+		return ep.resolve()
+	}
+	return p.resolveRunExecutionCwd(ctx, cityName, runID)
+}
+
+// resolveRunExecutionCwd resolves a run's git cwd from its bead-derived
+// run-detail projection — the same seam the run-detail endpoint serves — reading
+// the detail's executionPath {kind:"known", path}. This is why the browser can
+// send the run id alone: the server already knows where the run executed, and the
+// public read-only shield can scrub executionPath from the projected detail
+// without breaking the diff. An unknown run, a still-warming projection, an
+// unsupported (v1/wisp) run, or a run whose path is unavailable all collapse to
+// the same clear 400 — from the diff endpoint's view they mean the same thing: no
+// folder to diff. The resolved path is NOT trusted; it flows through the same
+// isValidRunCwd/allowedRoots gate in readRunGitDiff as a client-supplied path.
+func (p *Plane) resolveRunExecutionCwd(ctx context.Context, cityName, runID string) (cwd string, errMsg string) {
+	const noPath = "run has no known execution path"
+	t, ok := p.cityRunTailer(cityName)
+	if !ok {
+		return "", noPath
+	}
+	value, _, err := t.detail(ctx, runID)
+	if err != nil {
+		return "", noPath
+	}
+	ep := value.detail.ExecutionPath
+	if ep.Kind != "known" || strings.TrimSpace(ep.Path) == "" {
+		return "", noPath
+	}
+	return ep.Path, ""
 }
 
 // validateRunScopeQuery mirrors the BFF's fromRequestScope shape checks. The

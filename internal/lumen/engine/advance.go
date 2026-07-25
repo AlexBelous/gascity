@@ -281,6 +281,9 @@ func (d *driver) advanceUnit(u planUnit, scope, nodeOutputs map[string]string, o
 	if err != nil || handled {
 		return err
 	}
+	if d.outcomeScopeTerminated(u) {
+		return nil
+	}
 
 	if u.silent {
 		// A pure lit/interp: compute its scope value once its deps have settled;
@@ -598,8 +601,8 @@ func (d *driver) appendPoolActivated(u planUnit, route, prompt string) error {
 		Activation:       u.activation,
 		ParentActivation: u.parent,
 		MemberIndex:      u.memberIndex,
-		After:            u.afterDeps,
-		Members:          u.memberDeps,
+		After:            d.effectiveAfterDeps(u),
+		Members:          d.effectiveMemberDeps(u),
 		Kind:             string(u.irKind),
 		DispatchMode:     DispatchModePool,
 		Route:            route,
@@ -614,12 +617,12 @@ func (d *driver) appendPoolActivated(u planUnit, route, prompt string) error {
 // defer decision is consistent with Run's ordering and the reducer's ready().
 func (d *driver) depsSettled(u planUnit) bool {
 	st := d.st()
-	for _, dep := range u.afterDeps {
+	for _, dep := range d.effectiveAfterDeps(u) {
 		if _, settled := st.outcomeOf(dep); !settled {
 			return false
 		}
 	}
-	for _, m := range u.memberDeps {
+	for _, m := range d.effectiveMemberDeps(u) {
 		if _, settled := st.outcomeOf(m); !settled {
 			return false
 		}
@@ -1496,6 +1499,9 @@ func (d *driver) allUnitsSettled(units []planUnit) bool {
 			continue
 		}
 		n := st.Nodes[units[i].activation]
+		if n == nil && d.outcomeScopeTerminated(units[i]) {
+			continue
+		}
 		if n == nil || !n.Settled {
 			return false
 		}

@@ -66,7 +66,9 @@ type step struct {
 	env          []string
 
 	// settle fields.
-	outcome string
+	outcome       string
+	reason        string
+	publicOutcome bool
 
 	// do fields.
 	agentRef string
@@ -80,6 +82,26 @@ type step struct {
 
 	// settle/lit/interp/do value evaluation.
 	raw map[string]json.RawMessage
+}
+
+// outcomeScopePosition identifies one direct member of an executable formula or
+// grouping-block scope. A unit can belong to multiple scopes when blocks nest;
+// positions are stored nearest-scope first.
+type outcomeScopePosition struct {
+	scope  int
+	member int
+}
+
+// outcomeTransfer is the minimal durable-plan description needed to recognize
+// that an authored settle actually transferred control. ownerActivation must
+// settle before the transfer can escape (so a cleanup finalizer runs first);
+// sourceActivation is the authored settle itself.
+type outcomeTransfer struct {
+	ownerActivation  string
+	sourceActivation string
+	sourceOutcome    string
+	sourceDetail     string
+	nonFailedOnly    bool
 }
 
 // unitKind classifies a plan unit's execution shape.
@@ -114,6 +136,15 @@ type planUnit struct {
 	ns          string // the namespace this unit renders in ("" = root, "greeting/" = a run sub-graph)
 
 	rawAfter []string // IR `after` node ids
+
+	// outcomeScopes preserve only the block/formula membership needed for public
+	// outcome authors. outcomeAuthor describes a transfer this unit propagates;
+	// haltOn lists earlier authors whose completed transfer prevents this unit's
+	// admission. depHaltOn lets drain aggregates omit never-admitted children.
+	outcomeScopes []outcomeScopePosition
+	outcomeAuthor *outcomeTransfer
+	haltOn        []outcomeTransfer
+	depHaltOn     map[string][]outcomeTransfer
 
 	// Dependencies are split by kind so the drain exception is scoped correctly
 	// (H1): afterDeps are blocking gates (a failed/skipped one skip-cascades this
@@ -446,6 +477,12 @@ type lowerer struct {
 	targetStack []string
 	inAggregate bool
 
+	// nextOutcomeScope assigns deterministic, plan-local identities to formula and
+	// grouping-block scopes. consumeOutcomeTransfer is set only while lowering a
+	// direct aggregate member, whose author is consumed by that aggregate.
+	nextOutcomeScope       int
+	consumeOutcomeTransfer bool
+
 	// inputNames is the MAIN document's declared input field names — the immutable,
 	// tick-stable ref set a run-body repeat cond may read besides its own body and
 	// iteration (the re-decide freeze in lowerLoop). Run-body loops are entry-top-level
@@ -486,9 +523,22 @@ func (l *lowerer) qAfter(after []string) []string {
 }
 
 func (l *lowerer) lowerNodes(nodes []ir.Node, parent string) error {
+	scope := l.nextOutcomeScope
+	l.nextOutcomeScope++
+	savedConsumed := l.consumeOutcomeTransfer
+	l.consumeOutcomeTransfer = false
+	defer func() {
+		l.consumeOutcomeTransfer = savedConsumed
+	}()
+
 	for i := range nodes {
+		firstUnit := len(l.units)
 		if err := l.lowerNode(nodes[i], parent, nil); err != nil {
 			return err
+		}
+		position := outcomeScopePosition{scope: scope, member: i}
+		for unitIndex := firstUnit; unitIndex < len(l.units); unitIndex++ {
+			l.units[unitIndex].outcomeScopes = append(l.units[unitIndex].outcomeScopes, position)
 		}
 	}
 	return nil
@@ -607,15 +657,19 @@ func (l *lowerer) lowerScatter(n ir.Node, parent string) error {
 	firstUnit := len(l.units)
 	var memberActs []string
 	savedAgg := l.inAggregate
+	savedConsumed := l.consumeOutcomeTransfer
 	l.inAggregate = true // members are under an aggregate: fences a for-each/cleanup/recover member (a run/loop member is allowed)
+	l.consumeOutcomeTransfer = true
 	for i := range members {
 		idx := i
 		if err := l.lowerNode(members[i], scatterAct, &idx); err != nil {
 			l.inAggregate = savedAgg
+			l.consumeOutcomeTransfer = savedConsumed
 			return err
 		}
 	}
 	l.inAggregate = savedAgg
+	l.consumeOutcomeTransfer = savedConsumed
 	// Direct members only (L1): a member unit is one lowered directly under this
 	// scatter (parent == scatterAct). A nested scatter/block contributes its own
 	// aggregate/children as inner units parented elsewhere — those must NOT inflate
@@ -928,7 +982,7 @@ func (l *lowerer) lowerCleanup(n ir.Node, parent string) error {
 	if err != nil {
 		return err
 	}
-	l.units = append(l.units, planUnit{
+	unit := planUnit{
 		kind:       unitCleanup,
 		activation: activationFor(l.qid(n.ID)),
 		nodeID:     l.qid(n.ID),
@@ -944,7 +998,16 @@ func (l *lowerer) lowerCleanup(n ir.Node, parent string) error {
 			bodyIRKind:    bKind,
 			body:          bStep,
 		},
-	})
+	}
+	if gStep.publicOutcome {
+		unit.outcomeAuthor = authoredOutcomeTransfer(
+			unit.activation,
+			activationFor(l.qid(guarded.ID)),
+			gStep,
+			false,
+		)
+	}
+	l.units = append(l.units, unit)
 	return nil
 }
 
@@ -1141,7 +1204,7 @@ func (l *lowerer) lowerRecover(n ir.Node, parent string) error {
 	if strings.ContainsAny(errorBinding, "./:") {
 		return fmt.Errorf("%w: recover %q errorBinding %q must not contain '.', '/', or ':'", ErrUnsupportedNode, n.ID, errorBinding)
 	}
-	l.units = append(l.units, planUnit{
+	unit := planUnit{
 		kind:       unitRecover,
 		activation: activationFor(l.qid(n.ID)),
 		nodeID:     l.qid(n.ID),
@@ -1158,7 +1221,16 @@ func (l *lowerer) lowerRecover(n ir.Node, parent string) error {
 			body:          bStep,
 			errorBinding:  errorBinding,
 		},
-	})
+	}
+	if gStep.publicOutcome {
+		unit.outcomeAuthor = authoredOutcomeTransfer(
+			unit.activation,
+			activationFor(l.qid(guarded.ID)),
+			gStep,
+			true,
+		)
+	}
+	l.units = append(l.units, unit)
 	return nil
 }
 
@@ -2541,7 +2613,53 @@ func (l *lowerer) resolveDeps() error {
 		}
 	}
 
+	l.wireOutcomeTransfers()
 	return nil
+}
+
+// wireOutcomeTransfers connects each public author to only the later members of
+// its nearest formula/block scope. It also records when a dependency may be
+// absent because that later member was never admitted.
+func (l *lowerer) wireOutcomeTransfers() {
+	for authorIndex := range l.units {
+		authorUnit := &l.units[authorIndex]
+		if authorUnit.outcomeAuthor == nil || len(authorUnit.outcomeScopes) == 0 {
+			continue
+		}
+		transfer := *authorUnit.outcomeAuthor
+		nearest := authorUnit.outcomeScopes[0]
+		for candidateIndex := range l.units {
+			candidate := &l.units[candidateIndex]
+			for _, position := range candidate.outcomeScopes {
+				if position.scope != nearest.scope || position.member <= nearest.member {
+					continue
+				}
+				candidate.haltOn = append(candidate.haltOn, transfer)
+				break
+			}
+		}
+	}
+
+	byActivation := make(map[string]*planUnit, len(l.units))
+	for i := range l.units {
+		byActivation[l.units[i].activation] = &l.units[i]
+	}
+	for i := range l.units {
+		unit := &l.units[i]
+		for _, dependency := range unit.allDeps() {
+			dependencyUnit := byActivation[dependency]
+			if dependencyUnit == nil || len(dependencyUnit.haltOn) == 0 {
+				continue
+			}
+			if unit.depHaltOn == nil {
+				unit.depHaltOn = make(map[string][]outcomeTransfer)
+			}
+			unit.depHaltOn[dependency] = append(
+				[]outcomeTransfer(nil),
+				dependencyUnit.haltOn...,
+			)
+		}
+	}
 }
 
 // nonSilentClosure returns the settleable activations a dependency contributes as a
@@ -2736,7 +2854,7 @@ func (spec *loopSpec) mintRunBodyAttempt(attempt int, loopActivation, loopNS str
 }
 
 func (l *lowerer) addLeaf(n ir.Node, parent string, memberIndex *int, s step, silent bool) {
-	l.units = append(l.units, planUnit{
+	unit := planUnit{
 		kind:        unitLeaf,
 		activation:  activationFor(l.qid(n.ID)),
 		nodeID:      l.qid(n.ID),
@@ -2747,7 +2865,11 @@ func (l *lowerer) addLeaf(n ir.Node, parent string, memberIndex *int, s step, si
 		ns:          l.prefix,
 		rawAfter:    l.qAfter(n.After),
 		leaf:        s,
-	})
+	}
+	if s.publicOutcome && !l.consumeOutcomeTransfer {
+		unit.outcomeAuthor = authoredOutcomeTransfer(unit.activation, unit.activation, s, false)
+	}
+	l.units = append(l.units, unit)
 }
 
 // gatherOverName extracts the scatter node id a gather drains from its `over`
@@ -2979,14 +3101,30 @@ func decodeExec(n ir.Node, allowPending bool) (step, error) {
 	return s, nil
 }
 
-// decodeSettle lifts a settle node's outcome into a step; its value expression
-// is evaluated later against the live scope.
+// decodeSettle lifts a settle node's outcome and public-author marker into a
+// step; its value expression is evaluated later against the live scope.
 func decodeSettle(n ir.Node) step {
 	s := step{kind: ir.NodeSettle, id: n.ID, raw: n.Raw}
 	if raw, ok := n.Raw["outcome"]; ok {
 		_ = json.Unmarshal(raw, &s.outcome)
 	}
+	if raw, ok := n.Raw["reason"]; ok {
+		_ = json.Unmarshal(raw, &s.reason)
+	}
+	if raw, ok := n.Raw["publicOutcome"]; ok {
+		_ = json.Unmarshal(raw, &s.publicOutcome)
+	}
 	return s
+}
+
+func authoredOutcomeTransfer(owner, source string, authored step, nonFailedOnly bool) *outcomeTransfer {
+	return &outcomeTransfer{
+		ownerActivation:  owner,
+		sourceActivation: source,
+		sourceOutcome:    authored.outcome,
+		sourceDetail:     authored.reason,
+		nonFailedOnly:    nonFailedOnly,
+	}
 }
 
 // evalValue renders an IR value expression to a string against scope.

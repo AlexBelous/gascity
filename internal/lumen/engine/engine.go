@@ -400,12 +400,89 @@ func (d *driver) outcomeForDialect(outcome string) string {
 	return outcome
 }
 
+// outcomeTransferOccurred reports whether an authored public settle actually
+// escaped its wrapper. The source match distinguishes an evaluated author from
+// the same activation being skip-cascaded, while the owner settlement delays a
+// cleanup transfer until its finalizer has run. Legacy journals retain their
+// historical sequential-settle behavior.
+func (d *driver) outcomeTransferOccurred(transfer outcomeTransfer) bool {
+	st := d.st()
+	if st.SemanticDialect != SemanticDialectCurrent {
+		return false
+	}
+	owner := st.Nodes[transfer.ownerActivation]
+	source := st.Nodes[transfer.sourceActivation]
+	if owner == nil || !owner.Settled || source == nil || !source.Settled {
+		return false
+	}
+	if source.Outcome != d.outcomeForDialect(transfer.sourceOutcome) ||
+		source.Detail != transfer.sourceDetail {
+		return false
+	}
+	return !transfer.nonFailedOnly || source.Outcome != OutcomeFailed
+}
+
+// outcomeScopeTerminated reports whether a not-yet-admitted unit belongs to the
+// sequential tail of a scope already settled by an outcome author. Work already
+// present in the fold must drain normally.
+func (d *driver) outcomeScopeTerminated(u planUnit) bool {
+	if d.st().Nodes[u.activation] != nil {
+		return false
+	}
+	for _, transfer := range u.haltOn {
+		if d.outcomeTransferOccurred(transfer) {
+			return true
+		}
+	}
+	return false
+}
+
+// dependencyHalted reports whether a dependency will never be admitted because
+// an outcome author settled its scope. An already-admitted dependency is never
+// removed: authored settlement prevents new admission but does not detach work.
+func (d *driver) dependencyHalted(u planUnit, activation string) bool {
+	if d.st().Nodes[activation] != nil {
+		return false
+	}
+	for _, transfer := range u.depHaltOn[activation] {
+		if d.outcomeTransferOccurred(transfer) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *driver) effectiveDeps(u planUnit, deps []string) []string {
+	var effective []string
+	for _, dep := range deps {
+		if d.dependencyHalted(u, dep) {
+			continue
+		}
+		effective = append(effective, dep)
+	}
+	if len(effective) == len(deps) {
+		return deps
+	}
+	return effective
+}
+
+func (d *driver) effectiveAfterDeps(u planUnit) []string {
+	return d.effectiveDeps(u, u.afterDeps)
+}
+
+func (d *driver) effectiveMemberDeps(u planUnit) []string {
+	return d.effectiveDeps(u, u.memberDeps)
+}
+
 // runUnit drives one plan unit through the decide -> persist -> act -> persist
 // cycle. A silent (pure lit/interp) unit only computes its scope value. Every
 // other unit emits node.activated, then — if a leaf's dependency settled with a
 // blocking outcome — settles `skipped` (the skip-cascade), otherwise runs and
 // settles its real outcome.
 func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error {
+	if d.outcomeScopeTerminated(u) {
+		return nil
+	}
 	if u.silent {
 		view, err := d.scopeFor(u.ns, scope)
 		if err != nil {
@@ -519,7 +596,7 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 // drains into its aggregate, it does not skip it).
 func (d *driver) blocked(u planUnit) bool {
 	st := d.st()
-	for _, dep := range u.afterDeps {
+	for _, dep := range d.effectiveAfterDeps(u) {
 		if outcome, settled := st.outcomeOf(dep); settled && isBlocking(outcome) {
 			return true
 		}
@@ -534,11 +611,12 @@ func (d *driver) blocked(u planUnit) bool {
 // have skipped). It reads memberDeps — the same edge set the reducer's ready()
 // gates on (nodeState.Members) — so the executor and the fold stay in agreement.
 func (d *driver) aggregateAllSkipped(u planUnit) bool {
-	if len(u.memberDeps) == 0 {
+	members := d.effectiveMemberDeps(u)
+	if len(members) == 0 {
 		return false
 	}
 	st := d.st()
-	for _, m := range u.memberDeps {
+	for _, m := range members {
 		o, settled := st.outcomeOf(m)
 		if !settled || !didNotRun(o) {
 			return false
@@ -2531,8 +2609,8 @@ func (d *driver) appendActivated(u planUnit) error {
 		Activation:       u.activation,
 		ParentActivation: u.parent,
 		MemberIndex:      u.memberIndex,
-		After:            u.afterDeps,
-		Members:          u.memberDeps,
+		After:            d.effectiveAfterDeps(u),
+		Members:          d.effectiveMemberDeps(u),
 		Kind:             string(u.irKind),
 		Duration:         duration,
 	})

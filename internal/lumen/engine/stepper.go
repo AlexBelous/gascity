@@ -125,6 +125,9 @@ func Settle(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID s
 	// (its deps are settled by construction), so a duplicate Settle stays a no-op via the
 	// idem-token dedup below.
 	if n := d.st().Nodes[u.activation]; n == nil || !n.Settled {
+		if d.outcomeScopeTerminated(u) {
+			return StepResult{}, fmt.Errorf("lumen: settle: do %q was not admitted because its outcome scope already settled", node)
+		}
 		if !d.depsSettled(u) {
 			return StepResult{}, fmt.Errorf("lumen: settle: do %q is not ready — its dependencies have not settled; settle it only when `gc lumen step` offers it", node)
 		}
@@ -201,6 +204,9 @@ func (d *driver) stepDrive(units []planUnit, scope, nodeOutputs map[string]strin
 			return StepResult{}, err
 		}
 		if handled {
+			continue
+		}
+		if d.outcomeScopeTerminated(u) {
 			continue
 		}
 		// Defer a unit whose deps have not all settled: a linear stepper never hits this

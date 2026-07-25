@@ -188,7 +188,10 @@ func TestControllerShutdown(t *testing.T) {
 		tryStopController(dir, &bytes.Buffer{})
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: give up silently rather than fail the test; no
+			// awaitClose/awaitCond substitute preserves that silent-timeout
+			// semantic, so only the literal is upgraded to the shared budget.
 		}
 	})
 
@@ -199,13 +202,9 @@ func TestControllerShutdown(t *testing.T) {
 		t.Fatal("tryStopController returned false, expected true")
 	}
 
-	select {
-	case <-done:
-		if exitCode != 0 {
-			t.Errorf("runController exit code = %d, want 0; stderr: %s", exitCode, stderr.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runController did not exit after stop")
+	awaitClose(t, done, "runController exiting after stop")
+	if exitCode != 0 {
+		t.Errorf("runController exit code = %d, want 0; stderr: %s", exitCode, stderr.String())
 	}
 
 	// Agent should have been stopped during shutdown.
@@ -273,11 +272,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	if !tryStopController(cityPath, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, want true via fallback socket")
 	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("stop did not invoke cancel via fallback socket")
-	}
+	awaitClose(t, ctx.Done(), "stop invoking cancel via fallback socket")
 }
 
 func TestControllerSocketPathUsesShortCanonicalPathForLongAlias(t *testing.T) {
@@ -495,7 +490,10 @@ func TestControllerReloadsConfig(t *testing.T) {
 		cancel()
 		select {
 		case <-loopDone:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: give up silently rather than fail the test; no
+			// awaitClose/awaitCond substitute preserves that silent-timeout
+			// semantic, so only the literal is upgraded to the shared budget.
 		}
 	})
 
@@ -588,7 +586,10 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 		cancel()
 		select {
 		case <-loopDone:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: give up silently rather than fail the test; no
+			// awaitClose/awaitCond substitute preserves that silent-timeout
+			// semantic, so only the literal is upgraded to the shared budget.
 		}
 	})
 
@@ -744,11 +745,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 		t.Fatalf("rewrite city.toml: %v", err)
 	}
 
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after city.toml rewrite; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after city.toml rewrite")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after file change; stderr=%q", stderr.String())
 	}
@@ -768,11 +765,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 		t.Fatalf("MkdirAll(agents): %v", err)
 	}
 	// First poke is from the mkdir CREATE event on the watched city dir.
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for poke after agents/ mkdir; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "poke after agents/ mkdir")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after agents/ mkdir; stderr=%q", stderr.String())
 	}
@@ -792,11 +785,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 	if err := os.WriteFile(agentFile, []byte("You are noreen.\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(agentFile): %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for poke after write inside agents/; subtree watch did not register; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "poke after write inside agents/ subtree")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after write inside agents/; subtree watch did not register; stderr=%q", stderr.String())
 	}
@@ -823,11 +812,7 @@ func TestWatchConfigDirs_FileSeedStillWatchesFile(t *testing.T) {
 		t.Fatalf("rewrite city.toml: %v", err)
 	}
 
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after direct file seed changed; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after direct file seed changed")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after direct file seed changed; stderr=%q", stderr.String())
 	}
@@ -928,11 +913,7 @@ func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 		t.Fatalf("write legacy city-root trace: %v", err)
 	}
 
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after legacy city-root trace write; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after legacy city-root trace write")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after legacy city-root trace write; stderr=%q", stderr.String())
 	}
@@ -969,11 +950,7 @@ func TestWatchConfigDirs_SymlinkSeedDirWatchesNestedPreExistingDir(t *testing.T)
 		t.Fatalf("rewrite symlink target file: %v", err)
 	}
 
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after nested symlink seed dir changed; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after nested symlink seed dir changed")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after nested symlink seed dir changed; stderr=%q", stderr.String())
 	}
@@ -1004,11 +981,7 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 	if err := os.RemoveAll(agentDir); err != nil {
 		t.Fatalf("RemoveAll agent dir: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after recursive subdir removal; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after recursive subdir removal")
 
 	dirty.Store(false)
 	select {
@@ -1021,11 +994,7 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("recreated\n"), 0o644); err != nil {
 		t.Fatalf("seed recreated prompt: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after recursive subdir recreation; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after recursive subdir recreation")
 
 	dirty.Store(false)
 	select {
@@ -1035,11 +1004,7 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("edited\n"), 0o644); err != nil {
 		t.Fatalf("edit recreated prompt: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after edit in recreated recursive subdir; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after edit in recreated recursive subdir")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after edit in recreated recursive subdir; stderr=%q", stderr.String())
 	}
@@ -1093,11 +1058,7 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 	if err := os.WriteFile(promptPath, []byte("edited prompt\n"), 0o644); err != nil {
 		t.Fatalf("edit prompt: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for poke after edit to %s; pre-existing nested subdir was not watched; stderr=%q", promptPath, stderr.String())
-	}
+	awaitClose(t, pokeCh, "poke after edit to pre-existing nested subdir")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after edit to nested file %s; stderr=%q", promptPath, stderr.String())
 	}
@@ -1111,11 +1072,7 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 	if err := os.WriteFile(overlayPath, []byte(`{"a":2}`), 0o644); err != nil {
 		t.Fatalf("edit overlay: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for poke after edit to %s; overlay subtree was not watched; stderr=%q", overlayPath, stderr.String())
-	}
+	awaitClose(t, pokeCh, "poke after edit to overlay subtree")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after edit to %s; stderr=%q", overlayPath, stderr.String())
 	}
@@ -1213,11 +1170,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	shutdown := func() {
 		shutdownOnce.Do(func() {
 			cancel()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("controller did not exit during cleanup; stdout=%q stderr=%q", stdout.String(), stderr.String())
-			}
+			awaitClose(t, done, "controller exiting during cleanup")
 			deadline := time.Now().Add(2 * time.Second)
 			for time.Now().Before(deadline) {
 				_ = os.RemoveAll(dir)
@@ -1354,11 +1307,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleControllerConn did not exit")
-	}
+	awaitClose(t, done, "handleControllerConn exiting")
 }
 
 func TestHandleSessionCircuitResetSocketCmd(t *testing.T) {
@@ -1492,11 +1441,7 @@ func TestResetSessionCircuitBreakerStateClearsRacingOpenPersist(t *testing.T) {
 		persistErr <- persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), session.ID, cb, identity, t0.Add(6*time.Minute))
 	}()
 
-	select {
-	case <-store.entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("persist did not reach blocked OPEN metadata write")
-	}
+	awaitClose(t, store.entered, "persist reaching blocked OPEN metadata write")
 
 	resetErr := make(chan error, 1)
 	go func() {
@@ -1889,11 +1834,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	}
 
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for controllerLoop to exit")
-	}
+	awaitClose(t, done, "controllerLoop exiting")
 
 	if !strings.Contains(stderr.String(), "config reload") {
 		t.Errorf("expected config reload error in stderr, got: %s", stderr.String())
@@ -2042,7 +1983,10 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		tryStopController(dir, &bytes.Buffer{})
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: give up silently rather than fail the test; no
+			// awaitClose/awaitCond substitute preserves that silent-timeout
+			// semantic, so only the literal is upgraded to the shared budget.
 		}
 	})
 
@@ -2145,7 +2089,10 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 		tryStopController(dir, &bytes.Buffer{})
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: give up silently rather than fail the test; no
+			// awaitClose/awaitCond substitute preserves that silent-timeout
+			// semantic, so only the literal is upgraded to the shared budget.
 		}
 	})
 
@@ -2186,11 +2133,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 
 	// Stop controller.
 	tryStopController(dir, &bytes.Buffer{})
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("controller did not exit")
-	}
+	awaitClose(t, done, "controller exiting")
 }
 
 // waitForController polls until the controller socket at dir is responsive,

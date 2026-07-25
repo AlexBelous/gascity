@@ -974,13 +974,17 @@ func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.
 		t.Fatal("reconcile blocked on provider Stop; drain-ack stop must be async")
 	}
 
-	select {
-	case name := <-sp.stopStarted:
-		if name != "worker" {
-			t.Fatalf("Stop called for %q, want worker", name)
+	var name string
+	awaitCond(t, func() bool {
+		select {
+		case name = <-sp.stopStarted:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("async Stop was not started")
+	}, "async Stop to start")
+	if name != "worker" {
+		t.Fatalf("Stop called for %q, want worker", name)
 	}
 
 	got, err := env.store.Get(session.ID)
@@ -1208,11 +1212,14 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	tracker := &asyncStartTracker{}
 	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 
-	select {
-	case <-sp.stopStarted:
-	case <-time.After(time.Second):
-		t.Fatal("async drain-ack stop did not start")
-	}
+	awaitCond(t, func() bool {
+		select {
+		case <-sp.stopStarted:
+			return true
+		default:
+			return false
+		}
+	}, "async drain-ack stop to start")
 
 	if tracker.wait(10 * time.Millisecond) {
 		t.Fatal("async drain-ack stop tracker reported drained while Stop is blocked")
@@ -1248,18 +1255,24 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
 	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", nil, firstTracker, &stderr)
-	select {
-	case <-first.stopStarted:
-	case <-time.After(time.Second):
-		t.Fatal("first async drain-ack stop did not start")
-	}
+	awaitCond(t, func() bool {
+		select {
+		case <-first.stopStarted:
+			return true
+		default:
+			return false
+		}
+	}, "first async drain-ack stop to start")
 
 	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", nil, secondTracker, &stderr)
-	select {
-	case <-second.stopStarted:
-	case <-time.After(time.Second):
-		t.Fatal("second async drain-ack stop was suppressed by another tracker scope")
-	}
+	awaitCond(t, func() bool {
+		select {
+		case <-second.stopStarted:
+			return true
+		default:
+			return false
+		}
+	}, "second async drain-ack stop to start")
 	close(first.releaseStop)
 	firstReleased = true
 	close(second.releaseStop)
@@ -1282,11 +1295,14 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	tracker := &asyncStartTracker{}
 	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
 
-	select {
-	case <-sp.stopStarted:
-	case <-time.After(time.Second):
-		t.Fatal("async drain-ack stop did not start")
-	}
+	awaitCond(t, func() bool {
+		select {
+		case <-sp.stopStarted:
+			return true
+		default:
+			return false
+		}
+	}, "async drain-ack stop to start")
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop tracker did not drain after Stop panic")
 	}
@@ -1511,11 +1527,14 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 	}
 	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", nil, &cr.asyncStops, &synchronizedBuffer{})
 
-	select {
-	case <-sp.stopStarted:
-	case <-time.After(time.Second):
-		t.Fatal("async drain-ack stop did not start")
-	}
+	awaitCond(t, func() bool {
+		select {
+		case <-sp.stopStarted:
+			return true
+		default:
+			return false
+		}
+	}, "async drain-ack stop to start")
 
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -1528,11 +1547,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 	case <-time.After(25 * time.Millisecond):
 	}
 	close(sp.releaseStop)
-	select {
-	case <-shutdownDone:
-	case <-time.After(time.Second):
-		t.Fatal("shutdown did not finish after async drain-ack stop returned")
-	}
+	awaitClose(t, shutdownDone, "shutdown to finish after async drain-ack stop returned")
 }
 
 func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t *testing.T) {
@@ -4071,11 +4086,7 @@ func TestReconcileSessionBeads_DrainAckStopFailurePreservesMetadata(t *testing.T
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0", woken)
 	}
-	select {
-	case <-stopCalled:
-	case <-time.After(time.Second):
-		t.Fatal("async Stop was not called")
-	}
+	awaitClose(t, stopCalled, "async Stop to be called")
 	deadline := time.Now().Add(time.Second)
 	for !strings.Contains(stderr.String(), "session reconciler: async drain-ack stop worker: stop failed: session unavailable") && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)

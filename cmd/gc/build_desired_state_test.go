@@ -5354,11 +5354,7 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 	go create()
 	go create()
 
-	select {
-	case <-store.firstCreateStarted:
-	case <-time.After(time.Second):
-		t.Fatal("first pool create did not start")
-	}
+	awaitClose(t, store.firstCreateStarted, "first pool create to start")
 
 	select {
 	case <-store.secondCreateStarted:
@@ -5367,12 +5363,8 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 		t.Fatal("second pool create reached the store before first create finished; alias lock did not serialize create")
 	case <-time.After(150 * time.Millisecond):
 		close(store.releaseFirstCreate)
-		select {
-		case <-store.secondCreateStarted:
-			close(store.releaseSecondCreate)
-		case <-time.After(time.Second):
-			t.Fatal("second pool create did not start after first create completed")
-		}
+		awaitClose(t, store.secondCreateStarted, "second pool create to start after first create completed")
+		close(store.releaseSecondCreate)
 	}
 
 	for i := 0; i < 2; i++ {
@@ -5434,11 +5426,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 	go create("worker-1", 1)
 	go create("worker-2", 2)
 
-	select {
-	case <-store.firstCreateStarted:
-	case <-time.After(time.Second):
-		t.Fatal("first pool create did not start")
-	}
+	awaitClose(t, store.firstCreateStarted, "first pool create to start")
 
 	select {
 	case <-store.secondCreateStarted:
@@ -5447,12 +5435,8 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 		t.Fatal("second pool create reached the store before first tmux_alias create finished")
 	case <-time.After(150 * time.Millisecond):
 		close(store.releaseFirstCreate)
-		select {
-		case <-store.secondCreateStarted:
-			close(store.releaseSecondCreate)
-		case <-time.After(time.Second):
-			t.Fatal("second pool create did not start after first create completed")
-		}
+		awaitClose(t, store.secondCreateStarted, "second pool create to start after first create completed")
+		close(store.releaseSecondCreate)
 	}
 
 	seen := map[string]bool{}

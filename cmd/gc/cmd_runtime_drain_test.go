@@ -1072,20 +1072,24 @@ func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	cancel()
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0 on context cancel", code)
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-		// Flag must remain set so the controller can still act on its next tick.
-		if !dops.restartRequested["worker"] {
-			t.Error("restart flag should remain set after context cancel")
-		}
-		if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
-			t.Errorf("stderr = %q, want pending restart warning", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
+	}, "doRuntimeRequestRestart exiting on context cancel")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 on context cancel", code)
+	}
+	// Flag must remain set so the controller can still act on its next tick.
+	if !dops.restartRequested["worker"] {
+		t.Error("restart flag should remain set after context cancel")
+	}
+	if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
+		t.Errorf("stderr = %q, want pending restart warning", got)
 	}
 }
 
@@ -1184,13 +1188,17 @@ func TestDoRuntimeRequestRestartProceedsAndPendsOnCancel(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	cancel()
 
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0 on context cancel; stderr: %s", code, stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-done:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
+	}, "doRuntimeRequestRestart exiting on context cancel")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 on context cancel; stderr: %s", code, stderr.String())
 	}
 	if !persistCalled {
 		t.Fatal("persistRestart was not called")

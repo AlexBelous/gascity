@@ -322,11 +322,7 @@ func TestHandleReloadSocketCmdAsyncAccepted(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload socket handler did not exit")
-	}
+	awaitClose(t, done, "reload socket handler exiting after client close")
 }
 
 func TestHandleReloadSocketCmdPropagatesSoft(t *testing.T) {
@@ -355,11 +351,7 @@ func TestHandleReloadSocketCmdPropagatesSoft(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload socket handler did not exit")
-	}
+	awaitClose(t, done, "reload socket handler exiting after client close")
 }
 
 func TestHandleReloadSocketCmdAsyncIgnoresInvalidTimeout(t *testing.T) {
@@ -391,11 +383,7 @@ func TestHandleReloadSocketCmdAsyncIgnoresInvalidTimeout(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload socket handler did not exit")
-	}
+	awaitClose(t, done, "reload socket handler exiting after client close")
 }
 
 func TestHandleReloadSocketCmdSyncTimeout(t *testing.T) {
@@ -424,11 +412,7 @@ func TestHandleReloadSocketCmdSyncTimeout(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload socket handler did not exit")
-	}
+	awaitClose(t, done, "reload socket handler exiting after client close")
 }
 
 func TestHandleReloadSocketCmdBusyOnAcceptTimeout(t *testing.T) {
@@ -453,11 +437,7 @@ func TestHandleReloadSocketCmdBusyOnAcceptTimeout(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload socket handler did not exit")
-	}
+	awaitClose(t, done, "reload socket handler exiting after client close")
 	select {
 	case req := <-reloadReqCh:
 		t.Fatalf("unexpected queued reload request after busy reply: %+v", req)
@@ -494,11 +474,7 @@ func TestHandleReloadSocketCmdWaitsForAcceptedAfterHandoff(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload socket handler did not exit")
-	}
+	awaitClose(t, done, "reload socket handler exiting after client close")
 }
 
 func TestControllerReloadAcceptTimeoutDefault(t *testing.T) {
@@ -575,7 +551,10 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 		tryStopController(dir, &bytes.Buffer{})
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: give up silently rather than fail the test; no
+			// awaitClose/awaitCond substitute preserves that silent-timeout
+			// semantic, so only the literal is upgraded to the shared budget.
 		}
 	})
 
@@ -785,7 +764,10 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 		tryStopController(dir, &bytes.Buffer{})
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
+			// Best-effort: give up silently rather than fail the test; no
+			// awaitClose/awaitCond substitute preserves that silent-timeout
+			// semantic, so only the literal is upgraded to the shared budget.
 		}
 	})
 

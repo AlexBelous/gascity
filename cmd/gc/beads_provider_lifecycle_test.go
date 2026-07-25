@@ -4235,11 +4235,14 @@ wait
 	cancel()
 
 	var err error
-	select {
-	case err = <-resultCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("provider op did not return after cancellation")
-	}
+	awaitCond(t, func() bool {
+		select {
+		case err = <-resultCh:
+			return true
+		default:
+			return false
+		}
+	}, "provider op returning after cancellation")
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -4269,13 +4272,17 @@ wait
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 	cancel()
 
-	select {
-	case err := <-resultCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("provider op error = %v, want context canceled", err)
+	var err error
+	awaitCond(t, func() bool {
+		select {
+		case err = <-resultCh:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("provider op did not return after parent cancellation")
+	}, "provider op returning after parent cancellation")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("provider op error = %v, want context canceled", err)
 	}
 	waitForProviderTestPIDExit(t, pid, "provider op with parent context")
 }
@@ -4312,11 +4319,14 @@ wait
 	cancel()
 
 	var ok bool
-	select {
-	case ok = <-resultCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("provider probe did not return after cancellation")
-	}
+	awaitCond(t, func() bool {
+		select {
+		case ok = <-resultCh:
+			return true
+		default:
+			return false
+		}
+	}, "provider probe returning after cancellation")
 	if ok {
 		t.Fatal("expected timeout probe to return false")
 	}
@@ -4344,13 +4354,16 @@ func useCancelableProviderLifecycleContext(t *testing.T) <-chan context.CancelFu
 
 func waitForProviderLifecycleCancel(t *testing.T, cancelCh <-chan context.CancelFunc) context.CancelFunc {
 	t.Helper()
-	select {
-	case cancel := <-cancelCh:
-		return cancel
-	case <-time.After(2 * time.Second):
-		t.Fatal("provider lifecycle context was not created")
-		return nil
-	}
+	var cancel context.CancelFunc
+	awaitCond(t, func() bool {
+		select {
+		case cancel = <-cancelCh:
+			return true
+		default:
+			return false
+		}
+	}, "provider lifecycle context creation")
+	return cancel
 }
 
 func waitForProviderTestChildPID(t *testing.T, path string) int {
@@ -8516,7 +8529,7 @@ while [ ! -f "$release_file" ]; do
 			if err != nil {
 				t.Errorf("lock holder exit: %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget): // custom kill+drain recovery on timeout; not a bare hang detector, so awaitClose/awaitCond don't fit
 			_ = holder.Process.Kill()
 			<-holderDone
 			t.Errorf("timed out waiting for lock holder to exit")
@@ -11240,12 +11253,7 @@ func TestAcquireProviderSemaphore_SerializesConcurrentOps(t *testing.T) {
 	// Release first — second should unblock.
 	release1()
 
-	select {
-	case <-acquired:
-		// Expected.
-	case <-time.After(2 * time.Second):
-		t.Fatal("second acquire did not unblock after release")
-	}
+	awaitClose(t, acquired, "second acquire unblocking after release")
 }
 
 func TestAcquireProviderSemaphore_IndependentCities(t *testing.T) {
@@ -11274,6 +11282,9 @@ func TestAcquireProviderSemaphore_IndependentCities(t *testing.T) {
 	case <-acquired:
 		// Expected — different cities are independent.
 	case <-time.After(2 * time.Second):
+		// Negative assertion: asserts acquire for an independent city does not
+		// block past 2s. hangBudget is the wrong tool here — widening this would
+		// let a real (but shorter-than-budget) blocking regression pass silently.
 		t.Fatal("acquire for different city blocked unexpectedly")
 	}
 }

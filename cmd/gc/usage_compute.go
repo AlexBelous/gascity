@@ -168,7 +168,13 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	if sink == nil || sink == usage.Discard {
 		return
 	}
-	store := cr.cityBeadStore()
+	// Route the session-bead read/marker-write through the sessions-class seam,
+	// not the raw work store: once [beads.classes.sessions] flips to sqlite the
+	// session beads relocate to .gc/store/sessions.db, and a raw work-store Get
+	// would miss every one ("loading session … bead not found") — the 07-24 mc
+	// usage incident. resolveSessionStore is the work store byte-for-byte on an
+	// unrouted city, so this is DARK there.
+	store := resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
 	if store == nil {
 		return
 	}

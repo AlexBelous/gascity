@@ -56,17 +56,51 @@ func maybeRouteBdShowLocal(cityPath string, cfg *config.City, bdArgs []string, s
 			fmt.Fprintf(stderr, "gc bd: show %q: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1, true
 		}
-		if !exists {
-			// No class store file: a reserved-prefix id has nowhere else to
-			// live, so this is genuine absence.
-			printBdShowNotFoundExact(stderr, id)
-			return 1, true
+		if exists {
+			b, found, err := classStoreShowBead(cityPath, class, id)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc bd: show %q via %s class store failed: %v\n", id, class, err) //nolint:errcheck // best-effort stderr
+				return 1, true
+			}
+			if found {
+				return printBdShowBead(b, jsonOut, stdout, stderr), true
+			}
 		}
-		return renderClassShow(cityPath, class, id, jsonOut, stdout, stderr), true
+		// Window-3 deploy-lineage fall-through: the combined infra scope minted
+		// every infra bead — session/order/message/nudge included — under gcg,
+		// and those are imported with their gcg id KEPT (infra_scope_migrate.go,
+		// option i) into their NON-graph class store. So a gcg id that misses the
+		// graph store may still be a reclassified non-graph bead; probe the other
+		// routed class stores before declaring absence. (Native gcg ids are graph
+		// beads and already resolved above, so this only runs on a graph miss.)
+		if class == config.BeadClassGraph {
+			if code, handled := probeRoutedClassStoresByID(cityPath, cfg, id, class, jsonOut, stdout, stderr); handled {
+				return code, true
+			}
+		}
+		// No class store file, or a genuine miss across every routed class: a
+		// reserved-prefix id has nowhere else to live, so this is absence.
+		printBdShowNotFoundExact(stderr, id)
+		return 1, true
 	}
 
 	// Legacy-id probe over the routed classes, in cutover order.
+	if code, handled := probeRoutedClassStoresByID(cityPath, cfg, id, "", jsonOut, stdout, stderr); handled {
+		return code, true
+	}
+	return 0, false
+}
+
+// probeRoutedClassStoresByID probes every routed class store (except exclude)
+// for id in cutover order, rendering the first hit. handled=false means a clean
+// miss across all probed classes — the caller decides absence-vs-passthrough. A
+// routing-state or store failure is surfaced (handled=true, non-zero code): the
+// root-loss discipline forbids reading a hard failure as absence.
+func probeRoutedClassStoresByID(cityPath string, cfg *config.City, id, exclude string, jsonOut bool, stdout, stderr io.Writer) (int, bool) {
 	for _, class := range []string{config.BeadClassOrders, config.BeadClassNudges, config.BeadClassMessaging, config.BeadClassSessions, config.BeadClassGraph} {
+		if class == exclude {
+			continue
+		}
 		routed, err := classShowRouted(cityPath, cfg, class)
 		if err != nil {
 			// Routing state unknowable: falling through to bd could read a
@@ -225,21 +259,6 @@ func classStoreShowBead(cityPath, class, id string) (beads.Bead, bool, error) {
 		return b, true, nil
 	}
 	return beads.Bead{}, false, nil
-}
-
-// renderClassShow reads a reserved-prefix id from its class store and prints
-// it in bd's show shape, preserving the 404-vs-error split.
-func renderClassShow(cityPath, class, id string, jsonOut bool, stdout, stderr io.Writer) int {
-	b, found, err := classStoreShowBead(cityPath, class, id)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: show %q via %s class store failed: %v\n", id, class, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if !found {
-		printBdShowNotFoundExact(stderr, id)
-		return 1
-	}
-	return printBdShowBead(b, jsonOut, stdout, stderr)
 }
 
 // printBdShowNotFound renders genuine absence in bd's own "no issue found"

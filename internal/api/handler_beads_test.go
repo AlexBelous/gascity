@@ -1185,6 +1185,46 @@ func TestBeadStoresForIDUsesLongestConfiguredHyphenatedPrefix(t *testing.T) {
 	}
 }
 
+// TestBeadStoresForIDReachesReclassifiedGcgSession pins the API twin of the
+// gc-bd-show fall-through: on the window-3 deploy lineage a SESSION bead kept
+// its gcg id when reclassified into the sessions class store, so GET/PATCH
+// /v0/bead/{gcg-session-id} must reach the sessions store, not 404 after the
+// graph miss.
+func TestBeadStoresForIDReachesReclassifiedGcgSession(t *testing.T) {
+	state := newFakeState(t)
+	cityStore := beads.NewMemStore()
+	graphStore := beads.NewMemStore()
+	sessStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: "gcg-4242", Type: "session", Status: "open", Title: "reclassified",
+		Labels: []string{"gc:session"},
+	}}, nil)
+	state.cityBeadStore = cityStore
+	state.graphBeadStore = graphStore
+	state.sessionsBeadStore = sessStore
+
+	server := &Server{state: state}
+
+	// The candidate set for a gcg id must include the sessions store (after graph).
+	foundSess := false
+	for _, c := range server.beadStoresForID("gcg-4242") {
+		if c == sessStore {
+			foundSess = true
+		}
+	}
+	if !foundSess {
+		t.Fatalf("beadStoresForID(gcg-4242) omitted the routed sessions store")
+	}
+
+	// GET /v0/bead/{id} resolves the reclassified session rather than 404ing.
+	out, err := server.humaHandleBeadGet(context.Background(), &BeadGetInput{ID: "gcg-4242"})
+	if err != nil {
+		t.Fatalf("humaHandleBeadGet(gcg-4242) = %v, want the reclassified session bead", err)
+	}
+	if out.Body.ID != "gcg-4242" {
+		t.Fatalf("resolved id = %q, want gcg-4242", out.Body.ID)
+	}
+}
+
 func TestBeadUpdateSetsAndClearsParent(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]

@@ -1,8 +1,13 @@
 package beads
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -404,4 +409,150 @@ func TestRetryOnBusy(t *testing.T) {
 			t.Fatalf("expected 1 call, got %d", calls)
 		}
 	})
+}
+
+func closeSQLiteTestStore(t *testing.T, s Store) {
+	t.Helper()
+	if c, ok := s.(interface{ CloseStore() error }); ok {
+		c.CloseStore() //nolint:errcheck
+	}
+}
+
+func TestSQLiteStoreReadOnlyReadsWithoutMutating(t *testing.T) {
+	dir := t.TempDir()
+	// Seed a source db through the normal read-write path.
+	rw, err := OpenSQLiteStore(dir, WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("open rw: %v", err)
+	}
+	seeded, err := rw.Create(Bead{ID: "gcg-42", Title: "src", Type: "session", Status: "open"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	closeSQLiteTestStore(t, rw)
+
+	ro, err := OpenSQLiteStore(dir, WithSQLiteStoreReadOnly(), WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("open ro: %v", err)
+	}
+	defer closeSQLiteTestStore(t, ro)
+
+	got, err := ro.Get(seeded.ID)
+	if err != nil {
+		t.Fatalf("ro get: %v", err)
+	}
+	if got.Title != "src" {
+		t.Fatalf("ro get title = %q, want src", got.Title)
+	}
+	rows, err := ro.List(ListQuery{IncludeClosed: true, TierMode: TierBoth, AllowScan: true})
+	if err != nil {
+		t.Fatalf("ro list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ro list = %d rows, want 1", len(rows))
+	}
+
+	// Writes must be rejected by the driver, never mutate the source.
+	if _, err := ro.Create(Bead{Title: "nope", Type: "task"}); err == nil {
+		t.Fatal("read-only Create unexpectedly succeeded")
+	}
+}
+
+func fileSHA256(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read %s: %v", p, err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestSQLiteStoreReadOnlyLeavesSourceByteIdenticalWithLiveWAL reproduces the
+// exact scenario the query_only(1) form failed: a read-only open over a source
+// db that carries a POPULATED, un-checkpointed -wal (a stopped writer's crash
+// state), as the SOLE connection. A mode=ro open must read the WAL-resident
+// rows AND leave both the main db file and the -wal byte-identical across
+// open/read/close — a query_only connection instead auto-checkpoints on close,
+// rewriting the main db and deleting the -wal (mutating the migration source).
+func TestSQLiteStoreReadOnlyLeavesSourceByteIdenticalWithLiveWAL(t *testing.T) {
+	// Seed a checkpointed row through the store, then a second row via a raw
+	// writer with autocheckpoint disabled so it stays WAL-resident.
+	seed := t.TempDir()
+	rw, err := OpenSQLiteStore(seed, WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("open seed: %v", err)
+	}
+	if _, err := rw.Create(Bead{ID: "gcg-1", Type: "session", Title: "checkpointed", Status: "open"}); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+	closeSQLiteTestStore(t, rw)
+
+	raw, err := sql.Open("sqlite", filepath.Join(seed, "beads.sqlite")+"?_pragma=wal_autocheckpoint(0)")
+	if err != nil {
+		t.Fatalf("open raw writer: %v", err)
+	}
+	raw.SetMaxOpenConns(1)
+	beadJSON := `{"id":"gcg-2","issue_type":"session","status":"open","title":"wal-resident"}`
+	if _, err := raw.Exec(
+		"INSERT INTO beads(id,tier,title,status,issue_type,created_at,updated_at,bead_json) VALUES('gcg-2','main','wal-resident','open','session',1,1,?)",
+		beadJSON); err != nil {
+		t.Fatalf("wal-resident insert: %v", err)
+	}
+	// Copy main + -wal out from under the still-open writer so the copy carries a
+	// live, un-checkpointed WAL but has NO holding connection (the stopped-writer
+	// crash state), then release the writer.
+	src := t.TempDir()
+	for _, suffix := range []string{"", "-wal"} {
+		b, rerr := os.ReadFile(filepath.Join(seed, "beads.sqlite"+suffix))
+		if rerr != nil {
+			t.Fatalf("read seed%s: %v", suffix, rerr)
+		}
+		if werr := os.WriteFile(filepath.Join(src, "beads.sqlite"+suffix), b, 0o644); werr != nil {
+			t.Fatalf("write src%s: %v", suffix, werr)
+		}
+	}
+	_ = raw.Close()
+
+	mainPath := filepath.Join(src, "beads.sqlite")
+	walPath := mainPath + "-wal"
+	if _, err := os.Stat(walPath); err != nil {
+		t.Fatalf("precondition: source has no live -wal: %v", err)
+	}
+	mainBefore, walBefore := fileSHA256(t, mainPath), fileSHA256(t, walPath)
+
+	ro, err := OpenSQLiteStore(src, WithSQLiteStoreReadOnly(), WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("open ro: %v", err)
+	}
+	rows, err := ro.List(ListQuery{IncludeClosed: true, TierMode: TierBoth, AllowScan: true})
+	if err != nil {
+		t.Fatalf("ro list: %v", err)
+	}
+	closeSQLiteTestStore(t, ro)
+
+	// The read must see BOTH the checkpointed and the WAL-resident row.
+	if len(rows) != 2 {
+		t.Fatalf("ro list = %d rows, want 2 (incl the WAL-resident row)", len(rows))
+	}
+	if _, err := os.Stat(walPath); err != nil {
+		t.Fatalf("read-only open DELETED the source -wal (checkpoint-on-close): %v", err)
+	}
+	if got := fileSHA256(t, mainPath); got != mainBefore {
+		t.Fatalf("read-only open MUTATED the source main db (checkpoint-on-close): %s != %s", got, mainBefore)
+	}
+	if got := fileSHA256(t, walPath); got != walBefore {
+		t.Fatalf("read-only open MUTATED the source -wal: %s != %s", got, walBefore)
+	}
+}
+
+func TestSQLiteStoreReadOnlyMissingFileErrors(t *testing.T) {
+	// A read-only open never creates the file or its parent directory.
+	dir := filepath.Join(t.TempDir(), "absent")
+	if _, err := OpenSQLiteStore(dir, WithSQLiteStoreReadOnly()); err == nil {
+		t.Fatal("expected error opening a nonexistent read-only store")
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Fatalf("read-only open created the directory: stat err = %v", statErr)
+	}
 }

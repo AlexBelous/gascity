@@ -1362,7 +1362,7 @@ func importRigInfraClassResidue(cityPath string, cfg *config.City, rigStore bead
 	now := time.Now()
 	if graph, err := graphClassStoreFor(cityPath); err != nil {
 		return fmt.Errorf("graph class store: %w", err)
-	} else if _, err := importGraphSnapshot(graph, rigStore, false); err != nil {
+	} else if _, err := importGraphSnapshot(graph, rigStore, false, false); err != nil {
 		return fmt.Errorf("graph residue: %w", err)
 	}
 	if sess, err := sessionsdb.SharedStoreFor(cityPath); err != nil {

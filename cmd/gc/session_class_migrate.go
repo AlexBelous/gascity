@@ -74,10 +74,32 @@ func ensureSessionsClassMigrated(cityPath string, cfg *config.City, stderr io.Wr
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
 
+	// Deploy-lineage (window-3) integration: open the combined infra scope as an
+	// additional READ-ONLY source for the sessions slice. Opened before the reset
+	// so a present-but-unopenable scope aborts before the class store is touched.
+	infraScope, closeInfra, haveInfra, err := openInfraCombinedScopeSource(cityPath)
+	defer closeInfra()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: sessions class migration: %v\n", err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+
 	result, err := migrateSessionsIntoClassStore(class, store, time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: sessions class migration: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
+	}
+	if haveInfra {
+		// The reset already ran (migrateSessionsIntoClassStore); import the infra
+		// scope's session slice on top with the same copy-verify gate. Session
+		// beads keep their gcg id (see infra_scope_migrate.go — option i).
+		infraRes, ierr := importSessionsSnapshot(class, infraScope, time.Now(), true)
+		if ierr != nil {
+			fmt.Fprintf(stderr, "gc start: sessions class migration (infra scope): %v\n", ierr) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		result.imported += infraRes.imported
+		result.dropped += infraRes.dropped
 	}
 	if err := writeSessionsMigratedMarkerFile(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: sessions class migration: %v\n", err) //nolint:errcheck // best-effort stderr

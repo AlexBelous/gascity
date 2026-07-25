@@ -71,8 +71,23 @@ func ensureOrdersClassMigrated(cityPath string, cfg *config.City, stderr io.Writ
 	}
 	defer closeStores()
 
+	// Deploy-lineage (window-3) integration: add the combined infra scope as an
+	// additional READ-ONLY source for the orders slice (its order-tracking beads
+	// keep their gcg id). It is NOT added to openOrderClassMigrationStores, which
+	// the residue sweep also drives — the sweep must never delete from the source.
+	infraScope, closeInfra, haveInfra, err := openInfraCombinedScopeSource(cityPath)
+	defer closeInfra()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: orders class migration: %v\n", err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	migrationSources := stores
+	if haveInfra {
+		migrationSources = append(append([]beads.Store{}, stores...), infraScope)
+	}
+
 	policy := orderTrackingRetentionPolicyForConfig(cfg)
-	result, err := migrateOrdersTrackingIntoClassStore(class, stores, policy)
+	result, err := migrateOrdersTrackingIntoClassStore(class, migrationSources, policy)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: orders class migration: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
@@ -85,7 +100,7 @@ func ensureOrdersClassMigrated(cityPath string, cfg *config.City, stderr io.Writ
 	// landed in bd; re-importing after the marker closes most of that window
 	// (INSERT OR IGNORE keeps it idempotent). Best-effort — anything it still
 	// misses is bounded by the at-most-one-extra-fire crash contract.
-	if straggler, err := migrateOrdersTrackingIntoClassStore(class, stores, policy); err == nil {
+	if straggler, err := migrateOrdersTrackingIntoClassStore(class, migrationSources, policy); err == nil {
 		result.imported += straggler.imported
 	}
 	fmt.Fprintf(stderr, "gc start: orders class migrated to %s (%d runs imported, %d aged out)\n", ordersClassStorePath(cityPath), result.imported, result.skipped) //nolint:errcheck // best-effort stderr

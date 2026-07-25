@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -98,11 +99,91 @@ func graphClassStoreFor(cityPath string) (*beads.SQLiteStore, error) {
 	if !ok {
 		return nil, fmt.Errorf("opening graph class store: unexpected store type %T", st)
 	}
+	// Re-apply the deploy-lineage id floor on every open. On a window-3 combined
+	// scope import, non-graph gcg-<n> ids were reclassified into sibling stores
+	// while the graph store keeps minting gcg-<n>; recoverSequence only sees this
+	// store's own rows, so without this a post-cutover graph mint could reissue a
+	// suffix an imported session/order/message/nudge bead already holds. The floor
+	// file records the global max gcg suffix (see graph_class_migrate.go); the
+	// bump is idempotent and a no-op once the store's own rows exceed it.
+	floor, err := readGraphSeqFloor(cityPath)
+	if err != nil {
+		// Fail CLOSED: a present-but-unreadable floor sidecar must NOT open the
+		// graph store with floor 0 — that silently re-arms the very re-mint
+		// collision the floor exists to prevent (the graph store could reissue a
+		// gcg-<n> a sibling class store already owns). Surface it; the migration /
+		// caller aborts rather than corrupt ids. Do not cache the handle.
+		_ = closeBeadStoreHandle(sq) //nolint:errcheck // best-effort close
+		return nil, fmt.Errorf("opening graph class store: %w", err)
+	}
+	if floor > 0 {
+		sq.AdvanceSequenceFloor(floor)
+	}
 	if graphClassHandles.byDir == nil {
 		graphClassHandles.byDir = make(map[string]*beads.SQLiteStore)
 	}
 	graphClassHandles.byDir[dir] = sq
 	return sq, nil
+}
+
+// graphSeqFloorPath is the durable id-floor sidecar the deploy-lineage graph
+// migration writes and graphClassStoreFor re-applies on open.
+func graphSeqFloorPath(cityPath string) string {
+	return filepath.Join(graphClassStoreDir(cityPath), "graph.seqfloor")
+}
+
+// readGraphSeqFloor returns the persisted graph id floor. It returns (0, nil)
+// ONLY when the sidecar is genuinely absent (a fresh our-branch city — DARK). A
+// present-but-unreadable or corrupt/negative sidecar returns a non-nil error:
+// the collision guard must never be silently disabled by a read/parse failure,
+// which fail-open (returning 0) would do.
+func readGraphSeqFloor(cityPath string) (int64, error) {
+	raw, err := os.ReadFile(graphSeqFloorPath(cityPath))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading graph seq floor %s: %w", graphSeqFloorPath(cityPath), err)
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing graph seq floor %s: %w", graphSeqFloorPath(cityPath), err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("graph seq floor %s is negative (%d)", graphSeqFloorPath(cityPath), n)
+	}
+	return n, nil
+}
+
+// writeGraphSeqFloor atomically persists the graph id floor (temp + rename), the
+// same durability shape as the migrated markers.
+func writeGraphSeqFloor(cityPath string, floor int64) error {
+	if floor <= 0 {
+		return nil
+	}
+	dir := graphClassStoreDir(cityPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("writing graph seq floor: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, "graph.seqfloor.tmp-*")
+	if err != nil {
+		return fmt.Errorf("writing graph seq floor: %w", err)
+	}
+	name := tmp.Name()
+	if _, err := fmt.Fprintf(tmp, "%d\n", floor); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return fmt.Errorf("writing graph seq floor: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return fmt.Errorf("writing graph seq floor: %w", err)
+	}
+	if err := os.Rename(name, graphSeqFloorPath(cityPath)); err != nil {
+		_ = os.Remove(name)
+		return fmt.Errorf("writing graph seq floor: %w", err)
+	}
+	return nil
 }
 
 // routedGraphStoreFor resolves a city's graph-class routing and, when routed,

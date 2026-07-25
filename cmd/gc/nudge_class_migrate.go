@@ -79,12 +79,45 @@ func ensureNudgesClassMigrated(cityPath string, cfg *config.City, stderr io.Writ
 		return false
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
-	front := nudgequeue.NewStore(beads.NudgesStore{Store: resolveNudgesStore(store, cfg, cityPath, nil)})
+	// Read the migration SOURCE directly — NOT through resolveNudgesStore (a
+	// class-routing resolver that, if it ever routed to the destination class
+	// store, would invert source↔destination and import zero shadows). graph,
+	// sessions, and orders already read their source store directly.
+	front := nudgequeue.NewStore(beads.NudgesStore{Store: store})
+
+	// Deploy-lineage (window-3) integration: open the combined infra scope as an
+	// additional READ-ONLY source for the nudge shadow slice. The live queue is a
+	// city-level file already imported above; only the durable shadow beads live
+	// in the combined scope. Opened before the reset so a present-but-unopenable
+	// scope aborts before the class store is touched.
+	infraScope, closeInfra, haveInfra, err := openInfraCombinedScopeSource(cityPath)
+	defer closeInfra()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: nudges class migration: %v\n", err) //nolint:errcheck // best-effort stderr
+		return false
+	}
 
 	result, err := migrateNudgeQueueIntoClassStore(class, cityPath, front, time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: nudges class migration: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
+	}
+	if haveInfra {
+		// Import the infra scope's terminal nudge shadows on top (shadow beads keep
+		// their gcg id — option i). Same copy-verify gate as the primary path. The
+		// 24h terminal-shadow lookback (importTerminalNudgeShadows uses
+		// nudgequeue.DefaultTTL) is INTENTIONAL and symmetric with the work-store
+		// path: live queue items are re-imported from the file queue above, and a
+		// terminal shadow older than the deliver-by TTL carries no wait-finalization
+		// value, so bounding the combined-scope shadow import matches native.
+		infraFront := nudgequeue.NewStore(beads.NudgesStore{Store: infraScope})
+		imported, skipped, ierr := importTerminalNudgeShadows(class, infraFront, time.Now())
+		if ierr != nil {
+			fmt.Fprintf(stderr, "gc start: nudges class migration (infra scope): %v\n", ierr) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		result.terminalImported += imported
+		result.skipped += skipped
 	}
 	if err := writeNudgesMigratedMarkerFile(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: nudges class migration: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -166,27 +199,48 @@ func migrateNudgeQueueIntoClassStore(class *nudgesdb.Store, cityPath string, fro
 	}
 	result.liveImported = len(importedIDs)
 
-	shadows, err := front.ShadowHistorySince(now.Add(-nudgequeue.DefaultTTL))
+	terminalImported, skipped, err := importTerminalNudgeShadows(class, front, now)
 	if err != nil {
-		return result, fmt.Errorf("listing legacy nudge shadows: %w", err)
+		return result, err
 	}
-	for _, shadow := range shadows {
-		if shadow.ID == "" || !nudgequeue.IsTerminalState(shadow.State) {
-			result.skipped++
-			continue
-		}
-		if err := class.ImportTerminalShadow(shadow, shadow.CreatedAt, shadow.TerminalAt); err != nil {
-			return result, err
-		}
-		result.terminalImported++
-		importedIDs = append(importedIDs, shadow.ID)
-	}
+	result.terminalImported = terminalImported
+	result.skipped += skipped
 	for _, id := range importedIDs {
 		if _, ok, err := class.FindRecordIncludingTerminal(id); err != nil || !ok {
 			return result, fmt.Errorf("verifying imported nudge %q: found=%v err=%w", id, ok, err)
 		}
 	}
 	return result, nil
+}
+
+// importTerminalNudgeShadows imports a front's terminal shadow history within
+// the queue TTL into the class store, copy-verifying each imported id. Non-
+// terminal or id-less shadows are skipped. Shared by the primary (work-store)
+// path and the deploy-lineage combined-scope import; INSERT OR IGNORE keeps a
+// re-import idempotent.
+func importTerminalNudgeShadows(class *nudgesdb.Store, front *nudgequeue.Store, now time.Time) (imported, skipped int, err error) {
+	shadows, err := front.ShadowHistorySince(now.Add(-nudgequeue.DefaultTTL))
+	if err != nil {
+		return 0, 0, fmt.Errorf("listing legacy nudge shadows: %w", err)
+	}
+	var importedIDs []string
+	for _, shadow := range shadows {
+		if shadow.ID == "" || !nudgequeue.IsTerminalState(shadow.State) {
+			skipped++
+			continue
+		}
+		if err := class.ImportTerminalShadow(shadow, shadow.CreatedAt, shadow.TerminalAt); err != nil {
+			return imported, skipped, err
+		}
+		imported++
+		importedIDs = append(importedIDs, shadow.ID)
+	}
+	for _, id := range importedIDs {
+		if _, ok, err := class.FindRecordIncludingTerminal(id); err != nil || !ok {
+			return imported, skipped, fmt.Errorf("verifying imported nudge %q: found=%v err=%w", id, ok, err)
+		}
+	}
+	return imported, skipped, nil
 }
 
 // writeNudgesMigratedMarkerFile atomically writes the migrated marker that
@@ -265,8 +319,8 @@ func sweepLegacyNudgeResidue(cityPath string, cfg *config.City, stderr io.Writer
 		fmt.Fprintf(stderr, "gc: nudges legacy residue sweep: %v\n", err) //nolint:errcheck // best-effort stderr
 		return removed
 	}
-	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
-	front := nudgequeue.NewStore(beads.NudgesStore{Store: resolveNudgesStore(store, cfg, cityPath, nil)})
+	defer closeBeadStoreHandle(store)                             //nolint:errcheck // best-effort close
+	front := nudgequeue.NewStore(beads.NudgesStore{Store: store}) // read the residue SOURCE directly
 	shadows, err := front.ShadowHistorySince(time.Time{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: nudges legacy residue sweep: %v\n", err) //nolint:errcheck // best-effort stderr

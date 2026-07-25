@@ -94,10 +94,34 @@ func ensureMessagingClassMigrated(cityPath string, cfg *config.City, stderr io.W
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
 
+	// Deploy-lineage (window-3) integration: open the combined infra scope as an
+	// additional READ-ONLY source for the messaging slice (mail + extmsg). Opened
+	// before the reset so a present-but-unopenable scope aborts before the class
+	// store is touched.
+	infraScope, closeInfra, haveInfra, err := openInfraCombinedScopeSource(cityPath)
+	defer closeInfra()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: messaging class migration: %v\n", err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+
 	result, err := migrateMessagingIntoClassStore(class, store, cfg, cityPath, time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: messaging class migration: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
+	}
+	if haveInfra {
+		// Reset already ran; import the infra scope's mail + extmsg slice on top
+		// with the same copy-verify gate. Records keep their gcg id (option i).
+		infraRes, ierr := importMessagingSnapshot(class, infraScope, cfg, cityPath, time.Now(), true)
+		if ierr != nil {
+			fmt.Fprintf(stderr, "gc start: messaging class migration (infra scope): %v\n", ierr) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		result.mailImported += infraRes.mailImported
+		result.extmsgImported += infraRes.extmsgImported
+		result.mailDropped += infraRes.mailDropped
+		result.endedDropped += infraRes.endedDropped
 	}
 	if err := writeMessagingMigratedMarkerFile(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: messaging class migration: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -137,9 +161,14 @@ func migrateMessagingIntoClassStore(class *messagingdb.Store, store beads.Store,
 // conversation's generation-ceiling ended binding). INSERT OR IGNORE keeps
 // re-imports idempotent. verify re-reads every imported id from the class
 // store — the copy-verify gate the pre-marker migration requires.
-func importMessagingSnapshot(class *messagingdb.Store, store beads.Store, cfg *config.City, cityPath string, now time.Time, verify bool) (messagingClassMigrationResult, error) {
+func importMessagingSnapshot(class *messagingdb.Store, store beads.Store, cfg *config.City, _ string, now time.Time, verify bool) (messagingClassMigrationResult, error) {
 	result := messagingClassMigrationResult{}
-	msgStore := beads.MailStore{Store: resolveMailMessagesStore(store, cfg, cityPath, nil)}
+	// Read the migration SOURCE directly — NOT through resolveMailMessagesStore.
+	// The resolver is class-routing machinery; today it is identity, but if it
+	// ever routes messaging reads to the destination class store, feeding a source
+	// store through it would invert source↔destination and import zero. graph,
+	// sessions, and orders already read their source store directly; match them.
+	msgStore := beads.MailStore{Store: store}
 
 	records, err := beadmail.ExportOpenMessages(msgStore)
 	if err != nil {
@@ -338,7 +367,7 @@ func sweepLegacyMessagingResidue(cityPath string, cfg *config.City, stderr io.Wr
 		fmt.Fprintf(stderr, "gc: messaging legacy residue sweep: merged %d messages / %d extmsg records into the class store\n", stragglers.mailImported, stragglers.extmsgImported) //nolint:errcheck // best-effort stderr
 	}
 
-	msgStore := beads.MailStore{Store: resolveMailMessagesStore(store, cfg, cityPath, nil)}
+	msgStore := beads.MailStore{Store: store} // read the residue SOURCE directly (see importMessagingSnapshot)
 	now := time.Now()
 	var ids []string
 	mailResidue, err := beadmail.ExportResidueMessageBeads(msgStore)

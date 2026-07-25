@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionsdb "github.com/gastownhall/gascity/internal/classdb/sessions"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -508,6 +509,23 @@ func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (bea
 			}
 			if !errors.Is(err, beads.ErrNotFound) {
 				return nil, beads.Bead{}, "", err
+			}
+		}
+		// Window-3 deploy lineage: the combined infra scope minted sessions under
+		// the gcg prefix too, and they keep their gcg id when reclassified into the
+		// sessions class store (infra_scope_migrate.go). A gcg id that misses the
+		// graph store may be such a session, so probe the routed sessions class
+		// store (the one non-graph class store that is a beads.Store) before the
+		// work-store scan. A clean miss falls through; a hard failure surfaces.
+		if cfg, cerr := loadCityConfig(cityPath, warningWriter); cerr == nil {
+			if sess, routed, rerr := sessionsdb.RoutedStoreFor(cityPath, cfg); rerr != nil {
+				return nil, beads.Bead{}, "", fmt.Errorf("sessions class store: %w", rerr)
+			} else if routed {
+				if b, gerr := sess.Get(beadID); gerr == nil {
+					return sess, b, cityPath, nil
+				} else if !errors.Is(gerr, beads.ErrNotFound) {
+					return nil, beads.Bead{}, "", gerr
+				}
 			}
 		}
 	}

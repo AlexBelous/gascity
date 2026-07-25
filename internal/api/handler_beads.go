@@ -177,19 +177,34 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	// Class-prefix arm: a graph-relocated city keeps graph-class beads (reserved
 	// id-prefix "gcg") in a dedicated graph store that is NOT reachable via a
 	// rig/HQ prefix or a routes.jsonl entry, so a graph-class id would otherwise
-	// fall through to the candidate scan and miss. Return [graph, work] —
-	// graph-first (prefix-owner first) — so the per-store Get-then-mutate loop in
-	// the by-id handlers federates the graph store ahead of work and pins it on
-	// the first probe. Skipped for a default (non-relocated) city, where
+	// fall through to the candidate scan and miss. Return [graph, sessions, work]
+	// — graph-first (prefix-owner first) — so the per-store Get-then-mutate loop
+	// in the by-id handlers federates the graph store ahead of the rest and pins
+	// it on the first probe. Skipped for a default (non-relocated) city, where
 	// GraphBeadStore() == CityBeadStore(): the arm never fires and this path stays
 	// byte-identical.
+	//
+	// The sessions store is appended for the window-3 deploy lineage: its combined
+	// infra scope minted EVERY infra bead — sessions included — under the gcg
+	// prefix, and those keep their gcg id when reclassified into the sessions
+	// class store (cmd/gc/infra_scope_migrate.go). So a gcg id that misses the
+	// graph store may be a reclassified SESSION bead; the sessions class store is
+	// the one non-graph class store that is itself a beads.Store, so it can join
+	// this Get-then-mutate loop. (Order/message/nudge class beads are typed record
+	// stores, not beads.Store, and are not served by the generic /v0/bead/{id}
+	// path on ANY city — native or reclassified — so their generic-path behavior
+	// is unchanged; they are reached through their typed endpoints.)
 	if graph := s.state.GraphBeadStore().Store; graph != nil {
 		if city := s.state.CityBeadStore(); graph != city {
 			if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && beadIDHasConfiguredPrefix(id, prefix) {
-				if city != nil {
-					return []beads.Store{graph, city}
+				candidates := []beads.Store{graph}
+				if sess := s.state.SessionsBeadStore().Store; sess != nil && sess != graph && sess != city {
+					candidates = append(candidates, sess)
 				}
-				return []beads.Store{graph}
+				if city != nil {
+					candidates = append(candidates, city)
+				}
+				return candidates
 			}
 		}
 	}

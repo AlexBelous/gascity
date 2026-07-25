@@ -38,6 +38,7 @@ type SQLiteStoreOptions struct {
 	retentionPeriod         time.Duration
 	retentionSweepInterval  time.Duration
 	disableRetentionSweeper bool
+	readOnly                bool
 }
 
 var (
@@ -64,6 +65,22 @@ func WithSQLiteStoreRetention(period, sweepInterval time.Duration) SQLiteStoreOp
 		o.retentionPeriod = period
 		o.retentionSweepInterval = sweepInterval
 		o.disableRetentionSweeper = sweepInterval <= 0
+	}
+}
+
+// WithSQLiteStoreReadOnly opens the store strictly read-only: connections use
+// SQLite's file:...?mode=ro, schema application (which would issue writes —
+// journal-mode pragmas, CREATE TABLE) is skipped, and the retention sweeper
+// never starts. A mode=ro connection cannot acquire the write lock, so it can
+// neither mutate a row NOR checkpoint the WAL on close — the source's main db
+// AND -wal stay byte-identical across open/read/close, which the "must stay
+// bit-intact for rollback" migration-source contract requires. The full read
+// surface (List/Get/DepList) works, reading WAL-resident rows a stopped writer
+// left uncheckpointed. The file must already exist; the parent directory is
+// never created.
+func WithSQLiteStoreReadOnly() SQLiteStoreOption {
+	return func(o *SQLiteStoreOptions) {
+		o.readOnly = true
 	}
 }
 
@@ -123,8 +140,10 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	if cfg.prefix == "" {
 		cfg.prefix = sqliteDefaultPrefix
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("opening sqlite store: %w", err)
+	if !cfg.readOnly {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("opening sqlite store: %w", err)
+		}
 	}
 	dbPath := filepath.Join(dir, sqliteStoreFilename)
 
@@ -134,6 +153,22 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	// (the classdb/core G0 finding) — leaving the read pool without the
 	// busy timeout the retry machinery below assumes.
 	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	if cfg.readOnly {
+		// A TRUE read-only connection (SQLite's file:...?mode=ro): it never
+		// acquires the write lock, so it can neither mutate a row NOR checkpoint
+		// the WAL on close. That last point is the whole guarantee — a
+		// query_only(1) connection blocks SQL writes but NOT the internal
+		// checkpoint-on-close, which (when it is the sole/last connection, e.g.
+		// the migration reading a stopped controller's .gc/infra) rewrites the
+		// main db file and DELETES the -wal, silently mutating the source and
+		// breaking the byte-intact reversibility contract. mode=ro cannot do
+		// that, yet still reads WAL-resident rows a stopped writer left
+		// uncheckpointed. The pinned modernc build parses mode=ro ONLY behind
+		// the file: URI scheme (a bare-path ?mode=ro is ignored and still
+		// checkpoints), so the file: prefix is REQUIRED. applySchema (which
+		// writes) is skipped below, so no write of any kind reaches the source.
+		dsn = "file:" + dbPath + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	}
 
 	// Write connection: single connection serializes all mutations.
 	db, err := sql.Open("sqlite", dsn)
@@ -151,9 +186,14 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		disableRetentionSweeper: cfg.disableRetentionSweeper,
 	}
 
-	if err := s.applySchema(context.Background()); err != nil {
-		db.Close() //nolint:errcheck
-		return nil, err
+	// applySchema issues writes (journal-mode pragmas, CREATE TABLE), so a
+	// read-only open skips it: the source db already carries the schema this
+	// same codebase wrote. recoverSequence is a pure read and stays.
+	if !cfg.readOnly {
+		if err := s.applySchema(context.Background()); err != nil {
+			db.Close() //nolint:errcheck
+			return nil, err
+		}
 	}
 	if err := s.recoverSequence(context.Background()); err != nil {
 		db.Close() //nolint:errcheck
@@ -171,7 +211,9 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	readDB.SetConnMaxIdleTime(5 * time.Minute)
 	s.readDB = readDB
 
-	s.startRetentionSweeper()
+	if !cfg.readOnly {
+		s.startRetentionSweeper()
+	}
 	return s, nil
 }
 
@@ -427,6 +469,19 @@ func (s *SQLiteStore) normalizeCreate(b Bead) Bead {
 
 func (s *SQLiteStore) nextID() string {
 	return fmt.Sprintf("%s-%d", s.prefix, s.seq.Add(1))
+}
+
+// AdvanceSequenceFloor lifts the store's in-memory id sequence so the next
+// auto-minted id has a numeric suffix strictly greater than n. It never lowers
+// the floor. It is the collision guard for a store whose reserved-prefix
+// namespace was seeded from an EXTERNAL sequence the store's own rows do not
+// reflect: a migration that copies foreign beads sharing this store's mint
+// prefix (e.g. the window-3 combined-scope graph import, where non-graph gcg-<n>
+// ids live in sibling stores) must call this with the global max suffix so a
+// fresh mint never reissues an id already claimed elsewhere. Callers persist n
+// out of band and re-apply it on every open until the store's own rows exceed it.
+func (s *SQLiteStore) AdvanceSequenceFloor(n int64) {
+	s.ensureSequenceAtLeast(n)
 }
 
 func (s *SQLiteStore) ensureSequenceAtLeast(n int64) {

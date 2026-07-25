@@ -9,14 +9,21 @@ package main
 // then copy-verify, then the atomic marker flips routing, then a background
 // residue sweep clears the bd copies (open beads younger than the grace are
 // spared for the mixed-version window; unknown open beads merge-import
-// before any sweep on later boots). Closed graph beads deliberately do NOT
-// cross: the store's own retention purges terminal rows within hours, and
-// nothing replays closed molecule topology.
+// before any sweep on later boots). From the bd WORK store, closed graph beads
+// do NOT cross: a native city's closed molecule topology lives (and is
+// whole-tree GC'd) in the graph store itself, never replayed from bd.
+//
+// The window-3 deploy lineage is the exception: mc's live molecules run inside
+// the combined .gc/infra scope, so that source imports INCLUDING closed graph
+// beads — a mid-flight molecule's already-closed steps/gates must cross or the
+// finalize outcome vote (which reads closed step results on this branch)
+// miscounts. See importGraphSnapshot's includeClosed parameter.
 
 import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,10 +106,41 @@ func ensureGraphClassMigrated(cityPath string, cfg *config.City, stderr io.Write
 		return false
 	}
 
+	// Deploy-lineage (window-3) integration: add the combined infra scope as an
+	// additional, READ-ONLY import source. importGraphSnapshot already filters to
+	// ClassGraph, so the scope's non-graph gcg beads are ignored here; the graph
+	// beads import with their gcg ids preserved. A present-but-unopenable scope is
+	// fatal (abort before the marker) — flipping routing while it is unreadable
+	// would orphan its graph beads.
+	infraScope, closeInfra, haveInfra, err := openInfraCombinedScopeSource(cityPath)
+	defer closeInfra()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: graph class migration: %v\n", err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	// The bd work stores import OPEN-only (native behavior); the RESET runs here.
 	imported, err := migrateGraphIntoClassStore(class, stores)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: graph class migration: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
+	}
+	if haveInfra {
+		// The combined scope imports INCLUDING closed graph beads (mid-flight
+		// molecules' closed steps/gates must cross for correct finalize votes),
+		// with the same copy-verify gate, then the id-floor collision guard lifts
+		// (and persists) the graph store's floor above the GLOBAL max gcg suffix so
+		// a post-cutover graph mint never reuses a gcg-<n> now owned by a sibling
+		// (non-graph) class store.
+		n, ierr := importGraphSnapshot(class, infraScope, true, true)
+		if ierr != nil {
+			fmt.Fprintf(stderr, "gc start: graph class migration (infra scope): %v\n", ierr) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		imported += n
+		if err := applyGraphSeqFloorFromInfraScope(cityPath, infraScope, class); err != nil {
+			fmt.Fprintf(stderr, "gc start: graph class migration: %v\n", err) //nolint:errcheck // best-effort stderr
+			return false
+		}
 	}
 	if err := writeGraphMigratedMarkerFile(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: graph class migration: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -111,14 +149,59 @@ func ensureGraphClassMigrated(cityPath string, cfg *config.City, stderr io.Write
 	// Straggler pass: a pour racing the marker flip merge-imports here;
 	// anything still missed converges on a later boot's residue sweep.
 	for _, st := range stores {
-		if stragglers, err := importGraphSnapshot(class, st, false); err == nil {
+		if stragglers, err := importGraphSnapshot(class, st, false, false); err == nil {
 			imported += stragglers
 		}
 	}
 
-	fmt.Fprintf(stderr, "gc start: graph class migrated to %s (%d open graph beads imported)\n", //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc start: graph class migrated to %s (%d graph beads imported)\n", //nolint:errcheck // best-effort stderr
 		graphClassStorePath(cityPath), imported)
 	return true
+}
+
+// applyGraphSeqFloorFromInfraScope lifts the graph class store's id floor above
+// the GLOBAL max gcg-<n> suffix of the ENTIRE combined scope — graph AND the
+// reclassified non-graph beads — then persists it so every later open re-applies
+// it (graphClassStoreFor). This is the deploy-lineage mint-collision guard: the
+// graph store recovers its floor from its own rows only, which omit the non-graph
+// gcg-<n> ids now living in sibling stores, so without this a fresh graph mint
+// could reissue one. Compound ids (gcg-wisp-0007) are ignored — they occupy a
+// distinct namespace no plain gcg-<n> mint can hit.
+func applyGraphSeqFloorFromInfraScope(cityPath string, infraScope beads.Store, class *beads.SQLiteStore) error {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		return nil
+	}
+	rows, err := infraScope.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return fmt.Errorf("scanning infra scope for graph id floor: %w", err)
+	}
+	var maxSuffix int64
+	for _, b := range rows {
+		if n := reservedPrefixNumericSuffix(b.ID, prefix); n > maxSuffix {
+			maxSuffix = n
+		}
+	}
+	if maxSuffix <= 0 {
+		return nil
+	}
+	class.AdvanceSequenceFloor(maxSuffix)
+	return writeGraphSeqFloor(cityPath, maxSuffix)
+}
+
+// reservedPrefixNumericSuffix returns the trailing integer of a plain
+// "<prefix>-<n>" id, or 0 for a non-matching prefix or a compound/non-numeric
+// suffix.
+func reservedPrefixNumericSuffix(id, prefix string) int64 {
+	rest, ok := strings.CutPrefix(id, prefix+"-")
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // migrateGraphIntoClassStore imports the bd store's current open graph
@@ -138,7 +221,7 @@ func migrateGraphIntoClassStore(class *beads.SQLiteStore, stores []beads.Store) 
 	}
 	imported := 0
 	for _, st := range stores {
-		n, err := importGraphSnapshot(class, st, true)
+		n, err := importGraphSnapshot(class, st, true, false)
 		imported += n
 		if err != nil {
 			return imported, err
@@ -147,19 +230,32 @@ func migrateGraphIntoClassStore(class *beads.SQLiteStore, stores []beads.Store) 
 	return imported, nil
 }
 
-// importGraphSnapshot copies the bd store's open graph-class beads (both
-// tiers) and their within-graph dep edges into the class store. Already
-// present ids are skipped (merge semantics for the straggler/residue
-// passes). verify re-reads every imported id before returning.
-func importGraphSnapshot(class *beads.SQLiteStore, store beads.Store, verify bool) (int, error) {
-	rows, err := store.List(beads.ListQuery{TierMode: beads.TierBoth, AllowScan: true})
+// importGraphSnapshot copies a store's graph-class beads (both tiers) and their
+// within-graph dep edges into the class store. Already present ids are skipped
+// (merge semantics for the straggler/residue passes). verify re-reads every
+// imported id before returning.
+//
+// includeClosed controls whether CLOSED graph beads cross. The bd work-store
+// path passes false — the historical drop, since a native city's closed graph
+// topology lives (and is GC'd) in the graph store itself. The window-3
+// combined-scope path passes true: mc's live molecules run IN .gc/infra, so a
+// mid-flight molecule's already-CLOSED steps/gates must cross too, or finalize's
+// outcome vote (which reads closed step results on this branch) miscounts and
+// convergence breaks — and gc bd show <closed-gcg-id> would 404. Graph retention
+// is disabled on the class store, so whole-tree workflow GC prunes these, exactly
+// as for a natively-run molecule.
+func importGraphSnapshot(class *beads.SQLiteStore, store beads.Store, verify, includeClosed bool) (int, error) {
+	rows, err := store.List(beads.ListQuery{IncludeClosed: includeClosed, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
 		return 0, fmt.Errorf("listing bd graph beads: %w", err)
 	}
 	graphRows := make([]beads.Bead, 0, len(rows))
 	graphIDs := make(map[string]bool, len(rows))
 	for _, b := range rows {
-		if coordclass.Classify(b) != coordclass.ClassGraph || b.Status == "closed" {
+		if coordclass.Classify(b) != coordclass.ClassGraph {
+			continue
+		}
+		if !includeClosed && b.Status == "closed" {
 			continue
 		}
 		graphRows = append(graphRows, b)
@@ -256,7 +352,7 @@ func sweepLegacyGraphResidue(cityPath string, cfg *config.City, stderr io.Writer
 	now := time.Now()
 	deleted := 0
 	for _, store := range stores {
-		if _, err := importGraphSnapshot(class, store, false); err != nil {
+		if _, err := importGraphSnapshot(class, store, false, false); err != nil {
 			fmt.Fprintf(stderr, "gc: graph legacy residue sweep: import: %v\n", err) //nolint:errcheck // best-effort stderr
 			continue                                                                 // never delete what we could not first converge
 		}

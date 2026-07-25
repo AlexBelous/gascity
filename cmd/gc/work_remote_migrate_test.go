@@ -30,6 +30,14 @@ func testRemoteTarget() workTopologyTarget {
 	return workTopologyTarget{Host: "db.example", Port: "3306", Database: "orgdb"}
 }
 
+// gatewayRemoteCityConfig is a remote city whose target is declared a hosted,
+// server-authoritative gateway via [beads.work] remote_config="verify".
+func gatewayRemoteCityConfig() *config.City {
+	cfg := remoteCityConfig()
+	cfg.Beads.Work.RemoteConfig = config.BeadsWorkRemoteConfigVerify
+	return cfg
+}
+
 // withWorkRemoteSeams overrides the exec-backed seams with fakes for the duration
 // of a test. local is the source (city's managed-local work DB); remote is the
 // org endpoint. addedPrefixes captures the allowed_prefixes writes.
@@ -431,6 +439,42 @@ func TestReconcileRemoteAllowedPrefixesReAppends(t *testing.T) {
 	}
 }
 
+// TestReconcileRemoteAllowedPrefixesGatewayVerifiesNoAppend pins deliverable C on a
+// verify-mode (server-authoritative) gateway: the self-heal reads presence and, on
+// a missing prefix, surfaces a doctor error and logs loudly — it never attempts
+// add-to-set against the read-only config.
+func TestReconcileRemoteAllowedPrefixesGatewayVerifiesNoAppend(t *testing.T) {
+	origRead := workRemoteReadAllowedPrefixes
+	origAdd := workRemoteAddPrefixToSet
+	t.Cleanup(func() {
+		workRemoteReadAllowedPrefixes = origRead
+		workRemoteAddPrefixToSet = origAdd
+	})
+	workRemoteReadAllowedPrefixes = func(beads.Store) (map[string]bool, error) {
+		return map[string]bool{"hq": true}, nil // "al" missing, server-provisioned incompletely
+	}
+	workRemoteAddPrefixToSet = func(beads.Store, string) error {
+		t.Fatal("gateway self-heal must NEVER attempt add-to-set against read-only config")
+		return nil
+	}
+	var log strings.Builder
+	err := reconcileRemoteAllowedPrefixes(newFakeWorkStore(), gatewayRemoteCityConfig(), &log)
+	if err == nil || !strings.Contains(err.Error(), "provision server-side") || !strings.Contains(err.Error(), "al") {
+		t.Fatalf("gateway self-heal must surface a doctor error naming the missing prefix + provisioning, got %v", err)
+	}
+	if !strings.Contains(log.String(), "server-authoritative") {
+		t.Fatalf("gateway self-heal must log loudly, got %q", log.String())
+	}
+
+	// All prefixes present on the gateway → clean, no error, no append.
+	workRemoteReadAllowedPrefixes = func(beads.Store) (map[string]bool, error) {
+		return map[string]bool{"hq": true, "al": true}, nil
+	}
+	if err := reconcileRemoteAllowedPrefixes(newFakeWorkStore(), gatewayRemoteCityConfig(), &strings.Builder{}); err != nil {
+		t.Fatalf("gateway self-heal with all prefixes present must be clean, got %v", err)
+	}
+}
+
 // TestRemoteResumeCopyPreProbeAborts pins F5/F10: the resume copy pre-probes the
 // FULL incoming id set BEFORE the guarded upsert, so a foreign row (even one older
 // than ours, which the guarded upsert would have replaced) is never overwritten.
@@ -630,6 +674,203 @@ func TestWorkTopologyDoctorStateRemote(t *testing.T) {
 	}
 	if !strings.Contains(detail, "remote-auth=unreachable") || !strings.Contains(detail, "prefixes=missing:al") {
 		t.Fatalf("remote doctor line missing unreachable/missing surface: %q", detail)
+	}
+}
+
+// TestRemoteTargetIsHostedGatewaySignal pins deliverable A: the gateway/plain arm
+// keys on the EXPLICIT [beads.work] remote_config mode, not any inferred heuristic.
+// The default (empty / "write") is PLAIN; only "verify" is a gateway.
+func TestRemoteTargetIsHostedGatewaySignal(t *testing.T) {
+	if remoteTargetIsHostedGateway(remoteCityConfig()) {
+		t.Fatal("default remote_config (empty) must be PLAIN (writable)")
+	}
+	writeCfg := remoteCityConfig()
+	writeCfg.Beads.Work.RemoteConfig = config.BeadsWorkRemoteConfigWrite
+	if remoteTargetIsHostedGateway(writeCfg) {
+		t.Fatal("remote_config=\"write\" must be PLAIN (writable)")
+	}
+	if !remoteTargetIsHostedGateway(gatewayRemoteCityConfig()) {
+		t.Fatal("remote_config=\"verify\" must be a hosted GATEWAY")
+	}
+	if remoteTargetIsHostedGateway(nil) {
+		t.Fatal("nil cfg must not be a gateway")
+	}
+}
+
+// TestConfigStepRemoteAllowedPrefixesModeAware pins deliverable B in isolation:
+// WRITE mode writes via add-to-set and re-read-guards; VERIFY mode verifies (read)
+// and aborts on a missing prefix without ever writing.
+func TestConfigStepRemoteAllowedPrefixesModeAware(t *testing.T) {
+	origRead := workRemoteReadAllowedPrefixes
+	origAdd := workRemoteAddPrefixToSet
+	t.Cleanup(func() {
+		workRemoteReadAllowedPrefixes = origRead
+		workRemoteAddPrefixToSet = origAdd
+	})
+
+	t.Run("write mode writes the union then re-read passes", func(t *testing.T) {
+		var added []string
+		workRemoteAddPrefixToSet = func(_ beads.Store, p string) error { added = append(added, p); return nil }
+		workRemoteReadAllowedPrefixes = func(beads.Store) (map[string]bool, error) {
+			return map[string]bool{"hq": true, "al": true}, nil // reflects the write
+		}
+		if err := configStepRemoteAllowedPrefixes(newFakeWorkStore(), remoteCityConfig()); err != nil {
+			t.Fatal(err)
+		}
+		if !sliceContains(added, "hq") || !sliceContains(added, "al") {
+			t.Fatalf("write config step must add-to-set hq and al, got %v", added)
+		}
+	})
+
+	t.Run("write mode re-read guard aborts on a silent no-op", func(t *testing.T) {
+		workRemoteAddPrefixToSet = func(beads.Store, string) error { return nil } // silent no-op
+		workRemoteReadAllowedPrefixes = func(beads.Store) (map[string]bool, error) {
+			return map[string]bool{"hq": true}, nil // "al" never landed
+		}
+		err := configStepRemoteAllowedPrefixes(newFakeWorkStore(), remoteCityConfig())
+		if err == nil || !strings.Contains(err.Error(), "al") || !strings.Contains(err.Error(), "remote_config") {
+			t.Fatalf("re-read guard must abort naming the still-absent prefix + the verify hint, got %v", err)
+		}
+	})
+
+	t.Run("verify mode verifies present, no write", func(t *testing.T) {
+		workRemoteReadAllowedPrefixes = func(beads.Store) (map[string]bool, error) {
+			return map[string]bool{"hq": true, "al": true}, nil
+		}
+		workRemoteAddPrefixToSet = func(beads.Store, string) error {
+			t.Fatal("verify config step must NEVER write")
+			return nil
+		}
+		if err := configStepRemoteAllowedPrefixes(newFakeWorkStore(), gatewayRemoteCityConfig()); err != nil {
+			t.Fatalf("verify with all prefixes present must pass, got %v", err)
+		}
+	})
+
+	t.Run("verify mode aborts on a missing prefix", func(t *testing.T) {
+		workRemoteReadAllowedPrefixes = func(beads.Store) (map[string]bool, error) {
+			return map[string]bool{"hq": true}, nil // "al" not provisioned server-side
+		}
+		workRemoteAddPrefixToSet = func(beads.Store, string) error {
+			t.Fatal("verify config step must NEVER write, even on a missing prefix")
+			return nil
+		}
+		err := configStepRemoteAllowedPrefixes(newFakeWorkStore(), gatewayRemoteCityConfig())
+		if err == nil || !strings.Contains(err.Error(), "al") || !strings.Contains(err.Error(), "server-side") {
+			t.Fatalf("verify must abort naming the missing prefix + server-side provisioning, got %v", err)
+		}
+	})
+}
+
+// TestEnsureWorkRemoteGatewayVerifiesPrefixes pins deliverable B end-to-end on a
+// verify-mode target: with every required prefix present the migration completes
+// and NEVER writes allowed_prefixes (verify-not-write).
+func TestEnsureWorkRemoteGatewayVerifiesPrefixes(t *testing.T) {
+	city := t.TempDir()
+	writeUnifiedMarker(t, city)
+	local := newFakeWorkStore()
+	remote := newFakeWorkStore()
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	local.seed(&fakeWorkRec{id: "al-1", status: "open", issueType: "task", createdAt: created, updatedAt: created})
+
+	var added []string
+	withWorkRemoteSeams(t, local, remote, &added)
+	// The gateway already has both prefixes provisioned server-side.
+	workRemoteReadAllowedPrefixes = func(beads.Store) (map[string]bool, error) {
+		return map[string]bool{"hq": true, "al": true}, nil
+	}
+
+	if err := ensureWorkRemote(city, gatewayRemoteCityConfig(), &strings.Builder{}); err != nil {
+		t.Fatalf("gateway migration with provisioned prefixes must succeed: %v", err)
+	}
+	if len(added) != 0 {
+		t.Fatalf("gateway migration must VERIFY, never write allowed_prefixes, got %v", added)
+	}
+	m, ok, err := readWorkTopologyMarker(workRemoteMarkerPath(city))
+	if err != nil || !ok || !m.isComplete() {
+		t.Fatalf("gateway migration must complete the marker: ok=%v complete=%v err=%v", ok, ok && m.isComplete(), err)
+	}
+	if _, err := remote.Get("al-1"); err != nil {
+		t.Fatalf("gateway migration must still copy work beads: %v", err)
+	}
+}
+
+// TestEnsureWorkRemoteGatewayAbortsOnMissingPrefixes pins deliverable B's
+// boot-blocking abort: a verify-mode target missing a required prefix aborts BEFORE
+// any marker, names the missing prefix + server-side provisioning, and never writes.
+func TestEnsureWorkRemoteGatewayAbortsOnMissingPrefixes(t *testing.T) {
+	city := t.TempDir()
+	writeUnifiedMarker(t, city)
+	local := newFakeWorkStore()
+	remote := newFakeWorkStore()
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	local.seed(&fakeWorkRec{id: "al-1", status: "open", issueType: "task", createdAt: created, updatedAt: created})
+
+	var added []string
+	withWorkRemoteSeams(t, local, remote, &added)
+	workRemoteReadAllowedPrefixes = func(beads.Store) (map[string]bool, error) {
+		return map[string]bool{"hq": true}, nil // "al" NOT provisioned server-side
+	}
+
+	err := ensureWorkRemote(city, gatewayRemoteCityConfig(), &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "al") || !strings.Contains(err.Error(), "server-side") {
+		t.Fatalf("gateway missing-prefix must abort naming the prefix + server-side provisioning, got %v", err)
+	}
+	// Boot-blocking BEFORE the marker (like the credential preflight): no marker, no
+	// write, no copy.
+	if _, ok, _ := readWorkTopologyMarker(workRemoteMarkerPath(city)); ok {
+		t.Fatal("gateway missing-prefix abort must leave NO marker")
+	}
+	if len(added) != 0 {
+		t.Fatalf("gateway missing-prefix abort must not write allowed_prefixes, got %v", added)
+	}
+	if _, err := remote.Get("al-1"); err == nil {
+		t.Fatal("gateway missing-prefix abort must not copy any work beads")
+	}
+}
+
+// TestWorkTopologyDoctorStateGatewayMode pins deliverable D: the doctor line
+// reflects the verify mode and, when a REACHABLE gateway is missing a prefix, the
+// server-side provisioning hint. An UNREACHABLE gateway shows no misleading hint.
+func TestWorkTopologyDoctorStateGatewayMode(t *testing.T) {
+	origProbe := workRemoteDoctorProbe
+	t.Cleanup(func() { workRemoteDoctorProbe = origProbe })
+
+	workRemoteDoctorProbe = func(string, *config.City) remoteDoctorStatus {
+		return remoteDoctorStatus{reachable: true, prefixesPresent: true}
+	}
+	detail, err := workTopologyDoctorState(t.TempDir(), gatewayRemoteCityConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, "remote-config=verify") || !strings.Contains(detail, "prefixes=present") {
+		t.Fatalf("gateway doctor line must show verify mode + present prefixes: %q", detail)
+	}
+
+	workRemoteDoctorProbe = func(string, *config.City) remoteDoctorStatus {
+		return remoteDoctorStatus{reachable: true, prefixesPresent: false, missing: []string{"al"}}
+	}
+	detail, err = workTopologyDoctorState(t.TempDir(), gatewayRemoteCityConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, "remote-config=verify") || !strings.Contains(detail, "prefixes=missing:al") || !strings.Contains(detail, "provision server-side") {
+		t.Fatalf("reachable gateway doctor line must surface the missing prefix + provisioning hint: %q", detail)
+	}
+
+	// UNREACHABLE gateway: verify mode still shown, but NO provisioning hint (the
+	// probe could not read the prefixes — blaming provisioning would mislead).
+	workRemoteDoctorProbe = func(string, *config.City) remoteDoctorStatus {
+		return remoteDoctorStatus{reachable: false, authDetail: "bad password", prefixesPresent: false}
+	}
+	detail, err = workTopologyDoctorState(t.TempDir(), gatewayRemoteCityConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, "remote-auth=unreachable") || !strings.Contains(detail, "remote-config=verify") {
+		t.Fatalf("unreachable gateway doctor line must show unreachable + verify mode: %q", detail)
+	}
+	if strings.Contains(detail, "provision server-side") {
+		t.Fatalf("unreachable gateway must NOT show the provisioning hint: %q", detail)
 	}
 }
 

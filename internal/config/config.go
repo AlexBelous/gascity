@@ -1472,6 +1472,17 @@ type BeadsWorkConfig struct {
 	// and is one-way (managed is rejected once remote). Any other value fails
 	// config load.
 	Target string `toml:"target,omitempty" jsonschema:"pattern=^(|managed|dolt://[^/]+:[0-9]+/[^/?#]+)$"`
+	// RemoteConfig declares whether the remote target's own config (the org
+	// DB's allowed_prefixes) is writable or server-authoritative — a property
+	// ORTHOGONAL to how bd authenticates to it. "write" (default) is a plain,
+	// writable self-hosted Dolt: the migration provisions allowed_prefixes via
+	// `bd config add-to-set`. "verify" marks a hosted, server-authoritative
+	// beads GATEWAY whose config is read-only to bd: allowed_prefixes is
+	// provisioned server-side (beads-web / beads-provisioner) and the migration
+	// VERIFIES it, boot-blocking on a missing prefix instead of writing. Empty
+	// defaults to "write". Only meaningful with a remote target; any other
+	// value, or a non-empty value without a remote target, fails config load.
+	RemoteConfig string `toml:"remote_config,omitempty" jsonschema:"enum=write,enum=verify"`
 }
 
 // Work-topology values for [beads] infra and [beads.work] scope/target.
@@ -1494,6 +1505,15 @@ const (
 	// beadsWorkTargetRemoteScheme is the required URL scheme for a remote
 	// task-DB target (dolt://host:port/database).
 	beadsWorkTargetRemoteScheme = "dolt://"
+
+	// BeadsWorkRemoteConfigWrite provisions the remote target's allowed_prefixes
+	// via a writable `bd config add-to-set` (the default; a plain self-hosted
+	// Dolt we control).
+	BeadsWorkRemoteConfigWrite = "write"
+	// BeadsWorkRemoteConfigVerify marks a hosted, server-authoritative beads
+	// gateway whose config is read-only to bd: the migration verifies
+	// allowed_prefixes and boot-blocks on a missing prefix instead of writing.
+	BeadsWorkRemoteConfigVerify = "verify"
 )
 
 // EffectiveScope returns the configured work scope, mapping the empty/unset
@@ -1527,6 +1547,24 @@ func (w BeadsWorkConfig) IsUnified() bool {
 func (w BeadsWorkConfig) IsRemote() bool {
 	_, _, _, ok := w.RemoteTarget()
 	return ok
+}
+
+// EffectiveRemoteConfig returns the configured remote-config mode, mapping the
+// empty/unset state to the "write" default. Values are validated at load, so
+// callers can switch on the two remote-config constants.
+func (w BeadsWorkConfig) EffectiveRemoteConfig() string {
+	if strings.TrimSpace(w.RemoteConfig) == "" {
+		return BeadsWorkRemoteConfigWrite
+	}
+	return strings.TrimSpace(w.RemoteConfig)
+}
+
+// RemoteConfigIsVerify reports whether the remote target is a hosted,
+// server-authoritative beads gateway (remote_config="verify") whose config is
+// read-only to bd — so the migration verifies allowed_prefixes rather than
+// writing it. False for the default writable ("write") mode.
+func (w BeadsWorkConfig) RemoteConfigIsVerify() bool {
+	return w.EffectiveRemoteConfig() == BeadsWorkRemoteConfigVerify
 }
 
 // RemoteTarget parses a remote work target of the form
@@ -4970,6 +5008,14 @@ func validateBeadsTopology(b BeadsConfig) error {
 	}
 	if b.Work.IsRemote() && b.Work.EffectiveScope() != BeadsWorkScopeUnified {
 		return fmt.Errorf("beads.work.target %q requires beads.work.scope=%q (a remote task DB is shared only in the unified topology)", b.Work.Target, BeadsWorkScopeUnified)
+	}
+	switch strings.TrimSpace(b.Work.RemoteConfig) {
+	case "", BeadsWorkRemoteConfigWrite, BeadsWorkRemoteConfigVerify:
+	default:
+		return fmt.Errorf("beads.work.remote_config: unknown value %q (known: %q, %q)", b.Work.RemoteConfig, BeadsWorkRemoteConfigWrite, BeadsWorkRemoteConfigVerify)
+	}
+	if strings.TrimSpace(b.Work.RemoteConfig) != "" && !b.Work.IsRemote() {
+		return fmt.Errorf("beads.work.remote_config=%q is only meaningful with a remote beads.work.target (dolt://host:port/database)", b.Work.RemoteConfig)
 	}
 	return nil
 }

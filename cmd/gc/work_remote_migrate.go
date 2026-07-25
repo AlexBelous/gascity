@@ -86,15 +86,87 @@ var workRemoteAddPrefixToSet = func(store beads.Store, prefix string) error {
 	return bd.ConfigAddToSet(allowedPrefixesConfigKey, prefix)
 }
 
-// configStepRemoteAllowedPrefixes unions this city's full prefix set (HQ + every
-// bound rig) into the org DB's allowed_prefixes.
+// ── hosted-gateway detection (S8) ────────────────────────────────────────────
+
+// remoteTargetIsHostedGateway reports whether the remote work target is a HOSTED,
+// server-authoritative beads GATEWAY — declared EXPLICITLY via
+// [beads.work] remote_config="verify" — whose config (the org DB's
+// allowed_prefixes) is read-only to bd, so the migration must VERIFY (read) it
+// rather than WRITE it.
+//
+// CHOSEN SIGNAL: the explicit [beads.work] remote_config mode, NOT an inferred
+// heuristic. Config-authority (server-authoritative vs writable) is ORTHOGONAL to
+// how bd authenticates: an operator can use a credential command to reach a plain,
+// writable self-hosted Dolt (e.g. rotated passwords), so inferring "gateway" from
+// the credential-command env would misclassify that as read-only and deadlock the
+// migration (abort telling the operator to "provision server-side" infra that does
+// not exist for their Dolt) while the self-heal refused to re-append a real
+// eviction. The operator declares the target's config authority; the default
+// (empty / "write") is the plain writable path, byte-identical to S5 (DARK).
+func remoteTargetIsHostedGateway(cfg *config.City) bool {
+	return cfg != nil && cfg.Beads.Work.RemoteConfigIsVerify()
+}
+
+// configStepRemoteAllowedPrefixes ensures this city's full prefix set (HQ + every
+// bound rig) is present in the org DB's allowed_prefixes.
+//
+//   - WRITE mode (default; plain, writable self-hosted Dolt): union the set in via
+//     the transactional `bd config add-to-set`, then RE-READ and fail loudly if a
+//     required prefix is still absent — turning a silent read-only no-op (e.g. a
+//     server-authoritative target misconfigured as write) into a safe abort.
+//   - VERIFY mode (hosted, server-authoritative gateway): the set is provisioned
+//     SERVER-SIDE at project creation and bd cannot write it, so VERIFY (read) that
+//     every required prefix is already present and return a boot-blocking,
+//     actionable error naming any missing prefix — the migration cannot mint them
+//     into the shared org DB itself.
 func configStepRemoteAllowedPrefixes(store beads.Store, cfg *config.City) error {
-	for _, p := range cityScopePrefixes(cfg) {
+	required := cityScopePrefixes(cfg)
+	if remoteTargetIsHostedGateway(cfg) {
+		return verifyGatewayAllowedPrefixes(store, required)
+	}
+	for _, p := range required {
 		if err := workRemoteAddPrefixToSet(store, p); err != nil {
 			return err
 		}
 	}
+	// Re-read-after-write guard: `bd config add-to-set` can silently no-op against a
+	// server-authoritative target, so re-read and fail loudly (boot-blocking, before
+	// the marker) if any required prefix is still absent instead of silently
+	// misrouting later mints to the org prefix.
+	present, err := workRemoteReadAllowedPrefixes(store)
+	if err != nil {
+		return fmt.Errorf("re-reading allowed_prefixes after write: %w", err)
+	}
+	if missing := missingPrefixes(required, present); len(missing) > 0 {
+		return fmt.Errorf("wrote allowed_prefixes via `bd config add-to-set` but %v is still absent on the remote — the target may be a server-authoritative gateway that rejects config writes; set [beads.work] remote_config=%q and provision the prefix(es) server-side", missing, config.BeadsWorkRemoteConfigVerify)
+	}
 	return nil
+}
+
+// verifyGatewayAllowedPrefixes reads the org DB's allowed_prefixes and returns a
+// boot-blocking, actionable error if any required prefix is absent — the
+// verify-mode (hosted gateway) arm, where config is server-authoritative and the
+// migration cannot mint prefixes itself.
+func verifyGatewayAllowedPrefixes(store beads.Store, required []string) error {
+	present, err := workRemoteReadAllowedPrefixes(store)
+	if err != nil {
+		return fmt.Errorf("reading gateway allowed_prefixes: %w", err)
+	}
+	if missing := missingPrefixes(required, present); len(missing) > 0 {
+		return fmt.Errorf("hosted beads gateway org DB is missing required allowed_prefixes %v — [beads.work] remote_config=%q declares its config server-authoritative (read-only to bd), so this migration cannot mint them; provision these prefix(es) server-side (beads-web / beads-provisioner) for this project, then retry", missing, config.BeadsWorkRemoteConfigVerify)
+	}
+	return nil
+}
+
+// missingPrefixes returns the required prefixes absent from present, order-stable.
+func missingPrefixes(required []string, present map[string]bool) []string {
+	var missing []string
+	for _, p := range required {
+		if !present[p] {
+			missing = append(missing, p)
+		}
+	}
+	return missing
 }
 
 // workRemoteReadAllowedPrefixes reads the org DB's current allowed_prefixes set
@@ -214,6 +286,19 @@ func ensureWorkRemote(cityPath string, cfg *config.City, stderr io.Writer) error
 		return fmt.Errorf("work remote blocked: cannot authenticate to %s — set BEADS_DOLT_CREDENTIAL_COMMAND or GC_DOLT_PASSWORD for the remote endpoint: %w", remoteTargetURL(target), err)
 	}
 
+	// Gateway config gate (S8): a verify-mode (server-authoritative) target's
+	// allowed_prefixes is provisioned SERVER-SIDE and read-only to bd, so VERIFY (a
+	// read, like the preflight) that every required prefix is present BEFORE
+	// recording any durable migration intent. A missing prefix aborts loudly and
+	// leaves NO marker — the operator provisions it server-side (beads-web /
+	// beads-provisioner) and reboots.
+	gateway := remoteTargetIsHostedGateway(cfg)
+	if gateway {
+		if err := configStepRemoteAllowedPrefixes(remoteStore, cfg); err != nil {
+			return fmt.Errorf("work remote: %w", err)
+		}
+	}
+
 	// Durable pre-copy intent (F1/F8): BEFORE any org-DB write, persist a STARTED
 	// remote marker pinning {Target, Stamp}. A fresh migration mints the stamp once;
 	// a resume already loaded it above.
@@ -227,9 +312,14 @@ func ensureWorkRemote(cityPath string, cfg *config.City, stderr io.Writer) error
 		}
 	}
 
-	// Config step (D): union this city's prefixes into the org DB allowed_prefixes.
-	if err := configStepRemoteAllowedPrefixes(remoteStore, cfg); err != nil {
-		return fmt.Errorf("work remote: appending allowed_prefixes: %w", err)
+	// Config step (D): a WRITE-mode target unions this city's prefixes into the org
+	// DB allowed_prefixes via add-to-set (an org-DB write, so it follows the recorded
+	// intent above), then re-reads to confirm. A VERIFY-mode target was checked
+	// before the marker; nothing to write here.
+	if !gateway {
+		if err := configStepRemoteAllowedPrefixes(remoteStore, cfg); err != nil {
+			return fmt.Errorf("work remote: appending allowed_prefixes: %w", err)
+		}
 	}
 
 	// Source set (E): export the LOCAL unified city DB (durable + ephemeral,
@@ -470,19 +560,24 @@ func importRemoteResidueFromSource(remoteStore, oldStore beads.Store, ourStamp s
 // allowed_prefixes when a concurrent city's lost-update evicted them — the
 // spec-mandated convergent self-heal, run from the residue/doctor convergence
 // path (never the hot boot check). It never removes another city's entries.
+//
+// Mode-aware (S8): on a verify-mode (server-authoritative) target the org DB's
+// config is read-only to bd, so the self-heal CANNOT re-append. It VERIFIES
+// presence via the same read and, on a missing prefix, logs loudly and surfaces a
+// doctor error (the operator must provision it server-side); it never attempts
+// add-to-set against a read-only config.
 func reconcileRemoteAllowedPrefixes(store beads.Store, cfg *config.City, stderr io.Writer) error {
 	present, err := workRemoteReadAllowedPrefixes(store)
 	if err != nil {
 		return err
 	}
-	var missing []string
-	for _, p := range cityScopePrefixes(cfg) {
-		if !present[p] {
-			missing = append(missing, p)
-		}
-	}
+	missing := missingPrefixes(cityScopePrefixes(cfg), present)
 	if len(missing) == 0 {
 		return nil
+	}
+	if remoteTargetIsHostedGateway(cfg) {
+		fmt.Fprintf(stderr, "gc: work remote: ERROR: hosted gateway org DB missing required allowed_prefixes %v — config is server-authoritative; provision them server-side (beads-web / beads-provisioner). The migration cannot re-append them.\n", missing) //nolint:errcheck // best-effort stderr
+		return fmt.Errorf("work remote: hosted gateway missing allowed_prefixes %v (provision server-side)", missing)
 	}
 	for _, p := range missing {
 		if err := workRemoteAddPrefixToSet(store, p); err != nil {

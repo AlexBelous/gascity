@@ -420,6 +420,22 @@ after the five ensure*ClassMigrated calls.
   city's prefixes are still present and re-append when absent
   (convergent self-heal), so an eviction is detected and repaired
   instead of silently degrading mints to the org prefix.
+  When the operator declares the target a hosted, server-authoritative
+  GATEWAY via `[beads.work] remote_config="verify"` (config-authority is
+  ORTHOGONAL to auth method, so it is declared explicitly, never inferred
+  from the credential command — a credential command can front a plain,
+  writable Dolt), config is read-only to bd: `allowed_prefixes` is
+  provisioned SERVER-SIDE at project creation (beads-web /
+  beads-provisioner) and the migration VERIFIES it with `bd config get`
+  rather than writing it. A missing required prefix is a boot-blocking
+  abort BEFORE any marker — naming the prefix and instructing server-side
+  provisioning — because the migration cannot mint prefixes into the
+  shared org DB itself; the self-heal and doctor line likewise
+  verify-and-surface (never re-append) in verify mode. The default
+  (`remote_config="write"`, or unset) is the plain writable path:
+  `bd config add-to-set` followed by a re-read guard that boot-blocks if
+  the write silently no-ops (e.g. a server-authoritative target
+  misconfigured as write).
 - The city's org-DB identity stamp is an IDENTITY, not a derivation:
   minted ONCE (random, never hostname-derived — hostnames change on
   container reschedule and a re-derived stamp makes the city's own rows

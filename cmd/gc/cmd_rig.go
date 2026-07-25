@@ -300,6 +300,32 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		name = filepath.Base(rigPath)
 	}
 
+	// Addendum E: on a unified/remote city (shared work DB) the new rig's prefix
+	// must be pairwise-distinct and non-reserved BEFORE we create it. DARK on a
+	// scoped city (each rig keeps its own DB) — sharedWorkDB is false and nothing
+	// here runs.
+	//
+	// Both the shares-decision and the distinctness scan must consult the EXPANDED
+	// (pack/include-composed) config — the raw edit cfg omits rigs declared in
+	// included pack fragments, so validating against it would miss a collision with
+	// a fragment rig and brick the city at the next boot. Fall back to the raw cfg
+	// only when expansion fails, so a broken pack never blocks a scoped rig-add.
+	topoCfg := cfg
+	if expanded, expErr := loadCityConfig(cityPath, io.Discard); expErr == nil && expanded != nil {
+		topoCfg = expanded
+	}
+	sharedWorkDB, sharedErr := rigAddSharesWorkDB(cityPath, topoCfg)
+	if sharedErr != nil {
+		fmt.Fprintf(stderr, "gc rig add: %v\n", sharedErr) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	}
+	if sharedWorkDB {
+		if err := validateNewRigPrefixForSharedWorkDB(topoCfg, name, prefixOverride); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return config.Rig{}, 1
+		}
+	}
+
 	deps := rig.Deps{
 		FS:           fs,
 		CityPath:     cityPath,
@@ -379,6 +405,17 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
+	}
+
+	// Addendum E: on a shared work DB, register the new rig's prefix into
+	// allowed_prefixes so it can mint <prefix>-N. The rig is already created; a
+	// registration failure surfaces the actionable error (non-zero) rather than
+	// leaving the rig silently unable to mint.
+	if sharedWorkDB {
+		if err := registerNewRigPrefixInSharedWorkDB(cityPath, r.EffectivePrefix(), stderr); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+			return r, 1
+		}
 	}
 	return r, 0
 }

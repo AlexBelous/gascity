@@ -4974,6 +4974,26 @@ func validateBeadsTopology(b BeadsConfig) error {
 	return nil
 }
 
+// ValidateBeadsTopology is the exported entry to the load-time work-topology
+// enum/ladder validation (unknown infra/scope/target values and the illegal
+// remote-without-unified combination). Operator tooling that computes a
+// prospective [beads]/[beads.work] change — `gc bd topology` — validates the
+// desired config through the exact same rule the loader enforces, so the CLI
+// and the config loader can never diverge on what a legal forward combination is.
+func ValidateBeadsTopology(b BeadsConfig) error {
+	return validateBeadsTopology(b)
+}
+
+// ValidateBeadsClasses is the exported entry to the load-time per-class backend
+// validation (unknown class names, the non-configurable work class, unknown
+// backends, unlanded sqlite stores, and the shadow-vs-effective-sqlite mutual
+// exclusion). `gc bd topology` runs it over a prospective config so a topology
+// flip that would implicitly route a shadow-configured class to sqlite is
+// rejected before it is written, matching the loader exactly.
+func ValidateBeadsClasses(b BeadsConfig) error {
+	return validateBeadsClasses(b)
+}
+
 // FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by
 // default: a nil pointer (the absent/omitted state) means enabled; only an
 // explicit formula_v2=false (or the deprecated graph_workflows=false alias)

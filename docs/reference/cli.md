@@ -273,9 +273,12 @@ deliberate city-scoped query is never silently downgraded to a rig store.
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
-so long-running workers can signal liveness to the dashboard, and
+so long-running workers can signal liveness to the dashboard,
 "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an
-in-progress assignment only when the bead still has that assignee.
+in-progress assignment only when the bead still has that assignee, and
+"topology", which inspects and sets the work-bead topology axes
+([beads] infra, [beads.work] scope/target) with a --dry-run migration
+preview (see "gc bd topology" below).
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -295,6 +298,9 @@ gc bd list --rig my-project -s open
 gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
 gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
 gc bd release-if-current my-project-abc worker-1
+gc bd topology                     # show the effective work-bead topology
+gc bd topology --scope unified --dry-run   # preview the unify migration
+gc bd topology --scope unified     # set scope=unified (restart to migrate)
 ```
 
 ## gc beads

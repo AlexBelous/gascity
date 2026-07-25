@@ -155,9 +155,9 @@ func TestCleanupBlockMidFailFinallyRuns(t *testing.T) {
 	}
 }
 
-// TestCleanupBlockFinallyFailureWins proves a failing finally overrides a passing block
-// guarded (the finally's error supersedes).
-func TestCleanupBlockFinallyFailureWins(t *testing.T) {
+// TestCleanupBlockGuardedOutcomeWinsOverFinallyFailure proves block cleanup keeps
+// the guarded aggregate's settlement even when the finalizer itself fails.
+func TestCleanupBlockGuardedOutcomeWinsOverFinallyFailure(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	doc := decodeIR(t, blockDoc("cub",
@@ -172,7 +172,8 @@ func TestCleanupBlockFinallyFailureWins(t *testing.T) {
 	}
 	settled := settledIDs(t, res.Events)
 	assertSettled(t, settled, "clean/__guarded", engine.OutcomePass) // block passed
-	assertSettled(t, settled, "clean", engine.OutcomeFailed)         // finally failure wins
+	assertSettled(t, settled, "teardown", engine.OutcomeFailed)      // finalizer failure stays visible
+	assertSettled(t, settled, "clean", engine.OutcomeSucceeded)      // guarded settlement wins
 }
 
 // TestCleanupBlockGateFailedSkipCascade is DET seed #4: the cleanup's OWN `after` gate

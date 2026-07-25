@@ -73,9 +73,10 @@ func TestCleanupBodyRunsWhenGuardedFailed(t *testing.T) {
 	}
 }
 
-// TestCleanupFinallyFailureWins proves a failing finally overrides a passing guarded
-// (the finally's error supersedes).
-func TestCleanupFinallyFailureWins(t *testing.T) {
+// TestCleanupGuardedOutcomeWinsOverFinallyFailure proves cleanup is a finalizer,
+// not an outcome transformer: its own failure remains visible on the body node,
+// while the wrapper preserves the guarded settlement.
+func TestCleanupGuardedOutcomeWinsOverFinallyFailure(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 	doc := decodeIR(t, blockDoc("cu3",
@@ -87,7 +88,8 @@ func TestCleanupFinallyFailureWins(t *testing.T) {
 	}
 	settled := settledIDs(t, res.Events)
 	assertSettled(t, settled, "g", engine.OutcomePass)
-	assertSettled(t, settled, "clean", engine.OutcomeFailed) // finally failure wins over a passing guarded
+	assertSettled(t, settled, "b", engine.OutcomeFailed)
+	assertSettled(t, settled, "clean", engine.OutcomeSucceeded)
 }
 
 // TestCleanupSkipCascade proves a cleanup gated on a failed `after` dep settles skipped

@@ -1157,13 +1157,13 @@ func arrayFromInputValue(v any) ([]string, bool, error) {
 	}
 }
 
-// cleanupOutcome computes a cleanup's settled outcome from its guarded and body
-// (finally) outcomes: the finally NEVER swallows a result — it changes the outcome
-// only if it ITSELF fails, in which case its failure supersedes. So a failed/canceled
-// body wins; otherwise the outcome is transparently the guarded's
-// (succeeded/degraded/failed).
-func cleanupOutcome(guarded, body string) string {
-	if body == OutcomeFailed || body == OutcomeCanceled {
+// cleanupOutcome computes a cleanup wrapper's settlement. In the current
+// dialect cleanup is a finalizer, not an outcome transformer: the guarded
+// settlement always wins, while a finalizer failure remains visible on its own
+// node. Legacy journals retain the historical body-failure precedence.
+func (d *driver) cleanupOutcome(guarded, body string) string {
+	if d.st().SemanticDialect == SemanticDialectLegacy &&
+		(body == OutcomeFailed || body == OutcomeCanceled) {
 		return body
 	}
 	return guarded
@@ -1241,7 +1241,7 @@ func (d *driver) settleCleanup(u, gu, bu planUnit, scope, nodeOutputs map[string
 	if n := st.Nodes[bu.activation]; n != nil && n.Settled {
 		bodyOutcome = n.Outcome
 	}
-	outcome := cleanupOutcome(guardedOutcome, bodyOutcome)
+	outcome := d.cleanupOutcome(guardedOutcome, bodyOutcome)
 	if err := d.appendSettled(u.activation, outcome, guardedOutput, ""); err != nil {
 		return err
 	}

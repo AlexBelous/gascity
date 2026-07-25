@@ -55,3 +55,16 @@ func TestEventsScanBudgetConfigExplicitValueOverridesDefault(t *testing.T) {
 		t.Fatalf("MaxArchiveBytesPerRequestOrDefault() = %d, want 1 (explicit override)", got)
 	}
 }
+
+// Unlike its rotation-config siblings (MaxSize, ArchiveRetainAge), a
+// non-positive scan budget must NOT mean "unlimited" — that would silently
+// reintroduce the unbounded archive walk this knob exists to bound. It
+// falls back to the safe default instead.
+func TestEventsScanBudgetConfigNonPositiveValueFallsBackToDefault(t *testing.T) {
+	for _, maxBytes := range []int64{0, -1, -134217728} {
+		sb := EventsScanBudgetConfig{MaxArchiveBytesPerRequest: &maxBytes}
+		if got := sb.MaxArchiveBytesPerRequestOrDefault(); got != DefaultEventsScanBudgetMaxArchiveBytes {
+			t.Fatalf("MaxArchiveBytesPerRequestOrDefault() with configured %d = %d, want default %d", maxBytes, got, DefaultEventsScanBudgetMaxArchiveBytes)
+		}
+	}
+}

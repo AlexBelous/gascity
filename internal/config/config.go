@@ -1926,8 +1926,15 @@ type EventsScanBudgetConfig struct {
 }
 
 // MaxArchiveBytesPerRequestOrDefault returns the configured scan budget.
+// Unset (nil) and non-positive values both fall back to
+// DefaultEventsScanBudgetMaxArchiveBytes: unlike this struct's
+// rotation-config siblings (WithMaxSize, WithArchiveRetainAge), where a
+// non-positive value means "unlimited," an unlimited scan budget here would
+// silently reintroduce the unbounded archive walk this knob exists to
+// bound. A non-positive value is therefore treated as "not meaningfully
+// configured," not "no limit."
 func (c EventsScanBudgetConfig) MaxArchiveBytesPerRequestOrDefault() int64 {
-	if c.MaxArchiveBytesPerRequest == nil {
+	if c.MaxArchiveBytesPerRequest == nil || *c.MaxArchiveBytesPerRequest <= 0 {
 		return DefaultEventsScanBudgetMaxArchiveBytes
 	}
 	return *c.MaxArchiveBytesPerRequest

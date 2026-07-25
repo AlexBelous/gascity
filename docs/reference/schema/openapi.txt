@@ -6455,7 +6455,7 @@
         "additionalProperties": false,
         "properties": {
           "outcome": {
-            "description": "Aggregated run outcome: \"pass\", \"failed\", or \"degraded\".",
+            "description": "Aggregated run outcome: current runs emit \"succeeded\", \"failed\", \"degraded\", or \"skipped\"; legacy runs may emit \"pass\".",
             "type": "string"
           },
           "root_id": {

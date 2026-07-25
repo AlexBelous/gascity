@@ -2666,7 +2666,7 @@ type RotatedPayload struct {
 
 // RunResolvedPayload defines model for RunResolvedPayload.
 type RunResolvedPayload struct {
-	// Outcome Aggregated run outcome: "pass", "failed", or "degraded".
+	// Outcome Aggregated run outcome: current runs emit "succeeded", "failed", "degraded", or "skipped"; legacy runs may emit "pass".
 	Outcome string `json:"outcome"`
 
 	// RootId Run root id (the Lumen run stream id) that resolved.

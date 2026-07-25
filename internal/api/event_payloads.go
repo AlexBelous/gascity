@@ -319,7 +319,7 @@ func MoleculeResolvedPayloadJSON(p MoleculeResolvedPayload) json.RawMessage {
 // on RootID and treat delivery as at-least-once (see events.RunResolved).
 type RunResolvedPayload struct {
 	RootID  string    `json:"root_id" doc:"Run root id (the Lumen run stream id) that resolved."`
-	Outcome string    `json:"outcome" doc:"Aggregated run outcome: \"pass\", \"failed\", or \"degraded\"."`
+	Outcome string    `json:"outcome" doc:"Aggregated run outcome: current runs emit \"succeeded\", \"failed\", \"degraded\", or \"skipped\"; legacy runs may emit \"pass\"."`
 	Ts      time.Time `json:"ts" doc:"Resolution timestamp (UTC)."`
 }
 

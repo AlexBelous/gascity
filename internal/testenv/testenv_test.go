@@ -459,30 +459,47 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(tc.bin, "-test.run=^TestInitRefusesProdDoltPort$", "-test.v")
-			cmd.Env = append([]string{"GC_TESTENV_CHILD=1"}, tc.env...)
-			out, err := cmd.Output()
-			if tc.wantPanic {
-				if err == nil {
-					t.Fatalf("child succeeded but should have refused the prod Dolt port; output:\n%s", out)
-				}
-				stderr := exitStderr(err)
-				for _, want := range []string{"production Dolt server", "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"} {
-					if !strings.Contains(stderr, want) {
-						t.Errorf("panic message missing %q; stderr:\n%s", want, stderr)
-					}
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("re-exec: %v\nstderr: %s", err, exitStderr(err))
-			}
-			for _, want := range tc.wantOutput {
-				if !strings.Contains(string(out), want) {
-					t.Errorf("child output missing %q; got:\n%s", want, out)
-				}
-			}
+			env := append([]string{"GC_TESTENV_CHILD=1"}, tc.env...)
+			assertRefusesDoltPort(t, tc.bin, "TestInitRefusesProdDoltPort", "", env, tc.wantPanic, tc.wantOutput)
 		})
+	}
+}
+
+// assertRefusesDoltPort re-execs bin under testName's -test.run pattern (with
+// dir as its working directory, unless empty) and asserts either a panic —
+// whose stderr must contain both diagnostic substrings — or, when wantPanic
+// is false, that stdout contains every string in wantOutput. Shared by
+// TestInitRefusesProdDoltPort and TestInitRefusesAmbientCityDoltPort so the
+// hardcoded-port and ambient-city detection arms exercise a single re-exec
+// call site instead of two, keeping this package's tracked subprocess census
+// unchanged (see internal/testpolicy/resourcecensus and test/test-resources.toml).
+func assertRefusesDoltPort(t *testing.T, bin, testName, dir string, env []string, wantPanic bool, wantOutput []string) {
+	t.Helper()
+	cmd := exec.Command(bin, "-test.run=^"+testName+"$", "-test.v")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = env
+	out, err := cmd.Output()
+	if wantPanic {
+		if err == nil {
+			t.Fatalf("child succeeded but should have refused the Dolt port; output:\n%s", out)
+		}
+		stderr := exitStderr(err)
+		for _, want := range []string{"production Dolt server", "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("panic message missing %q; stderr:\n%s", want, stderr)
+			}
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("re-exec: %v\nstderr: %s", err, exitStderr(err))
+	}
+	for _, want := range wantOutput {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("child output missing %q; got:\n%s", want, out)
+		}
 	}
 }
 
@@ -561,34 +578,12 @@ func TestInitRefusesAmbientCityDoltPort(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := buildSyntheticCity(t, ambientPort)
-			cmd := exec.Command(exe, "-test.run=^TestInitRefusesAmbientCityDoltPort$", "-test.v")
-			cmd.Dir = dir
-			cmd.Env = append([]string{
+			env := append([]string{
 				"GC_TESTENV_CHILD=1",
 				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_PORT",
 				"BEADS_DOLT_SERVER_PORT=" + tc.port,
 			}, tc.extraEnv...)
-			out, err := cmd.Output()
-			if tc.wantPanic {
-				if err == nil {
-					t.Fatalf("child succeeded but should have refused the ambient city's Dolt port; output:\n%s", out)
-				}
-				stderr := exitStderr(err)
-				for _, want := range []string{"production Dolt server", "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"} {
-					if !strings.Contains(stderr, want) {
-						t.Errorf("panic message missing %q; stderr:\n%s", want, stderr)
-					}
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("re-exec: %v\nstderr: %s", err, exitStderr(err))
-			}
-			for _, want := range tc.wantOutput {
-				if !strings.Contains(string(out), want) {
-					t.Errorf("child output missing %q; got:\n%s", want, out)
-				}
-			}
+			assertRefusesDoltPort(t, exe, "TestInitRefusesAmbientCityDoltPort", dir, env, tc.wantPanic, tc.wantOutput)
 		})
 	}
 }

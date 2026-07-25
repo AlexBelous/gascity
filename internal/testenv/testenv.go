@@ -66,7 +66,9 @@ package testenv
 import (
 	"net/netip"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -222,9 +224,25 @@ func refuseProdDoltPort(survives func(name string) bool) {
 // (e.g. non-delegated `gc supervisor start`, guarded by
 // platformSupervisorHomeOverrideError in cmd/gc/cmd_supervisor_lifecycle.go)
 // is not tripped by an ambient HOME override such as an agent sandbox's
-// isolated home. Compile-enabling stub only; wired into init()'s go-test
-// branch in ga-py7lxk's GREEN step — no behavioral wiring yet.
+// isolated home. Mirrors platformSupervisorHomeOverrideError's own lookup
+// (same uid-based passwd lookup, same darwin/linux gate, same cleaned-path
+// comparison) but normalizes HOME instead of erroring. Unlike
+// LeakVectorVars, HOME cannot simply be unset — os.UserHomeDir() depends on
+// it fleet-wide — so it is corrected to the real value instead of scrubbed.
 func normalizeHomeToPasswdHome() {
+	switch runtime.GOOS {
+	case "darwin", "linux":
+	default:
+		return
+	}
+	u, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(u.HomeDir) == "" {
+		return
+	}
+	if filepath.Clean(os.Getenv("HOME")) == filepath.Clean(u.HomeDir) {
+		return
+	}
+	_ = os.Setenv("HOME", u.HomeDir)
 }
 
 func init() {
@@ -253,4 +271,5 @@ func init() {
 			_ = os.Unsetenv(name)
 		}
 	}
+	normalizeHomeToPasswdHome()
 }

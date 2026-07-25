@@ -84,12 +84,15 @@ Blocked on external prerequisites (research a7f82370d6116fa31):
    confirm the provisioner accepts multi-allowed_prefixes (UNVERIFIED).
 3. Controller EIA/STS env (BEADS_DOLT_CREDENTIAL_COMMAND + EIA_*/STS_*/
    ORCHESTRATOR_KEY_FILE) + tailnet reachability to the gateway :3306.
-When met: set `[beads.work] scope="unified" target="dolt://<gateway>:3306/bd_<mc>"
-remote_config="verify"` (the explicit server-authoritative-gateway signal; leave
-`remote_config` unset/"write" only for a plain self-hosted Dolt), bounce. Boot runs
-ensureWorkUnified (trivial) then ensureWorkRemote — which on a verify target VERIFIES
-allowed_prefixes on the gateway (via `bd config get`, never add-to-set) and aborts
-before the marker if the provisioner did not set the full prefix set. Managed-local Dolt is
+When met: set `[beads.work] scope="unified" target="dolt://<gateway>:3306/bd_<mc>"`,
+bounce. Boot runs ensureWorkUnified (trivial) then ensureWorkRemote — which registers
+the prefix set (HQ + every rig) into the org DB's `allowed_prefixes` via
+`bd config add-to-set` (this works against a hosted gateway: config writes are
+gated only by MySQL grants and the controller holds a whole-schema rw credential
+from its `beads:write` EIA), then re-reads `allowed_prefixes` as the authoritative
+check and boot-blocks BEFORE the marker if a required prefix is still absent (the
+controller credential lacks org-DB config write — a read-only/`hard_blocked` EIA —
+or the operator must provision the prefixes server-side). Managed-local Dolt is
 kept alive until residue drains; remote is one-way. Verify remote reachability
 (doctor), pipeline, and new-work mints under mc into the org DB.
 

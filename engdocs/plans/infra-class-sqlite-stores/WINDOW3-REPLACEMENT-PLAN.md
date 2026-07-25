@@ -113,11 +113,18 @@ on four prerequisites, two of them out of our hands:
    credential-command (`feat/dolt-credential-command` `ApplyGatewayCredential`) +
    events-journal (mc's observer depends on it). A merged bd build. mc's current bd
    has none of the first three.
-2. **S8 (gascity gateway-aware `allowed_prefixes`) — buildable, being built.** On a
-   hosted gateway, config is server-authoritative/read-only, so our
-   `bd config add-to-set allowed_prefixes` no-ops. Fix: on a `dolt://` gateway
-   target, skip add-to-set, verify prefixes via `bd config get`, fail loudly if the
-   provisioner didn't set them.
+2. **S8 (gascity `allowed_prefixes` registration) — DONE.** The migration writes
+   the prefix set (HQ + every rig) into the org DB's `allowed_prefixes` via
+   `bd config add-to-set`, then re-reads it as the authoritative check. This works
+   against a hosted gateway too — config writes are a normal `REPLACE INTO config`
+   gated ONLY by MySQL grants, and the controller holds a whole-schema rw credential
+   (its `beads:write` EIA), so the write succeeds; bd never client-blocks config
+   writes on a gateway (the "server-authoritative" behavior is bd-init identity
+   adoption only). It boot-blocks before the marker if a prefix is still absent (a
+   read-only/`hard_blocked` credential, or the operator must provision server-side).
+   So a hosted org DB needs only `issue_prefix` at creation — the rest of
+   `allowed_prefixes` (incl. each future rig) is added post-creation via `add-to-set`
+   against the remote.
 3. **Hosted provision (ops, out-of-tree):** beads-web/beads-provisioner must create
    `bd_<mc>` with `issue_prefix=mc` and `allowed_prefixes={mc, <every rig prefix>}`.
    Multi-`allowed_prefixes` support is UNVERIFIED (corp-public apps/beads +

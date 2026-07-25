@@ -128,20 +128,12 @@ func workTopologyDoctorState(cityPath string, cfg *config.City) (string, error) 
 			}
 		}
 		detail += fmt.Sprintf(" prefixes=%s", prefixes)
-		// S8: surface the allowed_prefixes CONFIG mode from [beads.work] remote_config.
-		// In verify mode the set is provisioned server-side and the migration VERIFIES
-		// it (bd cannot write it), so a missing prefix is an operator-provisioning
-		// error, not a self-healable eviction. In write mode it is written/self-healed.
-		if remoteTargetIsHostedGateway(cfg) {
-			detail += " remote-config=verify"
-			// Only hint provisioning when the gateway is REACHABLE and the read
-			// actually showed a miss — an unreachable probe reports missing=false
-			// prefixes, and the hint would misleadingly blame provisioning.
-			if st.reachable && !st.prefixesPresent {
-				detail += " (provision server-side: beads-web/beads-provisioner)"
-			}
-		} else {
-			detail += " remote-config=write"
+		// S8: surface the allowed_prefixes verification state. Only hint the fix when
+		// the endpoint is REACHABLE and the read actually showed a miss — an
+		// unreachable probe reports prefixesPresent=false with no read, and the hint
+		// would misleadingly blame the credential/provisioning.
+		if st.reachable && !st.prefixesPresent {
+			detail += " (grant the controller org-DB config write access, or provision server-side: beads-web/beads-provisioner)"
 		}
 	}
 	if statErr != nil {

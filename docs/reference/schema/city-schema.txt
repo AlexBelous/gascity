@@ -1109,14 +1109,6 @@
           "type": "string",
           "pattern": "^(|managed|dolt://[^/]+:[0-9]+/[^/?#]+)$",
           "description": "Target selects where the unified task DB lives: \"managed\" (default; the\ncity's local managed Dolt) or a remote endpoint of the form\ndolt://host:port/database (all three parts required, port numeric).\nEmpty defaults to \"managed\". A remote target requires scope=\"unified\"\nand is one-way (managed is rejected once remote). Any other value fails\nconfig load."
-        },
-        "remote_config": {
-          "type": "string",
-          "enum": [
-            "write",
-            "verify"
-          ],
-          "description": "RemoteConfig declares whether the remote target's own config (the org\nDB's allowed_prefixes) is writable or server-authoritative — a property\nORTHOGONAL to how bd authenticates to it. \"write\" (default) is a plain,\nwritable self-hosted Dolt: the migration provisions allowed_prefixes via\n`bd config add-to-set`. \"verify\" marks a hosted, server-authoritative\nbeads GATEWAY whose config is read-only to bd: allowed_prefixes is\nprovisioned server-side (beads-web / beads-provisioner) and the migration\nVERIFIES it, boot-blocking on a missing prefix instead of writing. Empty\ndefaults to \"write\". Only meaningful with a remote target; any other\nvalue, or a non-empty value without a remote target, fails config load."
         }
       },
       "additionalProperties": false,

@@ -415,35 +415,30 @@ after the five ensure*ClassMigrated calls.
 - Config step: append this city's prefixes to the org DB's
   `allowed_prefixes` via the prerequisite slice's transactional
   `bd config add-to-set` (a plain read-modify-write is a lost-update race
-  against concurrent cities; never remove other cities' entries). The
-  remote-target boot topology check and the doctor line verify this
-  city's prefixes are still present and re-append when absent
-  (convergent self-heal), so an eviction is detected and repaired
-  instead of silently degrading mints to the org prefix.
-  When the operator declares the target a hosted, server-authoritative
-  GATEWAY via `[beads.work] remote_config="verify"` (config-authority is
-  ORTHOGONAL to auth method, so it is declared explicitly, never inferred
-  from the credential command — a credential command can front a plain,
-  writable Dolt), config is read-only to bd: `allowed_prefixes` is
-  provisioned SERVER-SIDE at project creation (beads-web /
-  beads-provisioner) and the migration VERIFIES it with `bd config get`
-  rather than writing it. A missing required prefix is a boot-blocking
-  abort BEFORE any marker — naming the prefix and instructing server-side
-  provisioning — because the migration cannot mint prefixes into the
-  shared org DB itself; the self-heal and doctor line likewise
-  verify-and-surface (never re-append) in verify mode. The default
-  (`remote_config="write"`, or unset) is the plain writable path:
-  `bd config add-to-set` followed by a re-read guard that boot-blocks if
-  the write silently no-ops (e.g. a server-authoritative target
-  misconfigured as write).
+  against concurrent cities; never remove other cities' entries). This
+  works against a HOSTED beads GATEWAY too: config writes there are a
+  normal `REPLACE INTO config` gated ONLY by the MySQL grant, and the
+  controller — which must hold a `beads:write` EIA to mint work beads at
+  all — maps to the whole-schema rw credential, so the write succeeds.
+  The migration then VERIFIES by re-read (`bd config get`, the source of
+  truth — never parse the write's error string) and BOOT-BLOCKS before
+  the `work.remote` marker if a required prefix is still absent, naming
+  both causes: the controller credential lacks org-DB config write access
+  (a read-only / hard-blocked / over-quota EIA), or `allowed_prefixes`
+  must be provisioned server-side (beads-web / beads-provisioner). The
+  doctor line and convergent self-heal run the same attempt-then-re-read
+  shape, so an eviction is repaired (or surfaced as a doctor error when
+  the re-append still can't land) instead of silently degrading mints to
+  the org prefix.
 - The city's org-DB identity stamp is an IDENTITY, not a derivation:
   minted ONCE (random, never hostname-derived — hostnames change on
   container reschedule and a re-derived stamp makes the city's own rows
   look foreign) and PERSISTED before first use. The persistence vehicle
   is a STARTED-state `work.remote` marker written via the locked writer
-  BEFORE any org-DB write (the allowed_prefixes step included),
-  carrying {Target, Stamp}; the migration finalizes it to complete
-  after copy+verify. A started marker whose Target differs from the
+  BEFORE any STAMPED org-DB row write, carrying {Target, Stamp}; the
+  migration finalizes it to complete after copy+verify. (The
+  `allowed_prefixes` union is an idempotent, unstamped config write that
+  precedes the marker, so a missing-prefix boot-block leaves no marker.) A started marker whose Target differs from the
   configured target refuses boot with an actionable message — a crashed
   partial copy is never silently stranded in a retargeted org DB.
 - Copy — collision discrimination is TWO-armed and pre-destructive,

@@ -130,11 +130,11 @@ const (
 // OutcomePending is a repeat-scoped, NON-CONSUMING settle: it means "the check is not
 // finished yet (CI still running) — re-poll WITHOUT burning the author's repeat budget."
 // It is a new VALUE in the already-folded nodeState.Outcome string, NOT a new folded
-// field, so the reducer is UNCHANGED (reducerVersion STAYS 4): applyOutcomeSettled stores
+// field, so the pending slice itself adds no reducer state: applyOutcomeSettled stores
 // it verbatim, and every reducer predicate hits its existing DEFAULT arm for "pending" —
 // isBlocking → false (non-blocking), ranOutcome → false (excluded from loopScope's outcome
 // scan and record(), so a poll never pollutes nodeOutputs), didNotRun → false, and
-// statusForOutcome → "done". An old v4 reducer folds a pending journal identically. The
+// statusForOutcome → "done". The
 // author-visible iteration is derived by consumingCountBefore (a pure fold-scan that skips
 // pending settles), decoupled from the physical attempt index which advances every pass.
 // Pending is signaled two ways: a pool do's gc.outcome=pending close (LumenOutcomeForGCOutcome)
@@ -143,13 +143,27 @@ const (
 // loop is refused); a pool do that mis-closes gc.outcome=pending outside a repeat has no
 // static signal and settles a top-level non-failing OutcomePending (documented residual).
 const (
-	OutcomePass     = "pass"
+	// OutcomeSucceeded is the canonical successful outcome in the current Lumen
+	// runtime. Historical Gas journals used "pass"; the semantic dialect keeps
+	// those journals replayable without leaking that spelling into new runs.
+	OutcomeSucceeded = "succeeded"
+	// OutcomePass is retained as a source-compatibility alias for callers compiled
+	// against the earlier Gas API. New journals persist OutcomeSucceeded.
+	OutcomePass     = OutcomeSucceeded
 	OutcomeFailed   = "failed"
 	OutcomeDegraded = "degraded"
 	OutcomeSkipped  = "skipped"
 	OutcomeCanceled = "canceled"
 	OutcomePending  = "pending"
+
+	outcomeLegacyPass = "pass"
 )
+
+// IsSucceededOutcome reports whether outcome is either the current successful
+// spelling or the legacy spelling returned when replaying a pre-dialect run.
+func IsSucceededOutcome(outcome string) bool {
+	return outcome == OutcomeSucceeded || outcome == outcomeLegacyPass
+}
 
 const (
 	// SemanticDialectLegacy identifies journals written before Gas City stamped
@@ -381,7 +395,7 @@ type effectScheduledPayload struct {
 }
 
 // effectSettledPayload is the body of EventEffectSettled. NodeOutcome memoizes
-// the resolved node outcome (pass/degraded/failed) the effect produced, so a
+// the resolved node outcome (succeeded/degraded/failed) the effect produced, so a
 // resume that finds effect.settled committed but outcome.settled missing can
 // settle the node from this record WITHOUT re-invoking the host (B1). Result
 // (ok/failed/interrupted) alone is lossy — ok maps to both pass and degraded —

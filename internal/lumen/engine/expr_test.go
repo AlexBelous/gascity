@@ -7,7 +7,7 @@ import (
 )
 
 // closedExprTestScope is a fixed loop scope for the T-E1 table: iteration 2, a
-// body binding `draft` (outcome pass, output "hello"), a numeric run input
+// body binding `draft` (outcome succeeded, output "hello"), a numeric run input
 // `max`=3, and a settled node `a` (outcome failed, output "aout").
 func closedExprTestScope() loopScope {
 	return loopScope{
@@ -42,7 +42,7 @@ func TestClosedExprSubsetMirrorsReference(t *testing.T) {
 		{"lit-null", `{"kind":"literal","value":null}`, nil},
 		// refs
 		{"ref-iteration", `{"kind":"ref","name":"iteration"}`, float64(2)},
-		{"ref-body-outcome", `{"kind":"ref","name":"draft","field":"outcome"}`, "pass"},
+		{"ref-body-outcome", `{"kind":"ref","name":"draft","field":"outcome"}`, OutcomeSucceeded},
 		{"ref-body-bare", `{"kind":"ref","name":"draft"}`, "hello"},
 		{"ref-input", `{"kind":"ref","name":"max"}`, float64(3)},
 		{"ref-node-outcome", `{"kind":"ref","name":"a","field":"outcome"}`, "failed"},
@@ -85,9 +85,9 @@ func TestClosedExprSubsetMirrorsReference(t *testing.T) {
 		{"not-false", opNot(lit(false)), true},
 		{"not-null", opNot(lit(nil)), true},
 		{"not-nonzero", opNot(lit(5)), false},
-		// the canonical dogfood cond over the fixed scope: draft.outcome == pass || iteration >= 3
+		// the canonical dogfood cond over the fixed scope: draft.outcome == succeeded || iteration >= 3
 		{"dogfood-cond-true", op("||",
-			op("==", `{"kind":"ref","name":"draft","field":"outcome"}`, lit("pass")),
+			op("==", `{"kind":"ref","name":"draft","field":"outcome"}`, lit(OutcomeSucceeded)),
 			op(">=", `{"kind":"ref","name":"iteration"}`, lit(3))), true},
 		{"dogfood-cond-fail-branch", op("||",
 			op("==", `{"kind":"ref","name":"draft","field":"outcome"}`, lit("fail")),

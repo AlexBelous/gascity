@@ -66,7 +66,7 @@ func condOutcomePassOrIter() string {
 	return `{"kind":"operator","op":"||","operands":[
       {"kind":"operator","op":"==","operands":[
         {"kind":"ref","name":"draft","field":"outcome"},
-        {"kind":"literal","value":"pass"}]},
+        {"kind":"literal","value":"succeeded"}]},
       {"kind":"operator","op":">=","operands":[
         {"kind":"ref","name":"iteration"},
         {"kind":"literal","value":5}]}]}`
@@ -231,9 +231,9 @@ func TestRepeatEngineInlineFailThenPass(t *testing.T) {
 	got := settledActivations(t, res.Events)
 	want := [][2]string{
 		{"draft:0", "failed"},
-		{"draft:1", "pass"},
-		{"repeat_1:0", "pass"},
-		{"publish:0", "pass"},
+		{"draft:1", engine.OutcomeSucceeded},
+		{"repeat_1:0", engine.OutcomeSucceeded},
+		{"publish:0", engine.OutcomeSucceeded},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("settled activations = %v, want %v", got, want)
@@ -243,7 +243,7 @@ func TestRepeatEngineInlineFailThenPass(t *testing.T) {
 			t.Errorf("settled[%d] = %v, want %v", i, got[i], want[i])
 		}
 	}
-	if outcome, _, _, output := loopSettle(t, res.Events, "repeat_1:0"); outcome != "pass" || output != "attempt-pass" {
+	if outcome, _, _, output := loopSettle(t, res.Events, "repeat_1:0"); outcome != engine.OutcomeSucceeded || output != "attempt-pass" {
 		t.Fatalf("loop settle = {%q, %q}, want {pass, attempt-pass} (the satisfying attempt's output)", outcome, output)
 	}
 	// The dependent ran exactly once (gated on the loop node, not a body attempt).
@@ -420,7 +420,7 @@ func TestRepeatIterationBindingInPromptAndCond(t *testing.T) {
 	if !tokens[res.StreamID+":draft:do:1"] || !tokens[res.StreamID+":draft:do:2"] {
 		t.Fatalf("effect tokens = %v, want :do:1 and :do:2", tokens)
 	}
-	if outcome, _, _, _ := loopSettle(t, res.Events, "repeat_1:0"); outcome != "pass" {
+	if outcome, _, _, _ := loopSettle(t, res.Events, "repeat_1:0"); outcome != engine.OutcomeSucceeded {
 		t.Fatalf("loop outcome = %q, want pass", outcome)
 	}
 }

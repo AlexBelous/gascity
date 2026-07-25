@@ -190,7 +190,7 @@ func TestRunTwoExecLinearOrdering(t *testing.T) {
 	}
 
 	settled := settledIDs(t, res.Events)
-	want := [][2]string{{"a", "pass"}, {"b", "pass"}}
+	want := [][2]string{{"a", engine.OutcomeSucceeded}, {"b", engine.OutcomeSucceeded}}
 	if len(settled) != len(want) {
 		t.Fatalf("settled = %v, want %v", settled, want)
 	}

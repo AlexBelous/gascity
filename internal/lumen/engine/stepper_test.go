@@ -146,7 +146,11 @@ func TestStepperDeterminismOracle(t *testing.T) {
 		t.Fatalf("Verify stepper journal: %v", err)
 	}
 	settled := settledIDs(t, stepEvents)
-	wantSettled := [][2]string{{"a", "pass"}, {"b", "pass"}, {"c", "pass"}}
+	wantSettled := [][2]string{
+		{"a", engine.OutcomeSucceeded},
+		{"b", engine.OutcomeSucceeded},
+		{"c", engine.OutcomeSucceeded},
+	}
 	if len(settled) != len(wantSettled) {
 		t.Fatalf("settled = %v, want %v", settled, wantSettled)
 	}

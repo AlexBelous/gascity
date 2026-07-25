@@ -66,6 +66,17 @@ type loopScope struct {
 	// scope Run threads): bare ref → output string, ".outcome" → outcome string.
 	nodeOutputs  map[string]string
 	nodeOutcomes map[string]string
+	// succeededOutcome is dialect-specific: current runs expose "succeeded";
+	// pre-dialect runs retain "pass". Empty means the current spelling for direct
+	// evaluator tests that construct loopScope without a driver.
+	succeededOutcome string
+}
+
+func (s loopScope) success() string {
+	if s.succeededOutcome != "" {
+		return s.succeededOutcome
+	}
+	return OutcomeSucceeded
 }
 
 // resolve returns a ref name's (value, outcome) and whether it resolved. An
@@ -75,14 +86,14 @@ func (s loopScope) resolve(name string) (value any, outcome string, found bool) 
 	case "":
 		return nil, "", false
 	case s.iterationName:
-		// The iteration counter is a step result {value: N, outcome: "pass"}.
-		return float64(s.iteration), OutcomePass, true
+		// The iteration counter is a successful step result.
+		return float64(s.iteration), s.success(), true
 	case s.bodyName:
 		return s.bodyOutput, s.bodyOutcome, true
 	}
 	if v, ok := s.input[name]; ok {
-		// Run input is a pre-settled binding; its outcome is pass.
-		return normalizeExprValue(v), OutcomePass, true
+		// Run input is a pre-settled successful binding.
+		return normalizeExprValue(v), s.success(), true
 	}
 	if out, ok := s.nodeOutputs[name]; ok {
 		return out, s.nodeOutcomes[name], true

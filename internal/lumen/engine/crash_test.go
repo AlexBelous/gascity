@@ -172,8 +172,10 @@ func TestCrashDiagonalConvergesDETT1(t *testing.T) {
 	}
 	genesis := settledOutcomeByID(t, gRes.Events)
 	for id, want := range map[string]string{
-		"A": "pass", "D": "pass", "m1": "pass", "m2": "pass",
-		"S": "pass", "G": "pass", "gc": "pass", "X": "failed", "Y": "skipped",
+		"A": engine.OutcomeSucceeded, "D": engine.OutcomeSucceeded,
+		"m1": engine.OutcomeSucceeded, "m2": engine.OutcomeSucceeded,
+		"S": engine.OutcomeSucceeded, "G": engine.OutcomeSucceeded,
+		"gc": engine.OutcomeSucceeded, "X": "failed", "Y": "skipped",
 	} {
 		if genesis[id] != want {
 			t.Fatalf("genesis %s = %q, want %q — the representative formula regressed", id, genesis[id], want)

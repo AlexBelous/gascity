@@ -173,8 +173,8 @@ func TestCondScopeCollisionPrecedence(t *testing.T) {
 				t.Errorf("x resolved the spec-layer value, want the node value (node shadows binding)")
 			}
 			// The node's real outcome wins over the ⚑B2 backfill for a shadowed name.
-			if !evalBool(t, op("==", refO("x"), lit("pass")), cs) {
-				t.Errorf("x.outcome did not resolve the node's settled outcome pass")
+			if !evalBool(t, op("==", refO("x"), lit(OutcomeSucceeded)), cs) {
+				t.Errorf("x.outcome did not resolve the node's settled outcome succeeded")
 			}
 		})
 	}
@@ -205,16 +205,16 @@ func TestCondScopeOutcomeSemantics(t *testing.T) {
 		t.Fatalf("condScope(stage/): %v", err)
 	}
 	// (1) leaf sibling: max-attempt-wins ⇒ outcome pass, value the highest attempt's.
-	if !evalBool(t, op("==", refO("leaf"), lit("pass")), cs) {
-		t.Errorf("leaf.outcome != pass (max-attempt-wins failed)")
+	if !evalBool(t, op("==", refO("leaf"), lit(OutcomeSucceeded)), cs) {
+		t.Errorf("leaf.outcome != succeeded (max-attempt-wins failed)")
 	}
 	if !evalBool(t, op("==", refV("leaf"), lit("leaf1")), cs) {
 		t.Errorf("leaf did not resolve leaf1")
 	}
 	// (2) ⚑B1 aggregate sibling: outcome pass AND bare == "" (the empty transparent
 	// output, visible ONLY via the flat-nodeOutputs overlay).
-	if !evalBool(t, op("==", refO("sc"), lit("pass")), cs) {
-		t.Errorf("sc.outcome != pass — ⚑B1 aggregate outcome unreachable inside ns")
+	if !evalBool(t, op("==", refO("sc"), lit(OutcomeSucceeded)), cs) {
+		t.Errorf("sc.outcome != succeeded — ⚑B1 aggregate outcome unreachable inside ns")
 	}
 	if !evalBool(t, op("==", refV("sc"), lit("")), cs) {
 		t.Errorf("sc did not resolve its empty aggregate output — ⚑B1 value overlay missing")
@@ -223,14 +223,14 @@ func TestCondScopeOutcomeSemantics(t *testing.T) {
 	if !evalBool(t, op("==", refV("mylet"), lit("letval")), cs) {
 		t.Errorf("silent let value not visible inside ns")
 	}
-	if evalBool(t, op("==", refO("mylet"), lit("pass")), cs) {
-		t.Errorf("mylet.outcome == pass was TRUE — a silent let must NOT be blanket-stamped (⚑B2)")
+	if evalBool(t, op("==", refO("mylet"), lit(OutcomeSucceeded)), cs) {
+		t.Errorf("mylet.outcome == succeeded was TRUE — a silent let must NOT be blanket-stamped (⚑B2)")
 	}
 	if !evalBool(t, op("==", refO("mylet"), lit("")), cs) {
 		t.Errorf("mylet.outcome != \"\" — a silent let keeps root-parity empty outcome")
 	}
 	// (4) ⚑B2 binding backfill: a spec-derived binding name's outcome is pass.
-	if !evalBool(t, op("==", refO("name"), lit("pass")), cs) {
-		t.Errorf("name.outcome != pass — spec-derived binding backfill missing (⚑B2)")
+	if !evalBool(t, op("==", refO("name"), lit(OutcomeSucceeded)), cs) {
+		t.Errorf("name.outcome != succeeded — spec-derived binding backfill missing (⚑B2)")
 	}
 }

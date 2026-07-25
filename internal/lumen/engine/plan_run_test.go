@@ -709,7 +709,7 @@ func retryMember(loopID, bodyID, script string) string {
 // lowers inside a sub-formula (LIS).
 func repeatMemberForgedCond(loopID, bodyID string) string {
 	forged := `{"kind":"operator","op":"==","operands":[` +
-		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"pass"}]}`
+		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"succeeded"}]}`
 	return `{"kind":"repeat","id":"` + loopID + `","name":"` + loopID + `","after":[],` +
 		`"iterationName":"iteration","cond":` + forged + `,` +
 		`"body":{"kind":"exec","id":"` + bodyID + `","name":"` + bodyID + `","after":[],` +

@@ -328,6 +328,7 @@ func (d *driver) settleDoTurn(u planUnit, scope, nodeOutputs map[string]string, 
 	}
 
 	nodeOutcome, effResult, detail, out := foldAgentOutcome(agentOutcome, agentOutput)
+	nodeOutcome = d.outcomeForDialect(nodeOutcome)
 	if err := d.append(EventEffectSettled, effectIdem+":done", effectSettledPayload{
 		Activation:  u.activation,
 		IdemToken:   effectIdem,
@@ -380,7 +381,8 @@ func findStepperDoUnit(units []planUnit, node string) (planUnit, bool) {
 }
 
 // foldAgentOutcome maps the agent's self-reported --outcome onto the node outcome,
-// effect result, detail, and output the settle records. pass/degraded/failed reuse the
+// effect result, detail, and output the settle records. succeeded (and legacy
+// pass)/degraded/failed reuse the
 // host-path foldDoResult, so a stepper settle is byte-identical (modulo the provenance
 // session ref, which folds to a no-op) to a StubHost RunDo of the same outcome — the
 // determinism oracle. A missing/unknown outcome is fail-closed to failed (the v1
@@ -388,7 +390,7 @@ func findStepperDoUnit(units []planUnit, node string) (planUnit, bool) {
 // pending (the non-consuming re-poll outcome) with an ok effect result.
 func foldAgentOutcome(agentOutcome, agentOutput string) (nodeOutcome, effResult, detail, out string) {
 	switch agentOutcome {
-	case OutcomePass:
+	case OutcomeSucceeded, outcomeLegacyPass:
 		n, e, dt, o, _ := foldDoResult(enginehost.DoResult{Outcome: enginehost.OutcomePass, Output: agentOutput}, nil)
 		return n, e, dt, o
 	case OutcomeDegraded:

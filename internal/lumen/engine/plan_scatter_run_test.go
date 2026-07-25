@@ -168,7 +168,7 @@ func TestLowerLeafLoopInScatterInSubFormulaLowers(t *testing.T) {
 // only. Only the run-body loop stays fenced; the leaf loop above lowers.
 func TestLowerRunBodyLoopInScatterInSubFormulaRefused(t *testing.T) {
 	runBodyLoop := `{"kind":"repeat","id":"loop","name":"loop","after":[],"iterationName":"iteration",` +
-		`"cond":{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"round","field":"outcome"},{"kind":"literal","value":"pass"}]},` +
+		`"cond":{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"round","field":"outcome"},{"kind":"literal","value":"succeeded"}]},` +
 		`"body":{"kind":"run","id":"round","name":"round","after":[],"target":{"kind":"by-name","name":"leaf"},` +
 		`"environment":{"fields":[]},"outcome":"transparent"}}`
 	subScatter := `{"kind":"scatter","id":"sc","name":"sc","after":[],"form":"members","members":[` + runBodyLoop + `]}`

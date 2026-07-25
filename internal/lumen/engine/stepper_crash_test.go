@@ -116,7 +116,7 @@ func TestStepperCrashInSettleFailsAtMostOnce(t *testing.T) {
 			if final.Outcome != engine.OutcomeFailed {
 				t.Fatalf("run outcome = %q, want failed (b interrupted → failed → cascade)", final.Outcome)
 			}
-			assertStepperSettled(t, store, streamID, map[string]string{"a": "pass", "b": "failed", "c": "skipped"})
+			assertStepperSettled(t, store, streamID, map[string]string{"a": engine.OutcomeSucceeded, "b": "failed", "c": "skipped"})
 			if err := store.Verify(ctx, streamID); err != nil {
 				t.Fatalf("Verify surviving journal: %v", err)
 			}
@@ -159,7 +159,11 @@ func TestStepperCrashAfterSettleReloads(t *testing.T) {
 	if final.Outcome != engine.OutcomePass {
 		t.Fatalf("run outcome = %q, want pass (b settled pass before the crash, reloaded)", final.Outcome)
 	}
-	assertStepperSettled(t, store, streamID, map[string]string{"a": "pass", "b": "pass", "c": "pass"})
+	assertStepperSettled(t, store, streamID, map[string]string{
+		"a": engine.OutcomeSucceeded,
+		"b": engine.OutcomeSucceeded,
+		"c": engine.OutcomeSucceeded,
+	})
 	// b settled exactly once — the crash-after-settle reload never re-appends its outcome.
 	if n := countJournalType(t, store, streamID, engine.EventOutcomeSettled); n != 3 {
 		t.Fatalf("outcome.settled count = %d, want 3 (each do once, b never re-run)", n)
@@ -208,7 +212,11 @@ func TestStepperCrashBetweenStepAndSettleReoffers(t *testing.T) {
 	if final.Outcome != engine.OutcomePass {
 		t.Fatalf("run outcome = %q, want pass", final.Outcome)
 	}
-	assertStepperSettled(t, store, streamID, map[string]string{"a": "pass", "b": "pass", "c": "pass"})
+	assertStepperSettled(t, store, streamID, map[string]string{
+		"a": engine.OutcomeSucceeded,
+		"b": engine.OutcomeSucceeded,
+		"c": engine.OutcomeSucceeded,
+	})
 	if err := store.Verify(ctx, streamID); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}

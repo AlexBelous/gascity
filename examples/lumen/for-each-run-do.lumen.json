@@ -62,7 +62,7 @@
             "op": "==",
             "operands": [
               { "kind": "ref", "name": "stage", "field": "outcome" },
-              { "kind": "literal", "value": "pass" }
+              { "kind": "literal", "value": "succeeded" }
             ]
           },
           {

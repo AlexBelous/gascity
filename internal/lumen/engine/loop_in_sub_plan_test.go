@@ -59,7 +59,7 @@ func lisMarqueeCond(bodyRef, numRef string) string {
 	return `{"kind":"operator","op":"||","operands":[` +
 		`{"kind":"operator","op":"==","operands":[` +
 		`{"kind":"ref","name":"` + bodyRef + `","field":"outcome"},` +
-		`{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":">=","operands":[` +
 		`{"kind":"ref","name":"iteration"},{"kind":"ref","name":"` + numRef + `"}]}]}`
 }
@@ -162,7 +162,7 @@ func TestLowerLoopCondRefSynthBodyBanned(t *testing.T) {
 	// A guard whose then id is `gthen`, and a repeat loop whose cond reads `gthen`.
 	guard := guardNode("g", nil, condRefEq("who", "go"), execNode("gthen", nil, "echo t"))
 	condReadsSynth := `{"kind":"operator","op":"==","operands":[` +
-		`{"kind":"ref","name":"gthen","field":"outcome"},{"kind":"literal","value":"pass"}]}`
+		`{"kind":"ref","name":"gthen","field":"outcome"},{"kind":"literal","value":"succeeded"}]}`
 	doc := decodeBundle(t, plainDoc(guard+","+lisRepeatLeaf(condReadsSynth)))
 	if _, err := buildUnits(doc, true, true); err == nil || !strings.Contains(err.Error(), "synthesized decision body") {
 		t.Fatalf("loop cond ref to a synth then = %v, want a synth-body refusal", err)
@@ -183,7 +183,7 @@ func TestLowerLoopCondRefSynthBodyBanned(t *testing.T) {
 // root AND inside a sub-formula.
 func TestLowerLoopCondRefNoNewFoldEdges(t *testing.T) {
 	cond := `{"kind":"operator","op":"==","operands":[` +
-		`{"kind":"ref","name":"sib","field":"outcome"},{"kind":"literal","value":"pass"}]}`
+		`{"kind":"ref","name":"sib","field":"outcome"},{"kind":"literal","value":"succeeded"}]}`
 	// Root: `sib` is a real sibling exec; the loop must NOT gate on it.
 	root := decodeBundle(t, plainDoc(execNode("sib", nil, "echo s")+","+lisRepeatLeaf(cond)))
 	rootUnits, err := buildUnits(root, true, true)
@@ -297,7 +297,7 @@ func TestLowerRepeatRunBodyMintedGraphInputNames(t *testing.T) {
 		`{"name":"max_review_rounds","value":{"kind":"expr","expr":{"kind":"literal","value":12}}}]},` +
 		`"outcome":"transparent"}`
 	outerCond := `{"kind":"operator","op":"||","operands":[` +
-		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"stage","field":"outcome"},{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"stage","field":"outcome"},{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":">=","operands":[{"kind":"ref","name":"iteration"},{"kind":"literal","value":2}]}]}`
 	outer := `{"kind":"repeat","id":"outer","name":"outer","after":[],"iterationName":"iteration",` +
 		`"cond":` + outerCond + `,"body":` + outerBody + `}`
@@ -320,7 +320,7 @@ func TestLowerRepeatRunBodyMintedGraphInputNames(t *testing.T) {
 func TestLowerLoopCondRefSynthBodyBannedInSub(t *testing.T) {
 	guard := guardNode("g", nil, condRefEq("who", "go"), execNode("gthen", nil, "echo t"))
 	condReadsSynth := `{"kind":"operator","op":"==","operands":[` +
-		`{"kind":"ref","name":"gthen","field":"outcome"},{"kind":"literal","value":"pass"}]}`
+		`{"kind":"ref","name":"gthen","field":"outcome"},{"kind":"literal","value":"succeeded"}]}`
 	wrapper := lisSubFormula("wrapper", "", guard+","+lisRepeatLeaf(condReadsSynth))
 	doc := decodeBundle(t, runMainDoc(lisWrapperRunNoEnv(), wrapper))
 	if _, err := buildUnits(doc, true, true); err == nil || !strings.Contains(err.Error(), "synthesized decision body") {

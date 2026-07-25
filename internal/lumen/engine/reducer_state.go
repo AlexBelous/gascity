@@ -38,6 +38,13 @@ func normalizeSemanticDialect(stamped string) (string, error) {
 	}
 }
 
+func (s *lumenState) succeededOutcome() string {
+	if s.SemanticDialect == SemanticDialectLegacy {
+		return outcomeLegacyPass
+	}
+	return OutcomeSucceeded
+}
+
 // nodeState is one activation's fold state: its identity, its dependency edges
 // (activation keys — the DAG carried by node.activated events), and its
 // settlement. InFrontier mirrors the Tier-A frontier so the fold can emit the
@@ -127,7 +134,7 @@ func (s *lumenState) StateHash() [32]byte {
 
 // isBlocking reports whether an outcome blocks its dependents from running (and
 // triggers the skip-cascade). failed, canceled, and skipped are blocking;
-// pass and degraded drain through. Making skipped blocking is what makes the
+// succeeded and degraded drain through. Making skipped blocking is what makes the
 // skip-cascade transitive (A fails → B skipped → C skipped).
 func isBlocking(outcome string) bool {
 	switch outcome {
@@ -142,20 +149,20 @@ func isBlocking(outcome string) bool {
 // It is deliberately distinct from isBlocking, which also includes `failed` (a
 // member that DID run and lost): a drain aggregate over an all-didNotRun member
 // set never ran and itself SKIPS (N-1); a single member that ran
-// (pass/degraded/failed) makes the aggregate DRAIN.
+// (succeeded/degraded/failed) makes the aggregate DRAIN.
 func didNotRun(outcome string) bool {
 	return outcome == OutcomeSkipped || outcome == OutcomeCanceled
 }
 
 // ranOutcome reports whether a settled outcome means the unit actually RAN
-// (pass / degraded / failed), as opposed to skip-cascading (skipped / canceled).
+// (succeeded / degraded / failed), as opposed to skip-cascading (skipped / canceled).
 // It is the genesis record() predicate: runLeaf/runScatter/runGather record a
 // unit's output into scope/nodeOutputs, but a unit intercepted by blocked() or
 // aggregateAllSkipped() settles WITHOUT recording. Resume reproduces this rule
 // exactly so a resumed run's interpolation scope matches genesis (B1).
 func ranOutcome(outcome string) bool {
 	switch outcome {
-	case OutcomePass, OutcomeDegraded, OutcomeFailed:
+	case OutcomeSucceeded, outcomeLegacyPass, OutcomeDegraded, OutcomeFailed:
 		return true
 	default:
 		return false
@@ -246,9 +253,9 @@ func (s *lumenState) activationKeys() []string {
 
 // runOutcome aggregates the run's outcome over TOP-LEVEL activations (parent ==
 // root, i.e. ParentActivation == ""): failed dominates, then degraded, then
-// pass; skipped nodes do not count, and members/combine children inside a
+// succeeded; skipped nodes do not count, and members/combine children inside a
 // scatter or gather drain into their aggregate rather than the run. An empty
-// run passes.
+// run succeeds.
 func (s *lumenState) runOutcome() string {
 	var anyFailed, anyDegraded, anySettled bool
 	for _, k := range s.activationKeys() {
@@ -270,9 +277,9 @@ func (s *lumenState) runOutcome() string {
 	case anyDegraded:
 		return OutcomeDegraded
 	case anySettled:
-		return OutcomePass
+		return s.succeededOutcome()
 	default:
-		return OutcomePass
+		return s.succeededOutcome()
 	}
 }
 

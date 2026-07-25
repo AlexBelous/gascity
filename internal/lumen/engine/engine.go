@@ -389,6 +389,17 @@ type driver struct {
 // decide phase can read dependency outcomes and aggregate results.
 func (d *driver) st() *lumenState { return d.state.(*lumenState) }
 
+func (d *driver) succeededOutcome() string {
+	return d.st().succeededOutcome()
+}
+
+func (d *driver) outcomeForDialect(outcome string) string {
+	if IsSucceededOutcome(outcome) {
+		return d.succeededOutcome()
+	}
+	return outcome
+}
+
 // runUnit drives one plan unit through the decide -> persist -> act -> persist
 // cycle. A silent (pure lit/interp) unit only computes its scope value. Every
 // other unit emits node.activated, then — if a leaf's dependency settled with a
@@ -452,7 +463,7 @@ func (d *driver) runUnit(u planUnit, scope, nodeOutputs map[string]string) error
 	// every drain member settled skipped/canceled did no work at all. It must
 	// itself SKIP — its combine / authored body must NOT run (no side effects) —
 	// and the skip cascades to its dependents, exactly like a failed `after` gate.
-	// A single member that RAN (pass/degraded/failed) makes it drain instead. This
+	// A single member that RAN (succeeded/degraded/failed) makes it drain instead. This
 	// runs BEFORE runScatter/runGather so an all-skip aggregate never executes.
 	if d.aggregateAllSkipped(u) {
 		if err := d.appendSettled(u.activation, OutcomeSkipped, "", "skipped: every drain member skipped (nothing ran)"); err != nil {
@@ -603,7 +614,7 @@ func (d *driver) runLeaf(u planUnit, scope, nodeOutputs map[string]string) error
 		}
 		outcome := u.leaf.outcome
 		if outcome == "" {
-			outcome = OutcomePass
+			outcome = d.succeededOutcome()
 		}
 		// A settle's authored `reason` is carried as the settle's detail so a recover
 		// catch can bind {{ error.reason }} from a failed guarded (folded to
@@ -704,6 +715,7 @@ func (d *driver) runDo(u planUnit, scope, nodeOutputs map[string]string) error {
 		return err
 	}
 	nodeOutcome, effResult, detail, out, session := foldDoResult(result, runErr)
+	nodeOutcome = d.outcomeForDialect(nodeOutcome)
 
 	if err := d.append(EventEffectSettled, effectIdem+":done", effectSettledPayload{
 		Activation:  u.activation,
@@ -753,9 +765,9 @@ func (d *driver) settleIndexRenderFailed(u planUnit, detail string) error {
 // `skipped`, not `degraded` (N-1/N-3). A member failure drains into the
 // aggregate rather than skip-cascading it. With on_fail "stop", any
 // failed/canceled member fails the scatter. Otherwise the outcome reflects the
-// degree of success (M1): if NO member passed and at least one failed, the
+// degree of success (M1): if NO member succeeded and at least one failed, the
 // honest outcome is `failed` (a total loss, not a partial success); a mix of
-// pass and non-pass is `degraded`; all-pass is `pass`.
+// succeeded and non-succeeded is `degraded`; all-succeeded is `succeeded`.
 func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
 	outcome := scatterDrainOutcome(d.st(), u.members, u.onFail)
 	if err := d.appendSettled(u.activation, outcome, "", ""); err != nil {
@@ -767,9 +779,10 @@ func (d *driver) runScatter(u planUnit, nodeOutputs map[string]string) error {
 
 // scatterDrainOutcome computes a drain aggregate's outcome from its settled member
 // activations (M1): with on_fail "stop", any failed/canceled member fails the
-// aggregate; otherwise the outcome reflects the degree of success — no pass with at
-// least one blocking failure is `failed` (a total loss), a mix of pass and non-pass
-// is `degraded`, all-pass is `pass`. It is the single source of the scatter(members)
+// aggregate; otherwise the outcome reflects the degree of success — no success with at
+// least one blocking failure is `failed` (a total loss), a mix of successful and
+// non-successful members is `degraded`, and all-successful is successful. It is the
+// single source of the scatter(members)
 // and for-each fan outcome rule, so the static and dynamic fans agree.
 func scatterDrainOutcome(st *lumenState, memberActs []string, onFail string) string {
 	anyPass, anyNonPass, anyBlocking := false, false, false
@@ -778,7 +791,7 @@ func scatterDrainOutcome(st *lumenState, memberActs []string, onFail string) str
 		if !settled {
 			continue
 		}
-		if o == OutcomePass {
+		if IsSucceededOutcome(o) {
 			anyPass = true
 		} else {
 			anyNonPass = true
@@ -795,7 +808,7 @@ func scatterDrainOutcome(st *lumenState, memberActs []string, onFail string) str
 	case anyNonPass:
 		return OutcomeDegraded
 	}
-	return OutcomePass
+	return st.succeededOutcome()
 }
 
 // runForEach drives a for-each (scatter form:each) inline: it evaluates the `over`
@@ -1069,7 +1082,8 @@ func arrayFromInputValue(v any) ([]string, bool, error) {
 // cleanupOutcome computes a cleanup's settled outcome from its guarded and body
 // (finally) outcomes: the finally NEVER swallows a result — it changes the outcome
 // only if it ITSELF fails, in which case its failure supersedes. So a failed/canceled
-// body wins; otherwise the outcome is transparently the guarded's (pass/degraded/failed).
+// body wins; otherwise the outcome is transparently the guarded's
+// (succeeded/degraded/failed).
 func cleanupOutcome(guarded, body string) string {
 	if body == OutcomeFailed || body == OutcomeCanceled {
 		return body
@@ -1498,10 +1512,10 @@ func (d *driver) chosenArm(u planUnit) (*dispatchArm, bool) {
 }
 
 // settleDecisionSkipped settles a decision arm (guard/dispatch) that took no branch:
-// PASS with an empty result (no side effect, no skip-cascade). It records the empty
+// success with an empty result (no side effect, no skip-cascade). It records the empty
 // output so a downstream {{id}} resolves to "" and genesis matches a resume.
 func (d *driver) settleDecisionSkipped(u planUnit, scope, nodeOutputs map[string]string) error {
-	if err := d.appendSettled(u.activation, OutcomePass, "", "no branch taken"); err != nil {
+	if err := d.appendSettled(u.activation, d.succeededOutcome(), "", "no branch taken"); err != nil {
 		return err
 	}
 	d.record(u.nodeID, "", scope, nodeOutputs)
@@ -1510,12 +1524,12 @@ func (d *driver) settleDecisionSkipped(u planUnit, scope, nodeOutputs map[string
 
 // settleDecisionFromBody settles a decision arm transparently from its chosen body (a leaf,
 // a guard/dispatch arm, or a run arm's aggregate) and records the body's output for a
-// downstream {{id}}. ⚑B2 PRECONDITION: it silently DEFAULTS PASS/"" when the body node is
+// downstream {{id}}. ⚑B2 PRECONDITION: it silently defaults to success/"" when the body node is
 // nil-or-unsettled — so the CALLER must not call it for a run arm until the aggregate is
 // Settled (runDispatchRunArm asserts the loud in-pass invariant; advanceDispatchRunArm parks
 // while unsettled). A leaf/guard arm body always settles before this in the same pass.
 func (d *driver) settleDecisionFromBody(u, bu planUnit, scope, nodeOutputs map[string]string) error {
-	outcome, output := OutcomePass, ""
+	outcome, output := d.succeededOutcome(), ""
 	if bn := d.st().Nodes[bu.activation]; bn != nil && bn.Settled {
 		outcome, output = bn.Outcome, bn.Output
 	}
@@ -1673,12 +1687,12 @@ func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loo
 	for k, v := range parts.childView {
 		view[k] = v
 	}
-	// ⚑B2: back-fill OutcomePass for the SPEC-DERIVED binding/default names ONLY — an env
-	// binding, or a defaulted-unbound sub-input, is a pre-settled run input (root input
-	// parity: "its outcome is pass"). A name shadowed by a direct-child key keeps that
+	// ⚑B2: back-fill the dialect's successful outcome for the SPEC-DERIVED
+	// binding/default names ONLY — an env binding, or a defaulted-unbound sub-input,
+	// is a pre-settled run input. A name shadowed by a direct-child key keeps that
 	// node's real outcome, and a name already walked is left alone. NEVER blanket-stamp
 	// view keys: a silent let is in the view but never settles, so stamping it would flip
-	// `mylet.outcome == "pass"` TRUE inside ns where root yields "".
+	// `mylet.outcome == "succeeded"` TRUE inside ns where root yields "".
 	outcomes := parts.outcomes
 	bound := map[string]bool{}
 	backfill := func(name string) {
@@ -1688,7 +1702,7 @@ func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loo
 		if _, ok := outcomes[name]; ok {
 			return
 		}
-		outcomes[name] = OutcomePass
+		outcomes[name] = d.succeededOutcome()
 	}
 	for _, f := range parts.spec.env {
 		bound[f.name] = true
@@ -1699,7 +1713,12 @@ func (d *driver) condScope(ns string, scope, nodeOutputs map[string]string) (loo
 			backfill(fld.Name)
 		}
 	}
-	return loopScope{input: nil, nodeOutputs: view, nodeOutcomes: outcomes}, nil
+	return loopScope{
+		input:            nil,
+		nodeOutputs:      view,
+		nodeOutcomes:     outcomes,
+		succeededOutcome: d.succeededOutcome(),
+	}, nil
 }
 
 // loopScopeNS builds the LOOP-flavored namespace-local cond/attempts scope (⚑B1, Q-C):
@@ -1722,11 +1741,12 @@ func (d *driver) loopScopeNS(spec *loopSpec, iteration int, bn *nodeState, ns st
 		return loopScope{}, err
 	}
 	sc := loopScope{
-		iterationName: spec.iterationName,
-		iteration:     iteration,
-		input:         input,
-		nodeOutputs:   parts.childView,
-		nodeOutcomes:  parts.outcomes,
+		iterationName:    spec.iterationName,
+		iteration:        iteration,
+		input:            input,
+		nodeOutputs:      parts.childView,
+		nodeOutcomes:     parts.outcomes,
+		succeededOutcome: d.succeededOutcome(),
 	}
 	if bn != nil {
 		sc.bodyName = spec.bodyBareID
@@ -1868,7 +1888,7 @@ func retypeScalar(s string, t ir.Type) any {
 
 // transparentOutcome aggregates a run's direct-member outcomes into the transparent
 // run outcome, byte-for-byte mirroring runOutcome (reducer_state.go) over the member
-// set: failed|canceled dominates → failed; any degraded → degraded; else pass. A
+// set: failed|canceled dominates → failed; any degraded → degraded; else success. A
 // skipped member contributes nothing (it did not run), so a sub-formula that
 // skip-cascaded a tail still reports the honest outcome of the steps that ran.
 func transparentOutcome(st *lumenState, members []string) string {
@@ -1892,9 +1912,9 @@ func transparentOutcome(st *lumenState, members []string) string {
 	case anyDegraded:
 		return OutcomeDegraded
 	case anySettled:
-		return OutcomePass
+		return st.succeededOutcome()
 	default:
-		return OutcomePass
+		return st.succeededOutcome()
 	}
 }
 
@@ -2266,11 +2286,12 @@ func (d *driver) loopScope(spec *loopSpec, iteration int, bn *nodeState, nodeOut
 		outcomes[id] = n.Outcome
 	}
 	sc := loopScope{
-		iterationName: spec.iterationName,
-		iteration:     iteration,
-		input:         d.input,
-		nodeOutputs:   nodeOutputs,
-		nodeOutcomes:  outcomes,
+		iterationName:    spec.iterationName,
+		iteration:        iteration,
+		input:            d.input,
+		nodeOutputs:      nodeOutputs,
+		nodeOutcomes:     outcomes,
+		succeededOutcome: d.succeededOutcome(),
 	}
 	if bn != nil {
 		// ⚑B2: the cond names the body by its BARE authored id (root: bare == qualified).
@@ -2309,7 +2330,7 @@ func evalCondTruthy(expr json.RawMessage, scope loopScope) (bool, error) {
 
 // combineOutcome aggregates the settled outcomes of a gather's combine members:
 // a blocking outcome (failed/canceled/skipped) dominates to failed, then
-// degraded, else pass. Silent members contribute nothing (they never settle).
+// degraded, else success. Silent members contribute nothing (they never settle).
 func (d *driver) combineOutcome(combine []planUnit) string {
 	st := d.st()
 	var anyFailed, anyDegraded bool
@@ -2334,7 +2355,7 @@ func (d *driver) combineOutcome(combine []planUnit) string {
 	case anyDegraded:
 		return OutcomeDegraded
 	default:
-		return OutcomePass
+		return d.succeededOutcome()
 	}
 }
 
@@ -2500,7 +2521,7 @@ func (d *driver) appendActivated(u planUnit) error {
 	// kind AND for a timeout's body activation (whose synthesized unit carries no timeout spec),
 	// so a non-timeout node.activated is byte-identical. appendPoolActivated is deliberately
 	// untouched (a pool-do body activation never carries duration). The reducer does NOT fold
-	// this field, so it is snapshot/StateHash-transparent — reducerVersion STAYS 4.
+	// this field, so it is snapshot/StateHash-transparent.
 	duration := ""
 	if u.timeout != nil {
 		duration = u.timeout.duration
@@ -2529,7 +2550,7 @@ func (d *driver) appendSettled(activation, outcome, output, detail string) error
 func (d *driver) appendSettledRetryable(activation, outcome, output, detail string, retryable bool) error {
 	return d.append(EventOutcomeSettled, d.streamID+":"+activation+":settled", outcomeSettledPayload{
 		Activation: activation,
-		Outcome:    outcome,
+		Outcome:    d.outcomeForDialect(outcome),
 		Output:     output,
 		Detail:     detail,
 		Retryable:  retryable,
@@ -2542,7 +2563,7 @@ func (d *driver) appendSettledRetryable(activation, outcome, output, detail stri
 func (d *driver) appendLoopSettled(activation, outcome, output, reason string, retriesRemaining *int) error {
 	return d.append(EventOutcomeSettled, d.streamID+":"+activation+":settled", outcomeSettledPayload{
 		Activation:       activation,
-		Outcome:          outcome,
+		Outcome:          d.outcomeForDialect(outcome),
 		Output:           output,
 		Reason:           reason,
 		RetriesRemaining: retriesRemaining,

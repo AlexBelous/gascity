@@ -22,7 +22,7 @@ func TestEnqueueRefusesUnlowerableIR(t *testing.T) {
 	// the charset ban refuses it at lowering (durable — idents never carry '/' or ':').
 	loopBody := execNodeExit("body", "echo hi", []int{0}, nil)
 	forgedCond := `{"kind":"operator","op":"==","operands":[` +
-		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"pass"}]}`
+		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"succeeded"}]}`
 	doc := decodeIR(t, bundleDoc(
 		"",
 		repeatNode(loopBody, forgedCond),

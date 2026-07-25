@@ -23,7 +23,7 @@ func lisdMarqueeCond() string {
 	return `{"kind":"operator","op":"||","operands":[` +
 		`{"kind":"operator","op":"==","operands":[` +
 		`{"kind":"ref","name":"round","field":"outcome"},` +
-		`{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":">=","operands":[` +
 		`{"kind":"ref","name":"iteration"},{"kind":"ref","name":"max_review_rounds"}]}]}`
 }
@@ -677,7 +677,7 @@ func TestAdvanceRunBodyLoopInSubAllDidNotRunSpins(t *testing.T) {
 		subDoc("wrapper", strField("who"),
 			repeatRunLoop(nil,
 				runNodeJSON("stage", nil, "greeter", "name", "who"),
-				runCondOutcomeEq("pass")))+","+ // a skipped aggregate never matches
+				runCondOutcomeEq(engine.OutcomeSucceeded)))+","+ // a skipped aggregate never matches
 			subDoc("greeter", strField("name"), settleNode("s", "canceled")),
 	))
 	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())

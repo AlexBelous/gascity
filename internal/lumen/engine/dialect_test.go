@@ -79,6 +79,45 @@ func TestFreshRunsStampCurrentSemanticDialect(t *testing.T) {
 	}
 }
 
+func TestCurrentDialectUsesSucceededOutcomeVocabulary(t *testing.T) {
+	doc := decodeIR(t, blockDoc("current-outcomes",
+		execNode("work", `echo done`, nil),
+	))
+
+	result, err := engine.Run(context.Background(), newStore(t), doc, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.Outcome != engine.OutcomeSucceeded {
+		t.Fatalf("run outcome = %q, want %q", result.Outcome, engine.OutcomeSucceeded)
+	}
+	if got := settledIDs(t, result.Events); len(got) != 1 || got[0] != [2]string{"work", engine.OutcomeSucceeded} {
+		t.Fatalf("settled outcomes = %v, want [[work %s]]", got, engine.OutcomeSucceeded)
+	}
+	if got := closedOutcome(t, result.Events); got != engine.OutcomeSucceeded {
+		t.Fatalf("run.closed outcome = %q, want %q", got, engine.OutcomeSucceeded)
+	}
+}
+
+func TestCurrentRepeatConditionObservesSucceeded(t *testing.T) {
+	body := execNodeExit("draft", `echo done`, []int{0}, nil)
+	cond := `{"kind":"operator","op":"==","operands":[` +
+		`{"kind":"ref","name":"draft","field":"outcome"},` +
+		`{"kind":"literal","value":"succeeded"}]}`
+	doc := decodeIR(t, blockDoc("current-repeat-outcome", repeatNode(body, cond)))
+
+	result, err := engine.Run(context.Background(), newStore(t), doc, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.Outcome != engine.OutcomeSucceeded {
+		t.Fatalf("run outcome = %q, want %q", result.Outcome, engine.OutcomeSucceeded)
+	}
+	if got := countAttemptMinted(result.Events); got != 1 {
+		t.Fatalf("attempt.minted count = %d, want 1 (succeeded condition exits immediately)", got)
+	}
+}
+
 func TestPreDialectJournalFoldsAsLegacy(t *testing.T) {
 	payload, err := canonJSON(t, map[string]any{
 		"root_id":    "gcg-run-legacy-dialect",
@@ -128,8 +167,8 @@ func TestResumeMigratesV4SnapshotAsLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume v4 snapshot: %v", err)
 	}
-	if result.Outcome != engine.OutcomePass {
-		t.Fatalf("legacy resumed outcome = %q, want %q", result.Outcome, engine.OutcomePass)
+	if result.Outcome != "pass" {
+		t.Fatalf("legacy resumed outcome = %q, want pass", result.Outcome)
 	}
 	if result.NodeOutputs["work"] != "resumed" {
 		t.Fatalf("legacy resumed output = %q, want resumed", result.NodeOutputs["work"])

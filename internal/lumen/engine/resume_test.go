@@ -227,11 +227,11 @@ func TestResumeContinuesCrashedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if res.Outcome != engine.OutcomePass {
+	if res.Outcome != "pass" {
 		t.Errorf("resumed outcome = %q, want pass", res.Outcome)
 	}
 	settled := settledOutcomeByID(t, res.Events)
-	if settled["B"] != engine.OutcomePass {
+	if settled["B"] != "pass" {
 		t.Errorf("B settled %q, want pass (B ran on resume)", settled["B"])
 	}
 	// A was NOT re-run: exactly one A settlement exists across the whole journal.
@@ -242,7 +242,7 @@ func TestResumeContinuesCrashedRun(t *testing.T) {
 	if n := countSettlements(t, full, "A:0"); n != 1 {
 		t.Errorf("A settlements = %d, want 1 (A reloaded, not re-run)", n)
 	}
-	if got := closedOutcome(t, full); got != engine.OutcomePass {
+	if got := closedOutcome(t, full); got != "pass" {
 		t.Errorf("run.closed outcome = %q, want pass", got)
 	}
 	if err := store.Verify(ctx, stream); err != nil {
@@ -488,14 +488,14 @@ func TestResumeSettlesDoNodeFromRecordedEffectNoHostCall(t *testing.T) {
 	if len(stub.Calls()) != 0 {
 		t.Fatalf("host called %d times on resume, want 0 (settled-window effect is memoized, not re-run)", len(stub.Calls()))
 	}
-	if res.Outcome != engine.OutcomePass {
+	if res.Outcome != "pass" {
 		t.Errorf("resumed outcome = %q, want pass (settled from recorded effect)", res.Outcome)
 	}
 	if got := res.NodeOutputs["work"]; got != "recorded output" {
 		t.Errorf("work output = %q, want the recorded effect output (never the host's)", got)
 	}
 	settled := settledOutcomeByID(t, res.Events)
-	if settled["work"] != engine.OutcomePass {
+	if settled["work"] != "pass" {
 		t.Errorf("work settled %q, want pass", settled["work"])
 	}
 	full, err := store.ReadStream(ctx, stream, 1, 0)
@@ -563,7 +563,7 @@ func TestResumeDoesNotReExecuteSettledCombineMember(t *testing.T) {
 	if len(host2.Calls()) != 0 {
 		t.Fatalf("host called %d times on resume, want 0 (settled combine member must not re-execute)", len(host2.Calls()))
 	}
-	if resumed.Outcome != engine.OutcomePass {
+	if resumed.Outcome != engine.OutcomeSucceeded {
 		t.Errorf("resumed outcome = %q, want pass", resumed.Outcome)
 	}
 	full, err := store2.ReadStream(ctx, res.StreamID, 1, 0)
@@ -627,7 +627,7 @@ func TestResumeReconcilesProjectionForSealedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume sealed: %v", err)
 	}
-	if resumed.Outcome != engine.OutcomePass {
+	if resumed.Outcome != "pass" {
 		t.Errorf("resumed outcome = %q, want pass", resumed.Outcome)
 	}
 	// Tier-A converged: the root is closed and the frontier is empty.

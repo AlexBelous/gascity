@@ -29,7 +29,7 @@ func runCondPassOrIter() string {
 	return `{"kind":"operator","op":"||","operands":[` +
 		`{"kind":"operator","op":"==","operands":[` +
 		`{"kind":"ref","name":"stage","field":"outcome"},` +
-		`{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":">=","operands":[` +
 		`{"kind":"ref","name":"iteration"},{"kind":"literal","value":5}]}]}`
 }
@@ -342,7 +342,7 @@ func TestAdvanceRepeatRunBodyAllDidNotRunSpins(t *testing.T) {
 		strField("who"),
 		repeatRunLoop(nil,
 			runNodeJSON("stage", nil, "greeter", "name", "who"),
-			runCondOutcomeEq("pass")), // a skipped aggregate never matches
+			runCondOutcomeEq(engine.OutcomeSucceeded)), // a skipped aggregate never matches
 		subDoc("greeter", strField("name"), settleNode("s", "canceled")),
 	))
 	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())
@@ -448,7 +448,7 @@ func TestEnqueueRepeatRunBodyDryRunRefuses(t *testing.T) {
 	// greeter's own body is a repeat loop whose cond forges a '/'-bearing ref — a
 	// permanent reserved-delimiter refusal, so the dry-run mint refuses.
 	forgedCond := `{"kind":"operator","op":"==","operands":[` +
-		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"pass"}]}`
+		`{"kind":"ref","name":"forged/ref","field":"outcome"},{"kind":"literal","value":"succeeded"}]}`
 	subLoop := subDoc("greeter", strField("name"),
 		repeatNode(execNode("b1", "echo hi", nil), forgedCond))
 	doc := decodeIR(t, bundleDoc(

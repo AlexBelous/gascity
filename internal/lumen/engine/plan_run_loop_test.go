@@ -102,7 +102,7 @@ func repeatRunCondPassOrIter() string {
 	return `{"kind":"operator","op":"||","operands":[` +
 		`{"kind":"operator","op":"==","operands":[` +
 		`{"kind":"ref","name":"stage","field":"outcome"},` +
-		`{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":">=","operands":[` +
 		`{"kind":"ref","name":"iteration"},{"kind":"literal","value":2}]}]}`
 }
@@ -328,8 +328,8 @@ func TestMintRunBodyAttemptAttemptInvariant(t *testing.T) {
 // The freeze makes decide(N) a pure function of (bn(N), N) — tick-stable.
 func TestLowerRepeatRunBodyCondExternalNodeRefRefused(t *testing.T) {
 	cond := `{"kind":"operator","op":"||","operands":[` +
-		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"stage","field":"outcome"},{"kind":"literal","value":"pass"}]},` +
-		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"other","field":"outcome"},{"kind":"literal","value":"pass"}]}]}`
+		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"stage","field":"outcome"},{"kind":"literal","value":"succeeded"}]},` +
+		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"other","field":"outcome"},{"kind":"literal","value":"succeeded"}]}]}`
 	doc := decodeBundle(t, runMainDoc(
 		execNode("other", nil, "echo o")+","+
 			repeatRunNode(runNode("stage", nil, "greeter", "name", "who"), cond),
@@ -347,7 +347,7 @@ func TestLowerRepeatRunBodyCondExternalNodeRefRefused(t *testing.T) {
 func TestLowerRepeatRunBodyCondAllowedRefsLower(t *testing.T) {
 	// body ref + iteration + the input field `who` — the full allowed set in one cond.
 	cond := `{"kind":"operator","op":"||","operands":[` +
-		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"stage","field":"outcome"},{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"stage","field":"outcome"},{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":">=","operands":[{"kind":"ref","name":"iteration"},{"kind":"ref","name":"who"}]}]}`
 	doc := decodeBundle(t, runMainDoc(
 		repeatRunNode(runNode("stage", nil, "greeter", "name", "who"), cond),

@@ -91,7 +91,7 @@ func TestLoopScopeNSBodyBareIDResolves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loopScopeNS: %v", err)
 	}
-	if !evalBool(t, op("==", refO("round"), lit("pass")), cs) {
+	if !evalBool(t, op("==", refO("round"), lit(OutcomeSucceeded)), cs) {
 		t.Errorf("round.outcome did not resolve the attempt outcome (bodyBareID arm)")
 	}
 	if !evalBool(t, op("==", refV("round"), lit("the-output")), cs) {
@@ -233,8 +233,8 @@ func TestLoopScopeNSAggregateSiblingVisible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loopScopeNS: %v", err)
 	}
-	if !evalBool(t, op("==", refO("sc"), lit("pass")), cs) {
-		t.Errorf("sc.outcome != pass — ⚑B1 aggregate outcome unreachable inside the loop scope")
+	if !evalBool(t, op("==", refO("sc"), lit(OutcomeSucceeded)), cs) {
+		t.Errorf("sc.outcome != succeeded — ⚑B1 aggregate outcome unreachable inside the loop scope")
 	}
 	if !evalBool(t, op("==", refV("sc"), lit("")), cs) {
 		t.Errorf("sc did not resolve its empty aggregate output — ⚑B1 value overlay missing")

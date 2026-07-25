@@ -102,7 +102,7 @@
                 "op": "==",
                 "operands": [
                   { "kind": "ref", "name": "round", "field": "outcome" },
-                  { "kind": "literal", "value": "pass" }
+                  { "kind": "literal", "value": "succeeded" }
                 ]
               },
               {

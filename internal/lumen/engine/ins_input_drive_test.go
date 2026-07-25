@@ -54,7 +54,7 @@ func TestRunOptionalUnboundInputClosesChildShadow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if res.Outcome != engine.OutcomePass {
+	if res.Outcome != engine.OutcomeSucceeded {
 		t.Fatalf("run outcome = %q, want pass", res.Outcome)
 	}
 	if n := countAttemptMinted(res.Events); n != 3 {
@@ -198,7 +198,7 @@ func TestRebuildDoesNotRefuseRequiredUnboundOldJournal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume of a pre-INS required-unbound journal errored (rebuild must NOT refuse): %v", err)
 	}
-	if res.Outcome != engine.OutcomePass {
+	if res.Outcome != "pass" {
 		t.Fatalf("resumed outcome = %q, want pass", res.Outcome)
 	}
 	if got := res.NodeOutputs["greet"]; got != "token=[]" {

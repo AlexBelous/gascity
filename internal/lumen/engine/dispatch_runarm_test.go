@@ -385,7 +385,7 @@ func TestDispatchRunArmDownstreamReads(t *testing.T) {
 		darDispatch("policy",
 			darRunArm("separate", "sepLane", "drainSeparate", darLaneEnv("fanout")))+","+
 			execNode("consumer", `echo "got: {{ d }}"`, []string{"d"})+","+
-			guardExecAfter("g", []string{"d"}, condOutcomeEq("d", "pass"), "gthen", `echo "guard ran"`),
+			guardExecAfter("g", []string{"d"}, condOutcomeEq("d", engine.OutcomeSucceeded), "gthen", `echo "guard ran"`),
 		darLaneExecSub("drainSeparate")))
 	res, err := engine.Run(ctx, store, doc, map[string]any{"policy": "separate", "target": "t"})
 	if err != nil {
@@ -533,7 +533,7 @@ func TestDispatchRunArmDepthComposedForEachInArm(t *testing.T) {
 	fanLane := subDoc("fanLane", arrField("arr")+","+strField("tag"),
 		forEachNode(nil, "r", "continue", refOver("arr"),
 			runNodeRawEnv("lane", nil, "reviewLane", innerEnv))+","+
-			guardExecAfter("gg", []string{"fan"}, condOutcomeEq("fan", "pass"), "ggthen", `echo "fan ok"`)+","+
+			guardExecAfter("gg", []string{"fan"}, condOutcomeEq("fan", engine.OutcomeSucceeded), "ggthen", `echo "fan ok"`)+","+
 			leafLoop)
 	armEnv := `[` + darEnvRef("arr", "items") + `,` + darEnvRef("tag", "label") + `]`
 	doc := decodeIR(t, bundleDoc(

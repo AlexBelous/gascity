@@ -478,7 +478,7 @@ func TestAdvancePoolRepeatFailThenPass(t *testing.T) {
 	if r3.Run.Outcome != engine.OutcomePass {
 		t.Fatalf("run outcome = %q, want pass", r3.Run.Outcome)
 	}
-	if outcome, _, _, _ := loopSettle(t, r3.Run.Events, "repeat_1:0"); outcome != "pass" {
+	if outcome, _, _, _ := loopSettle(t, r3.Run.Events, "repeat_1:0"); outcome != engine.OutcomeSucceeded {
 		t.Fatalf("loop settle = %q, want pass", outcome)
 	}
 	// Both attempts settled under DISTINCT per-attempt outcome.settled tokens.

@@ -123,8 +123,8 @@ func TestLoopScopeNSOptionalUnboundNullSemantics(t *testing.T) {
 			t.Fatalf("loopScopeNS(iter %d): %v", iter, err)
 		}
 		// present-null ⇒ outcome pass (NOT a miss — a value-only seeding impl fails this pin).
-		if !evalBool(t, op("==", refO("x"), lit("pass")), cs) {
-			t.Errorf("iter %d: x.outcome != pass — present-null must settle outcome pass", iter)
+		if !evalBool(t, op("==", refO("x"), lit(OutcomeSucceeded)), cs) {
+			t.Errorf("iter %d: x.outcome != succeeded — present-null must settle successfully", iter)
 		}
 		// length(null) == 0, stable across ticks (SLX §1.6).
 		lv, err := evalClosedExpr(json.RawMessage(lengthCallExpr("x")), cs)
@@ -179,7 +179,7 @@ func TestLowerRunBodyLoopOptionalUnboundInputNoFoldEdge(t *testing.T) {
 	inner := lisSubFormula("inner", lisStrField("name"), execNode("hello", nil, "echo hi"))
 	optX := `{"name":"x","type":{"kind":"atomic","name":"string"},"required":false,"body":false}`
 	cond := `{"kind":"operator","op":"||","operands":[` +
-		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"round","field":"outcome"},{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"round","field":"outcome"},{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"x"},{"kind":"literal","value":"done"}]}]}`
 	wrapper := lisSubFormula("wrapper", lisStrField("who")+","+lisMaxRoundsField()+","+optX,
 		execNode("x", nil, "echo done")+","+lisRepeatRunBody("loop", cond))

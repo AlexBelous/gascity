@@ -141,8 +141,8 @@ func TestDoStepStubbedPassFoldsThroughExecutor(t *testing.T) {
 	}
 
 	settled := settledIDs(t, res.Events)
-	if len(settled) != 1 || settled[0] != [2]string{"summarize", "pass"} {
-		t.Errorf("settled = %v, want [{summarize pass}]", settled)
+	if len(settled) != 1 || settled[0] != [2]string{"summarize", engine.OutcomeSucceeded} {
+		t.Errorf("settled = %v, want [{summarize succeeded}]", settled)
 	}
 	if err := store.Verify(ctx, res.StreamID); err != nil {
 		t.Errorf("Verify = %v", err)

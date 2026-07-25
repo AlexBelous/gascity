@@ -73,7 +73,7 @@ func condLaneOutcomePassOrIter(n int) string {
 	return `{"kind":"operator","op":"||","operands":[` +
 		`{"kind":"operator","op":"==","operands":[` +
 		`{"kind":"ref","name":"lane","field":"outcome"},` +
-		`{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":">=","operands":[` +
 		`{"kind":"ref","name":"iteration"},{"kind":"literal","value":` + string(nJSON) + `}]}]}`
 }
@@ -83,7 +83,7 @@ func condLaneOutcomePassOrIter(n int) string {
 func condLaneOutcomePass() string {
 	return `{"kind":"operator","op":"==","operands":[` +
 		`{"kind":"ref","name":"lane","field":"outcome"},` +
-		`{"kind":"literal","value":"pass"}]}`
+		`{"kind":"literal","value":"succeeded"}]}`
 }
 
 // repeatStr returns a slice of n copies of s (small phase-list builder).
@@ -586,7 +586,7 @@ func condLaneDraftOutcomePassOrIter() string {
 	return `{"kind":"operator","op":"||","operands":[` +
 		`{"kind":"operator","op":"==","operands":[` +
 		`{"kind":"ref","name":"draft","field":"outcome"},` +
-		`{"kind":"literal","value":"pass"}]},` +
+		`{"kind":"literal","value":"succeeded"}]},` +
 		`{"kind":"operator","op":">=","operands":[` +
 		`{"kind":"ref","name":"iteration"},{"kind":"literal","value":5}]}]}`
 }

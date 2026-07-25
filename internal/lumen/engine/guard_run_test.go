@@ -28,7 +28,7 @@ func condEqualRaw(ref, litJSON string) string {
 // condOutcomePass builds `<ref>.outcome == "pass"` — a guard cond reading a
 // sibling's settled outcome.
 func condOutcomePass(ref string) string {
-	return `{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"` + ref + `","field":"outcome"},{"kind":"literal","value":"pass"}]}`
+	return `{"kind":"operator","op":"==","operands":[{"kind":"ref","name":"` + ref + `","field":"outcome"},{"kind":"literal","value":"succeeded"}]}`
 }
 
 // guardExecAfter renders a guard node (explicit id + after) with a closed cond and an

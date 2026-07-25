@@ -91,7 +91,7 @@
               },
               {
                 "kind": "literal",
-                "value": "pass"
+                "value": "succeeded"
               }
             ]
           },

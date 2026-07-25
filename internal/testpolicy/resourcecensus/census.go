@@ -132,8 +132,11 @@ var bootstrapPolicy = Ledger{
 			// 535/166: +1 call/file for
 			// internal/classdb/sessions/crash_integration_test.go, the
 			// sessions-class restart-projection crash gate (same pattern).
-			BaselineCalls:   535,
-			BaselineFiles:   166,
+			// 536/167: +1 call/file for
+			// internal/beads/snapshot_integration_test.go — the ImportBeads
+			// no-hooks pin drives real bd subprocesses against a scoped store.
+			BaselineCalls:   536,
+			BaselineFiles:   167,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -143,10 +146,14 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   429,
-			BaselineFiles:   158,
+			Scope:    ScopeAll,
+			Resource: ResourceFixedSleep,
+			// 430/159: +1 call/file for
+			// internal/beads/snapshot_integration_test.go — a deadline-bounded
+			// 20ms poll interval in waitForMarkerContains (yield-poll settle,
+			// not a fixed-duration wait).
+			BaselineCalls:   430,
+			BaselineFiles:   159,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",

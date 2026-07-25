@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -32,7 +33,7 @@ const (
 	// workTopologySourceMetadataKey stamps the originating city's identity on
 	// every migrated work row (the remote collision discriminator the remote
 	// slice's pre-probe reads). Written atomically with the row before import.
-	workTopologySourceMetadataKey = "gc.topology_source"
+	workTopologySourceMetadataKey = beadmeta.TopologySourceMetadataKey
 )
 
 // beadIsTopologyQuarantined reports whether a bead carries the unify quarantine

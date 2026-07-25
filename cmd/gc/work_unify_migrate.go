@@ -39,7 +39,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
-	messagingdb "github.com/gastownhall/gascity/internal/classdb/messaging"
 	nudgesdb "github.com/gastownhall/gascity/internal/classdb/nudges"
 	sessionsdb "github.com/gastownhall/gascity/internal/classdb/sessions"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1241,7 +1240,7 @@ func importRigInfraClassResidue(cityPath string, cfg *config.City, rigStore bead
 	} else if _, err := importSessionsSnapshot(sess, rigStore, now, false); err != nil {
 		return fmt.Errorf("sessions residue: %w", err)
 	}
-	if msg, err := messagingdb.SharedStoreFor(cityPath); err != nil {
+	if msg, err := messagingClassStoreHandle(cityPath); err != nil {
 		return fmt.Errorf("messaging class store: %w", err)
 	} else if _, err := importMessagingSnapshot(msg, rigStore, cfg, cityPath, now, false); err != nil {
 		return fmt.Errorf("messaging residue: %w", err)

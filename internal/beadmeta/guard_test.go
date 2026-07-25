@@ -40,6 +40,10 @@ var allowedNonMetadata = map[string]string{
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
 
+	// Work-topology quarantine LABEL (cmd/gc/work_unify_quarantine.go) — a
+	// bead label, not a metadata key; labels have no central registry.
+	"gc.topology_migrating": "unify-migration quarantine label, not metadata",
+
 	// Cobra command-tree annotations (not bead metadata).
 	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
 	"gc.json.schema_dir":            "cobra annotation: JSON schema output dir",

@@ -8,6 +8,44 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+// backlogSlowStore simulates a slow backing store via a real time.Sleep per
+// operation. claimDueQueuedNudgesForTarget's deadline cutoff is checked
+// against the real wall clock (not an injectable clock.Clock), so unlike the
+// enqueue path's fake-clock-advancing advancingNudgeStore, timing this drain
+// path requires operations that actually consume wall-clock time.
+type backlogSlowStore struct {
+	beads.Store
+	latency time.Duration
+	ops     int64
+}
+
+func (s *backlogSlowStore) tick() { atomic.AddInt64(&s.ops, 1); time.Sleep(s.latency) }
+
+func (s *backlogSlowStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	s.tick()
+	return []beads.Bead{{ID: "shadow-open", Status: "open", Metadata: map[string]string{"state": "queued"}}}, nil
+}
+
+func (s *backlogSlowStore) Create(b beads.Bead) (beads.Bead, error) {
+	s.tick()
+	if b.ID == "" {
+		b.ID = "created-shadow"
+	}
+	b.Status = "open"
+	return b, nil
+}
+
+func (s *backlogSlowStore) Get(id string) (beads.Bead, error) {
+	s.tick()
+	return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"state": "queued"}}, nil
+}
+
+func (s *backlogSlowStore) Close(string) error { s.tick(); return nil }
+
+func (s *backlogSlowStore) SetMetadata(string, string, string) error { s.tick(); return nil }
+
+func (s *backlogSlowStore) SetMetadataBatch(string, map[string]string) error { s.tick(); return nil }
+
 // installSlowNudgeStoreSeam swaps openNudgeBeadStore for the duration of the
 // test so claimDueQueuedNudgesForTarget/Matching -- which always open their
 // own store rather than accepting one as a parameter, unlike
@@ -23,16 +61,15 @@ func installSlowNudgeStoreSeam(t *testing.T, store beads.Store) {
 }
 
 // timeQueuedNudgeClaim seeds a dead backlog, then times a claim pass against
-// the given deadline. Reuses backlogSlowStore/seedDeadBacklog from
-// sling_nudge_backlog_test.go so the drain path is measured the same way the
-// already-fixed enqueue path is.
+// the given deadline. Reuses seedDeadBacklog from sling_nudge_backlog_test.go
+// so the backlog is seeded the same way the enqueue path's tests seed it.
 func timeQueuedNudgeClaim(t *testing.T, backlog int, latency time.Duration, deadline time.Time) (time.Duration, int64) {
 	t.Helper()
 	cityPath := t.TempDir()
-	seedDeadBacklog(t, cityPath, backlog)
+	start := time.Now()
+	seedDeadBacklog(t, cityPath, start, backlog)
 	store := &backlogSlowStore{latency: latency}
 	installSlowNudgeStoreSeam(t, store)
-	start := time.Now()
 	if _, err := claimDueQueuedNudgesForTarget(cityPath, nudgeTarget{}, start, deadline); err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget (backlog=%d): %v", backlog, err)
 	}

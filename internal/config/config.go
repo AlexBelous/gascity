@@ -1906,11 +1906,20 @@ func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
 const (
 	// DefaultEventsScanBudgetMaxArchiveBytes is the default per-call
 	// compressed-archive read budget for a selective, unbounded-lower-edge
-	// events list query (see events.BoundedScanProvider). Sized as a
-	// fraction of DefaultEventsRotationMaxSizeBytes under a typical JSONL
-	// gzip compression ratio; not benchmarked against production
-	// archive-size telemetry — operators with unusually large or dense
-	// archives should tune [events.scan_budget] explicitly.
+	// events list query (see events.BoundedScanProvider). Validated against
+	// this fleet's own retained archives rather than assumed: sampling all
+	// 53 gzip archives in this city's .gc/ dir (2026-07-25) gives min 281 B,
+	// median 53.8 MiB, mean 40.0 MiB, p90 54.7 MiB, max 152.9 MiB — median
+	// and p90 sit close together because most archives rotate at the same
+	// DefaultEventsRotationMaxSizeBytes (256 MiB) trigger and compress at
+	// roughly the same ~4.7x JSONL/gzip ratio. 128 MiB clears that typical
+	// archive size more than 2x over (room for two rotations before a
+	// budget-exhausted page forces pagination) and fits 52 of the 53
+	// sampled archives outright; the one oversized outlier is still read in
+	// full, just alone, via readNewestBounded's forward-progress guarantee
+	// (the first archive opened is never charge-rejected). Operators with a
+	// denser or larger archive profile should tune [events.scan_budget]
+	// explicitly.
 	DefaultEventsScanBudgetMaxArchiveBytes int64 = 128 * 1024 * 1024
 )
 

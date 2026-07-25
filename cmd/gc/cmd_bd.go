@@ -242,7 +242,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (reserved-prefix ids are minted only by the embedded class stores), so
 	// a write targeting one is always a mistake — refuse it before any store
 	// or subprocess work, naming the gc replacement.
-	if msg, refuse := bdInfraWriteRefusal(bdArgs); refuse {
+	if msg, refuse := bdInfraWriteRefusal(cityPath, cfg, bdArgs, stderr); refuse {
 		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionsdb "github.com/gastownhall/gascity/internal/classdb/sessions"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
@@ -5982,6 +5983,45 @@ name = "test-city"
 	}
 	if strings.Contains(err.Error(), "bead not found") {
 		t.Fatalf("findBeadAcrossStores() error = %v, want provider failure instead of masked not-found", err)
+	}
+}
+
+// TestProbeRoutedBeadStoresForIDFindsReclassifiedSessionID pins the G2
+// residence-probe fallback: a reclassified mixed-prefix (mc-) infra bead in a
+// routed class store is found even though its non-reserved id routes by prefix
+// to the work store.
+func TestProbeRoutedBeadStoresForIDFindsReclassifiedSessionID(t *testing.T) {
+	city := t.TempDir()
+	class, err := sessionsdb.SharedStoreFor(city)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := class.ImportBead(beads.Bead{
+		ID: "mc-555", Type: "session", Status: "open",
+		Labels: []string{"gc:session"}, Title: "reclassified",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeSessionsMigratedMarker(t, city)
+
+	st, b, found, err := probeRoutedBeadStoresForID(city, sqliteSessionsCityConfig(), "mc-555")
+	if err != nil {
+		t.Fatalf("probe errored: %v", err)
+	}
+	if !found {
+		t.Fatal("probe did not find the reclassified session id")
+	}
+	if st == nil || b.ID != "mc-555" {
+		t.Fatalf("probe returned store=%v bead=%q, want the sessions store and mc-555", st, b.ID)
+	}
+}
+
+// TestProbeRoutedBeadStoresForIDDarkOnNativeCity pins the G2 DARK path: on a
+// city with no class store routed the fallback finds nothing and surfaces no
+// error, so findBeadAcrossStores reports its usual absence.
+func TestProbeRoutedBeadStoresForIDDarkOnNativeCity(t *testing.T) {
+	if _, _, found, err := probeRoutedBeadStoresForID(t.TempDir(), sqliteSessionsCityConfig(), "mc-nope"); err != nil || found {
+		t.Fatalf("native-city probe: found=%v err=%v, want false,nil", found, err)
 	}
 }
 

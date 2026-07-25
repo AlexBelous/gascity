@@ -1,8 +1,14 @@
 package main
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	sessionsdb "github.com/gastownhall/gascity/internal/classdb/sessions"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestBdInfraWriteRefusalMutations pins the reserved-prefix arm: every bd
@@ -26,8 +32,11 @@ func TestBdInfraWriteRefusalMutations(t *testing.T) {
 		{[]string{"show", "gco-5"}, false, ""},      // reads stay unguarded
 		{[]string{"list", "--json"}, false, ""},
 	}
+	// A bare city routes no class store, so the residence arm is dark: the
+	// non-reserved mutation cases pass through exactly as before.
+	city := t.TempDir()
 	for _, tc := range cases {
-		msg, refuse := bdInfraWriteRefusal(tc.args)
+		msg, refuse := bdInfraWriteRefusal(city, nil, tc.args, io.Discard)
 		if refuse != tc.refuse {
 			t.Errorf("bdInfraWriteRefusal(%v) = (%q, %v), want refuse=%v", tc.args, msg, refuse, tc.refuse)
 			continue
@@ -35,6 +44,77 @@ func TestBdInfraWriteRefusalMutations(t *testing.T) {
 		if refuse && !strings.Contains(msg, tc.mention) {
 			t.Errorf("bdInfraWriteRefusal(%v) message %q does not name %q", tc.args, msg, tc.mention)
 		}
+	}
+}
+
+// TestBdInfraWriteRefusalRedirectsReclassifiedResidentID pins the G4 residence
+// arm: a bd mutation of a reclassified mixed-prefix (mc-) infra bead now living
+// in a routed class store is refused with the "use gc <X>" redirect, even though
+// its id carries no reserved prefix.
+func TestBdInfraWriteRefusalRedirectsReclassifiedResidentID(t *testing.T) {
+	city := t.TempDir()
+	class, err := sessionsdb.SharedStoreFor(city)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := class.ImportBead(beads.Bead{
+		ID: "mc-333", Type: "session", Status: "open",
+		Labels: []string{"gc:session"}, Title: "reclassified session",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeSessionsMigratedMarker(t, city)
+
+	msg, refuse := bdInfraWriteRefusal(city, sqliteSessionsCityConfig(), []string{"update", "mc-333", "--status", "closed"}, io.Discard)
+	if !refuse {
+		t.Fatalf("guard did not refuse a write to a reclassified resident infra id (msg=%q)", msg)
+	}
+	if !strings.Contains(msg, "gc session") {
+		t.Fatalf("refusal does not redirect to gc session: %q", msg)
+	}
+}
+
+// TestBdInfraWriteRefusalDarkOnNativeCity pins the G4 DARK path: on a city with
+// no class store routed (marker absent), the residence arm never fires and a
+// work-prefixed write passes through unrefused.
+func TestBdInfraWriteRefusalDarkOnNativeCity(t *testing.T) {
+	city := t.TempDir()
+	if msg, refuse := bdInfraWriteRefusal(city, sqliteSessionsCityConfig(), []string{"update", "mc-404", "--status", "closed"}, io.Discard); refuse {
+		t.Fatalf("guard refused a work id on a native city: %q", msg)
+	}
+}
+
+// TestBdInfraWriteRefusalFallsThroughOnProbeError pins the advisory-only
+// contract: when a routed class store's residence probe ERRORS (here the graph
+// class store, routed but with a corrupt seq-floor sidecar), the guard degrades
+// to bd passthrough for a non-reserved work id (logging, not refusing) — a
+// transient class-store fault must not block unrelated work-bead mutations. A
+// reserved-prefix id on the same city still refuses (the fail-closed data gate
+// is unchanged).
+func TestBdInfraWriteRefusalFallsThroughOnProbeError(t *testing.T) {
+	city := t.TempDir()
+	if err := writeGraphMigratedMarkerFile(city); err != nil {
+		t.Fatal(err)
+	}
+	// A corrupt seq-floor sidecar makes graphClassStoreFor (and thus the residence
+	// probe) fail closed while graph routing reads active.
+	if err := os.WriteFile(graphSeqFloorPath(city), []byte("not-an-int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Beads: config.BeadsConfig{Classes: map[string]config.BeadClassConfig{
+		config.BeadClassGraph: {Backend: config.BeadsClassBackendSQLite},
+	}}}
+
+	var stderr strings.Builder
+	if msg, refuse := bdInfraWriteRefusal(city, cfg, []string{"update", "mc-77", "--status", "closed"}, &stderr); refuse {
+		t.Fatalf("guard refused a work id on a residence-probe error (must fall through): %q", msg)
+	}
+	if !strings.Contains(stderr.String(), "residence probe") {
+		t.Fatalf("probe error was not logged before falling through: %q", stderr.String())
+	}
+	// The reserved-prefix data gate is unaffected by the same broken city.
+	if _, refuse := bdInfraWriteRefusal(city, cfg, []string{"update", "gcs-1", "--status", "closed"}, &stderr); !refuse {
+		t.Fatal("reserved-prefix id must still refuse (fail-closed) despite the broken graph store")
 	}
 }
 
@@ -61,8 +141,9 @@ func TestBdInfraWriteRefusalCreate(t *testing.T) {
 		// the walk: --assignee consumes its value.
 		{[]string{"create", "x", "--assignee", "gc:nudge", "-t", "task"}, false, ""},
 	}
+	city := t.TempDir()
 	for _, tc := range cases {
-		msg, refuse := bdInfraWriteRefusal(tc.args)
+		msg, refuse := bdInfraWriteRefusal(city, nil, tc.args, io.Discard)
 		if refuse != tc.refuse {
 			t.Errorf("bdInfraWriteRefusal(%v) = (%q, %v), want refuse=%v", tc.args, msg, refuse, tc.refuse)
 			continue

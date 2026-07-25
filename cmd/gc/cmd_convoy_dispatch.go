@@ -560,7 +560,50 @@ func findBeadAcrossStores(cityPath, beadID string, warningWriter io.Writer) (bea
 		}
 		return store, bead, rig.Path, nil
 	}
+
+	// Residence-probe fallback (G2): a window-3 mixed-prefix infra bead (mc-/ga-)
+	// reclassified into a class store keeps its non-reserved id, so the city/rig
+	// scan above misses it — its id routes by prefix to the work store, where it no
+	// longer lives. Probe the routed class stores that are themselves beads.Store
+	// (sessions + graph) by id before declaring absence. DARK on a native city:
+	// unrouted class stores are skipped, and a routed store that lacks the id
+	// simply falls through to the not-found below.
+	if st, b, found, err := probeRoutedBeadStoresForID(cityPath, cfg, beadID); err != nil {
+		return nil, beads.Bead{}, "", err
+	} else if found {
+		return st, b, cityPath, nil
+	}
 	return nil, beads.Bead{}, "", fmt.Errorf("getting bead %q: %w", beadID, beads.ErrNotFound)
+}
+
+// probeRoutedBeadStoresForID probes the routed class stores that are themselves
+// beads.Store — graph then sessions (prefix-owner order) — for beadID by point
+// read. It is the residence-probe fallback for a reclassified mixed-prefix infra
+// bead whose non-reserved id defeats by-prefix routing. A clean miss returns
+// found=false (the caller reports absence); a hard routing/store failure surfaces
+// and is never read as absence (root-loss discipline). The order/message/nudge
+// class stores are typed record stores, not beads.Store, so they are unreachable
+// here and are inspected through their typed surfaces on any city.
+func probeRoutedBeadStoresForID(cityPath string, cfg *config.City, beadID string) (beads.Store, beads.Bead, bool, error) {
+	if graph, routed, err := routedGraphStoreFor(cityPath, controlGraphRoutingCfg(cityPath, cfg)); err != nil {
+		return nil, beads.Bead{}, false, fmt.Errorf("graph class store: %w", err)
+	} else if routed {
+		if b, gerr := graph.Get(beadID); gerr == nil {
+			return graph, b, true, nil
+		} else if !errors.Is(gerr, beads.ErrNotFound) {
+			return nil, beads.Bead{}, false, fmt.Errorf("graph class store: %w", gerr)
+		}
+	}
+	if sess, routed, err := sessionsdb.RoutedStoreFor(cityPath, cfg); err != nil {
+		return nil, beads.Bead{}, false, fmt.Errorf("sessions class store: %w", err)
+	} else if routed {
+		if b, gerr := sess.Get(beadID); gerr == nil {
+			return sess, b, true, nil
+		} else if !errors.Is(gerr, beads.ErrNotFound) {
+			return nil, beads.Bead{}, false, fmt.Errorf("sessions class store: %w", gerr)
+		}
+	}
+	return nil, beads.Bead{}, false, nil
 }
 
 func findUniqueBeadAcrossStoresView(cityPath, beadID string) (convoyStoreView, beads.Bead, error) {

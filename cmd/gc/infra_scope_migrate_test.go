@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -401,5 +403,163 @@ func TestEnsureGraphClassMigratedImportsClosedInfraScopeGraphBeads(t *testing.T)
 	}
 	if got.Status != "closed" {
 		t.Fatalf("imported step status = %q, want closed", got.Status)
+	}
+}
+
+// G1 (safety gate): a ClassWork bead in the combined infra scope that no class
+// migration imports and that the Dolt work store does not already own is an
+// ORPHAN — the preflight fails the boot before any class marker is written,
+// naming the id.
+func TestInfraScopeClassifierPreflightErrorsOnWorkClassOrphan(t *testing.T) {
+	city := t.TempDir()
+	src := seedCombinedInfraScope(t, city)
+	if _, err := src.Create(beads.Bead{ID: "mc-orphan-1", Type: "task", Title: "stranded work"}); err != nil {
+		t.Fatal(err)
+	}
+	closeBeadStoreHandle(src) //nolint:errcheck
+	err := ensureInfraScopeClassifierClean(city, beads.NewMemStore(), &strings.Builder{})
+	if err == nil {
+		t.Fatal("preflight passed with a work-class orphan in the infra scope")
+	}
+	if !strings.Contains(err.Error(), "mc-orphan-1") {
+		t.Fatalf("preflight error does not name the orphan id: %v", err)
+	}
+}
+
+// G1: the SAME id present in the work store is a safe duplicate — the routed
+// fleet still sees the bead there, so the preflight passes.
+func TestInfraScopeClassifierPreflightPassesWorkClassSafeDuplicate(t *testing.T) {
+	city := t.TempDir()
+	src := seedCombinedInfraScope(t, city)
+	if _, err := src.Create(beads.Bead{ID: "mc-dupe-1", Type: "task", Title: "shared work"}); err != nil {
+		t.Fatal(err)
+	}
+	closeBeadStoreHandle(src) //nolint:errcheck
+	work := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "mc-dupe-1", Type: "task", Status: "open"}}, nil)
+	if err := ensureInfraScopeClassifierClean(city, work, &strings.Builder{}); err != nil {
+		t.Fatalf("preflight failed on a safe duplicate: %v", err)
+	}
+}
+
+// G1 fast path: an infra scope with only infrastructure-class beads (zero
+// ClassWork) passes WITHOUT ever point-reading the work store — the work store
+// here hard-fails every Get, so any consultation would surface.
+func TestInfraScopeClassifierPreflightZeroWorkClassSkipsWorkStore(t *testing.T) {
+	city := t.TempDir()
+	src := seedCombinedInfraScope(t, city)
+	if _, err := src.Create(beads.Bead{
+		ID: "gcg-1", Type: "session", Status: "open",
+		Labels: []string{"gc:session"}, Metadata: map[string]string{"state": "awake"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closeBeadStoreHandle(src) //nolint:errcheck
+	work := &getErrStore{Store: beads.NewMemStore(), err: errors.New("work store must not be read on the zero-ClassWork fast path")}
+	if err := ensureInfraScopeClassifierClean(city, work, &strings.Builder{}); err != nil {
+		t.Fatalf("zero-ClassWork preflight failed (fast path consulted the work store?): %v", err)
+	}
+}
+
+// G1: a hard work-store read failure while checking a ClassWork bead surfaces —
+// it must never be flattened into "orphan" (which would boot-block a healthy
+// city) or "safe" (which would let a real orphan through).
+func TestInfraScopeClassifierPreflightSurfacesWorkStoreReadFailure(t *testing.T) {
+	city := t.TempDir()
+	src := seedCombinedInfraScope(t, city)
+	if _, err := src.Create(beads.Bead{ID: "mc-ambig-1", Type: "task", Title: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	closeBeadStoreHandle(src) //nolint:errcheck
+	sentinel := errors.New("work store unavailable")
+	work := &getErrStore{Store: beads.NewMemStore(), err: sentinel}
+	err := ensureInfraScopeClassifierClean(city, work, &strings.Builder{})
+	if err == nil || !errors.Is(err, sentinel) {
+		t.Fatalf("preflight did not surface the work-store read failure: %v", err)
+	}
+}
+
+// G1 DARK: a city with no .gc/infra scope is a no-op — the work store (which
+// hard-fails Get) is never opened or read.
+func TestInfraScopeClassifierPreflightDarkWithoutScope(t *testing.T) {
+	work := &getErrStore{Store: beads.NewMemStore(), err: errors.New("work store must not be read when no .gc/infra exists")}
+	if err := ensureInfraScopeClassifierClean(t.TempDir(), work, &strings.Builder{}); err != nil {
+		t.Fatalf("preflight errored on a city with no infra scope: %v", err)
+	}
+}
+
+// G1 (MINOR 2): a clean census stamps a durable marker keyed on the scope's
+// stat signature; a second boot over the UNCHANGED (retained, read-only) scope
+// matches the marker and skips the rescan + the work-store open entirely — the
+// work store here hard-fails every Get, so any re-census would surface.
+func TestInfraScopeClassifierPreflightSkipsUnchangedScopeOnSecondBoot(t *testing.T) {
+	city := t.TempDir()
+	src := seedCombinedInfraScope(t, city)
+	if _, err := src.Create(beads.Bead{
+		ID: "gcg-1", Type: "session", Status: "open",
+		Labels: []string{"gc:session"}, Metadata: map[string]string{"state": "awake"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closeBeadStoreHandle(src) //nolint:errcheck
+
+	// First boot: full census, stamps the clean marker.
+	if err := ensureInfraScopeClassifierClean(city, beads.NewMemStore(), &strings.Builder{}); err != nil {
+		t.Fatalf("first-boot preflight failed: %v", err)
+	}
+	if !infraScopePreflightClean(city) {
+		t.Fatal("clean census did not stamp a matching preflight-clean marker (call site would still open the work store)")
+	}
+
+	// Second boot: the marker matches the unchanged scope, so the census is
+	// skipped — a work store that hard-fails Get is never touched.
+	work := &getErrStore{Store: beads.NewMemStore(), err: errors.New("clean-marked unchanged scope must not re-open/read the work store")}
+	if err := ensureInfraScopeClassifierClean(city, work, &strings.Builder{}); err != nil {
+		t.Fatalf("second-boot preflight re-ran over an unchanged scope: %v", err)
+	}
+}
+
+// G1 (MINOR 2): when the .gc/infra scope changes on disk the stamped marker no
+// longer matches, so the full census RE-RUNS — here it catches a newly
+// introduced work-class orphan that the stale marker would otherwise skip.
+func TestInfraScopeClassifierPreflightRescansWhenScopeChanges(t *testing.T) {
+	city := t.TempDir()
+	src := seedCombinedInfraScope(t, city)
+	if _, err := src.Create(beads.Bead{
+		ID: "gcg-1", Type: "session", Status: "open",
+		Labels: []string{"gc:session"}, Metadata: map[string]string{"state": "awake"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closeBeadStoreHandle(src) //nolint:errcheck
+
+	// First boot clean + stamped.
+	if err := ensureInfraScopeClassifierClean(city, beads.NewMemStore(), &strings.Builder{}); err != nil {
+		t.Fatalf("first-boot preflight failed: %v", err)
+	}
+	if !infraScopePreflightClean(city) {
+		t.Fatal("first census did not stamp a matching marker")
+	}
+
+	// Mutate the retained scope: add a work-class orphan, then force a distinct
+	// stat signature so the change is detected regardless of mtime granularity.
+	src2, err := beads.OpenSQLiteStore(infraCombinedScopeDir(city), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src2.Create(beads.Bead{ID: "mc-late-orphan", Type: "task", Title: "added after the census"}); err != nil {
+		t.Fatal(err)
+	}
+	closeBeadStoreHandle(src2) //nolint:errcheck
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(infraCombinedScopeDir(city), "beads.sqlite"), future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	if infraScopePreflightClean(city) {
+		t.Fatal("changed scope still reported clean (stale marker would skip the census)")
+	}
+	err = ensureInfraScopeClassifierClean(city, beads.NewMemStore(), &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "mc-late-orphan") {
+		t.Fatalf("re-census did not catch the newly introduced orphan: %v", err)
 	}
 }

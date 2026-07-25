@@ -211,14 +211,46 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
-	candidates := make([]beads.Store, 0, len(rigNames)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+	candidates := make([]beads.Store, 0, len(rigNames)+3)
+	cityStore := s.state.CityBeadStore()
+	if cityStore != nil {
 		candidates = append(candidates, cityStore)
 	}
 	for _, rigName := range rigNames {
 		candidates = append(candidates, stores[rigName])
 	}
+
+	// Reclassified mixed-prefix fallback: a window-3 mc-/ga- infra bead
+	// reclassified into a class store keeps its non-reserved id, so neither the
+	// configured-prefix arms nor the gcg class-prefix arm above route it — it would
+	// fall through this candidate scan and 404. Append the class stores that are
+	// themselves beads.Store — graph and sessions — so the by-id Get-then-continue
+	// loop federates them after the work stores. Deduped against the work store and
+	// each other; skipped when a class store collapses onto the city store (native
+	// city, GraphBeadStore() == CityBeadStore()) so the scan stays byte-identical
+	// off the deploy lineage. Order/message/nudge class stores are typed record
+	// stores, not beads.Store, and are not served by the generic /v0/bead/{id} path
+	// on ANY city — they are reached through their typed endpoints.
+	candidates = appendDistinctBeadStore(candidates, s.state.GraphBeadStore().Store, cityStore)
+	candidates = appendDistinctBeadStore(candidates, s.state.SessionsBeadStore().Store, cityStore)
 	return candidates
+}
+
+// appendDistinctBeadStore appends store to candidates when it is non-nil, is not
+// the city/work store, and is not already present. A class store that collapses
+// onto the city store (native, non-relocated city) adds nothing. Pointer identity
+// is the dedup key — every typed class wrapper shares the one underlying store
+// value the candidate scan already holds.
+func appendDistinctBeadStore(candidates []beads.Store, store, cityStore beads.Store) []beads.Store {
+	if store == nil || store == cityStore {
+		return candidates
+	}
+	for _, c := range candidates {
+		if c == store {
+			return candidates
+		}
+	}
+	return append(candidates, store)
 }
 
 func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {

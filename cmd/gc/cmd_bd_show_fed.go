@@ -123,6 +123,41 @@ func probeRoutedClassStoresByID(cityPath string, cfg *config.City, id, exclude s
 	return 0, false
 }
 
+// residentRoutedClassForID reports the routed class store that holds id, if any,
+// by the same per-class residence walk probeRoutedClassStoresByID renders from:
+// classShowRouted gates each class on a cheap marker stat (an unrouted class, and
+// every class on a native city, never opens a store) and classStoreShowBead
+// point-reads the routed ones in cutover order. Unlike the show federation this
+// returns the class and bead rather than rendering, so the fail-closed write
+// guard can redirect a reclassified mixed-prefix infra write. A routing-state or
+// store failure surfaces (never read as absence — the root-loss discipline); a
+// clean miss returns found=false. Covers all five classes: unlike the by-id read
+// paths (which serve only the beads.Store-typed graph/sessions stores), residence
+// is a recognition decision, and classStoreShowBead already point-reads the typed
+// order/message/nudge record stores through their own accessors.
+func residentRoutedClassForID(cityPath string, cfg *config.City, id, exclude string) (string, beads.Bead, bool, error) {
+	for _, class := range []string{config.BeadClassOrders, config.BeadClassNudges, config.BeadClassMessaging, config.BeadClassSessions, config.BeadClassGraph} {
+		if class == exclude {
+			continue
+		}
+		routed, err := classShowRouted(cityPath, cfg, class)
+		if err != nil {
+			return "", beads.Bead{}, false, fmt.Errorf("%s class routing: %w", class, err)
+		}
+		if !routed {
+			continue
+		}
+		b, found, err := classStoreShowBead(cityPath, class, id)
+		if err != nil {
+			return "", beads.Bead{}, false, fmt.Errorf("%s class store: %w", class, err)
+		}
+		if found {
+			return class, b, true, nil
+		}
+	}
+	return "", beads.Bead{}, false, nil
+}
+
 // bdShowRoutable reports whether a bd arg list is a plain `show <id> [--json]`
 // read with exactly one positional id. Anything else (a different verb,
 // multiple ids, or any other flag) is not routed and falls through.

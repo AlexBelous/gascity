@@ -1225,6 +1225,83 @@ func TestBeadStoresForIDReachesReclassifiedGcgSession(t *testing.T) {
 	}
 }
 
+// TestBeadStoresForIDAppendsClassStoresForReclassifiedMixedPrefixID pins G3: a
+// window-3 mc-/ga- infra bead reclassified into a class store keeps its
+// non-reserved id, so the /v0/bead/{id} candidate builder appends the graph and
+// sessions class stores AFTER the work stores rather than 404ing on the
+// city/rig miss.
+func TestBeadStoresForIDAppendsClassStoresForReclassifiedMixedPrefixID(t *testing.T) {
+	state := newFakeState(t)
+	cityStore := beads.NewMemStore()
+	graphStore := beads.NewMemStore()
+	sessStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: "ga-777", Type: "session", Status: "open", Title: "reclassified",
+		Labels: []string{"gc:session"},
+	}}, nil)
+	state.cityBeadStore = cityStore
+	state.graphBeadStore = graphStore
+	state.sessionsBeadStore = sessStore
+
+	server := &Server{state: state}
+	got := server.beadStoresForID("ga-777")
+
+	foundGraph, foundSess, cityIdx, sessIdx := false, false, -1, -1
+	for i, c := range got {
+		switch c {
+		case cityStore:
+			cityIdx = i
+		case graphStore:
+			foundGraph = true
+		case sessStore:
+			foundSess = true
+			sessIdx = i
+		}
+	}
+	if !foundGraph || !foundSess {
+		t.Fatalf("beadStoresForID(ga-777) = %v, want graph and sessions class stores appended", got)
+	}
+	if cityIdx < 0 || sessIdx < cityIdx {
+		t.Fatalf("class stores must follow the work store: cityIdx=%d sessIdx=%d (%v)", cityIdx, sessIdx, got)
+	}
+
+	// And the by-id GET federates them rather than 404ing.
+	out, err := server.humaHandleBeadGet(context.Background(), &BeadGetInput{ID: "ga-777"})
+	if err != nil {
+		t.Fatalf("humaHandleBeadGet(ga-777) = %v, want the reclassified session", err)
+	}
+	if out.Body.ID != "ga-777" {
+		t.Fatalf("resolved id = %q, want ga-777", out.Body.ID)
+	}
+}
+
+// TestBeadStoresForIDByteIdenticalOnNativeCity pins the G3 DARK path: when the
+// class stores collapse onto the city store (native, non-relocated city),
+// appendDistinctBeadStore adds no new candidate and the fallback scan stays
+// byte-identical to the work-store-only set (city + rigs).
+func TestBeadStoresForIDByteIdenticalOnNativeCity(t *testing.T) {
+	state := newFakeState(t)
+	cityStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	// graphBeadStore/sessionsBeadStore left nil → they collapse onto cityStore,
+	// so appendDistinctBeadStore must add no new candidate.
+
+	server := &Server{state: state}
+	got := server.beadStoresForID("ga-777")
+
+	allowed := map[beads.Store]bool{cityStore: true}
+	for _, st := range state.stores {
+		allowed[st] = true
+	}
+	for _, c := range got {
+		if !allowed[c] {
+			t.Fatalf("native-city beadStoresForID appended a non-work store %p; got %v", c, got)
+		}
+	}
+	if len(got) == 0 || got[0] != cityStore {
+		t.Fatalf("native-city beadStoresForID must lead with the city store; got %v", got)
+	}
+}
+
 func TestBeadUpdateSetsAndClearsParent(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]

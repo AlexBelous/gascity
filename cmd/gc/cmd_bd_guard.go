@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
@@ -44,11 +45,30 @@ func reservedClassForBeadID(id string) (string, bool) {
 // bdInfraWriteRefusal reports whether bdArgs is a bd write targeting an
 // infra-class bead, and the operator-facing refusal message. Mutations
 // (update/close/reopen/delete, plus the gc-only release-if-current) are
-// judged by their positional ids' reserved prefixes; creates are judged by
-// classifying the declared type/labels. Anything else — including an
-// ambiguous arg scan, which the exact-ID guard already fails closed — is
-// not this guard's business.
-func bdInfraWriteRefusal(bdArgs []string) (string, bool) {
+// judged first by their positional ids' reserved prefixes, then — for
+// non-reserved ids — by RESIDENCE in a routed class store; creates are judged
+// by classifying the declared type/labels. Anything else — including an
+// ambiguous arg scan, which the exact-ID guard already fails closed — is not
+// this guard's business.
+//
+// The residence arm exists for the window-3 deploy lineage: a mixed-prefix
+// infra bead (mc-/ga-) reclassified into a class store keeps its non-reserved
+// id, so the reserved-prefix arm alone would not recognize it and the write
+// would fall to bd's unhelpful "no issue found". Consulting residence lets the
+// guard still emit the "use gc <X>" redirect. This arm is an ADVISORY redirect,
+// NOT a data-safety gate: the reserved-prefix arm above is the fail-closed data
+// gate, and a raw `bd <mutation> mc-<reclassified-id>` cannot corrupt anything
+// (bd routes the id by its mc-/ga- prefix to the Dolt work store, where the bead
+// no longer lives → a soft "no issue found"). So a residence-PROBE error must
+// NOT refuse: a single class store's transient sqlite lock/open hiccup under
+// concurrent CLI access would otherwise block EVERY ordinary work-bead
+// `gc bd update/close` on a migrated city. On a probe error we log and degrade
+// to bd passthrough; only a POSITIVE residence hit emits the redirect, and a
+// clean miss falls through. Hot-path cost: the probe runs ONLY for non-reserved
+// mutation ids, and residentRoutedClassForID gates each class on a cheap marker
+// stat — a native (non-migrated) city routes no class store, so the probe never
+// opens one and the guard stays effectively dark off the deploy lineage.
+func bdInfraWriteRefusal(cityPath string, cfg *config.City, bdArgs []string, stderr io.Writer) (string, bool) {
 	if len(bdArgs) == 0 {
 		return "", false
 	}
@@ -63,6 +83,21 @@ func bdInfraWriteRefusal(bdArgs []string) (string, bool) {
 	}
 	for _, id := range ids {
 		if class, found := reservedClassForBeadID(id); found {
+			return fmt.Sprintf("refusing %s of %s: %s-class beads live in the embedded class store (.gc/store), not bd; use %s",
+				bdArgs[0], id, class, infraClassBdReplacement[class]), true
+		}
+	}
+	// Reaching here means no id carried a reserved prefix; consult residence for a
+	// reclassified mixed-prefix infra bead. Advisory only — never guard-fatal.
+	for _, id := range ids {
+		class, _, found, err := residentRoutedClassForID(cityPath, cfg, id, "")
+		if err != nil {
+			// Degrade to bd passthrough: a class-store I/O fault must not block an
+			// unrelated work-bead write. bd itself will report a genuine absence.
+			fmt.Fprintf(stderr, "gc bd: residence probe for %s failed, falling through to bd: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if found {
 			return fmt.Sprintf("refusing %s of %s: %s-class beads live in the embedded class store (.gc/store), not bd; use %s",
 				bdArgs[0], id, class, infraClassBdReplacement[class]), true
 		}

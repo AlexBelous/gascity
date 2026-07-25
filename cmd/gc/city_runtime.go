@@ -231,6 +231,22 @@ func (cr *CityRuntime) BootError() error {
 	return cr.bootBlockingErr
 }
 
+// bootBlockingRuntime returns a minimal CityRuntime carrying a fatal boot
+// condition. Callers that hit a boot-blocking migration/preflight error return
+// this so the controller start is refused via BootError; the runtime is
+// otherwise inert and must not be run.
+func bootBlockingRuntime(p CityRuntimeParams, err error) *CityRuntime {
+	return &CityRuntime{
+		bootBlockingErr: err,
+		cityPath:        p.CityPath,
+		cityName:        p.CityName,
+		cfg:             p.Cfg,
+		sp:              p.SP,
+		stdout:          p.Stdout,
+		stderr:          p.Stderr,
+	}
+}
+
 // newCityRuntime creates a CityRuntime, building internal components
 // (crash tracker, idle tracker, wisp GC, order dispatcher) from the
 // provided parameters.
@@ -271,6 +287,25 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	}
 
 	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, managedDoltHealth, managedDoltOwned, managedDoltPort)
+
+	// Window-3 safety gate (G1): BEFORE any class migration, refuse the boot if
+	// the combined .gc/infra scope holds a bead the current classifier calls
+	// ClassWork that no class store would import and that the Dolt work store
+	// does not already own — such a bead would be silently orphaned by the flip.
+	// DARK off the deploy lineage: no .gc/infra means no work store is opened. A
+	// prior clean census over the byte-identical (retained, read-only) scope
+	// stamps a marker; a matching marker skips even the work-store open here.
+	if _, present := infraScopeMigrationSource(p.CityPath); present && !infraScopePreflightClean(p.CityPath) {
+		workStore, werr := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath)
+		if werr != nil {
+			return bootBlockingRuntime(p, fmt.Errorf("infra-scope classifier preflight: opening work store: %w", werr))
+		}
+		err := ensureInfraScopeClassifierClean(p.CityPath, workStore, p.Stderr)
+		closeBeadStoreHandle(workStore) //nolint:errcheck // best-effort close
+		if err != nil {
+			return bootBlockingRuntime(p, err)
+		}
+	}
 
 	// Seamless orders-class cutover: when [beads.classes.orders] selects the
 	// sqlite backend, import legacy tracking beads and write the migrated
@@ -318,30 +353,14 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// pattern the class migrations use. On success, converge undrained residue
 	// sources in the background, mirroring the class residue sweeps.
 	if err := ensureWorkUnified(p.CityPath, p.Cfg, p.Stderr); err != nil {
-		return &CityRuntime{
-			bootBlockingErr: err,
-			cityPath:        p.CityPath,
-			cityName:        p.CityName,
-			cfg:             p.Cfg,
-			sp:              p.SP,
-			stdout:          p.Stdout,
-			stderr:          p.Stderr,
-		}
+		return bootBlockingRuntime(p, err)
 	}
 	// Work-remote migration (deliverable A): AFTER unify, relocate the unified city
 	// work DB to the configured remote org endpoint when the city is remote and the
 	// remote marker is absent. Same boot-blocking discipline as unify — a failed or
 	// aborted remote migration refuses the controller start.
 	if err := ensureWorkRemote(p.CityPath, p.Cfg, p.Stderr); err != nil {
-		return &CityRuntime{
-			bootBlockingErr: err,
-			cityPath:        p.CityPath,
-			cityName:        p.CityName,
-			cfg:             p.Cfg,
-			sp:              p.SP,
-			stdout:          p.Stdout,
-			stderr:          p.Stderr,
-		}
+		return bootBlockingRuntime(p, err)
 	}
 	// The ctx-bound residue-convergence loop (re-armed by residue-source appends,
 	// retried on the order-rescan cadence) is started from cr.run so the runtime

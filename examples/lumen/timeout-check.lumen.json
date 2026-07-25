@@ -5,8 +5,10 @@
     "producer": "donbox/formula-language"
   },
   "name": "timeout-check",
+  "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 6, "col": 0},
   "input": {
     "name": "timeout-check.input",
+    "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 9, "col": 0},
     "fields": [
       {
         "name": "who",
@@ -22,12 +24,14 @@
       "id": "loop",
       "name": "loop",
       "after": [],
+      "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 25, "col": 0},
       "iterationName": "iteration",
       "body": {
         "kind": "run",
         "id": "stage",
         "name": "stage",
         "after": [],
+        "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 31, "col": 0},
         "target": { "kind": "by-name", "name": "stageFormula" },
         "environment": {
           "fields": [
@@ -71,8 +75,10 @@
         "producer": "donbox/formula-language"
       },
       "name": "stageFormula",
+      "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 72, "col": 0},
       "input": {
         "name": "stageFormula.input",
+        "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 76, "col": 0},
         "fields": [
           {
             "name": "who",
@@ -88,6 +94,7 @@
           "id": "draft",
           "name": "draft",
           "after": [],
+          "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 93, "col": 0},
           "source": { "kind": "prompt" },
           "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
           "body": { "raw": "Draft a plan for {{ who }}, then settle this step." }
@@ -97,12 +104,14 @@
           "id": "check",
           "name": "check",
           "after": ["draft"],
+          "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 102, "col": 0},
           "duration": { "kind": "literal", "value": "5m" },
           "body": {
             "kind": "exec",
             "id": "v",
             "name": "v",
             "after": [],
+            "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 108, "col": 0},
             "interpreter": { "kind": "shell", "program": { "kind": "exec" } },
             "body": { "raw": "echo checked", "language": "bash", "source": { "kind": "inline" } },
             "exitMap": { "pass": [0], "retryable": [] }
@@ -113,6 +122,7 @@
           "id": "report",
           "name": "report",
           "after": ["check"],
+          "origin": {"uri": "examples/lumen/timeout-check.lumen.json", "line": 118, "col": 0},
           "interpreter": { "kind": "shell", "program": { "kind": "exec" } },
           "body": { "raw": "echo report {{ check }}", "language": "bash", "source": { "kind": "inline" } },
           "exitMap": { "pass": [0], "retryable": [] }

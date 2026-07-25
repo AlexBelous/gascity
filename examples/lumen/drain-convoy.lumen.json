@@ -5,8 +5,10 @@
     "producer": "donbox/formula-language"
   },
   "name": "drain-convoy",
+  "origin": {"uri": "examples/lumen/drain-convoy.lumen.json", "line": 6, "col": 0},
   "input": {
     "name": "drain-convoy.input",
+    "origin": {"uri": "examples/lumen/drain-convoy.lumen.json", "line": 9, "col": 0},
     "fields": [
       {
         "name": "members",
@@ -22,6 +24,7 @@
       "id": "fanout",
       "name": "fanout",
       "after": [],
+      "origin": {"uri": "examples/lumen/drain-convoy.lumen.json", "line": 25, "col": 0},
       "form": "each",
       "binder": "item",
       "over": { "kind": "member", "base": { "kind": "ref", "name": "input" }, "name": "members" },
@@ -29,12 +32,14 @@
         "kind": "block",
         "id": "fanout.body",
         "after": [],
+        "origin": {"uri": "examples/lumen/drain-convoy.lumen.json", "line": 32, "col": 0},
         "members": [
           {
             "kind": "run",
             "id": "lane",
             "name": "lane",
             "after": [],
+            "origin": {"uri": "examples/lumen/drain-convoy.lumen.json", "line": 38, "col": 0},
             "target": { "kind": "by-name", "name": "impl" },
             "environment": {
               "fields": [
@@ -59,8 +64,10 @@
         "producer": "donbox/formula-language"
       },
       "name": "impl",
+      "origin": {"uri": "examples/lumen/drain-convoy.lumen.json", "line": 60, "col": 0},
       "input": {
         "name": "impl.input",
+        "origin": {"uri": "examples/lumen/drain-convoy.lumen.json", "line": 64, "col": 0},
         "fields": [
           {
             "name": "item",
@@ -76,6 +83,7 @@
           "id": "work",
           "name": "work",
           "after": [],
+          "origin": {"uri": "examples/lumen/drain-convoy.lumen.json", "line": 81, "col": 0},
           "source": { "kind": "prompt" },
           "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
           "body": {

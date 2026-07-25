@@ -110,9 +110,10 @@ func decodeFieldStrict(raw map[string]json.RawMessage, key string, dst any) erro
 
 // WalkNodes visits every IR node in the document — the top-level nodes and all
 // nested nodes, regardless of the field they nest under — calling fn with each
-// node's raw object. It identifies a node structurally: a JSON object carrying
-// kind, id, and after (which distinguishes true IR nodes from expression values
-// like {"kind":"literal", ...} that carry a kind but no id/after).
+// node's raw object. It identifies a node structurally the same way as the
+// upstream companion validator: a JSON object carrying a string kind and an
+// array after. This distinguishes schedulable nodes from expression/type values,
+// while still letting validation report a nested node that is missing its id.
 func (ir *IR) WalkNodes(fn func(node map[string]json.RawMessage)) {
 	for i := range ir.Nodes {
 		walkRawObject(ir.Nodes[i].Raw, fn)
@@ -120,10 +121,13 @@ func (ir *IR) WalkNodes(fn func(node map[string]json.RawMessage)) {
 }
 
 func walkRawObject(obj map[string]json.RawMessage, fn func(map[string]json.RawMessage)) {
-	_, hasKind := obj["kind"]
-	_, hasID := obj["id"]
-	_, hasAfter := obj["after"]
-	if hasKind && hasID && hasAfter {
+	var kind string
+	rawKind, hasKind := obj["kind"]
+	kindOK := hasKind && json.Unmarshal(rawKind, &kind) == nil
+	var after []json.RawMessage
+	rawAfter, hasAfter := obj["after"]
+	afterOK := hasAfter && json.Unmarshal(rawAfter, &after) == nil
+	if kindOK && afterOK {
 		fn(obj)
 	}
 	for _, v := range obj {

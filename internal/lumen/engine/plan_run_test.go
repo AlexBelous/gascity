@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/lumen/ir"
+	"github.com/gastownhall/gascity/internal/lumen/irtest"
 )
 
 // TestRunDoFixtureLowers guards the hand-authored dolt-e2e bundle fixture: it
@@ -181,7 +182,7 @@ func TestRecoverDoFixtureLowers(t *testing.T) {
 // decode/validate error. It is the R1a lowering fixtures' front door.
 func decodeBundle(t *testing.T, doc string) *ir.IR {
 	t.Helper()
-	d, err := ir.Decode([]byte(doc))
+	d, err := irtest.DecodeForLowering([]byte(doc))
 	if err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}

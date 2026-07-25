@@ -319,15 +319,18 @@ func TestParseInputConvoyFlag(t *testing.T) {
 const drainConvoyIR = `{
   "contract": {"name":"lumen.ir","version":"0.2.5","producer":"test"},
   "name":"drain-convoy",
+  "origin":{"uri":"test","line":0,"col":0},
   "input":{"name":"drain-convoy.input","fields":[
     {"name":"members","type":{"kind":"array","element":{"kind":"atomic","name":"string"}},"required":true,"body":false}
-  ]},
+  ],"origin":{"uri":"test","line":0,"col":0}},
   "nodes":[
     {"kind":"scatter","id":"fanout","name":"fanout","after":[],
+     "origin":{"uri":"test","line":1,"col":0},
      "form":"each","binder":"item",
      "over":{"kind":"member","base":{"kind":"ref","name":"input"},"name":"members"},
-     "body":{"kind":"block","id":"fanout.body","after":[],"members":[
+     "body":{"kind":"block","id":"fanout.body","after":[],"origin":{"uri":"test","line":2,"col":0},"members":[
        {"kind":"run","id":"lane","name":"lane","after":[],
+        "origin":{"uri":"test","line":3,"col":0},
         "target":{"kind":"by-name","name":"impl"},
         "environment":{"fields":[
           {"name":"item","value":{"kind":"expr","expr":{"kind":"ref","name":"item"}}}
@@ -340,11 +343,13 @@ const drainConvoyIR = `{
     "impl":{
       "contract":{"name":"lumen.ir","version":"0.2.5","producer":"test"},
       "name":"impl",
+      "origin":{"uri":"test","line":0,"col":0},
       "input":{"name":"impl.input","fields":[
         {"name":"item","type":{"kind":"atomic","name":"string"},"required":true,"body":false}
-      ]},
+      ],"origin":{"uri":"test","line":0,"col":0}},
       "nodes":[
         {"kind":"do","id":"work","name":"work","after":[],
+         "origin":{"uri":"test","line":1,"col":0},
          "source":{"kind":"prompt"},
          "interpreter":{"kind":"agent","mode":{"kind":"do"}},
          "body":{"raw":"Process {{ item }}.","language":"markdown","source":{"kind":"inline"}}}

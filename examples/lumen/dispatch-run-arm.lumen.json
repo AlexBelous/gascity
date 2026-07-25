@@ -5,8 +5,10 @@
     "producer": "donbox/formula-language"
   },
   "name": "dispatch-run-arm",
+  "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 6, "col": 0},
   "input": {
     "name": "dispatch-run-arm.input",
+    "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 9, "col": 0},
     "fields": [
       {
         "name": "policy",
@@ -28,7 +30,9 @@
       "id": "d",
       "name": "d",
       "after": [],
+      "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 31, "col": 0},
       "subject": { "kind": "ref", "name": "policy" },
+      "exhaustive": false,
       "arms": [
         {
           "match": { "kind": "literal", "value": "separate" },
@@ -37,6 +41,7 @@
             "id": "sepLane",
             "name": "sepLane",
             "after": [],
+            "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 40, "col": 0},
             "target": { "kind": "by-name", "name": "drainSeparate" },
             "environment": {
               "fields": [
@@ -60,6 +65,7 @@
             "id": "sharedLane",
             "name": "sharedLane",
             "after": [],
+            "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 63, "col": 0},
             "target": { "kind": "by-name", "name": "drainShared" },
             "environment": {
               "fields": [
@@ -87,8 +93,10 @@
         "producer": "donbox/formula-language"
       },
       "name": "drainSeparate",
+      "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 88, "col": 0},
       "input": {
         "name": "drainSeparate.input",
+        "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 92, "col": 0},
         "fields": [
           {
             "name": "reviewer",
@@ -110,6 +118,7 @@
           "id": "drain",
           "name": "drain",
           "after": [],
+          "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 115, "col": 0},
           "source": { "kind": "prompt" },
           "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
           "body": {
@@ -138,8 +147,10 @@
         "producer": "donbox/formula-language"
       },
       "name": "drainShared",
+      "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 139, "col": 0},
       "input": {
         "name": "drainShared.input",
+        "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 144, "col": 0},
         "fields": [
           {
             "name": "reviewer",
@@ -161,6 +172,7 @@
           "id": "drain",
           "name": "drain",
           "after": [],
+          "origin": {"uri": "examples/lumen/dispatch-run-arm.lumen.json", "line": 168, "col": 0},
           "source": { "kind": "prompt" },
           "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
           "body": {

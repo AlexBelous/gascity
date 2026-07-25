@@ -1,8 +1,10 @@
 {
   "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
   "name": "shared-lane",
+  "origin": {"uri": "examples/lumen/shared-lane.lumen.json", "line": 2, "col": 0},
   "input": {
     "name": "shared-lane.input",
+    "origin": {"uri": "examples/lumen/shared-lane.lumen.json", "line": 5, "col": 0},
     "fields": [
       { "name": "mode", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false },
       { "name": "work_items", "type": { "kind": "array", "element": { "kind": "atomic", "name": "string" } }, "required": true, "body": false }
@@ -14,7 +16,9 @@
       "id": "route",
       "name": "route",
       "after": [],
+      "origin": {"uri": "examples/lumen/shared-lane.lumen.json", "line": 17, "col": 0},
       "subject": { "kind": "ref", "name": "mode" },
+      "exhaustive": false,
       "arms": [
         {
           "match": { "kind": "literal", "value": "same-session" },
@@ -23,6 +27,7 @@
             "id": "sharedLane",
             "name": "sharedLane",
             "after": [],
+            "origin": {"uri": "examples/lumen/shared-lane.lumen.json", "line": 26, "col": 0},
             "target": { "kind": "by-name", "name": "doWorkShared" },
             "environment": {
               "fields": [
@@ -39,8 +44,10 @@
     "doWorkShared": {
       "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
       "name": "doWorkShared",
+      "origin": {"uri": "examples/lumen/shared-lane.lumen.json", "line": 40, "col": 0},
       "input": {
         "name": "doWorkShared.input",
+        "origin": {"uri": "examples/lumen/shared-lane.lumen.json", "line": 44, "col": 0},
         "fields": [
           { "name": "items", "type": { "kind": "array", "element": { "kind": "atomic", "name": "string" } }, "required": true, "body": false }
         ]
@@ -51,6 +58,7 @@
           "id": "lane_loop",
           "name": "lane_loop",
           "after": [],
+          "origin": {"uri": "examples/lumen/shared-lane.lumen.json", "line": 56, "col": 0},
           "iterationName": "iteration",
           "cond": {
             "kind": "operator",
@@ -79,6 +87,7 @@
             "id": "lane",
             "name": "lane",
             "after": [],
+            "origin": {"uri": "examples/lumen/shared-lane.lumen.json", "line": 84, "col": 0},
             "origin": { "uri": "shared-lane", "line": 1, "col": 0 },
             "source": { "kind": "prompt" },
             "interpreter": { "kind": "agent", "mode": { "kind": "do" }, "origin": { "uri": "shared-lane", "line": 1, "col": 0 } },

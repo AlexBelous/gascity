@@ -11,22 +11,28 @@ import (
 const bundleDoc = `{
   "contract": {"name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language"},
   "name": "main",
-  "input": {"name": "main.input", "fields": []},
+  "input": {"name": "main.input", "fields": [], "origin": {"uri": "main", "line": 0, "col": 0}},
   "nodes": [
     {"kind": "run", "id": "greeting", "name": "greeting", "after": [],
+     "origin": {"uri": "main", "line": 1, "col": 0},
      "target": {"kind": "by-name", "name": "greeter"},
      "environment": {"fields": []},
      "outcome": "transparent"}
   ],
+  "origin": {"uri": "main", "line": 0, "col": 0},
   "formulas": {
     "greeter": {
       "contract": {"name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language"},
       "name": "greeter",
-      "input": {"name": "greeter.input", "fields": []},
+      "input": {"name": "greeter.input", "fields": [], "origin": {"uri": "greeter", "line": 0, "col": 0}},
       "nodes": [
         {"kind": "exec", "id": "hello", "name": "hello", "after": [],
-         "interpreter": {"program": {"kind": "shell"}}, "body": {"raw": "echo hi"}}
-      ]
+         "origin": {"uri": "greeter", "line": 1, "col": 0},
+         "interpreter": {"kind": "shell", "program": {"kind": "bash"}},
+         "exitMap": {"pass": [0]},
+         "body": {"raw": "echo hi"}}
+      ],
+      "origin": {"uri": "greeter", "line": 0, "col": 0}
     }
   }
 }`
@@ -86,8 +92,10 @@ func assertLosslessMarshal(t *testing.T, doc *IR, src string) {
 // backward-compatibility guarantee (absent bundle ⇒ unchanged irHash).
 func TestNoBundleByteIdentity(t *testing.T) {
 	const plain = `{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
-		`"name":"m","input":{"name":"m.input","fields":[]},` +
-		`"nodes":[{"kind":"exec","id":"a","name":"a","after":[],"body":{"raw":"echo"}}]}`
+		`"name":"m","input":{"name":"m.input","fields":[],"origin":{"uri":"m","line":0,"col":0}},` +
+		`"nodes":[{"kind":"exec","id":"a","name":"a","after":[],"origin":{"uri":"m","line":1,"col":0},` +
+		`"interpreter":{"kind":"shell","program":{"kind":"bash"}},"exitMap":{"pass":[0]},"body":{"raw":"echo"}}],` +
+		`"origin":{"uri":"m","line":0,"col":0}}`
 	doc, err := Decode([]byte(plain))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
@@ -107,8 +115,8 @@ func TestBundleValidateRecursesIntoSubDocs(t *testing.T) {
 	if err == nil {
 		t.Fatal("Decode accepted an unknown sub-doc node kind")
 	}
-	if !strings.Contains(err.Error(), "formulas[\"greeter\"]") || !strings.Contains(err.Error(), "bogus") {
-		t.Errorf("error %q does not name formulas[\"greeter\"] + the bad kind", err)
+	if !strings.Contains(err.Error(), "formulas[\"greeter\"]") || !strings.Contains(err.Error(), "/nodes/0/kind") {
+		t.Errorf("error %q does not name formulas[\"greeter\"] + the bad kind field", err)
 	}
 }
 
@@ -116,11 +124,13 @@ func TestBundleValidateRecursesIntoSubDocs(t *testing.T) {
 // is enforced INSIDE bundled sub-docs too.
 func TestBundlePhantomRunFieldInSubDocRefused(t *testing.T) {
 	sub := `{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
-		`"name":"s","input":{"name":"s.input","fields":[]},` +
+		`"name":"s","input":{"name":"s.input","fields":[],"origin":{"uri":"s","line":0,"col":0}},` +
 		`"nodes":[{"kind":"run","id":"r","name":"r","after":[],"target":{"kind":"by-name","name":"z"},` +
-		`"outcome":"transparent","phantom":1}]}`
+		`"origin":{"uri":"s","line":1,"col":0},"outcome":"transparent","phantom":1}],` +
+		`"origin":{"uri":"s","line":0,"col":0}}`
 	doc := `{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
-		`"name":"main","input":{"name":"main.input","fields":[]},"nodes":[],` +
+		`"name":"main","input":{"name":"main.input","fields":[],"origin":{"uri":"main","line":0,"col":0}},` +
+		`"nodes":[],"origin":{"uri":"main","line":0,"col":0},` +
 		`"formulas":{"s":` + sub + `}}`
 	_, err := Decode([]byte(doc))
 	if err == nil || !strings.Contains(err.Error(), "phantom") {
@@ -144,9 +154,13 @@ func TestBundleNestedBundleRefused(t *testing.T) {
 	nested := strings.Replace(bundleDoc,
 		`"nodes": [
         {"kind": "exec", "id": "hello", "name": "hello", "after": [],
-         "interpreter": {"program": {"kind": "shell"}}, "body": {"raw": "echo hi"}}
-      ]`,
-		`"nodes": [], "formulas": {"deeper": {"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},"name":"deeper","input":{"name":"d.input","fields":[]},"nodes":[]}}`,
+         "origin": {"uri": "greeter", "line": 1, "col": 0},
+         "interpreter": {"kind": "shell", "program": {"kind": "bash"}},
+         "exitMap": {"pass": [0]},
+         "body": {"raw": "echo hi"}}
+      ],
+      "origin": {"uri": "greeter", "line": 0, "col": 0}`,
+		`"nodes": [], "origin": {"uri": "greeter", "line": 0, "col": 0}, "formulas": {"deeper": {"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},"name":"deeper","input":{"name":"d.input","fields":[],"origin":{"uri":"d","line":0,"col":0}},"nodes":[],"origin":{"uri":"d","line":0,"col":0}}}`,
 		1)
 	_, err := Decode([]byte(nested))
 	if err == nil || !strings.Contains(err.Error(), "flat") {
@@ -157,7 +171,8 @@ func TestBundleNestedBundleRefused(t *testing.T) {
 // TestBundleNullEntryRefused proves a null bundle entry is refused loudly.
 func TestBundleNullEntryRefused(t *testing.T) {
 	doc := `{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
-		`"name":"main","input":{"name":"main.input","fields":[]},"nodes":[],` +
+		`"name":"main","input":{"name":"main.input","fields":[],"origin":{"uri":"main","line":0,"col":0}},` +
+		`"nodes":[],"origin":{"uri":"main","line":0,"col":0},` +
 		`"formulas":{"greeter":null}}`
 	_, err := Decode([]byte(doc))
 	if err == nil || !strings.Contains(err.Error(), "greeter") {
@@ -185,10 +200,14 @@ func TestBundleUnsupportedSubContractRefused(t *testing.T) {
 func TestBundleMalformedSubInputRefused(t *testing.T) {
 	sub := `{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
 		`"name":"greeter","input":{"name":"greeter.input","fields":[` +
-		`{"name":"who","type":{"kind":"atomic","name":"string"},"required":"true"}]},` + // required is a STRING, not bool
-		`"nodes":[{"kind":"exec","id":"hello","name":"hello","after":[],"body":{"raw":"echo hi"}}]}`
+		`{"name":"who","type":{"kind":"atomic","name":"string"},"required":"true","body":false}],` + // required is a STRING, not bool
+		`"origin":{"uri":"greeter","line":0,"col":0}},` +
+		`"nodes":[{"kind":"exec","id":"hello","name":"hello","after":[],"origin":{"uri":"greeter","line":1,"col":0},` +
+		`"interpreter":{"kind":"shell","program":{"kind":"bash"}},"exitMap":{"pass":[0]},"body":{"raw":"echo hi"}}],` +
+		`"origin":{"uri":"greeter","line":0,"col":0}}`
 	doc := `{"contract":{"name":"lumen.ir","version":"0.2.5","producer":"x"},` +
-		`"name":"main","input":{"name":"main.input","fields":[]},"nodes":[],` +
+		`"name":"main","input":{"name":"main.input","fields":[],"origin":{"uri":"main","line":0,"col":0}},` +
+		`"nodes":[],"origin":{"uri":"main","line":0,"col":0},` +
 		`"formulas":{"greeter":` + sub + `}}`
 	if _, err := Decode([]byte(doc)); err == nil {
 		t.Fatal("Decode accepted a sub-doc with a type-mismatched `required` field (lenient input decode defeats the run-env guard)")

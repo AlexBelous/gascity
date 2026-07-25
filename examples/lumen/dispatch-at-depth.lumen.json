@@ -5,8 +5,10 @@
     "producer": "donbox/formula-language"
   },
   "name": "dispatch-at-depth",
+  "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 6, "col": 0},
   "input": {
     "name": "dispatch-at-depth.input",
+    "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 9, "col": 0},
     "fields": [
       {
         "name": "drain_policy",
@@ -28,6 +30,7 @@
       "id": "continue-chain",
       "name": "continue-chain",
       "after": [],
+      "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 31, "col": 0},
       "target": { "kind": "by-name", "name": "midChain" },
       "environment": {
         "fields": [
@@ -42,8 +45,10 @@
     "midChain": {
       "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
       "name": "midChain",
+      "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 43, "col": 0},
       "input": {
         "name": "midChain.input",
+        "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 47, "col": 0},
         "fields": [
           { "name": "drain_policy", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false },
           { "name": "target", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false }
@@ -55,6 +60,7 @@
           "id": "continue-chain",
           "name": "continue-chain",
           "after": [],
+          "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 60, "col": 0},
           "target": { "kind": "by-name", "name": "leafChain" },
           "environment": {
             "fields": [
@@ -69,8 +75,10 @@
     "leafChain": {
       "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
       "name": "leafChain",
+      "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 70, "col": 0},
       "input": {
         "name": "leafChain.input",
+        "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 75, "col": 0},
         "fields": [
           { "name": "drain_policy", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false },
           { "name": "target", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false }
@@ -82,7 +90,9 @@
           "id": "implement",
           "name": "implement",
           "after": [],
+          "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 89, "col": 0},
           "subject": { "kind": "ref", "name": "drain_policy" },
+          "exhaustive": false,
           "arms": [
             {
               "match": { "kind": "literal", "value": "separate" },
@@ -91,6 +101,7 @@
                 "id": "lanes",
                 "name": "lanes",
                 "after": [],
+                "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 98, "col": 0},
                 "target": { "kind": "by-name", "name": "drainSeparate" },
                 "environment": {
                   "fields": [
@@ -108,6 +119,7 @@
                 "id": "sharedLane",
                 "name": "sharedLane",
                 "after": [],
+                "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 115, "col": 0},
                 "source": { "kind": "prompt" },
                 "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
                 "body": {
@@ -133,8 +145,10 @@
     "drainSeparate": {
       "contract": { "name": "lumen.ir", "version": "0.2.5", "producer": "donbox/formula-language" },
       "name": "drainSeparate",
+      "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 134, "col": 0},
       "input": {
         "name": "drainSeparate.input",
+        "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 140, "col": 0},
         "fields": [
           { "name": "reviewer", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false },
           { "name": "target", "type": { "kind": "atomic", "name": "string" }, "required": true, "body": false }
@@ -146,6 +160,7 @@
           "id": "drain",
           "name": "drain",
           "after": [],
+          "origin": {"uri": "examples/lumen/dispatch-at-depth.lumen.json", "line": 155, "col": 0},
           "source": { "kind": "prompt" },
           "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
           "body": {

@@ -5,8 +5,10 @@
     "producer": "donbox/formula-language"
   },
   "name": "guard-run-do",
+  "origin": {"uri": "examples/lumen/guard-run-do.lumen.json", "line": 6, "col": 0},
   "input": {
     "name": "guard-run-do.input",
+    "origin": {"uri": "examples/lumen/guard-run-do.lumen.json", "line": 9, "col": 0},
     "fields": [
       {
         "name": "who",
@@ -22,12 +24,14 @@
       "id": "loop",
       "name": "loop",
       "after": [],
+      "origin": {"uri": "examples/lumen/guard-run-do.lumen.json", "line": 25, "col": 0},
       "iterationName": "iteration",
       "body": {
         "kind": "run",
         "id": "stage",
         "name": "stage",
         "after": [],
+        "origin": {"uri": "examples/lumen/guard-run-do.lumen.json", "line": 31, "col": 0},
         "target": { "kind": "by-name", "name": "greeter" },
         "environment": {
           "fields": [
@@ -71,8 +75,10 @@
         "producer": "donbox/formula-language"
       },
       "name": "greeter",
+      "origin": {"uri": "examples/lumen/guard-run-do.lumen.json", "line": 72, "col": 0},
       "input": {
         "name": "greeter.input",
+        "origin": {"uri": "examples/lumen/guard-run-do.lumen.json", "line": 76, "col": 0},
         "fields": [
           {
             "name": "name",
@@ -95,6 +101,7 @@
           "id": "draft",
           "name": "draft",
           "after": [],
+          "origin": {"uri": "examples/lumen/guard-run-do.lumen.json", "line": 100, "col": 0},
           "cond": {
             "kind": "operator",
             "op": "==",
@@ -108,6 +115,7 @@
             "id": "draft.then",
             "name": "draft.then",
             "after": [],
+            "origin": {"uri": "examples/lumen/guard-run-do.lumen.json", "line": 113, "col": 0},
             "source": { "kind": "prompt" },
             "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
             "body": { "raw": "Say hello to {{ name }}, then settle this step." },

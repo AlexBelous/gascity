@@ -5,8 +5,10 @@
     "producer": "donbox/formula-language"
   },
   "name": "guard-do",
+  "origin": {"uri": "examples/lumen/guard-do.lumen.json", "line": 6, "col": 0},
   "input": {
     "name": "guard-do.input",
+    "origin": {"uri": "examples/lumen/guard-do.lumen.json", "line": 9, "col": 0},
     "fields": [
       {
         "name": "mode",
@@ -22,6 +24,7 @@
       "id": "g",
       "name": "g",
       "after": [],
+      "origin": {"uri": "examples/lumen/guard-do.lumen.json", "line": 25, "col": 0},
       "cond": {
         "kind": "operator",
         "op": "==",
@@ -35,6 +38,7 @@
         "id": "gthen",
         "name": "gthen",
         "after": [],
+        "origin": {"uri": "examples/lumen/guard-do.lumen.json", "line": 38, "col": 0},
         "source": { "kind": "prompt" },
         "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
         "body": { "raw": "Do the gated work, then settle this step." },

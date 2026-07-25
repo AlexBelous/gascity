@@ -1,15 +1,111 @@
 package lumen_test
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/lumen/ir"
 )
+
+const (
+	latestLumenUpstreamCommit = "6cdc72c54d57cf6fc4dc939b44a9c117eb7339b0"
+	reviewQuorumIRSHA256      = "ff20c581e915e43b0addc143d6f6fda7df21f3c07c3f57c62edb59b71738158a"
+)
+
+func TestReviewQuorumMatchesPinnedLatestUpstreamCompiler(t *testing.T) {
+	checkedIn, err := os.ReadFile("review-quorum.lumen.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hashBytes(checkedIn); got != reviewQuorumIRSHA256 {
+		t.Fatalf("review-quorum IR SHA-256 = %s, want %s", got, reviewQuorumIRSHA256)
+	}
+
+	upstream := os.Getenv("LUMEN_UPSTREAM_REPO")
+	if upstream == "" {
+		t.Log("LUMEN_UPSTREAM_REPO is unset; pinned artifact hash checked, live compiler identity skipped")
+		return
+	}
+	head, err := exec.Command("git", "-C", upstream, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("read upstream HEAD: %v", err)
+	}
+	if got := strings.TrimSpace(string(head)); got != latestLumenUpstreamCommit {
+		t.Fatalf("upstream HEAD = %s, want pinned %s", got, latestLumenUpstreamCommit)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	check := exec.CommandContext(ctx, "npm", "-w", "@formula-language/core", "run", "check")
+	check.Dir = upstream
+	if output, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("build pinned upstream compiler: %v\n%s", err, output)
+	}
+
+	source, err := filepath.Abs("review-quorum.lumen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const compileScript = `
+const fs = require("node:fs");
+const { compileLumenFormulaLanguage } = require(process.argv[1] + "/packages/core/dist");
+const result = compileLumenFormulaLanguage({
+  uri: "review-quorum.lumen",
+  text: fs.readFileSync(process.argv[2], "utf8"),
+});
+const errors = (result.diagnostics || []).filter((diagnostic) => diagnostic.severity === "error");
+if (errors.length || !result.formula) {
+  process.stderr.write(JSON.stringify({ diagnostics: result.diagnostics }, null, 2) + "\n");
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify(result.formula, null, 2) + "\n");
+`
+	compile := exec.CommandContext(ctx, "node", "-e", compileScript, upstream, source)
+	compiled, err := compile.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compile review-quorum with pinned upstream: %v\n%s", err, compiled)
+	}
+	if !bytes.Equal(compiled, checkedIn) {
+		t.Fatalf("pinned upstream compiler output differs from checked-in review-quorum IR: got SHA-256 %s, want %s",
+			hashBytes(compiled), reviewQuorumIRSHA256)
+	}
+}
+
+func TestLumenJSONExamplesPassStrictAdmission(t *testing.T) {
+	files, err := filepath.Glob("*.lumen.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no Lumen JSON examples found")
+	}
+	for _, file := range files {
+		file := file
+		t.Run(file, func(t *testing.T) {
+			data, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ir.Decode(data); err != nil {
+				t.Fatalf("strict IR admission: %v", err)
+			}
+		})
+	}
+}
+
+func hashBytes(data []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
 
 func TestReviewQuorumIsARealDocumentWorkflow(t *testing.T) {
 	t.Parallel()

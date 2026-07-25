@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
 	"github.com/gastownhall/gascity/internal/lumen/ir"
+	"github.com/gastownhall/gascity/internal/lumen/irtest"
 )
 
 // newStore opens a fresh journal store in a temp dir.
@@ -28,7 +29,7 @@ func newStore(t *testing.T) *graphstore.Store {
 // decodeIR builds an *ir.IR from a JSON literal, exercising the real decode path.
 func decodeIR(t *testing.T, jsonDoc string) *ir.IR {
 	t.Helper()
-	doc, err := ir.Decode([]byte(jsonDoc))
+	doc, err := irtest.DecodeForLowering([]byte(jsonDoc))
 	if err != nil {
 		t.Fatalf("decode IR: %v", err)
 	}

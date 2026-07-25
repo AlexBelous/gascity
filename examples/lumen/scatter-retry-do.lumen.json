@@ -5,8 +5,10 @@
     "producer": "donbox/formula-language"
   },
   "name": "scatter-retry-do",
+  "origin": {"uri": "examples/lumen/scatter-retry-do.lumen.json", "line": 6, "col": 0},
   "input": {
     "name": "scatter-retry-do.input",
+    "origin": {"uri": "examples/lumen/scatter-retry-do.lumen.json", "line": 9, "col": 0},
     "fields": []
   },
   "nodes": [
@@ -15,6 +17,7 @@
       "id": "lanes",
       "name": "lanes",
       "after": [],
+      "origin": {"uri": "examples/lumen/scatter-retry-do.lumen.json", "line": 18, "col": 0},
       "form": "members",
       "on_fail": "continue",
       "members": [
@@ -23,12 +26,14 @@
           "id": "r1",
           "name": "r1",
           "after": [],
+          "origin": {"uri": "examples/lumen/scatter-retry-do.lumen.json", "line": 26, "col": 0},
           "attempts": { "kind": "literal", "value": 2 },
           "body": {
             "kind": "do",
             "id": "laneA",
             "name": "laneA",
             "after": [],
+            "origin": {"uri": "examples/lumen/scatter-retry-do.lumen.json", "line": 32, "col": 0},
             "source": { "kind": "prompt" },
             "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
             "body": { "raw": "Lane A: say hello, then settle this step." },
@@ -40,12 +45,14 @@
           "id": "r2",
           "name": "r2",
           "after": [],
+          "origin": {"uri": "examples/lumen/scatter-retry-do.lumen.json", "line": 43, "col": 0},
           "attempts": { "kind": "literal", "value": 2 },
           "body": {
             "kind": "do",
             "id": "laneB",
             "name": "laneB",
             "after": [],
+            "origin": {"uri": "examples/lumen/scatter-retry-do.lumen.json", "line": 49, "col": 0},
             "source": { "kind": "prompt" },
             "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
             "body": { "raw": "Lane B: say hello, then settle this step." },

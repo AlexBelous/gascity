@@ -261,6 +261,13 @@ type NativeDoltStore struct {
 	generation uint64
 	actor      string
 	idPrefix   string
+	// scopeRoot is the on-disk scope directory this store was opened at (the
+	// dir holding the .beads config that resolves its Dolt endpoint). It lets a
+	// caller recover the store's scope root — and thus its resolved (Host, Port,
+	// Database) endpoint via the .beads files — without a bd subprocess, so the
+	// endpoint-identity dedups collapse aliased NATIVE rig legs the same way they
+	// collapse bd-CLI legs. Empty for storage-only test handles.
+	scopeRoot string
 
 	// reopen re-establishes the managed Dolt connection after a transient
 	// connection failure (a :3307 hard-kill/rebind). It MUST re-resolve the
@@ -350,11 +357,17 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		return nil, err
 	}
 	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store.scopeRoot = scopeRoot
 	for _, opt := range opts {
 		opt(store)
 	}
 	return store, nil
 }
+
+// ScopeRoot returns the on-disk scope directory this store was opened at, or ""
+// for a storage-only handle. Callers use it to resolve the store's work
+// endpoint from its .beads files without a subprocess.
+func (s *NativeDoltStore) ScopeRoot() string { return s.scopeRoot }
 
 // OpenNativeStorage opens a native Dolt storage handle for the given scope and
 // projected env. It is the building block for a NativeDoltStore reopen hook: a

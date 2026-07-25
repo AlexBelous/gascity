@@ -75,7 +75,13 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			rigNames = []string{input.Rig}
 		}
 	} else {
-		rigNames = sortedRigNames(stores)
+		// Endpoint collapse (residual C): post-unify/remote each rig store is a
+		// distinct instance aliasing the one org DB, so an un-collapsed fan-out
+		// appends every shared-DB row once per rig leg (the rigName+ID dedup only
+		// fires for multi-assignee and never spans aliases). Collapsing to one
+		// representative per endpoint lists — and, via boundedCounts below,
+		// counts — each bead once. DARK on a scoped city.
+		rigNames = endpointCollapsedRigNames(s.state, sortedRigNames(stores))
 	}
 
 	var all []beads.Bead
@@ -420,7 +426,11 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}
 
 	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
+	// Endpoint collapse (residual C): aliased rig legs return the identical ready
+	// set; the seen[b.ID] dedup below already folds duplicates, so collapsing here
+	// only avoids the redundant per-alias reads (notably over a remote org DB).
+	// DARK on a scoped city.
+	rigNames := endpointCollapsedRigNames(s.state, sortedRigNames(stores))
 	var all []beads.Bead
 	var pa partialAggregator
 	seen := make(map[string]bool)

@@ -935,7 +935,47 @@ func coordClassStoreCandidates(cfg *config.City, cityStore beads.Store, rigStore
 			candidates = append(candidates, classStoreCandidate{store: s, ref: rig.Name})
 		}
 	}
-	return candidates
+	return dedupEndpointIdenticalClassCandidates(candidates)
+}
+
+// dedupEndpointIdenticalClassCandidates collapses the reconciler's per-tick
+// candidate fan-out to one entry per physical endpoint (residual-C). Post-unify
+// every rig candidate re-points at the city database, so iterating them re-scans
+// the shared DB once per aliased leg — redundant work per tick, and (over a
+// remote org DB) redundant WAN reads with independent stale caches. The city
+// candidate (index 0) roots the comparison and always survives; an aliased rig
+// leg is dropped, a genuinely distinct rig leg (scoped city, or a not-yet-
+// re-pointed rig) is kept. DARK: marker-less cities return the list untouched.
+func dedupEndpointIdenticalClassCandidates(candidates []classStoreCandidate) []classStoreCandidate {
+	if len(candidates) < 2 {
+		return candidates
+	}
+	cityRoot, ok := workStoreScopeRoot(candidates[0].store)
+	if !ok || !workTopologyActive(cityRoot) {
+		return candidates
+	}
+	out := make([]classStoreCandidate, 0, len(candidates))
+	keptRoots := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		root, resolved := workStoreScopeRoot(c.store)
+		if !resolved {
+			out = append(out, c)
+			continue
+		}
+		aliased := false
+		for _, kept := range keptRoots {
+			if same, err := sameResolvedWorkEndpoint(cityRoot, kept, root); err == nil && same {
+				aliased = true
+				break
+			}
+		}
+		if aliased {
+			continue
+		}
+		out = append(out, c)
+		keptRoots = append(keptRoots, root)
+	}
+	return out
 }
 
 // workAssignmentStores is the work-class candidate builder for the
@@ -974,7 +1014,101 @@ func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, e
 		stores = append(stores, rigStores[name])
 	}
 	appendExtras()
-	return stores
+	return dedupEndpointIdenticalWorkStores(stores)
+}
+
+// dedupEndpointIdenticalWorkStores collapses work stores that resolve to the
+// same physical endpoint (residual-C). Post-unify/remote the city store and
+// every rig store re-point at ONE org database, so the retirement sweeps —
+// which iterate this list keyed by store INDEX — would release/reassign the
+// same bead once per aliased leg. The round-1 hazard is concrete: two rig
+// stores carry independent stale caches over the shared DB, so a duplicate
+// release fired against a bead a worker just re-claimed WIPES the fresh claim.
+// Collapsing aliased legs to their first occurrence makes each sweep act
+// exactly once per bead.
+//
+// The city store (stores[0]) roots the endpoint comparison; its backing dir is
+// the cityPath the identity reader needs. Stores whose scope root can't be
+// resolved (a non-bd-CLI backing: the local graph sqlite store, an exec/mem
+// fake) are KEPT unconditionally — they are never endpoint-identical to the
+// bd-CLI work DB and dropping one would silence a distinct store. DARK: a
+// marker-less city (workTopologyActive false) returns the list untouched, so a
+// scoped/single-store city is byte-identical.
+func dedupEndpointIdenticalWorkStores(stores []beads.Store) []beads.Store {
+	if len(stores) < 2 {
+		return stores
+	}
+	cityRoot, ok := workStoreScopeRoot(stores[0])
+	if !ok || !workTopologyActive(cityRoot) {
+		return stores
+	}
+	out := make([]beads.Store, 0, len(stores))
+	keptRoots := make([]string, 0, len(stores))
+	for _, s := range stores {
+		root, resolved := workStoreScopeRoot(s)
+		if !resolved {
+			out = append(out, s) // unresolvable backing: always keep (graph/mem/exec)
+			continue
+		}
+		aliased := false
+		for _, kept := range keptRoots {
+			if same, err := sameResolvedWorkEndpoint(cityRoot, kept, root); err == nil && same {
+				aliased = true
+				break
+			}
+		}
+		if aliased {
+			continue
+		}
+		out = append(out, s)
+		keptRoots = append(keptRoots, root)
+	}
+	return out
+}
+
+// workStoreScopeRoot returns the on-disk scope root backing a work store, whose
+// directory names a resolvable .beads endpoint. It is provider-agnostic: a
+// bd-CLI backing exposes its dir via bdStoreBacking; a native (remote-target)
+// backing — the provider a work.remote/unified city REQUIRES — exposes it via
+// NativeDoltStore.ScopeRoot(), reached by unwrapping the CachingStore /
+// beadPolicyStore layers the choke point wraps around it. Without the native
+// arm the sweep + coordClass dedups would no-op on exactly the remote multi-rig
+// topology they target, leaving the round-1 double-release live (each aliased
+// native rig leg carries an independent stale cache over the one org DB).
+// Exec/mem/graph backings expose no scope root and return ("", false): the
+// endpoint dedup then keeps them untouched (conservative).
+func workStoreScopeRoot(store beads.Store) (string, bool) {
+	if store == nil {
+		return "", false
+	}
+	if bs, ok := bdStoreBacking(store); ok && bs != nil {
+		if dir := strings.TrimSpace(bs.Dir()); dir != "" {
+			return dir, true
+		}
+	}
+	// Native/other scope-root-exposing backing: unwrap the standard wrapper
+	// layers and probe each for a ScopeRoot() accessor. Bounded like
+	// bdStoreBacking against an unexpected wrap cycle.
+	for range 8 {
+		if sr, ok := store.(interface{ ScopeRoot() string }); ok {
+			if root := strings.TrimSpace(sr.ScopeRoot()); root != "" {
+				return root, true
+			}
+		}
+		if cached, ok := store.(*beads.CachingStore); ok {
+			if cached == nil || cached.Backing() == nil {
+				return "", false
+			}
+			store = cached.Backing()
+			continue
+		}
+		if inner, _, ok := unwrapBeadPolicyStore(store); ok {
+			store = inner
+			continue
+		}
+		return "", false
+	}
+	return "", false
 }
 
 // unclaimResult reports the outcome of one unassign sweep over a retired

@@ -297,6 +297,21 @@ type WorkReadPrefixer interface {
 	WorkReadPrefixes() (prefixes []string, ok bool)
 }
 
+// WorkStoreEndpointDeduper is an optional capability for states whose per-rig
+// work stores may alias ONE physical endpoint (post-unify/remote: every rig
+// re-points at the city/org database). Aggregate surfaces that fan out across
+// BeadStores() would otherwise list a shared-DB bead once per aliased rig store.
+// DedupeWorkStoreKeys collapses BeadStores() keys to one representative per
+// physical endpoint, order-preserved. It returns keys unchanged on a
+// scoped/marker-less city (DARK), and is modeled on WorkReadPrefixer so test
+// fakes are not forced to grow it. It is the residual-C companion to the
+// shared-handle registry: once the registry makes aliased scopes share one store
+// INSTANCE, sortedRigNames dedups them for free; until then this collapses them
+// by resolved endpoint.
+type WorkStoreEndpointDeduper interface {
+	DedupeWorkStoreKeys(keys []string) []string
+}
+
 // StateMutator extends State with write operations for mutation endpoints.
 type StateMutator interface {
 	State

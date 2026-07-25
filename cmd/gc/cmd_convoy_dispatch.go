@@ -573,6 +573,17 @@ func findUniqueBeadAcrossStoresView(cityPath, beadID string) (convoyStoreView, b
 			return convoyStoreView{}, beads.Bead{}, fmt.Errorf("getting bead %q from %s: %w", beadID, candidate.path, err)
 		}
 		if found {
+			// Residual-C aliasing-not-ambiguity: post-unify/remote a multi-store
+			// hit across endpoint-identical scopes is the SAME bead reported by
+			// aliased legs, not a genuine collision. openSourceWorkflowStores
+			// already collapses aliased candidates upstream, so this is the
+			// defense-in-depth guard for any caller that reaches here with an
+			// un-deduped list. A read fault falls through to the existing
+			// ambiguity error (conservative — surfaces the multi-hit rather than
+			// masking a true collision). Truly distinct endpoints still error.
+			if same, err := sameResolvedWorkEndpoint(cityPath, foundView.path, candidate.path); err == nil && same {
+				continue
+			}
 			return convoyStoreView{}, beads.Bead{}, fmt.Errorf(
 				"source bead %s exists in multiple stores (%s and %s); source workflow commands require a uniquely resolvable source bead id",
 				beadID,

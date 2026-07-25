@@ -585,9 +585,13 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 	// reserved-prefix beads (win3 gap G28).
 	prefixes, remoteScoped := workReadPrefixesFor(s.state)
 	stores := s.state.BeadStores()
-	// sortedRigNames deduplicates rigs sharing one store instance, so each
-	// store's persisted statuses are counted exactly once.
-	rigNames := sortedRigNames(stores)
+	// sortedRigNames deduplicates rigs sharing one store instance; the endpoint
+	// collapse then folds DISTINCT rig instances that alias one org DB
+	// (post-unify/remote) so the non-remote fan-out below sums each store's
+	// persisted statuses exactly once instead of once per aliased rig leg. DARK
+	// on a scoped city. (The remote branch collapses to a single prefix-scoped
+	// city leg independently.)
+	rigNames := endpointCollapsedRigNames(s.state, sortedRigNames(stores))
 	type workQuery struct {
 		label         string
 		store         beads.Store

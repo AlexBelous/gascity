@@ -152,6 +152,50 @@ func remoteWorkReadPrefixes(cityPath string, cfg *config.City) ([]string, bool) 
 	return prefixes, true
 }
 
+// workTopologyActive reports whether cityPath carries an active work-topology
+// marker (unified or remote). It is the DARK gate for the residual
+// endpoint-identity dedups (deliverable C): a marker-less city returns false, so
+// every fan-out that enumerates scope DIRS stays on its exact pre-topology code
+// path. It degrades a marker read fault to false (best-effort), matching the
+// class-sweep-elision gate — the dedup is an optimization/correctness collapse
+// that only ever merges scopes genuinely sharing one database, never a behavior
+// a scoped city depends on.
+func workTopologyActive(cityPath string) bool {
+	return loadWorkTopologyBestEffort(cityPath).sharesCityDatabase()
+}
+
+// dedupEndpointIdenticalScopeRoots collapses scope roots that resolve to the
+// same physical work endpoint, preserving order and keeping the FIRST
+// occurrence. It is the residual-C collapse for the fan-outs that enumerate
+// scope DIRS (convoy candidates, the work-assignment sweep), where the
+// shared-handle registry's instance identity does not reach.
+//
+// It is CONSERVATIVE on a read fault: a root whose identity cannot be resolved
+// (or cannot be compared to a kept root) is KEPT and probed on its own, never
+// silently dropped — the same discipline sameResolvedWorkEndpoint documents.
+// Callers gate it on workTopologyActive so a marker-less city never pays the
+// per-pair identity read and stays byte-identical.
+func dedupEndpointIdenticalScopeRoots(cityPath string, roots []string) []string {
+	if len(roots) < 2 {
+		return roots
+	}
+	out := make([]string, 0, len(roots))
+	for _, root := range roots {
+		aliased := false
+		for _, kept := range out {
+			same, err := sameResolvedWorkEndpoint(cityPath, kept, root)
+			if err == nil && same {
+				aliased = true
+				break
+			}
+		}
+		if !aliased {
+			out = append(out, root)
+		}
+	}
+	return out
+}
+
 // sameResolvedWorkEndpoint reports whether two scope roots resolve to the same
 // (Host, Port, Database) work database. It is the collapse key for the
 // candidate-builder dedups: aliased scopes (post-unify/remote) return true so a

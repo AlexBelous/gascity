@@ -81,7 +81,13 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	}
 
 	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
+	// Residual-C endpoint collapse: post-unify/remote the per-rig work stores
+	// alias one physical database, so an un-deduped fan-out lists every
+	// shared-DB convoy once per aliased rig. sortedRigNames only collapses
+	// stores that are the SAME instance (file provider / a shared registry
+	// handle); distinct instances over one endpoint need the resolved-endpoint
+	// collapse. DARK on a scoped/marker-less city.
+	rigNames := endpointCollapsedRigNames(s.state, sortedRigNames(stores))
 	var convoys []beads.Bead
 	var pa partialAggregator
 	for _, rigName := range rigNames {

@@ -359,7 +359,14 @@ func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
 			StoreRef: "city:" + s.state.CityName(),
 		})
 	}
-	for rigName, store := range s.state.BeadStores() {
+	// Endpoint collapse (residual C): aliased rig stores (post-unify/remote)
+	// would surface the same source-workflow root in "multiple stores" — the
+	// convoy-blocker hazard class — so collapse them to one representative per
+	// endpoint. Iterating sorted+collapsed keys also makes the ref order
+	// deterministic. DARK on a scoped city.
+	beadStores := s.state.BeadStores()
+	for _, rigName := range endpointCollapsedRigNames(s.state, sortedRigNames(beadStores)) {
+		store := beadStores[rigName]
 		if store == nil {
 			continue
 		}

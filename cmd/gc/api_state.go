@@ -1338,6 +1338,80 @@ func (cs *controllerState) WorkReadPrefixes() ([]string, bool) {
 
 var _ api.WorkReadPrefixer = (*controllerState)(nil)
 
+// DedupeWorkStoreKeys implements api.WorkStoreEndpointDeduper: it collapses
+// BeadStores() keys (the city name + rig names) to one representative per
+// resolved work endpoint. Post-unify/remote every rig re-points at the city
+// database, so an aggregate fan-out would list a shared-DB bead once per aliased
+// rig; keeping one key per endpoint makes the listing count each bead once. The
+// city key roots the comparison and always survives; an aliased rig key is
+// dropped, a genuinely distinct rig (scoped city, or a not-yet-re-pointed rig)
+// is kept. DARK: returns keys unchanged on a marker-less city.
+func (cs *controllerState) DedupeWorkStoreKeys(keys []string) []string {
+	cs.mu.RLock()
+	cityPath, cityName, cfg := cs.cityPath, cs.cityName, cs.cfg
+	cs.mu.RUnlock()
+	if len(keys) < 2 || !workTopologyActive(cityPath) {
+		return keys
+	}
+	scopeRootForKey := func(key string) (string, bool) {
+		if key == cityName {
+			return cityPath, true
+		}
+		if cfg == nil {
+			return "", false
+		}
+		for _, rig := range cfg.Rigs {
+			if rig.Name == key {
+				if strings.TrimSpace(rig.Path) == "" {
+					return "", false
+				}
+				return resolveStoreScopeRoot(cityPath, rig.Path), true
+			}
+		}
+		return "", false
+	}
+	// Process the city key FIRST so it is the surviving representative for its
+	// endpoint — an alphabetically-earlier rig name that aliases the city must
+	// not displace it. Output order is immaterial to callers (every consumer
+	// re-sorts or id-dedups), but keeping the city key deterministic guards a
+	// future consumer that special-cases the city representative.
+	ordered := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key == cityName {
+			ordered = append(ordered, key)
+		}
+	}
+	for _, key := range keys {
+		if key != cityName {
+			ordered = append(ordered, key)
+		}
+	}
+	out := make([]string, 0, len(keys))
+	keptRoots := make([]string, 0, len(keys))
+	for _, key := range ordered {
+		root, ok := scopeRootForKey(key)
+		if !ok {
+			out = append(out, key) // unresolvable key: keep it (conservative)
+			continue
+		}
+		aliased := false
+		for _, kept := range keptRoots {
+			if same, err := sameResolvedWorkEndpoint(cityPath, kept, root); err == nil && same {
+				aliased = true
+				break
+			}
+		}
+		if aliased {
+			continue
+		}
+		out = append(out, key)
+		keptRoots = append(keptRoots, root)
+	}
+	return out
+}
+
+var _ api.WorkStoreEndpointDeduper = (*controllerState)(nil)
+
 // Version returns the GC binary version string.
 func (cs *controllerState) Version() string {
 	return cs.version

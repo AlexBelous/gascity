@@ -479,6 +479,19 @@ func convoyStoreCandidatesWithProvider(cfg *config.City, cityPath, beadID string
 			add(resolveStoreScopeRoot(cityPath, rig.Path))
 		}
 	}
+	// Residual-C endpoint-identity dedup: post-unify/remote every rig scope
+	// re-points at the city (org) database, so each candidate DIR is a distinct
+	// string that resolves to ONE endpoint. Left un-collapsed, a by-id
+	// resolution would find the same bead in N+1 aliased stores and hard-fail
+	// "exists in multiple stores", and a live-roots scan would report spurious
+	// multi-store ambiguity. Collapse aliases to their first occurrence so both
+	// see exactly one store per endpoint; a genuinely distinct rig database
+	// (scoped city, or a not-yet-re-pointed late-bound rig) keeps its own
+	// candidate. DARK: gated on workTopologyActive, so a marker-less city keeps
+	// the exact string-deduped list, byte-identical.
+	if workTopologyActive(cityPath) {
+		candidates = dedupEndpointIdenticalScopeRoots(cityPath, candidates)
+	}
 	return candidates
 }
 

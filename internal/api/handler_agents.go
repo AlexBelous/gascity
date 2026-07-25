@@ -309,7 +309,10 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		}
 	}
 	if rigNames == nil {
-		rigNames = sortedRigNames(stores)
+		// Endpoint collapse (residual C): the active-bead probe returns on the
+		// first match, so aliased rig legs are redundant; collapsing avoids the
+		// extra per-alias probes over a shared org DB. DARK on a scoped city.
+		rigNames = endpointCollapsedRigNames(s.state, sortedRigNames(stores))
 	}
 	seen := make(map[string]bool, len(assignees))
 	var unique []string

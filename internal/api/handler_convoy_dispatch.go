@@ -592,7 +592,11 @@ func workflowStores(state State) []workflowStoreInfo {
 		})
 	}
 
-	for _, rigName := range sortedRigNames(beadStores) {
+	// Endpoint collapse (residual C): post-unify/remote aliased rig stores would
+	// re-scan the one org DB and surface the same workflow root in "multiple
+	// stores"; collapse them so the snapshot scan probes each endpoint once. DARK
+	// on a scoped city. The graph leg above is a distinct endpoint, never collapsed.
+	for _, rigName := range endpointCollapsedRigNames(state, sortedRigNames(beadStores)) {
 		if rigName == cityName {
 			continue
 		}

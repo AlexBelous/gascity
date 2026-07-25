@@ -369,6 +369,21 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 	return deduped
 }
 
+// endpointCollapsedRigNames collapses BeadStores() keys that resolve to one
+// physical work endpoint to a single representative, so an aggregate fan-out
+// counts each shared-DB bead once. sortedRigNames only collapses stores that are
+// the SAME instance (file provider); post-unify/remote each rig is a DISTINCT
+// instance aliasing the one org DB, which needs the resolved-endpoint collapse
+// the state supplies via WorkStoreEndpointDeduper. DARK: a no-op when the state
+// lacks the capability or on a scoped/marker-less city (the deduper returns the
+// input unchanged).
+func endpointCollapsedRigNames(state State, rigNames []string) []string {
+	if d, ok := state.(WorkStoreEndpointDeduper); ok {
+		return d.DedupeWorkStoreKeys(rigNames)
+	}
+	return rigNames
+}
+
 // BeadGraphResponse is the response shape for GET /v0/beads/graph/{rootID}.
 // Returns raw beads and deps — no status mapping, no presentation logic.
 type BeadGraphResponse struct {

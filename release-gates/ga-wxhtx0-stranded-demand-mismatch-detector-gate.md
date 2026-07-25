@@ -32,7 +32,7 @@ conflict, so the bounded self-rebase exception was not needed.
 |---|---|---|---|
 | 1 | Review PASS present | PASS | `ga-g8qh81` is closed with a PASS close reason and `REVIEWER VERDICT: PASS` for the exact reviewed SHA. |
 | 2 | Acceptance criteria met | PASS | The reviewed code adds a mutex-protected, in-memory per-template detector; observes successful idle-timeout kills; fails closed when assigned-work lookup fails; publishes at the configurable tracker threshold (default 3) and doubling intervals; resets when the episode breaks; registers a typed `session.demand_mismatch` payload; and performs no autonomous response. See the acceptance evidence below. |
-| 3 | Tests pass | PASS with baseline exceptions | All change-owning tests and required surface gates pass. `make test-fast-parallel` completed 6/8 jobs and exposed two failures outside the diff: the deterministic provider-factory ambient-city failure reproduced on current main and is owned by `ga-y4se3w`; a controller reload timeout occurred only under shard contention, while 10 isolated current-main samples passed in 0.53–0.91s, and is now owned by `ga-jin89y`. The candidate changes none of the failing tests or their controller/provider implementation files. The failed suite result is retained here rather than retried away. |
+| 3 | Tests pass | PASS | The final `make test-fast-parallel` rerun passed all 8 jobs. All change-owning tests and required surface gates also pass. An earlier run exposed two unrelated baseline defects: the provider-factory ambient-city failure reproduced on current main and is owned by `ga-y4se3w`; a controller reload timeout is owned by `ga-jin89y`. The candidate changes none of the failing tests or their controller/provider implementation files. |
 | 4 | No high-severity review findings open | PASS | The reviewer recorded no blocking findings and no HIGH or CRITICAL finding. Security, spec compliance, and coverage reviews are PASS. |
 | 5 | Final branch is clean | PASS | Before writing this gate file, `git status --porcelain=v1` returned no paths at the reviewed detached HEAD. Cleanliness is rechecked after committing the gate artifact. |
 | 6 | Branch diverges cleanly from main | PASS | Evaluated first; see the dedicated evidence above. |
@@ -57,6 +57,7 @@ conflict, so the bounded self-rebase exception was not needed.
 - `go test ./internal/events/... ./internal/api/... -run '^(TestEveryKnownEventTypeHasRegisteredPayload|TestOpenAPISpecInSync)$' -count=1 -v`: PASS.
 - `go vet ./...`: PASS.
 - `go build ./...`: PASS.
+- `make test-fast-parallel`: PASS, all 8 jobs on the final rerun.
 - `make dashboard-check`: PASS, including the dashboard build, TypeScript checks, e2e typecheck, and dashboard Go packages.
 - `make check-docs`: PASS.
 - Dashboard smoke: the built frontend was served with the current workspace’s
@@ -65,7 +66,7 @@ conflict, so the bounded self-rebase exception was not needed.
   preview was stopped and the port was verified closed.
 - Changed Go files are `gofmt`-clean; `git diff --check` reports no whitespace errors.
 
-## Baseline exceptions retained from the required fast run
+## Earlier-run baseline diagnostics
 
 - `TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior/default`
   fails on both the candidate and current `origin/main` because the ambient
@@ -74,8 +75,8 @@ conflict, so the bounded self-rebase exception was not needed.
 - `TestControllerReloadCommandReloadsConfigImmediately` timed out once in
   `unit-cmd-gc-2-of-6` after 3.32 seconds. The candidate does not modify
   `cmd/gc/controller.go`, `cmd/gc/controller_test.go`, or
-  `cmd/gc/city_runtime.go`; 10 isolated runs on current main all passed.
-  Follow-up reliability bug: `ga-jin89y`.
+  `cmd/gc/city_runtime.go`; 10 isolated runs on current main and the final
+  all-shards candidate rerun passed. Follow-up reliability bug: `ga-jin89y`.
 - A deliberately broad diagnostic race selector also exposed an existing
   unsynchronized test buffer in
   `TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout`. The identical

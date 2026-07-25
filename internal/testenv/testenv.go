@@ -217,6 +217,16 @@ func refuseProdDoltPort(survives func(name string) bool) {
 	}
 }
 
+// normalizeHomeToPasswdHome sets HOME to the OS passwd home for the current
+// uid when it differs, so test-binary code that depends on the real HOME
+// (e.g. non-delegated `gc supervisor start`, guarded by
+// platformSupervisorHomeOverrideError in cmd/gc/cmd_supervisor_lifecycle.go)
+// is not tripped by an ambient HOME override such as an agent sandbox's
+// isolated home. Compile-enabling stub only; wired into init()'s go-test
+// branch in ga-py7lxk's GREEN step — no behavioral wiring yet.
+func normalizeHomeToPasswdHome() {
+}
+
 func init() {
 	if !isGoTestBinary() {
 		// Testscript subcommand mode (e.g. this binary was copied to

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -78,6 +79,39 @@ func TestApplySlingInlineBead_ExistingBeadWarns(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
+// TestApplySlingInlineBead_MultilineTextRejected proves the helper refuses to
+// create a task bead from inline text containing embedded newlines — a strong
+// signal the caller pasted multi-line content (e.g. several bead references)
+// into the positional argument rather than a genuine short title. Real
+// multi-line content should go through --stdin, where the first line becomes
+// the title and the rest becomes the description.
+func TestApplySlingInlineBead_MultilineTextRejected(t *testing.T) {
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	finalBead, inlineText, errCode, errMsg := applySlingInlineBead(
+		&config.City{}, "line one\nline two", false /*isFormula*/, false /*dryRun*/, existingSlingSourceBead{},
+		store, "rig/store", "" /*stdinDesc*/, &stdout, &stderr)
+	if errCode != "inline_text_multiline" {
+		t.Fatalf("errCode = %q, want %q (errMsg=%q)", errCode, "inline_text_multiline", errMsg)
+	}
+	if errMsg == "" {
+		t.Fatalf("errMsg is empty, want a non-empty explanation")
+	}
+	if inlineText {
+		t.Fatalf("inlineText = %v, want false", inlineText)
+	}
+	if finalBead != "line one\nline two" {
+		t.Fatalf("finalBead = %q, want input unchanged", finalBead)
+	}
+	got, err := store.List(beads.ListQuery{})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("store has %d beads, want 0 (no bead should be created for rejected multiline input)", len(got))
 	}
 }
 

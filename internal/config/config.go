@@ -1805,6 +1805,10 @@ type EventsConfig struct {
 	// Rotation configures file-backed JSONL rotation. Defaults are applied
 	// by EventsRotationConfig helper methods when this table is absent.
 	Rotation EventsRotationConfig `toml:"rotation,omitempty"`
+	// ScanBudget configures the archive-scan budget for selective,
+	// unbounded-lower-edge list queries. Defaults are applied by
+	// EventsScanBudgetConfig helper methods when this table is absent.
+	ScanBudget EventsScanBudgetConfig `toml:"scan_budget,omitempty"`
 }
 
 // UsageConfig holds usage-fact sink settings.
@@ -1884,6 +1888,36 @@ func (c EventsRotationConfig) CheckIntervalDurationOrDefault() time.Duration {
 // return zero, which keeps all archives.
 func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
 	return durationOr(c.ArchiveRetainAge, 0)
+}
+
+const (
+	// DefaultEventsScanBudgetMaxArchiveBytes is the default per-call
+	// compressed-archive read budget for a selective, unbounded-lower-edge
+	// events list query (see events.BoundedScanProvider). Sized as a
+	// fraction of DefaultEventsRotationMaxSizeBytes under a typical JSONL
+	// gzip compression ratio; not benchmarked against production
+	// archive-size telemetry — operators with unusually large or dense
+	// archives should tune [events.scan_budget] explicitly.
+	DefaultEventsScanBudgetMaxArchiveBytes int64 = 128 * 1024 * 1024
+)
+
+// EventsScanBudgetConfig holds the archive-scan budget for
+// events.BoundedScanProvider (a selective filter with no AfterSeq/Since
+// floor). Without this bound, such a query falls back to scanning the
+// provider's entire retained history.
+type EventsScanBudgetConfig struct {
+	// MaxArchiveBytesPerRequest bounds the compressed-archive bytes read in
+	// a single ListNewestBounded call. Defaults to
+	// DefaultEventsScanBudgetMaxArchiveBytes.
+	MaxArchiveBytesPerRequest *int64 `toml:"max_archive_bytes_per_request,omitempty" jsonschema:"default=134217728"`
+}
+
+// MaxArchiveBytesPerRequestOrDefault returns the configured scan budget.
+func (c EventsScanBudgetConfig) MaxArchiveBytesPerRequestOrDefault() int64 {
+	if c.MaxArchiveBytesPerRequest == nil {
+		return DefaultEventsScanBudgetMaxArchiveBytes
+	}
+	return *c.MaxArchiveBytesPerRequest
 }
 
 const (

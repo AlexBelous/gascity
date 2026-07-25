@@ -127,6 +127,10 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 	if strings.ContainsRune(streamID, ':') {
 		return AdvanceResult{}, fmt.Errorf("lumen: advance: stream id %q must not contain ':' (it is the run root node id; ':' is the activation-key delimiter)", streamID)
 	}
+	repeatLimit, err := configuredRepeatLimit(opts)
+	if err != nil {
+		return AdvanceResult{}, err
+	}
 
 	units, err := buildUnits(doc, opts.Host != nil || opts.PoolRouter != nil, opts.Host != nil)
 	if err != nil {
@@ -178,6 +182,7 @@ func Advance(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID 
 			state:         reducer.Zero(streamID),
 			host:          opts.Host,
 			input:         seeded,
+			repeatLimit:   repeatLimit,
 			snapshotEvery: opts.SnapshotEvery,
 		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -835,7 +840,7 @@ func (d *driver) resettleLoopAttemptIndexWindow(u planUnit, attempt int, scope m
 // sub-graph through advanceUnit (a nested mini-pass), and PARK when a minted sub-do is
 // in flight (inFlightPoolWork reports it from the fold with zero changes). An
 // exec/settle-only attempt settles in-pass, so the loop can mint and settle several
-// attempts in one pass (Advance/Run parity), bounded by lumenRepeatLoopCap.
+// attempts in one pass (Advance/Run parity), bounded by d.repeatLimit.
 //
 // DECIDE-EVERY-TICK is only sound because the cond's ref set is FROZEN at lowering
 // to {the body's bare id, the iteration counter, input fields} — all attempt-local /
@@ -848,7 +853,7 @@ func (d *driver) resettleLoopAttemptIndexWindow(u planUnit, attempt int, scope m
 // precedent) — a follow-up design, not this slice.
 //
 // WALL-TIME NOTE: this is the first Advance arm that can spend unbounded time in one
-// pass — up to lumenRepeatLoopCap (32) sequential exec-bodied attempts under the
+// pass — up to d.repeatLimit sequential exec-bodied attempts under the
 // non-renewed 30s writer lease, so a slow exec body can outlive the lease mid-pass
 // (the same class as inline Run's attempt loops). A lease renew or a per-tick attempt
 // budget is a deliberate follow-up, not this slice.
@@ -903,7 +908,7 @@ func (d *driver) driveRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs
 	}
 	inheritDependencyPolicy(u, subUnits, &agg)
 	d.registerRunBodyEnv(spec, attempt, u.ns, subUnits)
-	if err := d.appendAttemptMinted(u.activation, attempt, repeatRemaining(attempt)); err != nil {
+	if err := d.appendAttemptMinted(u.activation, attempt, d.repeatRemaining(attempt)); err != nil {
 		return false, err
 	}
 	for i := range subUnits {
@@ -1411,7 +1416,7 @@ func (d *driver) ensureLoopActivated(u planUnit) error {
 // claims each attempt.
 func (d *driver) materializeLoopAttempt(u planUnit, attempt, maxAttempts int, scope map[string]string, opts Options) error {
 	spec := u.loop
-	budget := lumenRepeatLoopCap
+	budget := d.repeatLimit
 	if spec.irKind == ir.NodeRetry {
 		budget = maxAttempts
 	}

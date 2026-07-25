@@ -491,6 +491,29 @@ func TestRepeatPoolInfinitePendingPhysicalCap(t *testing.T) {
 	}
 }
 
+func TestRepeatPhysicalCapDoesNotLimitConsumingIterations(t *testing.T) {
+	ctx := context.Background()
+	restore := engine.SetLoopPhysicalCapForTest(2)
+	defer restore()
+
+	store := newStore(t)
+	body := execNodeExit("draft", "echo tick", []int{0}, nil)
+	doc := decodeIR(t, blockDoc("physical-cap-consuming",
+		repeatNode(body, `{"kind":"literal","value":false}`),
+	))
+	res, err := engine.RunWithOptions(ctx, store, doc, nil, engine.Options{RepeatLimit: 3})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if n := countAttemptMinted(res.Events); n != 3 {
+		t.Fatalf("attempt count = %d, want 3 consuming iterations", n)
+	}
+	outcome, reason, _, _ := loopSettle(t, res.Events, "repeat_1:0")
+	if outcome != engine.OutcomeFailed || reason != "loop_cap" {
+		t.Fatalf("loop settle = {%q, %q}, want {failed, loop_cap}", outcome, reason)
+	}
+}
+
 // TestRepeatPoolPendingIterationRendersConsumingCount pins the ADVANCE/RESUME-side
 // {{iteration}} bind (materializeLoopAttempt): a pool do repeat whose body prompt renders
 // {{iteration}}, driven pending×2 then pass, must render the CONSUMING count (1) on every

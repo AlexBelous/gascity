@@ -68,21 +68,21 @@ func resolveLeaseHolder(opts Options) string {
 	return leaseHolder
 }
 
-// lumenRepeatLoopCap is the mandatory hard bound on a repeat loop's CONSUMING
-// iterations (mirroring the reference runner). A cond that never turns truthy
-// terminates after this many consuming attempts, settling the loop
-// failed{reason:"loop_cap"} — no unbounded loop is expressible.
-const lumenRepeatLoopCap = 32
+const (
+	// DefaultRepeatLimit is the conformance-normative hard bound on each repeat
+	// loop's consuming iterations. Options.RepeatLimit may override it per run.
+	DefaultRepeatLimit = 10_000
 
-// lumenLoopPhysicalCap bounds a repeat loop's PHYSICAL attempt index, independent of
-// the consuming iteration cap. Once a pending re-poll advances the physical namespace
-// (bodyID:N) WITHOUT incrementing the consuming iteration (consumingCountBefore skips
-// pending settles), a forever-pending check would never trip lumenRepeatLoopCap and
-// would spin minting fresh attempt namespaces. This SEPARATE cap fails such a run loudly
-// (settleLoop failed{reason:"poll_cap"}). It is a constant comparison over the
-// fold-derived physical index, so it is deterministic. For a NON-pending loop
-// consuming == physical, so lumenRepeatLoopCap (32) always fires first and this cap is
-// inert — existing loops stay byte-identical (journal, renders, StateHash).
+	// legacyRepeatLimit preserves the historical Gas runtime cap when replaying a
+	// journal that predates semantic-dialect stamping.
+	legacyRepeatLimit = 32
+)
+
+// lumenLoopPhysicalCap bounds non-consuming pending polls independently of the
+// consuming iteration limit. Pending re-polls advance the physical namespace
+// (bodyID:N) without incrementing the consuming iteration, so a forever-pending
+// check would otherwise mint fresh attempt namespaces forever. Non-pending
+// attempts never consume this poll budget.
 //
 // OPEN RISK (owner sizing — flag for review): 512 is a guess with no corpus data on real
 // poll counts. Too low starves legitimate CI polling; too high delays a stuck-pending
@@ -127,6 +127,11 @@ const DefaultSnapshotEvery = 256
 type Options struct {
 	// Host runs agent `do` steps. Nil refuses do nodes.
 	Host enginehost.AgentHost
+	// RepeatLimit caps the consuming iterations of each repeat loop. Zero uses
+	// DefaultRepeatLimit. A negative value is invalid and is rejected before a
+	// fresh run writes run.started. Pending polls do not consume this limit, and
+	// retry(N) remains governed only by its authored N.
+	RepeatLimit int
 	// SnapshotEvery anchors a fold snapshot at the next unit boundary once this
 	// many events have accumulated since the last snapshot, and once more at the
 	// run seal (before run.closed). 0 disables snapshotting entirely (opt-in): the
@@ -193,6 +198,27 @@ type WorkDispatch struct {
 	Metadata map[string]string
 }
 
+func configuredRepeatLimit(opts Options) (int, error) {
+	if opts.RepeatLimit < 0 {
+		return 0, fmt.Errorf("lumen: repeat limit must be non-negative, got %d", opts.RepeatLimit)
+	}
+	if opts.RepeatLimit == 0 {
+		return DefaultRepeatLimit, nil
+	}
+	return opts.RepeatLimit, nil
+}
+
+func repeatLimitForDialect(opts Options, dialect string) (int, error) {
+	limit, err := configuredRepeatLimit(opts)
+	if err != nil {
+		return 0, err
+	}
+	if dialect == SemanticDialectLegacy {
+		return legacyRepeatLimit, nil
+	}
+	return limit, nil
+}
+
 // WorkObservation is a dispatched work bead's terminal state as ObserveWork reports
 // it (REDESIGN §1.4/§2.4). Outcome is a pre-mapped Lumen outcome
 // (pass/failed/degraded — the seam applies LumenOutcomeForGCOutcome, fail-closed),
@@ -228,6 +254,10 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 	}
 	if doc == nil {
 		return RunResult{}, fmt.Errorf("lumen: nil IR document")
+	}
+	repeatLimit, err := configuredRepeatLimit(opts)
+	if err != nil {
+		return RunResult{}, err
 	}
 
 	units, err := buildUnits(doc, opts.Host != nil, opts.Host != nil)
@@ -270,6 +300,7 @@ func RunWithOptions(ctx context.Context, store *graphstore.Store, doc *ir.IR, in
 		state:         reducer.Zero(streamID),
 		host:          opts.Host,
 		input:         seeded,
+		repeatLimit:   repeatLimit,
 		snapshotEvery: opts.SnapshotEvery,
 		runEnvs:       runEnvIndex(units),
 	}
@@ -340,6 +371,9 @@ type driver struct {
 	// `iteration >= max_check_attempts`). It is the same map baseScope seeds the
 	// string interpolation scope from.
 	input map[string]any
+	// repeatLimit is the per-loop consuming iteration cap selected for this run's
+	// semantic dialect.
+	repeatLimit int
 
 	// snapshotEvery is the fold-snapshot cadence (0 = disabled); sinceSnapshot
 	// counts committed events since the last anchored snapshot.
@@ -2112,7 +2146,7 @@ func (d *driver) runLoop(u planUnit, scope, nodeOutputs map[string]string) error
 
 	// retry: evaluate the attempts budget ONCE. An invalid budget (non-integer or
 	// < 1) settles the loop failed{invalid_input} with ZERO attempts (reference
-	// parity). repeat has no budget expression (it is capped at lumenRepeatLoopCap).
+	// parity). repeat has no budget expression; the host supplies its per-loop cap.
 	maxAttempts := 0
 	if spec.irKind == ir.NodeRetry {
 		as, err := d.loopEvalScope(u, 0, nil, scope, nodeOutputs)
@@ -2156,7 +2190,7 @@ func (d *driver) runLoop(u planUnit, scope, nodeOutputs map[string]string) error
 // is bodyID:N — a NEW activation ⇒ a fresh claim/settle/effect token per attempt.
 func (d *driver) runAttempt(u planUnit, attempt, maxAttempts int, scope, nodeOutputs map[string]string) error {
 	spec := u.loop
-	budget := lumenRepeatLoopCap
+	budget := d.repeatLimit
 	if spec.irKind == ir.NodeRetry {
 		budget = maxAttempts
 	}
@@ -2202,7 +2236,7 @@ func (d *driver) runAttempt(u planUnit, attempt, maxAttempts int, scope, nodeOut
 // aggregate through runUnit (so resume memoization, per-attempt effect tokens, and
 // crash boundaries apply for free at any nesting level), then decides via the shared
 // loopDecide over the folded aggregate outcome. Only repeat reaches here (⚑S2 refuses
-// retry+run), so maxAttempts is unused (the cap is lumenRepeatLoopCap).
+// retry+run), so maxAttempts is unused (the cap is d.repeatLimit).
 func (d *driver) runRunBodyLoop(u planUnit, scope, nodeOutputs map[string]string) error {
 	spec := u.loop
 	for attempt := 0; ; attempt++ {
@@ -2243,7 +2277,7 @@ func (d *driver) runRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs m
 	}
 	inheritDependencyPolicy(u, subUnits, &agg)
 	d.registerRunBodyEnv(spec, attempt, u.ns, subUnits)
-	if err := d.appendAttemptMinted(u.activation, attempt, repeatRemaining(attempt)); err != nil {
+	if err := d.appendAttemptMinted(u.activation, attempt, d.repeatRemaining(attempt)); err != nil {
 		return err
 	}
 	for i := range subUnits {
@@ -2261,10 +2295,10 @@ func (d *driver) runRunBodyAttempt(u planUnit, attempt int, scope, nodeOutputs m
 // For a long-polling pending loop it therefore understates the consuming budget still
 // available — it is a fold no-op and observability-only (no reducer reads it and nothing
 // gates on it), so the imprecision is cosmetic. The authoritative bounds are the consuming
-// cap (lumenRepeatLoopCap, via the loopDecide iteration) and the physical cap
+// cap (d.repeatLimit, via the loopDecide iteration) and the physical cap
 // (lumenLoopPhysicalCap).
-func repeatRemaining(attempt int) int {
-	remaining := lumenRepeatLoopCap - (attempt + 1)
+func (d *driver) repeatRemaining(attempt int) int {
+	remaining := d.repeatLimit - (attempt + 1)
 	if remaining < 0 {
 		return 0
 	}
@@ -2356,14 +2390,13 @@ func (d *driver) loopDecide(u planUnit, attempt, maxAttempts int, bn *nodeState,
 			// Exit returning the last body result (reference: returns lastResult).
 			return false, d.settleLoop(u, bn.Outcome, bn.Output, "", nil, scope, nodeOutputs)
 		}
-		// Physical spin bound (poll_cap): a forever-pending check never trips the
-		// consuming cap below (consuming stays flat), so bound the physical attempt index
-		// separately. Checked BEFORE the consuming cap; for a non-pending loop
-		// consuming == physical so the consuming cap fires first and this is inert.
-		if attempt+1 >= lumenLoopPhysicalCap {
+		// Poll spin bound: only non-consuming pending attempts spend this separate
+		// budget. A non-pending loop is governed solely by its consuming limit.
+		pendingPolls := attempt + 1 - iteration
+		if bn.Outcome == OutcomePending && pendingPolls >= lumenLoopPhysicalCap {
 			return false, d.settleLoop(u, OutcomeFailed, bn.Output, "poll_cap", nil, scope, nodeOutputs)
 		}
-		if iteration >= lumenRepeatLoopCap {
+		if iteration >= d.repeatLimit {
 			return false, d.settleLoop(u, OutcomeFailed, bn.Output, "loop_cap", nil, scope, nodeOutputs)
 		}
 		return true, nil

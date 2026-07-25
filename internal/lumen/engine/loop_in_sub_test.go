@@ -626,9 +626,9 @@ func TestAdvanceRunBodyLoopInSubWriteOnceRedundant(t *testing.T) {
 }
 
 // TestAdvanceRunBodyLoopInSubLoopCapAtDepth pins §2.9's hard-cap arm AT DEPTH: a run-body
-// loop inside a wrapper whose cond never matches drives to lumenRepeatLoopCap — each
-// attempt's sub-formula RUNS in a fresh depth namespace (wrap/stage/0/s … wrap/stage/31/s)
-// and the loop settles failed{loop_cap}, bounded.
+// loop inside a wrapper whose cond never matches drives to its configured cap —
+// each attempt's sub-formula RUNS in a fresh depth namespace and the loop settles
+// failed{loop_cap}, bounded.
 func TestAdvanceRunBodyLoopInSubLoopCapAtDepth(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -643,7 +643,9 @@ func TestAdvanceRunBodyLoopInSubLoopCapAtDepth(t *testing.T) {
 				runCondOutcomeEq("never")))+","+ // impossible; no iteration escape
 			subDoc("greeter", strField("name"), settleNode("s", "pass")),
 	))
-	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())
+	opts := fake.opts()
+	opts.RepeatLimit = 3
+	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, opts)
 	if err != nil {
 		t.Fatalf("advance: %v", err)
 	}
@@ -656,9 +658,9 @@ func TestAdvanceRunBodyLoopInSubLoopCapAtDepth(t *testing.T) {
 	}
 	// Each attempt got a fresh DEPTH namespace: attempt 0 and the last attempt both settled.
 	settled := settledOutcomeByID(t, streamStored(t, store, streamID))
-	if settled["wrap/stage/0/s"] != engine.OutcomePass || settled["wrap/stage/31/s"] != engine.OutcomePass {
-		t.Errorf("want fresh depth namespaces wrap/stage/0/s and wrap/stage/31/s both settled pass; got 0=%q 31=%q",
-			settled["wrap/stage/0/s"], settled["wrap/stage/31/s"])
+	if settled["wrap/stage/0/s"] != engine.OutcomePass || settled["wrap/stage/2/s"] != engine.OutcomePass {
+		t.Errorf("want fresh depth namespaces wrap/stage/0/s and wrap/stage/2/s both settled pass; got 0=%q 2=%q",
+			settled["wrap/stage/0/s"], settled["wrap/stage/2/s"])
 	}
 }
 
@@ -680,7 +682,9 @@ func TestAdvanceRunBodyLoopInSubAllDidNotRunSpins(t *testing.T) {
 				runCondOutcomeEq(engine.OutcomeSucceeded)))+","+ // a skipped aggregate never matches
 			subDoc("greeter", strField("name"), settleNode("s", "canceled")),
 	))
-	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())
+	opts := fake.opts()
+	opts.RepeatLimit = 3
+	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, opts)
 	if err != nil {
 		t.Fatalf("advance: %v", err)
 	}

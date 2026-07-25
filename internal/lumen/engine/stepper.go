@@ -162,6 +162,9 @@ func stepDriverFor(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 	if streamID == "" {
 		return nil, nil, nil, nil, nil, fmt.Errorf("lumen: stepper: empty stream id")
 	}
+	if _, err := configuredRepeatLimit(opts); err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
 
 	units, err = buildUnits(doc, true, true)
 	if err != nil {
@@ -172,7 +175,11 @@ func stepDriverFor(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 	// Engine-mode only: the stepper never dispatches to a pool or a host — it is the
 	// agent's own session. Threading a clean Options prevents a caller accidentally
 	// engaging pool mode and turning a v1 do into a dispatched bead.
-	stepOpts := Options{SnapshotEvery: opts.SnapshotEvery, LeaseHolder: opts.LeaseHolder}
+	stepOpts := Options{
+		RepeatLimit:   opts.RepeatLimit,
+		SnapshotEvery: opts.SnapshotEvery,
+		LeaseHolder:   opts.LeaseHolder,
+	}
 
 	lease, err := store.AcquireWriterLease(ctx, streamID, resolveLeaseHolder(stepOpts), leaseTTL)
 	if err != nil {

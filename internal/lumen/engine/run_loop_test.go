@@ -23,8 +23,7 @@ func repeatRunLoop(after []string, runBody, cond string) string {
 }
 
 // runCondPassOrIter is the canonical RBL exit `stage.outcome == "pass" ||
-// iteration >= 5` over the fixed "stage" body id (5 comfortably exceeds every
-// fixture's attempt count without approaching the 32 loop cap).
+// iteration >= 5` over the fixed "stage" body id.
 func runCondPassOrIter() string {
 	return `{"kind":"operator","op":"||","operands":[` +
 		`{"kind":"operator","op":"==","operands":[` +
@@ -296,7 +295,7 @@ func TestAdvanceRepeatRunBodyWriteOnceUnderRedundantAdvance(t *testing.T) {
 
 // TestAdvanceRepeatRunBodyLoopCap (§6 seed #6) proves a cond that never matches drives to
 // the loop cap: each attempt's sub-formula RUNS (settle pass), the cond checks an
-// impossible outcome, and after lumenRepeatLoopCap attempts the loop settles
+// impossible outcome, and after the configured limit the loop settles
 // failed{loop_cap} — each attempt in a fresh namespace, bounded.
 func TestAdvanceRepeatRunBodyLoopCap(t *testing.T) {
 	ctx := context.Background()
@@ -310,7 +309,9 @@ func TestAdvanceRepeatRunBodyLoopCap(t *testing.T) {
 			runCondOutcomeEq("never")), // impossible; no iteration escape
 		subDoc("greeter", strField("name"), settleNode("s", "pass")),
 	))
-	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())
+	opts := fake.opts()
+	opts.RepeatLimit = 3
+	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, opts)
 	if err != nil {
 		t.Fatalf("advance: %v", err)
 	}
@@ -323,8 +324,8 @@ func TestAdvanceRepeatRunBodyLoopCap(t *testing.T) {
 	}
 	// Each attempt got a fresh namespace: attempt 0 and the last attempt both settled.
 	settled := settledOutcomeByID(t, streamStored(t, store, streamID))
-	if settled["stage/0/s"] != engine.OutcomePass || settled["stage/31/s"] != engine.OutcomePass {
-		t.Errorf("want fresh namespaces stage/0/s and stage/31/s both settled pass; got 0=%q 31=%q", settled["stage/0/s"], settled["stage/31/s"])
+	if settled["stage/0/s"] != engine.OutcomePass || settled["stage/2/s"] != engine.OutcomePass {
+		t.Errorf("want fresh namespaces stage/0/s and stage/2/s both settled pass; got 0=%q 2=%q", settled["stage/0/s"], settled["stage/2/s"])
 	}
 }
 
@@ -345,7 +346,9 @@ func TestAdvanceRepeatRunBodyAllDidNotRunSpins(t *testing.T) {
 			runCondOutcomeEq(engine.OutcomeSucceeded)), // a skipped aggregate never matches
 		subDoc("greeter", strField("name"), settleNode("s", "canceled")),
 	))
-	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, fake.opts())
+	opts := fake.opts()
+	opts.RepeatLimit = 3
+	res, err := engine.Advance(ctx, store, doc, streamID, map[string]any{"who": "world"}, opts)
 	if err != nil {
 		t.Fatalf("advance: %v", err)
 	}

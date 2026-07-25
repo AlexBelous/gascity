@@ -152,6 +152,9 @@ func Resume(ctx context.Context, store *graphstore.Store, doc *ir.IR, streamID s
 	if streamID == "" {
 		return RunResult{}, fmt.Errorf("lumen: resume: empty stream id")
 	}
+	if _, err := configuredRepeatLimit(opts); err != nil {
+		return RunResult{}, err
+	}
 
 	units, err := buildUnits(doc, opts.Host != nil, opts.Host != nil)
 	if err != nil {
@@ -332,6 +335,10 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 	// semantics mid-flight (the accepted mixed-semantics row) instead of stranding
 	// forever (the enqueue-wedge class).
 	seeded, _ := resolveDeclaredInput(doc.Input.Fields, input)
+	repeatLimit, err := repeatLimitForDialect(opts, ls.SemanticDialect)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	d := &driver{
 		ctx:              ctx,
@@ -344,6 +351,7 @@ func rebuildDriver(ctx context.Context, store *graphstore.Store, doc *ir.IR, str
 		head:             head,
 		host:             opts.Host,
 		input:            seeded,
+		repeatLimit:      repeatLimit,
 		snapshotEvery:    opts.SnapshotEvery,
 		crashInterrupted: crashInterrupted,
 		settledEffects:   recordedEffects,
@@ -649,7 +657,7 @@ func reconstructOutputs(s *lumenState) (nodeOutputs, scope map[string]string) {
 	// so a node id can carry MULTIPLE settled activations; its authoritative output
 	// is the highest-numbered attempt's. activationKeys() is LEXICOGRAPHIC
 	// ("b:10" < "b:2"), so a plain last-write-wins walk would seed the wrong attempt
-	// once a node exceeds ten attempts (the loop cap is 32). Order by the numeric
+	// once a node exceeds ten attempts. Order by the numeric
 	// attempt suffix (activationAttempt) and let the max attempt win — deterministic,
 	// and byte-identical to the single-attempt path (one activation ⇒ one write).
 	best := map[string]int{} // node id -> highest ran-attempt index seeded so far

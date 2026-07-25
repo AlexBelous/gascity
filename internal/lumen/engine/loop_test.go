@@ -262,9 +262,16 @@ func TestRepeatEngineInlineFailThenPass(t *testing.T) {
 	}
 }
 
-// TestRepeatLoopCapSettlesFailed (T-L2) proves the mandatory infinite-loop guard:
-// a repeat whose cond never turns truthy runs EXACTLY 32 attempts, then the loop
-// settles failed{reason:"loop_cap"}, and a dependent skip-cascades.
+func TestDefaultRepeatLimitMatchesUpstream(t *testing.T) {
+	if engine.DefaultRepeatLimit != 10_000 {
+		t.Fatalf("DefaultRepeatLimit = %d, want 10,000", engine.DefaultRepeatLimit)
+	}
+}
+
+// TestRepeatLoopCapSettlesFailed (T-L2) proves the host-overridable,
+// per-loop infinite-loop guard: a repeat whose cond never turns truthy runs
+// exactly the configured number of consuming iterations, then settles
+// failed{reason:"loop_cap"} and halts a dependent.
 func TestRepeatLoopCapSettlesFailed(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -275,22 +282,22 @@ func TestRepeatLoopCapSettlesFailed(t *testing.T) {
 	publish := execNode("publish", "echo published", []string{"repeat_1"})
 	doc := decodeIR(t, blockDoc("l2", loop, publish))
 
-	res, err := engine.Run(ctx, store, doc, nil)
+	res, err := engine.RunWithOptions(ctx, store, doc, nil, engine.Options{RepeatLimit: 3})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if n := countAttemptMinted(res.Events); n != 32 {
-		t.Fatalf("attempt.minted count = %d, want 32 (the loop cap)", n)
+	if n := countAttemptMinted(res.Events); n != 3 {
+		t.Fatalf("attempt.minted count = %d, want 3 (the configured loop cap)", n)
 	}
-	// Count body settles (draft:*) — exactly 32.
+	// Count body settles (draft:*) — exactly the configured cap.
 	bodySettles := 0
 	for _, s := range settledActivations(t, res.Events) {
 		if engine.ActivationNodeID(s[0]) == "draft" {
 			bodySettles++
 		}
 	}
-	if bodySettles != 32 {
-		t.Fatalf("draft settled %d times, want exactly 32", bodySettles)
+	if bodySettles != 3 {
+		t.Fatalf("draft settled %d times, want exactly 3", bodySettles)
 	}
 	outcome, reason, _, _ := loopSettle(t, res.Events, "repeat_1:0")
 	if outcome != "failed" || reason != "loop_cap" {
@@ -299,6 +306,45 @@ func TestRepeatLoopCapSettlesFailed(t *testing.T) {
 	// The dependent skip-cascades off the failed loop.
 	if st := nodeStatus(t, store, "publish"); st != "skipped" {
 		t.Fatalf("publish status = %q, want skipped (skip-cascade off the failed loop)", st)
+	}
+}
+
+func TestNegativeRepeatLimitRefusesBeforeRunStarted(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	body := execNodeExit("draft", "echo tick", []int{0}, nil)
+	doc := decodeIR(t, blockDoc("negative-limit",
+		repeatNode(body, `{"kind":"literal","value":false}`),
+	))
+
+	_, err := engine.RunWithOptions(ctx, store, doc, nil, engine.Options{RepeatLimit: -1})
+	if err == nil || !strings.Contains(err.Error(), "repeat limit") {
+		t.Fatalf("RunWithOptions(RepeatLimit=-1) = %v, want repeat-limit error", err)
+	}
+	var journalRows int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM journal`).Scan(&journalRows); err != nil {
+		t.Fatalf("count journal: %v", err)
+	}
+	if journalRows != 0 {
+		t.Fatalf("negative repeat limit wrote %d journal rows, want 0", journalRows)
+	}
+}
+
+func TestAdvanceNegativeRepeatLimitRefusesBeforeRunStarted(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	streamID := "gcg-negative-repeat-limit"
+	body := execNodeExit("draft", "echo tick", []int{0}, nil)
+	doc := decodeIR(t, blockDoc("negative-advance-limit",
+		repeatNode(body, `{"kind":"literal","value":false}`),
+	))
+
+	_, err := engine.Advance(ctx, store, doc, streamID, nil, engine.Options{RepeatLimit: -1})
+	if err == nil || !strings.Contains(err.Error(), "repeat limit") {
+		t.Fatalf("Advance(RepeatLimit=-1) = %v, want repeat-limit error", err)
+	}
+	if n := countJournalType(t, store, streamID, engine.EventRunStarted); n != 0 {
+		t.Fatalf("negative repeat limit wrote %d run.started events, want 0", n)
 	}
 }
 

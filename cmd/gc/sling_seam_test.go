@@ -106,7 +106,7 @@ func TestApplySlingInlineBead_MultilineTextRejected(t *testing.T) {
 	if finalBead != "line one\nline two" {
 		t.Fatalf("finalBead = %q, want input unchanged", finalBead)
 	}
-	got, err := store.List(beads.ListQuery{})
+	got, err := store.List(beads.ListQuery{AllowScan: true})
 	if err != nil {
 		t.Fatalf("store.List: %v", err)
 	}

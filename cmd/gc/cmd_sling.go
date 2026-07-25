@@ -326,6 +326,13 @@ func applySlingInlineBead(cfg *config.City, beadOrFormula string, isFormula, dry
 	}
 	inlineText = previewInlineText
 	if createInlineBead {
+		if strings.Contains(finalBead, "\n") {
+			return finalBead, false, "inline_text_multiline", fmt.Sprintf(
+				"gc sling: inline text argument contains embedded newlines; " +
+					"pass multi-line content via --stdin (first line becomes the " +
+					"title, the rest becomes the description), or if you meant to " +
+					"reference existing beads, sling each one separately")
+		}
 		created, err := store.Create(beads.Bead{Title: finalBead, Description: stdinDescription, Type: "task"})
 		if err != nil {
 			return finalBead, false, "bead_create_failed", fmt.Sprintf("gc sling: creating bead: %v", err)

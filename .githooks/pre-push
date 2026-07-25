@@ -52,4 +52,17 @@ fi
 
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
-exec make test-fast-parallel
+#
+# Gate concurrency control (ga-scxvr8): N agents pushing at once must not run
+# this heavy suite concurrently -- flock-serialize host-wide with a generous
+# timeout so a bare `git push` queues instead of manufacturing a false-red
+# or a --no-verify bypass. repo_root is already set above: go_changed only
+# ever becomes 1 inside the loop iteration that also sets any_non_deletion=1,
+# which is the same condition that populates repo_root.
+# shellcheck source=../scripts/lib/gate-lock.sh disable=SC1091
+. "$repo_root/scripts/lib/gate-lock.sh"
+gc_gate_serialize_run \
+  "${GC_GATE_LOCK_FILE:-/var/tmp/gc-gate-serialize.lock}" \
+  "${GC_GATE_LOCK_TIMEOUT:-3600}" \
+  "pre-push" \
+  -- make test-fast-parallel

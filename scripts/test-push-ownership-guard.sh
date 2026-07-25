@@ -440,20 +440,21 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
 # ---------------------------------------------------------------------------
 # Hook wiring — real .githooks/pre-push, real bare remote.
 #
-# install_guard_hook copies the REAL guard lib and the REAL
-# .githooks/pre-push (not a re-implementation) into the temp repo, so these
-# tests catch a future edit to either file breaking the wiring. A trivial
-# Makefile stands in for the real one: pushing a brand-new branch makes the
-# hook's `go_changed` gate trip (no remote counterpart to diff against) and
-# fall through to `exec make test-fast-parallel`, which these tests don't
-# want to actually run — only the ownership guard's wiring is under test
-# here.
+# install_guard_hook copies the REAL guard lib, the REAL gate-lock lib, and
+# the REAL .githooks/pre-push (not a re-implementation) into the temp repo,
+# so these tests catch a future edit to any of the three breaking the wiring.
+# A trivial Makefile stands in for the real one: pushing a brand-new branch
+# makes the hook's `go_changed` gate trip (no remote counterpart to diff
+# against) and fall through to `make test-fast-parallel` (via
+# gc_gate_serialize_run), which these tests don't want to actually run —
+# only the ownership guard's wiring is under test here.
 # ---------------------------------------------------------------------------
 
 install_guard_hook() {
     local repo="$1"
-    mkdir -p "$repo/scripts" "$repo/.githooks"
+    mkdir -p "$repo/scripts/lib" "$repo/.githooks"
     cp "$LIB" "$repo/scripts/push-ownership-guard.sh"
+    cp "$REPO_ROOT/scripts/lib/gate-lock.sh" "$repo/scripts/lib/gate-lock.sh"
     cp "$REPO_ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
     chmod +x "$repo/.githooks/pre-push"
     printf 'test-fast-parallel:\n\t@true\n' > "$repo/Makefile"

@@ -975,8 +975,8 @@ func lumenSeedSelfRun(t *testing.T, cityPath string, doc *ir.IR, input map[strin
 // TestLumenRunsTickEmitsRunResolvedOnSeal is the P5-OBS.3 happy path: a
 // controller-driven run that dispatches, is closed pass by an ordinary worker,
 // then observed and sealed emits exactly one run.resolved carrying the run root
-// and outcome — and only at the seal, not on the earlier park, and not again on a
-// redundant follow-up tick over the now-delisted run.
+// and canonical succeeded outcome — and only at the seal, not on the earlier
+// park, and not again on a redundant follow-up tick over the now-delisted run.
 func TestLumenRunsTickEmitsRunResolvedOnSeal(t *testing.T) {
 	ctx := context.Background()
 	cr, cityPath, _ := lumenTestRuntime(t)
@@ -1013,8 +1013,8 @@ func TestLumenRunsTickEmitsRunResolvedOnSeal(t *testing.T) {
 	if e.Payload.RootID != streamID {
 		t.Errorf("payload RootID = %q, want %q", e.Payload.RootID, streamID)
 	}
-	if e.Payload.Outcome != beadmeta.OutcomePass {
-		t.Errorf("payload Outcome = %q, want %q", e.Payload.Outcome, beadmeta.OutcomePass)
+	if e.Payload.Outcome != engine.OutcomeSucceeded {
+		t.Errorf("payload Outcome = %q, want %q", e.Payload.Outcome, engine.OutcomeSucceeded)
 	}
 	if e.Payload.Ts.IsZero() {
 		t.Errorf("payload Ts is zero, want a resolution timestamp")
@@ -1089,8 +1089,8 @@ func TestLumenRunResolvedAtLeastOnceOnAlreadySealedArm(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("run.resolved on already-sealed re-observe = %d, want 1 (at-least-once recovery)", len(got))
 	}
-	if got[0].Payload.RootID != streamID || got[0].Payload.Outcome != beadmeta.OutcomePass {
-		t.Errorf("payload = %+v, want RootID=%q Outcome=pass", got[0].Payload, streamID)
+	if got[0].Payload.RootID != streamID || got[0].Payload.Outcome != engine.OutcomeSucceeded {
+		t.Errorf("payload = %+v, want RootID=%q Outcome=%s", got[0].Payload, streamID, engine.OutcomeSucceeded)
 	}
 }
 

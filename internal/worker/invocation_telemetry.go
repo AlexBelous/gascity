@@ -498,6 +498,74 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 			slog.String("session_id", id), slog.String("provider", family))
 		return 0, false, nil
 	}
+	return f.sweepResolvedTranscript(ctx, family, id, meta, path, now)
+}
+
+// DiscoverSweepTranscript resolves the transcript rollout path for id's model-usage
+// sweep WITHOUT reading it — the same bounded, keyed discovery
+// SweepSessionModelUsage runs internally, exposed so a caller can memoize the
+// resolved path across ticks. The live-session sweep uses this to resolve each
+// transcript once instead of re-scanning codex day dirs every reconcile tick (the
+// sweep Factory is rebuilt per tick, so the memo lives on the caller). Returns ""
+// when the family is unregistered, a codex session carries no session_key, or no
+// rollout is discovered yet — the caller treats "" as "retry next tick" and does
+// not cache it.
+func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) string {
+	id = strings.TrimSpace(id)
+	if f == nil || id == "" || meta == nil {
+		return ""
+	}
+	family := invocationUsageFamily(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
+	if _, ok := invocationUsageSpecs[family]; !ok {
+		return ""
+	}
+	if family == "codex" && strings.TrimSpace(meta["session_key"]) == "" {
+		return ""
+	}
+	return f.discoverSweepTranscript(family, id, meta, now)
+}
+
+// SweepSessionModelUsageAtPath is SweepSessionModelUsage against an
+// ALREADY-RESOLVED transcript path — the seam the live-session sweep uses so a
+// memoized rollout path skips per-tick discovery. It performs the same family gate,
+// cursor-guarded extraction, per-invocation fact/metric emission, cursor advance,
+// and settle/err contract as SweepSessionModelUsage; ONLY the discovery step is
+// replaced by the supplied path. An empty path is a transient miss (settled=false).
+// Every other property — exactly-once via the shared invocation-usage cursor +
+// usage.ModelIdempotencyKey, partial-tail safety, the 64KB tail bound, and the
+// sink-failure cursor semantics — is identical, because both entry points delegate
+// to sweepResolvedTranscript.
+func (f *Factory) SweepSessionModelUsageAtPath(ctx context.Context, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
+	id = strings.TrimSpace(id)
+	if f == nil || id == "" || meta == nil {
+		return 0, true, nil
+	}
+	sink := f.usageSink
+	if sink == nil || sink == usage.Discard {
+		return 0, true, nil
+	}
+	family := invocationUsageFamily(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
+	if _, ok := invocationUsageSpecs[family]; !ok {
+		slog.Debug("model-usage sweep (at path): unregistered provider family; skipping",
+			slog.String("session_id", id), slog.String("provider", strings.TrimSpace(meta["provider"])))
+		return 0, true, nil
+	}
+	if strings.TrimSpace(path) == "" {
+		return 0, false, nil
+	}
+	return f.sweepResolvedTranscript(ctx, family, id, meta, path, now)
+}
+
+// sweepResolvedTranscript is the shared post-discovery body of the model-usage
+// sweep: given a resolved transcript path and its provider family, it extracts
+// per-invocation usage after the persisted cursor, emits one model usage.Fact (plus
+// the mirrored gc.agent.tokens.* / cost OTel metrics) per new invocation, advances
+// the cursor, and reports the settle/err contract documented on
+// SweepSessionModelUsage. Both the discovery-driven SweepSessionModelUsage and the
+// memoized-path SweepSessionModelUsageAtPath delegate here so the two stay
+// byte-identical past discovery.
+func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
+	sink := f.usageSink
 	usages, extractErr := f.Adapter().InvocationUsage(family, path)
 	if extractErr != nil {
 		// Transient: a torn mid-write tail can fail the parse; retry on a later tick.

@@ -1412,7 +1412,18 @@ func TestNewSessionProviderFromContext_PackRuntimeCollisionSurfaces(t *testing.T
 }
 
 func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testing.T) {
-	t.Setenv("GC_CITY", "")
+	// The "default" subtest below calls newSessionProvider() with no explicit
+	// config, so it falls through to ambient city resolution. clearGCEnv
+	// clears GC_CITY_PATH/GC_RIG/GC_DIR etc., but findCity falls back to
+	// os.Getwd() once GC_DIR is unset, and its ceiling check only bounds how
+	// far a walk climbs -- it doesn't stop a walk that starts inside a real
+	// nested city tree and finds city.toml on the way up. Running this test
+	// from inside a live gc worktree (any .gc/worktrees/<city>/... path)
+	// resolves the real ambient city, and if its roster has ACP-routed
+	// agents, wraps base in an auto.Provider, breaking the sp == base
+	// identity check. t.Chdir to an isolated temp dir closes that path too.
+	clearGCEnv(t)
+	t.Chdir(t.TempDir())
 	t.Setenv("GC_SESSION", "fake")
 
 	base := runtime.NewFake()

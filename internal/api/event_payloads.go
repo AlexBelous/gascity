@@ -664,6 +664,7 @@ func init() {
 	events.RegisterPayload(events.OrderFired, events.NoPayload{})
 	events.RegisterPayload(events.OrderCompleted, events.NoPayload{})
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
+	events.RegisterPayload(events.OrderEffectAssertionFailed, events.OrderEffectAssertionFailedPayload{})
 
 	// webhook.* — E8 supervisor webhook receiver observability.
 	events.RegisterPayload(events.WebhookReceived, WebhookReceivedPayload{})

@@ -1362,6 +1362,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
 	var output []byte
 	var execErrMsg string
+	probe, hasProbe := orderEffectProbes[a.Name]
+	var effectBefore string
+	var effectBeforeOK bool
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		redacted := redactOrderEnvError(err, redactionEnv)
@@ -1369,6 +1372,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		outcome = orders.RunOutcomeExecEnvFailed
 		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
+		if hasProbe {
+			effectBefore, effectBeforeOK = probe.snapshot(cityPath)
+		}
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
@@ -1413,6 +1419,33 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		Type:    events.OrderCompleted,
 		Actor:   "controller",
 		Subject: scoped,
+	})
+	if hasProbe && effectBeforeOK {
+		if after, ok := probe.snapshot(cityPath); ok && after == effectBefore {
+			m.recordEffectAssertionFailed(scoped, probe.label, after)
+		}
+	}
+}
+
+// recordEffectAssertionFailed publishes a best-effort
+// order.effect_assertion_failed event: an exec order reported success but
+// its registered probe's before/after snapshots were identical, meaning
+// the durable observable it should have advanced did not change.
+// Detection only — this never blocks or retries the order.
+func (m *memoryOrderDispatcher) recordEffectAssertionFailed(scoped, probeLabel, snapshot string) {
+	payload, err := json.Marshal(events.OrderEffectAssertionFailedPayload{
+		OrderName: scoped,
+		Probe:     probeLabel,
+		Snapshot:  snapshot,
+	})
+	if err != nil {
+		return
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderEffectAssertionFailed,
+		Actor:   "controller",
+		Subject: scoped,
+		Payload: payload,
 	})
 }
 

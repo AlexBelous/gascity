@@ -37,6 +37,21 @@ type StoreMaintenanceFailedPayload struct {
 // IsEventPayload marks StoreMaintenanceFailedPayload as an events.Payload variant.
 func (StoreMaintenanceFailedPayload) IsEventPayload() {}
 
+// OrderEffectAssertionFailedPayload is the typed payload for
+// order.effect_assertion_failed events. Emitted when an exec order
+// reports success but the durable observable its probe watches (e.g.
+// the Dolt backup artifact tree, or eligible-database .dolt dirs for
+// sync) did not change between the pre- and post-exec snapshots.
+// Detection only — no remediation is implied or triggered by this event.
+type OrderEffectAssertionFailedPayload struct {
+	OrderName string `json:"order_name"`
+	Probe     string `json:"probe"`
+	Snapshot  string `json:"snapshot"`
+}
+
+// IsEventPayload marks OrderEffectAssertionFailedPayload as an events.Payload variant.
+func (OrderEffectAssertionFailedPayload) IsEventPayload() {}
+
 // BeadWorktreeReapedPayload is the typed payload for bead.worktree.reaped
 // events. Emitted when the worktree reaper successfully removes a merged
 // worktree and its branch after a bead is closed.

@@ -2382,6 +2382,9 @@
             "$ref": "#/components/schemas/NoPayload"
           },
           {
+            "$ref": "#/components/schemas/OrderEffectAssertionFailedPayload"
+          },
+          {
             "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
           },
           {
@@ -4810,6 +4813,26 @@
           "scoped_name",
           "due",
           "reason"
+        ],
+        "type": "object"
+      },
+      "OrderEffectAssertionFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "order_name": {
+            "type": "string"
+          },
+          "probe": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_name",
+          "probe",
+          "snapshot"
         ],
         "type": "object"
       },
@@ -11899,6 +11922,7 @@
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
+            "order.effect_assertion_failed": "#/components/schemas/TypedEventStreamEnvelopeOrderEffectAssertionFailed",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
             "pg.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved",
@@ -12061,6 +12085,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderEffectAssertionFailed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed"
@@ -13127,6 +13154,7 @@
                 "order.fired",
                 "order.completed",
                 "order.failed",
+                "order.effect_assertion_failed",
                 "provider.swapped",
                 "worker.operation",
                 "project.identity.stamped",
@@ -14394,6 +14422,57 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope order.completed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeOrderEffectAssertionFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderEffectAssertionFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.effect_assertion_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope order.effect_assertion_failed",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOrderFailed": {
@@ -16277,6 +16356,7 @@
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
+            "order.effect_assertion_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderEffectAssertionFailed",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
             "pg.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved",
@@ -16439,6 +16519,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderEffectAssertionFailed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed"
@@ -17576,6 +17659,7 @@
                 "order.fired",
                 "order.completed",
                 "order.failed",
+                "order.effect_assertion_failed",
                 "provider.swapped",
                 "worker.operation",
                 "project.identity.stamped",
@@ -18940,6 +19024,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope order.completed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeOrderEffectAssertionFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderEffectAssertionFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.effect_assertion_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope order.effect_assertion_failed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOrderFailed": {

@@ -854,6 +854,12 @@ export const zOrderCheckListBody = z.object({
     checks: z.array(zOrderCheckResponse).nullable()
 });
 
+export const zOrderEffectAssertionFailedPayload = z.object({
+    order_name: z.string(),
+    probe: z.string(),
+    snapshot: z.string()
+});
+
 export const zOrderHistoryDetailResponse = z.object({
     bead_id: z.string(),
     created_at: z.string(),
@@ -3217,6 +3223,7 @@ export const zEventPayload = z.union([
     zMailEventPayload,
     zMoleculeResolvedPayload,
     zNoPayload,
+    zOrderEffectAssertionFailedPayload,
     zOutboundChannelMismatchPayload,
     zOutboundEventPayload,
     zPostgresCredentialResolvedPayload,
@@ -4050,6 +4057,23 @@ export const zTypedEventStreamEnvelopeOrderCompleted = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope order.effect_assertion_failed
+ */
+export const zTypedEventStreamEnvelopeOrderEffectAssertionFailed = z.object({
+    actor: z.string(),
+    message: z.string().optional(),
+    payload: zOrderEffectAssertionFailedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('order.effect_assertion_failed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope order.failed
  */
 export const zTypedEventStreamEnvelopeOrderFailed = z.object({
@@ -4708,6 +4732,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeMailSent.extend({ type: z.literal('mail.sent') }),
     zTypedEventStreamEnvelopeMoleculeResolved.extend({ type: z.literal('molecule.resolved') }),
     zTypedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
+    zTypedEventStreamEnvelopeOrderEffectAssertionFailed.extend({ type: z.literal('order.effect_assertion_failed') }),
     zTypedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
     zTypedEventStreamEnvelopePgCredentialResolved.extend({ type: z.literal('pg.credential_resolved') }),
@@ -5512,6 +5537,24 @@ export const zTypedTaggedEventStreamEnvelopeOrderCompleted = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope order.effect_assertion_failed
+ */
+export const zTypedTaggedEventStreamEnvelopeOrderEffectAssertionFailed = z.object({
+    actor: z.string(),
+    city: z.string(),
+    message: z.string().optional(),
+    payload: zOrderEffectAssertionFailedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('order.effect_assertion_failed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope order.failed
  */
 export const zTypedTaggedEventStreamEnvelopeOrderFailed = z.object({
@@ -6206,6 +6249,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeMailSent.extend({ type: z.literal('mail.sent') }),
     zTypedTaggedEventStreamEnvelopeMoleculeResolved.extend({ type: z.literal('molecule.resolved') }),
     zTypedTaggedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
+    zTypedTaggedEventStreamEnvelopeOrderEffectAssertionFailed.extend({ type: z.literal('order.effect_assertion_failed') }),
     zTypedTaggedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedTaggedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
     zTypedTaggedEventStreamEnvelopePgCredentialResolved.extend({ type: z.literal('pg.credential_resolved') }),

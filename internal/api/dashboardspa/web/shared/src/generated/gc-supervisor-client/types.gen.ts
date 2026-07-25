@@ -844,7 +844,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderEffectAssertionFailedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1982,6 +1982,12 @@ export type OrderCheckResponse = {
     reason: string;
     rig?: string;
     scoped_name: string;
+};
+
+export type OrderEffectAssertionFailedPayload = {
+    order_name: string;
+    probe: string;
+    snapshot: string;
 };
 
 export type OrderHistoryDetailResponse = {
@@ -5190,6 +5196,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeMoleculeResolved) | ({
     type: 'order.completed';
 } & TypedEventStreamEnvelopeOrderCompleted) | ({
+    type: 'order.effect_assertion_failed';
+} & TypedEventStreamEnvelopeOrderEffectAssertionFailed) | ({
     type: 'order.failed';
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
@@ -5980,6 +5988,23 @@ export type TypedEventStreamEnvelopeOrderCompleted = {
 };
 
 /**
+ * TypedEventStreamEnvelope order.effect_assertion_failed
+ */
+export type TypedEventStreamEnvelopeOrderEffectAssertionFailed = {
+    actor: string;
+    message?: string;
+    payload: OrderEffectAssertionFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.effect_assertion_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope order.failed
  */
 export type TypedEventStreamEnvelopeOrderFailed = {
@@ -6679,6 +6704,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeMoleculeResolved) | ({
     type: 'order.completed';
 } & TypedTaggedEventStreamEnvelopeOrderCompleted) | ({
+    type: 'order.effect_assertion_failed';
+} & TypedTaggedEventStreamEnvelopeOrderEffectAssertionFailed) | ({
     type: 'order.failed';
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
@@ -7507,6 +7534,24 @@ export type TypedTaggedEventStreamEnvelopeOrderCompleted = {
     subject?: string;
     ts: string;
     type: 'order.completed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope order.effect_assertion_failed
+ */
+export type TypedTaggedEventStreamEnvelopeOrderEffectAssertionFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: OrderEffectAssertionFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.effect_assertion_failed';
     workflow?: WorkflowEventProjection;
 };
 

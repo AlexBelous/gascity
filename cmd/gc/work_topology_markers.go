@@ -238,7 +238,14 @@ func appendWorkResidueSource(path string, src workResidueSource) error {
 			src.RecordedAt = time.Now().UTC()
 		}
 		m.ResidueSources = append(m.ResidueSources, src)
-		return writeWorkTopologyMarker(path, m)
+		if err := writeWorkTopologyMarker(path, m); err != nil {
+			return err
+		}
+		// Re-arm any running residue-convergence loop for this city (F16): a
+		// late rig recorded here (rig-add / canonicalization) converges without
+		// waiting for the next boot or slow tick. No-op when no loop is running.
+		kickWorkUnifyResidueConvergence(cityPathFromWorkMarkerPath(path))
+		return nil
 	})
 }
 

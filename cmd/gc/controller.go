@@ -1328,6 +1328,13 @@ func runController(
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
+	// Boot-blocking work-topology refusal (deliverable A): a failed/aborted
+	// unify migration must refuse the controller start before any reconciler or
+	// dispatcher runs, so a partial work copy is never exposed.
+	if err := cr.BootError(); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for

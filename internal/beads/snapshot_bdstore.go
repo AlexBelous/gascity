@@ -251,6 +251,28 @@ func (s *BdStore) applyForcedPass(ctx context.Context, forced []Snapshot, report
 	return nil
 }
 
+// HasWorkspacePrefixMintCapability reports whether the store's bd binary
+// advertises the fork-proof workspace-prefix-mint capability. The topology
+// migrations' capability gate calls it before any prefix-override mint or
+// guarded-upsert option (ConflictSkip / AllowStaleIDs), refusing with a clear
+// message that names the required bd when it is absent.
+func (s *BdStore) HasWorkspacePrefixMintCapability() (bool, error) {
+	return s.hasWorkspacePrefixMintCapability()
+}
+
+// ConfigAddToSet appends value to the database config-table set at key via the
+// transactional `bd config add-to-set` primitive (the prerequisite bd slice) —
+// a server-side read-modify-write that never clobbers a concurrent city's entry.
+// The unify/remote config step uses it to union scope prefixes into
+// allowed_prefixes. It runs through the store's scoped runner so the child sees
+// the same BEADS_DIR/credentials every other bd call on this store gets.
+func (s *BdStore) ConfigAddToSet(key, value string) error {
+	if _, err := s.runner(s.dir, "bd", "config", "add-to-set", key, value); err != nil {
+		return fmt.Errorf("bd config add-to-set %s %q: %w", key, value, err)
+	}
+	return nil
+}
+
 // hasWorkspacePrefixMintCapability probes `bd version --json` for the
 // workspace-prefix-mint capability. The probe is fork-proof (a capabilities key,
 // never a version-number comparison) because this fleet pins forked bd builds.

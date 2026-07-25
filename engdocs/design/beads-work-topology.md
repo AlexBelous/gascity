@@ -299,8 +299,12 @@ after the five ensure*ClassMigrated calls.
   live reconciler/dispatcher. Because CLI one-shots run without the
   controller, mid-copy rows are additionally QUARANTINED until the
   marker: the import stamps a `gc.topology_migrating` label on every
-  copied row, the hook/claim/ready surfaces exclude labeled rows, and
-  the label is cleared as part of the marker step. (Otherwise: unify
+  copied row, the hook/claim/ready surfaces exclude labeled rows
+  (unconditionally in the work-query runner — not only on graph-routed
+  cities), and the label clear is CONVERGENT, not a one-shot tail step:
+  a sweep-by-label runs on every marker-present boot until no labeled
+  rows remain, so a crash anywhere after the marker write cannot leave
+  the migrated backlog invisible. (Otherwise: unify
   copies rig A then aborts on rig B; the city runs for days; an agent
   claims the city COPY of an open rig-A bead, its `updated_at` now
   newest, and the eventual re-run's guarded upsert keeps the claim and
@@ -344,21 +348,35 @@ after the five ensure*ClassMigrated calls.
 - Re-point: run the (now marker-aware) canonicalization pass over all
   scopes; verify each scope's resolved target per the section above.
 - Straggler pass: immediately after re-pointing each rig, re-open its OLD
-  database via the recorded identity (never via scope resolution) and run
-  one more `ImportBeads` pass — writes that landed during the copy window
-  converge via the guarded upsert. On COUNTER-mode databases two guards
-  apply (hash-id databases, the gc default, are immune): after the pass,
-  advance the unified DB's per-prefix issue counter to max(old-database
-  max id, unified max id) so a post-re-point mint cannot reuse a
-  copy-window number; and the straggler/residue imports treat an incoming
-  id that exists with a DIFFERENT `created_at` as a reported conflict
-  (id + both sources named), never an upsert.
-- Residue convergence: on every later boot, a background pass re-imports
-  from each recorded identity until a drain check (source ClassWork rows
-  all present-or-older in the unified DB) passes, then records that
-  source as drained in the marker payload. Only then is the old database
-  cold backup. Old rig databases are LEFT IN PLACE; the city teardown
-  machinery already knows how to drop them later.
+  database via the recorded identity (never via scope resolution; when
+  the recorded host/port are empty, the temp scope writes an EXPLICIT
+  loopback endpoint resolved from the current managed runtime — never
+  `managed_city`, which the contract rejects for non-city scopes) and
+  run one more `ImportBeads` pass — writes that landed during the copy
+  window converge via the guarded upsert, the infra-class residue import
+  re-runs against the same recorded identity, and flagged rows
+  (tie-kept/stale-skipped/conflict-skipped) get their dep/label deltas
+  applied via the link diff plus the conditional stale re-import. On
+  COUNTER-mode databases v1 REFUSES unify at preflight, naming the
+  missing counter-advance guard (hash-id databases, the gc default, are
+  unaffected); the straggler/residue imports additionally treat an
+  incoming id that exists with a DIFFERENT `created_at` as a reported
+  conflict (id + both sources named), never an upsert. Copy-verify reads
+  are routing-proof (a verify satisfiable by the SOURCE database via bd
+  prefix routing is no verify at all). v1 unify requires the bd
+  work-store provider — a native-provider city is refused at the
+  capability gate with the config alternatives named.
+- Residue convergence: a background pass re-imports from each recorded
+  identity until a drain check passes — source ClassWork rows all
+  present-or-older in the unified DB AND their dep/label sets reflected,
+  where dep edges whose far endpoint is a reserved-class bead are
+  represented by the graph-attach metadata conversion, not work-store
+  deps, and are excluded from the diff. The pass runs at boot, RE-ARMS
+  in-process whenever a residue source is appended (a rig added to a
+  long-lived controller must not wait for a reboot), and retries on a
+  slow ticker while undrained sources remain. Only after drained is the
+  old database cold backup. Old rig databases are LEFT IN PLACE; the
+  city teardown machinery already knows how to drop them later.
 - Quiesce: unify runs at controller boot before the reconciler and
   dispatcher start. Live agents in surviving tmux sessions are the
   residual concurrent-writer risk — the straggler + residue passes (not

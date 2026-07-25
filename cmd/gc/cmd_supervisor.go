@@ -2101,6 +2101,19 @@ func reconcileCities(
 			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
 			continue
 		}
+		// Boot-blocking work-topology refusal (deliverable A): a failed/aborted
+		// unify must not start this city. Tear down the per-city context and events
+		// recorder we already constructed before skipping it (F20), since the
+		// managedCity is never inserted into the registry on this path.
+		if bootErr := cityRuntime.BootError(); bootErr != nil {
+			cityCancel()
+			if fr != nil {
+				_ = fr.Close() //nolint:errcheck // best-effort cleanup
+			}
+			emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", bootErr, stderr)
+			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", bootErr))
+			continue
+		}
 		mc.cr = cityRuntime
 
 		// Wire API state.

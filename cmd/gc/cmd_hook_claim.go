@@ -283,11 +283,16 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
-// fresh claim: it has an id, is currently unassigned, and matches one of this
-// session's route targets.
+// fresh claim: it has an id, is currently unassigned, matches one of this
+// session's route targets, and is not under the work-unify quarantine. The
+// quarantine check is belt-and-braces with the ready-federation filter
+// (deliverable G): even if a gc.topology_migrating-labeled row leaked into the
+// candidate list, a fresh claim of it is refused until the marker clears the
+// label.
 func hookCandidateClaimable(candidate beads.Bead, routeTargets []string) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
+		!beadIsTopologyQuarantined(candidate) &&
 		hookClaimMatchesRoute(candidate, routeTargets)
 }
 

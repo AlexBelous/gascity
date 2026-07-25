@@ -33,6 +33,11 @@ func graphFederatedWorkQueryRunner(cityPath string, cfg *config.City) hookStoreR
 		if err != nil {
 			return out, err
 		}
+		// Work-unify quarantine seam (F17/F21): drop gc.topology_migrating rows
+		// from the shell output UNCONDITIONALLY of graph-routing, so a
+		// non-graph-routed city (and the pass-through arms below) never surface a
+		// mid-copy bead. Count-form output passes through untouched.
+		out = filterTopologyQuarantinedWorkQueryOutput(out)
 		st, routed, rerr := routedGraphStoreFor(cityPath, cfg)
 		if rerr != nil {
 			return "", fmt.Errorf("graph-class routing: %w", rerr)
@@ -157,6 +162,11 @@ func mergeGraphReadyIntoWorkQueryOutput(out string, st *beads.SQLiteStore) (stri
 			rows = append(rows, b)
 		}
 	}
+	// Work-unify quarantine seam (deliverable G): a row still carrying the
+	// gc.topology_migrating label is a mid-copy bead an aborted one-shot unify
+	// left behind — withhold it from the ready candidate list until the marker
+	// step clears the label. Marker-less/unlabeled rows flow untouched.
+	rows = filterTopologyQuarantined(rows)
 	buf, err := json.Marshal(rows)
 	if err != nil {
 		return "", fmt.Errorf("graph-class ready merge: %w", err)

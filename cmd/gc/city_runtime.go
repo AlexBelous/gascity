@@ -52,6 +52,13 @@ var orderRescanInterval = time.Minute
 // across runController and controllerLoop. A machine-wide supervisor can
 // instantiate multiple CityRuntimes — one per registered city.
 type CityRuntime struct {
+	// bootBlockingErr, when non-nil, records a fatal boot condition (a failed or
+	// aborted work-scope unify migration) that MUST refuse the controller start.
+	// Every newCityRuntime call site checks BootError() immediately and aborts —
+	// the same hard refusal checkWorkTopologyMarkers produces — so a partial work
+	// copy is never exposed to a live reconciler/dispatcher.
+	bootBlockingErr error
+
 	cityPath     string
 	cityName     string
 	configName   string
@@ -213,6 +220,17 @@ const cityRuntimeReloadLifecycleRetryLimit = 2
 // plus the first patrol can legitimately exceed one minute.
 const postCreateProtectionTimeout = 2 * time.Minute
 
+// BootError returns the fatal boot condition (a failed/aborted work-scope unify)
+// that must refuse the controller start, or nil. Callers MUST check it
+// immediately after newCityRuntime and abort startup when it is non-nil; the
+// returned runtime is otherwise minimal and must not be run.
+func (cr *CityRuntime) BootError() error {
+	if cr == nil {
+		return nil
+	}
+	return cr.bootBlockingErr
+}
+
 // newCityRuntime creates a CityRuntime, building internal components
 // (crash tracker, idle tracker, wisp GC, order dispatcher) from the
 // provided parameters.
@@ -291,6 +309,28 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if ensureGraphClassMigrated(p.CityPath, p.Cfg, p.Stderr) {
 		go sweepLegacyGraphResidue(p.CityPath, p.Cfg, p.Stderr)
 	}
+
+	// Work-scope unify migration (deliverable A): AFTER the five class
+	// migrations, merge every rig's work beads into the city database when the
+	// city is unified and a rig still resolves elsewhere. A failed or aborted
+	// unify is BOOT-BLOCKING — return a minimal runtime carrying the fatal error
+	// so the caller refuses to start, rather than the return-false-and-continue
+	// pattern the class migrations use. On success, converge undrained residue
+	// sources in the background, mirroring the class residue sweeps.
+	if err := ensureWorkUnified(p.CityPath, p.Cfg, p.Stderr); err != nil {
+		return &CityRuntime{
+			bootBlockingErr: err,
+			cityPath:        p.CityPath,
+			cityName:        p.CityName,
+			cfg:             p.Cfg,
+			sp:              p.SP,
+			stdout:          p.Stdout,
+			stderr:          p.Stderr,
+		}
+	}
+	// The ctx-bound residue-convergence loop (re-armed by residue-source appends,
+	// retried on the order-rescan cadence) is started from cr.run so the runtime
+	// context stops it — see run().
 
 	// Sessions shadow-write gate (P4): re-seed the class store from the bd
 	// truth so the soak's zero-discrepancy diff starts converged.
@@ -459,6 +499,14 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	}
 	if ctx.Err() != nil {
 		return
+	}
+
+	// Work-unify residue convergence (deliverable F, re-armed per F16): drain
+	// each recorded old rig database into the unified city DB and sweep the
+	// quarantine label, retried on the order-rescan cadence and poked by
+	// residue-source appends, until this runtime context is canceled.
+	if cr.cityPath != "" {
+		go runWorkUnifyResidueConvergenceLoop(ctx, cr.cityPath, cr.cfg, cr.stderr)
 	}
 
 	// Startup instrumentation: per-phase elapsed timing plus a watchdog

@@ -46,7 +46,7 @@ func newLumenStepCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // newLumenSettleCmd registers `gc lumen settle --run <streamID> --node <id> --outcome
-// <pass|fail|degraded|pending> --output <text>`: record the do's self-reported outcome and
+// <succeeded|failed|degraded|pending> --output <text>`: record the do's self-reported outcome and
 // print the NEXT ready do (fusing the next step) or `done`.
 func newLumenSettleCmd(stdout, stderr io.Writer) *cobra.Command {
 	var runID, node, outcome, output string
@@ -62,7 +62,7 @@ func newLumenSettleCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if strings.TrimSpace(outcome) == "" {
-				fmt.Fprintf(stderr, "gc lumen settle: --outcome is required (pass|fail|degraded|pending)\n") //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "gc lumen settle: --outcome is required (succeeded|failed|degraded|pending; pass/fail aliases accepted)\n") //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			return runLumenStepper(stdout, stderr, "gc lumen settle", runID, jsonOut,
@@ -73,7 +73,7 @@ func newLumenSettleCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	c.Flags().StringVar(&runID, "run", "", "the run's journal stream id")
 	c.Flags().StringVar(&node, "node", "", "the do node id being settled (as `gc lumen step` printed it)")
-	c.Flags().StringVar(&outcome, "outcome", "", "the do's self-reported outcome: pass|fail|degraded|pending")
+	c.Flags().StringVar(&outcome, "outcome", "", "the do's self-reported outcome: succeeded|failed|degraded|pending (pass/fail aliases accepted)")
 	c.Flags().StringVar(&output, "output", "", "the do's result text (consumed by a downstream {{ref}})")
 	c.Flags().BoolVar(&jsonOut, "json", false, "emit the result as a JSON object")
 	return c

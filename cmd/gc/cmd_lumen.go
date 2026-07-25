@@ -226,7 +226,7 @@ Drive it turn by turn in THIS session — do not wait for anyone:
        gc bd update <this-bead-id> --set-metadata gc.outcome=<pass|fail> --status closed
      then stop.
   3. Otherwise, perform the printed prompt's work in THIS session, then run:
-       gc lumen settle --run %s --node <id> --outcome <pass|fail|degraded> --output "<result>" --json
+       gc lumen settle --run %s --node <id> --outcome <succeeded|failed|degraded> --output "<result>" --json
      It prints the next step (same shape). Repeat from step 1.
 `, streamID, streamID, streamID)
 }

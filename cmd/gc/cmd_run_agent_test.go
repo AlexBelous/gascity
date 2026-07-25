@@ -69,8 +69,8 @@ func TestRunAgentDoStepWithInjectedHost(t *testing.T) {
 	if !strings.Contains(s, "summarize") || !strings.Contains(s, "[do]") {
 		t.Errorf("output missing do step line:\n%s", s)
 	}
-	if !strings.Contains(s, "outcome: pass") {
-		t.Errorf("output missing pass outcome:\n%s", s)
+	if !strings.Contains(s, "outcome: succeeded") {
+		t.Errorf("output missing succeeded outcome:\n%s", s)
 	}
 }
 

@@ -83,7 +83,7 @@ func TestRunInResolvedCityEnqueuesAndWaits(t *testing.T) {
 
 	out := stdout.String()
 	streamAt := strings.Index(out, waitedStream)
-	outcomeAt := strings.Index(out, "outcome: pass")
+	outcomeAt := strings.Index(out, "outcome: succeeded")
 	if streamAt < 0 || outcomeAt < 0 || streamAt > outcomeAt {
 		t.Fatalf("stdout must expose stream before terminal outcome:\n%s", out)
 	}
@@ -97,6 +97,7 @@ func TestRunInResolvedCityPropagatesTerminalStatus(t *testing.T) {
 		wantCode   int
 		wantOutput string
 	}{
+		{name: "legacy pass remains successful", result: engine.RunResult{Outcome: "pass"}, wantCode: 0, wantOutput: "outcome: pass"},
 		{name: "failed formula", result: engine.RunResult{Outcome: engine.OutcomeFailed}, wantCode: 1, wantOutput: "outcome: failed"},
 		{name: "canceled waiter detaches", waitErr: context.Canceled, wantCode: 130, wantOutput: "run continues in city"},
 	}
@@ -195,8 +196,8 @@ func TestWaitForLumenRunObservesSealAndCancellationDoesNotClose(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wait for completed run: %v", err)
 		}
-		if result.Outcome != engine.OutcomePass {
-			t.Fatalf("outcome = %q, want pass", result.Outcome)
+		if result.Outcome != engine.OutcomeSucceeded {
+			t.Fatalf("outcome = %q, want succeeded", result.Outcome)
 		}
 		var closes int
 		for _, event := range result.Events {

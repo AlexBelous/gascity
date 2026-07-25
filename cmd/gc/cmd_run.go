@@ -266,7 +266,7 @@ func doCityRun(ctx context.Context, cityPath, irPath, route, inputJSON string, d
 	}
 
 	printRunCompletion(stdout, doc, result)
-	if result.Outcome != engine.OutcomePass {
+	if !engine.IsSucceededOutcome(result.Outcome) {
 		return 1
 	}
 	return 0

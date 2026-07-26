@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -760,9 +761,19 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	cityDir := setupInvalidConfigManagedRuntime(t)
 	stopCommands := startAcknowledgingStandaloneController(t, cityDir)
 	var shutdowns int
+	ownershipHeld := false
 	overrideShutdownBeadsProviderForStop(t, func(path string) error {
 		shutdowns++
 		assertSameTestPath(t, path, cityDir)
+		lock, err := acquireControllerLock(path)
+		switch {
+		case err == nil:
+			_ = lock.Close()
+		case errors.Is(err, errControllerAlreadyRunning):
+			ownershipHeld = true
+		default:
+			return err
+		}
 		return nil
 	})
 
@@ -785,6 +796,9 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	}
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
+	}
+	if !ownershipHeld {
+		t.Fatal("controller ownership was released before managed provider shutdown")
 	}
 	if !strings.Contains(stdout.String(), "Controller stopping...") {
 		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
@@ -839,6 +853,40 @@ provider = "file"
 		}
 	case <-time.After(time.Second):
 		t.Fatal("controller did not receive stop command")
+	}
+}
+
+func TestCmdStopBodyHoldsControllerOwnershipThroughProviderShutdown(t *testing.T) {
+	cityDir := setupCity(t, "acknowledged-controller-stop")
+	startAcknowledgingStandaloneController(t, cityDir)
+
+	ownershipHeld := false
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		lock, err := acquireControllerLock(path)
+		if err == nil {
+			_ = lock.Close()
+			return nil
+		}
+		if errors.Is(err, errControllerAlreadyRunning) {
+			ownershipHeld = true
+			return nil
+		}
+		return err
+	})
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "acknowledged-controller-stop"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !ownershipHeld {
+		t.Fatal("controller ownership was released before provider shutdown")
 	}
 }
 

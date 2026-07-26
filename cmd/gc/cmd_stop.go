@@ -302,10 +302,12 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
 	switch stopResult.outcome {
 	case controllerStopAcknowledged:
-		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
+		ownership, err := waitForAcknowledgedControllerOwnership(cityPath, stopResult, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second)
+		if err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		defer ownership.Close() //nolint:errcheck // retain ownership through terminal cleanup
 		// Controller handled the shutdown — still stop bead store below.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -440,10 +442,13 @@ func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 var shutdownBeadsProviderForStop = shutdownBeadsProvider
 
 func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stderr io.Writer, force bool) (bool, int) {
-	controllerStopped, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
+	controllerStopped, ownership, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
 	if controllerErr != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", controllerErr) //nolint:errcheck // best-effort stderr
 		return true, 1
+	}
+	if ownership != nil {
+		defer ownership.Close() //nolint:errcheck // retain ownership through terminal cleanup
 	}
 	stopped, stopErr := stopCityManagedBeadsProvider(cityPath)
 	if stopErr != nil {
@@ -457,31 +462,32 @@ func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stde
 	return true, 0
 }
 
-func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, error) {
+func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, *os.File, error) {
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
 	switch stopResult.outcome {
 	case controllerStopAcknowledged:
-		if err := waitForStandaloneControllerStop(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
-			return true, err
+		ownership, err := waitForAcknowledgedControllerOwnership(cityPath, stopResult, supervisorCityStopTimeout(cityPath))
+		if err != nil {
+			return true, nil, err
 		}
-		return true, nil
+		return true, ownership, nil
 	case controllerStopDefinitePreEntryUnavailable:
 		// No stop request entered a controller, so the lock probe may proceed.
 	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
-		return true, stopResult.failClosedError()
+		return true, nil, stopResult.failClosedError()
 	default:
-		return true, stopResult.failClosedError()
+		return true, nil, stopResult.failClosedError()
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return false, nil, nil
 		}
-		return false, fmt.Errorf("probing standalone controller runtime dir: %w", err)
+		return false, nil, fmt.Errorf("probing standalone controller runtime dir: %w", err)
 	}
 	if err := waitForStandaloneControllerStop(cityPath, 0); err != nil {
-		return false, err
+		return false, nil, err
 	}
-	return false, nil
+	return false, nil, nil
 }
 
 func warnInvalidConfigAfterSuccessfulStop(cityPath string, stderr io.Writer) {

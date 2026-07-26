@@ -679,10 +679,17 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	var controllerOwnership *os.File
 	if opts.Force && supervisorAliveHook() != 0 {
 		stopResult := tryStopControllerWithForce(cityPath, io.Discard, true)
 		switch stopResult.outcome {
-		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+		case controllerStopAcknowledged:
+			controllerOwnership, err = waitForAcknowledgedControllerOwnership(cityPath, stopResult, supervisorCityStopTimeout(cityPath))
+			if err != nil {
+				fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+				return true, 1
+			}
+		case controllerStopDefinitePreEntryUnavailable:
 		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
 			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
 			return true, 1
@@ -690,6 +697,9 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
 			return true, 1
 		}
+	}
+	if controllerOwnership != nil {
+		defer controllerOwnership.Close() //nolint:errcheck // retain ownership through terminal cleanup
 	}
 	if err := reg.Unregister(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
@@ -727,13 +737,15 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			}
 			return true, 1
 		}
-		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
-			} else {
-				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+		if controllerOwnership == nil {
+			if waitErr := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); waitErr != nil {
+				if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
+					fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, waitErr, entry.EffectiveName(), reErr) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, waitErr, entry.EffectiveName()) //nolint:errcheck
+				}
+				return true, 1
 			}
-			return true, 1
 		}
 	}
 	return true, 0

@@ -658,14 +658,26 @@ func ScanRepository(root string) (Census, error) {
 	if err != nil {
 		return Census{}, fmt.Errorf("listing tracked Go source: %w", err)
 	}
-	parts := strings.Split(string(out), "\x00")
-	files := make([]string, 0, len(parts))
-	for _, name := range parts {
-		if name != "" {
-			files = append(files, filepath.ToSlash(name))
-		}
-	}
+	files := trackedSourcePaths(out)
 	return scanFiles(os.DirFS(root), files, reviewedHermeticPackages(bootstrapPolicy.ReviewedHermeticBody))
+}
+
+func trackedSourcePaths(raw []byte) []string {
+	parts := strings.Split(string(raw), "\x00")
+	files := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, name := range parts {
+		name = filepath.ToSlash(name)
+		if name == "" {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		files = append(files, name)
+	}
+	return files
 }
 
 // ScanFS scans every *_test.go file in sourceFS. Sibling Go source supplies

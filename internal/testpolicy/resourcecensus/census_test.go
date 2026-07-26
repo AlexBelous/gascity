@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -2302,6 +2303,18 @@ func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 	}
 	if want := RenderMarkdown(ledger); got != want {
 		t.Fatalf("TESTING.md resource ledger block is stale\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestTrackedSourcePathsDeduplicatesUnmergedIndexStages(t *testing.T) {
+	raw := []byte("scripts/precommit_contract_test.go\x00" +
+		"scripts/precommit_contract_test.go\x00" +
+		"scripts/precommit_contract_test.go\x00")
+
+	got := trackedSourcePaths(raw)
+	want := []string{"scripts/precommit_contract_test.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("trackedSourcePaths() = %q, want %q", got, want)
 	}
 }
 

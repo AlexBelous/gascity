@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"sync/atomic"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -75,6 +77,89 @@ func TestControllerStateConfigOnlyUpdateDoesNotBlessIncoherentSessionStore(t *te
 	if _, err := cs.sessionStartSnapshot(); err == nil {
 		t.Fatal("config-only update made a previously incoherent session store available")
 	}
+}
+
+func TestControllerStateSessionStartSnapshotRejectsPendingConfigMutation(t *testing.T) {
+	cs := &controllerState{
+		cfg:                         &config.City{},
+		sp:                          runtime.NewFake(),
+		cityBeadStore:               beads.NewMemStore(),
+		sessionStartGeneration:      3,
+		sessionStartStoreGeneration: 3,
+	}
+	cs.markConfigMutationPending("next-revision")
+
+	if _, _, err := cs.acquireSessionStartSnapshot(); err == nil {
+		t.Fatal("exact session start acquired a snapshot while runtime config application was pending")
+	}
+
+	cs.clearConfigMutationPending()
+	snapshot, release, err := cs.acquireSessionStartSnapshot()
+	if err != nil {
+		t.Fatalf("acquireSessionStartSnapshot after matching runtime application: %v", err)
+	}
+	release()
+	if snapshot.Generation != 3 {
+		t.Fatalf("generation = %d, want 3", snapshot.Generation)
+	}
+}
+
+func TestControllerStatePendingConfigUpdateWaitsForExactStartLease(t *testing.T) {
+	stubSessionStartCityStoreOpen(t)
+	cacheCtx, cancelCache := context.WithCancel(context.Background())
+	t.Cleanup(cancelCache)
+	oldCfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	newCfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", DependsOn: []string{"database"}}}}
+	cs := &controllerState{
+		cfg:                         oldCfg,
+		sp:                          runtime.NewFake(),
+		cityBeadStore:               beads.NewMemStore(),
+		eventProv:                   events.NewFake(),
+		cacheCtx:                    cacheCtx,
+		sessionStartGeneration:      7,
+		sessionStartStoreGeneration: 7,
+	}
+
+	_, release, err := cs.acquireSessionStartSnapshot()
+	if err != nil {
+		t.Fatalf("acquire old exact-start lease: %v", err)
+	}
+	updated := make(chan struct{})
+	go func() {
+		cs.updateWithPendingConfigMutation(newCfg, cs.sp, "next-revision")
+		close(updated)
+	}()
+	awaitCond(t, func() bool {
+		cs.sessionStartLeaseMu.Lock()
+		defer cs.sessionStartLeaseMu.Unlock()
+		return cs.sessionStartSwapPending
+	}, "pending config update to enter the exact-start generation fence")
+
+	if cs.configMutationPending.Load() {
+		t.Fatal("config mutation enabled legacy fallback before the old exact-start lease drained")
+	}
+	select {
+	case <-updated:
+		t.Fatal("config update completed before the old exact-start lease released")
+	default:
+	}
+
+	release()
+	awaitClose(t, updated, "pending config update")
+	if !cs.configMutationPending.Load() {
+		t.Fatal("config update exposed new controller state without marking runtime application pending")
+	}
+}
+
+func stubSessionStartCityStoreOpen(t *testing.T) {
+	t.Helper()
+	previous := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = previous
+	})
 }
 
 func TestControllerStateSessionStartLeaseFencesGenerationSwap(t *testing.T) {

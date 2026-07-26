@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -232,6 +233,103 @@ func TestCityRuntimeSessionStartAntiEntropySeedsWithoutQueueAlarm(t *testing.T) 
 	if got := controller.Pending(); got != 1 {
 		t.Fatalf("pending keys = %d, want 1 from periodic authoritative seed without a queue alarm", got)
 	}
+}
+
+func TestCityRuntimeSessionStartConfigMutationKeepsOneOwner(t *testing.T) {
+	stubSessionStartCityStoreOpen(t)
+	tests := []struct {
+		name       string
+		oldDepends []string
+		newDepends []string
+	}{
+		{name: "dependency added", newDepends: []string{"database"}},
+		{name: "dependency removed", oldDepends: []string{"database"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cacheCtx, cancelCache := context.WithCancel(context.Background())
+			t.Cleanup(cancelCache)
+			oldCfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", DependsOn: test.oldDepends}}}
+			newCfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", DependsOn: test.newDepends}}}
+			cs := coherentSessionStartControllerStateForTest(oldCfg, runtime.NewFake(), beads.NewMemStore(), rollout.Auto)
+			cs.cacheCtx = cacheCtx
+			cr := &CityRuntime{
+				cfg:                   oldCfg,
+				cs:                    cs,
+				sessionStartMode:      rollout.Auto,
+				sessionStartOwnership: sessionStartOwnershipKeyed,
+				stdout:                io.Discard,
+				stderr:                io.Discard,
+			}
+			info := session.Info{
+				ID:          "gcs-config-transition1",
+				Type:        session.BeadType,
+				Template:    "worker",
+				WakeRequest: string(session.WakeCauseExplicit),
+			}
+
+			assertSingleSessionStartOwner(t, cr, info, oldCfg)
+			cs.updateWithPendingConfigMutation(newCfg, cs.sp, "next-revision")
+
+			if _, _, err := cs.acquireSessionStartSnapshot(); err == nil {
+				t.Fatal("keyed owner remained available while runtime config application was pending")
+			}
+			if option := cr.sessionStartLegacyExclusionOption(); option != nil {
+				t.Fatal("auto mode did not temporarily return pending config ownership to legacy")
+			}
+
+			cr.cfg = newCfg
+			cs.clearConfigMutationPending()
+			assertSingleSessionStartOwner(t, cr, info, newCfg)
+		})
+	}
+}
+
+func TestCityRuntimeSessionStartRequireBlocksBothOwnersDuringConfigMutation(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	cs := coherentSessionStartControllerStateForTest(cfg, runtime.NewFake(), beads.NewMemStore(), rollout.Require)
+	cs.markConfigMutationPending("next-revision")
+	cr := &CityRuntime{
+		cfg:                   cfg,
+		cs:                    cs,
+		sessionStartMode:      rollout.Require,
+		sessionStartOwnership: sessionStartOwnershipKeyed,
+	}
+	info := session.Info{
+		ID:          "gcs-required-config1",
+		Type:        session.BeadType,
+		Template:    "worker",
+		WakeRequest: string(session.WakeCauseExplicit),
+	}
+
+	if _, _, err := cs.acquireSessionStartSnapshot(); err == nil {
+		t.Fatal("required keyed owner acquired config while runtime application was pending")
+	}
+	option := cr.sessionStartLegacyExclusionOption()
+	if option == nil || !legacySessionStartExcluded(option, info) {
+		t.Fatal("require mode allowed legacy to enter while keyed config was unavailable")
+	}
+}
+
+func assertSingleSessionStartOwner(
+	t *testing.T,
+	cr *CityRuntime,
+	info session.Info,
+	cfg *config.City,
+) {
+	t.Helper()
+	_, _, keyedOwns := resolveExactSessionStartOwnership(info, cfg, time.Now().UTC())
+	option := cr.sessionStartLegacyExclusionOption()
+	legacyOwns := option == nil || !legacySessionStartExcluded(option, info)
+	if keyedOwns == legacyOwns {
+		t.Fatalf("session start owner = keyed:%t legacy:%t, want exactly one", keyedOwns, legacyOwns)
+	}
+}
+
+func legacySessionStartExcluded(option startExecutionOption, info session.Info) bool {
+	opts := startExecutionOptions{}
+	option(&opts)
+	return opts.legacyStartExcluded != nil && opts.legacyStartExcluded(info)
 }
 
 func newSessionStartCityRuntimeForTest(t *testing.T, mode rollout.Mode, coherent bool) *CityRuntime {

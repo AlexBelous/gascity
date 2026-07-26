@@ -728,6 +728,18 @@ func beadEventID(evt events.Event) string {
 // update replaces the config, session provider, and reopens stores.
 // Stores are built outside the lock to avoid blocking readers during I/O.
 func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
+	cs.updateWithSessionStartTransition(cfg, sp, "")
+}
+
+func (cs *controllerState) updateWithPendingConfigMutation(cfg *config.City, sp runtime.Provider, revision string) {
+	cs.updateWithSessionStartTransition(cfg, sp, revision)
+}
+
+func (cs *controllerState) updateWithSessionStartTransition(
+	cfg *config.City,
+	sp runtime.Provider,
+	pendingRevision string,
+) {
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
 
@@ -768,6 +780,12 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var oldRigStores map[string]beads.Store
 	releaseSessionStartFence := cs.beginSessionStartGenerationSwap()
 	defer releaseSessionStartFence()
+	if pendingRevision != "" {
+		// The generation fence has stopped new exact-start snapshots and drained
+		// every old one. Only now may auto mode return ownership to legacy while
+		// the runtime loop catches up to the API-visible config generation.
+		cs.markConfigMutationPending(pendingRevision)
+	}
 	cs.mu.Lock()
 	cs.advanceSessionStartGenerationLocked()
 	cs.cfg = cfg
@@ -2609,7 +2627,7 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	if err := mutate(); err != nil {
 		return err
 	}
-	revision, err := cs.refreshConfigSnapshot()
+	_, err := cs.refreshConfigSnapshot()
 	if err != nil {
 		if snapshot != nil {
 			if restoreErr := snapshot.restore(); restoreErr != nil {
@@ -2619,7 +2637,6 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
-	cs.markConfigMutationPending(revision)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}
@@ -2643,7 +2660,7 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 	cs.mu.RLock()
 	sp := cs.sp
 	cs.mu.RUnlock()
-	cs.update(nextCfg, sp)
+	cs.updateWithPendingConfigMutation(nextCfg, sp, revision)
 	return revision, nil
 }
 

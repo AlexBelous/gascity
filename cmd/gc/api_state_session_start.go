@@ -25,6 +25,9 @@ func (cs *controllerState) sessionStartSnapshot() (controllerSessionStartSnapsho
 	if cs == nil {
 		return controllerSessionStartSnapshot{}, fmt.Errorf("capturing session-start state: controller state is nil")
 	}
+	if cs.configMutationPending.Load() {
+		return controllerSessionStartSnapshot{}, fmt.Errorf("capturing session-start state: runtime config application is pending")
+	}
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 

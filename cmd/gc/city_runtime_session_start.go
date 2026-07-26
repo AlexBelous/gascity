@@ -249,8 +249,16 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 	}
 	cr.sessionStartMu.Lock()
 	state := cr.sessionStartOwnership
+	mode := cr.sessionStartMode
 	cr.sessionStartMu.Unlock()
 	if state != sessionStartOwnershipKeyed && state != sessionStartOwnershipRequiredBlocked {
+		return nil
+	}
+	if state == sessionStartOwnershipKeyed && mode == rollout.Auto && cr.cs != nil && cr.cs.configMutationPending.Load() {
+		// updateWithPendingConfigMutation only sets this marker after the
+		// generation fence has drained old keyed work. New keyed snapshots fail
+		// closed until the runtime loop applies the same revision, so legacy is
+		// the sole available owner during this bounded handoff.
 		return nil
 	}
 	return withLegacyStartExclusion(func(info sessionpkg.Info) bool {

@@ -4,9 +4,9 @@
     "version": "0.2.5",
     "producer": "donbox/formula-language"
   },
-  "name": "hello-do",
+  "name": "hello_do",
   "input": {
-    "name": "hello-do.input",
+    "name": "hello_do.input",
     "fields": [],
     "origin": {
       "uri": "examples/lumen/hello-do.lumen",

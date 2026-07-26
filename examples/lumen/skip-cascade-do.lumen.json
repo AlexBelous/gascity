@@ -4,9 +4,9 @@
     "version": "0.2.5",
     "producer": "donbox/formula-language"
   },
-  "name": "skip-cascade-do",
+  "name": "skip_cascade_do",
   "input": {
-    "name": "skip-cascade-do.input",
+    "name": "skip_cascade_do.input",
     "fields": [],
     "origin": {
       "uri": "examples/lumen/skip-cascade-do.lumen",

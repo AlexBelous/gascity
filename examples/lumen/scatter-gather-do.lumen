@@ -1,4 +1,4 @@
-formula scatter-gather-do {
+formula scatter_gather_do() {
   scatter lanes {
     one: prompt Do lane one, then settle.
     two: prompt Do lane two, then settle.

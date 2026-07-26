@@ -4,14 +4,14 @@
 // Reviewers only read the document and write disjoint lane artifacts. Synthesis is
 // the sole document editor; verification is read-only except for verification.json.
 
-formula main accepts {
-  document_path: string
-  repository_path: string
-  artifact_dir: string
-  objective: string
-  lane_one_id: string
-  lane_two_id: string
-} {
+formula main(
+  document_path: string,
+  repository_path: string,
+  artifact_dir: string,
+  objective: string,
+  lane_one_id: string,
+  lane_two_id: string,
+) {
   lanes: scatter {
     reviewLaneOne: prompt with laneOneAgent ```markdown
       You are the implementation-realism reviewer in a real design-review quorum.

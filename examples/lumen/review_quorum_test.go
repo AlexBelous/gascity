@@ -18,16 +18,16 @@ import (
 )
 
 const (
-	latestLumenUpstreamCommit = "62b2904d3504e7d0ff630cd15b9ed3df9cde505b"
+	latestLumenUpstreamCommit = "07ad94aa2a18dda14ec5f16ac5fae3ca2fe15ef9"
 	reviewQuorumIRSHA256      = "ff20c581e915e43b0addc143d6f6fda7df21f3c07c3f57c62edb59b71738158a"
 )
 
-func TestReviewQuorumMatchesPinnedLatestUpstreamCompiler(t *testing.T) {
-	checkedIn, err := os.ReadFile("review-quorum.lumen.json")
+func TestLumenSourcesMatchPinnedLatestUpstreamCompiler(t *testing.T) {
+	reviewQuorum, err := os.ReadFile("review-quorum.lumen.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := hashBytes(checkedIn); got != reviewQuorumIRSHA256 {
+	if got := hashBytes(reviewQuorum); got != reviewQuorumIRSHA256 {
 		t.Fatalf("review-quorum IR SHA-256 = %s, want %s", got, reviewQuorumIRSHA256)
 	}
 
@@ -52,15 +52,11 @@ func TestReviewQuorumMatchesPinnedLatestUpstreamCompiler(t *testing.T) {
 		t.Fatalf("build pinned upstream compiler: %v\n%s", err, output)
 	}
 
-	source, err := filepath.Abs("review-quorum.lumen")
-	if err != nil {
-		t.Fatal(err)
-	}
 	const compileScript = `
 const fs = require("node:fs");
 const { compileLumenFormulaLanguage } = require(process.argv[1] + "/packages/core/dist");
 const result = compileLumenFormulaLanguage({
-  uri: "review-quorum.lumen",
+  uri: process.argv[3],
   text: fs.readFileSync(process.argv[2], "utf8"),
 });
 const errors = (result.diagnostics || []).filter((diagnostic) => diagnostic.severity === "error");
@@ -70,14 +66,37 @@ if (errors.length || !result.formula) {
 }
 process.stdout.write(JSON.stringify(result.formula, null, 2) + "\n");
 `
-	compile := exec.CommandContext(ctx, "node", "-e", compileScript, upstream, source)
-	compiled, err := compile.CombinedOutput()
+	sources, err := filepath.Glob("*.lumen")
 	if err != nil {
-		t.Fatalf("compile review-quorum with pinned upstream: %v\n%s", err, compiled)
+		t.Fatal(err)
 	}
-	if !bytes.Equal(compiled, checkedIn) {
-		t.Fatalf("pinned upstream compiler output differs from checked-in review-quorum IR: got SHA-256 %s, want %s",
-			hashBytes(compiled), reviewQuorumIRSHA256)
+	if len(sources) == 0 {
+		t.Fatal("no Lumen source examples found")
+	}
+	for _, source := range sources {
+		t.Run(source, func(t *testing.T) {
+			checkedIn, err := os.ReadFile(source + ".json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourcePath, err := filepath.Abs(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			uri := "examples/lumen/" + source
+			if source == "review-quorum.lumen" {
+				uri = source
+			}
+			compile := exec.CommandContext(ctx, "node", "-e", compileScript, upstream, sourcePath, uri)
+			compiled, err := compile.CombinedOutput()
+			if err != nil {
+				t.Fatalf("compile with pinned upstream: %v\n%s", err, compiled)
+			}
+			if !bytes.Equal(compiled, checkedIn) {
+				t.Fatalf("pinned upstream compiler output differs from checked-in IR: got SHA-256 %s, want %s",
+					hashBytes(compiled), hashBytes(checkedIn))
+			}
+		})
 	}
 }
 

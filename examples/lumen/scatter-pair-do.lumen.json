@@ -4,9 +4,9 @@
     "version": "0.2.5",
     "producer": "donbox/formula-language"
   },
-  "name": "scatter-pair-do",
+  "name": "scatter_pair_do",
   "input": {
-    "name": "scatter-pair-do.input",
+    "name": "scatter_pair_do.input",
     "fields": [],
     "origin": {
       "uri": "examples/lumen/scatter-pair-do.lumen",

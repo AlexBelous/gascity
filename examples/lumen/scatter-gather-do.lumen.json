@@ -4,9 +4,9 @@
     "version": "0.2.5",
     "producer": "donbox/formula-language"
   },
-  "name": "scatter-gather-do",
+  "name": "scatter_gather_do",
   "input": {
-    "name": "scatter-gather-do.input",
+    "name": "scatter_gather_do.input",
     "fields": [],
     "origin": {
       "uri": "examples/lumen/scatter-gather-do.lumen",

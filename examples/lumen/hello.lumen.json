@@ -9,7 +9,7 @@
     "name": "hello.input",
     "fields": [],
     "origin": {
-      "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+      "uri": "examples/lumen/hello.lumen",
       "line": 0,
       "col": 0
     }
@@ -21,7 +21,7 @@
       "name": "greet",
       "after": [],
       "origin": {
-        "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+        "uri": "examples/lumen/hello.lumen",
         "line": 1,
         "col": 0
       },
@@ -31,7 +31,7 @@
           "kind": "exec"
         },
         "origin": {
-          "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+          "uri": "examples/lumen/hello.lumen",
           "line": 1,
           "col": 0
         }
@@ -53,7 +53,7 @@
         "language": "bash",
         "syntax": "bare",
         "origin": {
-          "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+          "uri": "examples/lumen/hello.lumen",
           "line": 1,
           "col": 0
         }
@@ -67,7 +67,7 @@
     }
   ],
   "origin": {
-    "uri": "/data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/hello.lumen",
+    "uri": "examples/lumen/hello.lumen",
     "line": 0,
     "col": 0
   }

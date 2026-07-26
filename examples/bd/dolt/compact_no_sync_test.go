@@ -119,12 +119,12 @@ func TestCompactScriptDryRunPreservesPendingPushMarkerForNoSyncDatabase(t *testi
 	}
 }
 
-// TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh is a disproof
-// artifact, not a bug report: it pins the fact that a pending-push marker blocks
-// the flatten path by PRESENCE, not by staleness. It documents why "age the
-// stale marker out" is not by itself a fix — a fresh marker still yields a
-// push-retry-only run with no flatten.
-func TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh(t *testing.T) {
+// TestCompactScriptPendingPushMarkerRetriesAndFlattensWhenFresh pins the fixed
+// behavior: a pending-push marker's mere presence no longer blocks the flatten
+// path, even when the marker is fresh (well inside the retry window). Before
+// the fix, a fresh marker still yielded a push-retry-only run with no flatten —
+// staleness was never the actual blocker, presence was.
+func TestCompactScriptPendingPushMarkerRetriesAndFlattensWhenFresh(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
 	firstOut, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -147,14 +147,14 @@ func TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh(t *testing.T) 
 		t.Fatalf("fresh-marker retry should not hard-fail: %v\n%s", err, secondOut)
 	}
 	if strings.Contains(secondOut, "marker is stale") {
-		t.Fatalf("marker should be fresh for this disproof:\n%s", secondOut)
+		t.Fatalf("marker should be fresh for this test:\n%s", secondOut)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
-	if strings.Contains(string(data), "DOLT_RESET") {
-		t.Fatalf("HYPOTHESIS DISPROVED DIFFERENTLY: a fresh pending-push marker DID allow flatten:\n%s", data)
+	if !strings.Contains(string(data), "DOLT_RESET") {
+		t.Fatalf("a fresh pending-push marker must not block flatten:\n%s", data)
 	}
 }
 

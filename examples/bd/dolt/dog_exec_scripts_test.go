@@ -1433,21 +1433,29 @@ func TestCompactScriptFailsRetryWhenPendingPushRemoteHeadRemainsUnverified(t *te
 		t.Fatalf("initial compact should leave unverified remote push pending: %v\n%s", err, firstOut)
 	}
 
+	// The retry's own ancestry check still cannot verify the remote HEAD and
+	// push_remote_after_compaction still reports "manual reconciliation required"
+	// (unchanged, out of scope) — but that retry's exit code is no longer
+	// propagated as flatten_database's own result. Threshold=500 < the fixture's
+	// mocked commit count, so control falls through to the ordinary flow, which
+	// also cannot verify that HEAD, flattens anyway, and re-defers. The overall
+	// run now succeeds even though the proactive retry itself did not resolve.
 	secondOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("pending-push retry succeeded despite still-unverified remote HEAD:\n%s", secondOut)
+	if err != nil {
+		t.Fatalf("pending-push retry falling through to the ordinary flow should still succeed: %v\n%s", err, secondOut)
 	}
 	if !strings.Contains(secondOut, "pending_push=present") ||
-		!strings.Contains(secondOut, "manual reconciliation required") {
-		t.Fatalf("retry should surface a terminal manual-reconciliation state:\n%s", secondOut)
+		!strings.Contains(secondOut, "manual reconciliation required") ||
+		!strings.Contains(secondOut, "leaving local compaction pending remote repair") {
+		t.Fatalf("retry should surface the manual-reconciliation state and the ordinary flow's fresh defer:\n%s", secondOut)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	log := string(logData)
-	if strings.Count(log, "DOLT_RESET") != 1 {
-		t.Fatalf("pending-push retry must not flatten again:\n%s", log)
+	if strings.Count(log, "DOLT_RESET") != 2 {
+		t.Fatalf("ordinary flow should flatten again after the unresolved retry:\n%s", log)
 	}
 	if strings.Contains(log, "DOLT_PUSH") {
 		t.Fatalf("unverified remote retry must not force-push:\n%s", log)
@@ -1461,12 +1469,22 @@ func TestCompactScriptKeepsRetryDeferredWhenPendingPushAncestryProbeFails(t *tes
 		t.Fatalf("initial compact should leave unverified remote push pending: %v\n%s", err, firstOut)
 	}
 
+	// The retry's own probe failure is handled softly by push_remote_after_compaction
+	// (marker stays, no push). But threshold=500 < the fixture's mocked commit count,
+	// so flatten_database falls through to the ordinary flow's own independent
+	// preflight fetch+ancestry check afterward — governed by the same scenario tag,
+	// so it hits the identical probe failure. Unlike the retry's soft handling, the
+	// ordinary preflight's ancestry-probe failure is a pre-existing hard failure
+	// (unrelated to and unchanged by this fix) that aborts flatten_database before
+	// ever reaching a second DOLT_RESET, so it now surfaces as the whole compact run
+	// failing for this database.
 	secondOut, err := fixture.run(t, "remote_ancestry_probe_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err != nil {
-		t.Fatalf("pending-push retry should remain deferred when ancestry probe fails: %v\n%s", err, secondOut)
+	if err == nil {
+		t.Fatalf("pending-push retry falling through to a fresh preflight ancestry-probe failure should fail the run:\n%s", secondOut)
 	}
 	if !strings.Contains(secondOut, "pending_push=present") ||
-		!strings.Contains(secondOut, "ancestry probe failed") {
+		!strings.Contains(secondOut, "ancestry probe failed") ||
+		!strings.Contains(secondOut, "1 database(s) failed compaction") {
 		t.Fatalf("retry missing deferred ancestry-probe explanation:\n%s", secondOut)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
@@ -1475,7 +1493,7 @@ func TestCompactScriptKeepsRetryDeferredWhenPendingPushAncestryProbeFails(t *tes
 	}
 	log := string(logData)
 	if strings.Count(log, "DOLT_RESET") != 1 {
-		t.Fatalf("pending-push retry must not flatten again:\n%s", log)
+		t.Fatalf("ordinary preflight ancestry-probe failure must abort before a second flatten:\n%s", log)
 	}
 	if strings.Contains(log, "DOLT_PUSH") {
 		t.Fatalf("failed ancestry probe must not force-push:\n%s", log)
@@ -1544,8 +1562,17 @@ func TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch(t *testing.T) {
 	if !strings.Contains(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main:gascity-3')") {
 		t.Fatalf("pending-push retry should push stored refspec:\n%s", logData)
 	}
-	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
-		t.Fatalf("successful refspec retry should clear marker, stat err=%v", err)
+	// The refspec retry itself clears the marker on success. But threshold=500 <
+	// the fixture's mocked commit count, so flatten_database falls through to the
+	// ordinary flow afterward, which resolves refspec fresh (no GC_DOLT_REFSPEC_BEADS
+	// override on this run, so it uses the default main:main) and cannot verify that
+	// branch's mocked remote head, leaving a fresh marker for the default branch.
+	markerAfter, err := os.ReadFile(pendingPush)
+	if err != nil {
+		t.Fatalf("post-retry flatten should leave a fresh default-branch pending-push marker: %v", err)
+	}
+	if !strings.Contains(string(markerAfter), "remote_branch=main") {
+		t.Fatalf("fresh marker should reflect the default refspec, not the retried one:\n%s", markerAfter)
 	}
 }
 
@@ -1681,15 +1708,22 @@ func TestCompactScriptRetriesPendingPushWhenRemoteHeadEqualsCompactedSource(t *t
 		!strings.Contains(secondOut, "pushed compacted main") {
 		t.Fatalf("retry missing recovered-fetch self-heal explanation:\n%s", secondOut)
 	}
-	logData, err := os.ReadFile(fixture.doltLog)
+	// The retry itself uses the compacted-source-head fast path and never issues
+	// the local-log ancestry query — but threshold=500 < the fixture's mocked
+	// commit count, so flatten_database falls through to the ordinary flow after
+	// the retry, which runs its own independent preflight fetch+ancestry check
+	// (and, unable to verify the mocked remote head, leaves a fresh compaction
+	// pending remote repair). That is a separate, expected post-retry flatten,
+	// not evidence the retry itself depended on local-log ancestry.
+	if !strings.Contains(secondOut, "leaving local compaction pending remote repair") {
+		t.Fatalf("expected a fresh post-retry flatten to re-defer since the ordinary preflight cannot verify the mocked remote head:\n%s", secondOut)
+	}
+	markerAfter, err := os.ReadFile(pendingPush)
 	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
+		t.Fatalf("post-retry flatten should leave a fresh pending-push marker: %v", err)
 	}
-	if strings.Contains(string(logData), "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = 'headcommit'") {
-		t.Fatalf("compacted-source-head retry should not depend on post-flatten local log ancestry:\n%s", logData)
-	}
-	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
-		t.Fatalf("successful recovered retry should clear marker, stat err=%v", err)
+	if !strings.Contains(string(markerAfter), "compacted_from_head=compactcommit") {
+		t.Fatalf("fresh marker should record the new flatten's source head:\n%s", markerAfter)
 	}
 }
 
@@ -1702,10 +1736,12 @@ func TestCompactScriptPreservesPendingPushCreatedAtAcrossUnresolvedRetries(t *te
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
 	createdAt := compactMarkerValue(t, pendingPush, "created_at")
 
+	// Threshold=500 < the fixture's mocked commit count, so both retries below
+	// fall through to the ordinary flow instead of stopping at the retry itself.
 	time.Sleep(1100 * time.Millisecond)
 	secondOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("second retry should remain manually deferred while remote HEAD is unverified:\n%s", secondOut)
+	if err != nil {
+		t.Fatalf("unresolved retry falling through to the ordinary flow should still succeed: %v\n%s", err, secondOut)
 	}
 	if got := compactMarkerValue(t, pendingPush, "created_at"); got != createdAt {
 		t.Fatalf("unresolved retry refreshed pending-push marker age: before=%s after=%s\n%s", createdAt, got, secondOut)
@@ -1713,8 +1749,8 @@ func TestCompactScriptPreservesPendingPushCreatedAtAcrossUnresolvedRetries(t *te
 
 	time.Sleep(1100 * time.Millisecond)
 	thirdOut, err := fixture.run(t, "remote_ancestry_probe_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err != nil {
-		t.Fatalf("ancestry-probe failure should keep retry deferred with marker intact: %v\n%s", err, thirdOut)
+	if err == nil {
+		t.Fatalf("ordinary preflight hitting the same ancestry-probe failure should fail the run:\n%s", thirdOut)
 	}
 	if got := compactMarkerValue(t, pendingPush, "created_at"); got != createdAt {
 		t.Fatalf("deferred ancestry-probe retry refreshed pending-push marker age: before=%s after=%s\n%s", createdAt, got, thirdOut)
@@ -1802,13 +1838,18 @@ func TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush(t *testing.T) {
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
 
+	// A stale marker skips the auto-retry's own force-push, but — like a fresh
+	// marker — no longer blocks flatten: the ordinary flow proceeds afterward and,
+	// unable to verify the mocked remote HEAD locally, softly re-defers without
+	// force-pushing rather than blocking outright.
 	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("stale pending-push retry succeeded without manual review:\n%s", secondOut)
+	if err != nil {
+		t.Fatalf("stale pending-push marker should no longer block flatten: %v\n%s", err, secondOut)
 	}
 	if !strings.Contains(secondOut, "pending_push marker is stale") ||
-		!strings.Contains(secondOut, "manual review required") {
-		t.Fatalf("retry missing stale-marker manual-review explanation:\n%s", secondOut)
+		!strings.Contains(secondOut, "manual review required") ||
+		!strings.Contains(secondOut, "leaving local compaction pending remote repair") {
+		t.Fatalf("retry missing stale-marker manual-review explanation and the ordinary flow's fresh defer:\n%s", secondOut)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
@@ -1822,6 +1863,48 @@ func TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush(t *testing.T) {
 	}
 }
 
+// TestCompactScriptSkipFetchRetriesFlattenRegardlessOfPendingPushAge pins
+// acceptance criterion #3 from ga-9ebj9m: a --skip-fetch database must keep
+// compacting locally no matter how old its pending-push marker is. skip-fetch
+// databases never verify or clear the marker themselves (they have no fetch
+// to reason from), so before this fix they were the case most likely to be
+// permanently blocked by a stale marker.
+func TestCompactScriptSkipFetchRetriesFlattenRegardlessOfPendingPushAge(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	if _, err := os.Stat(pendingPush); err != nil {
+		t.Fatalf("push failure should write pending-push marker: %v", err)
+	}
+	// Age the marker well past the retry window — skip-fetch must not care.
+	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
+
+	secondOut, err := fixture.run(t, "remote_push_failure",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_SKIP_FETCH=1",
+	)
+	if err != nil {
+		t.Fatalf("skip-fetch compact must keep flattening regardless of pending-push marker age: %v\n%s", err, secondOut)
+	}
+	if !strings.Contains(secondOut, "skip-fetch set, proceeding from local source of truth") {
+		t.Fatalf("skip-fetch should bypass the fetch and proceed from local source of truth:\n%s", secondOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Count(log, "DOLT_RESET") != 2 {
+		t.Fatalf("skip-fetch run should flatten again despite the stale marker:\n%s", log)
+	}
+	if _, err := os.Stat(pendingPush); err != nil {
+		t.Fatalf("skip-fetch flatten should re-defer the push, keeping a pending-push marker: %v", err)
+	}
+}
+
 func TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorBeforeManualReview(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -1832,13 +1915,17 @@ func TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorBeforeManualReview
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
 	resetCompactGCLog(t, fixture)
 
+	// A stale marker skips the auto-retry (with a quarantine alert) but, like a
+	// fresh marker, no longer blocks flatten: the ordinary flow proceeds and
+	// re-defers since the mocked remote HEAD still can't be verified locally.
 	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("stale pending-push retry succeeded without manual review:\n%s", secondOut)
+	if err != nil {
+		t.Fatalf("stale pending-push marker should no longer block flatten: %v\n%s", err, secondOut)
 	}
 	if !strings.Contains(secondOut, "pending_push marker is stale") ||
-		!strings.Contains(secondOut, "manual review required") {
-		t.Fatalf("retry missing stale-marker manual-review explanation:\n%s", secondOut)
+		!strings.Contains(secondOut, "manual review required") ||
+		!strings.Contains(secondOut, "leaving local compaction pending remote repair") {
+		t.Fatalf("retry missing stale-marker manual-review explanation and the ordinary flow's fresh defer:\n%s", secondOut)
 	}
 	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", pendingPush, "compact-pending-push", "pending_push marker is stale")
 }
@@ -1852,16 +1939,20 @@ func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
 
+	// A stale marker still skips the dry-run's own "would retry remote push"
+	// notice, but — like a fresh marker — no longer blocks the dry-run's flatten
+	// preview.
 	dryRunOut, err := fixture.run(t, "remote_success",
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 		"GC_DOLT_COMPACT_DRY_RUN=1",
 	)
-	if err == nil {
-		t.Fatalf("dry-run stale pending-push retry succeeded without manual review:\n%s", dryRunOut)
+	if err != nil {
+		t.Fatalf("stale pending-push marker should no longer block the dry-run flatten preview: %v\n%s", err, dryRunOut)
 	}
 	if !strings.Contains(dryRunOut, "pending_push marker is stale") ||
-		!strings.Contains(dryRunOut, "manual review required") {
-		t.Fatalf("dry-run missing stale-marker manual-review explanation:\n%s", dryRunOut)
+		!strings.Contains(dryRunOut, "manual review required") ||
+		!strings.Contains(dryRunOut, "would flatten") {
+		t.Fatalf("dry-run missing stale-marker manual-review explanation and the flatten preview:\n%s", dryRunOut)
 	}
 	if strings.Contains(dryRunOut, "would retry remote push") {
 		t.Fatalf("dry-run should not claim it would retry a stale pending push:\n%s", dryRunOut)
@@ -1897,8 +1988,12 @@ func TestCompactScriptRecoversLegacyPendingPushMarkerWhenRemoteHeadIsLocal(t *te
 		t.Fatalf("read dolt log: %v", err)
 	}
 	log := string(logData)
-	if strings.Count(log, "DOLT_RESET") != 1 {
-		t.Fatalf("legacy pending-push retry must not flatten again:\n%s", log)
+	// Threshold=500 < the fixture's mocked commit count, so the successful legacy
+	// retry still falls through to the ordinary flow's own fresh flatten+push —
+	// which also verifies ancestry cleanly under this scenario, so the marker
+	// stays cleared rather than being recreated.
+	if strings.Count(log, "DOLT_RESET") != 2 {
+		t.Fatalf("ordinary flow should flatten again after the successful legacy retry:\n%s", log)
 	}
 	if strings.Count(log, "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") < 2 {
 		t.Fatalf("legacy pending-push retry should attempt the deferred remote push:\n%s", log)
@@ -1948,21 +2043,25 @@ func TestCompactScriptFailsRetryWhenPendingPushRemoteHeadChangesAgain(t *testing
 		t.Fatalf("initial compact should leave changed remote push pending: %v\n%s", err, firstOut)
 	}
 
+	// Threshold=500 < the fixture's mocked commit count, so the still-unresolved
+	// retry falls through to the ordinary flow, which flattens again and leaves a
+	// fresh marker rather than propagating the retry's own exit code.
 	secondOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("pending-push retry succeeded despite still-unverified changed remote HEAD:\n%s", secondOut)
+	if err != nil {
+		t.Fatalf("changed-remote-HEAD retry falling through to the ordinary flow should still succeed: %v\n%s", err, secondOut)
 	}
 	if !strings.Contains(secondOut, "pending_push=present") ||
-		!strings.Contains(secondOut, "manual reconciliation required") {
-		t.Fatalf("retry should surface manual reconciliation for changed remote HEAD:\n%s", secondOut)
+		!strings.Contains(secondOut, "manual reconciliation required") ||
+		!strings.Contains(secondOut, "leaving local compaction pending remote repair") {
+		t.Fatalf("retry should surface manual reconciliation for changed remote HEAD and the ordinary flow's fresh defer:\n%s", secondOut)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	log := string(logData)
-	if strings.Count(log, "DOLT_RESET") != 1 {
-		t.Fatalf("pending-push retry must not flatten again:\n%s", log)
+	if strings.Count(log, "DOLT_RESET") != 2 {
+		t.Fatalf("ordinary flow should flatten again after the unresolved retry:\n%s", log)
 	}
 	if strings.Contains(log, "DOLT_PUSH") {
 		t.Fatalf("unverified changed remote retry must not force-push:\n%s", log)
@@ -1974,8 +2073,8 @@ func TestCompactScriptFailsRetryWhenPendingPushRemoteHeadChangesAgain(t *testing
 	}
 	if !strings.Contains(string(markerData), "expected_remote_head=remotecommit") ||
 		!strings.Contains(string(markerData), "expected_remote_head_verified=0") ||
-		!strings.Contains(string(markerData), "compacted_from_head=headcommit") {
-		t.Fatalf("failed retry should update marker to latest known remote head:\n%s", markerData)
+		!strings.Contains(string(markerData), "compacted_from_head=compactcommit") {
+		t.Fatalf("fresh post-retry flatten should update marker to the new flatten's source head:\n%s", markerData)
 	}
 }
 

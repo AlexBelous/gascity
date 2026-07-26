@@ -201,7 +201,7 @@ func TestGCRunLumenReviewQuorumE2E(t *testing.T) {
 	releaseGCRunAgents(t, cityDir, gcRunSynthesisReleaseFile)
 
 	// Verification is a separate final Agent over the revised document. Observe
-	// its claimed session before release so a terminal pass cannot be mistaken
+	// its claimed session before release so terminal success cannot be mistaken
 	// for proof that the phase ran.
 	if runErr, exited, err := waitForGCRunClaimsWhileActive(runDone, cityDir, gcRunVerificationCohort, 1, gcRunSessionSpawnTimeout); err != nil {
 		if exited {
@@ -261,8 +261,8 @@ func TestGCRunLumenReviewQuorumE2E(t *testing.T) {
 		t.Fatalf("gc run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
 	runFinished = true
-	if !strings.Contains(stdout.String(), "outcome: pass") {
-		t.Fatalf("gc run exited zero without a pass outcome\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	if !strings.Contains(stdout.String(), "outcome: succeeded") {
+		t.Fatalf("gc run exited zero without a succeeded outcome\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
 
 	streamID := parseGCRunStreamID(t, stdout.String())
@@ -275,8 +275,8 @@ func TestGCRunLumenReviewQuorumE2E(t *testing.T) {
 	events := lumenStreamEvents(t, gs, streamID)
 	assertGCRunReviewPhaseOrdering(t, events)
 	closed := decodeRunClosed(t, findEvent(t, events, engine.EventRunClosed).Payload)
-	if closed.Outcome != engine.OutcomePass {
-		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
+	if closed.Outcome != engine.OutcomeSucceeded {
+		t.Fatalf("run.closed outcome = %q, want succeeded", closed.Outcome)
 	}
 
 	waitForGCRunDemoSessionsReturned(t, cityDir, lumenKillNonce(filepath.Base(cityDir)), gcRunSessionReturnTimeout)
@@ -554,8 +554,8 @@ func assertGCRunReviewPhaseOrdering(t *testing.T, events []graphstore.StoredEven
 			if settled[outcome.Activation] != 0 {
 				t.Fatalf("duplicate settlement for %s", outcome.Activation)
 			}
-			if outcome.Outcome != string(engine.OutcomePass) {
-				t.Fatalf("%s settled %q, want pass", outcome.Activation, outcome.Outcome)
+			if outcome.Outcome != string(engine.OutcomeSucceeded) {
+				t.Fatalf("%s settled %q, want succeeded", outcome.Activation, outcome.Outcome)
 			}
 			settled[outcome.Activation] = event.Seq
 		case engine.EventOwnedAdmitted:
@@ -575,8 +575,8 @@ func assertGCRunReviewPhaseOrdering(t *testing.T, events []graphstore.StoredEven
 				t.Fatal("journal contains duplicate lumen.run.closed events")
 			}
 			closed := decodeRunClosed(t, event.Payload)
-			if closed.Outcome != engine.OutcomePass {
-				t.Fatalf("run closed %q, want pass", closed.Outcome)
+			if closed.Outcome != engine.OutcomeSucceeded {
+				t.Fatalf("run closed %q, want succeeded", closed.Outcome)
 			}
 			runClosed = event.Seq
 		}

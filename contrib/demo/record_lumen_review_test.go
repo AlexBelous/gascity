@@ -903,6 +903,28 @@ func TestRecorderRequiresTruthfulRunEvidence(t *testing.T) {
 	}
 }
 
+func TestRecorderUsesCanonicalLumenOutcomeVocabulary(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("record-lumen-review.sh")
+	if err != nil {
+		t.Fatalf("reading recorder: %v", err)
+	}
+	text := string(data)
+	for _, required := range []string{
+		"(succeeded|failed|canceled|skipped|degraded)",
+		`payload.get("outcome") != "succeeded"`,
+		`closed[0][1].get("outcome") != "succeeded"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("recorder is missing canonical Lumen outcome contract %q", required)
+		}
+	}
+	if strings.Contains(text, `"outcome: pass"`) {
+		t.Error("recorder still waits for the legacy Lumen pass outcome")
+	}
+}
+
 func TestRecorderPinsProviderAndDoltExecutableProvenance(t *testing.T) {
 	t.Parallel()
 

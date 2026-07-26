@@ -93,7 +93,7 @@ classification.
 - Live acceptance: an opt-in `acceptance_c` path requires authenticated provider
   CLIs and checks real session visibility, non-empty structured findings,
   provider provenance, document changes, synthesis evidence, final verification,
-  terminal pass, and returned sessions.
+  terminal success, and returned sessions.
 - Recording: require a clean tracked tree and a binary built from that exact
   commit, capture the isolated City with asciinema, then render one uniform
   continuous speed-up. The recording visibly identifies real inference and
@@ -112,7 +112,7 @@ classification.
 ## Success criteria
 
 - The literal `gc run review-quorum.lumen <args>` front door reaches a terminal
-  `outcome: pass` through the current City's orchestrator.
+  `outcome: succeeded` through the current City's orchestrator.
 - One `gc session list` snapshot shows both real reviewer sessions concurrently;
   later snapshots show real synthesis and verification sessions.
 - `gc session peek` shows provider activity rather than a barrier script.

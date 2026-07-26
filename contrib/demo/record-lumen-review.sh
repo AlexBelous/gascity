@@ -1095,7 +1095,7 @@ run_output() {
 run_has_terminal() {
   local output
   output="$(run_output)" || return 1
-  [[ "$output" == *"outcome: pass"* || "$output" == *"outcome: fail"* ]]
+  [[ "$output" =~ outcome:[[:space:]](succeeded|failed|canceled|skipped|degraded) ]]
 }
 
 wait_reviewers_concurrent() {
@@ -1160,6 +1160,7 @@ wait_phase_seen() {
 wait_run_terminal() {
   local deadline=$((SECONDS + 1800))
   local output=""
+  local terminal_outcome=""
   while ((SECONDS < deadline)); do
     if ! output="$(run_output)"; then
       printf '[%s] timed out capturing gc run pane\n' "$(date -u +%FT%TZ)" \
@@ -1167,9 +1168,10 @@ wait_run_terminal() {
       sleep 0.5
       continue
     fi
-    if [[ "$output" == *"outcome: pass"* || "$output" == *"outcome: fail"* ]]; then
+    if [[ "$output" =~ outcome:[[:space:]](succeeded|failed|canceled|skipped|degraded) ]]; then
+      terminal_outcome="${BASH_REMATCH[1]}"
       printf '%s\n' "$output" >"$evidence/run.stdout"
-      [[ "$output" == *"outcome: pass"* ]]
+      [[ "$terminal_outcome" == "succeeded" ]]
       return
     fi
     sleep 0.5
@@ -1630,9 +1632,9 @@ for seq, payload in settlement_events:
     activation = payload.get("activation")
     if activation not in outcomes or activation in settled:
         raise SystemExit(f"duplicate or unexpected settlement {activation!r}")
-    if payload.get("outcome") != "pass":
-        raise SystemExit(f"settlement {activation} is not pass")
-    settled[activation] = {"seq": seq, "outcome": "pass"}
+    if payload.get("outcome") != "succeeded":
+        raise SystemExit(f"settlement {activation} is not succeeded")
+    settled[activation] = {"seq": seq, "outcome": "succeeded"}
 if set(admitted) != set(work) or set(settled) != set(outcomes):
     raise SystemExit("journal activation set does not match the review workflow")
 
@@ -1649,12 +1651,12 @@ if admitted["verify:0"]["seq"] <= settled["synthesize:0"]["seq"]:
     raise SystemExit("verification was admitted before synthesis settled")
 
 closed = [(seq, payload) for seq, typ, payload in events if typ == "lumen.run.closed"]
-if len(closed) != 1 or closed[0][1].get("outcome") != "pass":
-    raise SystemExit("journal has no unique terminal pass")
+if len(closed) != 1 or closed[0][1].get("outcome") != "succeeded":
+    raise SystemExit("journal has no unique terminal succeeded outcome")
 if closed[0][0] <= settled["verify:0"]["seq"]:
     raise SystemExit("run closed before verification settled")
 if events[-1][0] != closed[0][0] or events[-1][1] != "lumen.run.closed":
-    raise SystemExit("the unique run.closed pass is not the journal's final event")
+    raise SystemExit("the unique succeeded run.closed is not the journal's final event")
 json.dump(
     {
         "stream_id": stream_id,

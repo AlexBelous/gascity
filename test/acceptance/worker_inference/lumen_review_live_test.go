@@ -270,7 +270,7 @@ func TestLumenRealDesignReview(t *testing.T) {
 	require.NoError(t, runErr, "gc run failed\nstdout:\n%s\nstderr:\n%s", runStdout.String(), runStderr.String())
 	require.NoError(t, ctx.Err(), "gc run exceeded %s\nstdout:\n%s\nstderr:\n%s", liveReviewRunTimeout, runStdout.String(), runStderr.String())
 	cancel()
-	require.Contains(t, runStdout.String(), "outcome: pass", "gc run did not report terminal pass\nstderr:\n%s", runStderr.String())
+	require.Contains(t, runStdout.String(), "outcome: succeeded", "gc run did not report terminal success\nstderr:\n%s", runStderr.String())
 	for _, step := range []string{"reviewLaneOne", "reviewLaneTwo", "synthesize", "verify"} {
 		require.Contains(t, runStdout.String(), step, "gc run completion omitted %s", step)
 	}
@@ -286,7 +286,7 @@ func TestLumenRealDesignReview(t *testing.T) {
 	journalOut, err := runGCWithTimeout(liveReviewCommandTimeout, env, city.Dir, "graph", "journal", streamID)
 	require.NoError(t, err, "gc graph journal %s\n%s", streamID, journalOut)
 	require.Contains(t, journalOut, engine.EventRunClosed)
-	require.Contains(t, journalOut, string(engine.OutcomePass))
+	require.Contains(t, journalOut, string(engine.OutcomeSucceeded))
 	t.Logf("graph journal:\n%s", strings.TrimSpace(journalOut))
 
 	laneOnePath := filepath.Join(artifactDir, "lane-one.json")
@@ -1334,8 +1334,8 @@ func validateLiveReviewJournal(events []graphstore.StoredEvent) (map[string]stri
 			if _, exists := settled[payload.Activation]; exists {
 				return nil, fmt.Errorf("duplicate settlement for %s", payload.Activation)
 			}
-			if payload.Outcome != string(engine.OutcomePass) {
-				return nil, fmt.Errorf("%s settled %q, want pass", payload.Activation, payload.Outcome)
+			if payload.Outcome != string(engine.OutcomeSucceeded) {
+				return nil, fmt.Errorf("%s settled %q, want succeeded", payload.Activation, payload.Outcome)
 			}
 			settled[payload.Activation] = fact{seq: event.Seq}
 
@@ -1349,8 +1349,8 @@ func validateLiveReviewJournal(events []graphstore.StoredEvent) (map[string]stri
 			if runClosedSeq != 0 {
 				return nil, fmt.Errorf("journal contains more than one terminal run closure")
 			}
-			if payload.Outcome != string(engine.OutcomePass) {
-				return nil, fmt.Errorf("run closed %q, want pass", payload.Outcome)
+			if payload.Outcome != string(engine.OutcomeSucceeded) {
+				return nil, fmt.Errorf("run closed %q, want succeeded", payload.Outcome)
 			}
 			runClosedSeq = event.Seq
 		}
@@ -1358,7 +1358,7 @@ func validateLiveReviewJournal(events []graphstore.StoredEvent) (map[string]stri
 
 	for activation := range expected {
 		if admitted[activation].seq == 0 || settled[activation].seq == 0 {
-			return nil, fmt.Errorf("journal is missing admission or pass settlement for %s", activation)
+			return nil, fmt.Errorf("journal is missing admission or succeeded settlement for %s", activation)
 		}
 		if admitted[activation].seq >= settled[activation].seq {
 			return nil, fmt.Errorf("%s settled before its admission (admitted=%d settled=%d)", activation, admitted[activation].seq, settled[activation].seq)

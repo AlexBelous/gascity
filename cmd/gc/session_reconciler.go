@@ -1844,7 +1844,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
+			var statusCandidate *sessionLifecycleStatusPlan
+			if reconcileOpts.statusComparisonObserver != nil {
+				candidate := planSessionLifecycleStatus(sessionLifecycleShadowInput{
+					Info:              infoByID[id],
+					RuntimeObserved:   livenessErr == nil,
+					RuntimeAlive:      providerAlive,
+					ObservedAt:        clk.Now().UTC(),
+					StartupTimeout:    startupTimeout,
+					RollbackAvailable: !storeQueryPartial,
+				})
+				statusCandidate = &candidate
+			}
 			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
+			if statusCandidate != nil {
+				reconcileOpts.statusComparisonObserver(compareSessionLifecycleStatus(
+					sessionLifecycleStatusHealSiteOrphan,
+					*statusCandidate,
+					healBatch,
+					healErr,
+				))
+			}
 			if healErr != nil {
 				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 				continue
@@ -2620,7 +2640,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
+		var statusCandidate *sessionLifecycleStatusPlan
+		if reconcileOpts.statusComparisonObserver != nil {
+			candidate := planSessionLifecycleStatus(sessionLifecycleShadowInput{
+				Info:              infoByID[id],
+				RuntimeObserved:   sp != nil && strings.TrimSpace(name) != "",
+				RuntimeAlive:      alive,
+				ObservedAt:        clk.Now().UTC(),
+				StartupTimeout:    startupTimeout,
+				RollbackAvailable: true,
+			})
+			statusCandidate = &candidate
+		}
 		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, sessFront, clk, startupTimeout, true)
+		if statusCandidate != nil {
+			reconcileOpts.statusComparisonObserver(compareSessionLifecycleStatus(
+				sessionLifecycleStatusHealSiteDesired,
+				*statusCandidate,
+				healBatch,
+				healErr,
+			))
+		}
 		if healErr != nil {
 			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 			continue

@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -460,6 +461,229 @@ func TestCityRuntimeProviderSwapRestartFailureHonorsRolloutMode(t *testing.T) {
 				t.Fatalf("diagnostics = %q, want %q and injected failure", combinedDiagnostics, test.wantText)
 			}
 		})
+	}
+}
+
+func TestCityRuntimeRunCoordinatesSessionStartRolloutBeforeReadiness(t *testing.T) {
+	tests := []struct {
+		name           string
+		mode           rollout.Mode
+		factoryFails   bool
+		wantStarted    bool
+		wantBuild      bool
+		wantOwnership  sessionStartOwnership
+		wantChild      bool
+		wantDiagnostic string
+	}{
+		{
+			name:          "keyed child precedes legacy startup and readiness",
+			mode:          rollout.Auto,
+			wantStarted:   true,
+			wantBuild:     true,
+			wantOwnership: sessionStartOwnershipKeyed,
+			wantChild:     true,
+		},
+		{
+			name:           "auto degradation runs legacy startup",
+			mode:           rollout.Auto,
+			factoryFails:   true,
+			wantStarted:    true,
+			wantBuild:      true,
+			wantOwnership:  sessionStartOwnershipLegacy,
+			wantDiagnostic: "falling back to legacy",
+		},
+		{
+			name:           "require failure prevents readiness",
+			mode:           rollout.Require,
+			factoryFails:   true,
+			wantOwnership:  sessionStartOwnershipRequiredBlocked,
+			wantDiagnostic: "session-start controller",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stubManagedDoltStoreOpeners(t)
+			cityPath := t.TempDir()
+			tomlPath := filepath.Join(cityPath, "city.toml")
+			writeCityRuntimeConfig(t, tomlPath, "fake")
+			cfg, err := config.Load(osFS{}, tomlPath)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			cfg.Daemon.SessionStartReconciler = string(test.mode)
+			provider := runtime.NewFake()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			var stderr bytes.Buffer
+			var started atomic.Bool
+			var buildCalled atomic.Bool
+			var buildOwnership sessionStartOwnership
+			var buildHadChild bool
+			var cr *CityRuntime
+			cr = newTestCityRuntime(t, CityRuntimeParams{
+				CityPath: cityPath,
+				CityName: "test-city",
+				TomlPath: tomlPath,
+				Cfg:      cfg,
+				SP:       provider,
+				BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+					buildCalled.Store(true)
+					buildOwnership = cr.sessionStartOwnershipState()
+					cr.sessionStartMu.Lock()
+					buildHadChild = cr.sessionStartController != nil
+					cr.sessionStartMu.Unlock()
+					return DesiredStateResult{State: map[string]TemplateParams{}}
+				},
+				Dops: newDrainOps(provider),
+				Rec:  events.Discard,
+				OnStarted: func() {
+					started.Store(true)
+					cancel()
+				},
+				Stdout: io.Discard,
+				Stderr: &stderr,
+			})
+			cs := newControllerState(ctx, cfg, provider, events.NewFake(), "test-city", cityPath)
+			cs.cityBeadStore = beads.NewMemStore()
+			cr.setControllerState(cs)
+
+			if test.factoryFails {
+				previousFactory := newCitySessionStartController
+				newCitySessionStartController = func(sessionStartControllerOptions) (*sessionStartController, error) {
+					if test.mode == rollout.Require {
+						cancel()
+					}
+					return nil, errors.New("injected startup child failure")
+				}
+				t.Cleanup(func() {
+					newCitySessionStartController = previousFactory
+				})
+			}
+
+			cr.run(ctx)
+
+			if got := started.Load(); got != test.wantStarted {
+				t.Fatalf("OnStarted called = %t, want %t", got, test.wantStarted)
+			}
+			if got := buildCalled.Load(); got != test.wantBuild {
+				t.Fatalf("legacy startup build called = %t, want %t", got, test.wantBuild)
+			}
+			if test.wantBuild {
+				if buildOwnership != test.wantOwnership || buildHadChild != test.wantChild {
+					t.Fatalf("legacy startup observed ownership=%v child=%t, want ownership=%v child=%t", buildOwnership, buildHadChild, test.wantOwnership, test.wantChild)
+				}
+			} else if got := cr.sessionStartOwnershipState(); got != test.wantOwnership {
+				t.Fatalf("ownership after refused startup = %v, want %v", got, test.wantOwnership)
+			}
+			if test.wantDiagnostic != "" && !strings.Contains(stderr.String(), test.wantDiagnostic) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), test.wantDiagnostic)
+			}
+		})
+	}
+}
+
+func TestCityRuntimeShutdownDrainsSessionStartBeforeSessionTeardown(t *testing.T) {
+	provider := runtime.NewFake()
+	store := beads.NewMemStore()
+	cs := coherentSessionStartControllerStateForTest(&config.City{}, provider, store, rollout.Auto)
+
+	admissionEntered := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	if err := cs.installSessionStartEventAdmission(func(string) {
+		close(admissionEntered)
+		<-releaseAdmission
+	}); err != nil {
+		t.Fatalf("install event admission: %v", err)
+	}
+	t.Cleanup(cs.stopSessionStartEventAdmission)
+	defer func() {
+		select {
+		case <-releaseAdmission:
+		default:
+			close(releaseAdmission)
+		}
+	}()
+	eventDone := make(chan struct{})
+	evt := beadEventForSessionStartTest(t, events.BeadUpdated, beads.Bead{
+		ID:   "gcs-shutdown-admission1",
+		Type: session.BeadType,
+	})
+	go func() {
+		cs.admitSessionStartEvent(evt)
+		close(eventDone)
+	}()
+	awaitClose(t, admissionEntered, "shutdown event admission")
+
+	workerEntered := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 4,
+		MaxRetries:  0,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			close(workerEntered)
+			<-releaseWorker
+			return nil
+		},
+	})
+	t.Cleanup(controller.Stop)
+	defer func() {
+		select {
+		case <-releaseWorker:
+		default:
+			close(releaseWorker)
+		}
+	}()
+	if _, err := controller.Admit("gcs-shutdown-worker1", sessionStartAdmissionExplicitWake); err != nil {
+		t.Fatalf("admit keyed shutdown work: %v", err)
+	}
+	awaitClose(t, workerEntered, "shutdown keyed worker")
+
+	cr := &CityRuntime{
+		cfg:                    &config.City{},
+		sp:                     provider,
+		cs:                     cs,
+		rec:                    events.Discard,
+		stdout:                 io.Discard,
+		stderr:                 io.Discard,
+		sessionStartController: controller,
+		sessionStartOwnership:  sessionStartOwnershipKeyed,
+		sessionStartMode:       rollout.Auto,
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(shutdownDone)
+	}()
+	awaitCond(t, func() bool {
+		cs.mu.RLock()
+		stopping := cs.sessionStartEventAdmissionStopping
+		cs.mu.RUnlock()
+		return stopping
+	}, "shutdown to begin event-admission drain")
+
+	controller.mu.Lock()
+	workerStopped := controller.stopped
+	controller.mu.Unlock()
+	if workerStopped || provider.CountCalls("ListRunning", "") != 0 {
+		t.Fatal("shutdown advanced past event admission before its callback drained")
+	}
+
+	close(releaseAdmission)
+	awaitClose(t, eventDone, "shutdown event callback")
+	awaitCond(t, func() bool {
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		return controller.stopped
+	}, "shutdown to begin keyed-worker join")
+	if provider.CountCalls("ListRunning", "") != 0 {
+		t.Fatal("session teardown began before the keyed worker joined")
+	}
+
+	close(releaseWorker)
+	awaitClose(t, shutdownDone, "shutdown after keyed-worker join")
+	if got := provider.CountCalls("ListRunning", ""); got != 1 {
+		t.Fatalf("session teardown ListRunning calls = %d, want 1 after child join", got)
 	}
 }
 

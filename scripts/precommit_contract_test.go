@@ -72,7 +72,12 @@ func TestTestLocalJobCountUsesMachineAwareConcurrency(t *testing.T) {
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMORY_KIB=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMINFO=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_PROC_CGROUP=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_CGROUP_ROOT=") {
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_CGROUP_ROOT=") ||
+			strings.HasPrefix(entry, "GC_PUSH_GATE_NO_CAP=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_MAX_CONCURRENT=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_MAX_WAIT_SECONDS=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_POLL_SECONDS=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_UNRELATED_SENTINEL=") {
 			continue
 		}
 		baseEnv = append(baseEnv, entry)
@@ -151,9 +156,15 @@ func TestTestFastParallelDefersAutomaticConcurrencyUntilSliceEnrollment(t *testi
 	repoRoot := repoRoot(t)
 	baseEnv := make([]string, 0, len(os.Environ()))
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "LOCAL_TEST_JOBS=") {
-			baseEnv = append(baseEnv, entry)
+		if strings.HasPrefix(entry, "LOCAL_TEST_JOBS=") ||
+			strings.HasPrefix(entry, "GC_PUSH_GATE_NO_CAP=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_MAX_CONCURRENT=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_MAX_WAIT_SECONDS=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_POLL_SECONDS=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_UNRELATED_SENTINEL=") {
+			continue
 		}
+		baseEnv = append(baseEnv, entry)
 	}
 
 	tests := []struct {
@@ -168,7 +179,14 @@ func TestTestFastParallelDefersAutomaticConcurrencyUntilSliceEnrollment(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			args := append([]string{"-n"}, tt.makeArgs...)
 			args = append(args, "test-fast-parallel")
-			out, err := runPrecommitContractCommand(repoRoot, baseEnv, "make", args...)
+			makeEnv := append(append([]string(nil), baseEnv...),
+				"GC_PUSH_GATE_NO_CAP=1",
+				"PUSH_GATE_MAX_CONCURRENT=7",
+				"PUSH_GATE_MAX_WAIT_SECONDS=13",
+				"PUSH_GATE_POLL_SECONDS=2",
+				"PUSH_GATE_UNRELATED_SENTINEL=must-not-leak",
+			)
+			out, err := runPrecommitContractCommand(repoRoot, makeEnv, "make", args...)
 			if err != nil {
 				t.Fatalf("make -n test-fast-parallel failed: %v\n%s", err, out)
 			}
@@ -182,6 +200,20 @@ func TestTestFastParallelDefersAutomaticConcurrencyUntilSliceEnrollment(t *testi
 			wantJobAssignment := " LOCAL_TEST_JOBS=" + tt.wantJobValue + " CMD_GC_PROCESS_TOTAL="
 			if !strings.Contains(command, wantJobAssignment) {
 				t.Fatalf("test-fast-parallel should pass LOCAL_TEST_JOBS=%q through unchanged:\n%s", tt.wantJobValue, command)
+			}
+			for _, key := range []string{
+				"GC_PUSH_GATE_NO_CAP",
+				"PUSH_GATE_MAX_CONCURRENT",
+				"PUSH_GATE_MAX_WAIT_SECONDS",
+				"PUSH_GATE_POLL_SECONDS",
+			} {
+				wantForwarding := key + `="${` + key + `-}"`
+				if !strings.Contains(command, wantForwarding) {
+					t.Fatalf("test-fast-parallel should forward %s through TEST_ENV:\n%s", key, command)
+				}
+			}
+			if strings.Contains(command, "PUSH_GATE_UNRELATED_SENTINEL") {
+				t.Fatalf("test-fast-parallel must keep unrelated ambient variables out of TEST_ENV:\n%s", command)
 			}
 		})
 	}

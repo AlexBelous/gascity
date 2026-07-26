@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
+	"github.com/gastownhall/gascity/internal/lumen/enginehost"
 )
 
 // Dolt-backed real-bead do-node e2e's (REDESIGN §7/§8). These are the gate the
@@ -185,7 +186,7 @@ func TestLumenDoDoltE2E_OrdinaryClaimClose(t *testing.T) {
 	// (5) The dispatched work is a REAL ordinary bead in the CITY WORK store: an
 	// ordinary `bd show` resolves it (a journal projection would not), task-typed,
 	// closed, routed, run-linked, closed pass by the worker.
-	assertLumenRealWorkBeadClosedDolt(t, cityDir, realBeadID, streamID, lumenDoActivation, engine.OutcomePass)
+	assertLumenRealWorkBeadClosedDolt(t, cityDir, realBeadID, streamID, lumenDoActivation, enginehost.OutcomePass)
 
 	// (6) The do's fold row is a PLAIN step (no claimable Tier-A doppelganger) and no
 	// Tier-A frontier row survives for it — the actionable work is the real bead.
@@ -308,7 +309,7 @@ func TestLumenDoDoltE2E_DeadWorkerOrphanRelease(t *testing.T) {
 
 	// (7) The real bead resolves in the WORK store, closed pass, still carrying its
 	// original activation (greet:0) — proof the SAME bead recovered.
-	assertLumenRealWorkBeadClosedDolt(t, cityDir, realBeadID, streamID, lumenDoActivation, engine.OutcomePass)
+	assertLumenRealWorkBeadClosedDolt(t, cityDir, realBeadID, streamID, lumenDoActivation, enginehost.OutcomePass)
 
 	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
 	if err := gs.Verify(ctx, streamID); err != nil {

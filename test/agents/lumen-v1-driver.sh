@@ -46,17 +46,18 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     # Durable proof the prompt was read from the stepper, keyed by node id.
     printf '%s\n' "$prompt" > ".gc/lumen-v1-prompt-${node}.txt"
     step="$(gc lumen settle --run "$run" --node "$node" --outcome pass --output "$out" --json)"
-    # Deterministic between-turn pause for the kill/adopt leg (0 by default).
+    # Deterministic, nonce-tagged between-turn pause for the kill/adopt leg
+    # (0 by default). Killing the child makes this set -e driver exit.
     if [ "$step_sleep" != "0" ]; then
-      sleep "$step_sleep"
+      bash -c 'exec -a "$1" sleep "$2"' _ "$GC_LUMEN_E2E_NONCE" "$step_sleep"
     fi
   done
 
   agg="$(printf '%s' "$step" | jq -r '.outcome // "pass"')"
-  gc_outcome="pass"
-  if [ "$agg" != "pass" ]; then
-    gc_outcome="fail"
-  fi
+  case "$agg" in
+    pass | succeeded) gc_outcome="pass" ;;
+    *) gc_outcome="fail" ;;
+  esac
   gc bd update "$bead_id" --set-metadata "gc.outcome=${gc_outcome}" --status closed
   exit 0
 done

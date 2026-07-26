@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/graphstore"
 	"github.com/gastownhall/gascity/internal/lumen/engine"
+	"github.com/gastownhall/gascity/internal/lumen/enginehost"
 )
 
 // Dolt-backed `run` (sub-formula) e2e's (slice R1c). They prove the run kind's
@@ -339,7 +340,7 @@ func TestLumenRunDoltE2E_TransparentSubDo(t *testing.T) {
 
 	// The sub-do bead is a REAL ordinary work bead, closed pass, run-linked at the
 	// namespaced activation.
-	assertLumenRealWorkBeadClosedDolt(t, cityDir, realBeadID, streamID, subActivation, engine.OutcomePass)
+	assertLumenRealWorkBeadClosedDolt(t, cityDir, realBeadID, streamID, subActivation, enginehost.OutcomePass)
 
 	// The sub-do fold row is a PLAIN step (no claimable Tier-A doppelganger).
 	assertLumenDoFoldRowIsPlainStepDolt(t, journalPath, streamID, subNodeID)

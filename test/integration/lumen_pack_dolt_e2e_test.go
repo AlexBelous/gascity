@@ -42,6 +42,9 @@ func packReviewQuorumRoutedIRPath(t *testing.T) string {
 // conversion: the two reviewer-lane ids. base_ref defaults; convoy_id is optional.
 const reviewQuorumInput = `{"convoy_id":"gcg-c1","lane_one_id":"L1","lane_two_id":"L2"}`
 
+// reviewQuorumDemoInput supplies the real review-quorum demo's required inputs.
+const reviewQuorumDemoInput = `{"document_path":"design.md","repository_path":".","artifact_dir":".gc/review-quorum","objective":"Harden the design","lane_one_id":"L1","lane_two_id":"L2"}`
+
 // TestLumenPackReviewQuorumDoltE2E (L6 marquee, single-pool) proves the REAL
 // mol-review-quorum pack conversion seals on a live city: `scatter { retry{reviewLaneOne},
 // retry{reviewLaneTwo} }` then a top-level `synthesize` do that auto-chains after the
@@ -108,12 +111,12 @@ func TestLumenPackReviewQuorumDoltE2E(t *testing.T) {
 	}
 }
 
-// setupLumenRoutedQuorumCity builds a DOLT-backed city with THREE pool agents —
-// laneOneAgent, laneTwoAgent, and the sling default (lumenDoRoute) — each running the
-// scripted lumen-do worker. It mirrors setupLumenDoDoltCity but with the extra pools
-// the routed marquee needs: each reviewer lane's work bead routes to its OWN agent's
-// pool (gc.routed_to = the agentRef), so only that pool's worker can claim it, while
-// the unbound synthesize routes to the default. Returns the city dir.
+// setupLumenRoutedQuorumCity builds a DOLT-backed city with FOUR pool agents —
+// laneOneAgent, laneTwoAgent, verifierAgent, and the sling default (lumenDoRoute) —
+// each running the scripted lumen-do worker. It mirrors setupLumenDoDoltCity but with
+// the extra pools the routed marquee needs: each reviewer lane's work bead routes to
+// its OWN agent's pool (gc.routed_to = the agentRef), the verifier routes to its bound
+// pool, and the unbound synthesize routes to the default. Returns the city dir.
 func setupLumenRoutedQuorumCity(t *testing.T, maxActive int) string {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, true)
@@ -131,7 +134,7 @@ func setupLumenRoutedQuorumCity(t *testing.T, maxActive int) string {
 		return fmt.Sprintf("\n[[agent]]\nname = %q\nmax_active_sessions = %d\nstart_command = %q\n", name, maxActive, startCommand)
 	}
 	cityToml := fmt.Sprintf("[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\npatrol_interval = \"100ms\"\n", cityName) +
-		agentBlock(lumenDoRoute) + agentBlock("laneOneAgent") + agentBlock("laneTwoAgent")
+		agentBlock(lumenDoRoute) + agentBlock("laneOneAgent") + agentBlock("laneTwoAgent") + agentBlock("verifierAgent")
 
 	configPath := filepath.Join(t.TempDir(), "lumen-routed-quorum.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
@@ -166,13 +169,14 @@ func setupLumenRoutedQuorumCity(t *testing.T, maxActive int) string {
 // conversion binds reviewLaneOne `with laneOneAgent` and reviewLaneTwo `with
 // laneTwoAgent`, so each lane's real work bead is routed (gc.routed_to) to its OWN pool
 // and can only be claimed+closed by that pool's worker; the unbound synthesize routes to
-// the sling default. Distinct reviewer agents per lane, one synthesizer, all sealing pass
-// — the whole multi-agent-pack thesis on real beads.
+// the sling default and verify routes to verifierAgent. Distinct reviewer agents per
+// lane, one synthesizer, one verifier, all sealing pass — the whole multi-agent-pack
+// thesis on real beads.
 func TestLumenPackReviewQuorumRoutedDoltE2E(t *testing.T) {
 	cityDir := setupLumenRoutedQuorumCity(t, 3)
 	ctx := context.Background()
 
-	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, packReviewQuorumRoutedIRPath(t), "--input", reviewQuorumInput)
+	slingOut, err := gcDolt(cityDir, "lumen", "sling", lumenDoRoute, packReviewQuorumRoutedIRPath(t), "--input", reviewQuorumDemoInput)
 	if err != nil {
 		t.Fatalf("gc lumen sling (review-quorum) failed: %v\noutput: %s", err, slingOut)
 	}
@@ -195,7 +199,7 @@ func TestLumenPackReviewQuorumRoutedDoltE2E(t *testing.T) {
 	if closed.Outcome != engine.OutcomePass {
 		t.Fatalf("run.closed outcome = %q, want pass", closed.Outcome)
 	}
-	for _, act := range []string{"reviewLaneOne:0", "reviewLaneTwo:0", "lanes:0", "synthesize:0"} {
+	for _, act := range []string{"reviewLaneOne:0", "reviewLaneTwo:0", "lanes:0", "synthesize:0", "verify:0"} {
 		if got := outcomeSettledFor(t, events, act); got != engine.OutcomePass {
 			t.Fatalf("outcome.settled %s = %q, want pass", act, got)
 		}
@@ -216,6 +220,7 @@ func TestLumenPackReviewQuorumRoutedDoltE2E(t *testing.T) {
 		"reviewLaneOne:0": "laneOneAgent",
 		"reviewLaneTwo:0": "laneTwoAgent",
 		"synthesize:0":    lumenDoRoute,
+		"verify:0":        "verifierAgent",
 	}
 	for act, want := range wantRoute {
 		beadID, ok := beadByActivation[act]
@@ -230,7 +235,7 @@ func TestLumenPackReviewQuorumRoutedDoltE2E(t *testing.T) {
 			t.Fatalf("activation %s (bead %s) routed_to = %q, want %q (per-lane agent binding)", act, beadID, got, want)
 		}
 	}
-	t.Logf("PROOF per-lane routing: reviewLaneOne→laneOneAgent, reviewLaneTwo→laneTwoAgent, synthesize→%s; run.closed pass", lumenDoRoute)
+	t.Logf("PROOF routed review: reviewLaneOne→laneOneAgent, reviewLaneTwo→laneTwoAgent, synthesize→%s, verify→verifierAgent; run.closed pass", lumenDoRoute)
 
 	assertZeroControlBeadsDolt(t, cityDir, journalPath, streamID)
 	if err := gs.Verify(ctx, streamID); err != nil {

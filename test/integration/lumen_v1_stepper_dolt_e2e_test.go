@@ -136,7 +136,7 @@ func TestLumenV1StepperDoltE2E_SelfDriveSeal(t *testing.T) {
 	t.Logf("PROOF v1 stepper journal == genesis engine.Run (types + per-node settled facts)")
 
 	// (6) The run-bead closed with the aggregated gc.outcome=pass (the driver's final act).
-	assertV1DriverBeadClosed(t, cityDir, driverBeadID, streamID, engine.OutcomePass)
+	assertV1DriverBeadClosed(t, cityDir, driverBeadID, streamID, enginehost.OutcomePass)
 
 	// (7) The cross-process append chain (controller list pass + the worker's gc lumen
 	// step/settle processes + this reader) verifies.
@@ -205,7 +205,7 @@ func TestLumenV1StepperDoltE2E_KillMidRunResumes(t *testing.T) {
 			t.Fatalf("resumed run fact mismatch for %q: got=%v genesis=%v", node, facts[node], want)
 		}
 	}
-	assertV1DriverBeadClosed(t, cityDir, driverBeadID, streamID, engine.OutcomePass)
+	assertV1DriverBeadClosed(t, cityDir, driverBeadID, streamID, enginehost.OutcomePass)
 	if err := gs.Verify(ctx, streamID); err != nil {
 		t.Fatalf("graphstore.Verify(%s) after resume failed: %v", streamID, err)
 	}
@@ -276,7 +276,7 @@ func v1GenesisOracle(t *testing.T) (facts map[string][2]string, types []string) 
 	}
 	results := map[string]enginehost.DoResult{}
 	for node, oc := range v1LinearScript {
-		results[node] = enginehost.DoResult{Outcome: oc[0], Output: oc[1]}
+		results[node] = enginehost.DoResult{Outcome: enginehost.OutcomePass, Output: oc[1]}
 	}
 	res, err := engine.RunWithOptions(ctx, store, doc, nil, engine.Options{Host: &enginehost.StubHost{Results: results}})
 	if err != nil {

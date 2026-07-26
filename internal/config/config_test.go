@@ -2190,7 +2190,11 @@ func TestEffectiveSlingQueryRouteLabelAnyStampsFirstEntry(t *testing.T) {
 
 // TestEffectiveSlingQueryRouteLabelShellInjectionSafety guards NFR-01: a
 // label value containing shell metacharacters must reach the emitted bd
-// command as inert quoted data, never as executable syntax.
+// command as a single POSIX-single-quoted token (via shellquote.Quote),
+// never interpolated raw where the shell could parse it as syntax. Single
+// quoting doesn't strip the dangerous substring — it brackets it inertly —
+// so the safety property under test is "matches shellquote.Quote's own
+// escaping exactly," not "the substring is absent."
 func TestEffectiveSlingQueryRouteLabelShellInjectionSafety(t *testing.T) {
 	const malicious = "it's; rm -rf /"
 	a := Agent{Name: "worker", RouteLabel: []string{malicious}}
@@ -2199,8 +2203,9 @@ func TestEffectiveSlingQueryRouteLabelShellInjectionSafety(t *testing.T) {
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
 	}
-	if strings.Contains(got, "; rm -rf") {
-		t.Fatalf("EffectiveSlingQuery() leaked shell metacharacters unquoted: %q", got)
+	const wantEscaped = `--add-label='it'\''s; rm -rf /'`
+	if !strings.Contains(got, wantEscaped) {
+		t.Fatalf("EffectiveSlingQuery() = %q, want it to contain properly escaped %q", got, wantEscaped)
 	}
 }
 

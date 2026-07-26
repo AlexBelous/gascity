@@ -336,6 +336,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltConfigCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	// Read-timeout saturation risk: DoltConfigCheck only asserts the generated
+	// config matches city.toml, so a read_timeout wide enough to have caused the
+	// gc-2h7b connection-accumulation incident passes drift silently. This
+	// advisory flags the configured value itself.
+	register(doctor.NewDoltReadTimeoutRiskCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(&doctor.EventsLogCheck{})
 	register(doctor.NewEventLogSizeCheck())

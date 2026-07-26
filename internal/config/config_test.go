@@ -238,6 +238,18 @@ read_timeout_millis = -1
 	}
 }
 
+func TestDoltConfigEffectiveReadTimeoutMillis(t *testing.T) {
+	if got := (DoltConfig{}).EffectiveReadTimeoutMillis(); got != DefaultDoltReadTimeoutMillis {
+		t.Fatalf("default EffectiveReadTimeoutMillis = %d, want %d", got, DefaultDoltReadTimeoutMillis)
+	}
+	// A city override is honored verbatim (this is the stale long read timeout
+	// that lets orphaned per-call Sleep sockets accumulate — the doctor
+	// read-timeout risk check is what flags it).
+	if got := (DoltConfig{ReadTimeoutMillis: 60000}).EffectiveReadTimeoutMillis(); got != 60000 {
+		t.Fatalf("override EffectiveReadTimeoutMillis = %d, want 60000", got)
+	}
+}
+
 func TestParseWithAgentsAndStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]

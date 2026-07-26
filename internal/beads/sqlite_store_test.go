@@ -620,6 +620,140 @@ func TestSQLiteStoreReadOnlyLeavesSourceByteIdenticalWithLiveWAL(t *testing.T) {
 	}
 }
 
+// TestSQLiteStoreReadOnlyReadsLegacySchemaWithoutRevision reproduces the
+// combined infra store written before optimistic-concurrency revisions landed.
+// Migration opens this source read-only, so it must project a zero revision
+// without altering the legacy table or checkpointing its live WAL.
+func TestSQLiteStoreReadOnlyReadsLegacySchemaWithoutRevision(t *testing.T) {
+	seed := t.TempDir()
+	seedPath := filepath.Join(seed, sqliteStoreFilename)
+	raw, err := sql.Open("sqlite", seedPath+"?_pragma=journal_mode(WAL)&_pragma=wal_autocheckpoint(0)")
+	if err != nil {
+		t.Fatalf("open legacy writer: %v", err)
+	}
+	raw.SetMaxOpenConns(1)
+	for _, stmt := range []string{
+		`CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`CREATE TABLE beads (
+			id TEXT PRIMARY KEY,
+			tier TEXT NOT NULL CHECK (tier IN ('main','wisp')),
+			title TEXT NOT NULL,
+			status TEXT NOT NULL,
+			issue_type TEXT NOT NULL,
+			priority INTEGER,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			assignee TEXT NOT NULL DEFAULT '',
+			from_agent TEXT NOT NULL DEFAULT '',
+			parent_id TEXT NOT NULL DEFAULT '',
+			ref TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			bead_json TEXT NOT NULL
+		)`,
+		`CREATE TABLE labels (
+			bead_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			PRIMARY KEY(bead_id, label),
+			FOREIGN KEY(bead_id) REFERENCES beads(id) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE metadata (
+			bead_id TEXT NOT NULL,
+			meta_key TEXT NOT NULL,
+			meta_value TEXT NOT NULL,
+			PRIMARY KEY(bead_id, meta_key),
+			FOREIGN KEY(bead_id) REFERENCES beads(id) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE deps (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dep_type TEXT NOT NULL,
+			PRIMARY KEY(issue_id, depends_on_id, dep_type)
+		)`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("apply legacy schema: %v", err)
+		}
+	}
+	if _, err := raw.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("checkpoint legacy schema: %v", err)
+	}
+	beadJSON := `{"id":"gcg-42","title":"legacy","status":"open","issue_type":"task"}`
+	if _, err := raw.Exec(
+		`INSERT INTO beads(
+			id,tier,title,status,issue_type,created_at,updated_at,bead_json
+		) VALUES('gcg-42','main','legacy','open','task',1,1,?)`,
+		beadJSON,
+	); err != nil {
+		_ = raw.Close()
+		t.Fatalf("insert legacy bead: %v", err)
+	}
+
+	// Copy while the writer is open so the fixture retains the uncheckpointed
+	// row in its WAL, matching a stopped combined infra store.
+	src := t.TempDir()
+	for _, suffix := range []string{"", "-wal"} {
+		b, err := os.ReadFile(seedPath + suffix)
+		if err != nil {
+			_ = raw.Close()
+			t.Fatalf("read legacy source%s: %v", suffix, err)
+		}
+		if err := os.WriteFile(filepath.Join(src, sqliteStoreFilename+suffix), b, 0o644); err != nil {
+			_ = raw.Close()
+			t.Fatalf("write legacy fixture%s: %v", suffix, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close legacy writer: %v", err)
+	}
+
+	mainPath := filepath.Join(src, sqliteStoreFilename)
+	walPath := mainPath + "-wal"
+	mainBefore, walBefore := fileSHA256(t, mainPath), fileSHA256(t, walPath)
+	opened, err := OpenSQLiteStore(src, WithSQLiteStoreReadOnly(), WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("open legacy source read-only: %v", err)
+	}
+	ro := opened.(*SQLiteStore)
+	rows, err := ro.List(ListQuery{IncludeClosed: true, TierMode: TierBoth, AllowScan: true})
+	if err != nil {
+		_ = ro.CloseStore()
+		t.Fatalf("list legacy source: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "gcg-42" || rows[0].Revision != 0 {
+		_ = ro.CloseStore()
+		t.Fatalf("legacy list = %#v, want gcg-42 at revision zero", rows)
+	}
+	got, err := ro.Get("gcg-42")
+	if err != nil {
+		_ = ro.CloseStore()
+		t.Fatalf("get legacy bead: %v", err)
+	}
+	if got.Revision != 0 {
+		_ = ro.CloseStore()
+		t.Fatalf("legacy get revision = %d, want 0", got.Revision)
+	}
+	ready, err := ro.Ready()
+	if err != nil {
+		_ = ro.CloseStore()
+		t.Fatalf("ready legacy beads: %v", err)
+	}
+	if len(ready) != 1 || ready[0].Revision != 0 {
+		_ = ro.CloseStore()
+		t.Fatalf("legacy ready = %#v, want one bead at revision zero", ready)
+	}
+	if err := ro.CloseStore(); err != nil {
+		t.Fatalf("close legacy source: %v", err)
+	}
+	if got := fileSHA256(t, mainPath); got != mainBefore {
+		t.Fatalf("legacy read-only open mutated source main db: %s != %s", got, mainBefore)
+	}
+	if got := fileSHA256(t, walPath); got != walBefore {
+		t.Fatalf("legacy read-only open mutated source WAL: %s != %s", got, walBefore)
+	}
+}
+
 func TestSQLiteStoreReadOnlyMissingFileErrors(t *testing.T) {
 	// A read-only open never creates the file or its parent directory.
 	dir := filepath.Join(t.TempDir(), "absent")

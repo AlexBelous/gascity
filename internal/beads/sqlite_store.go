@@ -127,6 +127,7 @@ type SQLiteStore struct {
 	seq                     atomic.Int64 // in-memory sequence; recovered from DB on Open
 	closeOnce               sync.Once
 	readOnly                bool
+	hasRevisionColumn       bool
 	localStrings            *localSidecar // clone-local data; see Store.SetLocalString
 }
 
@@ -199,6 +200,14 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 			db.Close() //nolint:errcheck
 			return nil, err
 		}
+		s.hasRevisionColumn = true
+	} else {
+		hasRevision, err := sqliteBeadsHasRevisionColumn(context.Background(), db)
+		if err != nil {
+			db.Close() //nolint:errcheck
+			return nil, err
+		}
+		s.hasRevisionColumn = hasRevision
 	}
 	if err := s.recoverSequence(context.Background()); err != nil {
 		db.Close() //nolint:errcheck
@@ -293,9 +302,23 @@ func (s *SQLiteStore) applySchema(ctx context.Context) error {
 // cannot add it, and PRAGMA table_info is used instead of tolerating ALTER's
 // "duplicate column name" error so the check is deterministic.
 func (s *SQLiteStore) ensureRevisionColumn(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(beads)`)
+	hasRevision, err := sqliteBeadsHasRevisionColumn(ctx, s.db)
 	if err != nil {
-		return fmt.Errorf("inspecting sqlite schema: %w", err)
+		return err
+	}
+	if hasRevision {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE beads ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("adding revision column: %w", err)
+	}
+	return nil
+}
+
+func sqliteBeadsHasRevisionColumn(ctx context.Context, db *sql.DB) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(beads)`)
+	if err != nil {
+		return false, fmt.Errorf("inspecting sqlite schema: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
@@ -308,19 +331,16 @@ func (s *SQLiteStore) ensureRevisionColumn(ctx context.Context) error {
 			pk         int
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultVal, &pk); err != nil {
-			return fmt.Errorf("inspecting sqlite schema: %w", err)
+			return false, fmt.Errorf("inspecting sqlite schema: %w", err)
 		}
 		if name == "revision" {
-			return rows.Err()
+			return true, rows.Err()
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("inspecting sqlite schema: %w", err)
+		return false, fmt.Errorf("inspecting sqlite schema: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE beads ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`); err != nil {
-		return fmt.Errorf("adding revision column: %w", err)
-	}
-	return nil
+	return false, nil
 }
 
 func (s *SQLiteStore) recoverSequence(ctx context.Context) error {
@@ -667,7 +687,11 @@ func (s *SQLiteStore) IDPrefix() string {
 
 // Get retrieves a bead by ID.
 func (s *SQLiteStore) Get(id string) (Bead, error) {
-	row := s.readDB.QueryRowContext(context.Background(), `SELECT bead_json, revision FROM beads WHERE id=?`, id)
+	row := s.readDB.QueryRowContext(
+		context.Background(),
+		`SELECT bead_json, `+s.revisionSelectExpr("")+` FROM beads WHERE id=?`,
+		id,
+	)
 	b, err := scanSQLiteBead(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -676,6 +700,16 @@ func (s *SQLiteStore) Get(id string) (Bead, error) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 	}
 	return b, nil
+}
+
+func (s *SQLiteStore) revisionSelectExpr(tableAlias string) string {
+	if !s.hasRevisionColumn {
+		return "0"
+	}
+	if tableAlias != "" {
+		return tableAlias + ".revision"
+	}
+	return "revision"
 }
 
 type sqliteScanner interface {
@@ -812,7 +846,7 @@ func (s *SQLiteStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error
 }
 
 func (s *SQLiteStore) getTx(ctx context.Context, tx *sql.Tx, id string) (Bead, error) {
-	row := tx.QueryRowContext(ctx, `SELECT bead_json, revision FROM beads WHERE id=?`, id)
+	row := tx.QueryRowContext(ctx, `SELECT bead_json, `+s.revisionSelectExpr("")+` FROM beads WHERE id=?`, id)
 	b, err := scanSQLiteBead(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -874,7 +908,7 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	sqlText, args := sqliteListSQL(query)
+	sqlText, args := sqliteListSQL(query, s.revisionSelectExpr(""))
 	rows, err := s.readDB.QueryContext(context.Background(), sqlText, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing sqlite beads: %w", err)
@@ -901,7 +935,7 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 	return result, nil
 }
 
-func sqliteListSQL(q ListQuery) (string, []any) {
+func sqliteListSQL(q ListQuery, revisionExpr string) (string, []any) {
 	where := []string{}
 	args := []any{}
 	switch q.TierMode {
@@ -960,7 +994,7 @@ func sqliteListSQL(q ListQuery) (string, []any) {
 		where = append(where, "beads.id IN (SELECT m.bead_id FROM metadata m WHERE m.meta_key=? AND m.meta_value=?)")
 		args = append(args, k, v)
 	}
-	sqlText := "SELECT bead_json, revision FROM beads"
+	sqlText := "SELECT bead_json, " + revisionExpr + " FROM beads"
 	if len(where) > 0 {
 		sqlText += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -1008,7 +1042,7 @@ func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	default:
 		where = append(where, "b.tier='main'")
 	}
-	sqlText := `SELECT b.bead_json, b.revision FROM beads b WHERE ` + strings.Join(where, " AND ")
+	sqlText := `SELECT b.bead_json, ` + s.revisionSelectExpr("b") + ` FROM beads b WHERE ` + strings.Join(where, " AND ")
 	if q.Assignee != "" {
 		sqlText += " AND b.assignee=?"
 		args = append(args, q.Assignee)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionsdb "github.com/gastownhall/gascity/internal/classdb/sessions"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -40,6 +41,17 @@ func isComputeTerminalState(state string) bool {
 	switch session.State(strings.TrimSpace(state)) {
 	case session.StateAsleep, session.StateDrained, session.StateArchived,
 		session.StateSuspended, session.StateQuarantined:
+		return true
+	}
+	return false
+}
+
+// isLiveModelSweepState reports whether a session is currently awake and may
+// still append model invocations to its transcript. It is deliberately
+// disjoint from isComputeTerminalState.
+func isLiveModelSweepState(state string) bool {
+	switch session.State(strings.TrimSpace(state)) {
+	case session.StateActive, session.StateAwake:
 		return true
 	}
 	return false
@@ -166,15 +178,25 @@ func computeFactGetCandidate(info session.Info) bool {
 	return strings.TrimSpace(info.UsageComputeEmittedAt) != start
 }
 
-// emitDueComputeFacts emits a compute Fact for any of the given open sessions whose
-// awake interval has ended (terminal state) and has not yet been recorded. It reuses the
-// reconcile tick's already-loaded Info snapshot for the cheap candidate filter
-// (computeFactGetCandidate), then fetches the raw bead ONLY for the few sessions that
-// pass it: the usage lane genuinely needs the whole bead (ResolveRunID walks the
-// run-chain keys, and slept_at is not projected onto session.Info), so this is the usage
-// lane's OWN edge read rather than a snapshot raw-half read. A steady fleet of parked
-// sessions whose intervals are already accounted issues zero Gets. Best-effort: it never
-// blocks or fails the reconcile tick.
+// liveModelSweepCandidate reports whether an open snapshot row is worth
+// loading for an incremental transcript sweep. Unlike terminal compute
+// accounting, a live session remains a candidate every tick; the persisted
+// invocation cursor makes repeated sweeps idempotent.
+func liveModelSweepCandidate(info session.Info) bool {
+	return isLiveModelSweepState(info.MetadataState) &&
+		strings.TrimSpace(info.AwakeStartedAt) != ""
+}
+
+// emitDueComputeFacts accounts for terminal compute intervals and incrementally
+// sweeps model usage from awake sessions. It reuses the reconcile tick's Info
+// snapshot for cheap pre-Get filtering, then fetches raw beads only for terminal
+// or live candidates because run-chain, sleep-time, and transcript-cursor fields
+// are not all projected onto session.Info. On a routed sessions-class city it
+// also enumerates the canonical session union: retired rows may already be
+// closed and therefore absent from the open snapshot, while live rows may not
+// be present in a caller-supplied snapshot. Unrouted cities retain the
+// snapshot-only path. Accounting is best-effort and never fails the reconcile
+// tick.
 func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []session.Info) {
 	if cr.cs == nil {
 		return
@@ -233,21 +255,23 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		return sweepFactory
 	}
 	now := time.Now().UTC()
-	for _, info := range sessions {
-		if !computeFactGetCandidate(info) {
-			continue
+	processed := make(map[string]bool)
+	processSessionBead := func(b beads.Bead) {
+		processed[b.ID] = true
+		if b.Metadata == nil {
+			return
 		}
-		b, err := store.Get(info.ID)
-		if err != nil {
-			logf("usage: loading session %s for compute fact failed: %v", info.ID, err)
-			continue
+		state := b.Metadata["state"]
+		if isLiveModelSweepState(state) {
+			cr.sweepLiveSessionModelUsage(ctx, b, now, logf, modelSweepFactory)
+			return
 		}
 		// Re-check the terminal state from the FRESH bead: a session that re-awoke in
 		// the window since the snapshot was taken must not mint a tiny-wall fact for its
 		// just-STARTED interval and suppress the real end-of-interval emission. Best-
 		// effort accounting, the same NDI class as the sync-tail re-list delta.
-		if b.Metadata == nil || !isComputeTerminalState(b.Metadata["state"]) {
-			continue
+		if !isComputeTerminalState(state) {
+			return
 		}
 		awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
 		// Model-usage lane FIRST, symmetric to and beside the compute fact: recover the
@@ -282,5 +306,111 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		// recorded (idempotent), so wall-time accounting is never delayed by a pending
 		// sweep.
 		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
+	}
+	for _, info := range sessions {
+		if !computeFactGetCandidate(info) && !liveModelSweepCandidate(info) {
+			continue
+		}
+		b, err := store.Get(info.ID)
+		if err != nil {
+			logf("usage: loading session %s for usage facts failed: %v", info.ID, err)
+			continue
+		}
+		processSessionBead(b)
+	}
+
+	// Routed sessions close at retirement and disappear from the open reconcile
+	// snapshot above. Enumerate the canonical session union directly from the
+	// sessions-class store so recently closed rows and rows outside the snapshot's
+	// tier reach the same per-bead accounting path. Unrouted cities retain the
+	// snapshot-only behavior and avoid an extra full-store pass.
+	routed, routeErr := sessionsdb.Routed(cr.cityPath, cr.cfg)
+	if routeErr != nil {
+		logf("usage: resolving sessions-class routing for usage sweep failed: %v", routeErr)
+		return
+	}
+	if !routed {
+		return
+	}
+	rows, listErr := session.ListAllSessionBeads(store, beads.ListQuery{
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		AllowScan:     true,
+	})
+	if listErr != nil {
+		logf("usage: listing routed sessions for usage sweep failed: %v", listErr)
+		return
+	}
+	cutoff := now.Add(-2 * time.Hour)
+	for _, b := range rows {
+		if processed[b.ID] {
+			continue
+		}
+		// Closed session rows remain eligible only during the retention-safe
+		// catch-up window; open rows have no age cutoff.
+		if b.Status == "closed" && b.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		processSessionBead(b)
+	}
+}
+
+type liveSweepTranscriptCacheKey struct {
+	sessionID  string
+	awakeStart string
+	sessionKey string
+}
+
+// sweepLiveSessionModelUsage incrementally records model usage for an awake
+// session without closing its compute interval or stamping the terminal sweep
+// marker. Transcript discovery is memoized for the current awake epoch and
+// provider session key; a new epoch or replacement conversation therefore
+// resolves its own rollout instead of reusing a stale path.
+func (cr *CityRuntime) sweepLiveSessionModelUsage(
+	ctx context.Context,
+	b beads.Bead,
+	now time.Time,
+	logf func(string, ...any),
+	modelSweepFactory func() *worker.Factory,
+) {
+	if b.Metadata == nil || !isLiveModelSweepState(b.Metadata["state"]) ||
+		strings.TrimSpace(b.Metadata["awake_started_at"]) == "" {
+		return
+	}
+	factory := modelSweepFactory()
+	if factory == nil {
+		return
+	}
+	cacheKey := liveSweepTranscriptCacheKey{
+		sessionID:  b.ID,
+		awakeStart: strings.TrimSpace(b.Metadata["awake_started_at"]),
+		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
+	}
+	path, cached := cr.cachedLiveTranscriptPath(cacheKey)
+	if !cached {
+		path = factory.DiscoverSweepTranscript(b.ID, b.Metadata, now)
+		if path != "" {
+			cr.rememberLiveTranscriptPath(cacheKey, path)
+		}
+	}
+	if path == "" {
+		return
+	}
+	if _, _, err := factory.SweepSessionModelUsageAtPath(ctx, b.ID, b.Metadata, path, now); err != nil {
+		logf("usage: live model-usage sweep for session %s failed; will retry: %v", b.ID, err)
+	}
+}
+
+func (cr *CityRuntime) cachedLiveTranscriptPath(key liveSweepTranscriptCacheKey) (string, bool) {
+	if value, ok := cr.liveSweepTranscriptPaths.Load(key); ok {
+		path, _ := value.(string)
+		return path, true
+	}
+	return "", false
+}
+
+func (cr *CityRuntime) rememberLiveTranscriptPath(key liveSweepTranscriptCacheKey, path string) {
+	if strings.TrimSpace(path) != "" {
+		cr.liveSweepTranscriptPaths.Store(key, path)
 	}
 }

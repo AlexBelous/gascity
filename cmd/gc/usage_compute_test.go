@@ -50,6 +50,32 @@ func TestComputeFactGetCandidate(t *testing.T) {
 	}
 }
 
+func TestLiveModelSweepCandidate(t *testing.T) {
+	const awakeStart = "2026-01-02T00:30:00Z"
+	for _, tc := range []struct {
+		name  string
+		state string
+		awake string
+		want  bool
+	}{
+		{name: "active", state: "active", awake: awakeStart, want: true},
+		{name: "awake alias", state: "awake", awake: awakeStart, want: true},
+		{name: "missing interval anchor", state: "active", want: false},
+		{name: "terminal", state: "asleep", awake: awakeStart, want: false},
+		{name: "transitional", state: "draining", awake: awakeStart, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := session.Info{MetadataState: tc.state, AwakeStartedAt: tc.awake}
+			if got := liveModelSweepCandidate(info); got != tc.want {
+				t.Fatalf("liveModelSweepCandidate() = %v, want %v", got, tc.want)
+			}
+			if isLiveModelSweepState(tc.state) && isComputeTerminalState(tc.state) {
+				t.Fatalf("state %q is both live and compute-terminal", tc.state)
+			}
+		})
+	}
+}
+
 type captureSink struct{ facts []usage.Fact }
 
 func (c *captureSink) Record(_ context.Context, f usage.Fact) error {
@@ -275,20 +301,23 @@ func TestEmitComputeFactForBeadHungSinkReturnsPromptly(t *testing.T) {
 	}
 }
 
+const codexSweepSessionKey = "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+
 // writeCodexRolloutForSweep fabricates a codex rollout transcript
 // (rollout-<localtime>-<sessionID>.jsonl) under root/YYYY/MM/DD reachable by the
 // window-free keyed discovery: a session_meta line whose cwd is workDir, a
 // turn_context supplying the model, and one event_msg token_count per element of
-// tokenCounts ({total, lastInput, lastOutput}). Returns the rollout path.
-func writeCodexRolloutForSweep(t *testing.T, root, workDir, sessionID string, tokenCounts [][3]int) {
+// tokenCounts ({total, lastInput, lastOutput}). The keyed sweep scenarios share
+// codexSweepSessionKey; callers vary only the transcript contents and location.
+func writeCodexRolloutForSweep(t *testing.T, root, workDir string, tokenCounts [][3]int) {
 	t.Helper()
 	dayDir := filepath.Join(root, "2026", "06", "15")
 	if err := os.MkdirAll(dayDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dayDir, "rollout-2026-06-15T10-00-00-"+sessionID+".jsonl")
+	path := filepath.Join(dayDir, "rollout-2026-06-15T10-00-00-"+codexSweepSessionKey+".jsonl")
 	lines := []string{
-		fmt.Sprintf(`{"timestamp":"2026-06-15T10:00:00.000Z","type":"session_meta","payload":{"id":%q,"cwd":%q}}`, sessionID, workDir),
+		fmt.Sprintf(`{"timestamp":"2026-06-15T10:00:00.000Z","type":"session_meta","payload":{"id":%q,"cwd":%q}}`, codexSweepSessionKey, workDir),
 		`{"timestamp":"2026-06-15T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}`,
 	}
 	for i, tc := range tokenCounts {
@@ -315,6 +344,195 @@ func kindCount(facts []usage.Fact, kind usage.Kind) int {
 	return n
 }
 
+// TestEmitDueComputeFactsFindsRecentlyClosedRoutedSession proves the usage tick
+// does not depend on the reconcile snapshot retaining a terminal session. A
+// sessions-class city closes retired sessions in the routed SQLite store, so an
+// open-only snapshot is empty by the time usage accounting runs. The usage lane
+// must enumerate that class store itself and emit the interval's compute fact.
+func TestEmitDueComputeFactsFindsRecentlyClosedRoutedSession(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := sqliteSessionsCityConfig()
+	writeSessionsMigratedMarker(t, cityPath)
+
+	workStore := beads.NewMemStore()
+	routed := resolveSessionStore(workStore, cfg, cityPath, nil)
+	start := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	b, err := routed.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "recently closed routed session",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "asleep",
+			"session_name":     "routed-closed-1",
+			"awake_started_at": start.Format(time.RFC3339),
+			"slept_at":         start.Add(30 * time.Second).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := routed.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &captureSink{}
+	cs := &controllerState{
+		cityBeadStore: workStore,
+		usageSink:     sink,
+		cityName:      "demo",
+		cityPath:      cityPath,
+	}
+	cr := &CityRuntime{
+		cs:       cs,
+		cfg:      cfg,
+		sp:       runtime.NewFake(),
+		cityName: "demo",
+		cityPath: cityPath,
+		stderr:   io.Discard,
+	}
+
+	cr.emitDueComputeFacts(context.Background(), nil)
+
+	if got := kindCount(sink.facts, usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1 for recently closed routed session; facts: %+v", got, sink.facts)
+	}
+	if _, err := workStore.Get(b.ID); err == nil {
+		t.Fatal("routed session unexpectedly exists in the work store")
+	}
+	refreshed, err := routed.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := refreshed.Metadata[usageComputeEmittedAtKey]; got != start.Format(time.RFC3339) {
+		t.Fatalf("usage_compute_emitted_at = %q, want %q", got, start.Format(time.RFC3339))
+	}
+}
+
+// TestEmitDueComputeFactsSweepsLiveRoutedSessionIncrementally proves an awake
+// session is reached through routed-store enumeration even when the supplied
+// open snapshot is empty. Live ticks emit model facts only, repeat
+// idempotently through the persisted cursor, and emit only newly appended
+// transcript usage on a later tick.
+func TestEmitDueComputeFactsSweepsLiveRoutedSessionIncrementally(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	sessionKey := codexSweepSessionKey
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+	})
+
+	cfg := sqliteSessionsCityConfig()
+	cfg.Daemon.ObservePaths = []string{codexRoot}
+	writeSessionsMigratedMarker(t, cityPath)
+	workStore := beads.NewMemStore()
+	routed := resolveSessionStore(workStore, cfg, cityPath, nil)
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	b, err := routed.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "live routed codex session",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "active",
+			"session_name":     "routed-live-1",
+			"awake_started_at": start.Format(time.RFC3339),
+			"session_key":      sessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-routed-live",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{
+		cityBeadStore: workStore,
+		usageSink:     usage.NewLocalSink(sinkPath),
+		cityName:      "demo",
+		cityPath:      cityPath,
+	}
+	cr := &CityRuntime{
+		cs:       cs,
+		cfg:      cfg,
+		sp:       runtime.NewFake(),
+		cityName: "demo",
+		cityPath: cityPath,
+		stderr:   io.Discard,
+	}
+
+	// Tick 1: the nil snapshot cannot supply this routed session; the class-store
+	// enumeration must find it and sweep both complete invocations.
+	cr.emitDueComputeFacts(context.Background(), nil)
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if got := kindCount(facts, usage.KindModel); got != 2 {
+		t.Fatalf("tick 1 model facts = %d, want 2; facts: %+v", got, facts)
+	}
+	if got := kindCount(facts, usage.KindCompute); got != 0 {
+		t.Fatalf("tick 1 compute facts = %d, want 0 for an awake session", got)
+	}
+	cacheKey := liveSweepTranscriptCacheKey{
+		sessionID:  b.ID,
+		awakeStart: b.Metadata["awake_started_at"],
+		sessionKey: b.Metadata["session_key"],
+	}
+	if path, cached := cr.cachedLiveTranscriptPath(cacheKey); !cached || path == "" {
+		t.Fatalf("tick 1 did not memoize the resolved transcript path: path=%q cached=%v", path, cached)
+	}
+
+	// Tick 2: no transcript change, so the shared cursor makes the sweep
+	// idempotent even though live sessions remain candidates every tick.
+	cr.emitDueComputeFacts(context.Background(), nil)
+	facts, _, err = usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts after tick 2: %v", err)
+	}
+	if got := kindCount(facts, usage.KindModel); got != 2 {
+		t.Fatalf("tick 2 model facts = %d, want 2 (idempotent)", got)
+	}
+
+	// Tick 3: append one invocation; only that delta should be added.
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+		{750, 300, 150},
+	})
+	cr.emitDueComputeFacts(context.Background(), nil)
+	facts, _, err = usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts after tick 3: %v", err)
+	}
+	if got := kindCount(facts, usage.KindModel); got != 3 {
+		t.Fatalf("tick 3 model facts = %d, want 3 (one appended delta); facts: %+v", got, facts)
+	}
+	if got := kindCount(facts, usage.KindCompute); got != 0 {
+		t.Fatalf("tick 3 compute facts = %d, want 0 for an awake session", got)
+	}
+	refreshed, err := routed.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := refreshed.Metadata[session.MetadataKeyInvocationUsageCursor]; got != "total:750" {
+		t.Fatalf("invocation usage cursor = %q, want total:750", got)
+	}
+	if got := refreshed.Metadata[usageModelSweptAtKey]; got != "" {
+		t.Fatalf("usage_model_swept_at = %q, want empty while the interval remains awake", got)
+	}
+	if _, err := workStore.Get(b.ID); err == nil {
+		t.Fatal("routed live session unexpectedly exists in the work store")
+	}
+}
+
 // TestEmitDueComputeFactsAlsoSweepsModelUsage is the CORE regression for the
 // token-starvation bug: the controller reconcile tick emits per-interval compute
 // facts but never any model facts for pool-routed, hook-self-driven codex agents,
@@ -330,8 +548,8 @@ func TestEmitDueComputeFactsAlsoSweepsModelUsage(t *testing.T) {
 
 	// Codex names rollouts by the session_key uuid suffix; the keyed no-window
 	// discovery matches on exactly that.
-	sessionKey := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
-	writeCodexRolloutForSweep(t, codexRoot, workDir, sessionKey, [][3]int{
+	sessionKey := codexSweepSessionKey
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
 		{150, 100, 50},  // total=150, last input=100, output=50
 		{450, 200, 100}, // total=450, last input=200, output=100
 	})
@@ -446,7 +664,7 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 	workDir := t.TempDir()
 	codexRoot := t.TempDir()
 	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
-	sessionKey := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+	sessionKey := codexSweepSessionKey
 
 	store := beads.NewMemStore()
 	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
@@ -503,7 +721,7 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 	}
 
 	// The transcript is flushed to disk between ticks.
-	writeCodexRolloutForSweep(t, codexRoot, workDir, sessionKey, [][3]int{
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
 		{150, 100, 50},
 		{450, 200, 100},
 	})

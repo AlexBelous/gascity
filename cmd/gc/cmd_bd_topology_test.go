@@ -131,6 +131,34 @@ func TestBdTopologySetInfraLocal(t *testing.T) {
 	}
 }
 
+// A deploy-lineage city may still carry the retired graph_store key. The
+// topology setter is the migration surface for that city shape, so its
+// structured rewrite must canonicalize the retired key instead of rejecting
+// the otherwise-supported upgrade or silently changing graph routing.
+func TestBdTopologySetCanonicalizesRetiredGraphStore(t *testing.T) {
+	city := writeTopologyCity(t, t.TempDir(), "mc", `
+[beads]
+graph_store = "sqlite"
+`)
+
+	_, errOut, code := runBdTopology(t, city, "--infra", "local", "--scope", "unified")
+	if code != 0 {
+		t.Fatalf("set deploy-lineage topology exit=%d stderr=%s", code, errOut)
+	}
+
+	data, err := os.ReadFile(filepath.Join(city, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "graph_store") {
+		t.Fatalf("retired graph_store key was not canonicalized:\n%s", data)
+	}
+	if !strings.Contains(string(data), `infra = "local"`) ||
+		!strings.Contains(string(data), `scope = "unified"`) {
+		t.Fatalf("desired topology was not written:\n%s", data)
+	}
+}
+
 // TestBdTopologyValidationTable pins deliverable D: only valid forward
 // combinations are accepted; each rejection names the rule violated.
 func TestBdTopologyValidationTable(t *testing.T) {

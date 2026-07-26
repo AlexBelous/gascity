@@ -506,7 +506,7 @@ func ResolveCityAppendPath(fs fsys.FS, tomlPath string) (string, error) {
 // mutating it, so unparsable content here means the file changed underneath
 // us and a rewrite would destroy whatever is there now.
 func GuardCityRewriteKeyLoss(fs fsys.FS, path string) error {
-	return GuardRewriteKeyLoss[City](fs, path)
+	return guardRewriteKeyLoss[City](fs, path, cityRewriteCanonicalizesRetiredKey)
 }
 
 // GuardRewriteKeyLoss refuses to rewrite a TOML config whose current on-disk
@@ -521,6 +521,10 @@ func GuardCityRewriteKeyLoss(fs fsys.FS, path string) error {
 // mutating it, so unparsable content means the file changed underneath us and
 // a rewrite would destroy whatever is there now.
 func GuardRewriteKeyLoss[T any](fs fsys.FS, path string) error {
+	return guardRewriteKeyLoss[T](fs, path, nil)
+}
+
+func guardRewriteKeyLoss[T any](fs fsys.FS, path string, canonicalizes func(string) bool) error {
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -539,7 +543,14 @@ func GuardRewriteKeyLoss[T any](fs fsys.FS, path string) error {
 	}
 	keys := make([]string, 0, len(undecoded))
 	for _, key := range undecoded {
-		keys = append(keys, key.String())
+		name := key.String()
+		if canonicalizes != nil && canonicalizes(name) {
+			continue
+		}
+		keys = append(keys, name)
+	}
+	if len(keys) == 0 {
+		return nil
 	}
 	sort.Strings(keys)
 	return fmt.Errorf("refusing to rewrite %s: it contains keys this gc binary does not recognize and the rewrite would silently drop them: %s (upgrade gc or remove the keys, then retry)", path, strings.Join(keys, ", "))

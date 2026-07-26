@@ -23,6 +23,10 @@ type retiredKey struct {
 	RemovedIn string
 	// Note is optional migration guidance (what replaced it, or what to do).
 	Note string
+	// CanonicalizeOnRewrite is true only when Load folds the retired key's
+	// semantics into fields emitted by City.MarshalForWrite. Structured city
+	// edits may then drop the retired spelling without losing behavior.
+	CanonicalizeOnRewrite bool
 }
 
 // retiredKeys registers retired config keys by dotted TOML path. A key here is
@@ -38,18 +42,24 @@ type retiredKey struct {
 //     leaf under a still-decoded table (like beads.graph_store below) needs
 //     only the leaf key.
 //   - The struct-round-trip rewrite guard (GuardRewriteKeyLoss in
-//     site_binding.go) and `gc migrate` still refuse a file carrying a retired
-//     key (the rewrite would drop it); the upgrade runbook must state the
-//     new-knob setting to add before removing the retired key.
+//     site_binding.go) still refuses a retired key by default. A city key may
+//     opt into CanonicalizeOnRewrite only when Load preserves its behavior in
+//     the canonical City fields written back to disk.
 var retiredKeys = map[string]retiredKey{
 	// The b36/deploy-lineage single-infra-scope key ([beads] graph_store =
 	// "sqlite" | "dolt"). Superseded by the work-bead topology axes: relocate
 	// the graph class with [beads.classes.graph] backend="sqlite" (fine-grained)
 	// or [beads] infra="local" (all relocatable classes at once).
 	"beads.graph_store": {
-		RemovedIn: "the work-bead topology migration",
-		Note:      `set [beads.classes.graph] backend="sqlite" (or [beads] infra="local") instead`,
+		RemovedIn:             "the work-bead topology migration",
+		Note:                  `set [beads.classes.graph] backend="sqlite" (or [beads] infra="local") instead`,
+		CanonicalizeOnRewrite: true,
 	},
+}
+
+func cityRewriteCanonicalizesRetiredKey(key string) bool {
+	retired, ok := retiredKeys[key]
+	return ok && retired.CanonicalizeOnRewrite
 }
 
 // foldRetiredBeadsGraphStore honors the retired [beads] graph_store key by

@@ -134,6 +134,16 @@ type controllerState struct {
 	sessionStartEventAdmission         func(string)
 	sessionStartEventAdmissionStopping bool
 	sessionStartEventAdmissionWG       sync.WaitGroup
+
+	// sessionStartLeaseMu fences state swaps against exact-start work that has
+	// captured the previous generation. New leases fail fast while a swap is
+	// pending; the swap waits for existing leases before replacing or closing
+	// their store/provider/config generation.
+	sessionStartLeaseMu       sync.Mutex
+	sessionStartLeases        int
+	sessionStartSwapPending   bool
+	sessionStartLeasesDrained chan struct{}
+	sessionStartSwapDone      chan struct{}
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
@@ -756,6 +766,8 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Swap under short critical section.
 	var oldCityStore beads.Store
 	var oldRigStores map[string]beads.Store
+	releaseSessionStartFence := cs.beginSessionStartGenerationSwap()
+	defer releaseSessionStartFence()
 	cs.mu.Lock()
 	cs.advanceSessionStartGenerationLocked()
 	cs.cfg = cfg
@@ -891,6 +903,8 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	// the store-reuse reload path.
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	rawCfg := cs.loadRawSnapshot()
+	releaseSessionStartFence := cs.beginSessionStartGenerationSwap()
+	defer releaseSessionStartFence()
 	cs.mu.Lock()
 	storeWasCoherent := cs.sessionStartGeneration != 0 &&
 		cs.sessionStartStoreGeneration == cs.sessionStartGeneration

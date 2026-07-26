@@ -77,6 +77,60 @@ func TestControllerStateConfigOnlyUpdateDoesNotBlessIncoherentSessionStore(t *te
 	}
 }
 
+func TestControllerStateSessionStartLeaseFencesGenerationSwap(t *testing.T) {
+	oldCfg := &config.City{Workspace: config.Workspace{Name: "old"}}
+	newCfg := &config.City{Workspace: config.Workspace{Name: "new"}}
+	oldProvider := runtime.NewFake()
+	newProvider := runtime.NewFake()
+	store := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:                         oldCfg,
+		sp:                          oldProvider,
+		cityBeadStore:               store,
+		sessionStartGeneration:      4,
+		sessionStartStoreGeneration: 4,
+	}
+
+	snapshot, release, err := cs.acquireSessionStartSnapshot()
+	if err != nil {
+		t.Fatalf("acquireSessionStartSnapshot: %v", err)
+	}
+	if snapshot.Generation != 4 || snapshot.Config != oldCfg || snapshot.Provider != oldProvider {
+		t.Fatalf("leased snapshot = %+v, want old generation 4", snapshot)
+	}
+
+	updated := make(chan struct{})
+	go func() {
+		cs.updateConfigAndProviderOnly(newCfg, newProvider)
+		close(updated)
+	}()
+	awaitCond(t, func() bool {
+		cs.sessionStartLeaseMu.Lock()
+		defer cs.sessionStartLeaseMu.Unlock()
+		return cs.sessionStartSwapPending
+	}, "session-start generation swap to wait for lease")
+
+	if _, _, err := cs.acquireSessionStartSnapshot(); err == nil {
+		t.Fatal("new lease entered while a generation swap was pending")
+	}
+	select {
+	case <-updated:
+		t.Fatal("generation swap completed before the old lease released")
+	default:
+	}
+
+	release()
+	awaitClose(t, updated, "session-start generation swap")
+	current, currentRelease, err := cs.acquireSessionStartSnapshot()
+	if err != nil {
+		t.Fatalf("acquire current session-start snapshot: %v", err)
+	}
+	defer currentRelease()
+	if current.Generation != 5 || current.Config != newCfg || current.Provider != newProvider {
+		t.Fatalf("current snapshot = %+v, want new generation 5", current)
+	}
+}
+
 func TestControllerStateSessionEventAdmissionFiltersByDecodedBead(t *testing.T) {
 	cs := &controllerState{}
 	admitted := make(chan string, 4)

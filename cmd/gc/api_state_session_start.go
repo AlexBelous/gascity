@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -55,6 +56,78 @@ func (cs *controllerState) sessionStartSnapshot() (controllerSessionStartSnapsho
 		snapshot.Recorder = events.Discard
 	}
 	return snapshot, nil
+}
+
+func (cs *controllerState) acquireSessionStartSnapshot() (controllerSessionStartSnapshot, func(), error) {
+	if cs == nil {
+		return controllerSessionStartSnapshot{}, nil, fmt.Errorf("acquiring session-start state: controller state is nil")
+	}
+	cs.sessionStartLeaseMu.Lock()
+	if cs.sessionStartSwapPending {
+		cs.sessionStartLeaseMu.Unlock()
+		return controllerSessionStartSnapshot{}, nil, fmt.Errorf("acquiring session-start state: runtime generation is changing")
+	}
+	cs.sessionStartLeases++
+	cs.sessionStartLeaseMu.Unlock()
+
+	var once sync.Once
+	release := func() {
+		once.Do(cs.releaseSessionStartSnapshot)
+	}
+	snapshot, err := cs.sessionStartSnapshot()
+	if err != nil {
+		release()
+		return controllerSessionStartSnapshot{}, nil, err
+	}
+	return snapshot, release, nil
+}
+
+func (cs *controllerState) releaseSessionStartSnapshot() {
+	cs.sessionStartLeaseMu.Lock()
+	defer cs.sessionStartLeaseMu.Unlock()
+	if cs.sessionStartLeases == 0 {
+		return
+	}
+	cs.sessionStartLeases--
+	if cs.sessionStartLeases == 0 && cs.sessionStartSwapPending && cs.sessionStartLeasesDrained != nil {
+		close(cs.sessionStartLeasesDrained)
+		cs.sessionStartLeasesDrained = nil
+	}
+}
+
+func (cs *controllerState) beginSessionStartGenerationSwap() func() {
+	if cs == nil {
+		return func() {}
+	}
+	cs.sessionStartLeaseMu.Lock()
+	for cs.sessionStartSwapPending {
+		done := cs.sessionStartSwapDone
+		cs.sessionStartLeaseMu.Unlock()
+		<-done
+		cs.sessionStartLeaseMu.Lock()
+	}
+	cs.sessionStartSwapPending = true
+	cs.sessionStartSwapDone = make(chan struct{})
+	if cs.sessionStartLeases == 0 {
+		cs.sessionStartLeaseMu.Unlock()
+		return cs.endSessionStartGenerationSwap
+	}
+	cs.sessionStartLeasesDrained = make(chan struct{})
+	drained := cs.sessionStartLeasesDrained
+	cs.sessionStartLeaseMu.Unlock()
+	<-drained
+	return cs.endSessionStartGenerationSwap
+}
+
+func (cs *controllerState) endSessionStartGenerationSwap() {
+	cs.sessionStartLeaseMu.Lock()
+	defer cs.sessionStartLeaseMu.Unlock()
+	if !cs.sessionStartSwapPending {
+		return
+	}
+	cs.sessionStartSwapPending = false
+	close(cs.sessionStartSwapDone)
+	cs.sessionStartSwapDone = nil
 }
 
 func (cs *controllerState) advanceSessionStartGenerationLocked() {

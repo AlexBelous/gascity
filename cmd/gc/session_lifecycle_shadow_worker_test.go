@@ -37,6 +37,50 @@ func TestSessionLifecycleShadowWorkerRejectsInvalidConstruction(t *testing.T) {
 	}
 }
 
+func TestSessionLifecycleShadowWorkerReportsCompleteTimingIntervals(t *testing.T) {
+	enqueuedAt := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	startedAt := enqueuedAt.Add(3 * time.Millisecond)
+	completedAt := startedAt.Add(2 * time.Millisecond)
+	moments := make(chan time.Time, 3)
+	moments <- enqueuedAt
+	moments <- startedAt
+	moments <- completedAt
+
+	evaluations := make(chan sessionLifecycleStartShadowEvaluation, 1)
+	worker, err := newSessionLifecycleShadowWorker(1, func(evaluation sessionLifecycleStartShadowEvaluation) {
+		evaluations <- evaluation
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("newSessionLifecycleShadowWorker: %v", err)
+	}
+	worker.now = func() time.Time { return <-moments }
+	if err := worker.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(worker.Stop)
+
+	if err := worker.EnqueueStart(testSessionLifecycleStartShadowObservation("session-timing", "timing")); err != nil {
+		t.Fatalf("EnqueueStart: %v", err)
+	}
+	evaluation := receiveShadowEvaluation(t, evaluations)
+	if evaluation.EnqueuedAt != enqueuedAt ||
+		evaluation.StartedAt != startedAt ||
+		evaluation.CompletedAt != completedAt {
+		t.Fatalf(
+			"evaluation timestamps = enqueue:%s start:%s complete:%s",
+			evaluation.EnqueuedAt,
+			evaluation.StartedAt,
+			evaluation.CompletedAt,
+		)
+	}
+	if evaluation.QueueLatency != 3*time.Millisecond {
+		t.Fatalf("queue latency = %s, want 3ms", evaluation.QueueLatency)
+	}
+	if evaluation.PlanningLatency != 2*time.Millisecond {
+		t.Fatalf("planning latency = %s, want 2ms", evaluation.PlanningLatency)
+	}
+}
+
 func TestSessionLifecycleShadowWorkerCoalescesDuplicateKeysToNewestImmutableObservation(t *testing.T) {
 	evaluations := make(chan sessionLifecycleStartShadowEvaluation, 8)
 	blockerStarted := make(chan struct{})

@@ -12,11 +12,13 @@ import (
 )
 
 type sessionLifecycleStartShadowEvaluation struct {
-	Observation  sessionLifecycleStartShadowObservation
-	Comparison   sessionLifecycleStartSelectionComparison
-	EnqueuedAt   time.Time
-	StartedAt    time.Time
-	QueueLatency time.Duration
+	Observation     sessionLifecycleStartShadowObservation
+	Comparison      sessionLifecycleStartSelectionComparison
+	EnqueuedAt      time.Time
+	StartedAt       time.Time
+	CompletedAt     time.Time
+	QueueLatency    time.Duration
+	PlanningLatency time.Duration
 }
 
 type sessionLifecycleStartShadowEvaluationObserver func(sessionLifecycleStartShadowEvaluation)
@@ -172,18 +174,22 @@ func (w *sessionLifecycleShadowWorker) evaluate(key string) {
 	}
 	startedAt := w.now()
 	plan := planSessionLifecycleStartSelection(entry.observation.Input)
+	comparison := compareSessionLifecycleStartSelection(
+		plan,
+		entry.observation.LegacySelected,
+	)
+	completedAt := w.now()
 	w.observer(sessionLifecycleStartShadowEvaluation{
 		Observation: newSessionLifecycleStartShadowObservation(
 			entry.observation.Input,
 			entry.observation.LegacySelected,
 		),
-		Comparison: compareSessionLifecycleStartSelection(
-			plan,
-			entry.observation.LegacySelected,
-		),
-		EnqueuedAt:   entry.enqueuedAt,
-		StartedAt:    startedAt,
-		QueueLatency: startedAt.Sub(entry.enqueuedAt),
+		Comparison:      comparison,
+		EnqueuedAt:      entry.enqueuedAt,
+		StartedAt:       startedAt,
+		CompletedAt:     completedAt,
+		QueueLatency:    startedAt.Sub(entry.enqueuedAt),
+		PlanningLatency: completedAt.Sub(startedAt),
 	})
 }
 

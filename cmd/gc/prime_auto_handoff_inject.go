@@ -5,8 +5,6 @@ import (
 	"io"
 	"os"
 	"strings"
-
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
 
 type primeHookContextInjection struct {
@@ -37,18 +35,22 @@ func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHoo
 }
 
 // sessionStartAutoHandoffInjection returns only durable auto-handoff mail for
-// the current managed session. It intentionally constructs beadmail directly:
-// gc handoff persists this continuation class through beadmail regardless of
-// any separately configured ordinary-mail provider.
+// the current managed session. It intentionally uses the concrete beadmail
+// handoff seam: gc handoff persists this continuation class regardless of any
+// separately configured ordinary-mail provider, while message persistence and
+// session addressing still follow their respective coordination-class stores.
 func sessionStartAutoHandoffInjection(stderr io.Writer) primeHookContextInjection {
 	store, cityPath, code := openCityStoreWithPath(io.Discard, "gc prime")
 	if store == nil || code != 0 {
 		return primeHookContextInjection{}
 	}
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	mp := beadmail.NewWithStores(msgStore, sessStore)
+	mp, err := handoffMailProvider(store, sessStore)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc prime: routing auto-handoff mail: %v\n", err) //nolint:errcheck // best-effort hook diagnostics
+		return primeHookContextInjection{}
+	}
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	target, err := resolveMailTargetsWithConfig(cityPath, cfg, sessStore, sessionID)
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -2183,6 +2184,246 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 	}
 	if got := lastField(quietRow); got != "-" {
 		t.Fatalf("quiet-session LAST NUDGE = %q, want %q; row=%q", got, "-", quietRow)
+	}
+}
+
+// TestCmdSessionList_ShowsLiveWorkDirForRunningSession pins gc session
+// list's human table to the live process cwd (gastownhall/gascity#ga-ighomh.3
+// AC1) rather than the bead's stored, potentially stale work_dir metadata.
+func TestCmdSessionList_ShowsLiveWorkDirForRunningSession(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	fakeProvider := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "live-workdir-session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "live-workdir-session",
+			"template":     "worker",
+			"state":        "awake",
+			"work_dir":     "/stale/metadata/path",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+	fakeProvider.OrphanedRuntimes[b.ID] = runtime.LiveRuntime{SessionID: b.ID, PID: os.Getpid()}
+
+	liveDir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(liveDir); err != nil {
+		t.Fatalf("Chdir(%q): %v", liveDir, err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	wantLive := pathutil.NormalizePathForCompare(liveDir)
+	if !strings.Contains(out, wantLive) {
+		t.Fatalf("output missing live cwd %q:\n%s", wantLive, out)
+	}
+	if strings.Contains(out, "/stale/metadata/path") {
+		t.Fatalf("output still shows stale metadata work_dir, want live cwd only:\n%s", out)
+	}
+}
+
+// TestCmdSessionListJSON_ShowsLiveWorkDirForRunningSession is the --json
+// counterpart of TestCmdSessionList_ShowsLiveWorkDirForRunningSession,
+// pinning CLI human-table/JSON consistency (AC2/AC5).
+func TestCmdSessionListJSON_ShowsLiveWorkDirForRunningSession(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	fakeProvider := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "live-workdir-json-session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "live-workdir-json-session",
+			"template":     "worker",
+			"state":        "awake",
+			"work_dir":     "/stale/metadata/path",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+	fakeProvider.OrphanedRuntimes[b.ID] = runtime.LiveRuntime{SessionID: b.ID, PID: os.Getpid()}
+
+	liveDir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(liveDir); err != nil {
+		t.Fatalf("Chdir(%q): %v", liveDir, err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got sessionListJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not a JSON session list object: %v; stdout=%q", err, stdout.String())
+	}
+	row := sessionListJSONRowBySessionName(got.Sessions, "live-workdir-json-session")
+	if row == nil {
+		t.Fatalf("missing live-workdir-json-session row in JSON output:\n%s", stdout.String())
+	}
+	wantLive := pathutil.NormalizePathForCompare(liveDir)
+	if row.WorkDir != wantLive {
+		t.Fatalf("row.WorkDir = %q, want live cwd %q; row=%#v", row.WorkDir, wantLive, row)
+	}
+}
+
+// TestCmdSessionList_DistinctPooledSessionsShowDistinctWorkDirs pins AC4:
+// multiple pooled sessions in distinct real working directories must
+// display distinct paths even when their stored metadata shares the same
+// stale base path.
+func TestCmdSessionList_DistinctPooledSessionsShowDistinctWorkDirs(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	fakeProvider := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+
+	const sharedStaleBase = "/pool/shared/base"
+	beadA, err := store.Create(beads.Bead{
+		Title:  "pooled-session-a",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "pooled-session-a",
+			"template":     "worker",
+			"state":        "awake",
+			"work_dir":     sharedStaleBase,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session A): %v", err)
+	}
+	beadB, err := store.Create(beads.Bead{
+		Title:  "pooled-session-b",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "pooled-session-b",
+			"template":     "worker",
+			"state":        "awake",
+			"work_dir":     sharedStaleBase,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session B): %v", err)
+	}
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dirA); err != nil {
+		t.Fatalf("Chdir(%q): %v", dirA, err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	helper := exec.Command("sleep", "30")
+	helper.Dir = dirB
+	if err := helper.Start(); err != nil {
+		t.Fatalf("starting helper process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = helper.Process.Kill()
+		_ = helper.Wait()
+	})
+
+	fakeProvider.OrphanedRuntimes[beadA.ID] = runtime.LiveRuntime{SessionID: beadA.ID, PID: os.Getpid()}
+	fakeProvider.OrphanedRuntimes[beadB.ID] = runtime.LiveRuntime{SessionID: beadB.ID, PID: helper.Process.Pid}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	rowA := findRowContaining(lines, "pooled-session-a")
+	rowB := findRowContaining(lines, "pooled-session-b")
+	if rowA == "" || rowB == "" {
+		t.Fatalf("output missing expected session rows:\n%s", out)
+	}
+	wantA := pathutil.NormalizePathForCompare(dirA)
+	wantB := pathutil.NormalizePathForCompare(dirB)
+	if !strings.Contains(rowA, wantA) {
+		t.Fatalf("session A row missing live cwd %q: %q", wantA, rowA)
+	}
+	if !strings.Contains(rowB, wantB) {
+		t.Fatalf("session B row missing live cwd %q: %q", wantB, rowB)
+	}
+	if strings.Contains(out, sharedStaleBase) {
+		t.Fatalf("output still shows shared stale metadata base path, want live cwds only:\n%s", out)
 	}
 }
 

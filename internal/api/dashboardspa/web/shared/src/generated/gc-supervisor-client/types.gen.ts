@@ -844,7 +844,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | HandoffRestartNoEffectPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1328,6 +1328,19 @@ export type GroupRouteDecision = {
     Match: string;
     TargetSessionID: string;
     UpdateCursor: boolean;
+};
+
+export type HandoffRestartNoEffectPayload = {
+    after_awake_started_at: string;
+    after_generation: string;
+    before_awake_started_at: string;
+    before_generation: string;
+    elapsed_s: number;
+    mode: string;
+    reason: string;
+    restart_marker_state: string;
+    session_id: string;
+    session_name: string;
 };
 
 export type HealthOutputBody = {
@@ -5224,6 +5237,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
+    type: 'session.handoff_restart_no_effect';
+} & TypedEventStreamEnvelopeSessionHandoffRestartNoEffect) | ({
     type: 'session.idle_killed';
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
@@ -6269,6 +6284,23 @@ export type TypedEventStreamEnvelopeSessionDraining = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.handoff_restart_no_effect
+ */
+export type TypedEventStreamEnvelopeSessionHandoffRestartNoEffect = {
+    actor: string;
+    message?: string;
+    payload: HandoffRestartNoEffectPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_restart_no_effect';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.idle_killed
  */
 export type TypedEventStreamEnvelopeSessionIdleKilled = {
@@ -6713,6 +6745,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
+    type: 'session.handoff_restart_no_effect';
+} & TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect) | ({
     type: 'session.idle_killed';
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
@@ -7813,6 +7847,24 @@ export type TypedTaggedEventStreamEnvelopeSessionDraining = {
     subject?: string;
     ts: string;
     type: 'session.draining';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_restart_no_effect
+ */
+export type TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: HandoffRestartNoEffectPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_restart_no_effect';
     workflow?: WorkflowEventProjection;
 };
 

@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -273,6 +275,7 @@ func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dop
 		return handoffOutcome{code: 0}
 	}
 
+	restartBaseline := handoffRestartBaselineFromStore(sessStore, sessionName)
 	if err := dops.setRestartRequested(sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
@@ -297,6 +300,9 @@ func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dop
 		if err := persistRestart(); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
+	}
+	if err := armHandoffRestartClaim(sessStore, sessionName, "self", restartBaseline); err != nil {
+		fmt.Fprintf(stderr, "gc handoff: recording restart claim baseline: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
@@ -403,6 +409,55 @@ func sessionRestartableByController(sessStore beads.Store, sessionName string) (
 	return namedSessionMode(b) == "always", strings.TrimSpace(b.Metadata["pin_awake"]) == "true", nil
 }
 
+// handoffRestartBaselineFromStore reads the current generation/awake_started_at
+// identity off sessionName's session bead, for use as the pre-restart baseline
+// armed by armHandoffRestartClaim. Best-effort: any resolution or read failure
+// yields a zero identity rather than an error, since claim-arming is a
+// non-fatal diagnostic aid and must never block a handoff.
+func handoffRestartBaselineFromStore(sessStore beads.Store, sessionName string) handoffRestartIdentity {
+	if sessStore == nil || sessionName == "" {
+		return handoffRestartIdentity{}
+	}
+	id, err := resolveSessionID(sessStore, sessionName)
+	if err != nil {
+		return handoffRestartIdentity{}
+	}
+	b, err := sessStore.Get(id)
+	if err != nil {
+		return handoffRestartIdentity{}
+	}
+	return handoffRestartIdentity{
+		Generation:     b.Metadata["generation"],
+		AwakeStartedAt: b.Metadata["awake_started_at"],
+	}
+}
+
+// armHandoffRestartClaim persists a handoff_restart_claim baseline on
+// sessionName's session bead: the identity observed just before the restart
+// was requested, the mode that requested it, and when it was claimed. The
+// session reconciler's no-effect detector (recordHandoffRestartNoEffectIfDue)
+// compares the session's current identity against this baseline once the
+// startup grace period elapses.
+func armHandoffRestartClaim(sessStore beads.Store, sessionName, mode string, baseline handoffRestartIdentity) error {
+	if sessStore == nil || sessionName == "" {
+		return nil
+	}
+	id, err := resolveSessionID(sessStore, sessionName)
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil
+		}
+		return fmt.Errorf("resolving session %q: %w", sessionName, err)
+	}
+	raw, err := json.Marshal(handoffRestartClaim{Mode: mode, Baseline: baseline, ClaimedAt: time.Now().UTC()})
+	if err != nil {
+		return fmt.Errorf("marshaling handoff restart claim: %w", err)
+	}
+	return sessionFrontDoor(sessStore).ApplyPatch(id, map[string]string{
+		session.HandoffRestartClaimKey: string(raw),
+	})
+}
+
 func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName string) error {
 	if sessionName == "" {
 		return nil
@@ -425,8 +480,9 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 		return errors.Join(errs...)
 	}
 	if err := sessionFrontDoor(sessStore).ApplyPatch(id, map[string]string{
-		"restart_requested":          "",
-		"continuation_reset_pending": "",
+		"restart_requested":            "",
+		"continuation_reset_pending":   "",
+		session.HandoffRestartClaimKey: "",
 	}); err != nil {
 		errs = append(errs, fmt.Errorf("clearing bead restart flag: %w", err))
 	}
@@ -471,9 +527,13 @@ func doHandoffRemote(store, sessStore beads.Store, rec events.Recorder, sp runti
 	// still live. The metric label uses the agent identity (not the sanitized
 	// runtime session name) so handoff stops join the start/crash/kill counters.
 	agentIdentity := sessionAgentMetricIdentityByName(sessStore, sessionName)
+	restartBaseline := handoffRestartBaselineFromStore(sessStore, sessionName)
 	if err := workerKillSessionTargetWithConfig("", sessStore, sp, nil, sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if err := armHandoffRestartClaim(sessStore, sessionName, "remote", restartBaseline); err != nil {
+		fmt.Fprintf(stderr, "gc handoff: recording restart claim baseline: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	sessionID, resolveErr := resolveSessionID(sessStore, sessionName)
 	if resolveErr != nil {

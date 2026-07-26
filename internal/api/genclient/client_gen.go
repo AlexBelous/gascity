@@ -2059,6 +2059,20 @@ type GroupRouteDecision struct {
 	UpdateCursor    bool   `json:"UpdateCursor"`
 }
 
+// HandoffRestartNoEffectPayload defines model for HandoffRestartNoEffectPayload.
+type HandoffRestartNoEffectPayload struct {
+	AfterAwakeStartedAt  string `json:"after_awake_started_at"`
+	AfterGeneration      string `json:"after_generation"`
+	BeforeAwakeStartedAt string `json:"before_awake_started_at"`
+	BeforeGeneration     string `json:"before_generation"`
+	ElapsedS             int64  `json:"elapsed_s"`
+	Mode                 string `json:"mode"`
+	Reason               string `json:"reason"`
+	RestartMarkerState   string `json:"restart_marker_state"`
+	SessionId            string `json:"session_id"`
+	SessionName          string `json:"session_name"`
+}
+
 // HealthOutputBody defines model for HealthOutputBody.
 type HealthOutputBody struct {
 	// City City name.
@@ -6071,6 +6085,21 @@ type TypedEventStreamEnvelopeSessionDraining struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionHandoffRestartNoEffect defines model for TypedEventStreamEnvelopeSessionHandoffRestartNoEffect.
+type TypedEventStreamEnvelopeSessionHandoffRestartNoEffect struct {
+	Actor     string                        `json:"actor"`
+	Message   *string                       `json:"message,omitempty"`
+	Payload   HandoffRestartNoEffectPayload `json:"payload"`
+	RunId     *string                       `json:"run_id,omitempty"`
+	Seq       int64                         `json:"seq"`
+	SessionId *string                       `json:"session_id,omitempty"`
+	StepId    *string                       `json:"step_id,omitempty"`
+	Subject   *string                       `json:"subject,omitempty"`
+	Ts        time.Time                     `json:"ts"`
+	Type      string                        `json:"type"`
+	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionIdleKilled defines model for TypedEventStreamEnvelopeSessionIdleKilled.
 type TypedEventStreamEnvelopeSessionIdleKilled struct {
 	Actor     string                   `json:"actor"`
@@ -7303,6 +7332,22 @@ type TypedTaggedEventStreamEnvelopeSessionDraining struct {
 	Ts        time.Time                `json:"ts"`
 	Type      string                   `json:"type"`
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect defines model for TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect.
+type TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect struct {
+	Actor     string                        `json:"actor"`
+	City      string                        `json:"city"`
+	Message   *string                       `json:"message,omitempty"`
+	Payload   HandoffRestartNoEffectPayload `json:"payload"`
+	RunId     *string                       `json:"run_id,omitempty"`
+	Seq       int64                         `json:"seq"`
+	SessionId *string                       `json:"session_id,omitempty"`
+	StepId    *string                       `json:"step_id,omitempty"`
+	Subject   *string                       `json:"subject,omitempty"`
+	Ts        time.Time                     `json:"ts"`
+	Type      string                        `json:"type"`
+	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionIdleKilled defines model for TypedTaggedEventStreamEnvelopeSessionIdleKilled.
@@ -9489,6 +9534,32 @@ func (t *EventPayload) FromGroupCreatedEventPayload(v GroupCreatedEventPayload) 
 
 // MergeGroupCreatedEventPayload performs a merge with any union data inside the EventPayload, using the provided GroupCreatedEventPayload
 func (t *EventPayload) MergeGroupCreatedEventPayload(v GroupCreatedEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsHandoffRestartNoEffectPayload returns the union data inside the EventPayload as a HandoffRestartNoEffectPayload
+func (t EventPayload) AsHandoffRestartNoEffectPayload() (HandoffRestartNoEffectPayload, error) {
+	var body HandoffRestartNoEffectPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromHandoffRestartNoEffectPayload overwrites any union data inside the EventPayload as the provided HandoffRestartNoEffectPayload
+func (t *EventPayload) FromHandoffRestartNoEffectPayload(v HandoffRestartNoEffectPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeHandoffRestartNoEffectPayload performs a merge with any union data inside the EventPayload, using the provided HandoffRestartNoEffectPayload
+func (t *EventPayload) MergeHandoffRestartNoEffectPayload(v HandoffRestartNoEffectPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13656,6 +13727,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDraining(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionHandoffRestartNoEffect returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionHandoffRestartNoEffect
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionHandoffRestartNoEffect() (TypedEventStreamEnvelopeSessionHandoffRestartNoEffect, error) {
+	var body TypedEventStreamEnvelopeSessionHandoffRestartNoEffect
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionHandoffRestartNoEffect overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionHandoffRestartNoEffect
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionHandoffRestartNoEffect(v TypedEventStreamEnvelopeSessionHandoffRestartNoEffect) error {
+	v.Type = "session.handoff_restart_no_effect"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionHandoffRestartNoEffect performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionHandoffRestartNoEffect
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionHandoffRestartNoEffect(v TypedEventStreamEnvelopeSessionHandoffRestartNoEffect) error {
+	v.Type = "session.handoff_restart_no_effect"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionIdleKilled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionIdleKilled
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionIdleKilled() (TypedEventStreamEnvelopeSessionIdleKilled, error) {
 	var body TypedEventStreamEnvelopeSessionIdleKilled
@@ -14348,6 +14447,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
 	case "session.draining":
 		return t.AsTypedEventStreamEnvelopeSessionDraining()
+	case "session.handoff_restart_no_effect":
+		return t.AsTypedEventStreamEnvelopeSessionHandoffRestartNoEffect()
 	case "session.idle_killed":
 		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
@@ -16025,6 +16126,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect() (TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect(v TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect) error {
+	v.Type = "session.handoff_restart_no_effect"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect(v TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect) error {
+	v.Type = "session.handoff_restart_no_effect"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionIdleKilled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionIdleKilled
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionIdleKilled() (TypedTaggedEventStreamEnvelopeSessionIdleKilled, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionIdleKilled
@@ -16717,6 +16846,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
 	case "session.draining":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDraining()
+	case "session.handoff_restart_no_effect":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect()
 	case "session.idle_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":

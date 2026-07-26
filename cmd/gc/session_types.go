@@ -70,20 +70,22 @@ type idleProbeState struct {
 
 // drainTracker manages in-memory drain states for all sessions.
 type drainTracker struct {
-	mu               sync.Mutex
-	drains           map[string]*drainState     // session bead ID -> drain state
-	idleProbes       map[string]*idleProbeState // session bead ID -> async idle probe
-	resetStalls      map[string]bool            // session bead ID -> reset stall event emitted
-	suspendDeferrals map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
-	idleProbeCursor  int
+	mu                      sync.Mutex
+	drains                  map[string]*drainState     // session bead ID -> drain state
+	idleProbes              map[string]*idleProbeState // session bead ID -> async idle probe
+	resetStalls             map[string]bool            // session bead ID -> reset stall event emitted
+	handoffRestartNoEffects map[string]bool            // session bead ID -> handoff restart no-effect event emitted
+	suspendDeferrals        map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
+	idleProbeCursor         int
 }
 
 func newDrainTracker() *drainTracker {
 	return &drainTracker{
-		drains:           make(map[string]*drainState),
-		idleProbes:       make(map[string]*idleProbeState),
-		resetStalls:      make(map[string]bool),
-		suspendDeferrals: make(map[string]int),
+		drains:                  make(map[string]*drainState),
+		idleProbes:              make(map[string]*idleProbeState),
+		resetStalls:             make(map[string]bool),
+		handoffRestartNoEffects: make(map[string]bool),
+		suspendDeferrals:        make(map[string]int),
 	}
 }
 
@@ -236,6 +238,28 @@ func (dt *drainTracker) clearResetStall(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.resetStalls, beadID)
+}
+
+func (dt *drainTracker) markHandoffRestartNoEffect(beadID string) bool {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return true
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.handoffRestartNoEffects[beadID] {
+		return false
+	}
+	dt.handoffRestartNoEffects[beadID] = true
+	return true
+}
+
+func (dt *drainTracker) clearHandoffRestartNoEffect(beadID string) {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.handoffRestartNoEffects, beadID)
 }
 
 // Reconciler tuning defaults.

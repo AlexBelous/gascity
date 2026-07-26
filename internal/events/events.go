@@ -89,6 +89,14 @@ const (
 	// timeout. Operators use the typed payload to correlate the stuck
 	// session, template, reset timestamp, and elapsed wait.
 	SessionResetStalled = "session.reset_stalled"
+	// HandoffRestartNoEffect fires when a handoff armed a restart claim,
+	// the configured startup grace period has elapsed, and the session's
+	// generation/awake_started_at identity is still identical to the
+	// claimed baseline — meaning the requested restart had no observable
+	// effect. Operators use the typed payload to correlate the session,
+	// the mode (self vs remote) that requested the restart, the
+	// before/after identity, and the elapsed wait.
+	HandoffRestartNoEffect = "session.handoff_restart_no_effect"
 	// SessionWorkQueryFailed fires when the current managed session's
 	// work-discovery query subprocess is killed by an external signal or
 	// aborted by the runner-imposed timeout before producing output.
@@ -252,6 +260,7 @@ var KnownEventTypes = []string{
 	SessionStranded,
 	SessionUnknownState,
 	SessionResetStalled,
+	HandoffRestartNoEffect,
 	SessionWorkQueryFailed,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,

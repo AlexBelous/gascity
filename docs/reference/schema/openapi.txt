@@ -2370,6 +2370,9 @@
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
           },
           {
+            "$ref": "#/components/schemas/HandoffRestartNoEffectPayload"
+          },
+          {
             "$ref": "#/components/schemas/InboundEventPayload"
           },
           {
@@ -3555,6 +3558,55 @@
           "Match",
           "TargetSessionID",
           "UpdateCursor"
+        ],
+        "type": "object"
+      },
+      "HandoffRestartNoEffectPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "after_awake_started_at": {
+            "type": "string"
+          },
+          "after_generation": {
+            "type": "string"
+          },
+          "before_awake_started_at": {
+            "type": "string"
+          },
+          "before_generation": {
+            "type": "string"
+          },
+          "elapsed_s": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "restart_marker_state": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "session_name",
+          "mode",
+          "before_generation",
+          "before_awake_started_at",
+          "after_generation",
+          "after_awake_started_at",
+          "restart_marker_state",
+          "reason",
+          "elapsed_s"
         ],
         "type": "object"
       },
@@ -11916,6 +11968,7 @@
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
+            "session.handoff_restart_no_effect": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffRestartNoEffect",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
@@ -12112,6 +12165,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffRestartNoEffect"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled"
@@ -13091,6 +13147,7 @@
                 "session.stranded",
                 "session.unknown_state",
                 "session.reset_stalled",
+                "session.handoff_restart_no_effect",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -15263,6 +15320,57 @@
         "title": "TypedEventStreamEnvelope session.draining",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionHandoffRestartNoEffect": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HandoffRestartNoEffectPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_restart_no_effect",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.handoff_restart_no_effect",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionIdleKilled": {
         "additionalProperties": false,
         "properties": {
@@ -16294,6 +16402,7 @@
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
+            "session.handoff_restart_no_effect": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
@@ -16490,6 +16599,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled"
@@ -17540,6 +17652,7 @@
                 "session.stranded",
                 "session.unknown_state",
                 "session.reset_stalled",
+                "session.handoff_restart_no_effect",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -19875,6 +19988,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.draining",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HandoffRestartNoEffectPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_restart_no_effect",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.handoff_restart_no_effect",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionIdleKilled": {

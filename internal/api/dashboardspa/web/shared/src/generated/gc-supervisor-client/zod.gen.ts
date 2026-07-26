@@ -664,6 +664,19 @@ export const zGroupRouteDecision = z.object({
     UpdateCursor: z.boolean()
 });
 
+export const zHandoffRestartNoEffectPayload = z.object({
+    after_awake_started_at: z.string(),
+    after_generation: z.string(),
+    before_awake_started_at: z.string(),
+    before_generation: z.string(),
+    elapsed_s: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    mode: z.string(),
+    reason: z.string(),
+    restart_marker_state: z.string(),
+    session_id: z.string(),
+    session_name: z.string()
+});
+
 export const zHealthOutputBody = z.object({
     city: z.string().optional(),
     status: z.string(),
@@ -3214,6 +3227,7 @@ export const zEventPayload = z.union([
     zCityUnregisterSucceededPayload,
     zConditionalWritesDegradedPayload,
     zGroupCreatedEventPayload,
+    zHandoffRestartNoEffectPayload,
     zInboundEventPayload,
     zMailEventPayload,
     zMoleculeResolvedPayload,
@@ -4340,6 +4354,23 @@ export const zTypedEventStreamEnvelopeSessionDraining = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.handoff_restart_no_effect
+ */
+export const zTypedEventStreamEnvelopeSessionHandoffRestartNoEffect = z.object({
+    actor: z.string(),
+    message: z.string().optional(),
+    payload: zHandoffRestartNoEffectPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_restart_no_effect'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.idle_killed
  */
 export const zTypedEventStreamEnvelopeSessionIdleKilled = z.object({
@@ -4726,6 +4757,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
     zTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.extend({ type: z.literal('session.drain_acked_with_assigned_work') }),
     zTypedEventStreamEnvelopeSessionDraining.extend({ type: z.literal('session.draining') }),
+    zTypedEventStreamEnvelopeSessionHandoffRestartNoEffect.extend({ type: z.literal('session.handoff_restart_no_effect') }),
     zTypedEventStreamEnvelopeSessionIdleKilled.extend({ type: z.literal('session.idle_killed') }),
     zTypedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
     zTypedEventStreamEnvelopeSessionQuarantined.extend({ type: z.literal('session.quarantined') }),
@@ -5819,6 +5851,24 @@ export const zTypedTaggedEventStreamEnvelopeSessionDraining = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.handoff_restart_no_effect
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect = z.object({
+    actor: z.string(),
+    city: z.string(),
+    message: z.string().optional(),
+    payload: zHandoffRestartNoEffectPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_restart_no_effect'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.idle_killed
  */
 export const zTypedTaggedEventStreamEnvelopeSessionIdleKilled = z.object({
@@ -6224,6 +6274,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
     zTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.extend({ type: z.literal('session.drain_acked_with_assigned_work') }),
     zTypedTaggedEventStreamEnvelopeSessionDraining.extend({ type: z.literal('session.draining') }),
+    zTypedTaggedEventStreamEnvelopeSessionHandoffRestartNoEffect.extend({ type: z.literal('session.handoff_restart_no_effect') }),
     zTypedTaggedEventStreamEnvelopeSessionIdleKilled.extend({ type: z.literal('session.idle_killed') }),
     zTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
     zTypedTaggedEventStreamEnvelopeSessionQuarantined.extend({ type: z.literal('session.quarantined') }),

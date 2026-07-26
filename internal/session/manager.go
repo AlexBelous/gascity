@@ -433,6 +433,12 @@ type Info struct {
 	// pending restart on the awake scan. Under raw-refresh coexistence the mirror
 	// reflects the in-memory value; Step 6 handles the Get-cutover intra-tick carrier.
 	RestartRequested string // restart_requested (raw)
+	// HandoffRestartClaim is the RAW handoff_restart_claim metadata: a
+	// JSON-encoded handoffRestartClaim baseline armed by a handoff just
+	// before requesting a restart. The session reconciler's no-effect
+	// detector reads it (via handoffRestartClaimFromInfo) to tell whether a
+	// requested restart actually rotated the session's identity.
+	HandoffRestartClaim string // handoff_restart_claim (raw JSON)
 	// SessionIDFlag is the RAW session_id_flag metadata. freshRestartSessionKey
 	// (cmd/gc) reads it (trimmed != "") to decide whether the provider can inject a
 	// fresh session ID on a restart handoff. Additive mirror so that read can move off

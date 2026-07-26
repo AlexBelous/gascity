@@ -142,6 +142,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		SessionNameExplicit:            b.Metadata["session_name_explicit"],
 		WakeRequest:                    b.Metadata["wake_request"],
 		RestartRequested:               b.Metadata["restart_requested"],
+		HandoffRestartClaim:            b.Metadata[HandoffRestartClaimKey],
 		SessionIDFlag:                  b.Metadata["session_id_flag"],
 		TemplateOverrides:              b.Metadata["template_overrides"],
 		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],

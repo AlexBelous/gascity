@@ -88,6 +88,14 @@ var freshWakeConversationResetKeys = []string{
 // ResetCommittedAtKey records when a restart handoff durably committed.
 const ResetCommittedAtKey = "reset_committed_at"
 
+// HandoffRestartClaimKey records the JSON-encoded handoff_restart_claim: the
+// baseline generation/awake_started_at identity a handoff observed just
+// before requesting a restart, plus when it was claimed. The session
+// reconciler's no-effect detector compares the session's current identity
+// against this baseline once the grace period elapses, so it can tell a
+// restart that actually rotated the session from one that silently didn't.
+const HandoffRestartClaimKey = "handoff_restart_claim"
+
 // MetadataPatch is an atomic set of metadata key updates for one lifecycle
 // transition. Empty values intentionally clear metadata keys in existing store
 // implementations.

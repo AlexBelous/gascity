@@ -133,3 +133,32 @@ func SessionResetStalledPayloadJSON(sessionName, template, resetCommittedAt stri
 	})
 	return b
 }
+
+// HandoffRestartNoEffectPayload is the typed payload for
+// session.handoff_restart_no_effect events. It identifies the session, the
+// mode ("self" or "remote") that requested the restart, the claimed
+// baseline identity vs. the identity observed once the grace period
+// elapsed, whether the runtime restart marker is still pending or already
+// cleared, and the elapsed wait used to compute the diagnostic threshold.
+type HandoffRestartNoEffectPayload struct {
+	SessionID            string `json:"session_id"`
+	SessionName          string `json:"session_name"`
+	Mode                 string `json:"mode"`
+	BeforeGeneration     string `json:"before_generation"`
+	BeforeAwakeStartedAt string `json:"before_awake_started_at"`
+	AfterGeneration      string `json:"after_generation"`
+	AfterAwakeStartedAt  string `json:"after_awake_started_at"`
+	RestartMarkerState   string `json:"restart_marker_state"`
+	Reason               string `json:"reason"`
+	ElapsedSeconds       int    `json:"elapsed_s"`
+}
+
+// IsEventPayload marks HandoffRestartNoEffectPayload as an events.Payload variant.
+func (HandoffRestartNoEffectPayload) IsEventPayload() {}
+
+// HandoffRestartNoEffectPayloadJSON builds the JSON wire form for attachment
+// to an Event.Payload field.
+func HandoffRestartNoEffectPayloadJSON(p HandoffRestartNoEffectPayload) json.RawMessage {
+	b, _ := json.Marshal(p)
+	return b
+}

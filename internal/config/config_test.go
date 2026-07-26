@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func strPtr(s string) *string { return &s }
@@ -2141,6 +2142,65 @@ func TestEffectiveSlingQueryCustom(t *testing.T) {
 	want := "custom-dispatch {} --target=worker"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+// TestEffectiveSlingQueryRouteLabelStampsClaimLabel covers ga-18johz: a
+// label-gated agent's claim work_query (narrowed by RouteLabel, ga-0av489)
+// cannot claim a bead that DefaultSlingQuery only routed via gc.routed_to.
+// RouteLabel also takes precedence over RouteLabelAny when both are set —
+// only one claim label is stamped, not every candidate.
+func TestEffectiveSlingQueryRouteLabelStampsClaimLabel(t *testing.T) {
+	a := Agent{Name: "worker", RouteLabel: []string{"ready-to-build", "reviewed"}, RouteLabelAny: []string{"urgent"}}
+	got := a.EffectiveSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=worker --add-label=" + shellquote.Quote("ready-to-build")
+	if got != want {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+// TestEffectiveSlingQueryNoRouteLabelEmitsNoLabelStamp is the regression
+// guard for the 82 routed gascity beads whose target agent is not
+// label-gated: routing alone is already sufficient for them, so sling
+// output must stay byte-identical to before RouteLabel existed.
+func TestEffectiveSlingQueryNoRouteLabelEmitsNoLabelStamp(t *testing.T) {
+	a := Agent{Name: "mayor"}
+	got := a.EffectiveSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=mayor"
+	if got != want {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "--add-label") {
+		t.Errorf("EffectiveSlingQuery() = %q, non-label-gated agent must not emit a label stamp", got)
+	}
+}
+
+// TestEffectiveSlingQueryRouteLabelAnyStampsFirstEntry covers an
+// OR-gated agent (RouteLabel unset): the claim label stamped is the
+// first RouteLabelAny entry, matching the "first entry" rule used for
+// RouteLabel.
+func TestEffectiveSlingQueryRouteLabelAnyStampsFirstEntry(t *testing.T) {
+	a := Agent{Name: "worker", RouteLabelAny: []string{"needs-review", "needs-triage"}}
+	got := a.EffectiveSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=worker --add-label=" + shellquote.Quote("needs-review")
+	if got != want {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+// TestEffectiveSlingQueryRouteLabelShellInjectionSafety guards NFR-01: a
+// label value containing shell metacharacters must reach the emitted bd
+// command as inert quoted data, never as executable syntax.
+func TestEffectiveSlingQueryRouteLabelShellInjectionSafety(t *testing.T) {
+	const malicious = "it's; rm -rf /"
+	a := Agent{Name: "worker", RouteLabel: []string{malicious}}
+	got := a.EffectiveSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=worker --add-label=" + shellquote.Quote(malicious)
+	if got != want {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "; rm -rf") {
+		t.Fatalf("EffectiveSlingQuery() leaked shell metacharacters unquoted: %q", got)
 	}
 }
 

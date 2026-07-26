@@ -11,9 +11,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // testSocketName is the dedicated tmux socket used by this integration test
@@ -795,19 +798,45 @@ func TestHasDescendantWithNames(t *testing.T) {
 }
 
 func TestGetAllDescendants(t *testing.T) {
-	// Test the getAllDescendants helper function
-
 	// Test with nonexistent PID - should return empty slice
 	got := getAllDescendants("999999999")
 	if len(got) != 0 {
 		t.Errorf("getAllDescendants(nonexistent) = %v, want empty slice", got)
 	}
 
-	// Test with PID 1 (init/launchd) - should find some descendants
-	// Note: We can't test exact PIDs, just that the function doesn't panic
-	// and returns reasonable results
-	descendants := getAllDescendants("1")
-	t.Logf("getAllDescendants(\"1\") found %d descendants", len(descendants))
+	// Use a test-owned process tree instead of recursively scanning every
+	// descendant of PID 1, which is unbounded on shared hosts.
+	cmd := exec.Command("sh", "-c", "sleep 30 & wait")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting process tree: %v", err)
+	}
+	var descendants []string
+	t.Cleanup(func() {
+		for _, rawPID := range descendants {
+			pid, err := strconv.Atoi(rawPID)
+			if err != nil {
+				continue
+			}
+			process, err := os.FindProcess(pid)
+			if err == nil {
+				_ = process.Kill()
+			}
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	deadline := time.Now().Add(testutil.ExecRaceTimeout)
+	for time.Now().Before(deadline) {
+		descendants = getAllDescendants(strconv.Itoa(cmd.Process.Pid))
+		if len(descendants) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(descendants) == 0 {
+		t.Fatalf("getAllDescendants(%d) found no test-owned descendants", cmd.Process.Pid)
+	}
 
 	// Verify returned PIDs are all numeric strings
 	for _, pid := range descendants {

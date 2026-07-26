@@ -41,3 +41,29 @@ fail-closed and both callers retain the unchanged
 - `go build ./...`: PASS
 - `go vet ./...`: PASS
 - `make test-fast-parallel`: PASS, 8/8 fast jobs passed on the first attempt
+
+## Supplemental evaluation: guard header refresh
+
+- Deploy bead: `ga-qvl7oc`
+- Review bead: `ga-jkkrbe`
+- Reviewed commit: `2ebc7803491a0a5c35738d70ab08c3cc63763a2b`
+- Parent / prior PR head: `19141edb18306dffcc009c04aa10683e0bcaa676`
+- Base checked: `origin/main` at `bbb7354377996e553e1e1dd4821ade2afd6ab1a1`
+- Evaluated: 2026-07-25
+
+PASS. The reviewed follow-up refreshes only the header comments in
+`scripts/push-ownership-guard.sh` so they describe the existing
+branch-bead/assignee-bead retry contract. It intentionally documents, without
+resolving, the open authorization-semantics question tracked on `ga-1hc9k3`.
+The sibling mutation-proof test (`ga-3vvi6r`) is not included in this
+supplement because it has not completed builder/reviewer routing.
+
+| # | Criterion | Verdict | Evidence |
+|---|-----------|---------|----------|
+| 6 | Branch diverges cleanly from main | PASS | Evaluated first. The reviewed commit is a direct child of the prior PR head. `git merge-tree --write-tree origin/main 2ebc78034` exited 0 and produced tree `b7b2cd3f4e75c945761901508fa6d95c338429e0`; `git diff --check` produced no output. |
+| 1 | Review PASS present | PASS | Closed review bead `ga-jkkrbe` records `REVIEW VERDICT: PASS` for exact commit `2ebc7803491a0a5c35738d70ab08c3cc63763a2b`. |
+| 2 | Acceptance criteria met | PASS | An executable-line diff check confirmed every added/removed line is a comment or blank line. The refreshed header accurately documents branch-first resolution, the terminal-status-only (`rc=2`) fallback, the non-retryable `rc=1` states, and the intentionally unresolved lack of a relatedness check. |
+| 3 | Tests pass | PASS | On the exact reviewed SHA: Bash syntax and ShellCheck passed; the ownership-guard suite passed 22/22; `go test ./scripts/...`, `go build ./...`, and `go vet ./...` passed; and the first `make test-fast-parallel` attempt passed all 8 fast jobs. |
+| 4 | No high-severity review findings open | PASS | `ga-jkkrbe` is closed with a PASS verdict, reports no inaccuracies or scope creep, and identifies no security finding because executable behavior is unchanged. |
+| 5 | Final branch is clean | PASS | `git status --porcelain=v1` produced no output at the reviewed SHA before this gate supplement was added. |
+| 7 | Single feature theme | PASS | The supplemental commit touches only the push ownership guard's header; the existing PR remains confined to the same guard and its tests. |

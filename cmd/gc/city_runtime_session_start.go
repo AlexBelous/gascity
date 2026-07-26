@@ -234,6 +234,13 @@ func (cr *CityRuntime) stopSessionStartController() {
 	}
 }
 
+func (cr *CityRuntime) restartSessionStartController(ctx context.Context) error {
+	if cr == nil {
+		return fmt.Errorf("city runtime is nil")
+	}
+	return cr.ensureSessionStartController(ctx, cr.loadSessionBeadSnapshot())
+}
+
 func (cr *CityRuntime) sessionStartOwnershipState() sessionStartOwnership {
 	if cr == nil {
 		return sessionStartOwnershipLegacy

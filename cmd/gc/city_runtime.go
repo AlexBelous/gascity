@@ -2005,11 +2005,18 @@ func (cr *CityRuntime) reloadConfigTraced(
 	})
 
 	if providerChanged {
+		// The keyed child owns provider Start calls independently of the fleet
+		// tick. Drain it before observing or stopping the old provider so no old-
+		// generation start can appear behind the provider-swap census.
+		cr.stopSessionStartController()
 		running, lErr := cr.sp.ListRunning("")
 		if lErr != nil {
 			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
 			if runtime.IsPartialListError(lErr) {
 				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
+			}
+			if restartErr := cr.restartSessionStartController(ctx); restartErr != nil {
+				err = errors.Join(err, fmt.Errorf("restoring session-start controller after aborted provider swap: %w", restartErr))
 			}
 			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
@@ -2107,6 +2114,14 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
+	}
+	if providerChanged {
+		if err := cr.restartSessionStartController(ctx); err != nil {
+			// The provider/config swap is already committed and cannot be rolled
+			// back without resurrecting stopped old-provider sessions. Require mode
+			// remains fail-closed; auto's activation helper degrades loudly itself.
+			appendWarning(fmt.Sprintf("session-start controller restart after provider swap: %v; keyed starts remain blocked", err))
+		}
 	}
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {

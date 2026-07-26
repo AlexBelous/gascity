@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -308,6 +310,206 @@ func TestCityRuntimeSessionStartRequireBlocksBothOwnersDuringConfigMutation(t *t
 	option := cr.sessionStartLegacyExclusionOption()
 	if option == nil || !legacySessionStartExcluded(option, info) {
 		t.Fatal("require mode allowed legacy to enter while keyed config was unavailable")
+	}
+}
+
+func TestCityRuntimeProviderSwapDrainsKeyedStartBeforeListingOldProvider(t *testing.T) {
+	oldProvider := runtime.NewFake()
+	fixture := newSessionStartProviderSwapFixture(t, oldProvider, rollout.Auto)
+	cr := fixture.cr
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 4,
+		MaxRetries:  0,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			close(entered)
+			<-release
+			return nil
+		},
+	})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	cr.sessionStartController = controller
+	cr.sessionStartOwnership = sessionStartOwnershipKeyed
+	cr.sessionStartMode = rollout.Auto
+	if _, err := controller.Admit("gcs-provider-swap1", sessionStartAdmissionExplicitWake); err != nil {
+		t.Fatalf("admit pending keyed start: %v", err)
+	}
+	awaitClose(t, entered, "pending keyed start")
+
+	writeCityRuntimeConfig(t, fixture.tomlPath, "fail")
+	lastProviderName := "fake"
+	var reply reloadControlReply
+	reloadDone := make(chan struct{})
+	go func() {
+		reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, fixture.cityPath, nil, reloadSourceManual)
+		close(reloadDone)
+	}()
+	awaitCond(t, func() bool {
+		controller.mu.Lock()
+		stopped := controller.stopped
+		controller.mu.Unlock()
+		return stopped || oldProvider.CountCalls("ListRunning", "") > 0 || channelClosed(reloadDone)
+	}, "provider reload to reach keyed drain or old-provider listing")
+
+	controller.mu.Lock()
+	stopped := controller.stopped
+	controller.mu.Unlock()
+	if !stopped {
+		t.Fatal("provider reload listed or swapped the old provider before stopping the keyed child")
+	}
+	if got := oldProvider.CountCalls("ListRunning", ""); got != 0 {
+		t.Fatalf("old-provider ListRunning calls before keyed drain = %d, want 0", got)
+	}
+
+	close(release)
+	awaitClose(t, reloadDone, "provider reload after keyed drain")
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q, want applied: %+v", reply.Outcome, reply)
+	}
+	if got := oldProvider.CountCalls("ListRunning", ""); got != 1 {
+		t.Fatalf("old-provider ListRunning calls = %d, want 1 after keyed drain", got)
+	}
+	if cr.sessionStartController == nil || cr.sessionStartController == controller {
+		t.Fatal("provider reload did not restart a fresh keyed child")
+	}
+	if cr.sessionStartOwnershipState() != sessionStartOwnershipKeyed {
+		t.Fatalf("ownership after provider reload = %v, want keyed", cr.sessionStartOwnershipState())
+	}
+}
+
+func TestCityRuntimeProviderSwapListingFailureRestoresKeyedChild(t *testing.T) {
+	oldProvider := &partialListPoolProvider{
+		Fake:    runtime.NewFake(),
+		listErr: errors.New("old provider unavailable"),
+	}
+	fixture := newSessionStartProviderSwapFixture(t, oldProvider, rollout.Auto)
+	if err := fixture.cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("start old keyed child: %v", err)
+	}
+	oldChild := fixture.cr.sessionStartController
+
+	writeCityRuntimeConfig(t, fixture.tomlPath, "fail")
+	lastProviderName := "fake"
+	reply := fixture.cr.reloadConfigTraced(context.Background(), &lastProviderName, fixture.cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeFailed {
+		t.Fatalf("reload outcome = %q, want failed: %+v", reply.Outcome, reply)
+	}
+	if lastProviderName != "fake" || fixture.cr.sp != oldProvider {
+		t.Fatal("aborted provider swap changed the active provider")
+	}
+	if fixture.cr.sessionStartController == nil || fixture.cr.sessionStartController == oldChild {
+		t.Fatal("aborted provider swap did not restore a fresh keyed child")
+	}
+	if fixture.cr.sessionStartOwnershipState() != sessionStartOwnershipKeyed {
+		t.Fatalf("ownership after aborted provider swap = %v, want keyed", fixture.cr.sessionStartOwnershipState())
+	}
+}
+
+func TestCityRuntimeProviderSwapRestartFailureHonorsRolloutMode(t *testing.T) {
+	tests := []struct {
+		name          string
+		mode          rollout.Mode
+		wantOwnership sessionStartOwnership
+		wantText      string
+	}{
+		{name: "auto degrades loudly", mode: rollout.Auto, wantOwnership: sessionStartOwnershipLegacy, wantText: "falling back to legacy"},
+		{name: "require remains blocked", mode: rollout.Require, wantOwnership: sessionStartOwnershipRequiredBlocked, wantText: "keyed starts remain blocked"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			oldProvider := runtime.NewFake()
+			fixture := newSessionStartProviderSwapFixture(t, oldProvider, test.mode)
+			var stderr bytes.Buffer
+			fixture.cr.stderr = &stderr
+			if err := fixture.cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+				t.Fatalf("start old keyed child: %v", err)
+			}
+			previousFactory := newCitySessionStartController
+			newCitySessionStartController = func(sessionStartControllerOptions) (*sessionStartController, error) {
+				return nil, errors.New("injected child restart failure")
+			}
+			t.Cleanup(func() {
+				newCitySessionStartController = previousFactory
+			})
+
+			writeCityRuntimeConfig(t, fixture.tomlPath, "fail")
+			lastProviderName := "fake"
+			reply := fixture.cr.reloadConfigTraced(context.Background(), &lastProviderName, fixture.cityPath, nil, reloadSourceManual)
+
+			if reply.Outcome != reloadOutcomeApplied {
+				t.Fatalf("reload outcome = %q, want applied after committed provider swap: %+v", reply.Outcome, reply)
+			}
+			if lastProviderName != "fail" {
+				t.Fatalf("last provider = %q, want fail", lastProviderName)
+			}
+			if fixture.cr.sessionStartOwnershipState() != test.wantOwnership {
+				t.Fatalf("ownership = %v, want %v", fixture.cr.sessionStartOwnershipState(), test.wantOwnership)
+			}
+			combinedDiagnostics := stderr.String() + strings.Join(reply.Warnings, "\n")
+			if !strings.Contains(combinedDiagnostics, test.wantText) || !strings.Contains(combinedDiagnostics, "injected child restart failure") {
+				t.Fatalf("diagnostics = %q, want %q and injected failure", combinedDiagnostics, test.wantText)
+			}
+		})
+	}
+}
+
+type sessionStartProviderSwapFixture struct {
+	cr       *CityRuntime
+	cityPath string
+	tomlPath string
+}
+
+func newSessionStartProviderSwapFixture(
+	t *testing.T,
+	oldProvider runtime.Provider,
+	mode rollout.Mode,
+) sessionStartProviderSwapFixture {
+	t.Helper()
+	stubManagedDoltStoreOpeners(t)
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       oldProvider,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(oldProvider),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, oldProvider, events.NewFake(), "test-city", cityPath)
+	cs.rolloutFlags = rollout.ForTest(rollout.WithSessionStartReconciler(mode))
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+	return sessionStartProviderSwapFixture{cr: cr, cityPath: cityPath, tomlPath: tomlPath}
+}
+
+func channelClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
 

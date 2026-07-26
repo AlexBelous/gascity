@@ -1052,9 +1052,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	}
 	if fragMeta.IsDefined("daemon") {
 		formulaV2 := base.Daemon.FormulaV2
+		sessionStartReconciler := base.Daemon.SessionStartReconciler
 		base.Daemon = fragment.Daemon
 		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
 			base.Daemon.FormulaV2 = formulaV2
+		}
+		if !fragMeta.IsDefined("daemon", "session_start_reconciler") {
+			base.Daemon.SessionStartReconciler = sessionStartReconciler
 		}
 	}
 	if fragMeta.IsDefined("session") {

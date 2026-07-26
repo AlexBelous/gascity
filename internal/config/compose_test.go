@@ -106,6 +106,33 @@ patrol_interval = "1m"
 	}
 }
 
+func TestLoadWithIncludesPreservesSessionStartReconcilerAcrossDaemonFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+session_start_reconciler = "require"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+patrol_interval = "1m"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Daemon.SessionStartReconciler; got != "require" {
+		t.Fatalf("Daemon.SessionStartReconciler = %q, want require", got)
+	}
+	if cfg.Daemon.PatrolInterval != "1m" {
+		t.Fatalf("Daemon.PatrolInterval = %q, want fragment field", cfg.Daemon.PatrolInterval)
+	}
+}
+
 func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

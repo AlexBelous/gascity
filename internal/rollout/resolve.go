@@ -55,6 +55,15 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 		f.formulaV2 = resolved[bool]{value: value, origin: OriginConfig}
 	}
 
+	// daemon.session_start_reconciler — boot-latched Mode gate, no env
+	// override. Runtime capability selection happens at the controller
+	// composition root after resolution.
+	if err := resolveModeGate(cfg, lookup, &f, specByKey(keyDaemonSessionStartReconciler),
+		readDaemonSessionStartReconciler,
+		func(f *Flags, r resolved[Mode]) { f.sessionStartReconciler = r }); err != nil {
+		return Flags{}, err
+	}
+
 	return f, nil
 }
 

@@ -62,6 +62,20 @@ var specs = []Spec{
 		Justification: "Retire the v1 formula path and its process-global atomic.Bool setter " +
 			"anti-pattern; the migration whose completion deletes cmd/gc/feature_flags.go.",
 	},
+	{
+		Key:            keyDaemonSessionStartReconciler,
+		Category:       InfraRollout,
+		ConfigPath:     "daemon.session_start_reconciler",
+		EnvOverride:    "",
+		Default:        Default{Mode: ptr(Off)},
+		Owner:          Owner{Bead: "ga-f7v2ft", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-07-26",
+		VersionAnchor:  "gcSessionStartReconcilerRemovalFloor",
+		SelectsBetween: [2]string{"legacy fleet-wide session-start reconciliation", "keyed exact-session start reconciliation"},
+		Justification: "Roll out exact-key session-start ownership independently from the legacy " +
+			"fleet scan while parity, recovery, and latency evidence accumulate; the gate is " +
+			"deleted after keyed ownership becomes the only supported start path.",
+	},
 }
 
 // Specs returns a defensive copy of the canonical registry. The Default pointers

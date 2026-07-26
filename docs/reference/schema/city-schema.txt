@@ -1281,6 +1281,16 @@
           "type": "boolean",
           "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility as an alias. Explicit formula_v2 wins."
         },
+        "session_start_reconciler": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "SessionStartReconciler selects ownership of session-start causes during\nthe keyed reconciler rollout. \"off\" (the default) keeps every start on\nthe legacy fleet-wide reconciler. \"auto\" selects the keyed path when its\nboot-time requirements are available and otherwise degrades loudly.\n\"require\" refuses startup rather than falling back when those requirements\nare unavailable. The value is boot-latched; changing it requires a\ncontroller restart.",
+          "default": "off"
+        },
         "patrol_interval": {
           "type": "string",
           "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",

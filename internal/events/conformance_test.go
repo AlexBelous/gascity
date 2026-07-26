@@ -24,6 +24,7 @@ func TestFileRecorderConformance(t *testing.T) {
 	eventstest.RunProviderTests(t, factory)
 	eventstest.RunConcurrencyTests(t, factory)
 	eventstest.RunRotationTests(t, factory)
+	eventstest.RunContextCancellationTests(t, factory)
 }
 
 func TestFakeConformance(t *testing.T) {
@@ -34,4 +35,5 @@ func TestFakeConformance(t *testing.T) {
 	eventstest.RunProviderTests(t, factory)
 	eventstest.RunConcurrencyTests(t, factory)
 	eventstest.RunInMemoryWakeTests(t, factory)
+	eventstest.RunContextCancellationTests(t, factory)
 }

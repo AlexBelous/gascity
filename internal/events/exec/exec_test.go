@@ -3,6 +3,7 @@ package exec //nolint:revive // internal package, always imported with alias
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -90,7 +91,7 @@ func TestList(t *testing.T) {
 	script := writeScript(t, dir, allOpsScript())
 	p := NewProvider(script, os.Stderr)
 
-	evts, err := p.List(events.Filter{})
+	evts, err := p.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -116,7 +117,7 @@ esac
 `)
 	p := NewProvider(script, os.Stderr)
 
-	evts, err := p.List(events.Filter{})
+	evts, err := p.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -140,7 +141,7 @@ esac
 `)
 	p := NewProvider(script, os.Stderr)
 
-	_, err := p.List(events.Filter{Type: events.BeadCreated, AfterSeq: 5})
+	_, err := p.List(context.Background(), events.Filter{Type: events.BeadCreated, AfterSeq: 5})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -176,7 +177,7 @@ esac
 	p := NewProvider(script, os.Stderr)
 	until := time.Date(2025, 6, 15, 10, 31, 0, 0, time.UTC)
 
-	evts, err := p.List(events.Filter{Subject: "gc-1", Until: until, Limit: 1})
+	evts, err := p.List(context.Background(), events.Filter{Subject: "gc-1", Until: until, Limit: 1})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -226,7 +227,7 @@ esac
 `)
 	p := NewProvider(script, os.Stderr)
 
-	evts, err := p.List(events.Filter{Subject: "gc-1", Limit: 1})
+	evts, err := p.List(context.Background(), events.Filter{Subject: "gc-1", Limit: 1})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -251,7 +252,7 @@ esac
 `)
 	p := NewProvider(script, os.Stderr)
 
-	_, err := p.List(events.Filter{})
+	_, err := p.List(context.Background(), events.Filter{})
 	if err == nil {
 		t.Fatal("List returned nil error, want unmarshal error")
 	}
@@ -341,9 +342,9 @@ esac
 	p := NewProvider(script, os.Stderr)
 
 	// Multiple operations should only call ensure-running once.
-	p.List(events.Filter{}) //nolint:errcheck
-	p.LatestSeq()           //nolint:errcheck
-	p.List(events.Filter{}) //nolint:errcheck
+	p.List(context.Background(), events.Filter{}) //nolint:errcheck
+	p.LatestSeq()                                 //nolint:errcheck
+	p.List(context.Background(), events.Filter{}) //nolint:errcheck
 
 	data, _ := os.ReadFile(countFile)
 	count := strings.TrimSpace(string(data))
@@ -363,7 +364,7 @@ esac
 `)
 	p := NewProvider(script, os.Stderr)
 
-	evts, err := p.List(events.Filter{})
+	evts, err := p.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List after ensure-running exit 2: %v", err)
 	}
@@ -387,7 +388,7 @@ esac
 `)
 	p := NewProvider(script, os.Stderr)
 
-	_, err := p.List(events.Filter{})
+	_, err := p.List(context.Background(), events.Filter{})
 	if err == nil {
 		t.Fatal("expected error from exit 1, got nil")
 	}
@@ -412,7 +413,7 @@ esac
 	p.timeout = 500 * time.Millisecond
 
 	start := time.Now()
-	_, err := p.List(events.Filter{})
+	_, err := p.List(context.Background(), events.Filter{})
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -420,6 +421,42 @@ esac
 
 	if elapsed > 5*time.Second {
 		t.Errorf("timeout took %v, expected ~500ms", elapsed)
+	}
+}
+
+func TestContextCancellation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow test")
+	}
+
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  *) sleep 60 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+	// p.timeout stays at its 30s default, far longer than the ctx deadline
+	// below, so a fast return here proves the caller's ctx aborts the
+	// subprocess on its own rather than merely riding the provider's own
+	// internal timeout to completion.
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := p.List(ctx, events.Filter{})
+	if err == nil {
+		t.Fatal("expected error from ctx deadline, got nil")
+	}
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Errorf("cancellation took %v, expected ~500ms", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context.DeadlineExceeded", err)
 	}
 }
 

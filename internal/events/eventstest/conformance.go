@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -56,7 +57,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 			Message: "Build Tower of Hanoi",
 		})
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -85,7 +86,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
 		p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -109,7 +110,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 
 		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -131,7 +132,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		explicit := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
 		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Ts: explicit})
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -154,7 +155,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 			Message: "agent started successfully",
 		})
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -184,7 +185,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})
 		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -202,7 +203,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
 		p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -219,7 +220,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})
 		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 
-		got, err := p.List(events.Filter{Type: events.BeadCreated})
+		got, err := p.List(context.Background(), events.Filter{Type: events.BeadCreated})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -239,7 +240,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 		p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})
 
-		got, err := p.List(events.Filter{Actor: "gc"})
+		got, err := p.List(context.Background(), events.Filter{Actor: "gc"})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -260,7 +261,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 
 		// Get all events to find seq values.
-		all, err := p.List(events.Filter{})
+		all, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List(all): %v", err)
 		}
@@ -269,7 +270,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 
 		// Filter after the first event's seq.
-		got, err := p.List(events.Filter{AfterSeq: all[0].Seq})
+		got, err := p.List(context.Background(), events.Filter{AfterSeq: all[0].Seq})
 		if err != nil {
 			t.Fatalf("List(AfterSeq): %v", err)
 		}
@@ -295,7 +296,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc"}) // auto-filled = now
 
 		since := now.Add(-1 * time.Hour)
-		got, err := p.List(events.Filter{Since: since})
+		got, err := p.List(context.Background(), events.Filter{Since: since})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -315,7 +316,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.BeadClosed, Actor: "actor-a", Subject: "gc-2"})
 		p.Record(events.Event{Type: events.BeadUpdated, Actor: "actor-b", Subject: "gc-1"})
 
-		got, err := p.List(events.Filter{Subject: "gc-1"})
+		got, err := p.List(context.Background(), events.Filter{Subject: "gc-1"})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -340,7 +341,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.BeadUpdated, Actor: "actor-a", Subject: "boundary", Ts: cutoff})
 		p.Record(events.Event{Type: events.BeadClosed, Actor: "actor-a", Subject: "after", Ts: after})
 
-		got, err := p.List(events.Filter{Until: cutoff})
+		got, err := p.List(context.Background(), events.Filter{Until: cutoff})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -363,7 +364,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 			p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: subject})
 		}
 
-		got, err := p.List(events.Filter{Limit: 2})
+		got, err := p.List(context.Background(), events.Filter{Limit: 2})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -394,7 +395,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(55 * time.Minute)}) // limited out
 
 		// Get all to find seq of first event.
-		all, err := p.List(events.Filter{})
+		all, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List(all): %v", err)
 		}
@@ -402,7 +403,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 			t.Fatal("need at least 1 event")
 		}
 
-		got, err := p.List(events.Filter{
+		got, err := p.List(context.Background(), events.Filter{
 			Type:     events.BeadCreated,
 			Actor:    "human",
 			Subject:  "gc-1",
@@ -433,7 +434,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 
 		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
 
-		got, err := p.List(events.Filter{Type: events.MailSent})
+		got, err := p.List(context.Background(), events.Filter{Type: events.MailSent})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -446,7 +447,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p, cleanup := newProvider(t)
 		defer cleanup()
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -484,7 +485,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 
 		// Get all events to verify the seq matches the last event.
-		all, err := p.List(events.Filter{})
+		all, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -581,7 +582,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		p.Record(events.Event{Type: events.BeadClosed, Actor: "human", Subject: "gc-1"})
 
 		// Get all to find seq of last event.
-		all, err := p.List(events.Filter{})
+		all, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -627,7 +628,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		for i := 0; i < 5; i++ {
 			p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: fmt.Sprintf("h-%d", i)})
 		}
-		all, err := p.List(events.Filter{})
+		all, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -811,7 +812,7 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 
 		// (b) ReadAll spans active + archives.
-		all, err := p.List(events.Filter{})
+		all, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -823,6 +824,141 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 			if all[i].Seq <= all[i-1].Seq {
 				t.Errorf("List seq not monotonic at %d: %d <= %d", i, all[i].Seq, all[i-1].Seq)
 			}
+		}
+	})
+}
+
+// countingCancelContext cancels its embedded context the Nth time Err is
+// called, letting a test pin cancellation to a specific point in a
+// multi-archive scan loop instead of racing a background timer. Mirrors
+// internal/events's unexported countingCancelContext (reader_context_test.go);
+// duplicated here because eventstest is a separate package.
+type countingCancelContext struct {
+	context.Context
+	cancel   context.CancelFunc
+	cancelAt int
+	calls    int
+}
+
+func (c *countingCancelContext) Err() error {
+	c.calls++
+	if c.calls == c.cancelAt {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// newCancelAfter returns a context that becomes canceled on the Nth call to
+// Err(), so a test can prove a scan loop checks ctx.Err() once per
+// iteration rather than only once at entry.
+func newCancelAfter(n int) *countingCancelContext {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &countingCancelContext{Context: ctx, cancel: cancel, cancelAt: n}
+}
+
+// RunContextCancellationTests exercises List's ctx-cancellation contract.
+// ListWithBackgroundContextMatchesCurrentBehavior runs against every
+// provider: List(context.Background(), filter) must behave exactly as it
+// did before the ctx parameter was added. The remaining subtests exercise
+// providers that expose ForceRotate: List must abort a fallback archive scan
+// as soon as ctx is canceled, checking cancellation between archives rather
+// than only once upfront or only after scanning everything. Providers that
+// don't satisfy ForceRotate skip those subtests — the between-archives proof
+// needs multiple archives to distinguish "aborted partway" from "aborted
+// upfront" or "ran to completion".
+func RunContextCancellationTests(t *testing.T, newProvider func(t *testing.T) (events.Provider, func())) {
+	t.Helper()
+
+	t.Run("ListWithBackgroundContextMatchesCurrentBehavior", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1"})
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "human", Subject: "gc-1"})
+
+		got, err := p.List(context.Background(), events.Filter{Type: events.BeadCreated})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d events, want 1 (filter behavior unchanged by ctx param): %+v", len(got), got)
+		}
+		if got[0].Type != events.BeadCreated {
+			t.Errorf("Type = %q, want %q", got[0].Type, events.BeadCreated)
+		}
+	})
+
+	t.Run("ListAbortsBetweenArchives", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		rec, ok := p.(rotatableProvider)
+		if !ok {
+			t.Skipf("provider %T does not support ForceRotate", p)
+		}
+
+		const archives, perArchive = 3, 2
+		for r := 0; r < archives; r++ {
+			for i := 0; i < perArchive; i++ {
+				p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: fmt.Sprintf("r%d-%d", r, i)})
+			}
+			res, err := rec.ForceRotate()
+			if err != nil {
+				t.Fatalf("ForceRotate r=%d: %v", r, err)
+			}
+			if !res.Rotated {
+				t.Fatalf("ForceRotate r=%d did not rotate a non-empty log", r)
+			}
+			if res.Done != nil {
+				<-res.Done
+			}
+		}
+
+		// Err() call #1 fires before archive 1 is processed (not yet
+		// canceled). Call #2 fires before archive 2 -- that's where this
+		// cancels.
+		ctx := newCancelAfter(2)
+		got, err := p.List(ctx, events.Filter{})
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		if len(got) != perArchive {
+			t.Fatalf("got %d events, want exactly archive 1's %d events (partial progress before abort): %+v", len(got), perArchive, got)
+		}
+		for _, e := range got {
+			if !strings.HasPrefix(e.Subject, "r0-") {
+				t.Errorf("event %+v leaked from archive 2/3 -- scan should have aborted before opening them", e)
+			}
+		}
+	})
+
+	t.Run("ListAbortsUpfrontWhenAlreadyCanceled", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		rec, ok := p.(rotatableProvider)
+		if !ok {
+			t.Skipf("provider %T does not support ForceRotate", p)
+		}
+
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+		res, err := rec.ForceRotate()
+		if err != nil {
+			t.Fatalf("ForceRotate: %v", err)
+		}
+		if res.Done != nil {
+			<-res.Done
+		}
+
+		ctx := newCancelAfter(1) // cancels on the very first ctx.Err() check.
+		got, err := p.List(ctx, events.Filter{})
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("got %d events, want 0 (canceled before any archive opened): %+v", len(got), got)
 		}
 	})
 }
@@ -851,7 +987,7 @@ func RunConcurrencyTests(t *testing.T, newProvider func(t *testing.T) (events.Pr
 		}
 		wg.Wait()
 
-		got, err := p.List(events.Filter{})
+		got, err := p.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}

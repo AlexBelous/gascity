@@ -889,7 +889,7 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if err := nudgePokeController(target.cityPath); err != nil {
+	if err := pokeSessionStartControllerWith(target.cityPath, target.sessionID, sendControllerCommand, nudgePokeController); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
@@ -1139,7 +1139,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
 			return err
 		}
-		if err := nudgePokeController(target.cityPath); err != nil {
+		if err := pokeSessionStartControllerWith(target.cityPath, target.sessionID, sendControllerCommand, nudgePokeController); err != nil {
 			if nudgeWarningWriter != nil {
 				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: warning: poke failed after managed wake: %v\n", err) //nolint:errcheck
 			}

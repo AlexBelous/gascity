@@ -359,8 +359,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
-			// Poke again after bead creation to trigger immediate reconciler tick.
-			_ = pokeController(cityPath)
+			// Admit the exact durable key after creation. Mixed-version or
+			// unavailable keyed controllers retain the generic-poke fallback.
+			_ = pokeSessionStartController(cityPath, info.ID)
 
 			if jsonOutput {
 				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{

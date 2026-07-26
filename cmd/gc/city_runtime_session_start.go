@@ -250,6 +250,28 @@ func (cr *CityRuntime) sessionStartOwnershipState() sessionStartOwnership {
 	return cr.sessionStartOwnership
 }
 
+func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStartSocketReply {
+	if cr == nil {
+		return sessionStartSocketReplyFallback
+	}
+	if err := validateSessionStartAdmission(sessionID, sessionStartAdmissionSocket); err != nil {
+		return sessionStartSocketReplyInvalid
+	}
+
+	cr.sessionStartMu.Lock()
+	controller := cr.sessionStartController
+	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	cr.sessionStartMu.Unlock()
+	if !owned || controller == nil {
+		return sessionStartSocketReplyFallback
+	}
+	outcome, err := controller.Admit(sessionID, sessionStartAdmissionSocket)
+	if err != nil || outcome == sessionStartAdmissionOverflow {
+		return sessionStartSocketReplyFallback
+	}
+	return sessionStartSocketReplyOK
+}
+
 func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption {
 	if cr == nil {
 		return nil

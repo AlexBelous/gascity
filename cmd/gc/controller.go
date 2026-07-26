@@ -138,7 +138,9 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 // startControllerSocket listens on a Unix socket at .gc/controller.sock.
 // When a client sends "stop\n", cancelFn is called to shut down the
 // controller loop. convergenceReqCh is used to route convergence commands
-// to the event loop for serialized processing. Returns the listener for cleanup.
+// to the event loop for serialized processing. admitSessionStart accepts only
+// validated durable session keys; the runtime rereads their authoritative state.
+// Returns the listener for cleanup.
 func startControllerSocket(
 	cityPath string,
 	hostingMode controllerHostingMode,
@@ -149,6 +151,7 @@ func startControllerSocket(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	admitSessionStart sessionStartSocketAdmitter,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -169,7 +172,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart)
 		}
 	}()
 	return lis, nil
@@ -178,8 +181,9 @@ func startControllerSocket(
 // handleControllerConn reads from a connection and dispatches commands.
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
-// "identify" (typed process identity), and "converge:{json}" (convergence
-// commands routed to event loop).
+// "identify" (typed process identity), "converge:{json}" (convergence
+// commands routed to event loop), and "session-start:<id>" (exact durable-key
+// admission for the keyed start controller).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
@@ -191,6 +195,7 @@ func handleControllerConn(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	admitSessionStart sessionStartSocketAdmitter,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -238,6 +243,8 @@ func handleControllerConn(
 			default:
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case strings.HasPrefix(line, sessionStartCommandPrefix):
+			handleSessionStartSocketCmd(conn, line[len(sessionStartCommandPrefix):], admitSessionStart)
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
 		case strings.HasPrefix(line, "converge:"):
@@ -1317,10 +1324,17 @@ func runController(
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
+	var sessionStartRuntime atomic.Pointer[CityRuntime]
+	admitSessionStart := func(sessionID string) sessionStartSocketReply {
+		if cr := sessionStartRuntime.Load(); cr != nil {
+			return cr.admitSessionStartSocketKey(sessionID)
+		}
+		return sessionStartSocketReplyFallback
+	}
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1386,6 +1400,7 @@ func runController(
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
+	sessionStartRuntime.Store(cr)
 
 	// One-time startup hygiene: release stale runtime name claims held by
 	// closed configured named-session beads so on-demand respawn is not blocked

@@ -14,9 +14,10 @@ import (
 // the store verbatim there), so wrapping is byte-identical until a session
 // relocation is configured.
 //
-// The recorder is nil: a one-shot CLI command has no live event bus, matching
-// today's behavior where these paths emit no bead events. Threading a recorder
-// so relocated CLI writes emit bead.* is a separate follow-up.
+// The recorder is nil: a one-shot CLI command has no live event bus, so these
+// paths emit no bead events. Callers that write durable session-start intent
+// send the exact resulting session key over the controller socket; the
+// controller still rereads this store as the sole authority.
 func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
 	return resolveSessionStore(store, cfg, cityPath, nil)
 }

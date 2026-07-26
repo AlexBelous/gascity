@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -623,7 +624,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}
 
 	gotCommands := make([]string, 0, 3)
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(testutil.GoroutineRaceTimeout)
 	for len(gotCommands) < 3 {
 		select {
 		case err := <-errCh:
@@ -633,17 +634,23 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 		case cmd, ok := <-commands:
 			if !ok {
 				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping plus 2 pokes", gotCommands)
+					t.Fatalf("controller commands = %v, want ping, readiness poke, and exact start", gotCommands)
 				}
 				break
 			}
 			gotCommands = append(gotCommands, cmd)
 		case <-deadline:
-			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
+			t.Fatalf("timed out waiting for controller commands, got %v", gotCommands)
 		}
 	}
 
 	bead := onlySessionBead(t, cityDir)
+	wantCommands := []string{"ping\n", "poke\n", sessionStartCommandPrefix + bead.ID + "\n"}
+	for i, want := range wantCommands {
+		if gotCommands[i] != want {
+			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
+		}
+	}
 	if got := bead.Metadata[session.MCPIdentityMetadataKey]; got == "" {
 		t.Fatal("mcp_identity metadata = empty, want persisted identity")
 	}
@@ -2407,7 +2414,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}
 
 	gotCommands := make([]string, 0, 3)
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(testutil.GoroutineRaceTimeout)
 	for len(gotCommands) < 3 {
 		select {
 		case err := <-errCh:
@@ -2417,23 +2424,23 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 		case cmd, ok := <-commands:
 			if !ok {
 				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping plus 2 pokes", gotCommands)
+					t.Fatalf("controller commands = %v, want ping, readiness poke, and exact start", gotCommands)
 				}
 				break
 			}
 			gotCommands = append(gotCommands, cmd)
 		case <-deadline:
-			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
+			t.Fatalf("timed out waiting for controller commands, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n", "poke\n"}
+	b := onlySessionBead(t, cityDir)
+	wantCommands := []string{"ping\n", "poke\n", sessionStartCommandPrefix + b.ID + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
 		}
 	}
 
-	b := onlySessionBead(t, cityDir)
 	if got := b.Metadata["alias"]; got != "mayor" {
 		t.Fatalf("alias = %q, want mayor", got)
 	}

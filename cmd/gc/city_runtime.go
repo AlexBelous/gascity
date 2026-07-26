@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -116,6 +117,15 @@ type CityRuntime struct {
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 	lifecycleShadowWorker *sessionLifecycleShadowWorker
+
+	sessionStartMu         sync.Mutex
+	sessionStartController *sessionStartController
+	sessionStartOwnership  sessionStartOwnership
+	sessionStartMode       rollout.Mode
+	// sessionStartOptions is empty in production. Focused tests install the
+	// existing deterministic start waiters here so composition tests prove the
+	// real exact-start path without wall-clock stability delays.
+	sessionStartOptions []startExecutionOption
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -615,6 +625,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		// state, so desired state does not reference already-closed beads (#742).
 		if reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
+		}
+		if err := cr.ensureSessionStartController(ctx, sessionBeads); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: session-start controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
+			return
 		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
 		sessionBeads = cr.loadSessionBeadSnapshot()
@@ -2274,6 +2288,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		recordPhase(TraceSiteSessionSnapshot, "bead_reconcile.load_session_snapshot", phaseStart, traceSessionSnapshotFields(sessionBeads))
 		result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	}
+	cr.seedActiveSessionStartController(sessionBeads)
 	// Emit any due compute usage facts by reusing the open-session snapshot this
 	// tick already loaded, rather than issuing a second redundant store scan. The
 	// boot pass covers the whole fleet at once on the readiness path, so it takes
@@ -2421,6 +2436,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	if shadowOption := cr.sessionLifecycleShadowStartOption(); shadowOption != nil {
 		reconcileStartOptions = append(reconcileStartOptions, shadowOption)
+	}
+	if keyedOption := cr.sessionStartLegacyExclusionOption(); keyedOption != nil {
+		reconcileStartOptions = append(reconcileStartOptions, keyedOption)
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
@@ -3569,6 +3587,7 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		cr.stopSessionStartController()
 		cr.stopSessionLifecycleShadowWorker()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()

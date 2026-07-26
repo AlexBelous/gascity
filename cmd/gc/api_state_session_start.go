@@ -167,6 +167,9 @@ func (cs *controllerState) stopSessionStartEventAdmission() {
 	cs.sessionStartEventAdmission = nil
 	cs.mu.Unlock()
 	cs.sessionStartEventAdmissionWG.Wait()
+	cs.mu.Lock()
+	cs.sessionStartEventAdmissionStopping = false
+	cs.mu.Unlock()
 }
 
 func (cs *controllerState) admitSessionStartEvent(evt events.Event) {

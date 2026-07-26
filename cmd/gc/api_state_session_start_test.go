@@ -254,6 +254,11 @@ func TestControllerStateStoppingSessionEventAdmissionDrainsCallback(t *testing.T
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("callback calls = %d, want 1 after admission stopped", got)
 	}
+
+	if err := cs.installSessionStartEventAdmission(func(string) {}); err != nil {
+		t.Fatalf("reinstallSessionStartEventAdmission after completed drain: %v", err)
+	}
+	cs.stopSessionStartEventAdmission()
 }
 
 func beadEventForSessionStartTest(t *testing.T, eventType string, bead beads.Bead) events.Event {

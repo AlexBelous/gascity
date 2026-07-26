@@ -2041,16 +2041,18 @@ flatten_database() {
           ;;
       esac
     fi
+    pending_push_retry_stale=0
     if [ "$legacy_pending_push_recovered" != "1" ]; then
-      ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+      ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || pending_push_retry_stale=1
     fi
-    if [ -n "$dry_run" ]; then
-      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
-      return 0
+    if [ "$pending_push_retry_stale" != "1" ]; then
+      if [ -n "$dry_run" ]; then
+        printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
+      else
+        printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
+        push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
+      fi
     fi
-    printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
-    push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
-    return $?
   fi
 
   if ! count=$(commit_count "$db"); then

@@ -88,7 +88,7 @@ func (s *Server) runtimeSessionResponseHandle(info session.Info) sessionResponse
 	return newProviderSessionResponseHandle(s.state.SessionProvider(), info.SessionName, info.Provider)
 }
 
-func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
+func sessionToResponse(info session.Info, cfg *config.City, sp runtime.Provider) sessionResponse {
 	provider, displayName := info.Provider, ""
 	if cfg != nil {
 		provider, displayName = resolveProviderInfo(info.Provider, cfg)
@@ -103,7 +103,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		Provider:    provider,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
-		WorkDir:     info.WorkDir,
+		WorkDir:     session.ResolveLiveWorkDir(sp, info),
 		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
 		Attached:    info.Attached,
 		Rig:         rig,
@@ -141,7 +141,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 // "no persisted bead found" — the same case the pre-S2 path handled with a nil
 // bead — and the reason and metadata-derived fields are omitted.
 func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, cfg *config.City, sp runtime.Provider, hasDeferredQueue bool) sessionResponse {
-	r := sessionToResponse(info, cfg)
+	r := sessionToResponse(info, cfg, sp)
 	hasPersisted := pr.Status != "" || pr.Metadata != nil
 	// Expose effective options: provider EffectiveDefaults merged with
 	// per-session template_overrides. The dashboard uses this to display

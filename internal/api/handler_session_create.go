@@ -233,7 +233,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
 	})
 
-	resp := sessionToResponse(info, s.state.Config())
+	resp := sessionToResponse(info, s.state.Config(), s.state.SessionProvider())
 	resp.Kind = "agent"
 	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
@@ -422,7 +422,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 
-	resp := sessionToResponse(info, s.state.Config())
+	resp := sessionToResponse(info, s.state.Config(), s.state.SessionProvider())
 	resp.Kind = "provider"
 	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {

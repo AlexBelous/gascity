@@ -41,6 +41,32 @@ func TestMailProviderConformanceSQLite(t *testing.T) {
 	})
 }
 
+// TestCheckAutoHandoffsSQLiteBackend guards the provider-only auto-handoff
+// extension across the relocated messaging backend. The shared mail.Provider
+// suite cannot own this method because it is intentionally beadmail-specific.
+func TestCheckAutoHandoffsSQLiteBackend(t *testing.T) {
+	provider := beadmail.NewWithBackend(openTestStore(t), beads.NewMemStore())
+	sent, err := provider.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "context cycle",
+		Body:        "continue durable work",
+		ThreadID:    "thread-auto",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+
+	got, err := provider.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != sent.ID {
+		t.Fatalf("CheckAutoHandoffs = %#v, want only %q", got, sent.ID)
+	}
+}
+
 // eachBackend runs fn against a fresh beadmail provider per backend — the
 // portable harness for behavior both backends must share beyond the
 // provider conformance suite.

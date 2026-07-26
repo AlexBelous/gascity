@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -543,6 +544,31 @@ func (p *Provider) All(recipient string) ([]mail.Message, error) {
 // Check returns unread messages for the recipient without marking them read.
 func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 	return p.filterMessages(recipient, false)
+}
+
+// CheckAutoHandoffs returns unread continuation mail carrying both labels that
+// opt it into automatic SessionStart delivery. It deliberately excludes normal
+// mail so a recycle does not duplicate the UserPromptSubmit inbox injection.
+func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error) {
+	routes := p.recipientRoutesForAll(recipients)
+	candidates, err := p.backend.ListOpenForRecipients(routes, false)
+	if err != nil {
+		return nil, fmt.Errorf("beadmail: listing auto-handoff messages: %w", err)
+	}
+	var messages []mail.Message
+	for _, rec := range candidates {
+		if !rec.AutoHandoff || !rec.ArchiveAfterInject {
+			continue
+		}
+		messages = append(messages, rec.Message())
+	}
+	sort.Slice(messages, func(i, j int) bool {
+		if messages[i].CreatedAt.Equal(messages[j].CreatedAt) {
+			return messages[i].ID < messages[j].ID
+		}
+		return messages[i].CreatedAt.Before(messages[j].CreatedAt)
+	})
+	return messages, nil
 }
 
 // Reply creates a reply to an existing message. Inherits ThreadID from the

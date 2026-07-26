@@ -208,7 +208,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			}
 		}
 
-		resp := sessionToResponse(info, s.state.Config())
+		resp := sessionToResponse(info, s.state.Config(), s.state.SessionProvider())
 		resp.Kind = "agent"
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, nil)
@@ -359,7 +359,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 				return
 			}
 		}
-		resp := sessionToResponse(info, s.state.Config())
+		resp := sessionToResponse(info, s.state.Config(), s.state.SessionProvider())
 		resp.Kind = "provider"
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)

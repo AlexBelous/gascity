@@ -17,7 +17,7 @@ import (
 // golden oracle for the wire-equivalence test below, proving the S2 refactor
 // (building from session.Info + session.PersistedResponse) is byte-identical.
 func sessionResponseFromBead(info session.Info, b *beads.Bead, cfg *config.City, sp runtime.Provider, hasDeferredQueue bool) sessionResponse {
-	r := sessionToResponse(info, cfg)
+	r := sessionToResponse(info, cfg, sp)
 	if b != nil && cfg != nil {
 		agentTemplateOK := true
 		agent, agentFound := findAgent(cfg, info.Template)

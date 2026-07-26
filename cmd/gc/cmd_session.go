@@ -963,7 +963,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	sortSessionsCreatedDesc(sessions)
 
 	if jsonOutput {
-		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
+		return writeSessionListJSON(sessions, stateFilter, templateFilter, sp, stdout, stderr)
 	}
 
 	// Build the per-session reason-projection index from the one snapshot (no
@@ -1016,7 +1016,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		reason := sessionReason(s, infoIndex, cfg, cachedSP, poolDesired, readyWaitSet)
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
-		workDir := sessionListWorkDir(s)
+		workDir := sessionListWorkDir(sp, s)
 		age := formatDuration(time.Since(s.CreatedAt))
 		lastActive := "-"
 		if !s.LastActive.IsZero() {
@@ -1084,8 +1084,8 @@ type sessionListSummary struct {
 	Closed    int `json:"closed"`
 }
 
-func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter string, stdout, stderr io.Writer) int {
-	rows := sessionListJSONRows(sessions)
+func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter string, sp runtime.Provider, stdout, stderr io.Writer) int {
+	rows := sessionListJSONRows(sessions, sp)
 	result := sessionListJSON{
 		SchemaVersion: "1",
 		Filters:       sessionListFilters{State: stateFilter, Template: templateFilter},
@@ -1131,7 +1131,7 @@ func writeSessionNewJSON(stdout, stderr io.Writer, result sessionNewJSON) error 
 	return writeCLIJSONLineOrErr(stdout, stderr, "gc session new", result)
 }
 
-func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
+func sessionListJSONRows(sessions []session.Info, sp runtime.Provider) []sessionListJSONRow {
 	rows := make([]sessionListJSONRow, len(sessions))
 	for i, s := range sessions {
 		rows[i] = sessionListJSONRow{
@@ -1147,7 +1147,7 @@ func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
 			Provider:      s.Provider,
 			Transport:     s.Transport,
 			Command:       s.Command,
-			WorkDir:       s.WorkDir,
+			WorkDir:       session.ResolveLiveWorkDir(sp, s),
 			WorkerDir:     strings.TrimSpace(s.WorkerDir),
 			SessionName:   s.SessionName,
 			SessionKey:    s.SessionKey,
@@ -1209,8 +1209,8 @@ func sessionListTitle(s session.Info) string {
 	return title
 }
 
-func sessionListWorkDir(s session.Info) string {
-	return sessionListDisplayValue(s.WorkDir)
+func sessionListWorkDir(sp runtime.Provider, s session.Info) string {
+	return sessionListDisplayValue(session.ResolveLiveWorkDir(sp, s))
 }
 
 func sessionListDisplayValue(value string) string {

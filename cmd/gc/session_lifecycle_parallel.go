@@ -306,6 +306,7 @@ type startExecutionOptions struct {
 	statusComparisonObserver       sessionLifecycleStatusComparisonObserver
 	startSelectionObserver         sessionLifecycleStartSelectionComparisonObserver
 	startSelectionShadowObserver   func(sessionLifecycleStartShadowObservation)
+	legacyStartExcluded            func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -405,6 +406,16 @@ func withSessionLifecycleStartSelectionShadowObserver(
 ) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.startSelectionShadowObserver = observer
+	}
+}
+
+// withLegacyStartExclusion installs the active keyed-ownership bridge for the
+// start family. Returning true leaves the durable wake cause untouched and
+// prevents the fleet loop from preparing or entering the provider for that
+// session; the keyed controller is then the sole start decider.
+func withLegacyStartExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyStartExcluded = excluded
 	}
 }
 

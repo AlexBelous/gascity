@@ -3638,6 +3638,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue // skip startCandidates; wake budget is NOT consumed
 				}
 			}
+			if reconcileOpts.legacyStartExcluded != nil && reconcileOpts.legacyStartExcluded(info) {
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonCode("keyed_start_owner"), TraceOutcomeSkipped, target.tp.TemplateName, name, traceRecordPayload{
+						"session_id": info.ID,
+					})
+				}
+				continue
+			}
 
 			if trace != nil {
 				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate, target.tp.TemplateName, name, traceRecordPayload{

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -80,14 +81,8 @@ func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmis
 	}
 
 	now := clk.Now().UTC()
-	lifecycleInput := sessionpkg.LifecycleInputFromInfo(info)
-	lifecycleInput.Now = now
-	lifecycleInput.CreatedAt = info.CreatedAt
-	lifecycleInput.StaleCreatingAfter = staleCreatingStateTimeout
-	lifecycle := sessionpkg.ProjectLifecycle(lifecycleInput)
-	ownedCause := lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) ||
-		lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit)
-	if !ownedCause || lifecycle.Terminal {
+	lifecycle, cfgAgent, owned := resolveExactSessionStartOwnership(info, params.Config, now)
+	if !owned {
 		return nil
 	}
 
@@ -95,20 +90,10 @@ func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmis
 	if template == "" {
 		return fmt.Errorf("reconciling exact session start %q: persisted template is empty", info.ID)
 	}
-	cfgAgent := findAgentByTemplate(params.Config, template)
 	if cfgAgent == nil {
 		return nil
 	}
-	// Dependency-bearing templates remain legacy-owned until the keyed reverse
-	// dependency index lands. Starting them here would bypass the existing
-	// dependency wave gate.
-	if len(cfgAgent.DependsOn) > 0 {
-		return nil
-	}
 	if isAgentEffectivelySuspendedWith(params.Config, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
-		return nil
-	}
-	if lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) && info.DependencyOnly {
 		return nil
 	}
 	if lifecycle.HasBlocker(sessionpkg.BlockerHeld) || lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) {
@@ -203,6 +188,45 @@ func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmis
 		return fmt.Errorf("reconciling exact session start %q: start result did not commit", info.ID)
 	}
 	return nil
+}
+
+// resolveExactSessionStartOwnership projects the durable start family once and
+// returns whether the keyed controller owns it. Dependency-bearing templates
+// remain legacy-owned until keyed dependency fan-out exists.
+func resolveExactSessionStartOwnership(
+	info sessionpkg.Info,
+	cfg *config.City,
+	now time.Time,
+) (sessionpkg.LifecycleView, *config.Agent, bool) {
+	lifecycleInput := sessionpkg.LifecycleInputFromInfo(info)
+	lifecycleInput.Now = now
+	lifecycleInput.CreatedAt = info.CreatedAt
+	lifecycleInput.StaleCreatingAfter = staleCreatingStateTimeout
+	lifecycle := sessionpkg.ProjectLifecycle(lifecycleInput)
+	ownedCause := lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) ||
+		lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit)
+	if info.Closed || !ownedCause || lifecycle.Terminal {
+		return lifecycle, nil, false
+	}
+
+	template := resolvedSessionTemplateInfo(info, cfg)
+	if template == "" {
+		return lifecycle, nil, true
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil {
+		return lifecycle, nil, false
+	}
+	// Dependency-bearing templates remain legacy-owned until the keyed reverse
+	// dependency index lands. Starting them here would bypass the existing
+	// dependency wave gate.
+	if len(cfgAgent.DependsOn) > 0 {
+		return lifecycle, cfgAgent, false
+	}
+	if lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) && info.DependencyOnly {
+		return lifecycle, cfgAgent, false
+	}
+	return lifecycle, cfgAgent, true
 }
 
 func resolveExactSessionStartTemplate(

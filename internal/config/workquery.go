@@ -501,16 +501,24 @@ func (a *Agent) EffectiveSlingQuery() string {
 // DefaultSlingQuery returns the built-in metadata-routing sling query for
 // this agent. Callers outside config should prefer this helper over rebuilding
 // the command string to preserve the bd boundary invariant.
+//
+// The command literal must stay inside a single return expression. The bd
+// boundary guard (internal/beads.TestNoBdExecOutsideBeads) exempts returned
+// config templates from the "no bd exec outside internal/beads" invariant by
+// matching a `return ` prefix; binding the literal to a local first reads to
+// the guard as a command assembled for exec and fails CI. Optional arguments
+// are therefore built separately and concatenated into the return. Making the
+// guard structural rather than syntactic is tracked as ga-1sjtbh.
 func (a *Agent) DefaultSlingQuery() string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
-	query := "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route
+	labelArg := ""
 	if label := a.slingClaimLabel(); label != "" {
-		query += " --add-label=" + shellquote.Quote(label)
+		labelArg = " --add-label=" + shellquote.Quote(label)
 	}
-	return query
+	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route + labelArg
 }
 
 // slingClaimLabel returns the single label DefaultSlingQuery must stamp on a

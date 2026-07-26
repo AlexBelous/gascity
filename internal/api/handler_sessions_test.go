@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -8197,7 +8198,7 @@ func TestSessionToResponse_BaseOnlyDescendant_InheritsDisplayName(t *testing.T) 
 		Template: "myrig/mayor",
 		Provider: "codex-max",
 	}
-	resp := sessionToResponse(info, cfg)
+	resp := sessionToResponse(info, cfg, nil)
 
 	if resp.Provider != "codex-max" {
 		t.Errorf("Provider = %q, want codex-max", resp.Provider)
@@ -8243,7 +8244,7 @@ func TestSessionToResponse_AgentKindClassification(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			info := session.Info{ID: "sess-" + tc.name, Template: tc.template, Provider: "fake"}
-			resp := sessionToResponse(info, cfg)
+			resp := sessionToResponse(info, cfg, nil)
 			if resp.AgentKind != tc.want {
 				t.Errorf("AgentKind for template %q = %q, want %q", tc.template, resp.AgentKind, tc.want)
 			}
@@ -8259,10 +8260,65 @@ func TestSessionToResponse_ProjectsLastNudgeDeliveredAt(t *testing.T) {
 		Provider:             "codex",
 		CreatedAt:            stamp.Add(-time.Hour),
 		LastNudgeDeliveredAt: stamp,
-	}, nil)
+	}, nil, nil)
 
 	if resp.LastNudgeDeliveredAt != stamp.Format(time.RFC3339) {
 		t.Fatalf("LastNudgeDeliveredAt = %q, want %q", resp.LastNudgeDeliveredAt, stamp.Format(time.RFC3339))
+	}
+}
+
+// TestSessionToResponse_UsesLiveWorkDirOverStaleMetadata pins AC1/AC2
+// (gastownhall/gascity#ga-ighomh.3): the API projection's work_dir field
+// must report the live process cwd for a running session with a
+// resolvable PID, not the session's stored (possibly stale) metadata.
+func TestSessionToResponse_UsesLiveWorkDirOverStaleMetadata(t *testing.T) {
+	liveDir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(liveDir); err != nil {
+		t.Fatalf("Chdir(%q): %v", liveDir, err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	sp := runtime.NewFake()
+	sp.OrphanedRuntimes["sess-1"] = runtime.LiveRuntime{SessionID: "sess-1", PID: os.Getpid()}
+
+	info := session.Info{
+		ID:       "sess-1",
+		Template: "myrig/worker",
+		Provider: "codex",
+		WorkDir:  "/stale/metadata/path",
+	}
+	resp := sessionToResponse(info, nil, sp)
+
+	want := pathutil.NormalizePathForCompare(liveDir)
+	if resp.WorkDir != want {
+		t.Fatalf("WorkDir = %q, want live cwd %q", resp.WorkDir, want)
+	}
+}
+
+// TestSessionToResponse_FallsBackToStoredWorkDirWithoutLiveRuntime pins
+// AC3: when no live runtime resolves for the session (e.g., stopped
+// session, no scanner support), the response falls back to the stored
+// metadata and the session is still represented (never dropped).
+func TestSessionToResponse_FallsBackToStoredWorkDirWithoutLiveRuntime(t *testing.T) {
+	sp := runtime.NewFake()
+
+	info := session.Info{
+		ID:       "sess-stopped",
+		Template: "myrig/worker",
+		Provider: "codex",
+		WorkDir:  "/stored/fallback/path",
+	}
+	resp := sessionToResponse(info, nil, sp)
+
+	if resp.WorkDir != "/stored/fallback/path" {
+		t.Fatalf("WorkDir = %q, want stored fallback %q", resp.WorkDir, "/stored/fallback/path")
+	}
+	if resp.ID != "sess-stopped" {
+		t.Fatalf("session dropped from projection: ID = %q, want %q", resp.ID, "sess-stopped")
 	}
 }
 

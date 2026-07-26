@@ -464,10 +464,21 @@ install_guard_hook() {
 # setup_hook_push_scenario <status>: bare remote + a work clone with the
 # guard hook installed and one commit queued on a fresh bead-shaped branch,
 # plus a fake bd reporting the given status for that bead. Echoes
-# "<remote-dir> <work-dir> <fake-bd-dir> <branch>" on one line.
+# "<remote-dir> <work-dir> <fake-bd-dir> <branch> <lockfile>" on one line.
+#
+# <lockfile> is a private, per-scenario path (under the scenario's own
+# work-dir, so it's cleaned up by the caller's existing `rm -rf ... "$work"`)
+# for GC_GATE_LOCK_FILE. The hook copied in by install_guard_hook sources the
+# REAL scripts/lib/gate-lock.sh, which defaults to the real shared
+# /var/tmp/gc-gate-serialize.lock -- the same lockfile a real outer `git
+# push` holds for its whole `make test-fast-parallel` run. Since that outer
+# run's own job list (add_unit_core_job's `go test ./...`) includes this very
+# package, an unoverridden GC_GATE_LOCK_FILE here would make this test's push
+# contend the lock its own ancestor process already holds: a deterministic
+# self-deadlock on every real push, not mere flakiness under contention.
 setup_hook_push_scenario() {
     local status="$1"
-    local remote work fbd branch="ga-abc123.1-my-feature"
+    local remote work fbd branch="ga-abc123.1-my-feature" lockfile
     remote="$(new_bare_remote)"
     work="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-hookwork.XXXXXX")"
     git clone -q "$remote" "$work" 2>/dev/null
@@ -482,13 +493,14 @@ setup_hook_push_scenario() {
     fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
     write_fake_bd "$fbd"
     write_show_json "$fbd" "ga-abc123.1" "$status" "agent-x" "tmpl-x" "[]"
-    printf '%s %s %s %s' "$remote" "$work" "$fbd" "$branch"
+    lockfile="$work/.gate-lock-test.lock"
+    printf '%s %s %s %s %s' "$remote" "$work" "$fbd" "$branch" "$lockfile"
 }
 
 test_hook_blocks_push_on_stale_claim() {
-    local remote work fbd branch out rc
-    read -r remote work fbd branch <<<"$(setup_hook_push_scenario closed)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    local remote work fbd branch lockfile out rc
+    read -r remote work fbd branch lockfile <<<"$(setup_hook_push_scenario closed)"
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GC_GATE_LOCK_FILE="$lockfile" GC_GATE_LOCK_TIMEOUT=10 GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -ne 0 ]] && [[ -z "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/blocks-push-on-stale-claim (rejected, remote untouched)"
     else
@@ -498,9 +510,9 @@ test_hook_blocks_push_on_stale_claim() {
 }
 
 test_hook_no_verify_bypasses_guard() {
-    local remote work fbd branch out rc
-    read -r remote work fbd branch <<<"$(setup_hook_push_scenario closed)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push --no-verify origin "$branch" 2>&1)"; rc=$?
+    local remote work fbd branch lockfile out rc
+    read -r remote work fbd branch lockfile <<<"$(setup_hook_push_scenario closed)"
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GC_GATE_LOCK_FILE="$lockfile" GC_GATE_LOCK_TIMEOUT=10 GIT_TERMINAL_PROMPT=0 git push --no-verify origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]] && [[ -n "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/no-verify-bypasses-guard (push succeeded despite stale claim)"
     else
@@ -510,9 +522,9 @@ test_hook_no_verify_bypasses_guard() {
 }
 
 test_hook_allows_push_on_clean_claim() {
-    local remote work fbd branch out rc
-    read -r remote work fbd branch <<<"$(setup_hook_push_scenario in_progress)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    local remote work fbd branch lockfile out rc
+    read -r remote work fbd branch lockfile <<<"$(setup_hook_push_scenario in_progress)"
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GC_GATE_LOCK_FILE="$lockfile" GC_GATE_LOCK_TIMEOUT=10 GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]] && [[ -n "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/allows-push-on-clean-claim"
     else

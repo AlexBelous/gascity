@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestE2E_EventEmit verifies that gc event emit records a custom event.
@@ -105,7 +107,7 @@ func TestE2E_AgentLifecycleEvents(t *testing.T) {
 	cityDir := setupE2ECity(t, nil, city)
 
 	// Verify session.woke event exists.
-	verifyEvents(t, cityDir, "session.woke")
+	verifyEventsEventually(t, cityDir, "session.woke")
 
 	// Restart the city so we observe a session stop event without tearing the
 	// city out of supervisor scope before querying the API.
@@ -121,11 +123,30 @@ func TestE2E_AgentLifecycleEvents(t *testing.T) {
 	verifyEventLogEventually(t, cityDir, "session.stopped")
 }
 
+func verifyEventsEventually(t *testing.T, cityDir, eventType string) {
+	t.Helper()
+
+	deadline := time.Now().Add(testutil.ExecRaceTimeout)
+	var lastOut string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		lastOut, lastErr = gc(cityDir, "events", "--type", eventType)
+		if lastErr == nil && strings.TrimSpace(lastOut) != "" {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("gc events --type %s failed: %v\noutput: %s", eventType, lastErr, lastOut)
+	}
+	t.Fatalf("expected events of type %s, got empty output", eventType)
+}
+
 func verifyEventLogEventually(t *testing.T, cityDir, eventType string) {
 	t.Helper()
 
 	eventLog := filepath.Join(cityDir, ".gc", "events.jsonl")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testutil.ExecRaceTimeout)
 	needle := `"type":"` + eventType + `"`
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(eventLog)

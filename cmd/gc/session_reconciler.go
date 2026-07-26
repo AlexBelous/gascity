@@ -2472,7 +2472,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		if alive && shouldRollbackPendingCreate(session) {
 			switch stateBeforeHeal {
-			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+			case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAwake:
 				if pendingCreateStartInFlight(*session, clk, startupTimeout) {
 					if trace != nil {
 						trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_recovery_in_flight", "deferred", nil, nil, "")

@@ -506,7 +506,29 @@ func (a *Agent) DefaultSlingQuery() string {
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
-	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route
+	query := "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route
+	if label := a.slingClaimLabel(); label != "" {
+		query += " --add-label=" + shellquote.Quote(label)
+	}
+	return query
+}
+
+// slingClaimLabel returns the single label DefaultSlingQuery must stamp on a
+// slung bead so it satisfies this agent's label-gated work_query tiers.
+// RouteLabel (AND semantics) takes precedence: a bead must carry it to be
+// claimable, so its first entry is necessary. RouteLabelAny (OR semantics)
+// needs only one member satisfied, so its first entry is sufficient. Empty
+// when the agent is not label-gated at all — routing alone already suffices
+// for it, and stamping a label here would be a regression for the 82 routed
+// gascity beads with no RouteLabel/RouteLabelAny today.
+func (a *Agent) slingClaimLabel() string {
+	if len(a.RouteLabel) > 0 {
+		return a.RouteLabel[0]
+	}
+	if len(a.RouteLabelAny) > 0 {
+		return a.RouteLabelAny[0]
+	}
+	return ""
 }
 
 // EffectivePoolDemandQuery returns the count-form pool-demand query the

@@ -21,6 +21,32 @@ type sessionLifecycleStartShadowInput struct {
 	ProviderUnavailable  bool
 }
 
+// sessionLifecycleStartShadowObservation is the immutable handoff from the
+// serial legacy selector to the keyed shadow worker. LegacySelected is copied
+// from the exact candidate set the legacy reconciler produced; the shadow does
+// not repeat circuit-breaker or provider-health reads.
+type sessionLifecycleStartShadowObservation struct {
+	Input          sessionLifecycleStartShadowInput
+	LegacySelected bool
+}
+
+func newSessionLifecycleStartShadowObservation(
+	input sessionLifecycleStartShadowInput,
+	legacySelected bool,
+) sessionLifecycleStartShadowObservation {
+	return sessionLifecycleStartShadowObservation{
+		Input:          cloneSessionLifecycleStartShadowInput(input),
+		LegacySelected: legacySelected,
+	}
+}
+
+func cloneSessionLifecycleStartShadowInput(input sessionLifecycleStartShadowInput) sessionLifecycleStartShadowInput {
+	cloned := input
+	cloned.Info.Labels = append([]string(nil), input.Info.Labels...)
+	cloned.Info.AliasHistory = append([]string(nil), input.Info.AliasHistory...)
+	return cloned
+}
+
 type sessionLifecycleStartSelectionOutcome uint8
 
 const (

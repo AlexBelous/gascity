@@ -115,6 +115,7 @@ type CityRuntime struct {
 	// process-lifetime cache is what keeps a per-tick live lane from repeating
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
+	lifecycleShadowWorker *sessionLifecycleShadowWorker
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -195,6 +196,8 @@ type CityRuntimeParams struct {
 	ManagedDoltHealth   func(string) error
 	ManagedDoltOwned    func(string) (bool, error)
 	ManagedDoltPort     func(string) string
+
+	LifecycleShadowWorker *sessionLifecycleShadowWorker
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -320,6 +323,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
+		lifecycleShadowWorker:   p.LifecycleShadowWorker,
 		convergenceReqCh:        p.ConvergenceReqCh,
 		reloadReqCh: func() chan reloadRequest {
 			if p.ReloadReqCh != nil {
@@ -368,11 +372,40 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 	return cr.ct
 }
 
+func (cr *CityRuntime) startSessionLifecycleShadowWorker() {
+	if cr == nil || cr.lifecycleShadowWorker == nil {
+		return
+	}
+	if err := cr.lifecycleShadowWorker.Start(); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: lifecycle shadow worker disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow startup must not affect legacy reconciliation
+	}
+}
+
+func (cr *CityRuntime) stopSessionLifecycleShadowWorker() {
+	if cr == nil || cr.lifecycleShadowWorker == nil {
+		return
+	}
+	cr.lifecycleShadowWorker.Stop()
+}
+
+func (cr *CityRuntime) sessionLifecycleShadowStartOption() startExecutionOption {
+	if cr == nil || !cr.lifecycleShadowWorker.acceptingObservations() {
+		return nil
+	}
+	worker := cr.lifecycleShadowWorker
+	return withSessionLifecycleStartSelectionShadowObserver(func(observation sessionLifecycleStartShadowObservation) {
+		if err := worker.EnqueueStart(observation); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: lifecycle shadow observation dropped: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow admission must not affect legacy reconciliation
+		}
+	})
+}
+
 // run executes the reconciliation loop until ctx is canceled. This is
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
 	defer cr.shutdown()
+	cr.startSessionLifecycleShadowWorker()
 
 	dirty := cr.configDirty
 	if dirty == nil {
@@ -2386,6 +2419,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAssignedWorkDeferTracker(cr.adt),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 	}
+	if shadowOption := cr.sessionLifecycleShadowStartOption(); shadowOption != nil {
+		reconcileStartOptions = append(reconcileStartOptions, shadowOption)
+	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
 		// the boot tick so readiness does not wait on their wisp-tier work-probe
@@ -3533,6 +3569,7 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		cr.stopSessionLifecycleShadowWorker()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()

@@ -3485,7 +3485,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	phaseStart = time.Now()
 	var startSelectionInputs []sessionLifecycleStartShadowInput
 	var startSelectionInputByID map[string]int
-	if reconcileOpts.startSelectionObserver != nil {
+	observeStartSelection := reconcileOpts.startSelectionObserver != nil ||
+		reconcileOpts.startSelectionShadowObserver != nil
+	if observeStartSelection {
 		startSelectionInputs = make([]sessionLifecycleStartShadowInput, 0, len(wakeTargets))
 		startSelectionInputByID = make(map[string]int, len(wakeTargets))
 	}
@@ -3534,7 +3536,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			lifecycleTimerBlockerInfo(info, clk.Now()) == "user_hold" {
 			shouldWake = true
 		}
-		if reconcileOpts.startSelectionObserver != nil {
+		if observeStartSelection {
 			startSelectionInputByID[info.ID] = len(startSelectionInputs)
 			startSelectionInputs = append(startSelectionInputs, sessionLifecycleStartShadowInput{
 				Info:                 info,
@@ -3590,7 +3592,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				identity := namedSessionIdentityInfo(info)
 				if identity != "" {
 					circuitOpen := cb.IsOpen(identity, cbNow)
-					if reconcileOpts.startSelectionObserver != nil {
+					if observeStartSelection {
 						if idx, ok := startSelectionInputByID[info.ID]; ok {
 							startSelectionInputs[idx].CircuitOpen = circuitOpen
 						}
@@ -3616,7 +3618,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if gate != nil && target.tp.ResolvedProvider != nil {
 				phProvider := target.tp.ResolvedProvider.Name
 				phHealthy, phPresent := phSnap.check(phProvider)
-				if reconcileOpts.startSelectionObserver != nil {
+				if observeStartSelection {
 					if idx, ok := startSelectionInputByID[info.ID]; ok {
 						startSelectionInputs[idx].ProviderUnavailable = phPresent && !phHealthy
 					}
@@ -3841,14 +3843,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 	}
-	if reconcileOpts.startSelectionObserver != nil {
+	if observeStartSelection {
 		selectedByID := make(map[string]bool, len(startCandidates))
 		for _, candidate := range startCandidates {
 			selectedByID[candidate.info.ID] = true
 		}
 		for _, input := range startSelectionInputs {
-			plan := planSessionLifecycleStartSelection(input)
-			reconcileOpts.startSelectionObserver(compareSessionLifecycleStartSelection(plan, selectedByID[plan.SessionID]))
+			legacySelected := selectedByID[input.Info.ID]
+			if reconcileOpts.startSelectionObserver != nil {
+				plan := planSessionLifecycleStartSelection(input)
+				reconcileOpts.startSelectionObserver(compareSessionLifecycleStartSelection(plan, legacySelected))
+			}
+			if reconcileOpts.startSelectionShadowObserver != nil {
+				reconcileOpts.startSelectionShadowObserver(
+					newSessionLifecycleStartShadowObservation(input, legacySelected),
+				)
+			}
 		}
 	}
 	recordPhase(TraceSiteSessionReconcileWakeSleep, "session_reconcile.apply_wake_sleep_decisions", phaseStart, map[string]any{

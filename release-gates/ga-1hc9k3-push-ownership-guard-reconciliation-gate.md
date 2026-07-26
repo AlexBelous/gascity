@@ -67,3 +67,29 @@ supplement because it has not completed builder/reviewer routing.
 | 4 | No high-severity review findings open | PASS | `ga-jkkrbe` is closed with a PASS verdict, reports no inaccuracies or scope creep, and identifies no security finding because executable behavior is unchanged. |
 | 5 | Final branch is clean | PASS | `git status --porcelain=v1` produced no output at the reviewed SHA before this gate supplement was added. |
 | 7 | Single feature theme | PASS | The supplemental commit touches only the push ownership guard's header; the existing PR remains confined to the same guard and its tests. |
+
+## Supplemental evaluation: mutation-proof retry test
+
+- Deploy bead: `ga-2bf7oo`
+- Review bead: `ga-r7c5gl`
+- Reviewed commit: `3391c40f2fb399add86aa18831a1e7287885899d`
+- Parent / prior PR head: `54170bf9c4e801c1f10405a06bbe103340c5f4ac`
+- Combined candidate: `d2b354aafec461dd0d88343971e0986158eb62dc`
+- Base checked: `origin/main` at `8a6809e8fa6dc71faaa04e6a5ee4822dce130275`
+- Evaluated: 2026-07-26
+
+PASS. The reviewed follow-up adds three regression cases that prove a
+reassigned, rerouted, or held branch bead cannot be authorized by a distinct
+valid fallback assignment. It pins the current `rc=2`-only retry invariant
+without changing the guard itself or resolving the separate
+authorization-relatedness design question on `ga-1hc9k3`.
+
+| # | Criterion | Verdict | Evidence |
+|---|-----------|---------|----------|
+| 6 | Branch diverges cleanly from main | PASS | Evaluated first after applying the reviewed patch to the live PR head. `git merge-tree --write-tree origin/main d2b354aaf` exited 0 and produced tree `095611af5412988c901a7e4df70a5d8cb2e949d9`; `git diff --check` produced no output. |
+| 1 | Review PASS present | PASS | Closed review bead `ga-r7c5gl` records `REVIEW VERDICT: PASS` for exact source commit `3391c40f2fb399add86aa18831a1e7287885899d`. The reviewer also applied that test file to the PR lineage after GAP 2 (`2ebc78034`) and independently re-ran both the unmutated and mutation-proof checks on the combined tree. The patch cherry-picked without conflict onto the live PR head as `d2b354aaf`. |
+| 2 | Acceptance criteria met | PASS | The delta is exactly 60 additive lines in `scripts/test-push-ownership-guard.sh`: three cases cover reassigned, rerouted, and `hold:mayor` branch beads while a distinct valid fallback exists. The unchanged guard passes all 25 cases. The review independently proved the test's sensitivity by changing the retry condition from `rc -eq 2` to `rc -ne 0`: exactly the three new cases failed and all 22 prior cases passed. |
+| 3 | Tests pass | PASS | On combined candidate `d2b354aaf`: Bash syntax and ShellCheck passed; the ownership-guard suite passed 25/25; `go test ./scripts/...`, `go build ./...`, `go vet ./...`, and `make test-fast-parallel` passed. |
+| 4 | No high-severity review findings open | PASS | `ga-r7c5gl` is closed with a PASS verdict and reports no inaccuracies, scope creep, security finding, or coverage gap. PR #4651 had zero comments and zero reviews when this supplement was evaluated. |
+| 5 | Final branch is clean | PASS | `git status --porcelain=v1` produced no output at combined candidate `d2b354aaf` before this gate supplement was added. |
+| 7 | Single feature theme | PASS | The supplemental patch touches only the push ownership guard's existing shell regression suite; PR #4651 remains confined to the same guard subsystem and its tests. |

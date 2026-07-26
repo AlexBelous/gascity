@@ -139,6 +139,7 @@ const rowColumns = `id, title, bead_type, status, assignee, description, created
 // hands it out in place of the work store on migrated cities.
 type Store struct {
 	db                   *core.DB
+	localStrings         beads.CloneLocalStrings
 	retentionSweeperOnce sync.Once
 	maintenanceOnce      sync.Once
 }
@@ -155,7 +156,10 @@ func Open(path string, opts ...core.Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening sessions store: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{
+		db:           db,
+		localStrings: beads.NewCloneLocalStrings(path + ".local-strings.json"),
+	}, nil
 }
 
 // CloseStore closes the underlying database handles. Idempotent. (Named to
@@ -415,7 +419,7 @@ func (s *Store) ImportBead(b beads.Bead) (bool, error) {
 // import retries from the bd truth without resurrecting rows a previous
 // attempt imported (the P2/P3 no-resurrection lesson).
 func (s *Store) DeleteAllRows() error {
-	return s.db.Write(context.Background(), func(tx *sql.Tx) error {
+	if err := s.db.Write(context.Background(), func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM sessions`); err != nil {
 			return fmt.Errorf("resetting sessions rows: %w", err)
 		}
@@ -423,7 +427,13 @@ func (s *Store) DeleteAllRows() error {
 			return fmt.Errorf("resetting wait rows: %w", err)
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if err := s.localStrings.Clear(); err != nil {
+		return fmt.Errorf("resetting sessions local strings: %w", err)
+	}
+	return nil
 }
 
 // getRowTx fetches a row by id from either table inside a transaction,
@@ -684,10 +694,35 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 	})
 }
 
+// SetLocalString sets a clone-local value outside sessions.db. See
+// beads.Store.SetLocalString.
+func (s *Store) SetLocalString(id, key, value string) error {
+	if _, err := s.Get(id); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	if err := s.localStrings.Set(id, key, value); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	return nil
+}
+
+// GetLocalString returns a clone-local value previously set for a session or
+// wait bead. See beads.Store.GetLocalString.
+func (s *Store) GetLocalString(id, key string) (string, error) {
+	if _, err := s.Get(id); err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	value, err := s.localStrings.Get(id, key)
+	if err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	return value, nil
+}
+
 // Delete permanently removes a bead row — the retention primitive that
 // cannot exist on bd today (closed-session purge TTL, slice 4).
 func (s *Store) Delete(id string) error {
-	return s.db.Write(context.Background(), func(tx *sql.Tx) error {
+	if err := s.db.Write(context.Background(), func(tx *sql.Tx) error {
 		_, table, err := getRowTx(tx, id)
 		if err != nil {
 			return err
@@ -696,7 +731,13 @@ func (s *Store) Delete(id string) error {
 			return fmt.Errorf("deleting %s row %s: %w", table, id, err)
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if err := s.localStrings.DeleteBead(id); err != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, err)
+	}
+	return nil
 }
 
 // List returns beads matching the query with semantics byte-identical to

@@ -244,6 +244,29 @@ func (s *Shadow) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// SetLocalString writes through the authoritative primary and mirrors the
+// clone-local value onto the class store for cutover continuity. Shadow
+// failures remain observational and never fail the primary write.
+func (s *Shadow) SetLocalString(id, key, value string) error {
+	if err := s.primary.SetLocalString(id, key, value); err != nil {
+		return err
+	}
+	if !s.classHas(id) {
+		s.teeMissImport("set-local-string", id)
+	}
+	if s.classHas(id) {
+		if err := s.class.SetLocalString(id, key, value); err != nil {
+			shadowLog("set-local-string", id, err)
+		}
+	}
+	return nil
+}
+
+// GetLocalString reads from the authoritative primary.
+func (s *Shadow) GetLocalString(id, key string) (string, error) {
+	return s.primary.GetLocalString(id, key)
+}
+
 // Delete deletes via the primary, then removes the shadow row (a missing
 // shadow row is fine — nothing to converge for a deleted bead).
 func (s *Shadow) Delete(id string) error {

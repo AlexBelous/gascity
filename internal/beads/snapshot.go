@@ -473,18 +473,10 @@ func (o ImportOptions) allowStaleSet() map[string]bool {
 
 // ImportReport summarizes what a guarded-upsert import did, using bd import's
 // report vocabulary. Every arm lists the affected ids so a residue pass can diff
-// the flagged rows.
-//
-// DRAIN-SIGNAL CAVEAT: on the BdStore leg, Inserted may include existing
-// equal-clock rows whose content is identical (bd reports only content-differing
-// rows as tie/updated, so a content-identical re-import lands in `ids` and is
-// classified Inserted). Inserted therefore MUST NOT be used as a
-// progress/drain signal — a residue re-import of an already-drained source would
-// loop forever. Drain state is computed by per-id updated_at comparison via
-// GetBeadSnapshots, never by counting Inserted.
+// the flagged rows. Drain state is still computed by per-id updated_at
+// comparison via GetBeadSnapshots rather than report counts.
 type ImportReport struct {
-	// Inserted lists ids that were absent and newly created. See the
-	// drain-signal caveat above for the BdStore leg's classification limits.
+	// Inserted lists ids that were absent and newly created.
 	Inserted []string
 	// Updated lists existing ids the import rewrote (incoming strictly newer, or
 	// a forced tie override via AllowStaleIDs).

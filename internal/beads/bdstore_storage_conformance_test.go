@@ -286,7 +286,7 @@ func TestBdStoreGetUsesDirectShowForEphemeralRows(t *testing.T) {
 		cmd := name + " " + strings.Join(args, " ")
 		calls = append(calls, cmd)
 		switch cmd {
-		case "bd show --json bd-wisp":
+		case "bd show --json -- bd-wisp":
 			return []byte(`[{"id":"bd-wisp","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: %s", cmd)
@@ -302,7 +302,7 @@ func TestBdStoreGetUsesDirectShowForEphemeralRows(t *testing.T) {
 		t.Fatalf("Get = %+v, want ephemeral row bd-wisp", got)
 	}
 	wantCalls := []string{
-		"bd show --json bd-wisp",
+		"bd show --json -- bd-wisp",
 	}
 	if fmt.Sprint(calls) != fmt.Sprint(wantCalls) {
 		t.Fatalf("calls = %#v, want %#v", calls, wantCalls)

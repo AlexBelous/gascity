@@ -5,9 +5,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,24 @@ func TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "not loopback") {
 		t.Fatalf("tagged runner error = %v, want loopback rejection", err)
 	}
+
+	t.Run("diagnostic is bounded and terminated", func(t *testing.T) {
+		message := strings.Repeat("diagnostic", taggedProductMetricsMaximumDiagnosticBytes)
+		var diagnostic bytes.Buffer
+		writeProductMetricsTesthookDiagnosticTo(&diagnostic, errors.New(message))
+		if diagnostic.Len() != taggedProductMetricsMaximumDiagnosticBytes {
+			t.Fatalf("diagnostic size = %d, want %d", diagnostic.Len(), taggedProductMetricsMaximumDiagnosticBytes)
+		}
+		if diagnostic.Bytes()[diagnostic.Len()-1] != '\n' || !bytes.HasPrefix(diagnostic.Bytes(), []byte("diagnostic")) {
+			t.Fatalf("diagnostic = %q, want bounded error followed by newline", diagnostic.Bytes())
+		}
+
+		diagnostic.Reset()
+		writeProductMetricsTesthookDiagnosticTo(&diagnostic, nil)
+		if diagnostic.Len() != 0 {
+			t.Fatalf("nil error diagnostic = %q, want none", diagnostic.Bytes())
+		}
+	})
 }
 
 func TestProductMetricsTesthookCAReadIsBounded(t *testing.T) {
@@ -79,6 +99,9 @@ func TestProductMetricsTesthookCAReadIsBounded(t *testing.T) {
 }
 
 func TestProductMetricsTaggedProcessFixtureIsEnabled(t *testing.T) {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		configureProductMetricsTrustedProcessTempRoot(t)
+	}
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
 	seedPrivateUploaderProcessFixture(t, home, "6ba7b810-9dad-41d1-80b4-00c04fd430c8", time.Now().UTC())

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
 // This file is the two-tier file backend: the queue-operation bodies moved
@@ -22,6 +23,7 @@ import (
 type fileQueue struct {
 	cityPath   string
 	openShadow ShadowStoreOpener
+	clock      clock.Clock
 }
 
 // lazyShadow lazily opens the shadow-bead store the first time an operation
@@ -225,15 +227,19 @@ func (f *fileQueue) Enqueue(item Item, shadow beads.NudgesStore) error {
 		item.BeadID = beadID
 	}
 	err = WithState(f.cityPath, func(state *State) error {
-		now := time.Now()
+		clk := f.clock
+		if clk == nil {
+			clk = clock.Real{}
+		}
+		now := clk.Now()
 		deadline := now.Add(EnqueueMaintenanceBudget)
-		if err := RecoverExpiredInFlight(state, front, now, deadline); err != nil {
+		if err := RecoverExpiredInFlightWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := PruneExpired(state, front, now, deadline); err != nil {
+		if err := PruneExpiredWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := PruneDead(state, front, now, deadline); err != nil {
+		if err := PruneDeadWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
 		if queuedItemExists(state, item.ID) {
@@ -248,7 +254,7 @@ func (f *fileQueue) Enqueue(item Item, shadow beads.NudgesStore) error {
 			}
 			filtered := state.Pending[:0]
 			for i, existing := range state.Pending {
-				if time.Now().After(deadline) {
+				if clk.Now().After(deadline) {
 					filtered = append(filtered, state.Pending[i:]...)
 					break
 				}
@@ -270,7 +276,7 @@ func (f *fileQueue) Enqueue(item Item, shadow beads.NudgesStore) error {
 			// This causes at most one redundant delivery, not data corruption.
 			inFlight := state.InFlight[:0]
 			for i, existing := range state.InFlight {
-				if time.Now().After(deadline) {
+				if clk.Now().After(deadline) {
 					inFlight = append(inFlight, state.InFlight[i:]...)
 					break
 				}
@@ -580,9 +586,14 @@ func NoMaintenanceDeadline() time.Time {
 // Exported with RecoverExpiredInFlight / PruneDead as the file backend's
 // maintenance surface (cmd/gc test shims exercise the passes directly).
 func PruneExpired(state *State, front *Store, now, deadline time.Time) error {
+	return PruneExpiredWithClock(state, front, now, deadline, clock.Real{})
+}
+
+// PruneExpiredWithClock is PruneExpired with an injected deadline clock.
+func PruneExpiredWithClock(state *State, front *Store, now, deadline time.Time, clk clock.Clock) error {
 	filtered := state.Pending[:0]
 	for i, item := range state.Pending {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Pending[i:]...)
 			break
 		}
@@ -607,9 +618,14 @@ func PruneExpired(state *State, front *Store, now, deadline time.Time) error {
 // RecoverExpiredInFlight dead-letters expired in-flight items and returns
 // lease-expired claims to pending for immediate redelivery.
 func RecoverExpiredInFlight(state *State, front *Store, now, deadline time.Time) error {
+	return RecoverExpiredInFlightWithClock(state, front, now, deadline, clock.Real{})
+}
+
+// RecoverExpiredInFlightWithClock is RecoverExpiredInFlight with an injected deadline clock.
+func RecoverExpiredInFlightWithClock(state *State, front *Store, now, deadline time.Time, clk clock.Clock) error {
 	filtered := state.InFlight[:0]
 	for i, item := range state.InFlight {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.InFlight[i:]...)
 			break
 		}
@@ -642,10 +658,15 @@ func RecoverExpiredInFlight(state *State, front *Store, now, deadline time.Time)
 // confirmed terminal bead are retained so terminal history is not lost if
 // the bead store write failed.
 func PruneDead(state *State, front *Store, now, deadline time.Time) error {
+	return PruneDeadWithClock(state, front, now, deadline, clock.Real{})
+}
+
+// PruneDeadWithClock is PruneDead with an injected deadline clock.
+func PruneDeadWithClock(state *State, front *Store, now, deadline time.Time, clk clock.Clock) error {
 	cutoff := now.Add(-DeadRetention)
 	filtered := state.Dead[:0]
 	for i, item := range state.Dead {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Dead[i:]...)
 			break
 		}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
 // This file is the nudge-queue front door: the NAMED operations over the
@@ -169,7 +170,17 @@ type Queue struct {
 // state.json authority with shadow beads opened lazily through openShadow
 // (nil = no shadow store available; all bead writes no-op).
 func NewFileQueue(cityPath string, openShadow ShadowStoreOpener) *Queue {
-	return &Queue{backend: &fileQueue{cityPath: cityPath, openShadow: openShadow}}
+	return NewFileQueueWithClock(cityPath, openShadow, clock.Real{})
+}
+
+// NewFileQueueWithClock builds the file-backed queue with an injected clock.
+// Production callers use NewFileQueue; the explicit clock keeps maintenance
+// budget tests deterministic without changing the routed SQLite backend.
+func NewFileQueueWithClock(cityPath string, openShadow ShadowStoreOpener, clk clock.Clock) *Queue {
+	if clk == nil {
+		clk = clock.Real{}
+	}
+	return &Queue{backend: &fileQueue{cityPath: cityPath, openShadow: openShadow, clock: clk}}
 }
 
 // NewQueueWithBackend wraps a non-file backend (the embedded class store) as

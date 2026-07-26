@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	nudgesdb "github.com/gastownhall/gascity/internal/classdb/nudges"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -43,6 +44,7 @@ const (
 	defaultQueuedNudgeRetryDelay    = nudgequeue.RetryDelay
 	defaultQueuedNudgeMaxAttempts   = nudgequeue.MaxAttempts
 	defaultQueuedNudgeDeadRetention = nudgequeue.DeadRetention
+	nudgeEnqueueMaintenanceBudget   = nudgequeue.EnqueueMaintenanceBudget
 
 	defaultNudgePollInterval   = 2 * time.Second
 	defaultNudgePollQuiescence = 3 * time.Second
@@ -1788,7 +1790,16 @@ func rollbackQueuedNudge(cityPath string, front *nudgequeue.Store, item queuedNu
 }
 
 func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) error {
-	err := cityNudgeQueue(cityPath).Enqueue(item, store)
+	return enqueueQueuedNudgeWithQueue(cityPath, store, item, cityNudgeQueue(cityPath))
+}
+
+func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStore, item queuedNudge, clk clock.Clock) error {
+	q := nudgequeue.NewFileQueueWithClock(cityPath, nudgeShadowOpener(cityPath), clk)
+	return enqueueQueuedNudgeWithQueue(cityPath, store, item, q)
+}
+
+func enqueueQueuedNudgeWithQueue(cityPath string, store beads.NudgesStore, item queuedNudge, q *nudgequeue.Queue) error {
+	err := q.Enqueue(item, store)
 	if err == nil {
 		recordNudgeQueuedEvents(cityPath, item)
 		// Best-effort wake of the supervisor's nudge dispatcher. Legacy-mode
@@ -1842,15 +1853,27 @@ func noMaintenanceDeadline() time.Time {
 }
 
 func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
-	return nudgequeue.PruneExpired(state, front, now, deadline)
+	return pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func pruneExpiredQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
+	return nudgequeue.PruneExpiredWithClock(state, front, now, deadline, clk)
 }
 
 func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
-	return nudgequeue.RecoverExpiredInFlight(state, front, now, deadline)
+	return recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
+	return nudgequeue.RecoverExpiredInFlightWithClock(state, front, now, deadline, clk)
 }
 
 func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
-	return nudgequeue.PruneDead(state, front, now, deadline)
+	return pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
+	return nudgequeue.PruneDeadWithClock(state, front, now, deadline, clk)
 }
 
 func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error {

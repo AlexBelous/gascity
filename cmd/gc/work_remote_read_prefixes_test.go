@@ -35,7 +35,7 @@ func TestRemoteWorkReadPrefixes(t *testing.T) {
 
 	t.Run("remote city yields the prefix set", func(t *testing.T) {
 		city := t.TempDir()
-		writeRemoteMarker(t, city, "db.example.com", "3306", "org")
+		writeRemoteMarker(t, city, "db.example.com", "org")
 		prefixes, ok := remoteWorkReadPrefixes(city, newCfg())
 		if !ok {
 			t.Fatal("remote city must expose its prefix set")

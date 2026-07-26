@@ -45,6 +45,80 @@ func TestSQLiteStoreCreatesAndGets(t *testing.T) {
 	}
 }
 
+func TestSQLiteStorePersistsLocalStringsOutsideDatabase(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore (first): %v", err)
+	}
+	store := opened.(*SQLiteStore)
+	created, err := store.Create(Bead{Title: "local state"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetLocalString(created.ID, "last_woke_at", "2026-07-26T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore (first): %v", err)
+	}
+
+	sidecarPath := filepath.Join(dir, ".beads", "local-strings.json")
+	if _, err := os.Stat(sidecarPath); err != nil {
+		t.Fatalf("local-string sidecar %q: %v", sidecarPath, err)
+	}
+
+	reopened, err := OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore (second): %v", err)
+	}
+	reopenedStore := reopened.(*SQLiteStore)
+	defer func() { _ = reopenedStore.CloseStore() }()
+	got, err := reopenedStore.GetLocalString(created.ID, "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString after reopen: %v", err)
+	}
+	if got != "2026-07-26T00:00:00Z" {
+		t.Fatalf("GetLocalString after reopen = %q, want persisted value", got)
+	}
+	durable, err := reopenedStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get durable bead: %v", err)
+	}
+	if _, leaked := durable.Metadata["last_woke_at"]; leaked {
+		t.Fatal("clone-local string leaked into durable bead metadata")
+	}
+}
+
+func TestSQLiteStoreReadOnlyRejectsLocalStringWrites(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore (rw): %v", err)
+	}
+	store := opened.(*SQLiteStore)
+	created, err := store.Create(Bead{Title: "migration source"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore (rw): %v", err)
+	}
+
+	readOnly, err := OpenSQLiteStore(dir, WithSQLiteStoreReadOnly())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore (ro): %v", err)
+	}
+	readOnlyStore := readOnly.(*SQLiteStore)
+	defer func() { _ = readOnlyStore.CloseStore() }()
+	if err := readOnlyStore.SetLocalString(created.ID, "k", "v"); err == nil {
+		t.Fatal("SetLocalString on read-only store succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", "local-strings.json")); !os.IsNotExist(err) {
+		t.Fatalf("read-only SetLocalString created a sidecar: %v", err)
+	}
+}
+
 func TestSQLiteStoreReleaseIfCurrent(t *testing.T) {
 	s, err := OpenSQLiteStore(t.TempDir())
 	if err != nil {

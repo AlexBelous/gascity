@@ -67,8 +67,13 @@ func recordingImportRunner(calls *[]recordedImport, result string) BDImportRunne
 
 func snapForID(t *testing.T, id string) Snapshot {
 	t.Helper()
+	return snapForIDAt(t, id, "2026-01-01T00:00:00Z")
+}
+
+func snapForIDAt(t *testing.T, id, updatedAt string) Snapshot {
+	t.Helper()
 	return decodeOne(t, exportLine(t, map[string]any{
-		"id": id, "title": id, "status": "open", "updated_at": "2026-01-01T00:00:00Z",
+		"id": id, "title": id, "status": "open", "updated_at": updatedAt,
 	}))
 }
 
@@ -154,6 +159,9 @@ func TestBdStoreImportPlainInheritsScopedEnvAndNeedsNoCapability(t *testing.T) {
 		if len(args) > 0 && args[0] == "version" {
 			t.Fatalf("plain import must not probe capability")
 		}
+		if len(args) > 0 && args[0] == "show" {
+			return nil, fmt.Errorf("no issues found matching the provided IDs")
+		}
 		return nil, fmt.Errorf("unexpected %v", args)
 	}
 	s := NewBdStore("/city", runner, WithBdStoreEnv(map[string]string{"BEADS_DIR": "/city/.beads"}))
@@ -182,6 +190,65 @@ func TestBdStoreImportPlainInheritsScopedEnvAndNeedsNoCapability(t *testing.T) {
 	}
 	if len(report.Inserted) != 1 || report.Inserted[0] != "gc-1" {
 		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestBdStoreImportIdenticalTieReclassifiedKeptLocal(t *testing.T) {
+	f := &fakeBdRunner{
+		show: `[{"id":"gc-1","title":"gc-1","status":"open","updated_at":"2026-01-01T00:00:00Z"}]`,
+	}
+	s := NewBdStore("/city", f.run)
+	var calls []recordedImport
+	s.SetBDImportRunner(recordingImportRunner(&calls, `{"created":0,"updated":0,"ids":["gc-1"]}`))
+
+	report, err := s.ImportBeadSnapshots(context.Background(), []Snapshot{snapForID(t, "gc-1")}, ImportOptions{})
+	if err != nil {
+		t.Fatalf("ImportBeadSnapshots: %v", err)
+	}
+	if !reflect.DeepEqual(report.KeptLocal, []string{"gc-1"}) {
+		t.Fatalf("KeptLocal = %v, want [gc-1]; report=%+v", report.KeptLocal, report)
+	}
+	if len(report.Inserted) != 0 {
+		t.Fatalf("Inserted = %v, want none for existing identical tie", report.Inserted)
+	}
+}
+
+func TestReconcileGuardedBDReportClassifiesMixedAmbiguousIDs(t *testing.T) {
+	report := ImportReport{
+		Inserted:     []string{"gc-new", "gc-stale", "gc-tie", "gc-newer"},
+		Updated:      []string{"gc-known-updated"},
+		KeptLocal:    []string{"gc-known-tie"},
+		StaleSkipped: []string{"gc-known-stale"},
+	}
+	originalInserted := append([]string(nil), report.Inserted...)
+	incoming := []Snapshot{
+		snapForIDAt(t, "gc-new", "2026-01-02T00:00:00Z"),
+		snapForIDAt(t, "gc-stale", "2026-01-01T00:00:00Z"),
+		snapForIDAt(t, "gc-tie", "2026-01-02T00:00:00Z"),
+		snapForIDAt(t, "gc-newer", "2026-01-03T00:00:00Z"),
+	}
+	destination := []Snapshot{
+		snapForIDAt(t, "gc-stale", "2026-01-02T00:00:00Z"),
+		snapForIDAt(t, "gc-tie", "2026-01-02T00:00:00Z"),
+		snapForIDAt(t, "gc-newer", "2026-01-02T00:00:00Z"),
+	}
+
+	got := reconcileGuardedBDReport(report, incoming, destination)
+
+	if !reflect.DeepEqual(got.Inserted, []string{"gc-new"}) {
+		t.Fatalf("Inserted = %v, want [gc-new]", got.Inserted)
+	}
+	if !reflect.DeepEqual(got.Updated, []string{"gc-known-updated", "gc-newer"}) {
+		t.Fatalf("Updated = %v", got.Updated)
+	}
+	if !reflect.DeepEqual(got.KeptLocal, []string{"gc-known-tie", "gc-tie"}) {
+		t.Fatalf("KeptLocal = %v", got.KeptLocal)
+	}
+	if !reflect.DeepEqual(got.StaleSkipped, []string{"gc-known-stale", "gc-stale"}) {
+		t.Fatalf("StaleSkipped = %v", got.StaleSkipped)
+	}
+	if !reflect.DeepEqual(report.Inserted, originalInserted) {
+		t.Fatalf("input Inserted mutated to %v, want %v", report.Inserted, originalInserted)
 	}
 }
 
@@ -294,6 +361,44 @@ func TestBdStoreGetBeadSnapshots(t *testing.T) {
 	}
 	if byID["gc-1"].Status() != "closed" || byID["gc-1"].ClosedAt() == nil {
 		t.Fatalf("gc-1 verify fields wrong: %+v", byID["gc-1"])
+	}
+}
+
+func TestBdStoreGetBeadSnapshotsDelimitsDashPrefixedIDs(t *testing.T) {
+	var got []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("command = %q, want bd", name)
+		}
+		got = append([]string(nil), args...)
+		return []byte(`[]`), nil
+	}
+	s := NewBdStore("/city", runner)
+	if _, err := s.GetBeadSnapshots(context.Background(), []string{"-cyca"}); err != nil {
+		t.Fatalf("GetBeadSnapshots: %v", err)
+	}
+	want := []string{"show", "--json", "--", "-cyca"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("bd argv = %v, want %v", got, want)
+	}
+}
+
+func TestBdStoreGetDelimitsDashPrefixedID(t *testing.T) {
+	var got []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("command = %q, want bd", name)
+		}
+		got = append([]string(nil), args...)
+		return []byte(`[{"id":"-cyca","title":"dash","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}]`), nil
+	}
+	s := NewBdStore("/city", runner)
+	if _, err := s.Get("-cyca"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := []string{"show", "--json", "--", "-cyca"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("bd argv = %v, want %v", got, want)
 	}
 }
 

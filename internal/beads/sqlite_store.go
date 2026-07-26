@@ -42,6 +42,7 @@ type SQLiteStoreOptions struct {
 }
 
 var (
+	_ Store                         = (*SQLiteStore)(nil)
 	_ ConditionalAssignmentReleaser = (*SQLiteStore)(nil)
 	_ ForeignIDCreator              = (*SQLiteStore)(nil)
 )
@@ -125,6 +126,8 @@ type SQLiteStore struct {
 	retentionDone           chan struct{}
 	seq                     atomic.Int64 // in-memory sequence; recovered from DB on Open
 	closeOnce               sync.Once
+	readOnly                bool
+	localStrings            *localSidecar // clone-local data; see Store.SetLocalString
 }
 
 // OpenSQLiteStore opens or creates a pure-Go SQLite bead store under dir.
@@ -184,6 +187,8 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		retentionPeriod:         cfg.retentionPeriod,
 		retentionSweepInterval:  cfg.retentionSweepInterval,
 		disableRetentionSweeper: cfg.disableRetentionSweeper,
+		readOnly:                cfg.readOnly,
+		localStrings:            newLocalSidecar(filepath.Join(dir, ".beads", "local-strings.json")),
 	}
 
 	// applySchema issues writes (journal-mode pragmas, CREATE TABLE), so a
@@ -1092,6 +1097,36 @@ func (s *SQLiteStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return s.Update(id, UpdateOpts{Metadata: maps.Clone(kvs)})
 }
 
+// SetLocalString sets a clone-local string value for a bead. See
+// Store.SetLocalString. The value is persisted beside, rather than inside,
+// beads.sqlite so topology snapshots and migrations never carry it between
+// clones.
+func (s *SQLiteStore) SetLocalString(id, key, value string) error {
+	if s.readOnly {
+		return fmt.Errorf("setting local string on %q: sqlite store is read-only", id)
+	}
+	if _, err := s.Get(id); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	if err := s.localStrings.Set(id, key, value); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// Store.GetLocalString.
+func (s *SQLiteStore) GetLocalString(id, key string) (string, error) {
+	if _, err := s.Get(id); err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	value, err := s.localStrings.Get(id, key)
+	if err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	return value, nil
+}
+
 // Tx executes fn sequentially against the store.
 func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	return runSequentialTx(s, fn)
@@ -1099,7 +1134,7 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 
 // Delete permanently removes a bead and its indexed rows.
 func (s *SQLiteStore) Delete(id string) error {
-	return retryOnBusy(func() error {
+	if err := retryOnBusy(func() error {
 		tx, err := s.db.BeginTx(context.Background(), nil)
 		if err != nil {
 			return fmt.Errorf("sqlite delete: begin tx: %w", err)
@@ -1116,7 +1151,13 @@ func (s *SQLiteStore) Delete(id string) error {
 			return fmt.Errorf("deleting bead %q deps: %w", id, err)
 		}
 		return tx.Commit()
-	})
+	}); err != nil {
+		return err
+	}
+	if err := s.localStrings.DeleteBead(id); err != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, err)
+	}
+	return nil
 }
 
 // DepAdd records a dependency edge.

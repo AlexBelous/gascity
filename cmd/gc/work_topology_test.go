@@ -17,6 +17,8 @@ import (
 
 // ── test fixtures ─────────────────────────────────────────────────────────
 
+const workTopologyTestDoltPort = "3306"
+
 func writeUnifiedMarker(t *testing.T, city string) {
 	t.Helper()
 	if err := writeWorkTopologyMarker(workUnifiedMarkerPath(city), &workTopologyMarker{
@@ -27,12 +29,12 @@ func writeUnifiedMarker(t *testing.T, city string) {
 	}
 }
 
-func writeRemoteMarker(t *testing.T, city, host, port, database string) {
+func writeRemoteMarker(t *testing.T, city, host, database string) {
 	t.Helper()
 	if err := writeWorkTopologyMarker(workRemoteMarkerPath(city), &workTopologyMarker{
 		Kind:       workMarkerKindRemote,
 		RecordedAt: time.Now().UTC(),
-		Target:     &workTopologyTarget{Host: host, Port: port, Database: database},
+		Target:     &workTopologyTarget{Host: host, Port: workTopologyTestDoltPort, Database: database},
 	}); err != nil {
 		t.Fatalf("write remote marker: %v", err)
 	}
@@ -49,13 +51,13 @@ func writeUnifiedStamp(t *testing.T, scopeRoot, database string) {
 	}
 }
 
-func writeRemoteStamp(t *testing.T, scopeRoot, host, port, database string) {
+func writeRemoteStamp(t *testing.T, scopeRoot, host, database string) {
 	t.Helper()
 	if err := writeWorkTopologyStamp(scopeRoot, &workTopologyStamp{
 		Kind:       workMarkerKindRemote,
 		Database:   database,
 		Host:       host,
-		Port:       port,
+		Port:       workTopologyTestDoltPort,
 		RecordedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("write remote stamp: %v", err)
@@ -103,8 +105,8 @@ func inheritedRigState() contract.ConfigState {
 	return contract.ConfigState{EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified}
 }
 
-func cityCanonicalState(host, port string) contract.ConfigState {
-	return contract.ConfigState{EndpointOrigin: contract.EndpointOriginCityCanonical, DoltHost: host, DoltPort: port, EndpointStatus: contract.EndpointStatusUnverified}
+func cityCanonicalState(host string) contract.ConfigState {
+	return contract.ConfigState{EndpointOrigin: contract.EndpointOriginCityCanonical, DoltHost: host, DoltPort: workTopologyTestDoltPort, EndpointStatus: contract.EndpointStatusUnverified}
 }
 
 func inheritedCanonicalRigState(host, port string) contract.ConfigState {
@@ -186,7 +188,7 @@ func TestWorkTopologyUnifiedRigSharesActualCityDatabase(t *testing.T) {
 func TestWorkTopologyRemoteRelocatesCityAndRigs(t *testing.T) {
 	city := t.TempDir()
 	rig := filepath.Join(city, "fe")
-	writeRemoteMarker(t, city, "10.0.0.5", "3306", "orgdb")
+	writeRemoteMarker(t, city, "10.0.0.5", "orgdb")
 
 	if db, ok := workTopologyScopeDatabase(city, city); !ok || db != "orgdb" {
 		t.Fatalf("remote city db = (%q, %v), want (orgdb, true)", db, ok)
@@ -351,7 +353,7 @@ func TestCheckWorkTopologyDarkLegacyHqSharedDatabase(t *testing.T) {
 // db, but NO stamp, is not misclassified as a reverted remote migration.
 func TestCheckWorkTopologyHostedExternalCityPasses(t *testing.T) {
 	city := t.TempDir()
-	writeScopeFiles(t, city, cityCanonicalState("10.0.0.5", "3306"), "orgdb")
+	writeScopeFiles(t, city, cityCanonicalState("10.0.0.5"), "orgdb")
 	writeScopeFiles(t, filepath.Join(city, "fe"), inheritedCanonicalRigState("10.0.0.5", "3306"), "orgdb")
 	if err := contract.WriteProjectIdentity(fsys.OSFS{}, city, "proj_hosted"); err != nil {
 		t.Fatal(err)
@@ -385,8 +387,8 @@ func TestCheckWorkTopologyStampRevertRefuses(t *testing.T) {
 
 func TestCheckWorkTopologyRemoteStampRevertRefuses(t *testing.T) {
 	city := t.TempDir()
-	writeScopeFiles(t, city, cityCanonicalState("10.0.0.5", "3306"), "orgdb")
-	writeRemoteStamp(t, city, "10.0.0.5", "3306", "orgdb")
+	writeScopeFiles(t, city, cityCanonicalState("10.0.0.5"), "orgdb")
+	writeRemoteStamp(t, city, "10.0.0.5", "orgdb")
 
 	// target=managed contradicts the remote stamp.
 	if err := checkWorkTopologyMarkers(city, workCfg("unified", "managed")); err == nil {
@@ -401,7 +403,7 @@ func TestCheckWorkTopologyRemoteStampRevertRefuses(t *testing.T) {
 		t.Fatal("a remote stamp must reject a retarget")
 	}
 	// Loopback spelling must not trip the retarget arm (F8).
-	writeRemoteStamp(t, city, "localhost", "3306", "orgdb")
+	writeRemoteStamp(t, city, "localhost", "orgdb")
 	if err := checkWorkTopologyMarkers(city, workCfg("unified", "dolt://127.0.0.1:3306/orgdb")); err != nil {
 		t.Fatalf("loopback host spelling must not trip the stamp retarget arm: %v", err)
 	}
@@ -422,7 +424,7 @@ func TestCheckWorkTopologyUnifiedMarkerRejectsScopedConfig(t *testing.T) {
 func TestCheckWorkTopologyRemoteMarkerRejectsManagedTarget(t *testing.T) {
 	city := t.TempDir()
 	writeScopeFiles(t, city, managedCityState(), "hq")
-	writeRemoteMarker(t, city, "10.0.0.5", "3306", "orgdb")
+	writeRemoteMarker(t, city, "10.0.0.5", "orgdb")
 	if err := checkWorkTopologyMarkers(city, workCfg("unified", "managed", "fe")); err == nil {
 		t.Fatal("remote marker + target=managed must be rejected (one-way)")
 	}
@@ -434,7 +436,7 @@ func TestCheckWorkTopologyRemoteMarkerRejectsManagedTarget(t *testing.T) {
 func TestCheckWorkTopologyRemoteMarkerRejectsRetarget(t *testing.T) {
 	city := t.TempDir()
 	writeScopeFiles(t, city, managedCityState(), "hq")
-	writeRemoteMarker(t, city, "10.0.0.5", "3306", "orgdb")
+	writeRemoteMarker(t, city, "10.0.0.5", "orgdb")
 	if err := checkWorkTopologyMarkers(city, workCfg("unified", "dolt://10.0.0.9:3306/orgdb", "fe")); err == nil {
 		t.Fatal("remote marker recorded target must not be silently retargeted")
 	}
@@ -592,7 +594,7 @@ func TestWorkTopologyStampRoundTrip(t *testing.T) {
 	if _, ok, err := readWorkTopologyStamp(root); ok || err != nil {
 		t.Fatalf("absent stamp = (ok=%v, err=%v)", ok, err)
 	}
-	writeRemoteStamp(t, root, "10.0.0.5", "3306", "orgdb")
+	writeRemoteStamp(t, root, "10.0.0.5", "orgdb")
 	s, ok, err := readWorkTopologyStamp(root)
 	if err != nil || !ok || s.Kind != workMarkerKindRemote || s.Database != "orgdb" {
 		t.Fatalf("stamp round-trip = (%+v, %v, %v)", s, ok, err)

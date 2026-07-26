@@ -1333,7 +1333,7 @@ case "$*" in
   *"update hw-claim --claim --json"*)
     printf '[{"id":"hw-claim","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]' "${BEADS_ACTOR:-}"
     ;;
-  *"show --json hw-claim"*)
+  *"show --json -- hw-claim"*)
     printf '[{"id":"hw-claim","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]' "${BEADS_ACTOR:-}"
     ;;
   *"list --json --status=open"*"gc.continuation_group=body"*"gc.root_bead_id=root-1"*)
@@ -1392,7 +1392,7 @@ esac
 	if !strings.Contains(logText, "actor=worker-1 args=update hw-claim --claim --json") {
 		t.Fatalf("bd claim did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
-	if !strings.Contains(logText, "actor=worker-1 args=show --json hw-claim") {
+	if !strings.Contains(logText, "actor=worker-1 args=show --json -- hw-claim") {
 		t.Fatalf("bd canonical read did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
 	if !strings.Contains(logText, "args=update --json hw-next --assignee worker-1") {

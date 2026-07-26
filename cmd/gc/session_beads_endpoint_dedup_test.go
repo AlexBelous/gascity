@@ -43,10 +43,10 @@ func TestWorkAssignmentStoresEndpointDedupNative(t *testing.T) {
 		rigA := filepath.Join(city, "fe")
 		rigB := filepath.Join(city, "be")
 		// Canonical (remote) city + inherited rigs, all one org endpoint.
-		writeScopeFiles(t, city, cityCanonicalState("db.example", "3306"), "org")
+		writeScopeFiles(t, city, cityCanonicalState("db.example"), "org")
 		writeScopeFiles(t, rigA, inheritedCanonicalRigState("db.example", "3306"), "org")
 		writeScopeFiles(t, rigB, inheritedCanonicalRigState("db.example", "3306"), "org")
-		writeRemoteMarker(t, city, "db.example", "3306", "org")
+		writeRemoteMarker(t, city, "db.example", "org")
 
 		got := workAssignmentStores(nativeLikeStore(city), map[string]beads.Store{
 			"fe": nativeLikeStore(rigA),
@@ -61,10 +61,10 @@ func TestWorkAssignmentStoresEndpointDedupNative(t *testing.T) {
 		city := t.TempDir()
 		rigA := filepath.Join(city, "fe")
 		rigB := filepath.Join(city, "be")
-		writeScopeFiles(t, city, cityCanonicalState("db.example", "3306"), "org")
+		writeScopeFiles(t, city, cityCanonicalState("db.example"), "org")
 		writeScopeFiles(t, rigA, inheritedCanonicalRigState("db.example", "3306"), "org")
 		writeScopeFiles(t, rigB, inheritedCanonicalRigState("db.example", "3306"), "org")
-		writeRemoteMarker(t, city, "db.example", "3306", "org")
+		writeRemoteMarker(t, city, "db.example", "org")
 
 		cfg := workCfg("unified", "remote", rigA, rigB)
 		cfg.Rigs[0].Name = "fe"

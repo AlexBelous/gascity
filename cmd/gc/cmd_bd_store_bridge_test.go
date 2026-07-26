@@ -216,8 +216,8 @@ func TestBdStoreBridgeGetCmdReturnsBead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(args): %v", err)
 	}
-	if got := strings.TrimSpace(string(argsText)); got != "show --json BD-1" {
-		t.Fatalf("get args = %q, want %q", got, "show --json BD-1")
+	if got := strings.TrimSpace(string(argsText)); got != "show --json -- BD-1" {
+		t.Fatalf("get args = %q, want %q", got, "show --json -- BD-1")
 	}
 }
 

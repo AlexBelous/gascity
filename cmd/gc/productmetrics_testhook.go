@@ -20,10 +20,14 @@ import (
 )
 
 const (
-	taggedProductMetricsEndpointEnvironment = "GC_PRODUCT_METRICS_TESTHOOK_ENDPOINT"
-	taggedProductMetricsCAFileEnvironment   = "GC_PRODUCT_METRICS_TESTHOOK_CA_FILE"
-	taggedProductMetricsMaximumCABytes      = 64 * 1024
-	taggedProductMetricsReleaseVersion      = "0.31.0"
+	taggedProductMetricsEndpointEnvironment          = "GC_PRODUCT_METRICS_TESTHOOK_ENDPOINT"
+	taggedProductMetricsCAFileEnvironment            = "GC_PRODUCT_METRICS_TESTHOOK_CA_FILE"
+	taggedProductMetricsDiagnosticFDEnvironment      = "GC_PRODUCT_METRICS_TESTHOOK_DIAGNOSTIC_FD"
+	taggedProductMetricsDiagnosticFDEnvironmentValue = "3"
+	taggedProductMetricsDiagnosticFD                 = 3
+	taggedProductMetricsMaximumCABytes               = 64 * 1024
+	taggedProductMetricsMaximumDiagnosticBytes       = 4 * 1024
+	taggedProductMetricsReleaseVersion               = "0.31.0"
 )
 
 func configuredPrivateProductMetricsRunner() privateProductMetricsRunFunc {
@@ -34,7 +38,33 @@ func runProductMetricsTaggedChild(ctx context.Context, invocation productmetrics
 	if os.Getenv(taggedProductMetricsEndpointEnvironment) == "" {
 		return runProductionProductMetricsChild(ctx, invocation)
 	}
-	return runProductMetricsTesthookChild(ctx, invocation)
+	err := runProductMetricsTesthookChild(ctx, invocation)
+	writeProductMetricsTesthookDiagnostic(err)
+	return err
+}
+
+func writeProductMetricsTesthookDiagnostic(err error) {
+	if err == nil || os.Getenv(taggedProductMetricsDiagnosticFDEnvironment) != taggedProductMetricsDiagnosticFDEnvironmentValue {
+		return
+	}
+	file := os.NewFile(taggedProductMetricsDiagnosticFD, "product-metrics-testhook-diagnostic")
+	if file == nil {
+		return
+	}
+	defer func() { _ = file.Close() }()
+	writeProductMetricsTesthookDiagnosticTo(file, err)
+}
+
+func writeProductMetricsTesthookDiagnosticTo(writer io.Writer, err error) {
+	if writer == nil || err == nil {
+		return
+	}
+	diagnostic := []byte(err.Error())
+	if len(diagnostic) >= taggedProductMetricsMaximumDiagnosticBytes {
+		diagnostic = diagnostic[:taggedProductMetricsMaximumDiagnosticBytes-1]
+	}
+	diagnostic = append(diagnostic, '\n')
+	_, _ = writer.Write(diagnostic)
 }
 
 func runProductMetricsTesthookChild(ctx context.Context, invocation productmetrics.PrivateUploaderInvocation) error {

@@ -58,7 +58,7 @@ func TestSameResolvedWorkEndpoint(t *testing.T) {
 		rigA := filepath.Join(city, "fe")
 		rigB := filepath.Join(city, "be")
 		// localhost and 127.0.0.1 fold to one host; same port + database → alias.
-		writeScopeFiles(t, city, cityCanonicalState("localhost", "3306"), "org")
+		writeScopeFiles(t, city, cityCanonicalState("localhost"), "org")
 		writeScopeFiles(t, rigA, inheritedCanonicalRigState("127.0.0.1", "3306"), "org")
 		writeScopeFiles(t, rigB, inheritedCanonicalRigState("localhost", "3306"), "org")
 

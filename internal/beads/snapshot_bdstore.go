@@ -97,7 +97,7 @@ func (s *BdStore) GetBeadSnapshots(_ context.Context, ids []string) ([]Snapshot,
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"show", "--json"}, ids...)
+	args := append([]string{"show", "--json", "--"}, ids...)
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdNotFound(err) {
@@ -180,6 +180,18 @@ func (s *BdStore) ImportBeadSnapshots(ctx context.Context, snaps []Snapshot, opt
 
 	report := ImportReport{}
 	if len(guarded) > 0 {
+		var guardedDest []Snapshot
+		if !opts.ConflictSkip {
+			ids := make([]string, len(guarded))
+			for i, snap := range guarded {
+				ids[i] = snap.ID()
+			}
+			var err error
+			guardedDest, err = s.GetBeadSnapshots(cctx, ids)
+			if err != nil {
+				return ImportReport{}, fmt.Errorf("bd import: probing guarded destination: %w", err)
+			}
+		}
 		guardedArgs := []string{"import", "-", "--json"}
 		if opts.ConflictSkip {
 			guardedArgs = append(guardedArgs, "--conflict-skip")
@@ -189,6 +201,7 @@ func (s *BdStore) ImportBeadSnapshots(ctx context.Context, snaps []Snapshot, opt
 			return ImportReport{}, err
 		}
 		report = result.toReport()
+		report = reconcileGuardedBDReport(report, guarded, guardedDest)
 	}
 
 	if len(forced) > 0 {
@@ -197,6 +210,44 @@ func (s *BdStore) ImportBeadSnapshots(ctx context.Context, snaps []Snapshot, opt
 		}
 	}
 	return report, nil
+}
+
+// reconcileGuardedBDReport corrects bd import's ambiguous ids bucket using the
+// destination snapshot captured immediately before the guarded import. Some bd
+// builds put a content-identical equal-clock row in ids without also listing it
+// in tie_kept_local_ids; without the pre-probe that existing row is
+// indistinguishable from a new insert. This affects reporting only—the guarded
+// import remains the write authority.
+func reconcileGuardedBDReport(report ImportReport, incoming, destination []Snapshot) ImportReport {
+	if len(report.Inserted) == 0 || len(destination) == 0 {
+		return report
+	}
+	incomingAt := make(map[string]time.Time, len(incoming))
+	for _, snap := range incoming {
+		incomingAt[snap.ID()] = snap.UpdatedAt().UTC().Truncate(time.Second)
+	}
+	destinationAt := make(map[string]time.Time, len(destination))
+	for _, snap := range destination {
+		destinationAt[snap.ID()] = snap.UpdatedAt().UTC().Truncate(time.Second)
+	}
+	inserted := make([]string, 0, len(report.Inserted))
+	for _, id := range report.Inserted {
+		stored, existed := destinationAt[id]
+		if !existed {
+			inserted = append(inserted, id)
+			continue
+		}
+		switch source := incomingAt[id]; {
+		case source.Before(stored):
+			report.StaleSkipped = append(report.StaleSkipped, id)
+		case source.Equal(stored):
+			report.KeptLocal = append(report.KeptLocal, id)
+		default:
+			report.Updated = append(report.Updated, id)
+		}
+	}
+	report.Inserted = inserted
+	return report
 }
 
 // applyForcedPass runs the conditional --allow-stale re-import for the flagged
@@ -406,9 +457,8 @@ type bdImportChange struct {
 // lists every processed row (inserts, updates, and ties); subtracting the update,
 // tie, and conflict-skip ids yields the genuinely-inserted set. conflict_skipped_ids
 // is emitted by the capable bd the ConflictSkip path already requires, so it maps
-// straight into ConflictSkipped. See the ImportReport drain-signal caveat: bd
-// reports only content-DIFFERING rows as tie/updated, so a content-identical
-// equal-clock re-import lands in `ids` and is classified Inserted here.
+// straight into ConflictSkipped. ImportBeadSnapshots reconciles the otherwise
+// ambiguous ids bucket against its pre-import destination probe.
 func (r bdImportResult) toReport() ImportReport {
 	report := ImportReport{}
 	updated := make(map[string]bool, len(r.UpdatedIssues))

@@ -346,7 +346,7 @@ func NormalizeIDFilterPrefix(p string) (string, bool) {
 	}
 	for i := 0; i < len(np); i++ {
 		c := np[i]
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return "", false
 		}
 	}

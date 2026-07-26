@@ -82,7 +82,7 @@ func newIntegrationBdStore(t *testing.T, prefix string) (*BdStore, string) {
 		}
 		t.Fatalf("bd init: %v\n%s", err, out)
 	}
-	return NewBdStore(dir, runner, WithBdStoreEnv(scopedEnv)), dir
+	return NewBdStoreWithPrefix(dir, runner, prefix, WithBdStoreEnv(scopedEnv)), dir
 }
 
 // openNativeTestStore opens a native Dolt store at a fresh TempDir with the given

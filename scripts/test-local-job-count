@@ -3,11 +3,16 @@
 set -euo pipefail
 
 # A fast-suite shard can build a roughly 2.8 GiB test binary. Budget 4 GiB per
-# concurrent shard for compiler/linker headroom, cap automatic fan-out at 16,
-# and preserve the former three-job safety default when memory is unknowable.
+# concurrent shard for compiler/linker headroom. A heavy shard's Go compiler,
+# linker, test binaries, and child services can consume hundreds of cgroup
+# tasks at once, so also budget 1024 tasks per job. Cap automatic fan-out at
+# 16, and preserve the former three-job safety default when either finite
+# resource budget is unknowable.
 readonly job_memory_kib=$((4 * 1024 * 1024))
+readonly job_tasks=1024
 readonly max_auto_jobs=16
 readonly unknown_memory_jobs=3
+readonly unknown_tasks_jobs=3
 
 fail() {
   echo "test-local-job-count: $*" >&2
@@ -86,6 +91,71 @@ detect_cgroup_memory_kib() {
   cgroup_remaining_kib "$cgroup_root/memory" "$relative" memory.limit_in_bytes memory.usage_in_bytes
 }
 
+cgroup_remaining_tasks() {
+  local root="${1%/}" relative="${2#/}"
+  local dir limit current remaining best=0 found=0
+
+  [[ -n "$root" ]] || root=/
+  dir="$root"
+  if [[ -n "$relative" ]]; then
+    dir="$root/$relative"
+  fi
+
+  # pids.current is hierarchical: at an ancestor it includes every task in
+  # descendant scopes. A leaf may be unlimited while the containing systemd
+  # slice enforces TasksMax, so use the tightest finite remaining budget.
+  while [[ "$dir" == "$root" || "$dir" == "$root/"* ]]; do
+    if [[ -e "$dir/pids.max" || -e "$dir/pids.current" ]]; then
+      [[ -r "$dir/pids.max" && -r "$dir/pids.current" ]] || return 1
+      read -r limit < "$dir/pids.max" || return 1
+      read -r current < "$dir/pids.current" || return 1
+      [[ "$current" =~ ^[0-9]+$ ]] || return 1
+      found=1
+
+      if [[ "$limit" =~ ^[0-9]+$ ]]; then
+        if [[ "$current" -ge "$limit" ]]; then
+          remaining=1
+        else
+          remaining=$((limit - current))
+        fi
+        if [[ "$best" -eq 0 || "$remaining" -lt "$best" ]]; then
+          best="$remaining"
+        fi
+      elif [[ "$limit" != "max" ]]; then
+        return 1
+      fi
+    fi
+
+    [[ "$dir" == "$root" ]] && break
+    dir="${dir%/*}"
+  done
+
+  [[ "$found" -eq 1 ]] || return 1
+  if [[ "$best" -gt 0 ]]; then
+    printf '%s\n' "$best"
+  else
+    printf 'max\n'
+  fi
+}
+
+detect_cgroup_tasks() {
+  local proc_cgroup="${GC_TEST_LOCAL_PROC_CGROUP:-/proc/self/cgroup}"
+  local cgroup_root="${GC_TEST_LOCAL_CGROUP_ROOT:-/sys/fs/cgroup}"
+  local relative
+
+  [[ -r "$proc_cgroup" ]] || return 1
+
+  relative="$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' "$proc_cgroup" 2>/dev/null || true)"
+  if [[ -n "$relative" ]] &&
+    cgroup_remaining_tasks "$cgroup_root" "$relative"; then
+    return
+  fi
+
+  relative="$(awk -F: '$2 ~ /(^|,)pids(,|$)/ { print $3; exit }' "$proc_cgroup" 2>/dev/null || true)"
+  [[ -n "$relative" ]] || return 1
+  cgroup_remaining_tasks "$cgroup_root/pids" "$relative"
+}
+
 detect_memory_kib() {
   if [[ -n "${GC_TEST_LOCAL_MEMORY_KIB+x}" ]]; then
     [[ "$GC_TEST_LOCAL_MEMORY_KIB" =~ ^[0-9]+$ ]] ||
@@ -135,6 +205,7 @@ detect_memory_kib() {
 
 cpus="$(detect_cpus)"
 memory_kib="$(detect_memory_kib || true)"
+tasks_remaining="$(detect_cgroup_tasks || true)"
 jobs="$cpus"
 
 if [[ -n "$memory_kib" ]]; then
@@ -147,6 +218,18 @@ if [[ -n "$memory_kib" ]]; then
   fi
 elif [[ "$jobs" -gt "$unknown_memory_jobs" ]]; then
   jobs="$unknown_memory_jobs"
+fi
+
+if [[ "$tasks_remaining" =~ ^[0-9]+$ ]]; then
+  task_jobs=$((tasks_remaining / job_tasks))
+  if [[ "$task_jobs" -lt 1 ]]; then
+    task_jobs=1
+  fi
+  if [[ "$task_jobs" -lt "$jobs" ]]; then
+    jobs="$task_jobs"
+  fi
+elif [[ "$tasks_remaining" != "max" && "$jobs" -gt "$unknown_tasks_jobs" ]]; then
+  jobs="$unknown_tasks_jobs"
 fi
 
 if [[ "$jobs" -gt "$max_auto_jobs" ]]; then

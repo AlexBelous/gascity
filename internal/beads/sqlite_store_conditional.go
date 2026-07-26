@@ -166,6 +166,12 @@ func (s *SQLiteStore) DeleteBatch(ids []string) error {
 			}
 			return err
 		}
+		for _, id := range chunk {
+			if err := s.localStrings.DeleteBead(id); err != nil {
+				cleanupErr := fmt.Errorf("cleaning up local strings for %q: %w", id, err)
+				return &BatchDeleteError{Committed: append(deleted, chunk...), Err: cleanupErr}
+			}
+		}
 		deleted = append(deleted, chunk...)
 	}
 	return nil

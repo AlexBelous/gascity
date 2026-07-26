@@ -18,6 +18,8 @@ type unavailableStore struct{ err error }
 // operation with err.
 func NewUnavailableStore(err error) beads.Store { return unavailableStore{err: err} }
 
+var _ beads.Store = unavailableStore{}
+
 func (u unavailableStore) Create(beads.Bead) (beads.Bead, error) { return beads.Bead{}, u.err }
 func (u unavailableStore) Get(string) (beads.Bead, error)        { return beads.Bead{}, u.err }
 func (u unavailableStore) Update(string, beads.UpdateOpts) error { return u.err }
@@ -49,6 +51,8 @@ func (u unavailableStore) ListByMetadata(map[string]string, int, ...beads.QueryO
 }
 func (u unavailableStore) SetMetadata(string, string, string) error         { return u.err }
 func (u unavailableStore) SetMetadataBatch(string, map[string]string) error { return u.err }
+func (u unavailableStore) SetLocalString(string, string, string) error      { return u.err }
+func (u unavailableStore) GetLocalString(string, string) (string, error)    { return "", u.err }
 func (u unavailableStore) Tx(string, func(tx beads.Tx) error) error         { return u.err }
 func (u unavailableStore) Delete(string) error                              { return u.err }
 func (u unavailableStore) Ping() error                                      { return u.err }

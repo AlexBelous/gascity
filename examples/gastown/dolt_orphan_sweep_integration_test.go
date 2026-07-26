@@ -71,6 +71,7 @@ func TestSweep_ReapsRealDoltDataDirAfterSIGKILL(t *testing.T) {
 	if _, err := os.Stat(dataDir); err != nil {
 		t.Fatalf("data dir vanished from a sweep pass that should have skipped it: %v", err)
 	}
+	waitForDoltServerForMaintenanceTest(t, doltPath, port, "sweepdb")
 
 	if !killAndWait() {
 		t.Fatalf("dolt sql-server (pid %d) did not exit within 10s of SIGKILL", pid)

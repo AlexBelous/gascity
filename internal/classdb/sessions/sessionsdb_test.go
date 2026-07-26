@@ -2,6 +2,7 @@ package sessionsdb
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,6 +30,48 @@ func TestIDPrefixMatchesReservedClassPrefix(t *testing.T) {
 	}
 	if idPrefix != want {
 		t.Fatalf("idPrefix %q drifted from reserved class prefix %q", idPrefix, want)
+	}
+}
+
+func TestLocalStringsPersistOutsideSessionsDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (first): %v", err)
+	}
+	created, err := st.Create(beads.Bead{Title: "session", Type: session.BeadType})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := st.SetLocalString(created.ID, "last_probe_at", "2026-07-26T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	if err := st.CloseStore(); err != nil {
+		t.Fatalf("CloseStore (first): %v", err)
+	}
+
+	sidecarPath := path + ".local-strings.json"
+	if _, err := os.Stat(sidecarPath); err != nil {
+		t.Fatalf("local-string sidecar %q: %v", sidecarPath, err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (second): %v", err)
+	}
+	defer func() { _ = reopened.CloseStore() }()
+	got, err := reopened.GetLocalString(created.ID, "last_probe_at")
+	if err != nil {
+		t.Fatalf("GetLocalString after reopen: %v", err)
+	}
+	if got != "2026-07-26T00:00:00Z" {
+		t.Fatalf("GetLocalString after reopen = %q, want persisted value", got)
+	}
+	durable, err := reopened.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get durable session: %v", err)
+	}
+	if _, leaked := durable.Metadata["last_probe_at"]; leaked {
+		t.Fatal("clone-local string leaked into durable session metadata")
 	}
 }
 

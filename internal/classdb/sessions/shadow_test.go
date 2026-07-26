@@ -74,6 +74,30 @@ func TestShadowWritesReplayOntoClassStore(t *testing.T) {
 	}
 }
 
+func TestShadowLocalStringsRemainPrimaryAndSeedCutoverStore(t *testing.T) {
+	primary := beads.NewMemStore()
+	class := openTestStore(t)
+	created, err := primary.Create(beads.Bead{
+		Title: "session",
+		Type:  session.BeadType,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh := NewShadow(primary, class)
+	if err := sh.SetLocalString(created.ID, "probe", "ready"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	got, err := sh.GetLocalString(created.ID, "probe")
+	if err != nil || got != "ready" {
+		t.Fatalf("shadow GetLocalString = (%q, %v), want (ready, nil)", got, err)
+	}
+	classGot, err := class.GetLocalString(created.ID, "probe")
+	if err != nil || classGot != "ready" {
+		t.Fatalf("class GetLocalString = (%q, %v), want seeded ready value", classGot, err)
+	}
+}
+
 func TestShadowOnMissImportConverges(t *testing.T) {
 	// A row created before the shadow was enabled (directly on the primary)
 	// converges on its first teed write.

@@ -353,7 +353,7 @@ func TestBdStoreGet(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd show --json bd-abc-123`: {
+		`bd show --json -- bd-abc-123`: {
 			out: []byte(`[{"id":"bd-abc-123","title":"Build a widget","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","assignee":"alice"}]`),
 		},
 	})
@@ -379,7 +379,7 @@ func TestBdStoreGetFallsBackToEphemeralForWisps(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd show --json gc-wisp-abc`: {
+		`bd show --json -- gc-wisp-abc`: {
 			err: fmt.Errorf("issue gc-wisp-abc not found"),
 		},
 		`bd query --json ephemeral=true AND id=gc-wisp-abc --all --limit 1`: {
@@ -404,7 +404,7 @@ func TestBdStoreGetEphemeralFallbackReturnsErrNotFoundWhenMissing(t *testing.T) 
 		out []byte
 		err error
 	}{
-		`bd show --json gc-wisp-missing`: {
+		`bd show --json -- gc-wisp-missing`: {
 			err: fmt.Errorf("issue gc-wisp-missing not found"),
 		},
 		`bd query --json ephemeral=true AND id=gc-wisp-missing --all --limit 1`: {
@@ -453,7 +453,7 @@ func TestBdIssueToBeadFallsBackToMetadataFrom(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd show --json bd-msg-1`: {
+		`bd show --json -- bd-msg-1`: {
 			out: []byte(`[{"id":"bd-msg-1","title":"Update reminder","status":"open","issue_type":"message","created_at":"2025-01-15T10:30:00Z","assignee":"corp/lawrence","metadata":{"from":"priya"}}]`),
 		},
 	})
@@ -552,7 +552,7 @@ func TestBdStoreGetExactIDGuard(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd show --json gcy-dv7`: {
+		`bd show --json -- gcy-dv7`: {
 			out: []byte(`[{"id":"gcy-wisp-dv78","title":"Wrong bead","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
 	})
@@ -631,7 +631,7 @@ func TestBdStoreCloseForwardsStampedCloseReason(t *testing.T) {
 			return nil, fmt.Errorf("unexpected command name: %s", name)
 		}
 		switch strings.Join(args, " ") {
-		case "show --json bd-abc-123":
+		case "show --json -- bd-abc-123":
 			status := "open"
 			if closed {
 				status = "closed"
@@ -1031,7 +1031,7 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		switch strings.Join(args, " ") {
-		case "show --json bd-42":
+		case "show --json -- bd-42":
 			status := "open"
 			if closed {
 				status = "closed"
@@ -1101,14 +1101,14 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 	}
 
 	want := []string{
-		"bd show --json bd-42", // Tx initial Get
+		"bd show --json -- bd-42", // Tx initial Get
 		"bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
-		"bd show --json bd-42", // honesty re-read after update (close's honesty guard)
+		"bd show --json -- bd-42", // honesty re-read after update (close's honesty guard)
 		"bd close --force --json --reason completed during transaction bd-42",
-		"bd show --json bd-42", // honesty re-read after close (close's honesty guard)
+		"bd show --json -- bd-42", // honesty re-read after close (close's honesty guard)
 		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
-		"bd show --json bd-42", // Tx final Get
-		"bd show --json bd-42", // final Get after Tx
+		"bd show --json -- bd-42", // Tx final Get
+		"bd show --json -- bd-42", // final Get after Tx
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -1121,7 +1121,7 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		switch strings.Join(args, " ") {
-		case "show --json bd-42":
+		case "show --json -- bd-42":
 			status := "open"
 			if closed {
 				status = "closed"
@@ -1143,9 +1143,9 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 	}
 
 	want := []string{
-		"bd show --json bd-42", // Tx initial Get
+		"bd show --json -- bd-42", // Tx initial Get
 		"bd close --force --json --reason completed during transaction bd-42",
-		"bd show --json bd-42", // honesty re-read after close
+		"bd show --json -- bd-42", // honesty re-read after close
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -1156,7 +1156,7 @@ func TestBdStoreTxRetriesTransientUpdateApply(t *testing.T) {
 	updateCalls := 0
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		switch strings.Join(args, " ") {
-		case "show --json bd-42":
+		case "show --json -- bd-42":
 			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		case "update --json bd-42 --title before --status open --type task --set-metadata tx=applied":
 			updateCalls++
@@ -1186,7 +1186,7 @@ func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		switch strings.Join(args, " ") {
-		case "show --json bd-42":
+		case "show --json -- bd-42":
 			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","labels":["a","b"]}]`), nil
 		case "update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a":
 			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","labels":["b","c"]}]`), nil
@@ -1206,7 +1206,7 @@ func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
 	}
 
 	want := []string{
-		"bd show --json bd-42", // Tx initial Get
+		"bd show --json -- bd-42", // Tx initial Get
 		"bd update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a",
 	}
 	if !reflect.DeepEqual(commands, want) {
@@ -1269,7 +1269,7 @@ func TestBdStoreWaitForParentProjection(t *testing.T) {
 		defer mu.Unlock()
 
 		switch cmd {
-		case "show --json bd-child":
+		case "show --json -- bd-child":
 			showCalls++
 			if showCalls == 1 {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
@@ -1307,7 +1307,7 @@ func TestBdStoreWaitForParentRemovalProjection(t *testing.T) {
 		defer mu.Unlock()
 
 		switch cmd {
-		case "show --json bd-child":
+		case "show --json -- bd-child":
 			showCalls++
 			if showCalls == 1 {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
@@ -1341,7 +1341,7 @@ func TestBdStoreWaitForParentProjectionDetectsSupersededParent(t *testing.T) {
 			return []byte(`[]`), nil
 		case "list --json --include-infra --include-gates --limit 0 --parent bd-old":
 			return []byte(`[]`), nil
-		case "show --json bd-child":
+		case "show --json -- bd-child":
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-other"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", cmd)
@@ -1367,7 +1367,7 @@ func TestBdStoreWaitForParentProjectionGetsBeforeListing(t *testing.T) {
 		defer mu.Unlock()
 
 		switch cmd {
-		case "show --json bd-child":
+		case "show --json -- bd-child":
 			showCalls++
 			if showCalls == 1 {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-old"}]`), nil
@@ -1487,7 +1487,7 @@ func TestBdStoreCloseAllReturnsPartialCountAndErrorOnFallbackFailure(t *testing.
 		`bd close --force --json bd-2`: {
 			err: individualErr,
 		},
-		`bd show --json bd-2`: {
+		`bd show --json -- bd-2`: {
 			out: []byte(`[{"id":"bd-2","title":"two","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
 	})
@@ -2602,7 +2602,7 @@ func TestBdStoreStatusMapping(t *testing.T) {
 				out []byte
 				err error
 			}{
-				`bd show --json bd-x`: {
+				`bd show --json -- bd-x`: {
 					out: []byte(fmt.Sprintf(`[{"id":"bd-x","title":"test","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`, tt.bdStatus)),
 				},
 			})
@@ -2916,7 +2916,7 @@ func TestBdStoreDepAddParentChildAlreadyParentedIsNoop(t *testing.T) {
 		call := name + " " + strings.Join(args, " ")
 		calls = append(calls, call)
 		switch call {
-		case "bd show --json bd-child":
+		case "bd show --json -- bd-child":
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: %s", call)
@@ -2937,7 +2937,7 @@ func TestBdStoreGetNormalizesShowStyleDependencies(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd show --json bd-child`: {
+		`bd show --json -- bd-child`: {
 			out: []byte(`[
 				{
 					"id":"bd-child",
@@ -3165,6 +3165,127 @@ func TestBdStoreSetMetadataError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "setting metadata") {
 		t.Errorf("error = %q, want to contain 'setting metadata'", err)
+	}
+}
+
+// --- SetLocalString / GetLocalString ---
+
+func TestBdStoreSetLocalStringRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	got, err := s.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Errorf("GetLocalString = %q, want persisted value", got)
+	}
+}
+
+func TestBdStoreGetLocalStringUnsetReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	got, err := s.GetLocalString("bd-1", "never_set")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetLocalString unset = %q, want empty", got)
+	}
+}
+
+// TestBdStoreLocalStringNeverInvokesCommandRunner asserts the property
+// documented on BdStore.SetLocalString: clone-local writes are persisted to
+// a sidecar JSON file and never shell out to bd, so they never touch Dolt
+// sync or bd's on_update hook. The runner fails the test immediately if
+// invoked at all.
+func TestBdStoreLocalStringNeverInvokesCommandRunner(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("SetLocalString/GetLocalString must never invoke bd, got: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "k1", "v1"); err != nil {
+		t.Fatalf("SetLocalString k1: %v", err)
+	}
+	if err := s.SetLocalString("bd-1", "k2", "v2"); err != nil {
+		t.Fatalf("SetLocalString k2: %v", err)
+	}
+	if _, err := s.GetLocalString("bd-1", "k1"); err != nil {
+		t.Fatalf("GetLocalString k1: %v", err)
+	}
+	if _, err := s.GetLocalString("bd-1", "k2"); err != nil {
+		t.Fatalf("GetLocalString k2: %v", err)
+	}
+	if err := s.SetLocalString("bd-1", "k1", ""); err != nil {
+		t.Fatalf("SetLocalString clear k1: %v", err)
+	}
+}
+
+func TestBdStoreSetLocalStringPersistsAcrossNewInstanceSameDir(t *testing.T) {
+	dir := t.TempDir()
+	failRunner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+
+	first := beads.NewBdStore(dir, failRunner)
+	if err := first.SetLocalString("bd-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	// A fresh *BdStore at the same dir simulates a new process/session
+	// opening the same clone; clone-local data must survive that restart.
+	second := beads.NewBdStore(dir, failRunner)
+	got, err := second.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString from fresh instance: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Errorf("GetLocalString from fresh instance at same dir = %q, want persisted value", got)
+	}
+}
+
+func TestBdStoreDeleteRemovesLocalStrings(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		if len(args) == 0 || args[0] != "delete" {
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "k", "v"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	if err := s.Delete("bd-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	got, err := s.GetLocalString("bd-1", "k")
+	if err != nil {
+		t.Fatalf("GetLocalString after Delete: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetLocalString after Delete = %q, want empty (sidecar entry removed)", got)
 	}
 }
 

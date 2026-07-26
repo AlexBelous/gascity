@@ -466,29 +466,20 @@ func TestProcessExecutableMatchesPinnedPathAndBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pinned := filepath.Join(t.TempDir(), "sleep")
-	pinnedTemp := pinned + ".tmp"
-	pinnedFile, err := os.OpenFile(pinnedTemp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o555)
+	differentPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("second executable unavailable: %v", err)
+	}
+	differentPath, err = filepath.EvalSymlinks(differentPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pinnedFile.Write(payload); err != nil {
-		_ = pinnedFile.Close()
-		t.Fatal(err)
-	}
-	if err := pinnedFile.Sync(); err != nil {
-		_ = pinnedFile.Close()
-		t.Fatal(err)
-	}
-	if err := pinnedFile.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(pinnedTemp, pinned); err != nil {
-		t.Fatal(err)
+	if differentPath == sleepSource {
+		t.Skip("sleep and sh resolve to the same executable")
 	}
 	digest := sha256.Sum256(payload)
 	expected := hex.EncodeToString(digest[:])
-	cmd := exec.Command(pinned, "30")
+	cmd := exec.Command(sleepSource, "30")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -498,15 +489,15 @@ func TestProcessExecutableMatchesPinnedPathAndBytes(t *testing.T) {
 	})
 	pid := cmd.Process.Pid
 	if out, err := runHelper(t, nil, "lumen_demo_process_executable_matches",
-		strconv.Itoa(pid), pinned, expected); err != nil {
+		strconv.Itoa(pid), sleepSource, expected); err != nil {
 		t.Fatalf("pinned executable rejected: %v\n%s", err, out)
 	}
 	if out, err := runHelper(t, nil, "lumen_demo_process_executable_matches",
-		strconv.Itoa(pid), sleepSource, expected); err == nil {
+		strconv.Itoa(pid), differentPath, expected); err == nil {
 		t.Fatalf("different executable path accepted: %s", out)
 	}
 	if out, err := runHelper(t, nil, "lumen_demo_process_executable_matches",
-		strconv.Itoa(pid), pinned, strings.Repeat("0", 64)); err == nil {
+		strconv.Itoa(pid), sleepSource, strings.Repeat("0", 64)); err == nil {
 		t.Fatalf("wrong executable digest accepted: %s", out)
 	}
 }

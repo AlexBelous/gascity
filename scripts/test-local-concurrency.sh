@@ -88,7 +88,13 @@ assert_true "loadavg.script_references_seam" grep -q 'GC_TEST_LOCAL_LOADAVG' "$J
 # without CAP_SYS_PTRACE, macOS) rather than failing the whole suite on an
 # environment gap unrelated to the feature itself.
 if command -v strace >/dev/null 2>&1; then
-    if strace -f -e trace=%file -- "$JOB_COUNT" 2>&1 >/dev/null | grep -q '/proc/loadavg'; then
+    # Captured into a variable rather than piped live into grep: a piped
+    # `grep -q` closes its end of the pipe as soon as it finds a match, and
+    # under pipefail that early close can race strace's own exit — SIGPIPEing
+    # strace mid-write turns into a spurious pipeline failure even though the
+    # match was genuinely found. Capturing first removes the race entirely.
+    STRACE_OUT="$(strace -f -e trace=%file -- "$JOB_COUNT" 2>&1 >/dev/null || true)"
+    if [[ "$STRACE_OUT" == *"/proc/loadavg"* ]]; then
         record_pass "loadavg.default_path_opens_proc_loadavg"
     else
         record_fail "loadavg.default_path_opens_proc_loadavg" "/proc/loadavg not opened by the default (no-override) path"

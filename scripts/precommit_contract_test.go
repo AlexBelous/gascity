@@ -70,7 +70,8 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			strings.HasPrefix(entry, "PUSH_GATE_MAX_CONCURRENT=") ||
 			strings.HasPrefix(entry, "PUSH_GATE_MAX_WAIT_SECONDS=") ||
 			strings.HasPrefix(entry, "PUSH_GATE_POLL_SECONDS=") ||
-			strings.HasPrefix(entry, "PUSH_GATE_UNRELATED_SENTINEL=") {
+			strings.HasPrefix(entry, "PUSH_GATE_UNRELATED_SENTINEL=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG=") {
 			continue
 		}
 		baseEnv = append(baseEnv, entry)
@@ -103,8 +104,12 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			args = append(args, "test-fast-parallel")
 			cmd := exec.Command("make", args...)
 			cmd.Dir = repoRoot
+			// This table exercises the cpu/memory/cgroup axes only; pin loadavg=0
+			// so a live host's real /proc/loadavg can't shrink the expected job
+			// count out from under an unrelated case (ga-04m84s).
 			cmd.Env = append(append([]string(nil), baseEnv...),
 				"GC_TEST_LOCAL_CPUS="+tt.cpus,
+				"GC_TEST_LOCAL_LOADAVG=0",
 				"GC_PUSH_GATE_NO_CAP=1",
 				"PUSH_GATE_MAX_CONCURRENT=7",
 				"PUSH_GATE_MAX_WAIT_SECONDS=13",

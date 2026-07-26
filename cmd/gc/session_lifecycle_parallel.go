@@ -857,6 +857,44 @@ func prepareStartCandidateForCity(
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
+	return prepareStartCandidateForCityWithNamedRefresh(
+		candidate, cityPath, cityName, cfg, sp, store, clk, stderr, workDirResolver, true,
+	)
+}
+
+// prepareExactStartCandidateForCity prepares a candidate whose TemplateParams
+// were reconstructed from the same authoritative exact-key read. It keeps the
+// normal pre-wake freshness read and all existing preparation writes, but does
+// not replace that template through refreshConfiguredNamedStartCandidate's
+// fleet-wide snapshot.
+func prepareExactStartCandidateForCity(
+	candidate startCandidate,
+	cityPath string,
+	cityName string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	stderr io.Writer,
+	workDirResolver taskWorkDirResolver,
+) (*preparedStart, error) {
+	return prepareStartCandidateForCityWithNamedRefresh(
+		candidate, cityPath, cityName, cfg, sp, store, clk, stderr, workDirResolver, false,
+	)
+}
+
+func prepareStartCandidateForCityWithNamedRefresh(
+	candidate startCandidate,
+	cityPath string,
+	cityName string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	stderr io.Writer,
+	workDirResolver taskWorkDirResolver,
+	refreshNamed bool,
+) (*preparedStart, error) {
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
 			sessFront := sessionFrontDoor(store)
@@ -892,7 +930,9 @@ func prepareStartCandidateForCity(
 	} else {
 		candidate.info = candidate.info.ApplyPatch(fold)
 	}
-	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+	if refreshNamed {
+		candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+	}
 	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
 	// session_key / instance_token mints) onto candidate.info at their write sites, so
 	// the returned prepared.candidate.info stays coherent with the store WITHOUT a
@@ -1653,7 +1693,36 @@ func commitAsyncStartResultWithContext(
 	wave int,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
-) (committed bool) {
+) bool {
+	return commitStartResultWithFreshness(
+		ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace,
+	) == startCommitCommitted
+}
+
+type startCommitDisposition uint8
+
+const (
+	startCommitFailed startCommitDisposition = iota
+	startCommitCommitted
+	startCommitSuperseded
+)
+
+// commitStartResultWithFreshness applies the async start-result freshness
+// fence and distinguishes a durable commit failure from an expected stale
+// result. The keyed exact-start path needs that distinction so a concurrent
+// close or replacement converges as a successful no-op instead of being
+// retried, while genuine persistence failures still surface to its workqueue.
+func commitStartResultWithFreshness(
+	ctx context.Context,
+	result startResult,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	rec events.Recorder,
+	wave int,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) (disposition startCommitDisposition) {
 	name := result.prepared.candidate.name()
 	template := result.prepared.candidate.tp.TemplateName
 	// Session front door constructed once from the same store; nil when store
@@ -1676,7 +1745,7 @@ func commitAsyncStartResultWithContext(
 			// still show start_call / post_start_observe timings; commit_refresh
 			// may be unset if the panic fired before refreshAsyncStartResult.
 			logLifecycleOutcome(stderr, "start", wave, name, template, "panic_recovered", result.started, time.Now(), err, result.phases)
-			committed = false
+			disposition = startCommitFailed
 		}
 	}()
 
@@ -1702,7 +1771,10 @@ func commitAsyncStartResultWithContext(
 			outcome = "async_start_refresh_failed"
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
-		return false
+		if releaseInFlight && !cleanupRuntime {
+			return startCommitFailed
+		}
+		return startCommitSuperseded
 	}
 	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
 		refreshed.err = nil
@@ -1711,19 +1783,25 @@ func commitAsyncStartResultWithContext(
 	}
 	if ctx != nil && ctx.Err() != nil {
 		if refreshed.err != nil && refreshed.rollbackPending {
-			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
+			if commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace) {
+				return startCommitCommitted
+			}
+			return startCommitFailed
 		}
 		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
 			rollbackPendingCreate(refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
-		return false
+		return startCommitFailed
 	}
 	if sp != nil && refreshed.err == nil && refreshed.outcome != TraceOutcomeSessionInitializing {
 		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
 	}
-	return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
+	if commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace) {
+		return startCommitCommitted
+	}
+	return startCommitFailed
 }
 
 // refreshAsyncStartResult re-reads the session bead just before commit so the async

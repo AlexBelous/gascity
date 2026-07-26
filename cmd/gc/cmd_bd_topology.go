@@ -410,13 +410,21 @@ func bdTopologySet(cityPath string, cfg *config.City, f bdTopologyFlags, stdout,
 // ── dry-run plan ─────────────────────────────────────────────────────────────
 
 type bdTopologyPlan struct {
-	SchemaVersion string               `json:"schema_version"`
-	OK            bool                 `json:"ok"`
-	City          string               `json:"city"`
-	Desired       bdTopologyAxes       `json:"desired"`
-	InfraRung     bdTopologyInfraPlan  `json:"infra_rung"`
-	UnifyRung     bdTopologyUnifyPlan  `json:"unify_rung"`
-	RemoteRung    bdTopologyRemotePlan `json:"remote_rung"`
+	SchemaVersion string                `json:"schema_version"`
+	OK            bool                  `json:"ok"`
+	City          string                `json:"city"`
+	Desired       bdTopologyAxes        `json:"desired"`
+	InfraRung     bdTopologyInfraPlan   `json:"infra_rung"`
+	UnifyRung     bdTopologyUnifyPlan   `json:"unify_rung"`
+	RemoteRung    bdTopologyRemotePlan  `json:"remote_rung"`
+	Errors        []bdTopologyPlanError `json:"errors,omitempty"`
+}
+
+type bdTopologyPlanError struct {
+	Code    string `json:"code"`
+	Rung    string `json:"rung"`
+	Source  string `json:"source"`
+	Message string `json:"message"`
 }
 
 type bdTopologyInfraPlan struct {
@@ -466,6 +474,63 @@ type bdTopologyRemotePlan struct {
 	Note            string   `json:"note,omitempty"`
 }
 
+var (
+	bdTopologyCityCommandRunner = bdCommandRunnerForCity
+	bdTopologyRigCommandRunner  = bdCommandRunnerForRig
+	openWorkTopologyScopeStore  = openReadOnlyWorkTopologyScopeStore
+)
+
+// openReadOnlyWorkTopologyScopeStore constructs the bd-backed census view
+// without using the normal work-store opener. The normal opener may reap a
+// stale JSONL export and lets bd run startup migrations; both are valid for a
+// live store but violate topology dry-run's no-write contract.
+func openReadOnlyWorkTopologyScopeStore(cityPath, scopeRoot string) (beads.Store, func(), error) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("loading city config for read-only work census: %w", err)
+	}
+	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
+	if provider == "file" {
+		store, err := openExistingScopeLocalFileStore(scopeRoot)
+		return store, func() {}, err
+	}
+	if !providerUsesBdStoreContract(provider) {
+		return nil, func() {}, fmt.Errorf("work provider %q has no read-only topology census adapter", provider)
+	}
+	runner := bdTopologyCityCommandRunner(cityPath)
+	if !samePath(scopeRoot, cityPath) {
+		runner = bdTopologyRigCommandRunner(cityPath, cfg, scopeRoot)
+	}
+	store := beads.NewBdStoreWithPrefix(
+		scopeRoot,
+		bdTopologyReadOnlyCommandRunner(runner),
+		issuePrefixForScope(scopeRoot, cityPath, cfg),
+		bdStoreOptionsForConfig(cfg)...,
+	)
+	return store, func() {}, nil
+}
+
+func bdTopologyReadOnlyCommandRunner(next beads.CommandRunner) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			for _, arg := range args {
+				if arg == "--readonly" {
+					return next(dir, name, args...)
+				}
+			}
+			if len(args) == 0 {
+				args = []string{"--readonly"}
+			} else {
+				readOnlyArgs := make([]string, 0, len(args)+1)
+				readOnlyArgs = append(readOnlyArgs, args[0], "--readonly")
+				args = append(readOnlyArgs, args[1:]...)
+			}
+		}
+		return next(dir, name, args...)
+	}
+}
+
 func bdTopologyDryRun(cityPath string, cfg *config.City, f bdTopologyFlags, stdout, stderr io.Writer) int {
 	desired := bdTopologyDesired(cfg, f)
 	if err := validateDesiredTopology(cityPath, desired); err != nil {
@@ -473,18 +538,75 @@ func bdTopologyDryRun(cityPath string, cfg *config.City, f bdTopologyFlags, stdo
 	}
 	plan := bdTopologyPlan{
 		SchemaVersion: "1",
-		OK:            true,
 		City:          cityPath,
 		Desired:       desiredAxes(desired),
 		InfraRung:     bdTopologyPlanInfraRung(cityPath, desired),
 		UnifyRung:     bdTopologyPlanUnifyRung(cityPath, desired),
 		RemoteRung:    bdTopologyPlanRemoteRung(cityPath, desired),
 	}
+	plan.Errors = bdTopologyPlanErrors(plan)
+	plan.OK = len(plan.Errors) == 0
 	if f.json {
-		return writeCLIJSONLineOrExit(stdout, stderr, bdTopologyCommandName, plan)
+		if code := writeCLIJSONLineOrExit(stdout, stderr, bdTopologyCommandName, plan); code != 0 {
+			return code
+		}
+		if !plan.OK {
+			return 1
+		}
+		return 0
 	}
 	renderBdTopologyPlan(stdout, plan)
+	if !plan.OK {
+		for _, problem := range plan.Errors {
+			fmt.Fprintf(stderr, "%s: %s (%s/%s): %s\n", bdTopologyCommandName, problem.Code, problem.Rung, problem.Source, problem.Message) //nolint:errcheck
+		}
+		return 1
+	}
 	return 0
+}
+
+func bdTopologyPlanErrors(plan bdTopologyPlan) []bdTopologyPlanError {
+	var problems []bdTopologyPlanError
+	if census := plan.InfraRung.InfraScopeCensus; census != nil {
+		if census.Note != "" {
+			problems = append(problems, bdTopologyPlanError{
+				Code:    "infra_census_failed",
+				Rung:    "infra",
+				Source:  plan.InfraRung.InfraScopeDir,
+				Message: census.Note,
+			})
+		}
+		if census.Orphans > 0 {
+			problems = append(problems, bdTopologyPlanError{
+				Code:    "infra_work_orphans",
+				Rung:    "infra",
+				Source:  plan.InfraRung.InfraScopeDir,
+				Message: fmt.Sprintf("%d work-class bead(s) are absent from the work store: %s", census.Orphans, strings.Join(census.OrphanIDs, ", ")),
+			})
+		}
+	}
+	if plan.UnifyRung.Status == "would-run" {
+		for _, rig := range plan.UnifyRung.Rigs {
+			if rig.Countable {
+				continue
+			}
+			problems = append(problems, bdTopologyPlanError{
+				Code:    "work_census_failed",
+				Rung:    "unify",
+				Source:  rig.Rig,
+				Message: rig.Note,
+			})
+		}
+	}
+	if plan.RemoteRung.Status == "would-run" && !plan.RemoteRung.Countable {
+		problems = append(problems, bdTopologyPlanError{
+			Code:    "work_census_failed",
+			Rung:    "remote",
+			Source:  "hq",
+			Message: plan.RemoteRung.Note,
+		})
+	}
+	return problems
 }
 
 // bdTopologyPlanInfraRung computes the infra rung READ-ONLY: which of the five
@@ -531,8 +653,8 @@ func bdTopologyPlanInfraRung(cityPath string, desired *config.City) bdTopologyIn
 // bdTopologyInfraScopeCensus reruns the G1 preflight READ-ONLY over the .gc/infra
 // combined scope and reports the ClassWork census (scanned rows, ClassWork
 // count, and any orphan whose id is absent from the work store — the beads the
-// class flip would strand). Best-effort: an unopenable scope or work store yields
-// a Note instead of failing the plan.
+// class flip would strand). An unopenable scope or work store is retained as a
+// Note in the rendered plan and classified as a dry-run error.
 func bdTopologyInfraScopeCensus(cityPath string) *bdTopologyInfraCensus {
 	census := &bdTopologyInfraCensus{}
 	scope, closeScope, present, err := openInfraCombinedScopeSource(cityPath)
@@ -563,7 +685,7 @@ func bdTopologyInfraScopeCensus(cityPath string) *bdTopologyInfraCensus {
 	// A ClassWork bead in .gc/infra is imported by no class migration. Confirm each
 	// is a safe duplicate already in the work store; an absent id is an orphan that
 	// would block the boot flip (matches ensureInfraScopeClassifierClean).
-	workStore, closeWork, werr := openWorkUnifyScopeStore(cityPath, cityPath)
+	workStore, closeWork, werr := openWorkTopologyScopeStore(cityPath, cityPath)
 	if werr != nil {
 		census.Note = fmt.Sprintf("work store unavailable; G1 orphan check deferred to boot: %v", werr)
 		return census
@@ -658,10 +780,10 @@ func bdTopologyPlanRemoteRung(cityPath string, desired *config.City) bdTopologyR
 
 // bdTopologyCountWorkBeads opens a scope's work store READ-ONLY and counts its
 // ClassWork beads (durable + ephemeral). Best-effort: an unopenable store or a
-// failed List returns ok=false with an explanatory note instead of failing the
-// plan (a dry-run often runs against a stopped city).
+// failed List returns ok=false with an explanatory note; the caller retains the
+// plan for diagnostics and makes the dry-run fail closed.
 func bdTopologyCountWorkBeads(cityPath, scopeRoot string) (int, bool, string) {
-	store, closeFn, err := openWorkUnifyScopeStore(cityPath, scopeRoot)
+	store, closeFn, err := openWorkTopologyScopeStore(cityPath, scopeRoot)
 	if err != nil {
 		return 0, false, fmt.Sprintf("work store unavailable (count deferred to boot): %v", err)
 	}

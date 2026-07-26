@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,14 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+type topologyListErrorStore struct {
+	beads.Store
+}
+
+func (s *topologyListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, errors.New("schema unsupported")
+}
 
 // writeTopologyCity writes a minimal city.toml at dir and returns dir. body is
 // the [beads]/[beads.work]/[[rigs]] TOML appended after the workspace stanza.
@@ -290,9 +299,9 @@ func TestBdTopologyDryRunUnifyPlan(t *testing.T) {
 	beStore := newFakeWorkStore()
 	beStore.seed(&fakeWorkRec{id: "be-1", status: "open", issueType: "task"})
 
-	origOpen := openWorkUnifyScopeStore
-	t.Cleanup(func() { openWorkUnifyScopeStore = origOpen })
-	openWorkUnifyScopeStore = func(_, scopeRoot string) (beads.Store, func(), error) {
+	origOpen := openWorkTopologyScopeStore
+	t.Cleanup(func() { openWorkTopologyScopeStore = origOpen })
+	openWorkTopologyScopeStore = func(_, scopeRoot string) (beads.Store, func(), error) {
 		switch filepath.Base(scopeRoot) {
 		case "fe":
 			return feStore, func() {}, nil
@@ -340,6 +349,122 @@ func TestBdTopologyDryRunUnifyPlan(t *testing.T) {
 	}
 }
 
+func TestBdTopologyDryRunFailsClosedWhenRigCensusFails(t *testing.T) {
+	city := writeTopologyCity(t, t.TempDir(), "ga",
+		"\n[[rigs]]\nname = \"be\"\nprefix = \"be\"\npath = \"be\"\n")
+	before, err := os.ReadFile(filepath.Join(city, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origResolve := workUnifyResolveIdentity
+	t.Cleanup(func() { workUnifyResolveIdentity = origResolve })
+	workUnifyResolveIdentity = func(cityPath, scopeRoot string) (workUnifyScope, error) {
+		db := "hq"
+		if !samePath(scopeRoot, cityPath) {
+			db = filepath.Base(scopeRoot)
+		}
+		return workUnifyScope{root: scopeRoot, database: db}, nil
+	}
+
+	origOpen := openWorkTopologyScopeStore
+	t.Cleanup(func() { openWorkTopologyScopeStore = origOpen })
+	openWorkTopologyScopeStore = func(string, string) (beads.Store, func(), error) {
+		return &topologyListErrorStore{Store: newFakeWorkStore()}, func() {}, nil
+	}
+
+	out, _, code := runBdTopology(t, city, "--scope", "unified", "--dry-run", "--json")
+	if code == 0 {
+		t.Fatalf("unreadable required rig store must fail the dry-run; output=%s", out)
+	}
+	var result struct {
+		OK     bool `json:"ok"`
+		Errors []struct {
+			Code    string `json:"code"`
+			Rung    string `json:"rung"`
+			Source  string `json:"source"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("dry-run must preserve its JSON plan on failure: %v\noutput=%s", err, out)
+	}
+	if result.OK {
+		t.Fatalf("failed census plan reported ok: output=%s", out)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("errors = %+v, want one typed census error", result.Errors)
+	}
+	if got := result.Errors[0]; got.Code != "work_census_failed" || got.Rung != "unify" || got.Source != "be" ||
+		!strings.Contains(got.Message, "schema unsupported") {
+		t.Fatalf("error = %+v, want the failing rig census identity and cause", got)
+	}
+	if _, err := os.Stat(workUnifiedMarkerPath(city)); !os.IsNotExist(err) {
+		t.Fatalf("failed dry-run must not write the unified marker (stat err=%v)", err)
+	}
+	after, err := os.ReadFile(filepath.Join(city, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("failed dry-run modified city.toml:\nbefore=%q\nafter=%q", before, after)
+	}
+}
+
+func TestBdTopologyCountWorkBeadsUsesReadOnlyBD(t *testing.T) {
+	city := writeTopologyCity(t, t.TempDir(), "ga", "")
+	beadsDir := filepath.Join(city, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleExport := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(staleExport, []byte("must remain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls [][]string
+	origRunner := bdTopologyCityCommandRunner
+	t.Cleanup(func() { bdTopologyCityCommandRunner = origRunner })
+	bdTopologyCityCommandRunner = func(string) beads.CommandRunner {
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				t.Fatalf("command = %q, want bd", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			return []byte("[]"), nil
+		}
+	}
+	origOpen := openWorkTopologyScopeStore
+	t.Cleanup(func() { openWorkTopologyScopeStore = origOpen })
+	openWorkTopologyScopeStore = openReadOnlyWorkTopologyScopeStore
+
+	if _, ok, note := bdTopologyCountWorkBeads(city, city); !ok {
+		t.Fatalf("count failed: %s", note)
+	}
+	if len(calls) == 0 {
+		t.Fatal("count did not invoke bd")
+	}
+	for _, args := range calls {
+		found := false
+		for _, arg := range args {
+			if arg == "--readonly" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("bd call %q omitted --readonly", args)
+		}
+	}
+	data, err := os.ReadFile(staleExport)
+	if err != nil {
+		t.Fatalf("read-only census removed the stale export: %v", err)
+	}
+	if string(data) != "must remain\n" {
+		t.Fatalf("read-only census modified the stale export: %q", data)
+	}
+}
+
 // TestBdTopologyDryRunRemotePlan pins the remote rung: endpoint, allowed_prefixes,
 // copy count, and credential note.
 func TestBdTopologyDryRunRemotePlan(t *testing.T) {
@@ -349,9 +474,9 @@ func TestBdTopologyDryRunRemotePlan(t *testing.T) {
 	cityStore.seed(&fakeWorkRec{id: "ga-1", status: "open", issueType: "task"})
 	cityStore.seed(&fakeWorkRec{id: "ga-2", status: "open", issueType: "task"})
 	cityStore.seed(&fakeWorkRec{id: "ga-3", status: "closed", issueType: "task"})
-	origOpen := openWorkUnifyScopeStore
-	t.Cleanup(func() { openWorkUnifyScopeStore = origOpen })
-	openWorkUnifyScopeStore = func(string, string) (beads.Store, func(), error) {
+	origOpen := openWorkTopologyScopeStore
+	t.Cleanup(func() { openWorkTopologyScopeStore = origOpen })
+	openWorkTopologyScopeStore = func(string, string) (beads.Store, func(), error) {
 		return cityStore, func() {}, nil
 	}
 
@@ -385,6 +510,66 @@ func TestBdTopologyDryRunRemotePlan(t *testing.T) {
 	}
 }
 
+func TestBdTopologyDryRunFailsClosedWhenRemoteCensusFails(t *testing.T) {
+	city := writeTopologyCity(t, t.TempDir(), "ga", "")
+
+	origOpen := openWorkTopologyScopeStore
+	t.Cleanup(func() { openWorkTopologyScopeStore = origOpen })
+	openWorkTopologyScopeStore = func(string, string) (beads.Store, func(), error) {
+		return &topologyListErrorStore{Store: newFakeWorkStore()}, func() {}, nil
+	}
+
+	out, _, code := runBdTopology(t, city,
+		"--scope", "unified", "--target", "dolt://org.db:3306/shared", "--dry-run", "--json")
+	if code == 0 {
+		t.Fatalf("unreadable remote-copy source must fail the dry-run; output=%s", out)
+	}
+	var plan bdTopologyPlan
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatalf("dry-run must preserve its JSON plan on failure: %v\noutput=%s", err, out)
+	}
+	if plan.OK || len(plan.Errors) != 1 {
+		t.Fatalf("plan = %+v, want one blocking error", plan)
+	}
+	if got := plan.Errors[0]; got.Code != "work_census_failed" || got.Rung != "remote" || got.Source != "hq" ||
+		!strings.Contains(got.Message, "schema unsupported") {
+		t.Fatalf("error = %+v, want the remote-copy source identity and cause", got)
+	}
+}
+
+func TestBdTopologyDryRunFailsClosedWhenInfraCensusFails(t *testing.T) {
+	city := writeTopologyCity(t, t.TempDir(), "ga", "\n[beads]\ninfra = \"local\"\n")
+
+	infraDir := infraCombinedScopeDir(city)
+	if err := os.MkdirAll(infraDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(infraDir, "beads.sqlite"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origScope := openInfraCombinedScopeSource
+	t.Cleanup(func() { openInfraCombinedScopeSource = origScope })
+	openInfraCombinedScopeSource = func(string) (beads.Store, func(), bool, error) {
+		return &topologyListErrorStore{Store: newFakeWorkStore()}, func() {}, true, nil
+	}
+
+	out, _, code := runBdTopology(t, city, "--dry-run", "--json")
+	if code == 0 {
+		t.Fatalf("unreadable combined infra scope must fail the dry-run; output=%s", out)
+	}
+	var plan bdTopologyPlan
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatalf("dry-run must preserve its JSON plan on failure: %v\noutput=%s", err, out)
+	}
+	if plan.OK || len(plan.Errors) != 1 {
+		t.Fatalf("plan = %+v, want one blocking error", plan)
+	}
+	if got := plan.Errors[0]; got.Code != "infra_census_failed" || got.Rung != "infra" ||
+		got.Source != infraDir || !strings.Contains(got.Message, "schema unsupported") {
+		t.Fatalf("error = %+v, want the combined-infra source identity and cause", got)
+	}
+}
+
 // TestBdTopologyDryRunInfraCensus pins the infra-rung .gc/infra G1 census: an
 // orphan work-class bead (absent from the work store) is reported as blocking.
 func TestBdTopologyDryRunInfraCensus(t *testing.T) {
@@ -408,15 +593,15 @@ func TestBdTopologyDryRunInfraCensus(t *testing.T) {
 
 	// Work store lacks gcg-1 → orphan.
 	work := newFakeWorkStore()
-	origOpen := openWorkUnifyScopeStore
-	t.Cleanup(func() { openWorkUnifyScopeStore = origOpen })
-	openWorkUnifyScopeStore = func(string, string) (beads.Store, func(), error) {
+	origOpen := openWorkTopologyScopeStore
+	t.Cleanup(func() { openWorkTopologyScopeStore = origOpen })
+	openWorkTopologyScopeStore = func(string, string) (beads.Store, func(), error) {
 		return work, func() {}, nil
 	}
 
 	out, errOut, code := runBdTopology(t, city, "--dry-run", "--json")
-	if code != 0 {
-		t.Fatalf("infra dry-run exit=%d stderr=%s", code, errOut)
+	if code == 0 {
+		t.Fatalf("orphaned work-class bead must fail the infra dry-run: stderr=%s output=%s", errOut, out)
 	}
 	var plan bdTopologyPlan
 	if err := json.Unmarshal([]byte(out), &plan); err != nil {
@@ -428,5 +613,12 @@ func TestBdTopologyDryRunInfraCensus(t *testing.T) {
 	}
 	if c.WorkClass != 1 || c.Orphans != 1 {
 		t.Fatalf("census = %+v, want work_class=1 orphans=1", c)
+	}
+	if plan.OK || len(plan.Errors) != 1 {
+		t.Fatalf("plan = %+v, want one blocking orphan error", plan)
+	}
+	if got := plan.Errors[0]; got.Code != "infra_work_orphans" || got.Rung != "infra" ||
+		!strings.Contains(got.Message, "gcg-1") {
+		t.Fatalf("error = %+v, want the orphan id and infra rung", got)
 	}
 }

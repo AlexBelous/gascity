@@ -1,0 +1,212 @@
+package main
+
+import (
+	"encoding/json"
+	"sync/atomic"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+)
+
+func TestControllerStateSessionStartSnapshotCapturesOneGeneration(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "snapshot-city"}}
+	provider := runtime.NewFake()
+	store := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:                         cfg,
+		sp:                          provider,
+		cityBeadStore:               store,
+		cityName:                    "snapshot-city",
+		cityPath:                    "/snapshot-city",
+		sessionStartGeneration:      17,
+		sessionStartStoreGeneration: 17,
+	}
+
+	snapshot, err := cs.sessionStartSnapshot()
+	if err != nil {
+		t.Fatalf("sessionStartSnapshot: %v", err)
+	}
+	if snapshot.Generation != 17 {
+		t.Fatalf("generation = %d, want 17", snapshot.Generation)
+	}
+	if snapshot.Config != cfg || snapshot.Provider != provider || snapshot.Store != store {
+		t.Fatalf("snapshot mixed controller state: %+v", snapshot)
+	}
+	if snapshot.CityName != "snapshot-city" || snapshot.CityPath != "/snapshot-city" {
+		t.Fatalf("snapshot identity = %q %q, want snapshot-city /snapshot-city", snapshot.CityName, snapshot.CityPath)
+	}
+}
+
+func TestControllerStateSessionStartSnapshotFailsClosedWhenUnavailable(t *testing.T) {
+	tests := []struct {
+		name string
+		cs   *controllerState
+	}{
+		{name: "nil state"},
+		{name: "nil config", cs: &controllerState{sp: runtime.NewFake(), cityBeadStore: beads.NewMemStore()}},
+		{name: "nil provider", cs: &controllerState{cfg: &config.City{}, cityBeadStore: beads.NewMemStore()}},
+		{name: "nil store", cs: &controllerState{cfg: &config.City{}, sp: runtime.NewFake()}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := test.cs.sessionStartSnapshot(); err == nil {
+				t.Fatal("sessionStartSnapshot error = nil")
+			}
+		})
+	}
+}
+
+func TestControllerStateConfigOnlyUpdateDoesNotBlessIncoherentSessionStore(t *testing.T) {
+	store := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:                         &config.City{},
+		sp:                          runtime.NewFake(),
+		cityBeadStore:               store,
+		sessionStartGeneration:      9,
+		sessionStartStoreGeneration: 8,
+	}
+
+	cs.updateConfigAndProviderOnly(&config.City{}, runtime.NewFake())
+
+	if _, err := cs.sessionStartSnapshot(); err == nil {
+		t.Fatal("config-only update made a previously incoherent session store available")
+	}
+}
+
+func TestControllerStateSessionEventAdmissionFiltersByDecodedBead(t *testing.T) {
+	cs := &controllerState{}
+	admitted := make(chan string, 4)
+	if err := cs.installSessionStartEventAdmission(func(id string) {
+		admitted <- id
+	}); err != nil {
+		t.Fatalf("installSessionStartEventAdmission: %v", err)
+	}
+	t.Cleanup(cs.stopSessionStartEventAdmission)
+
+	tests := []struct {
+		name string
+		evt  events.Event
+		want string
+	}{
+		{
+			name: "proper session",
+			evt: beadEventForSessionStartTest(t, events.BeadCreated, beads.Bead{
+				ID:   "gcs-proper1",
+				Type: session.BeadType,
+			}),
+			want: "gcs-proper1",
+		},
+		{
+			name: "repairable session",
+			evt: beadEventForSessionStartTest(t, events.BeadUpdated, beads.Bead{
+				ID:     "gcs-repair1",
+				Labels: []string{session.LabelSession},
+			}),
+			want: "gcs-repair1",
+		},
+		{
+			name: "ordinary work",
+			evt: beadEventForSessionStartTest(t, events.BeadUpdated, beads.Bead{
+				ID:   "ga-work1",
+				Type: "task",
+			}),
+		},
+		{
+			name: "wrong type despite session label",
+			evt: beadEventForSessionStartTest(t, events.BeadUpdated, beads.Bead{
+				ID:     "ga-work2",
+				Type:   "task",
+				Labels: []string{session.LabelSession},
+			}),
+		},
+		{
+			name: "malformed payload",
+			evt:  events.Event{Type: events.BeadUpdated, Payload: []byte("not-json")},
+		},
+		{
+			name: "non bead event",
+			evt: beadEventForSessionStartTest(t, events.ControllerStarted, beads.Bead{
+				ID:   "gcs-wrong-event1",
+				Type: session.BeadType,
+			}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cs.admitSessionStartEvent(test.evt)
+			select {
+			case got := <-admitted:
+				if test.want == "" {
+					t.Fatalf("unexpected admission %q", got)
+				}
+				if got != test.want {
+					t.Fatalf("admission = %q, want %q", got, test.want)
+				}
+			default:
+				if test.want != "" {
+					t.Fatalf("missing admission %q", test.want)
+				}
+			}
+		})
+	}
+}
+
+func TestControllerStateStoppingSessionEventAdmissionDrainsCallback(t *testing.T) {
+	cs := &controllerState{}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	if err := cs.installSessionStartEventAdmission(func(string) {
+		calls.Add(1)
+		close(entered)
+		<-release
+	}); err != nil {
+		t.Fatalf("installSessionStartEventAdmission: %v", err)
+	}
+
+	eventDone := make(chan struct{})
+	go func() {
+		cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, beads.Bead{
+			ID:   "gcs-drain1",
+			Type: session.BeadType,
+		}))
+		close(eventDone)
+	}()
+	awaitClose(t, entered, "session-event admission callback")
+
+	stopDone := make(chan struct{})
+	go func() {
+		cs.stopSessionStartEventAdmission()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+		t.Fatal("stop returned before the admitted callback drained")
+	default:
+	}
+	close(release)
+	awaitClose(t, eventDone, "session-event callback completion")
+	awaitClose(t, stopDone, "session-event admission stop")
+
+	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, beads.Bead{
+		ID:   "gcs-after-stop1",
+		Type: session.BeadType,
+	}))
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("callback calls = %d, want 1 after admission stopped", got)
+	}
+}
+
+func beadEventForSessionStartTest(t *testing.T, eventType string, bead beads.Bead) events.Event {
+	t.Helper()
+	payload, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatalf("marshal bead event: %v", err)
+	}
+	return events.Event{Type: eventType, Subject: bead.ID, Payload: payload}
+}

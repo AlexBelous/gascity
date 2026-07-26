@@ -118,6 +118,22 @@ type controllerState struct {
 	// rolloutLogf, when non-nil, receives noteRolloutDrift's transition lines
 	// (tests capture it); nil falls back to os.Stderr via rolloutWarnf.
 	rolloutLogf func(format string, args ...any)
+
+	// sessionStartGeneration binds the exact-start controller's config,
+	// provider, and session store into one snapshot. The store generation only
+	// advances when the store swap succeeds; a failed reopen therefore makes
+	// sessionStartSnapshot fail closed instead of pairing a new config/provider
+	// with the previous store accidentally.
+	sessionStartGeneration      uint64
+	sessionStartStoreGeneration uint64
+
+	// sessionStartEventAdmission is installed only after the keyed controller
+	// is accepting work. Add and drain are serialized under mu so shutdown can
+	// remove admission, wait for callbacks already in flight, and only then
+	// stop the controller and stores.
+	sessionStartEventAdmission         func(string)
+	sessionStartEventAdmissionStopping bool
+	sessionStartEventAdmissionWG       sync.WaitGroup
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
@@ -177,20 +193,21 @@ func newControllerState(
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
 	}
 	cs := &controllerState{
-		cfg:                 cfg,
-		sp:                  sp,
-		cacheCtx:            ctx,
-		eventProv:           ep,
-		usageSink:           usageSinkForCity(cfg, cityPath),
-		editor:              configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		cityName:            cityName,
-		cityPath:            cityPath,
-		version:             version,
-		startedAt:           time.Now(),
-		adapterReg:          extmsg.NewAdapterRegistry(),
-		beadEventStartSeq:   beadEventStartSeq,
-		beadEventStartSeqOK: beadEventStartSeqOK,
-		rolloutFlags:        rolloutFlags,
+		cfg:                    cfg,
+		sp:                     sp,
+		cacheCtx:               ctx,
+		eventProv:              ep,
+		usageSink:              usageSinkForCity(cfg, cityPath),
+		editor:                 configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityName:               cityName,
+		cityPath:               cityPath,
+		version:                version,
+		startedAt:              time.Now(),
+		adapterReg:             extmsg.NewAdapterRegistry(),
+		beadEventStartSeq:      beadEventStartSeq,
+		beadEventStartSeqOK:    beadEventStartSeqOK,
+		rolloutFlags:           rolloutFlags,
+		sessionStartGeneration: 1,
 	}
 	// Boot-resolved rollout notices are retained on the Flags value; echo
 	// them once at startup so an env override contradicting explicit config
@@ -214,6 +231,7 @@ func newControllerState(
 		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
+		cs.sessionStartStoreGeneration = cs.sessionStartGeneration
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
@@ -573,6 +591,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			cached.ApplyEvent(evt.Type, evt.Payload)
 		}
 	}
+	cs.admitSessionStartEvent(evt)
 	if evt.Actor != "cache-reconcile" {
 		cs.Poke()
 	}
@@ -738,6 +757,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var oldCityStore beads.Store
 	var oldRigStores map[string]beads.Store
 	cs.mu.Lock()
+	cs.advanceSessionStartGenerationLocked()
 	cs.cfg = cfg
 	if rawCfg != nil {
 		cs.rawCfg = rawCfg
@@ -752,6 +772,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cs.cityBeadsDiagnostic = cityBeadsDiagnostic
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature
+		cs.sessionStartStoreGeneration = cs.sessionStartGeneration
 	}
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
@@ -871,12 +892,18 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 	usageSink := usageSinkForCity(cfg, cs.cityPath)
 	rawCfg := cs.loadRawSnapshot()
 	cs.mu.Lock()
+	storeWasCoherent := cs.sessionStartGeneration != 0 &&
+		cs.sessionStartStoreGeneration == cs.sessionStartGeneration
+	cs.advanceSessionStartGenerationLocked()
 	cs.cfg = cfg
 	if rawCfg != nil {
 		cs.rawCfg = rawCfg
 	}
 	cs.sp = sp
 	cs.usageSink = usageSink
+	if storeWasCoherent {
+		cs.sessionStartStoreGeneration = cs.sessionStartGeneration
+	}
 	cs.mu.Unlock()
 }
 

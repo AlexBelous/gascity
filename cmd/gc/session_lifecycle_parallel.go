@@ -304,6 +304,7 @@ type startExecutionOptions struct {
 	stabilityWaiter                startStabilityWaiter
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
 	statusComparisonObserver       sessionLifecycleStatusComparisonObserver
+	startSelectionObserver         sessionLifecycleStartSelectionComparisonObserver
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -389,6 +390,12 @@ func withSessionStaleKeyDetectionWaiter(waiter sessionpkg.StaleKeyDetectionWaite
 func withSessionLifecycleStatusComparisonObserver(observer sessionLifecycleStatusComparisonObserver) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.statusComparisonObserver = observer
+	}
+}
+
+func withSessionLifecycleStartSelectionComparisonObserver(observer sessionLifecycleStartSelectionComparisonObserver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.startSelectionObserver = observer
 	}
 }
 

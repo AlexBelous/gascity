@@ -332,18 +332,20 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	if !routed {
 		return
 	}
-	rows, listErr := session.ListAllSessionBeads(store, beads.ListQuery{
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
-		AllowScan:     true,
-	})
+	sessionStore := session.NewStore(beads.SessionStore{Store: store})
+	rows, listErr := sessionStore.ListAll(session.ListAllOptions{IncludeClosed: true})
 	if listErr != nil {
 		logf("usage: listing routed sessions for usage sweep failed: %v", listErr)
 		return
 	}
 	cutoff := now.Add(-2 * time.Hour)
-	for _, b := range rows {
-		if processed[b.ID] {
+	for _, info := range rows {
+		if processed[info.ID] {
+			continue
+		}
+		b, err := store.Get(info.ID)
+		if err != nil {
+			logf("usage: loading routed session %s for usage facts failed: %v", info.ID, err)
 			continue
 		}
 		// Closed session rows remain eligible only during the retention-safe

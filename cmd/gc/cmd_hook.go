@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -469,6 +470,23 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			Env:          queryEnv,
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
+		}
+		// Controller claim fast path (opt-in, beads.hook_claim_fastpath): route
+		// generated-default discovery and atomic claim through the running
+		// controller's pooled store so this hook opens no MySQL connection. Only a
+		// pre-request connection failure falls through to the subprocess path
+		// below (handled=false); a real controller verdict is terminal there. When
+		// the gate is off, the query is custom, the target is legacy control, or no
+		// controller client resolves, this is skipped and the subprocess path runs.
+		if flags, ferr := rollout.Resolve(cfg, rollout.ResolveOptions{}); ferr == nil &&
+			hookFastPathEligible(flags, a.WorkQuery, resolvedAgentName, hookClaimPrimaryRouteTarget(&a)) {
+			if client, _ := maintenanceAPIClient(cityPath); client != nil {
+				identities := []string{sessionID, sessionName, alias}
+				origin := strings.TrimSpace(overrides["GC_SESSION_ORIGIN"])
+				if code, handled := claimHookWorkFastPath(client, identities, claimOpts.RouteTargets, origin, workDir, claimOpts, stdout, stderr); handled {
+					return code
+				}
+			}
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}

@@ -2,11 +2,86 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout"
 )
+
+// fastPathClient is the full controller surface the hook fast path drives:
+// tier-discovery reads plus claim/identity mutations. *api.Client satisfies it.
+type fastPathClient interface {
+	fastPathReader
+	fastPathClaimer
+}
+
+var _ fastPathClient = (*api.Client)(nil)
+
+// hookFastPathEligible reports whether the controller claim fast path may serve
+// this hook claim. All must hold: the rollout gate is on; the agent uses the
+// generated default work_query (an explicit custom work_query is the caller's
+// full-discovery contract and MUST keep the subprocess adapter — invariant 3);
+// and neither the agent nor its route target is a legacy control-dispatcher,
+// whose workflow-control aliasing only the shell query reproduces.
+func hookFastPathEligible(flags rollout.Flags, workQuery, resolvedAgentName, primaryRouteTarget string) bool {
+	if !flags.HookClaimFastPath() {
+		return false
+	}
+	if strings.TrimSpace(workQuery) != "" {
+		return false
+	}
+	if hookLegacyWorkflowControlName(strings.TrimSpace(resolvedAgentName)) != "" {
+		return false
+	}
+	if hookLegacyWorkflowControlName(strings.TrimSpace(primaryRouteTarget)) != "" {
+		return false
+	}
+	return true
+}
+
+// claimHookWorkFastPath serves a generated-default hook claim through the
+// controller: it reproduces the tier-ordered candidate list via controller reads
+// (no worker SQL), then runs the shared tryHookClaim selection with API-backed
+// claim ops so the claim and identity stamp also avoid a worker-side connection.
+//
+// Return contract:
+//   - (code, true): the fast path handled the claim — a claim was written, or a
+//     clean no-work drain, or a real controller verdict failed fast. code is the
+//     process exit code.
+//   - (0, false): a PRE-REQUEST connection failure means the controller was
+//     unreachable; the caller must fall back to the subprocess path. This is the
+//     ONLY fallback trigger (invariant 4). A non-connection controller error is a
+//     definite verdict: it is logged and returned as a terminal failure, never
+//     shelled out (which would multiply the connection pressure the cure removes).
+func claimHookWorkFastPath(client fastPathClient, identities, routeTargets []string, sessionOrigin, workDir string, claimOpts hookClaimOptions, stdout, stderr io.Writer) (int, bool) {
+	const cmdName = "hook --claim"
+	candidates, err := fastPathClaimCandidates(client, identities, routeTargets, sessionOrigin)
+	if err != nil {
+		if api.IsConnError(err) {
+			logRoute(stderr, cmdName, "fallback", "controller-unreachable")
+			return 0, false
+		}
+		logRoute(stderr, cmdName, "api", "read-error")
+		fmt.Fprintf(stderr, "gc hook --claim: controller read failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	payload, err := json.Marshal(candidates)
+	if err != nil || len(candidates) == 0 {
+		// A []beads.Bead never fails to marshal; an empty tier set is an explicit
+		// no-work signal the runner must express as "[]", not "null".
+		payload = []byte("[]")
+	}
+	logRoute(stderr, cmdName, "api", "")
+	ops := newAPIFastPathClaimOps(client)
+	ops.Runner = func(string, string) (string, error) { return string(payload), nil }
+	return doHookClaim(cmdName, workDir, claimOpts, ops, stdout, stderr), true
+}
+
+// fastPathReader is the narrow controller-read surface the hook fast path needs
 
 // epicIssueType is the bead type the generated routed-pool query excludes
 // (--exclude-type=epic): an unassigned parent epic has no executable spec, so a

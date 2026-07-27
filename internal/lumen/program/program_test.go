@@ -57,6 +57,22 @@ func TestValidateProgramRejectsNonFiniteNumber(t *testing.T) {
 	}
 }
 
+func TestValidateProgramAcceptsOptionalTopLevelAtomicInput(t *testing.T) {
+	exec := program.NewExec("exec_1", nil, program.NewInterpolatedText([]program.TextPart{program.NewText("true")}), nil, nil, nil, program.NewExitMap([]int{0}, nil))
+	candidate := program.NewProgram(program.NewFormula("main", program.NewInput("main.input", []program.Field{
+		program.NewField("message", program.NewAtomicType("string"), false),
+	}), []program.Step{exec}))
+
+	validated, err := program.ValidateProgram(candidate)
+	if err != nil {
+		t.Fatalf("ValidateProgram rejected an optional atomic input: %v", err)
+	}
+	fields := validated.Formula().Input().Fields()
+	if len(fields) != 1 || fields[0].Required() {
+		t.Fatalf("validated fields = %#v, want one optional field", fields)
+	}
+}
+
 func TestTerminalOutcomesAreClosed(t *testing.T) {
 	for _, outcome := range []program.Outcome{
 		program.NewSucceeded(program.NewLiteral(program.String("ok"))),

@@ -160,6 +160,65 @@ func TestExecuteExpandsPinnedHomeCWDFormsOnly(t *testing.T) {
 	}
 }
 
+func TestExecuteCapturedRejectsRelativeBaseAndMissingHome(t *testing.T) {
+	ambient := t.TempDir()
+	t.Chdir(ambient)
+	if err := os.MkdirAll(filepath.Join(ambient, "relative"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+
+	t.Run("relative base", func(t *testing.T) {
+		fixture := newExecFixture(t, "true", nil, nil, nil)
+		observation, err := exechost.ExecuteCaptured(context.Background(), fixture.command, nil, "relative")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if failed, ok := pendingOutcome(t, fixture, observation).(kernel.Failed); !ok || failed.Reason() != "not_executable" {
+			t.Fatalf("outcome = %#v, want failed not_executable", pendingOutcome(t, fixture, observation))
+		}
+	})
+
+	t.Run("missing home", func(t *testing.T) {
+		child := filepath.Join(ambient, "child")
+		if err := os.MkdirAll(child, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		fixture := newExecFixture(t, "true", program.NewLiteral(program.String("$HOME/child")), nil, nil)
+		observation, err := exechost.ExecuteCaptured(context.Background(), fixture.command, nil, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if failed, ok := pendingOutcome(t, fixture, observation).(kernel.Failed); !ok || failed.Reason() != "not_executable" {
+			t.Fatalf("outcome = %#v, want failed not_executable", pendingOutcome(t, fixture, observation))
+		}
+	})
+}
+
+func TestExecuteCapturedResolvesRelativeHomeAgainstCapturedBase(t *testing.T) {
+	ambient := t.TempDir()
+	t.Chdir(ambient)
+	base := t.TempDir()
+	home := filepath.Join(base, "relative-home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "marker"), []byte("captured"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newExecFixture(t, "cat marker", program.NewLiteral(program.String("$HOME")), nil, nil)
+	observation, err := exechost.ExecuteCaptured(
+		context.Background(), fixture.command, []string{"HOME=relative-home"}, base,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	succeeded, ok := pendingOutcome(t, fixture, observation).(kernel.Succeeded)
+	if !ok || succeeded.Result().Stdout() != "captured" {
+		t.Fatalf("outcome = %#v, want captured marker", pendingOutcome(t, fixture, observation))
+	}
+}
+
 func TestExecuteAcceptsExplicitEmptyStdin(t *testing.T) {
 	fixture := newExecFixture(t, `if read -r line; then printf "line:%s" "$line"; else printf eof; fi`, nil, nil, program.NewLiteral(program.String("")))
 	observation, err := exechost.Execute(context.Background(), fixture.command)

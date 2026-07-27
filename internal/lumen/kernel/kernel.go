@@ -70,6 +70,26 @@ func NewObservation(hostRunKey HostRunKey, sequence PrivateSequence, stdout, std
 
 func (Observation) recordMarker() {}
 
+// Execution returns the captured exec result when this is an execution
+// observation. The result is false for a cancellation observation.
+func (r Observation) Execution() (stdout, stderr string, termination ExecTermination, ok bool) {
+	execution, ok := r.value.(execObservation)
+	if !ok {
+		return "", "", nil, false
+	}
+	return execution.stdout, execution.stderr, execution.termination, true
+}
+
+// Cancellation returns the cancellation reason when this is a cancellation
+// observation. The result is false for an execution observation.
+func (r Observation) Cancellation() (string, bool) {
+	canceled, ok := r.value.(canceledObservation)
+	if !ok {
+		return "", false
+	}
+	return canceled.reason, true
+}
+
 // NewCanceledObservation builds one closed host cancellation observation.
 func NewCanceledObservation(hostRunKey HostRunKey, sequence PrivateSequence, reason string) Observation {
 	return Observation{hostRunKey: hostRunKey, sequence: sequence, value: canceledObservation{reason: reason}}
@@ -296,6 +316,15 @@ type State struct {
 // Command returns the sole uncommitted host-ready command, if any.
 func (s State) Command() (ExecCommand, bool) {
 	if s.command.stepID == "" || s.issued || s.terminal != nil {
+		return ExecCommand{}, false
+	}
+	return s.command, true
+}
+
+// IssuedCommand returns the committed command while its observation is still
+// absent. A controller uses it after reopening a journal to resume advancement.
+func (s State) IssuedCommand() (ExecCommand, bool) {
+	if s.command.stepID == "" || !s.issued || s.pending.outcome != nil || s.terminal != nil {
 		return ExecCommand{}, false
 	}
 	return s.command, true

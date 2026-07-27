@@ -458,9 +458,6 @@ func ValidateProgram(candidate Program) (Program, error) {
 		if _, exists := known[field.name]; exists {
 			return Program{}, invalid(path+".name", "is duplicated")
 		}
-		if !field.required {
-			return Program{}, invalid(path+".required", "must be true in the admitted cohort")
-		}
 		if err := validateType(field.typ, path+".type"); err != nil {
 			return Program{}, err
 		}

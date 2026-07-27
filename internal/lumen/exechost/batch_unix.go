@@ -21,19 +21,34 @@ import (
 
 // Execute runs command through /bin/sh and returns its one closed kernel observation.
 func Execute(ctx context.Context, command kernel.ExecCommand) (kernel.Observation, error) {
+	base, err := os.Getwd()
+	if err != nil {
+		return kernel.Observation{}, fmt.Errorf("read working directory: %w", err)
+	}
+	return ExecuteCaptured(ctx, command, os.Environ(), base)
+}
+
+// ExecuteCaptured runs command using only the captured inherited environment
+// and base working directory.
+func ExecuteCaptured(ctx context.Context, command kernel.ExecCommand, inherited []string, base string) (kernel.Observation, error) {
 	if err := ctx.Err(); err != nil {
 		return kernel.NewCanceledObservation(command.HostRunKey(), command.PrivateSequence(), err.Error()), nil
+	}
+	if !filepath.IsAbs(base) {
+		return kernel.NewObservation(command.HostRunKey(), command.PrivateSequence(), "", "", kernel.SpawnErrorTermination("working directory must be absolute")), nil
 	}
 
 	cmd := exec.Command("/bin/sh", "-c", command.Script())
 	if cwd, ok := command.CWD(); ok {
-		cwd = resolveCWD(cwd)
+		cwd = resolveCWD(cwd, inherited, base)
 		if cwd == "" {
 			return kernel.NewObservation(command.HostRunKey(), command.PrivateSequence(), "", "", kernel.SpawnErrorTermination("empty working directory")), nil
 		}
 		cmd.Dir = cwd
+	} else {
+		cmd.Dir = base
 	}
-	cmd.Env = mergeEnvironment(os.Environ(), command.Environment())
+	cmd.Env = mergeEnvironment(inherited, command.Environment())
 	if stdin, ok := command.Stdin(); ok {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -74,18 +89,52 @@ func Execute(ctx context.Context, command kernel.ExecCommand) (kernel.Observatio
 	}
 }
 
-func resolveCWD(cwd string) string {
-	home := os.Getenv("HOME")
+func resolveCWD(cwd string, inherited []string, base string) string {
+	if cwd == "" {
+		return ""
+	}
+	home := environmentValue(inherited, "HOME")
 	switch {
 	case cwd == "~", cwd == "$HOME":
+		if home == "" {
+			return ""
+		}
+		if !filepath.IsAbs(home) {
+			return filepath.Join(base, home)
+		}
 		return home
 	case strings.HasPrefix(cwd, "~/"):
+		if home == "" {
+			return ""
+		}
+		if !filepath.IsAbs(home) {
+			home = filepath.Join(base, home)
+		}
 		return filepath.Join(home, cwd[2:])
 	case strings.HasPrefix(cwd, "$HOME/"):
+		if home == "" {
+			return ""
+		}
+		if !filepath.IsAbs(home) {
+			home = filepath.Join(base, home)
+		}
 		return filepath.Join(home, cwd[len("$HOME/"):])
 	default:
-		return cwd
+		if filepath.IsAbs(cwd) {
+			return cwd
+		}
+		return filepath.Join(base, cwd)
 	}
+}
+
+func environmentValue(values []string, key string) string {
+	for _, value := range values {
+		name, current, found := strings.Cut(value, "=")
+		if found && name == key {
+			return current
+		}
+	}
+	return ""
 }
 
 func completedObservation(command kernel.ExecCommand, cmd *exec.Cmd, stdout, stderr string, waitErr error) kernel.Observation {

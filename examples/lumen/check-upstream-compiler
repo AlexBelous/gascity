@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly pinned_commit=07ad94aa2a18dda14ec5f16ac5fae3ca2fe15ef9
+readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+upstream="${1:-${LUMEN_UPSTREAM_REPO:-}}"
+
+if [[ -z "$upstream" ]]; then
+  echo "usage: $0 /path/to/formula-language" >&2
+  exit 2
+fi
+
+actual_commit="$(git -C "$upstream" rev-parse HEAD)"
+if [[ "$actual_commit" != "$pinned_commit" ]]; then
+  echo "upstream HEAD is $actual_commit; want pinned $pinned_commit" >&2
+  exit 1
+fi
+
+npm -C "$upstream" -w @formula-language/core run check
+
+node - "$upstream" "$script_dir" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const upstream = process.argv[2];
+const examples = process.argv[3];
+const { compileLumenFormulaLanguage } = require(path.join(upstream, "packages/core/dist"));
+const sources = fs.readdirSync(examples)
+  .filter((name) => name.endsWith(".lumen"))
+  .sort();
+
+if (sources.length === 0) {
+  throw new Error(`no Lumen source examples found in ${examples}`);
+}
+
+const hash = (data) => crypto.createHash("sha256").update(data).digest("hex");
+for (const source of sources) {
+  const sourcePath = path.join(examples, source);
+  const artifactPath = `${sourcePath}.json`;
+  const uri = source === "review-quorum.lumen"
+    ? source
+    : `examples/lumen/${source}`;
+  const result = compileLumenFormulaLanguage({
+    uri,
+    text: fs.readFileSync(sourcePath, "utf8"),
+  });
+  const errors = (result.diagnostics || [])
+    .filter((diagnostic) => diagnostic.severity === "error");
+  if (errors.length > 0 || !result.formula) {
+    throw new Error(`${source} failed to compile:\n${JSON.stringify(result.diagnostics, null, 2)}`);
+  }
+
+  const compiled = Buffer.from(`${JSON.stringify(result.formula, null, 2)}\n`);
+  const checkedIn = fs.readFileSync(artifactPath);
+  if (!compiled.equals(checkedIn)) {
+    throw new Error(
+      `${source} differs from checked-in IR: got SHA-256 ${hash(compiled)}, want ${hash(checkedIn)}`,
+    );
+  }
+  process.stdout.write(`checked ${source}\n`);
+}
+NODE

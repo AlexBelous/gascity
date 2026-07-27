@@ -1,0 +1,85 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "run-do-chain",
+  "origin": {"uri": "examples/lumen/run-do-chain.lumen.json", "line": 6, "col": 0},
+  "input": {
+    "name": "run-do-chain.input",
+    "origin": {"uri": "examples/lumen/run-do-chain.lumen.json", "line": 9, "col": 0},
+    "fields": [
+      {
+        "name": "who",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "run",
+      "id": "greeting",
+      "name": "greeting",
+      "after": [],
+      "origin": {"uri": "examples/lumen/run-do-chain.lumen.json", "line": 25, "col": 0},
+      "target": { "kind": "by-name", "name": "greeter" },
+      "environment": {
+        "fields": [
+          {
+            "name": "name",
+            "value": { "kind": "expr", "expr": { "kind": "ref", "name": "who" } }
+          }
+        ]
+      },
+      "outcome": "transparent"
+    },
+    {
+      "kind": "do",
+      "id": "consume",
+      "name": "consume",
+      "after": ["greeting"],
+      "origin": {"uri": "examples/lumen/run-do-chain.lumen.json", "line": 41, "col": 0},
+      "source": { "kind": "prompt" },
+      "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+      "body": { "raw": "use {{ greeting }}" }
+    }
+  ],
+  "formulas": {
+    "greeter": {
+      "contract": {
+        "name": "lumen.ir",
+        "version": "0.2.5",
+        "producer": "donbox/formula-language"
+      },
+      "name": "greeter",
+      "origin": {"uri": "examples/lumen/run-do-chain.lumen.json", "line": 52, "col": 0},
+      "input": {
+        "name": "greeter.input",
+        "origin": {"uri": "examples/lumen/run-do-chain.lumen.json", "line": 56, "col": 0},
+        "fields": [
+          {
+            "name": "name",
+            "type": { "kind": "atomic", "name": "string" },
+            "required": true,
+            "body": false
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "kind": "do",
+          "id": "hello",
+          "name": "hello",
+          "after": [],
+          "origin": {"uri": "examples/lumen/run-do-chain.lumen.json", "line": 73, "col": 0},
+          "source": { "kind": "prompt" },
+          "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+          "body": { "raw": "EMIT=aval produce a value for {{ name }}" }
+        }
+      ]
+    }
+  }
+}

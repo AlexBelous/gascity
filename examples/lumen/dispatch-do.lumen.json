@@ -1,0 +1,62 @@
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "donbox/formula-language"
+  },
+  "name": "dispatch-do",
+  "origin": {"uri": "examples/lumen/dispatch-do.lumen.json", "line": 6, "col": 0},
+  "input": {
+    "name": "dispatch-do.input",
+    "origin": {"uri": "examples/lumen/dispatch-do.lumen.json", "line": 9, "col": 0},
+    "fields": [
+      {
+        "name": "policy",
+        "type": { "kind": "atomic", "name": "string" },
+        "required": true,
+        "body": false
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "kind": "dispatch",
+      "id": "d",
+      "name": "d",
+      "after": [],
+      "origin": {"uri": "examples/lumen/dispatch-do.lumen.json", "line": 25, "col": 0},
+      "subject": { "kind": "ref", "name": "policy" },
+      "exhaustive": false,
+      "arms": [
+        {
+          "match": { "kind": "literal", "value": "separate" },
+          "body": {
+            "kind": "do",
+            "id": "sep",
+            "name": "sep",
+            "after": [],
+            "origin": {"uri": "examples/lumen/dispatch-do.lumen.json", "line": 34, "col": 0},
+            "source": { "kind": "prompt" },
+            "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+            "body": { "raw": "Run the separate-session drain, then settle this step." },
+            "exitMap": { "pass": [0], "retryable": [] }
+          }
+        },
+        {
+          "match": { "kind": "literal", "value": "same-session" },
+          "body": {
+            "kind": "do",
+            "id": "shared",
+            "name": "shared",
+            "after": [],
+            "origin": {"uri": "examples/lumen/dispatch-do.lumen.json", "line": 47, "col": 0},
+            "source": { "kind": "prompt" },
+            "interpreter": { "kind": "agent", "mode": { "kind": "do" } },
+            "body": { "raw": "Run the shared-session drain, then settle this step." },
+            "exitMap": { "pass": [0], "retryable": [] }
+          }
+        }
+      ]
+    }
+  ]
+}

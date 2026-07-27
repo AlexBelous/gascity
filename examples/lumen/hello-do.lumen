@@ -1,0 +1,3 @@
+formula hello_do() {
+  greet: prompt Say hello to Gas City, then settle this step.
+}

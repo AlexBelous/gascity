@@ -18,9 +18,8 @@ import (
 // and re-introduce the double-claim race the CAS exists to prevent. See
 // AtomicClaimer for the full return contract.
 func (s *NativeDoltStore) ClaimBead(ctx context.Context, id, actor string) (Bead, bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	// A nil ctx is normalized to Background by nativeDoltOperationContext below,
+	// so no separate guard is needed here.
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return Bead{}, false, err

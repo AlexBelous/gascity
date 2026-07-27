@@ -14,10 +14,25 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// agentsResponseTTLFloor lets non-blocking /agents requests reuse a recently
+// built roster after the time-bucket entry has rolled over. The dashboard
+// Agents page refetches on session.*/bead.*/agent.* events with no
+// coalesceMs override, so it inherits DEFAULT_COALESCE_MS = 2.5s
+// (dashboardspa/web/frontend/src/hooks/useGcEvents.ts) — the floor must
+// exceed that cadence or every refetch would still force a full roster
+// rebuild (ga-gnwpu6). 6s, not /status's 3s: a cache hit does not re-store
+// the entry, so the rebuild rate settles at ~1 per floor window; 6s yields
+// one rebuild every ~7.5s against the 2.5s cadence while keeping worst-case
+// staleness under CockpitHome's 15s POLL_MS. Blocking (long-poll) requests
+// bypass it because they explicitly wait for change. Var, not const, so
+// tests can pin it (same reason as handler_status.go's statusResponseTTLFloor).
+var agentsResponseTTLFloor = 6 * time.Second
+
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
 func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput) (*ListOutput[agentResponse], error) {
 	bp := input.toBlockingParams()
-	if bp.isBlocking() {
+	blocking := bp.isBlocking()
+	if blocking {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 
@@ -37,11 +52,26 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 	index := s.latestIndex()
 	cacheKey := ""
-	if !wantPeek {
+	var bucket uint64
+	if !wantPeek && !blocking {
 		// Cache key derived from input struct tags — adding a new query
 		// param to AgentListInput automatically participates in the key.
+		// Keyed on a TIME bucket, not the event index: on a busy city the
+		// sequence advances every poll, so an index-keyed entry missed on
+		// nearly every dashboard refetch and forced a full ~600-tmux-exec
+		// roster rebuild per request (ga-gnwpu6). Blocking (long-poll)
+		// callers bypass this cache so the body they receive reflects the
+		// event they waited for, never one built before it — same lever as
+		// /status and bounded /beads all=true reads.
 		cacheKey = cacheKeyFor("agents", input)
-		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
+		bucket = responseCacheTimeBucket(time.Now())
+		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, bucket); ok {
+			return &ListOutput[agentResponse]{
+				Index: index,
+				Body:  body,
+			}, nil
+		}
+		if body, ok := cachedResponseWithinAgeAs[ListBody[agentResponse]](s, cacheKey, agentsResponseTTLFloor); ok {
 			return &ListOutput[agentResponse]{
 				Index: index,
 				Body:  body,
@@ -146,7 +176,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 	body := ListBody[agentResponse]{Items: agents, Total: len(agents)}
 	if cacheKey != "" {
-		s.storeResponse(cacheKey, index, body)
+		s.storeResponse(cacheKey, bucket, body)
 	}
 
 	return &ListOutput[agentResponse]{

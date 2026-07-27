@@ -38,6 +38,8 @@ type beadPolicyGraphStore struct {
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.AtomicClaimer                    = (*beadPolicyStore)(nil)
+	_ beads.AtomicClaimer                    = (*beadPolicyGraphStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -222,6 +224,24 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// ClaimBead implements beads.AtomicClaimer by forwarding to the wrapped store
+// when it supports atomic claim. Like Count/DeleteBatch/ReleaseIfCurrent, this
+// delegation must be explicit: the embedded Store interface does not promote
+// optional capabilities, so a policy-wrapped CachingStore-over-NativeDoltStore
+// would otherwise hide AtomicClaimer and the controller claim handler would
+// reject every generated-default hook claim ("bead store does not support atomic
+// claim"), silently defeating the managed-Dolt connection cure. The claim is a
+// compare-and-swap on an existing bead, not a create, so it carries no storage-
+// tier policy — forwarding to the inner claimer is complete. beadPolicyGraphStore
+// embeds *beadPolicyStore, so it forwards through this too.
+func (s *beadPolicyStore) ClaimBead(ctx context.Context, id, actor string) (beads.Bead, bool, error) {
+	claimer, ok := s.Store.(beads.AtomicClaimer)
+	if !ok {
+		return beads.Bead{}, false, beads.ErrAtomicClaimUnsupported
+	}
+	return claimer.ClaimBead(ctx, id, actor)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {

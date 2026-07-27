@@ -478,15 +478,29 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		// below (handled=false); a real controller verdict is terminal there. When
 		// the gate is off, the query is custom, the target is legacy control, or no
 		// controller client resolves, this is skipped and the subprocess path runs.
-		if flags, ferr := rollout.Resolve(cfg, rollout.ResolveOptions{}); ferr == nil &&
-			hookFastPathEligible(flags, a.WorkQuery, resolvedAgentName, hookClaimPrimaryRouteTarget(&a)) {
+		flags, ferr := rollout.Resolve(cfg, rollout.ResolveOptions{})
+		if ferr == nil && hookFastPathEligible(flags, a.WorkQuery, resolvedAgentName, hookClaimPrimaryRouteTarget(&a)) {
 			if client, _ := maintenanceAPIClient(cityPath); client != nil {
 				identities := []string{sessionID, sessionName, alias}
 				origin := strings.TrimSpace(overrides["GC_SESSION_ORIGIN"])
 				if code, handled := claimHookWorkFastPath(client, identities, claimOpts.RouteTargets, origin, workDir, claimOpts, stdout, stderr); handled {
 					return code
 				}
+				// handled=false means claimHookWorkFastPath already logged
+				// route=fallback for a pre-request connection failure; fall through.
+			} else {
+				// Eligible for the fast path but no controller client resolved: the
+				// controller is unavailable before the request, so the subprocess
+				// adapter is the fallback. Surface it (invariant 7's route vocabulary)
+				// so a fallback is observable, not inferred from the absence of
+				// route=api.
+				logRoute(stderr, "hook --claim", "fallback", "controller-unavailable")
 			}
+		} else if strings.TrimSpace(a.WorkQuery) != "" {
+			// A custom work_query is never protected by the fast path (invariant 3);
+			// it stays on the subprocess adapter. Report it as route=custom-shell so
+			// the custom lane is observable rather than silent.
+			logRoute(stderr, "hook --claim", "custom-shell", "")
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}

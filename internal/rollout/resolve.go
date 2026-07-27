@@ -55,6 +55,11 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 		f.formulaV2 = resolved[bool]{value: value, origin: OriginConfig}
 	}
 
+	// beads.hook_claim_fastpath — bool rollout gate, no env override.
+	if value, defined := readBeadsHookClaimFastPath(cfg); defined {
+		f.hookClaimFastPath = resolved[bool]{value: value, origin: OriginConfig}
+	}
+
 	return f, nil
 }
 

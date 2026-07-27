@@ -62,6 +62,24 @@ var specs = []Spec{
 		Justification: "Retire the v1 formula path and its process-global atomic.Bool setter " +
 			"anti-pattern; the migration whose completion deletes cmd/gc/feature_flags.go.",
 	},
+	{
+		Key:           keyBeadsHookClaimFastPath,
+		Category:      InfraRollout,
+		ConfigPath:    "beads.hook_claim_fastpath",
+		EnvOverride:   "",
+		Default:       Default{Bool: ptr(false)},
+		Owner:         Owner{Bead: "gc-2h7b.2.3", GitHub: "@gastownhall/gascity-admin"},
+		Expires:       "2027-07-31",
+		VersionAnchor: "gcHookClaimFastPathRemovalFloor",
+		SelectsBetween: [2]string{
+			"per-hook bd subprocess discovery + claim (legacy, opens a MySQL client per hook)",
+			"controller fast path over pooled NativeDoltStore (no worker-side SQL connection)",
+		},
+		Justification: "Route generated-default work_query discovery and atomic claim through the " +
+			"running controller's pooled store instead of a per-hook bd subprocess, so a worker hook " +
+			"never opens its own managed-Dolt connection; gated for staged rollout of the connection cure " +
+			"(gc-2h7b.2), rollback = disable back to the subprocess adapter.",
+	},
 }
 
 // Specs returns a defensive copy of the canonical registry. The Default pointers

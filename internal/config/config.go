@@ -1400,10 +1400,24 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// HookClaimFastPath opts a city into routing generated-default work_query
+	// discovery and atomic claim through the running controller's pooled
+	// NativeDoltStore instead of a per-hook bd subprocess (the managed-Dolt
+	// connection cure). Unset defaults to false: the fast path is opt-in, and
+	// rollback is a plain disable back to the subprocess adapter. Read the
+	// effective value via HookClaimFastPathEnabled(), never the field. Gated by
+	// the rollout registry key beads.hook_claim_fastpath.
+	HookClaimFastPath *bool `toml:"hook_claim_fastpath,omitempty" jsonschema:"default=false"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
 	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+}
+
+// HookClaimFastPathEnabled reports whether the controller claim fast path is
+// enabled. Unset defaults to disabled (opt-in rollout).
+func (b BeadsConfig) HookClaimFastPathEnabled() bool {
+	return b.HookClaimFastPath != nil && *b.HookClaimFastPath
 }
 
 // EventHooksEnabled reports whether bead event hooks should be installed.

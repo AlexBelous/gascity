@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Per-domain Huma input/output types for the beads handler
@@ -140,6 +142,24 @@ type BeadAssignInput struct {
 	Body struct {
 		Assignee string `json:"assignee,omitempty" doc:"Assignee name."`
 	}
+}
+
+// BeadClaimInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/claim.
+type BeadClaimInput struct {
+	CityScope
+	ID   string `path:"id" doc:"Bead ID."`
+	Body struct {
+		Actor string `json:"actor" doc:"Actor to claim the bead for (becomes the assignee)."`
+	}
+}
+
+// BeadClaimResult is the response body for a bead claim. Claimed reports whether
+// this actor won the bead; on a lost race Claimed is false with no error, and
+// Bead is zero-valued. On success Bead carries the canonical post-claim bead so
+// the caller need not re-read.
+type BeadClaimResult struct {
+	Claimed bool       `json:"claimed" doc:"True if this actor now owns the bead (assignee=actor, status=in_progress). False if another actor won or the bead was not claimable."`
+	Bead    beads.Bead `json:"bead" doc:"The canonical bead after a successful claim; zero-valued when claimed is false."`
 }
 
 // BeadDeleteInput is the Huma input for DELETE /v0/city/{cityName}/bead/{id}.

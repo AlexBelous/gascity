@@ -75,6 +75,13 @@ type Server struct {
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
 
+	// claimAdmitter bounds concurrent bead-claim mutations so a claim storm
+	// fails fast with a retryable 503 instead of piling onto the controller's
+	// bounded NativeDoltStore pool. Defaults to the process-wide
+	// defaultClaimAdmitter (shared by every per-city Server); tests inject a
+	// small-capacity gate to exercise saturation.
+	claimAdmitter *claimAdmitter
+
 	// rigIdem is the in-process live index + request_id state machine backing
 	// async server-side rig-create (POST /v0/city/{n}/rigs with a git_url). It
 	// starts empty at boot and is authoritative for admission (G13). One index
@@ -257,6 +264,7 @@ func newServer(state State, readOnly bool) *Server {
 		rigIdem:        newRigIdemIndex(),
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
+		claimAdmitter:  defaultClaimAdmitter,
 	}
 	// Latch the rollout snapshot once: prefer the State's boot latch (the
 	// production controllerState); fall back to resolving from Config() for

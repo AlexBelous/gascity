@@ -214,6 +214,11 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	// Claim declares 503: bounded admission saturation is a retryable degraded
+	// result (the controller hot path fails fast rather than piling onto the
+	// pooled NativeDoltStore). 400 for a missing actor; 409 when the bead is
+	// deleted concurrently between the store probe and the claim.
+	cityPost(sm, "/bead/{id}/claim", (*Server).humaHandleBeadClaim, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 
 	// Mail. Part of the P12 error-contract slice (see Beads above): each op

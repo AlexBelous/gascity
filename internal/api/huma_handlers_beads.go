@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -661,6 +662,61 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 		return &IndexOutput[map[string]string]{
 			Index: s.latestIndex(),
 			Body:  map[string]string{"status": "assigned", "assignee": assignee},
+		}, nil
+	}
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+}
+
+// humaHandleBeadClaim is the Huma-typed handler for POST /v0/bead/{id}/claim.
+// It is the controller fast path: a worker's atomic claim runs here, over the
+// controller's pooled NativeDoltStore, so the worker never opens its own SQL
+// connection. Admission is bounded — a claim storm fails fast with a retryable
+// 503 rather than piling onto the bounded pool — and saturation never triggers
+// managed-Dolt recovery; it is a plain degraded result.
+func (s *Server) humaHandleBeadClaim(ctx context.Context, input *BeadClaimInput) (*IndexOutput[BeadClaimResult], error) {
+	id := input.ID
+	actor := strings.TrimSpace(input.Body.Actor)
+	if actor == "" {
+		return nil, apierr.InvalidRequest.Msg("claim requires a non-empty actor")
+	}
+
+	release, admitted := s.claimAdmitter.tryAcquire()
+	if !admitted {
+		// Bounded admission full: fail fast so the caller retries or falls back.
+		// This is a degraded result, never a recovery trigger.
+		return nil, apierr.ServiceUnavailable.Msg("claim admission saturated; retry")
+	}
+	defer release()
+
+	for _, store := range s.beadStoresForID(id) {
+		// Get-first pins the store that actually owns this id before mutating,
+		// mirroring the assign/close handlers: a candidate that does not hold the
+		// bead is skipped, so a heterogeneous store list never turns a
+		// wrong-store probe into a spurious error.
+		if _, err := store.Get(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, apierr.Internal.Msg(err.Error())
+		}
+		claimer, ok := store.(beads.AtomicClaimer)
+		if !ok {
+			// The controller's bead stores are CachingStore over NativeDoltStore,
+			// both of which implement AtomicClaimer. The store that owns this bead
+			// not supporting atomic claim is a wiring defect, not a lost race.
+			return nil, apierr.Internal.Msg("bead store for " + id + " does not support atomic claim")
+		}
+		bead, claimed, err := claimer.ClaimBead(ctx, id, actor)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				// The bead existed a moment ago but was deleted concurrently.
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+			}
+			return nil, apierr.Internal.Msg(err.Error())
+		}
+		return &IndexOutput[BeadClaimResult]{
+			Index: s.latestIndex(),
+			Body:  BeadClaimResult{Claimed: claimed, Bead: bead},
 		}, nil
 	}
 	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")

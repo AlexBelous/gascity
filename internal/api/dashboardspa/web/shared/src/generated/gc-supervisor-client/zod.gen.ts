@@ -91,6 +91,10 @@ export const zBeadAssignInputBody = z.object({
     assignee: z.string().optional()
 });
 
+export const zBeadClaimInputBody = z.object({
+    actor: z.string()
+});
+
 export const zBeadClaimRejectedPayload = z.object({
     attempted_claimant: z.string(),
     bead_id: z.string(),
@@ -364,6 +368,11 @@ export const zBead = z.object({
     status: z.string(),
     title: z.string(),
     updated_at: z.iso.datetime().optional()
+});
+
+export const zBeadClaimResult = z.object({
+    bead: zBead,
+    claimed: z.boolean()
 });
 
 export const zBeadDepsResponse = z.object({
@@ -6615,6 +6624,22 @@ export const zPostV0CityByCityNameBeadByIdAssignPath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameBeadByIdAssignResponse = z.record(z.string(), z.string());
+
+export const zPostV0CityByCityNameBeadByIdClaimBody = zBeadClaimInputBody;
+
+export const zPostV0CityByCityNameBeadByIdClaimHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameBeadByIdClaimPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameBeadByIdClaimResponse = zBeadClaimResult;
 
 export const zPostV0CityByCityNameBeadByIdCloseHeaders = z.object({
     'X-GC-Request': z.string().min(1)

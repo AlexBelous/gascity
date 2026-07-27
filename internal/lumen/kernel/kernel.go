@@ -58,19 +58,36 @@ func (CommandIssued) recordMarker() {}
 
 // Observation records one correlated host execution observation.
 type Observation struct {
-	hostRunKey  HostRunKey
-	sequence    PrivateSequence
+	hostRunKey HostRunKey
+	sequence   PrivateSequence
+	value      observationValue
+}
+
+// NewObservation builds one closed host execution observation.
+func NewObservation(hostRunKey HostRunKey, sequence PrivateSequence, stdout, stderr string, termination ExecTermination) Observation {
+	return Observation{hostRunKey: hostRunKey, sequence: sequence, value: execObservation{stdout: stdout, stderr: stderr, termination: termination}}
+}
+
+func (Observation) recordMarker() {}
+
+// NewCanceledObservation builds one closed host cancellation observation.
+func NewCanceledObservation(hostRunKey HostRunKey, sequence PrivateSequence, reason string) Observation {
+	return Observation{hostRunKey: hostRunKey, sequence: sequence, value: canceledObservation{reason: reason}}
+}
+
+type observationValue interface{ observationValueMarker() }
+
+type execObservation struct {
 	stdout      string
 	stderr      string
 	termination ExecTermination
 }
 
-// NewObservation builds one closed host execution observation.
-func NewObservation(hostRunKey HostRunKey, sequence PrivateSequence, stdout, stderr string, termination ExecTermination) Observation {
-	return Observation{hostRunKey: hostRunKey, sequence: sequence, stdout: stdout, stderr: stderr, termination: termination}
-}
+func (execObservation) observationValueMarker() {}
 
-func (Observation) recordMarker() {}
+type canceledObservation struct{ reason string }
+
+func (canceledObservation) observationValueMarker() {}
 
 // Terminal commits one kernel-derived terminal outcome.
 type Terminal struct {
@@ -369,10 +386,20 @@ func foldObservation(state *State, record Observation, degraded *Degradation) er
 	if record.hostRunKey != state.command.hostRunKey || record.sequence != 1 {
 		return fmt.Errorf("observation correlation is not contiguous")
 	}
-	if err := validateTermination(record.termination); err != nil {
-		return err
+	switch observed := record.value.(type) {
+	case execObservation:
+		if err := validateTermination(observed.termination); err != nil {
+			return err
+		}
+		state.pending = Terminal{hostRunKey: state.command.hostRunKey, sequence: 1, outcome: project(state.command, observed, degraded)}
+	case canceledObservation:
+		if observed.reason == "" {
+			return fmt.Errorf("cancellation reason is required")
+		}
+		state.pending = Terminal{hostRunKey: state.command.hostRunKey, sequence: 1, outcome: NewCanceled(observed.reason)}
+	default:
+		return fmt.Errorf("observation value is not admitted")
 	}
-	state.pending = Terminal{hostRunKey: state.command.hostRunKey, sequence: 1, outcome: project(state.command, record, degraded)}
 	return nil
 }
 
@@ -390,12 +417,12 @@ func foldTerminal(state *State, record Terminal) error {
 	return nil
 }
 
-func project(command ExecCommand, observation Observation, degraded *Degradation) Outcome {
+func project(command ExecCommand, observation execObservation, degraded *Degradation) Outcome {
 	if exit, ok := observation.termination.(ExitTermination); ok && contains(command.pass, int(exit)) {
-		return Succeeded{result: ExecResult{stdout: observation.stdout, stderr: observation.stderr, termination: observation.termination}, degradation: degraded}
+		return Succeeded{result: ExecResult(observation), degradation: degraded}
 	}
 	reason := failureReason(observation.termination)
-	return Failed{reason: reason, detail: ExecFailure{stdout: observation.stdout, stderr: observation.stderr, termination: observation.termination}}
+	return Failed{reason: reason, detail: ExecFailure(observation)}
 }
 
 func failureReason(termination ExecTermination) string {

@@ -289,6 +289,31 @@ func TestFoldProjectsAuthoredDegradationOntoSucceeded(t *testing.T) {
 	}
 }
 
+func TestFoldProjectsCanceledObservationOntoCanceled(t *testing.T) {
+	formula := blockExecProgram(t, nil)
+	records := []kernel.Record{
+		kernel.NewGenesis("host-private", []kernel.InputBinding{kernel.NewInputBinding("message", program.String("world"))}),
+		kernel.NewCommandIssued("host-private", 1, "exec_1"),
+		kernel.NewCanceledObservation("host-private", 1, "context canceled"),
+	}
+	state, err := kernel.Fold(formula, records)
+	if err != nil {
+		t.Fatalf("Fold: %v", err)
+	}
+	pending, ok := state.PendingTerminal()
+	if !ok {
+		t.Fatal("Fold did not derive a pending terminal append")
+	}
+	canceled, ok := pending.Outcome().(kernel.Canceled)
+	if !ok || canceled.Reason() != "context canceled" {
+		t.Fatalf("pending outcome = %#v, want canceled context canceled", pending.Outcome())
+	}
+	state, err = kernel.Fold(formula, append(records, pending))
+	if err != nil || !state.Terminal() {
+		t.Fatalf("Fold committed terminal = (%#v, %v)", state, err)
+	}
+}
+
 func TestFoldPreservesSignalAndSpawnFailureDetails(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -348,6 +373,7 @@ func TestFoldRejectsCorruptPrivateHistory(t *testing.T) {
 	genesis := kernel.NewGenesis("host-private", []kernel.InputBinding{kernel.NewInputBinding("message", program.String("world"))})
 	issued := kernel.NewCommandIssued("host-private", 1, "exec_1")
 	observed := kernel.NewObservation("host-private", 1, "", "", kernel.ExitTermination(0))
+	canceled := kernel.NewCanceledObservation("host-private", 1, "context canceled")
 	state, err := kernel.Fold(formula, []kernel.Record{genesis, issued, observed})
 	if err != nil {
 		t.Fatalf("Fold setup: %v", err)
@@ -360,9 +386,12 @@ func TestFoldRejectsCorruptPrivateHistory(t *testing.T) {
 		"command step mismatch":         {genesis, kernel.NewCommandIssued("host-private", 1, "other")},
 		"duplicate command":             {genesis, issued, issued},
 		"observation before issue":      {genesis, observed},
+		"cancellation before issue":     {genesis, canceled},
 		"observation host mismatch":     {genesis, issued, kernel.NewObservation("other", 1, "", "", kernel.ExitTermination(0))},
 		"observation sequence mismatch": {genesis, issued, kernel.NewObservation("host-private", 2, "", "", kernel.ExitTermination(0))},
+		"cancellation without reason":   {genesis, issued, kernel.NewCanceledObservation("host-private", 1, "")},
 		"duplicate observation":         {genesis, issued, observed, observed},
+		"mixed observations":            {genesis, issued, observed, canceled},
 		"terminal host mismatch":        {genesis, issued, observed, kernel.NewTerminal("other", 1, pending.Outcome())},
 		"terminal sequence mismatch":    {genesis, issued, observed, kernel.NewTerminal("host-private", 2, pending.Outcome())},
 		"mismatched terminal":           {genesis, issued, observed, kernel.NewTerminal("host-private", 1, kernel.Failed{})},

@@ -214,7 +214,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandNormalizesInstanceSuffixedRouteTarg
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""}, nil)
 
 	if len(got) != 1 || got[0].ID != "instance-routed" {
 		t.Fatalf("filtered work = %#v, want instance-suffixed route target normalized to the base template and kept", got)
@@ -238,7 +238,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandLeavesUnmatchedInstanceSuffixAlone(
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""}, nil)
 
 	if len(got) != 0 {
 		t.Fatalf("filtered work = %#v, want out-of-range instance suffix left unmatched and dropped", got)

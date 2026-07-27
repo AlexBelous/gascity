@@ -95,7 +95,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				return acquireErr
 			}
 			defer release()
-			return reconcileExactSessionStart(reconcileCtx, admission, exactSessionStartParams{
+			owner, reconcileErr := reconcileExactSessionStartWithOwner(reconcileCtx, admission, exactSessionStartParams{
 				CityPath:     snapshot.CityPath,
 				CityName:     snapshot.CityName,
 				Config:       snapshot.Config,
@@ -106,6 +106,10 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				Stderr:       cr.sessionStartStderr(),
 				StartOptions: cr.sessionStartOptions,
 			})
+			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
+				cr.requestLegacySessionStartFallback()
+			}
+			return reconcileErr
 		},
 		Observer: func(result sessionStartReconcileResult) {
 			if result.Outcome == sessionStartReconcileExhausted {
@@ -180,7 +184,7 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 		if validateSessionStartAdmission(info.ID, sessionStartAdmissionAntiEntropy) != nil {
 			continue
 		}
-		_, _, owned := resolveExactSessionStartOwnership(info, stateSnapshot.Config, now)
+		owned := resolveExactSessionStartOwnership(info, stateSnapshot.Config, now)
 		if !owned {
 			continue
 		}
@@ -265,11 +269,36 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 	if !owned || controller == nil {
 		return sessionStartSocketReplyFallback
 	}
+	snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+	if err != nil {
+		return sessionStartSocketReplyFallback
+	}
+	defer release()
+	owner, err := exactSessionStartOwnerForKey(snapshot.Store, snapshot.Config, sessionID, time.Now().UTC())
+	if err != nil || owner != exactSessionStartKeyedOwner {
+		return sessionStartSocketReplyFallback
+	}
 	outcome, err := controller.Admit(sessionID, sessionStartAdmissionSocket)
 	if err != nil || outcome == sessionStartAdmissionOverflow {
 		return sessionStartSocketReplyFallback
 	}
 	return sessionStartSocketReplyOK
+}
+
+func (cr *CityRuntime) requestLegacySessionStartFallback() {
+	if cr == nil {
+		return
+	}
+	if cr.pokeCh != nil {
+		select {
+		case cr.pokeCh <- struct{}{}:
+		default:
+		}
+		return
+	}
+	if cr.cs != nil {
+		cr.cs.Poke()
+	}
 }
 
 func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption {
@@ -306,8 +335,7 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			return !info.Closed && !lifecycle.Terminal &&
 				(lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) || lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit))
 		}
-		_, _, owned := resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
-		return owned
+		return resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
 	})
 }
 

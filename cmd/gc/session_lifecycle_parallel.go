@@ -869,15 +869,15 @@ func prepareStartCandidateForCity(
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
 	return prepareStartCandidateForCityWithNamedRefresh(
-		candidate, cityPath, cityName, cfg, sp, store, clk, stderr, workDirResolver, true,
+		candidate, cityPath, cityName, cfg, sp, store, clk, stderr, workDirResolver, true, nil,
 	)
 }
 
 // prepareExactStartCandidateForCity prepares a candidate whose TemplateParams
 // were reconstructed from the same authoritative exact-key read. It keeps the
-// normal pre-wake freshness read and all existing preparation writes, but does
-// not replace that template through refreshConfiguredNamedStartCandidate's
-// fleet-wide snapshot.
+// authoritative pre-wake freshness read and all existing preparation writes,
+// but does not replace that template through
+// refreshConfiguredNamedStartCandidate's fleet-wide snapshot.
 func prepareExactStartCandidateForCity(
 	candidate startCandidate,
 	cityPath string,
@@ -890,7 +890,19 @@ func prepareExactStartCandidateForCity(
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
 	return prepareStartCandidateForCityWithNamedRefresh(
-		candidate, cityPath, cityName, cfg, sp, store, clk, stderr, workDirResolver, false,
+		candidate,
+		cityPath,
+		cityName,
+		cfg,
+		sp,
+		store,
+		clk,
+		stderr,
+		workDirResolver,
+		false,
+		func(store beads.Store, id string) (sessionpkg.Info, error) {
+			return getAuthoritativeExactSessionStartInfoBeforeWake(store, id, cfg, clk.Now().UTC())
+		},
 	)
 }
 
@@ -905,6 +917,7 @@ func prepareStartCandidateForCityWithNamedRefresh(
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
 	refreshNamed bool,
+	readCurrent func(beads.Store, string) (sessionpkg.Info, error),
 ) (*preparedStart, error) {
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
@@ -918,7 +931,13 @@ func prepareStartCandidateForCityWithNamedRefresh(
 			// a bead that is no longer a session (IsSessionBeadOrRepairable), the
 			// documented front-door-Get delta from the former raw store.Get. This is
 			// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
-			current, _, err := sessFront.GetPersistedResponse(id)
+			var current sessionpkg.Info
+			var err error
+			if readCurrent != nil {
+				current, err = readCurrent(store, id)
+			} else {
+				current, _, err = sessFront.GetPersistedResponse(id)
+			}
 			if err != nil {
 				return err
 			}

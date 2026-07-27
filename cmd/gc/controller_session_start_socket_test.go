@@ -10,6 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -145,6 +150,12 @@ func TestHandleControllerConnRejectsInvalidSessionStartKey(t *testing.T) {
 }
 
 func TestCityRuntimeAdmitsSessionStartSocketKey(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
 	reconciled := make(chan sessionStartAdmission, 1)
 	controller, err := newSessionStartController(sessionStartControllerOptions{
 		Workers:     1,
@@ -166,15 +177,18 @@ func TestCityRuntimeAdmitsSessionStartSocketKey(t *testing.T) {
 	defer controller.Stop()
 
 	cr := &CityRuntime{
+		cfg:                    env.cfg,
+		sp:                     env.sp,
+		cs:                     coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto),
 		sessionStartController: controller,
 		sessionStartOwnership:  sessionStartOwnershipKeyed,
 	}
-	if reply := cr.admitSessionStartSocketKey("ga-session-1"); reply != sessionStartSocketReplyOK {
+	if reply := cr.admitSessionStartSocketKey(bead.ID); reply != sessionStartSocketReplyOK {
 		t.Fatalf("reply = %q, want %q", reply, sessionStartSocketReplyOK)
 	}
 	select {
 	case admission := <-reconciled:
-		if admission.SessionID != "ga-session-1" || admission.Source != sessionStartAdmissionSocket {
+		if admission.SessionID != bead.ID || admission.Source != sessionStartAdmissionSocket {
 			t.Fatalf("admission = %+v, want exact socket key", admission)
 		}
 	case <-time.After(testutil.GoroutineRaceTimeout):
@@ -187,5 +201,89 @@ func TestCityRuntimeSessionStartSocketIngressFallsBackToLegacyOwner(t *testing.T
 	cr := &CityRuntime{sessionStartOwnership: sessionStartOwnershipLegacy}
 	if got := cr.admitSessionStartSocketKey("ga-session-1"); got != sessionStartSocketReplyFallback {
 		t.Fatalf("reply = %q, want %q", got, sessionStartSocketReplyFallback)
+	}
+}
+
+func TestCityRuntimeSessionStartSocketIngressFallsBackForLegacyOwnedKey(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{
+		{Name: "database", StartCommand: "true"},
+		{Name: "worker", StartCommand: "true", DependsOn: []string{"database"}},
+	}}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 8,
+		MaxRetries:  0,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("newSessionStartController: %v", err)
+	}
+	if err := controller.Start(context.Background()); err != nil {
+		t.Fatalf("controller.Start: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+
+	cr := &CityRuntime{
+		cfg:                    env.cfg,
+		sp:                     runtime.NewFake(),
+		cs:                     coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto),
+		sessionStartController: controller,
+		sessionStartOwnership:  sessionStartOwnershipKeyed,
+	}
+	if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyFallback {
+		t.Fatalf("reply = %q, want %q for a dependency-bearing legacy-owned start", got, sessionStartSocketReplyFallback)
+	}
+}
+
+func TestCityRuntimeSessionStartSocketIngressClassifiesFromAuthoritativeRow(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	backing := env.store
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"session_origin": "manual"})
+	if err := backing.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	cache := beads.NewCachingStore(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("prime controller cache: %v", err)
+	}
+	if err := backing.SetMetadata(bead.ID, poolManagedMetadataKey, "true"); err != nil {
+		t.Fatalf("mark backing row pool-managed: %v", err)
+	}
+
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 8,
+		MaxRetries:  0,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("newSessionStartController: %v", err)
+	}
+	if err := controller.Start(context.Background()); err != nil {
+		t.Fatalf("controller.Start: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+
+	cr := &CityRuntime{
+		cfg:                    env.cfg,
+		sp:                     env.sp,
+		cs:                     coherentSessionStartControllerStateForTest(env.cfg, env.sp, cache, rollout.Auto),
+		sessionStartController: controller,
+		sessionStartOwnership:  sessionStartOwnershipKeyed,
+	}
+	if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyFallback {
+		t.Fatalf("reply = %q, want %q for live pool row hidden by stale cache", got, sessionStartSocketReplyFallback)
 	}
 }

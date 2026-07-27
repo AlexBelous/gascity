@@ -32,24 +32,102 @@ type exactSessionStartParams struct {
 	StartOptions []startExecutionOption
 }
 
+type exactSessionStartOwner uint8
+
+const (
+	exactSessionStartUnowned exactSessionStartOwner = iota
+	exactSessionStartKeyedOwner
+	exactSessionStartLegacyOwner
+)
+
+type exactSessionStartPreWakeSkip struct {
+	owner exactSessionStartOwner
+}
+
+func (e *exactSessionStartPreWakeSkip) Error() string {
+	return "exact session start became ineligible before pre-wake commit"
+}
+
+// authoritativeSessionStartReadStore forces one exact-key read through the
+// store's live handle. It is deliberately confined to
+// getAuthoritativeSessionStartInfo: writes and ordinary reads must retain the
+// original store so optional write capabilities and cache refreshes survive.
+type authoritativeSessionStartReadStore struct {
+	beads.Store
+	live beads.LiveReader
+}
+
+func (s authoritativeSessionStartReadStore) Get(id string) (beads.Bead, error) {
+	return s.live.Get(id)
+}
+
+// getAuthoritativeSessionStartInfo reads one persisted session through the
+// typed session front door while bypassing an eventual-consistency cache. An
+// external CLI can commit a wake and send its socket hint before the matching
+// event refreshes the controller cache.
+func getAuthoritativeSessionStartInfo(store beads.Store, id string) (sessionpkg.Info, error) {
+	if store == nil {
+		return sessionpkg.Info{}, fmt.Errorf("session store is nil")
+	}
+	readStore := authoritativeSessionStartReadStore{
+		Store: store,
+		live:  beads.HandlesFor(store).Live,
+	}
+	info, _, err := sessionFrontDoor(readStore).GetPersistedResponse(id)
+	return info, err
+}
+
+func getAuthoritativeExactSessionStartInfoBeforeWake(
+	store beads.Store,
+	id string,
+	cfg *config.City,
+	now time.Time,
+) (sessionpkg.Info, error) {
+	info, err := getAuthoritativeSessionStartInfo(store, id)
+	if err != nil {
+		return sessionpkg.Info{}, err
+	}
+	lifecycle, _, owner := classifyExactSessionStartOwnership(info, cfg, now)
+	if owner != exactSessionStartKeyedOwner {
+		return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: owner}
+	}
+	if lifecycle.HasBlocker(sessionpkg.BlockerHeld) || lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) {
+		return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: owner}
+	}
+	return info, nil
+}
+
 // reconcileExactSessionStart rereads one durable session key and executes only
 // the pending-create and explicit-wake start family. The admission source is a
 // scheduling hint; persisted lifecycle state remains authoritative.
 func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmission, params exactSessionStartParams) error {
+	_, err := reconcileExactSessionStartWithOwner(ctx, admission, params)
+	return err
+}
+
+// reconcileExactSessionStartWithOwner returns the durable row's owner as seen
+// by the same authoritative read used for reconciliation. CityRuntime uses a
+// legacy result to request an immediate fleet tick, closing the race where a
+// key changes ownership after socket admission.
+func reconcileExactSessionStartWithOwner(
+	ctx context.Context,
+	admission sessionStartAdmission,
+	params exactSessionStartParams,
+) (exactSessionStartOwner, error) {
 	if ctx == nil {
-		return fmt.Errorf("reconciling exact session start %q: context is nil", admission.SessionID)
+		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: context is nil", admission.SessionID)
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return exactSessionStartUnowned, err
 	}
 	if params.Config == nil {
-		return fmt.Errorf("reconciling exact session start %q: config is nil", admission.SessionID)
+		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: config is nil", admission.SessionID)
 	}
 	if params.Provider == nil {
-		return fmt.Errorf("reconciling exact session start %q: runtime provider is nil", admission.SessionID)
+		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: runtime provider is nil", admission.SessionID)
 	}
 	if params.Store == nil {
-		return fmt.Errorf("reconciling exact session start %q: session store is nil", admission.SessionID)
+		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: session store is nil", admission.SessionID)
 	}
 	clk := params.Clock
 	if clk == nil {
@@ -68,47 +146,46 @@ func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmis
 		recorder = events.Discard
 	}
 
-	sessFront := sessionFrontDoor(params.Store)
-	info, _, err := sessFront.GetPersistedResponse(admission.SessionID)
+	info, err := getAuthoritativeSessionStartInfo(params.Store, admission.SessionID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound) {
-			return nil
+			return exactSessionStartUnowned, nil
 		}
-		return fmt.Errorf("reconciling exact session start %q: %w", admission.SessionID, err)
+		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: %w", admission.SessionID, err)
 	}
 	if info.Closed {
-		return nil
+		return exactSessionStartUnowned, nil
 	}
 
 	now := clk.Now().UTC()
-	lifecycle, cfgAgent, owned := resolveExactSessionStartOwnership(info, params.Config, now)
-	if !owned {
-		return nil
+	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, now)
+	if owner != exactSessionStartKeyedOwner {
+		return owner, nil
 	}
 
 	template := resolvedSessionTemplateInfo(info, params.Config)
 	if template == "" {
-		return fmt.Errorf("reconciling exact session start %q: persisted template is empty", info.ID)
+		return owner, fmt.Errorf("reconciling exact session start %q: persisted template is empty", info.ID)
 	}
 	if cfgAgent == nil {
-		return nil
+		return owner, nil
 	}
 	if isAgentEffectivelySuspendedWith(params.Config, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
-		return nil
+		return owner, nil
 	}
 	if lifecycle.HasBlocker(sessionpkg.BlockerHeld) || lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) {
-		return nil
+		return owner, nil
 	}
 
 	tp, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
 	if err != nil {
-		return fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
+		return owner, fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
 	}
 	observation, err := workerObserveLoadedSessionWithRuntimeHintsWithConfig(
 		ctx, params.CityPath, params.Store, params.Provider, params.Config, info, tp.Hints.ProcessNames,
 	)
 	if err != nil {
-		return fmt.Errorf("reconciling exact session start %q: observing runtime: %w", info.ID, err)
+		return owner, fmt.Errorf("reconciling exact session start %q: observing runtime: %w", info.ID, err)
 	}
 
 	startupTimeout := params.Config.Session.StartupTimeoutDuration()
@@ -137,7 +214,7 @@ func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmis
 		ProviderUnavailable:  providerUnavailable,
 	})
 	if plan.Outcome != sessionLifecycleStartSelectionPrepare {
-		return nil
+		return owner, nil
 	}
 
 	startOpts := startExecutionOptions{}
@@ -158,7 +235,11 @@ func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmis
 		startOpts.workDirResolver,
 	)
 	if err != nil {
-		return fmt.Errorf("reconciling exact session start %q: preparing start: %w", info.ID, err)
+		var skip *exactSessionStartPreWakeSkip
+		if errors.As(err, &skip) {
+			return skip.owner, nil
+		}
+		return owner, fmt.Errorf("reconciling exact session start %q: preparing start: %w", info.ID, err)
 	}
 	results := executePreparedStartWaveForCity(
 		ctx,
@@ -172,22 +253,22 @@ func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmis
 		params.StartOptions...,
 	)
 	if len(results) != 1 {
-		return fmt.Errorf("reconciling exact session start %q: start returned %d results", info.ID, len(results))
+		return owner, fmt.Errorf("reconciling exact session start %q: start returned %d results", info.ID, len(results))
 	}
 	result := results[0]
 	disposition := commitStartResultWithFreshness(
 		ctx, result, params.Provider, params.Store, clk, recorder, 0, stdout, stderr, nil,
 	)
 	if disposition == startCommitSuperseded {
-		return nil
+		return owner, nil
 	}
 	if disposition != startCommitCommitted {
 		if result.err != nil {
-			return fmt.Errorf("reconciling exact session start %q: %w", info.ID, result.err)
+			return owner, fmt.Errorf("reconciling exact session start %q: %w", info.ID, result.err)
 		}
-		return fmt.Errorf("reconciling exact session start %q: start result did not commit", info.ID)
+		return owner, fmt.Errorf("reconciling exact session start %q: start result did not commit", info.ID)
 	}
-	return nil
+	return owner, nil
 }
 
 // resolveExactSessionStartOwnership projects the durable start family once and
@@ -197,7 +278,16 @@ func resolveExactSessionStartOwnership(
 	info sessionpkg.Info,
 	cfg *config.City,
 	now time.Time,
-) (sessionpkg.LifecycleView, *config.Agent, bool) {
+) bool {
+	_, _, owner := classifyExactSessionStartOwnership(info, cfg, now)
+	return owner == exactSessionStartKeyedOwner
+}
+
+func classifyExactSessionStartOwnership(
+	info sessionpkg.Info,
+	cfg *config.City,
+	now time.Time,
+) (sessionpkg.LifecycleView, *config.Agent, exactSessionStartOwner) {
 	lifecycleInput := sessionpkg.LifecycleInputFromInfo(info)
 	lifecycleInput.Now = now
 	lifecycleInput.CreatedAt = info.CreatedAt
@@ -206,27 +296,50 @@ func resolveExactSessionStartOwnership(
 	ownedCause := lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) ||
 		lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit)
 	if info.Closed || !ownedCause || lifecycle.Terminal {
-		return lifecycle, nil, false
+		return lifecycle, nil, exactSessionStartUnowned
+	}
+	// Named-session canonicalization and pool capacity/slot validation are fleet
+	// invariants. Until those projections are available by immutable key, the
+	// fleet reconciler remains their sole effect owner.
+	if isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) {
+		return lifecycle, nil, exactSessionStartLegacyOwner
 	}
 
 	template := resolvedSessionTemplateInfo(info, cfg)
 	if template == "" {
-		return lifecycle, nil, true
+		return lifecycle, nil, exactSessionStartKeyedOwner
 	}
 	cfgAgent := findAgentByTemplate(cfg, template)
 	if cfgAgent == nil {
-		return lifecycle, nil, false
+		return lifecycle, nil, exactSessionStartLegacyOwner
 	}
 	// Dependency-bearing templates remain legacy-owned until the keyed reverse
 	// dependency index lands. Starting them here would bypass the existing
 	// dependency wave gate.
 	if len(cfgAgent.DependsOn) > 0 {
-		return lifecycle, cfgAgent, false
+		return lifecycle, cfgAgent, exactSessionStartLegacyOwner
 	}
 	if lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) && info.DependencyOnly {
-		return lifecycle, cfgAgent, false
+		return lifecycle, cfgAgent, exactSessionStartLegacyOwner
 	}
-	return lifecycle, cfgAgent, true
+	return lifecycle, cfgAgent, exactSessionStartKeyedOwner
+}
+
+func exactSessionStartOwnerForKey(
+	store beads.Store,
+	cfg *config.City,
+	sessionID string,
+	now time.Time,
+) (exactSessionStartOwner, error) {
+	if store == nil {
+		return exactSessionStartUnowned, fmt.Errorf("session store is nil")
+	}
+	info, err := getAuthoritativeSessionStartInfo(store, sessionID)
+	if err != nil {
+		return exactSessionStartUnowned, err
+	}
+	_, _, owner := classifyExactSessionStartOwnership(info, cfg, now)
+	return owner, nil
 }
 
 func resolveExactSessionStartTemplate(

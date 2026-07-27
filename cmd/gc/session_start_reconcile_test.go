@@ -105,6 +105,141 @@ func TestReconcileExactSessionStartColdCacheBackingGetBudget(t *testing.T) {
 	}
 }
 
+func TestReconcileExactSessionStartRefreshesCachedRowBeforeOwnership(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	backing := env.store
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"session_origin": "manual"})
+	if err := backing.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	cache := beads.NewCachingStore(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("prime controller cache: %v", err)
+	}
+
+	// Simulate an external writer changing the already-cached row into a pool
+	// member immediately before sending its exact socket hint. Pool ownership
+	// requires a fleet capacity census, so a stale cache hit must not start it.
+	if err := backing.SetMetadata(bead.ID, poolManagedMetadataKey, "true"); err != nil {
+		t.Fatalf("mark backing row pool-managed: %v", err)
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.Store = cache
+	if err := reconcileExactSessionStart(context.Background(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionSocket,
+	}, params); err != nil {
+		t.Fatalf("reconcileExactSessionStart: %v", err)
+	}
+	if got := env.sp.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0 after authoritative pool reclassification", got)
+	}
+}
+
+func TestReconcileExactSessionStartRechecksOwnershipAtPreWake(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"session_origin": "manual"})
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	before := env.sessionInfo(bead.ID)
+
+	store := &mutateAfterFirstSessionGetStore{
+		Store:  env.store,
+		target: bead.ID,
+		afterFirst: func() {
+			if err := env.store.SetMetadata(bead.ID, poolManagedMetadataKey, "true"); err != nil {
+				t.Fatalf("mark backing row pool-managed: %v", err)
+			}
+		},
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.Store = store
+	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionSocket,
+	}, params)
+	if err != nil {
+		t.Fatalf("reconcileExactSessionStartWithOwner: %v", err)
+	}
+	if owner != exactSessionStartLegacyOwner {
+		t.Fatalf("owner = %v, want legacy after pre-wake pool reclassification", owner)
+	}
+	if got := env.sp.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0 after pre-wake pool reclassification", got)
+	}
+	got := env.sessionInfo(bead.ID)
+	if got.Generation != before.Generation || got.InstanceToken != before.InstanceToken {
+		t.Fatalf(
+			"pre-wake mutation landed after ownership changed: generation/token (%q, %q) -> (%q, %q)",
+			before.Generation,
+			before.InstanceToken,
+			got.Generation,
+			got.InstanceToken,
+		)
+	}
+}
+
+func TestReconcileExactSessionStartRechecksBlockersAtPreWake(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"session_origin": "manual"})
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	before := env.sessionInfo(bead.ID)
+
+	store := &mutateAfterFirstSessionGetStore{
+		Store:  env.store,
+		target: bead.ID,
+		afterFirst: func() {
+			heldUntil := env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+			if err := env.store.SetMetadata(bead.ID, "held_until", heldUntil); err != nil {
+				t.Fatalf("hold session: %v", err)
+			}
+		},
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.Store = store
+	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionSocket,
+	}, params)
+	if err != nil {
+		t.Fatalf("reconcileExactSessionStartWithOwner: %v", err)
+	}
+	if owner != exactSessionStartKeyedOwner {
+		t.Fatalf("owner = %v, want keyed no-op after pre-wake hold", owner)
+	}
+	if got := env.sp.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0 after pre-wake hold", got)
+	}
+	got := env.sessionInfo(bead.ID)
+	if got.Generation != before.Generation || got.InstanceToken != before.InstanceToken {
+		t.Fatalf(
+			"pre-wake mutation landed after hold: generation/token (%q, %q) -> (%q, %q)",
+			before.Generation,
+			before.InstanceToken,
+			got.Generation,
+			got.InstanceToken,
+		)
+	}
+}
+
 func TestReconcileExactSessionStartDoesNotDuplicateLiveRuntime(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -521,6 +656,21 @@ func TestReconcileExactSessionStartIgnoresNonActionableKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+type mutateAfterFirstSessionGetStore struct {
+	beads.Store
+	target     string
+	gets       atomic.Int32
+	afterFirst func()
+}
+
+func (s *mutateAfterFirstSessionGetStore) Get(id string) (beads.Bead, error) {
+	b, err := s.Store.Get(id)
+	if err == nil && id == s.target && s.gets.Add(1) == 1 && s.afterFirst != nil {
+		s.afterFirst()
+	}
+	return b, err
 }
 
 func exactSessionStartTestParams(t *testing.T, env *reconcilerTestEnv) exactSessionStartParams {

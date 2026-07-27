@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestCityRuntimeSessionStartControllerOffKeepsLegacyOwnership(t *testing.T) {
@@ -196,6 +197,41 @@ func TestCityRuntimeSessionStartEventStartsWithoutFleetTick(t *testing.T) {
 	}, "event-admitted exact wake to commit active")
 	if got := env.sp.CountCalls("Start", "worker"); got != 1 {
 		t.Fatalf("provider Start calls = %d, want 1 without a fleet tick", got)
+	}
+}
+
+func TestCityRuntimeSessionStartWorkerImmediatelyDelegatesLegacyOwnedKey(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{
+		{Name: "database", StartCommand: "true"},
+		{Name: "worker", StartCommand: "true", DependsOn: []string{"database"}},
+	}}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	pokeCh := make(chan struct{}, 1)
+	cr := &CityRuntime{
+		cityPath: t.TempDir(),
+		cfg:      env.cfg,
+		sp:       env.sp,
+		cs:       coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto),
+		pokeCh:   pokeCh,
+		stdout:   io.Discard,
+		stderr:   io.Discard,
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	if _, err := cr.sessionStartController.Admit(bead.ID, sessionStartAdmissionInProcess); err != nil {
+		t.Fatalf("admit legacy-owned key: %v", err)
+	}
+
+	select {
+	case <-pokeCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("legacy-owned exact key did not request an immediate fleet reconcile")
 	}
 }
 
@@ -744,7 +780,7 @@ func assertSingleSessionStartOwner(
 	cfg *config.City,
 ) {
 	t.Helper()
-	_, _, keyedOwns := resolveExactSessionStartOwnership(info, cfg, time.Now().UTC())
+	keyedOwns := resolveExactSessionStartOwnership(info, cfg, time.Now().UTC())
 	option := cr.sessionStartLegacyExclusionOption()
 	legacyOwns := option == nil || !legacySessionStartExcluded(option, info)
 	if keyedOwns == legacyOwns {

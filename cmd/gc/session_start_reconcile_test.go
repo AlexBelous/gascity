@@ -105,6 +105,30 @@ func TestReconcileExactSessionStartColdCacheBackingGetBudget(t *testing.T) {
 	}
 }
 
+func TestGetAuthoritativeSessionStartRecordReturnsSameLiveReadRevision(t *testing.T) {
+	env := newReconcilerTestEnv()
+	bead := env.createSessionBead("worker", "worker")
+	store := newExactStatusCountingStore(t, env.store)
+	store.rewriteGet = func(gets int, id string, got beads.Bead, err error) (beads.Bead, error) {
+		if err == nil && id == bead.ID {
+			if gets == 1 {
+				got.Revision = 101
+			} else {
+				got.Revision = 202
+			}
+		}
+		return got, err
+	}
+
+	info, revision, err := getAuthoritativeSessionStartRecord(store, bead.ID)
+	if err != nil {
+		t.Fatalf("get authoritative record: %v", err)
+	}
+	if info.ID != bead.ID || revision != 101 || store.gets != 1 {
+		t.Fatalf("record = (%q, %d), live gets = %d; want (%q, 101), one", info.ID, revision, store.gets, bead.ID)
+	}
+}
+
 func TestReconcileExactSessionStartRefreshesCachedRowBeforeOwnership(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

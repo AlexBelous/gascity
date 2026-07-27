@@ -45,6 +45,7 @@ type exactSessionLifecycleStatusResult struct {
 	ControllerGeneration uint64
 	RequestedID          string
 	LoadedID             string
+	LoadedRevision       int64
 	Context              exactSessionLifecycleStatusContext
 	ObservedAt           time.Time
 	Disposition          exactSessionLifecycleStatusDisposition
@@ -63,6 +64,7 @@ type exactSessionLifecycleStatusInput struct {
 	Admission            sessionStartAdmission
 	ControllerGeneration uint64
 	RequestedID          string
+	LoadedRevision       int64
 	Context              exactSessionLifecycleStatusContext
 	Info                 session.Info
 	Observation          worker.LiveObservation
@@ -82,6 +84,7 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		ControllerGeneration: input.ControllerGeneration,
 		RequestedID:          input.RequestedID,
 		LoadedID:             input.Info.ID,
+		LoadedRevision:       input.LoadedRevision,
 		Context:              input.Context,
 		ObservedAt:           input.ObservedAt,
 		Disposition:          exactSessionLifecycleStatusDispositionPark,
@@ -126,6 +129,10 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		StartupTimeout:    input.StartupTimeout,
 		RollbackAvailable: true,
 	})
+	if plan.Outcome == sessionLifecycleStatusHeal && input.LoadedRevision <= 0 {
+		result.Reason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
+		return result
+	}
 	result.Reason = exactSessionLifecycleStatusReasonCandidate
 	result.Disposition = exactSessionLifecycleStatusDispositionCandidate
 	result.Plan = ptrExactSessionLifecycleStatusPlan(plan)

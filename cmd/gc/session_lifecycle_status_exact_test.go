@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -26,6 +27,7 @@ func TestEvaluateExactSessionLifecycleStatus(t *testing.T) {
 		Admission:            sessionStartAdmission{SessionID: "gcs-exact", Version: 4},
 		ControllerGeneration: 9,
 		RequestedID:          "gcs-exact",
+		LoadedRevision:       17,
 		Context:              exactSessionLifecycleStatusContextDesired,
 		Info: session.Info{
 			ID:            "gcs-exact",
@@ -104,6 +106,55 @@ func TestEvaluateExactSessionLifecycleStatus(t *testing.T) {
 	}
 }
 
+func TestEvaluateExactSessionLifecycleStatusRequiresRevisionOnlyForHeal(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	heal := exactSessionLifecycleStatusInput{
+		Admission:            sessionStartAdmission{SessionID: "gcs-exact-revision", Version: 4},
+		ControllerGeneration: 9,
+		RequestedID:          "gcs-exact-revision",
+		LoadedRevision:       17,
+		Context:              exactSessionLifecycleStatusContextDesired,
+		Info: session.Info{
+			ID:            "gcs-exact-revision",
+			State:         session.StateAwake,
+			MetadataState: string(session.StateAwake),
+			SessionKey:    "resume-key",
+		},
+		ObservedAt:         now,
+		PrerequisitesReady: true,
+	}
+
+	if got := evaluateExactSessionLifecycleStatus(heal); got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Reason != exactSessionLifecycleStatusReasonCandidate || got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusHeal || got.LoadedRevision != 17 {
+		t.Fatalf("positive-revision heal = %#v, want candidate heal carrying revision", got)
+	}
+	for _, revision := range []int64{0, -1} {
+		withoutRevision := heal
+		withoutRevision.LoadedRevision = revision
+		got := evaluateExactSessionLifecycleStatus(withoutRevision)
+		if got.Disposition != exactSessionLifecycleStatusDispositionPark || got.Reason != exactSessionLifecycleStatusReasonPrerequisiteUnavailable || got.Plan != nil || got.LoadedRevision != revision || got.Error != "" {
+			t.Fatalf("heal revision %d = %#v, want prerequisite-unavailable park without plan", revision, got)
+		}
+	}
+
+	converged := heal
+	converged.LoadedRevision = 0
+	converged.Info.State = session.StateAsleep
+	converged.Info.MetadataState = string(session.StateAsleep)
+	if got := evaluateExactSessionLifecycleStatus(converged); got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusNoop || got.Plan.Reason != sessionLifecycleStatusReasonConverged {
+		t.Fatalf("zero-revision converged status = %#v, want candidate converged no-op", got)
+	}
+
+	closed := heal
+	closed.LoadedRevision = 0
+	closed.Context = exactSessionLifecycleStatusContextUnavailable
+	closed.Info.Closed = true
+	closed.ObservedAt = time.Time{}
+	closed.PrerequisitesReady = false
+	if got := evaluateExactSessionLifecycleStatus(closed); got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusNoop || got.Plan.Reason != sessionLifecycleStatusReasonTerminal {
+		t.Fatalf("zero-revision closed status = %#v, want candidate terminal no-op", got)
+	}
+}
+
 func TestEvaluateExactSessionLifecycleStatusClosedAndUnavailable(t *testing.T) {
 	base := exactSessionLifecycleStatusInput{
 		Admission:            sessionStartAdmission{SessionID: "gcs-exact", Version: 4},
@@ -156,6 +207,12 @@ func TestReconcileExactSessionStartClosedStatusUsesOneReadWithoutEffects(t *test
 	}
 	before := exactStatusStoreState(t, env.store)
 	store := newExactStatusCountingStore(t, env.store)
+	store.rewriteGet = func(_ int, _ string, got beads.Bead, err error) (beads.Bead, error) {
+		if err == nil {
+			got.Revision = 41
+		}
+		return got, err
+	}
 	clk := &exactStatusCountingClock{now: env.clk.Now()}
 	observationCalls := 0
 	var reports []exactSessionLifecycleStatusResult
@@ -182,7 +239,7 @@ func TestReconcileExactSessionStartClosedStatusUsesOneReadWithoutEffects(t *test
 	if store.gets != 1 || store.lists != 0 || clk.calls != 0 || observationCalls != 0 {
 		t.Fatalf("closed read/list/clock/observation costs = %d/%d/%d/%d, want 1/0/0/0", store.gets, store.lists, clk.calls, observationCalls)
 	}
-	if len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Plan == nil || reports[0].Plan.Outcome != sessionLifecycleStatusNoop || reports[0].Plan.Reason != sessionLifecycleStatusReasonTerminal {
+	if len(reports) != 1 || reports[0].LoadedRevision != 41 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Plan == nil || reports[0].Plan.Outcome != sessionLifecycleStatusNoop || reports[0].Plan.Reason != sessionLifecycleStatusReasonTerminal {
 		t.Fatalf("closed reports = %#v, want one context-free terminal no-op", reports)
 	}
 	if calls := env.sp.SnapshotCalls(); len(calls) != 0 {
@@ -223,7 +280,7 @@ func TestReconcileExactSessionStartReportsWrappedIDCollision(t *testing.T) {
 	if owner != exactSessionStartUnowned || !errors.Is(err, beads.ErrIDCollision) {
 		t.Fatalf("owner/error = %d/%v, want unowned/wrapped ErrIDCollision", owner, err)
 	}
-	if len(reports) != 1 || reports[0].Reason != exactSessionLifecycleStatusReasonInvalidInput || !strings.Contains(reports[0].Error, collision.Error()) {
+	if len(reports) != 1 || reports[0].LoadedRevision != 0 || reports[0].Reason != exactSessionLifecycleStatusReasonInvalidInput || !strings.Contains(reports[0].Error, collision.Error()) {
 		t.Fatalf("collision reports = %#v, want one invalid_input with in-memory error", reports)
 	}
 	if store.lists != 0 {
@@ -278,8 +335,16 @@ func TestReconcileExactSessionStartReportsLoadedEarlyExitsOnce(t *testing.T) {
 			tt.configure(env)
 			bead := env.createSessionBead("worker", "worker")
 			env.setSessionMetadata(&bead, tt.metadata)
+			store := newExactStatusCountingStore(t, env.store)
+			store.rewriteGet = func(_ int, _ string, got beads.Bead, err error) (beads.Bead, error) {
+				if err == nil {
+					got.Revision = 61
+				}
+				return got, err
+			}
 			params := exactSessionStartTestParams(t, env)
 			params.Generation = 1
+			params.Store = store
 			observationCalls := 0
 			params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
 				observationCalls++
@@ -293,7 +358,7 @@ func TestReconcileExactSessionStartReportsLoadedEarlyExitsOnce(t *testing.T) {
 			if owner != tt.wantOwner || (err != nil) != tt.wantErr {
 				t.Fatalf("owner/error = %d/%v, want %d/error=%t", owner, err, tt.wantOwner, tt.wantErr)
 			}
-			if len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Reason != tt.wantReason || !reports[0].ObservedAt.IsZero() {
+			if len(reports) != 1 || reports[0].LoadedRevision != 61 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Reason != tt.wantReason || !reports[0].ObservedAt.IsZero() {
 				t.Fatalf("reports = %#v, want one %s with zero timestamp", reports, tt.wantReason)
 			}
 			if observationCalls != tt.wantObservations {
@@ -313,9 +378,17 @@ func TestReconcileExactSessionStartReportsNonClosedUnownedLoadedExitOnce(t *test
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
+	store := newExactStatusCountingStore(t, env.store)
+	store.rewriteGet = func(_ int, _ string, got beads.Bead, err error) (beads.Bead, error) {
+		if err == nil {
+			got.Revision = 71
+		}
+		return got, err
+	}
 	var reports []exactSessionLifecycleStatusResult
 	params := exactSessionStartTestParams(t, env)
 	params.Generation = 1
+	params.Store = store
 	observationCalls := 0
 	params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
 		observationCalls++
@@ -337,26 +410,28 @@ func TestReconcileExactSessionStartReportsNonClosedUnownedLoadedExitOnce(t *test
 	if calls := env.sp.SnapshotCalls(); len(calls) != 0 {
 		t.Fatalf("unowned provider calls = %#v, want none", calls)
 	}
-	if len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Reason != exactSessionLifecycleStatusReasonNotObserved || reports[0].Plan != nil || reports[0].LoadedID != bead.ID {
+	if len(reports) != 1 || reports[0].LoadedRevision != 71 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Reason != exactSessionLifecycleStatusReasonNotObserved || reports[0].Plan != nil || reports[0].LoadedID != bead.ID {
 		t.Fatalf("reports = %#v, want one unavailable report for %q", reports, bead.ID)
 	}
 }
 
 func TestReconcileExactSessionStartReportsPostObservationExitOnce(t *testing.T) {
 	tests := []struct {
-		name        string
-		metadata    map[string]string
-		observation worker.LiveObservation
-		rewriteGet  func(int, string, beads.Bead, error) (beads.Bead, error)
-		wantOwner   exactSessionStartOwner
-		wantGets    int
+		name               string
+		metadata           map[string]string
+		observation        worker.LiveObservation
+		rewriteGet         func(int, string, beads.Bead, error) (beads.Bead, error)
+		wantOwner          exactSessionStartOwner
+		wantGets           int
+		wantLoadedRevision int64
 	}{
 		{
-			name:        "no-op",
-			metadata:    map[string]string{"wake_request": string(session.WakeCauseExplicit), "state": string(session.StateAwake), "session_key": "resume"},
-			observation: worker.LiveObservation{Running: true, Alive: true},
-			wantOwner:   exactSessionStartKeyedOwner,
-			wantGets:    1,
+			name:               "no-op",
+			metadata:           map[string]string{"wake_request": string(session.WakeCauseExplicit), "state": string(session.StateAwake), "session_key": "resume"},
+			observation:        worker.LiveObservation{Running: true, Alive: true},
+			wantOwner:          exactSessionStartKeyedOwner,
+			wantGets:           1,
+			wantLoadedRevision: 4,
 		},
 		{
 			name: "superseded before pre-wake commit",
@@ -366,13 +441,18 @@ func TestReconcileExactSessionStartReportsPostObservationExitOnce(t *testing.T) 
 				"pending_create_started_at": time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
 			},
 			rewriteGet: func(gets int, _ string, bead beads.Bead, err error) (beads.Bead, error) {
+				if err == nil && gets == 1 {
+					bead.Revision = 101
+				}
 				if err == nil && gets == 2 {
 					bead.Status = "closed"
+					bead.Revision = 202
 				}
 				return bead, err
 			},
-			wantOwner: exactSessionStartUnowned,
-			wantGets:  2,
+			wantOwner:          exactSessionStartUnowned,
+			wantGets:           2,
+			wantLoadedRevision: 101,
 		},
 	}
 	for _, tt := range tests {
@@ -409,6 +489,9 @@ func TestReconcileExactSessionStartReportsPostObservationExitOnce(t *testing.T) 
 			requireExactStatusStoreUnchanged(t, before, store)
 			if len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextDesired || reports[0].RequestedID != bead.ID || reports[0].LoadedID != bead.ID || reports[0].ObservedAt.IsZero() || reports[0].Error != "" {
 				t.Fatalf("reports = %#v, want one post-observation report for %q", reports, bead.ID)
+			}
+			if reports[0].LoadedRevision != tt.wantLoadedRevision {
+				t.Fatalf("post-observation report revision = %d, want initial live-read revision %d", reports[0].LoadedRevision, tt.wantLoadedRevision)
 			}
 		})
 	}
@@ -654,33 +737,67 @@ func TestExactSessionStatusShadowOneKeyCostDoesNotGrowWithFleet(t *testing.T) {
 	for _, fleetSize := range []int{1, 1000, 10000} {
 		t.Run(fmt.Sprintf("fleet-%d", fleetSize), func(t *testing.T) {
 			env := newReconcilerTestEnv()
-			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", DependsOn: []string{"dependency"}}}}
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 			for i := 1; i < fleetSize; i++ {
 				env.createSessionBead("worker", fmt.Sprintf("worker-%d", i))
 			}
 			bead := env.createSessionBead("worker", "worker")
-			env.setSessionMetadata(&bead, map[string]string{"wake_request": string(session.WakeCauseExplicit)})
+			env.setSessionMetadata(&bead, map[string]string{
+				"wake_request": string(session.WakeCauseExplicit),
+				"state":        string(session.StateAwake),
+				"session_key":  "resume",
+			})
+			loaded, err := env.store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("read initial target: %v", err)
+			}
+			if loaded.Revision <= 0 {
+				t.Fatalf("initial target revision = %d, want positive", loaded.Revision)
+			}
 			before := exactStatusStoreState(t, env.store)
 			store := newExactStatusCountingStore(t, env.store)
+			var reports []exactSessionLifecycleStatusResult
+			var stdout, stderr bytes.Buffer
+			recorder := events.NewFake()
 			params := exactSessionStartTestParams(t, env)
 			params.Generation = 1
 			params.Store = store
-			params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(exactSessionLifecycleStatusResult) {}))
+			params.Recorder = recorder
+			params.Stdout = &stdout
+			params.Stderr = &stderr
+			params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				reports = append(reports, result)
+			}))
 			observationCalls := 0
-			params.ObserveLoadedSession = func(ctx context.Context, cityPath string, store beads.Store, provider runtime.Provider, cfg *config.City, loaded session.Info, processNames []string) (worker.LiveObservation, error) {
+			params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
 				observationCalls++
-				return workerObserveLoadedSessionWithRuntimeHintsWithConfig(ctx, cityPath, store, provider, cfg, loaded, processNames)
+				return worker.LiveObservation{Running: true, Alive: true}, nil
 			}
 			owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionExplicitWake, Version: 1}, params)
-			if err != nil || owner != exactSessionStartLegacyOwner {
-				t.Fatalf("reconcile owner/error = %d/%v, want legacy/nil", owner, err)
+			if err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("reconcile owner/error = %d/%v, want keyed/nil", owner, err)
 			}
-			if store.gets != 1 || store.lists != 0 || observationCalls != 0 {
-				t.Fatalf("fleet %d exact costs get/list/observation = %d/%d/%d, want 1/0/0", fleetSize, store.gets, store.lists, observationCalls)
+			if store.gets != 1 || store.lists != 0 || observationCalls != 1 {
+				t.Fatalf("fleet %d exact costs get/list/observation = %d/%d/%d, want 1/0/1", fleetSize, store.gets, store.lists, observationCalls)
+			}
+			if len(reports) != 1 {
+				t.Fatalf("fleet %d status reports = %d, want 1", fleetSize, len(reports))
+			}
+			report := reports[0]
+			if report.Disposition != exactSessionLifecycleStatusDispositionCandidate || report.Reason != exactSessionLifecycleStatusReasonCandidate ||
+				report.Plan == nil || report.Plan.Outcome != sessionLifecycleStatusNoop || report.Plan.Reason != sessionLifecycleStatusReasonConverged ||
+				report.LoadedRevision != loaded.Revision {
+				t.Fatalf("fleet %d report = %#v, want candidate converged no-op carrying revision %d", fleetSize, report, loaded.Revision)
 			}
 			requireExactStatusStoreUnchanged(t, before, store)
 			if calls := env.sp.SnapshotCalls(); len(calls) != 0 {
 				t.Fatalf("fleet %d provider calls = %#v, want none", fleetSize, calls)
+			}
+			if len(recorder.Events) != 0 {
+				t.Fatalf("fleet %d events = %#v, want none", fleetSize, recorder.Events)
+			}
+			if stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("fleet %d stdout/stderr = %q/%q, want empty", fleetSize, stdout.String(), stderr.String())
 			}
 		})
 	}
@@ -950,6 +1067,7 @@ func TestReconcileExactSessionStartRejectsMismatchedAuthoritativeIDBeforeEffects
 	store.rewriteGet = func(_ int, id string, got beads.Bead, err error) (beads.Bead, error) {
 		if err == nil && id == bead.ID {
 			got.ID = returnedID
+			got.Revision = 81
 		}
 		return got, err
 	}
@@ -965,7 +1083,7 @@ func TestReconcileExactSessionStartRejectsMismatchedAuthoritativeIDBeforeEffects
 	if owner != exactSessionStartUnowned || err == nil || !strings.Contains(err.Error(), wantErr) {
 		t.Fatalf("owner/error = %d/%v, want unowned/error containing %q", owner, err, wantErr)
 	}
-	if len(reports) != 1 || reports[0].Reason != exactSessionLifecycleStatusReasonInvalidInput || reports[0].RequestedID != bead.ID || reports[0].LoadedID != returnedID || reports[0].Error != wantErr {
+	if len(reports) != 1 || reports[0].LoadedRevision != 81 || reports[0].Reason != exactSessionLifecycleStatusReasonInvalidInput || reports[0].RequestedID != bead.ID || reports[0].LoadedID != returnedID || reports[0].Error != wantErr {
 		t.Fatalf("reports = %#v, want one invalid_input report with requested=%q loaded=%q error=%q", reports, bead.ID, returnedID, wantErr)
 	}
 	if calls := env.sp.SnapshotCalls(); len(calls) != 0 {

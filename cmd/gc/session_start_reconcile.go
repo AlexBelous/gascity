@@ -63,7 +63,7 @@ func (e *exactSessionStartPreWakeSkip) Error() string {
 
 // authoritativeSessionStartReadStore forces one exact-key read through the
 // store's live handle. It is deliberately confined to
-// getAuthoritativeSessionStartInfo: writes and ordinary reads must retain the
+// getAuthoritativeSessionStartRecord: writes and ordinary reads must retain the
 // original store so optional write capabilities and cache refreshes survive.
 type authoritativeSessionStartReadStore struct {
 	beads.Store
@@ -74,20 +74,24 @@ func (s authoritativeSessionStartReadStore) Get(id string) (beads.Bead, error) {
 	return s.live.Get(id)
 }
 
-// getAuthoritativeSessionStartInfo reads one persisted session through the
+// getAuthoritativeSessionStartRecord reads one persisted session through the
 // typed session front door while bypassing an eventual-consistency cache. An
 // external CLI can commit a wake and send its socket hint before the matching
-// event refreshes the controller cache.
-func getAuthoritativeSessionStartInfo(store beads.Store, id string) (sessionpkg.Info, error) {
+// event refreshes the controller cache. Its revision is from that same read;
+// callers must not refresh it before a future fenced write.
+func getAuthoritativeSessionStartRecord(store beads.Store, id string) (sessionpkg.Info, int64, error) {
 	if store == nil {
-		return sessionpkg.Info{}, fmt.Errorf("session store is nil")
+		return sessionpkg.Info{}, 0, fmt.Errorf("session store is nil")
 	}
 	readStore := authoritativeSessionStartReadStore{
 		Store: store,
 		live:  beads.HandlesFor(store).Live,
 	}
-	info, _, err := sessionFrontDoor(readStore).GetPersistedResponse(id)
-	return info, err
+	info, response, err := sessionFrontDoor(readStore).GetPersistedResponse(id)
+	if err != nil {
+		return sessionpkg.Info{}, 0, err
+	}
+	return info, response.Revision, nil
 }
 
 func getAuthoritativeExactSessionStartInfoBeforeWake(
@@ -96,7 +100,7 @@ func getAuthoritativeExactSessionStartInfoBeforeWake(
 	cfg *config.City,
 	now time.Time,
 ) (sessionpkg.Info, error) {
-	info, err := getAuthoritativeSessionStartInfo(store, id)
+	info, _, err := getAuthoritativeSessionStartRecord(store, id)
 	if err != nil {
 		return sessionpkg.Info{}, err
 	}
@@ -182,7 +186,7 @@ func reconcileExactSessionStartWithOwner(
 		}
 	}()
 
-	info, err := getAuthoritativeSessionStartInfo(params.Store, admission.SessionID)
+	info, loadedRevision, err := getAuthoritativeSessionStartRecord(params.Store, admission.SessionID)
 	if err != nil {
 		if errors.Is(err, beads.ErrIDCollision) {
 			retainStatus(exactSessionLifecycleStatusInput{
@@ -211,25 +215,24 @@ func reconcileExactSessionStartWithOwner(
 		}
 		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: %w", admission.SessionID, err)
 	}
+	retainStatusFromInitialRead := func(input exactSessionLifecycleStatusInput) {
+		input.Admission = admission
+		input.ControllerGeneration = params.Generation
+		input.RequestedID = admission.SessionID
+		input.Info = info
+		input.LoadedRevision = loadedRevision
+		retainStatus(input)
+	}
 	if info.ID != admission.SessionID {
 		mismatchErr := fmt.Errorf("authoritative read returned %q", info.ID)
-		retainStatus(exactSessionLifecycleStatusInput{
-			Admission:            admission,
-			ControllerGeneration: params.Generation,
-			RequestedID:          admission.SessionID,
-			Info:                 info,
-			UnavailableReason:    exactSessionLifecycleStatusReasonInvalidInput,
-			Error:                mismatchErr.Error(),
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{
+			UnavailableReason: exactSessionLifecycleStatusReasonInvalidInput,
+			Error:             mismatchErr.Error(),
 		})
 		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: %w", admission.SessionID, mismatchErr)
 	}
 	if info.Closed {
-		retainStatus(exactSessionLifecycleStatusInput{
-			Admission:            admission,
-			ControllerGeneration: params.Generation,
-			RequestedID:          admission.SessionID,
-			Info:                 info,
-		})
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{})
 		return exactSessionStartUnowned, nil
 	}
 
@@ -243,13 +246,9 @@ func reconcileExactSessionStartWithOwner(
 				reason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
 			}
 		}
-		retainStatus(exactSessionLifecycleStatusInput{
-			Admission:            admission,
-			ControllerGeneration: params.Generation,
-			RequestedID:          admission.SessionID,
-			Info:                 info,
-			Context:              exactSessionLifecycleStatusContextUnavailable,
-			UnavailableReason:    reason,
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{
+			Context:           exactSessionLifecycleStatusContextUnavailable,
+			UnavailableReason: reason,
 		})
 		return owner, nil
 	}
@@ -257,45 +256,41 @@ func reconcileExactSessionStartWithOwner(
 	template := resolvedSessionTemplateInfo(info, params.Config)
 	if template == "" {
 		templateErr := fmt.Errorf("persisted template is empty")
-		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: templateErr.Error()})
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: templateErr.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: %w", info.ID, templateErr)
 	}
 	if cfgAgent == nil {
-		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable})
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable})
 		return owner, nil
 	}
 	if isAgentEffectivelySuspendedWith(params.Config, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
-		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonNotObserved})
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonNotObserved})
 		return owner, nil
 	}
 	if lifecycle.HasBlocker(sessionpkg.BlockerHeld) || lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) {
-		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonNotObserved})
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonNotObserved})
 		return owner, nil
 	}
 
 	tp, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
 	if err != nil {
-		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: err.Error()})
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: err.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
 	}
 	observation, err := observeLoadedSession(
 		ctx, params.CityPath, params.Store, params.Provider, params.Config, info, tp.Hints.ProcessNames,
 	)
 	if err != nil {
-		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonObservationUnavailable, Error: err.Error()})
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonObservationUnavailable, Error: err.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: observing runtime: %w", info.ID, err)
 	}
 	statusObservedAt := clk.Now().UTC()
-	retainStatus(exactSessionLifecycleStatusInput{
-		Admission:            admission,
-		ControllerGeneration: params.Generation,
-		RequestedID:          admission.SessionID,
-		Context:              exactSessionLifecycleStatusContextDesired,
-		Info:                 info,
-		Observation:          observation,
-		ObservedAt:           statusObservedAt,
-		StartupTimeout:       params.Config.Session.StartupTimeoutDuration(),
-		PrerequisitesReady:   true,
+	retainStatusFromInitialRead(exactSessionLifecycleStatusInput{
+		Context:            exactSessionLifecycleStatusContextDesired,
+		Observation:        observation,
+		ObservedAt:         statusObservedAt,
+		StartupTimeout:     params.Config.Session.StartupTimeoutDuration(),
+		PrerequisitesReady: true,
 	})
 
 	startupTimeout := params.Config.Session.StartupTimeoutDuration()
@@ -438,7 +433,7 @@ func exactSessionStartOwnerForKey(
 	if store == nil {
 		return exactSessionStartUnowned, fmt.Errorf("session store is nil")
 	}
-	info, err := getAuthoritativeSessionStartInfo(store, sessionID)
+	info, _, err := getAuthoritativeSessionStartRecord(store, sessionID)
 	if err != nil {
 		return exactSessionStartUnowned, err
 	}

@@ -138,6 +138,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 		}
 		if outcome == sessionStartAdmissionOverflow {
 			fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start admission overflow for %s; authoritative audit requested\n", cr.sessionStartLogPrefix(), id) //nolint:errcheck // bounded queue overflow must be visible
+			cr.requestLegacySessionStartFallback()
 		}
 	}
 	if err := cr.cs.installSessionStartEventAdmission(admit); err != nil {

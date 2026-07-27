@@ -336,6 +336,138 @@ func TestCityRuntimeSessionStartEventStartsWithoutFleetTick(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeSessionStartEventOverflowRequestsLegacyFallback(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto)
+	pokeCh := make(chan struct{}, 1)
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstID := ""
+	original := newCitySessionStartController
+	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
+		opts.MaxDistinct = 1
+		opts.Reconcile = func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == firstID {
+				close(firstEntered)
+				<-releaseFirst
+			}
+			return nil
+		}
+		return original(opts)
+	}
+	t.Cleanup(func() { newCitySessionStartController = original })
+	cr := &CityRuntime{
+		cfg:    env.cfg,
+		sp:     env.sp,
+		cs:     cs,
+		pokeCh: pokeCh,
+		stdout: io.Discard,
+		stderr: io.Discard,
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	t.Cleanup(func() { close(releaseFirst) })
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	first := env.createSessionBead("gcs-event-overflow-first", "worker")
+	second := env.createSessionBead("gcs-event-overflow-second", "worker")
+	firstID = first.ID
+	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, first))
+	awaitClose(t, firstEntered, "first event reconciliation")
+	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, second))
+
+	select {
+	case <-pokeCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("overflowed session event did not request immediate legacy fallback")
+	}
+	if !cr.sessionStartController.TakeAuditRequest() {
+		t.Fatal("overflowed session event did not preserve the authoritative audit request")
+	}
+}
+
+func TestCityRuntimeSessionStartEventOverflowDoesNotBlockOnFullFallback(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto)
+	pokeCh := make(chan struct{}, 1)
+	pokeCh <- struct{}{}
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstID := ""
+	original := newCitySessionStartController
+	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
+		opts.MaxDistinct = 1
+		opts.Reconcile = func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == firstID {
+				close(firstEntered)
+				<-releaseFirst
+			}
+			return nil
+		}
+		return original(opts)
+	}
+	t.Cleanup(func() { newCitySessionStartController = original })
+	cr := &CityRuntime{cfg: env.cfg, sp: env.sp, cs: cs, pokeCh: pokeCh, stdout: io.Discard, stderr: io.Discard}
+	t.Cleanup(cr.stopSessionStartController)
+	t.Cleanup(func() { close(releaseFirst) })
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	first := env.createSessionBead("gcs-event-full-first", "worker")
+	second := env.createSessionBead("gcs-event-full-second", "worker")
+	firstID = first.ID
+	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, first))
+	awaitClose(t, firstEntered, "first event reconciliation")
+	eventDone := make(chan struct{})
+	go func() {
+		cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, second))
+		close(eventDone)
+	}()
+	awaitClose(t, eventDone, "overflow event with full fallback channel")
+	if !cr.sessionStartController.TakeAuditRequest() {
+		t.Fatal("full fallback channel cleared the authoritative audit request")
+	}
+}
+
+func TestCityRuntimeSessionStartSeedOverflowDoesNotRequestLegacyFallback(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	cs := coherentSessionStartControllerStateForTest(cfg, runtime.NewFake(), beads.NewMemStore(), rollout.Auto)
+	pokeCh := make(chan struct{}, 1)
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	original := newCitySessionStartController
+	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
+		opts.MaxDistinct = 1
+		opts.Reconcile = func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == "gcs-seed-overflow-first" {
+				close(firstEntered)
+				<-releaseFirst
+			}
+			return nil
+		}
+		return original(opts)
+	}
+	t.Cleanup(func() { newCitySessionStartController = original })
+	cr := &CityRuntime{cfg: cfg, sp: cs.sp, cs: cs, pokeCh: pokeCh, stdout: io.Discard, stderr: io.Discard}
+	t.Cleanup(cr.stopSessionStartController)
+	t.Cleanup(func() { close(releaseFirst) })
+	seed := newSessionBeadSnapshotFromInfos([]session.Info{
+		{ID: "gcs-seed-overflow-first", Type: session.BeadType, Template: "worker", WakeRequest: string(session.WakeCauseExplicit)},
+		{ID: "gcs-seed-overflow-second", Type: session.BeadType, Template: "worker", WakeRequest: string(session.WakeCauseExplicit)},
+	})
+	if err := cr.ensureSessionStartController(context.Background(), seed); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	awaitClose(t, firstEntered, "first seed reconciliation")
+	select {
+	case <-pokeCh:
+		t.Fatal("seed-time overflow requested legacy fallback")
+	default:
+	}
+}
+
 func TestCityRuntimeSessionStartWorkerImmediatelyDelegatesLegacyOwnedKey(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{

@@ -2455,14 +2455,14 @@ type DaemonConfig struct {
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
 	// for backwards compatibility as an alias. Explicit formula_v2 wins.
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
-	// SessionStartReconciler selects ownership of session-start causes during
-	// the keyed reconciler rollout. "off" (the default) keeps every start on
-	// the legacy fleet-wide reconciler. "auto" selects the keyed path when its
-	// boot-time requirements are available and otherwise degrades loudly.
+	// SessionReconciler selects keyed exact-start ownership during the rollout.
+	// "off" (the default) keeps all session work on the legacy fleet-wide
+	// reconciler. "auto" selects exact-start when available and otherwise
+	// degrades loudly. Status healing remains legacy-owned in every mode.
 	// "require" refuses startup rather than falling back when those requirements
 	// are unavailable. The value is boot-latched; changing it requires a
 	// controller restart.
-	SessionStartReconciler string `toml:"session_start_reconciler,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
+	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
 	// MaxRestarts is the maximum number of agent restarts within RestartWindow before
@@ -4639,15 +4639,15 @@ func (d DaemonConfig) FormulaV2Enabled() bool {
 	return d.FormulaV2 == nil || *d.FormulaV2
 }
 
-// SessionStartReconcilerMode returns the configured session-start reconciler
-// mode, mapping only omission to the safe "off" default. Unknown non-empty
-// values pass through so internal/rollout can reject them instead of silently
+// SessionReconcilerMode returns the configured session-reconciler mode,
+// mapping only omission to the safe "off" default. Unknown non-empty values
+// pass through so internal/rollout can reject them instead of silently
 // selecting the legacy path.
-func (d DaemonConfig) SessionStartReconcilerMode() string {
-	if d.SessionStartReconciler == "" {
+func (d DaemonConfig) SessionReconcilerMode() string {
+	if d.SessionReconciler == "" {
 		return "off"
 	}
-	return d.SessionStartReconciler
+	return d.SessionReconciler
 }
 
 func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {

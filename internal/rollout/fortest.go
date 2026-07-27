@@ -19,7 +19,7 @@ func defaultFlags() Flags {
 		beadsConditionalWrites: resolved[Mode]{value: Off, origin: OriginBuiltin},
 		beadsGuardedRelease:    resolved[Mode]{value: Off, origin: OriginBuiltin},
 		formulaV2:              resolved[bool]{value: true, origin: OriginBuiltin},
-		sessionStartReconciler: resolved[Mode]{value: Off, origin: OriginBuiltin},
+		sessionReconciler:      resolved[Mode]{value: Off, origin: OriginBuiltin},
 	}
 }
 

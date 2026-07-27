@@ -34,7 +34,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 
 	mode := rollout.ModeUnset
 	if cr.cs != nil {
-		mode = cr.cs.RolloutFlags().SessionStartReconciler()
+		mode = cr.cs.RolloutFlags().SessionReconciler()
 	}
 	cr.sessionStartMode = mode
 	if cr.sessionStartController != nil && cr.sessionStartOwnership == sessionStartOwnershipKeyed {

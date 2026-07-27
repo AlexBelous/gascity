@@ -546,7 +546,7 @@ func TestCityRuntimeRunCoordinatesSessionStartRolloutBeforeReadiness(t *testing.
 			if err != nil {
 				t.Fatalf("load config: %v", err)
 			}
-			cfg.Daemon.SessionStartReconciler = string(test.mode)
+			cfg.Daemon.SessionReconciler = string(test.mode)
 			provider := runtime.NewFake()
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -758,7 +758,7 @@ func newSessionStartProviderSwapFixture(
 		Stderr: io.Discard,
 	})
 	cs := newControllerState(context.Background(), cfg, oldProvider, events.NewFake(), "test-city", cityPath)
-	cs.rolloutFlags = rollout.ForTest(rollout.WithSessionStartReconciler(mode))
+	cs.rolloutFlags = rollout.ForTest(rollout.WithSessionReconciler(mode))
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
 	return sessionStartProviderSwapFixture{cr: cr, cityPath: cityPath, tomlPath: tomlPath}
@@ -831,7 +831,7 @@ func coherentSessionStartControllerStateForTest(
 		cityName:                    "test-city",
 		cityPath:                    "test-city",
 		eventProv:                   events.NewFake(),
-		rolloutFlags:                rollout.ForTest(rollout.WithSessionStartReconciler(mode)),
+		rolloutFlags:                rollout.ForTest(rollout.WithSessionReconciler(mode)),
 		sessionStartGeneration:      1,
 		sessionStartStoreGeneration: 1,
 	}

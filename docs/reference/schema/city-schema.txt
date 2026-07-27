@@ -1281,14 +1281,14 @@
           "type": "boolean",
           "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility as an alias. Explicit formula_v2 wins."
         },
-        "session_start_reconciler": {
+        "session_reconciler": {
           "type": "string",
           "enum": [
             "off",
             "auto",
             "require"
           ],
-          "description": "SessionStartReconciler selects ownership of session-start causes during\nthe keyed reconciler rollout. \"off\" (the default) keeps every start on\nthe legacy fleet-wide reconciler. \"auto\" selects the keyed path when its\nboot-time requirements are available and otherwise degrades loudly.\n\"require\" refuses startup rather than falling back when those requirements\nare unavailable. The value is boot-latched; changing it requires a\ncontroller restart.",
+          "description": "SessionReconciler selects keyed exact-start ownership during the rollout.\n\"off\" (the default) keeps all session work on the legacy fleet-wide\nreconciler. \"auto\" selects exact-start when available and otherwise\ndegrades loudly. Status healing remains legacy-owned in every mode.\n\"require\" refuses startup rather than falling back when those requirements\nare unavailable. The value is boot-latched; changing it requires a\ncontroller restart.",
           "default": "off"
         },
         "patrol_interval": {

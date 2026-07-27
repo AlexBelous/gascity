@@ -22,7 +22,7 @@ type Flags struct {
 	beadsConditionalWrites resolved[Mode]
 	beadsGuardedRelease    resolved[Mode]
 	formulaV2              resolved[bool]
-	sessionStartReconciler resolved[Mode]
+	sessionReconciler      resolved[Mode]
 	notices                []Notice
 }
 
@@ -37,8 +37,8 @@ func (f Flags) OriginOf(key string) Origin {
 		return f.beadsGuardedRelease.origin
 	case keyDaemonFormulaV2:
 		return f.formulaV2.origin
-	case keyDaemonSessionStartReconciler:
-		return f.sessionStartReconciler.origin
+	case keyDaemonSessionReconciler:
+		return f.sessionReconciler.origin
 	default:
 		return ""
 	}
@@ -55,8 +55,8 @@ func (f Flags) ValueOf(key string) string {
 		return string(f.beadsGuardedRelease.value)
 	case keyDaemonFormulaV2:
 		return strconv.FormatBool(f.formulaV2.value)
-	case keyDaemonSessionStartReconciler:
-		return string(f.sessionStartReconciler.value)
+	case keyDaemonSessionReconciler:
+		return string(f.sessionReconciler.value)
 	default:
 		return ""
 	}

@@ -106,7 +106,7 @@ patrol_interval = "1m"
 	}
 }
 
-func TestLoadWithIncludesPreservesSessionStartReconcilerAcrossDaemonFragment(t *testing.T) {
+func TestLoadWithIncludesPreservesSessionReconcilerAcrossDaemonFragment(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 include = ["fragment.toml"]
@@ -115,7 +115,7 @@ include = ["fragment.toml"]
 name = "test"
 
 [daemon]
-session_start_reconciler = "require"
+session_reconciler = "require"
 `)
 	fs.Files["/city/fragment.toml"] = []byte(`
 [daemon]
@@ -125,11 +125,58 @@ patrol_interval = "1m"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if got := cfg.Daemon.SessionStartReconciler; got != "require" {
-		t.Fatalf("Daemon.SessionStartReconciler = %q, want require", got)
+	if got := cfg.Daemon.SessionReconciler; got != "require" {
+		t.Fatalf("Daemon.SessionReconciler = %q, want require", got)
 	}
 	if cfg.Daemon.PatrolInterval != "1m" {
 		t.Fatalf("Daemon.PatrolInterval = %q, want fragment field", cfg.Daemon.PatrolInterval)
+	}
+}
+
+func TestLoadWithIncludesFragmentOverridesSessionReconciler(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+session_reconciler = "require"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+session_reconciler = "auto"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Daemon.SessionReconciler; got != "auto" {
+		t.Fatalf("Daemon.SessionReconciler = %q, want fragment override auto", got)
+	}
+}
+
+func TestLoadWithIncludesWarnsAndIgnoresRetiredSessionStartReconciler(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+session_start_reconciler = "auto"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Daemon.SessionReconciler; got != "" {
+		t.Fatalf("Daemon.SessionReconciler = %q, want retired key ignored", got)
+	}
+	if !containsWarningPrefix(prov.Warnings, `/city/city.toml: unknown field "daemon.session_start_reconciler"`) {
+		t.Fatalf("warnings = %v, want retired-key warning", prov.Warnings)
 	}
 }
 

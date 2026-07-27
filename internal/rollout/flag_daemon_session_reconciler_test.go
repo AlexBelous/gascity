@@ -6,7 +6,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-func TestResolveDaemonSessionStartReconciler(t *testing.T) {
+func TestResolveDaemonSessionReconciler(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -27,7 +27,7 @@ func TestResolveDaemonSessionStartReconciler(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			flags, err := Resolve(
-				&config.City{Daemon: config.DaemonConfig{SessionStartReconciler: test.raw}},
+				&config.City{Daemon: config.DaemonConfig{SessionReconciler: test.raw}},
 				ResolveOptions{LookupEnv: func(string) (string, bool) { return "", false }},
 			)
 			if (err != nil) != test.wantErr {
@@ -36,60 +36,60 @@ func TestResolveDaemonSessionStartReconciler(t *testing.T) {
 			if test.wantErr {
 				return
 			}
-			if got := flags.SessionStartReconciler(); got != test.want {
-				t.Fatalf("SessionStartReconciler = %q, want %q", got, test.want)
+			if got := flags.SessionReconciler(); got != test.want {
+				t.Fatalf("SessionReconciler = %q, want %q", got, test.want)
 			}
-			if got := flags.OriginOf(KeyDaemonSessionStartReconciler); got != test.wantOrigin {
+			if got := flags.OriginOf(KeyDaemonSessionReconciler); got != test.wantOrigin {
 				t.Fatalf("OriginOf = %q, want %q", got, test.wantOrigin)
 			}
-			if got := flags.ValueOf(KeyDaemonSessionStartReconciler); got != string(test.want) {
+			if got := flags.ValueOf(KeyDaemonSessionReconciler); got != string(test.want) {
 				t.Fatalf("ValueOf = %q, want %q", got, test.want)
 			}
 		})
 	}
 }
 
-func TestForTestSessionStartReconcilerIsInstanceLocal(t *testing.T) {
+func TestForTestSessionReconcilerIsInstanceLocal(t *testing.T) {
 	t.Parallel()
 
-	if got := ForTest().SessionStartReconciler(); got != Off {
+	if got := ForTest().SessionReconciler(); got != Off {
 		t.Fatalf("ForTest default = %q, want off", got)
 	}
-	auto := ForTest(WithSessionStartReconciler(Auto))
-	require := ForTest(WithSessionStartReconciler(Require))
-	off := ForTest(WithSessionStartReconciler(Off))
-	if auto.SessionStartReconciler() != Auto ||
-		require.SessionStartReconciler() != Require ||
-		off.SessionStartReconciler() != Off {
+	auto := ForTest(WithSessionReconciler(Auto))
+	require := ForTest(WithSessionReconciler(Require))
+	off := ForTest(WithSessionReconciler(Off))
+	if auto.SessionReconciler() != Auto ||
+		require.SessionReconciler() != Require ||
+		off.SessionReconciler() != Off {
 		t.Fatalf(
 			"ForTest modes = %q/%q/%q, want auto/require/off",
-			auto.SessionStartReconciler(),
-			require.SessionStartReconciler(),
-			off.SessionStartReconciler(),
+			auto.SessionReconciler(),
+			require.SessionReconciler(),
+			off.SessionReconciler(),
 		)
 	}
 }
 
-func TestZeroFlagsKeepsSessionStartReconcilerLegacy(t *testing.T) {
+func TestZeroFlagsKeepsSessionReconcilerLegacy(t *testing.T) {
 	t.Parallel()
 
 	var flags Flags
-	if got := flags.SessionStartReconciler(); got != ModeUnset {
+	if got := flags.SessionReconciler(); got != ModeUnset {
 		t.Fatalf("zero Flags session-start reconciler = %q, want ModeUnset", got)
 	}
-	if got := flags.OriginOf(KeyDaemonSessionStartReconciler); got != "" {
+	if got := flags.OriginOf(KeyDaemonSessionReconciler); got != "" {
 		t.Fatalf("zero Flags origin = %q, want empty", got)
 	}
 }
 
-func TestSessionStartReconcilerRegistryBinding(t *testing.T) {
+func TestSessionReconcilerRegistryBinding(t *testing.T) {
 	t.Parallel()
 
 	for _, spec := range Specs() {
-		if spec.Key != KeyDaemonSessionStartReconciler {
+		if spec.Key != KeyDaemonSessionReconciler {
 			continue
 		}
-		if spec.ConfigPath != "daemon.session_start_reconciler" {
+		if spec.ConfigPath != "daemon.session_reconciler" {
 			t.Fatalf("ConfigPath = %q", spec.ConfigPath)
 		}
 		if spec.Default.Mode == nil || *spec.Default.Mode != Off {
@@ -103,16 +103,16 @@ func TestSessionStartReconcilerRegistryBinding(t *testing.T) {
 		}
 		return
 	}
-	t.Fatalf("registry missing %s", KeyDaemonSessionStartReconciler)
+	t.Fatalf("registry missing %s", KeyDaemonSessionReconciler)
 }
 
-func TestSessionStartReconcilerDefaultsDoNotDrift(t *testing.T) {
+func TestSessionReconcilerDefaultsDoNotDrift(t *testing.T) {
 	t.Parallel()
 
-	if got := defaultFlags().SessionStartReconciler(); got != Off {
+	if got := defaultFlags().SessionReconciler(); got != Off {
 		t.Fatalf("defaultFlags session-start reconciler = %q, want off", got)
 	}
-	if got := (config.DaemonConfig{}).SessionStartReconcilerMode(); got != string(Off) {
+	if got := (config.DaemonConfig{}).SessionReconcilerMode(); got != string(Off) {
 		t.Fatalf("config accessor default = %q, want %q", got, Off)
 	}
 }

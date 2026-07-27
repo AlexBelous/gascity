@@ -106,6 +106,55 @@ patrol_interval = "1m"
 	}
 }
 
+func TestLoadWithIncludesLumenBetaLayering(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		fragment      string
+		wantLumenBeta bool
+	}{
+		{
+			name: "unrelated daemon fragment preserves root opt-in",
+			fragment: `
+[daemon]
+patrol_interval = "1m"
+`,
+			wantLumenBeta: true,
+		},
+		{
+			name: "explicit fragment false overrides root opt-in",
+			fragment: `
+[daemon]
+lumen_beta = false
+`,
+			wantLumenBeta: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+lumen_beta = true
+`)
+			fs.Files["/city/fragment.toml"] = []byte(tt.fragment)
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			if got := cfg.Daemon.LumenBetaEnabled(); got != tt.wantLumenBeta {
+				t.Fatalf("Daemon.LumenBetaEnabled() = %v, want %v", got, tt.wantLumenBeta)
+			}
+			if !cfg.Daemon.FormulaV2Enabled() {
+				t.Fatal("Daemon.FormulaV2Enabled() = false, want Lumen config layering to leave Formula v2 dispatch enabled")
+			}
+		})
+	}
+}
+
 func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

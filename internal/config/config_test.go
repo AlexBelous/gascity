@@ -130,6 +130,61 @@ name = "bright-lights"
 	}
 }
 
+func TestParseDefaultsLumenBetaDisabled(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.LumenBetaEnabled() {
+		t.Fatal("Daemon.LumenBetaEnabled() = true, want false when lumen_beta is omitted")
+	}
+}
+
+func TestParseLumenBetaExplicitOptInKeepsFormulaV2Dispatch(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+lumen_beta = true
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Daemon.LumenBetaEnabled() {
+		t.Fatal("Daemon.LumenBetaEnabled() = false, want true for explicit lumen_beta opt-in")
+	}
+	if !cfg.Daemon.FormulaV2Enabled() {
+		t.Fatal("Daemon.FormulaV2Enabled() = false, want Lumen opt-in to leave Formula v2 dispatch enabled")
+	}
+}
+
+func TestParsePreservesExplicitLumenBetaFalse(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+lumen_beta = false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.LumenBetaEnabled() {
+		t.Fatal("Daemon.LumenBetaEnabled() = true, want explicit false")
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "lumen_beta = false") {
+		t.Fatalf("Marshal output should preserve explicit lumen_beta=false:\n%s", data)
+	}
+}
+
 func TestParsePreservesExplicitFormulaV2False(t *testing.T) {
 	cfg, err := Parse([]byte(`
 [workspace]
@@ -3854,6 +3909,17 @@ func TestMarshalDefaultCityOmitsFormulaV2Default(t *testing.T) {
 	}
 	if !cfg.Daemon.FormulaV2Enabled() {
 		t.Errorf("round-trip of default city.toml should be formula-v2 enabled")
+	}
+}
+
+func TestMarshalDefaultCityOmitsLumenBeta(t *testing.T) {
+	c := DefaultCity("test")
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "lumen_beta") {
+		t.Errorf("default city.toml should omit lumen_beta (default-off):\n%s", data)
 	}
 }
 

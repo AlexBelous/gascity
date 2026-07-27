@@ -1288,7 +1288,7 @@
             "auto",
             "require"
           ],
-          "description": "SessionReconciler selects keyed exact-start ownership during the rollout.\n\"off\" (the default) keeps all session work on the legacy fleet-wide\nreconciler. \"auto\" selects exact-start when available and otherwise\ndegrades loudly. Status healing remains legacy-owned in every mode.\n\"require\" refuses startup rather than falling back when those requirements\nare unavailable. The value is boot-latched; changing it requires a\ncontroller restart.",
+          "description": "SessionReconciler selects keyed exact-start ownership and, when the current\nstore has a conditional writer, eligible desired-session status healing.\n\"off\" (the default) keeps both on the legacy fleet-wide reconciler. \"auto\"\ndegrades either family to legacy when its requirements are unavailable.\nOrphan and unsupported rows remain legacy-owned. \"require\" refuses startup\nonly when exact-start requirements are unavailable; a conditional-write\nrefusal instead parks heal candidates without disabling converged exact\nstarts. The value is boot-latched; changing it requires a controller restart.",
           "default": "off"
         },
         "patrol_interval": {

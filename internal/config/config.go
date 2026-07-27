@@ -2455,13 +2455,14 @@ type DaemonConfig struct {
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
 	// for backwards compatibility as an alias. Explicit formula_v2 wins.
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
-	// SessionReconciler selects keyed exact-start ownership during the rollout.
-	// "off" (the default) keeps all session work on the legacy fleet-wide
-	// reconciler. "auto" selects exact-start when available and otherwise
-	// degrades loudly. Status healing remains legacy-owned in every mode.
-	// "require" refuses startup rather than falling back when those requirements
-	// are unavailable. The value is boot-latched; changing it requires a
-	// controller restart.
+	// SessionReconciler selects keyed exact-start ownership and, when the current
+	// store has a conditional writer, eligible desired-session status healing.
+	// "off" (the default) keeps both on the legacy fleet-wide reconciler. "auto"
+	// degrades either family to legacy when its requirements are unavailable.
+	// Orphan and unsupported rows remain legacy-owned. "require" refuses startup
+	// only when exact-start requirements are unavailable; a conditional-write
+	// refusal instead parks heal candidates without disabling converged exact
+	// starts. The value is boot-latched; changing it requires a controller restart.
 	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`

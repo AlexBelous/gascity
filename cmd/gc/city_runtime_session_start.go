@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/rollout"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -95,17 +96,20 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				return acquireErr
 			}
 			defer release()
+			statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(snapshot.Store)
 			owner, reconcileErr := reconcileExactSessionStartWithOwner(reconcileCtx, admission, exactSessionStartParams{
-				Generation:   snapshot.Generation,
-				CityPath:     snapshot.CityPath,
-				CityName:     snapshot.CityName,
-				Config:       snapshot.Config,
-				Provider:     snapshot.Provider,
-				Store:        snapshot.Store,
-				Recorder:     snapshot.Recorder,
-				Stdout:       cr.sessionStartStdout(),
-				Stderr:       cr.sessionStartStderr(),
-				StartOptions: cr.sessionStartOptions,
+				Generation:        snapshot.Generation,
+				CityPath:          snapshot.CityPath,
+				CityName:          snapshot.CityName,
+				Config:            snapshot.Config,
+				Provider:          snapshot.Provider,
+				Store:             snapshot.Store,
+				StatusWriter:      statusWriter,
+				StatusWriterError: statusWriterErr,
+				Recorder:          snapshot.Recorder,
+				Stdout:            cr.sessionStartStdout(),
+				Stderr:            cr.sessionStartStderr(),
+				StartOptions:      cr.sessionStartOptions,
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				cr.requestLegacySessionStartFallback()
@@ -320,7 +324,7 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 		// the sole available owner during this bounded handoff.
 		return nil
 	}
-	return withLegacyStartExclusion(func(info sessionpkg.Info) bool {
+	excluded := func(info sessionpkg.Info) bool {
 		if validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) != nil {
 			return false
 		}
@@ -337,7 +341,27 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 				(lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) || lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit))
 		}
 		return resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
+	}
+	startOption := withLegacyStartExclusion(excluded)
+	if state != sessionStartOwnershipKeyed {
+		return startOption
+	}
+	snapshot, err := cr.cs.sessionStartSnapshot()
+	if err != nil {
+		return startOption
+	}
+	statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(snapshot.Store)
+	if statusWriter == nil && statusWriterErr == nil {
+		return startOption
+	}
+	statusOption := withLegacyStatusHealExclusion(func(info sessionpkg.Info) bool {
+		return validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) == nil &&
+			resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
 	})
+	return func(opts *startExecutionOptions) {
+		startOption(opts)
+		statusOption(opts)
+	}
 }
 
 func (cr *CityRuntime) sessionStartStdout() io.Writer {

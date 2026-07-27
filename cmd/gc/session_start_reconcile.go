@@ -37,6 +37,8 @@ type exactSessionStartParams struct {
 	Config               *config.City
 	Provider             runtime.Provider
 	Store                beads.Store
+	StatusWriter         beads.ConditionalWriter
+	StatusWriterError    error
 	Clock                clock.Clock
 	Recorder             events.Recorder
 	Stdout               io.Writer
@@ -174,7 +176,7 @@ func reconcileExactSessionStartWithOwner(
 	}
 	var statusResult *exactSessionLifecycleStatusResult
 	retainStatus := func(input exactSessionLifecycleStatusInput) {
-		if startOpts.exactStatusObserver == nil {
+		if startOpts.exactStatusObserver == nil && params.StatusWriter == nil && params.StatusWriterError == nil {
 			return
 		}
 		result := evaluateExactSessionLifecycleStatus(input)
@@ -292,6 +294,22 @@ func reconcileExactSessionStartWithOwner(
 		StartupTimeout:     params.Config.Session.StartupTimeoutDuration(),
 		PrerequisitesReady: true,
 	})
+	if (params.StatusWriter != nil || params.StatusWriterError != nil) &&
+		statusResult != nil && statusResult.Plan != nil && statusResult.Plan.Outcome == sessionLifecycleStatusHeal {
+		if params.StatusWriterError != nil {
+			return owner, fmt.Errorf("reconciling exact session start %q: resolving session-status writer: %w", info.ID, params.StatusWriterError)
+		}
+		plan := statusResult.Plan
+		if statusResult.Context != exactSessionLifecycleStatusContextDesired ||
+			statusResult.Disposition != exactSessionLifecycleStatusDispositionCandidate ||
+			statusResult.RequestedID == "" || statusResult.RequestedID != statusResult.LoadedID ||
+			statusResult.RequestedID != plan.SessionID || statusResult.LoadedRevision <= 0 || len(plan.Patch) == 0 {
+			return owner, fmt.Errorf("reconciling exact session start %q: malformed session-status heal candidate", info.ID)
+		}
+		if err := params.StatusWriter.UpdateIfMatch(statusResult.RequestedID, statusResult.LoadedRevision, beads.UpdateOpts{Metadata: plan.Patch}); err != nil {
+			return owner, fmt.Errorf("reconciling exact session start %q: applying session-status heal: %w", info.ID, err)
+		}
+	}
 
 	startupTimeout := params.Config.Session.StartupTimeoutDuration()
 	circuitOpen := strings.TrimSpace(info.SessionCircuitState) == sessionpkg.SessionCircuitStateOpen

@@ -71,10 +71,10 @@ var specs = []Spec{
 		Owner:          Owner{Bead: "ga-f7v2ft", GitHub: "@gastownhall/gascity-admin"},
 		Expires:        "2027-07-26",
 		VersionAnchor:  "gcSessionReconcilerRemovalFloor",
-		SelectsBetween: [2]string{"legacy fleet-wide session-start reconciliation", "keyed exact-session start reconciliation"},
-		Justification: "Roll out exact-key session-start ownership independently from the legacy fleet " +
-			"scan while parity, recovery, and latency evidence accumulate. The public gate is generic " +
-			"for future families, but status healing remains legacy-owned until its own parity slice lands.",
+		SelectsBetween: [2]string{"legacy fleet-wide session reconciliation", "keyed exact-start plus eligible desired-status healing"},
+		Justification: "Roll out exact-key start ownership and conditionally fenced desired-session status " +
+			"healing while orphan and unsupported rows remain on the legacy fleet scan. A required " +
+			"status refusal parks heal candidates without disabling converged exact starts.",
 	},
 }
 

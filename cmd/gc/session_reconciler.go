@@ -2603,34 +2603,36 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Heal advisory state metadata.
-		infoBeforeHeal := infoByID[id]
-		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoBeforeHeal.MetadataState))
-		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.PendingCreateStartedAt)
-		lastWokeAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.LastWokeAt)
-		healBatch, healErr := applySessionLifecycleStatusHeal(tick, id, sessionLifecycleStatusHealContext{
-			Site:              sessionLifecycleStatusHealSiteDesired,
-			RuntimeObserved:   sp != nil && strings.TrimSpace(name) != "",
-			RuntimeAlive:      alive,
-			RollbackAvailable: true,
-		}, sessFront, clk, startupTimeout, reconcileOpts.statusComparisonObserver)
-		if healErr != nil {
-			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
-			continue
+		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
+		if reconcileOpts.legacyStatusHealExcluded == nil || !reconcileOpts.legacyStatusHealExcluded(infoByID[id]) {
+			infoBeforeHeal := infoByID[id]
+			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.PendingCreateStartedAt)
+			lastWokeAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.LastWokeAt)
+			healBatch, healErr := applySessionLifecycleStatusHeal(tick, id, sessionLifecycleStatusHealContext{
+				Site:              sessionLifecycleStatusHealSiteDesired,
+				RuntimeObserved:   sp != nil && strings.TrimSpace(name) != "",
+				RuntimeAlive:      alive,
+				RollbackAvailable: true,
+			}, sessFront, clk, startupTimeout, reconcileOpts.statusComparisonObserver)
+			if healErr != nil {
+				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
+				continue
+			}
+			traceHealClearedPendingCreateLeaseInfo(
+				trace,
+				infoBeforeHeal,
+				cfg,
+				tp.TemplateName,
+				name,
+				string(stateBeforeHeal),
+				pendingCreateStartedAtBeforeHeal,
+				lastWokeAtBeforeHeal,
+				alive,
+				healBatch,
+			)
 		}
-		traceHealClearedPendingCreateLeaseInfo(
-			trace,
-			infoBeforeHeal,
-			cfg,
-			tp.TemplateName,
-			name,
-			string(stateBeforeHeal),
-			pendingCreateStartedAtBeforeHeal,
-			lastWokeAtBeforeHeal,
-			alive,
-			healBatch,
-		)
-		// The helper folded the successful legacy write before this trace and the
-		// same-tick readers below; the trace above intentionally used infoBeforeHeal.
+		// When legacy owns this heal, the helper folded its successful write
+		// before the same-tick readers below.
 		if recoverPendingIdleSleepInfo(infoByID[id], sessFront, running, clk) {
 			alive = false
 			// Fold the idle-stop-pending recovery sleep onto the snapshot (Step 6d).

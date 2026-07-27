@@ -308,6 +308,7 @@ type startExecutionOptions struct {
 	startSelectionObserver         sessionLifecycleStartSelectionComparisonObserver
 	startSelectionShadowObserver   func(sessionLifecycleStartShadowObservation)
 	legacyStartExcluded            func(sessionpkg.Info) bool
+	legacyStatusHealExcluded       func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -423,6 +424,12 @@ func withSessionLifecycleStartSelectionShadowObserver(
 func withLegacyStartExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyStartExcluded = excluded
+	}
+}
+
+func withLegacyStatusHealExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyStatusHealExcluded = excluded
 	}
 }
 

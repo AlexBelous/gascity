@@ -15,9 +15,11 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func TestCityRuntimeSessionStartControllerOffKeepsLegacyOwnership(t *testing.T) {
@@ -102,6 +104,17 @@ func TestCityRuntimeSessionStartControllerRequireFailsClosed(t *testing.T) {
 
 func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.T) {
 	env := newReconcilerTestEnv()
+	openConditionalStore := func() beads.Store {
+		opened, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+			Provider: "file", ConditionalWrites: gate.Auto,
+			OpenFileStore: func() (beads.Store, error) { return beads.NewMemStore(), nil },
+		})
+		if err != nil {
+			t.Fatalf("open conditional-write store: %v", err)
+		}
+		return opened.Store
+	}
+	env.store = openConditionalStore()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
@@ -111,7 +124,7 @@ func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.
 		t.Fatalf("request explicit wake: %v", err)
 	}
 	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto)
-	exactStatusCh := make(chan exactSessionLifecycleStatusResult, 1)
+	exactStatusCh := make(chan exactSessionLifecycleStatusResult, 2)
 	cr := &CityRuntime{
 		cityPath: t.TempDir(),
 		cityName: "test-city",
@@ -154,8 +167,113 @@ func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.
 		t.Fatal("exact status observer did not receive the seeded reconciliation result")
 	}
 	if exactStatus.ControllerGeneration != 1 || exactStatus.AdmissionVersion == 0 || exactStatus.Context != exactSessionLifecycleStatusContextDesired {
-		t.Fatalf("exact status composition result = %#v, want one generation-1 shadow-only result", exactStatus)
+		t.Fatalf("exact status composition result = %#v, want generation-1 result", exactStatus)
 	}
+
+	controller := cr.sessionStartController
+	env.store = openConditionalStore()
+	swapBead := env.createSessionBead("worker-swap", "worker")
+	swapPatch := session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())
+	swapPatch["session_key"] = "resume"
+	if err := env.store.SetMetadataBatch(swapBead.ID, swapPatch); err != nil {
+		t.Fatalf("request replacement-store heal: %v", err)
+	}
+	if err := env.sp.Start(context.Background(), "worker-swap", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("seed replacement-store runtime: %v", err)
+	}
+	swapInitial, err := env.store.Get(swapBead.ID)
+	if err != nil {
+		t.Fatalf("read replacement-store session: %v", err)
+	}
+	releaseSwap := cs.beginSessionStartGenerationSwap()
+	cs.mu.Lock()
+	cs.advanceSessionStartGenerationLocked()
+	cs.cityBeadStore = env.store
+	cs.sessionStartStoreGeneration = cs.sessionStartGeneration
+	cs.mu.Unlock()
+	releaseSwap()
+	if cr.sessionStartController != controller {
+		t.Fatal("store-generation swap restarted the keyed controller")
+	}
+	if _, err := controller.Admit(swapBead.ID, sessionStartAdmissionInProcess); err != nil {
+		t.Fatalf("admit replacement-store heal: %v", err)
+	}
+	var swapStatus exactSessionLifecycleStatusResult
+	select {
+	case swapStatus = <-exactStatusCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("replacement-store heal did not reconcile")
+	}
+	swapFinal, err := env.store.Get(swapBead.ID)
+	if err != nil {
+		t.Fatalf("read healed replacement-store session: %v", err)
+	}
+	if swapStatus.LoadedRevision != swapInitial.Revision || swapFinal.Revision != swapInitial.Revision+1 ||
+		swapFinal.Metadata["state"] != string(session.StateAwake) {
+		t.Fatalf("replacement-store heal revision/state = %d/%q from %d, want one fenced awake heal", swapFinal.Revision, swapFinal.Metadata["state"], swapInitial.Revision)
+	}
+
+	env.addDesired("worker-guard", "worker", true)
+	guardBead := env.createSessionBead("worker-guard", "worker")
+	if err := env.store.SetMetadataBatch(guardBead.ID, swapPatch); err != nil {
+		t.Fatalf("request legacy-guard wake: %v", err)
+	}
+	guardBefore, err := env.store.Get(guardBead.ID)
+	if err != nil {
+		t.Fatalf("read legacy-guard session: %v", err)
+	}
+	env.startOptions = append(env.startOptions, cr.sessionStartLegacyExclusionOption())
+	if woken := env.reconcile([]beads.Bead{guardBefore}); woken != 0 {
+		t.Fatalf("legacy guard wake attempts = %d, want 0", woken)
+	}
+	guardAfter, err := env.store.Get(guardBead.ID)
+	if err != nil {
+		t.Fatalf("read guarded session: %v", err)
+	}
+	if guardAfter.Metadata["state"] != string(session.StateAsleep) {
+		t.Fatalf("legacy desired heal was not excluded: state = %q, want asleep", guardAfter.Metadata["state"])
+	}
+
+	t.Run("concurrent update fences exact heal before effects", func(t *testing.T) {
+		fenceEnv := newReconcilerTestEnv()
+		fenceEnv.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+		fenceBead := fenceEnv.createSessionBead("worker", "worker")
+		fenceEnv.setSessionMetadata(&fenceBead, map[string]string{
+			"wake_request": string(session.WakeCauseExplicit),
+			"state":        string(session.StateAwake),
+			"session_key":  "resume",
+		})
+		initial, err := fenceEnv.store.Get(fenceBead.ID)
+		if err != nil {
+			t.Fatalf("read initial fenced session: %v", err)
+		}
+		counting := newExactStatusCountingStore(t, fenceEnv.store)
+		params := exactSessionStartTestParams(t, fenceEnv)
+		params.Generation, params.Store, params.StatusWriter = 1, counting, counting
+		params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
+			if err := fenceEnv.store.Update(fenceBead.ID, beads.UpdateOpts{Metadata: map[string]string{"state": string(session.StateQuarantined)}}); err != nil {
+				t.Fatalf("commit concurrent update: %v", err)
+			}
+			return worker.LiveObservation{}, nil
+		}
+		owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+			SessionID: fenceBead.ID, Source: sessionStartAdmissionExplicitWake, Version: 1,
+		}, params)
+		if owner != exactSessionStartKeyedOwner || !beads.IsPreconditionFailed(err) {
+			t.Fatalf("owner/error = %d/%v, want keyed/wrapped precondition", owner, err)
+		}
+		if counting.gets != 1 || counting.lists != 0 || counting.extraWrites != 1 || len(counting.Calls()) != 0 {
+			t.Fatalf("get/list/CAS/ordinary = %d/%d/%d/%d, want 1/0/1/0", counting.gets, counting.lists, counting.extraWrites, len(counting.Calls()))
+		}
+		final, err := fenceEnv.store.Get(fenceBead.ID)
+		if err != nil {
+			t.Fatalf("read final fenced session: %v", err)
+		}
+		if final.Revision != initial.Revision+1 || final.Metadata["state"] != string(session.StateQuarantined) ||
+			len(fenceEnv.sp.SnapshotCalls()) != 0 {
+			t.Fatalf("fenced final revision/state/provider = %d/%q/%#v, want concurrent row preserved and no effects", final.Revision, final.Metadata["state"], fenceEnv.sp.SnapshotCalls())
+		}
+	})
 
 	cr.stopSessionStartController()
 	select {

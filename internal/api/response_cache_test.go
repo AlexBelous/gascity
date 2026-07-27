@@ -280,7 +280,8 @@ func TestHandleAgentListRebuildsAfterFloorExpires(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
-	h := newTestCityHandler(t, state)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
@@ -292,9 +293,19 @@ func TestHandleAgentListRebuildsAfterFloorExpires(t *testing.T) {
 		t.Fatalf("ListByAssignee calls after first request = %d, want 2", store.listByAssigneeCalls)
 	}
 
-	// Sleep past both the bucket TTL and the floor so neither tier can serve
-	// a cached body; the next request must rebuild.
-	time.Sleep(5 * time.Millisecond)
+	// Force both cache tiers to miss deterministically by rewriting the
+	// stored entry directly, rather than sleeping past the TTLs: a real
+	// sleep is banned as new test-source debt by
+	// internal/testpolicy/resourcecensus, and would race against the 1ms
+	// bucket width anyway (index=0 only guarantees a miss if the real clock
+	// happens to cross a bucket boundary in between).
+	srv.responseCacheMu.Lock()
+	for k, entry := range srv.responseCacheEntries {
+		entry.index = 0
+		entry.storedAt = time.Now().Add(-agentsResponseTTLFloor - time.Millisecond)
+		srv.responseCacheEntries[k] = entry
+	}
+	srv.responseCacheMu.Unlock()
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

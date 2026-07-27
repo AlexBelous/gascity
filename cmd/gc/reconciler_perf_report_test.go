@@ -66,8 +66,8 @@ func TestBuildReconcilerPerfReportAggregatesPairedStartDeterministically(t *test
 	if err != nil {
 		t.Fatalf("build report: %v", err)
 	}
-	if got.Schema != reconcilerPerfSchemaV1 {
-		t.Fatalf("schema = %q, want %q", got.Schema, reconcilerPerfSchemaV1)
+	if got.SchemaVersion != reconcilerPerfSchemaV1 || !got.OK {
+		t.Fatalf("schema/ok = %q/%t, want %q/true", got.SchemaVersion, got.OK, reconcilerPerfSchemaV1)
 	}
 	if got.Coverage.MeasuredActions != 1 ||
 		got.Coverage.RequiredActions != 3 ||

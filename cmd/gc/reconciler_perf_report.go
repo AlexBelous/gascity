@@ -106,12 +106,13 @@ type reconcilerPerfTotals struct {
 }
 
 type reconcilerPerfReport struct {
-	Schema     string                        `json:"schema"`
-	Provenance reconcilerPerfProvenance      `json:"provenance"`
-	Warmup     reconcilerPerfWarmupPolicy    `json:"warmup"`
-	Coverage   reconcilerPerfCoverage        `json:"coverage"`
-	Actions    []reconcilerPerfActionSummary `json:"actions"`
-	Totals     reconcilerPerfTotals          `json:"totals"`
+	SchemaVersion string                        `json:"schema_version"`
+	OK            bool                          `json:"ok"`
+	Provenance    reconcilerPerfProvenance      `json:"provenance"`
+	Warmup        reconcilerPerfWarmupPolicy    `json:"warmup"`
+	Coverage      reconcilerPerfCoverage        `json:"coverage"`
+	Actions       []reconcilerPerfActionSummary `json:"actions"`
+	Totals        reconcilerPerfTotals          `json:"totals"`
 }
 
 func computeReconcilerPerfLatencyStats(samples []int64) reconcilerPerfLatencyStats {
@@ -158,9 +159,10 @@ func buildReconcilerPerfReport(input reconcilerPerfReportInput) (reconcilerPerfR
 	}
 
 	report := reconcilerPerfReport{
-		Schema:     reconcilerPerfSchemaV1,
-		Provenance: input.Provenance,
-		Warmup:     input.Warmup,
+		SchemaVersion: reconcilerPerfSchemaV1,
+		OK:            true,
+		Provenance:    input.Provenance,
+		Warmup:        input.Warmup,
 		Coverage: reconcilerPerfCoverage{
 			RequiredActions: len(reconcilerPerfRequiredActions),
 			MeasuredActions: len(cohortsByAction),
@@ -238,8 +240,9 @@ func summarizeReconcilerPerfCohort(
 	legacyLatencies := make([]int64, 0, len(pairs))
 	keyedLatencies := make([]int64, 0, len(pairs))
 	summary := reconcilerPerfActionSummary{
-		Action:    cohort.Action,
-		PairCount: len(pairs),
+		Action:          cohort.Action,
+		PairCount:       len(pairs),
+		MismatchPairIDs: []string{},
 	}
 	for _, pair := range pairs {
 		if strings.TrimSpace(pair.PairID) == "" {
@@ -320,7 +323,7 @@ func finishReconcilerPerfArmSummary(
 }
 
 func writeReconcilerPerfReport(w io.Writer, report reconcilerPerfReport) error {
-	if _, err := fmt.Fprintf(w, "Reconciler comparison %s\n", report.Schema); err != nil {
+	if _, err := fmt.Fprintf(w, "Reconciler comparison %s\n", report.SchemaVersion); err != nil {
 		return fmt.Errorf("writing reconciler comparison heading: %w", err)
 	}
 	if _, err := fmt.Fprintf(

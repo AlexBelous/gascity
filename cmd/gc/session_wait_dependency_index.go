@@ -44,16 +44,40 @@ func (i *sessionWaitDependencyIndex) Replace(wait sessionpkg.WaitInfo) error {
 	if !indexable {
 		return nil
 	}
+	addWaitDependencyRegistration(i.byWaitID, i.byDependency, wait.ID, registration)
+	return nil
+}
 
-	i.byWaitID[wait.ID] = registration
-	for _, depID := range registration.depIDs {
-		edges := i.byDependency[depID]
-		if edges == nil {
-			edges = make(map[string]string)
-			i.byDependency[depID] = edges
+// Rebuild atomically replaces the index from the supplied wait census. It does
+// not validate census freshness; callers must fence stale snapshots.
+func (i *sessionWaitDependencyIndex) Rebuild(waits []sessionpkg.WaitInfo) error {
+	seen := make(map[string]struct{}, len(waits))
+	for _, wait := range waits {
+		if err := validateWaitDependencyIndexID("wait ID", wait.ID); err != nil {
+			return fmt.Errorf("rebuilding wait dependency index: %w", err)
 		}
-		edges[wait.ID] = registration.sessionID
+		if _, exists := seen[wait.ID]; exists {
+			return fmt.Errorf("rebuilding wait dependency index: duplicate wait ID %q", wait.ID)
+		}
+		seen[wait.ID] = struct{}{}
 	}
+
+	byWaitID := make(map[string]waitDependencyRegistration, len(waits))
+	byDependency := make(map[string]map[string]string)
+	for _, wait := range waits {
+		registration, indexable, err := waitDependencyRegistrationFrom(wait)
+		if err != nil {
+			return fmt.Errorf("rebuilding wait dependency index for %q: %w", wait.ID, err)
+		}
+		if indexable {
+			addWaitDependencyRegistration(byWaitID, byDependency, wait.ID, registration)
+		}
+	}
+
+	i.mu.Lock()
+	i.byWaitID = byWaitID
+	i.byDependency = byDependency
+	i.mu.Unlock()
 	return nil
 }
 
@@ -140,6 +164,18 @@ func validateWaitDependencyIndexID(field, value string) error {
 		return fmt.Errorf("%s is empty or has surrounding whitespace", field)
 	}
 	return nil
+}
+
+func addWaitDependencyRegistration(byWaitID map[string]waitDependencyRegistration, byDependency map[string]map[string]string, waitID string, registration waitDependencyRegistration) {
+	byWaitID[waitID] = registration
+	for _, depID := range registration.depIDs {
+		edges := byDependency[depID]
+		if edges == nil {
+			edges = make(map[string]string)
+			byDependency[depID] = edges
+		}
+		edges[waitID] = registration.sessionID
+	}
 }
 
 func (i *sessionWaitDependencyIndex) removeLocked(waitID string) {

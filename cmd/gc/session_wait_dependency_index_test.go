@@ -292,6 +292,160 @@ func TestSessionWaitDependencyIndex_ConcurrentReplaceRemoveAndLookup(t *testing.
 	}
 }
 
+func TestSessionWaitDependencyIndex_RebuildAtomicallyReplacesAndClearsCensus(t *testing.T) {
+	index := newSessionWaitDependencyIndex()
+	if err := index.Replace(sessionpkg.WaitInfo{
+		ID:        "old-wait",
+		SessionID: "old-session",
+		Status:    "open",
+		Kind:      "deps",
+		State:     waitStatePending,
+		DepMode:   "all",
+		DepIDs:    []string{"old-dependency"},
+	}); err != nil {
+		t.Fatalf("Replace(old): %v", err)
+	}
+
+	if err := index.Rebuild([]sessionpkg.WaitInfo{
+		{
+			ID:        "wait-a",
+			SessionID: "session-a",
+			Status:    "open",
+			Kind:      "deps",
+			State:     waitStatePending,
+			DepMode:   "all",
+			DepIDs:    []string{"dep-x", "dep-y"},
+		},
+		{
+			ID:     "wait-ready",
+			Status: "open",
+			Kind:   "deps",
+			State:  waitStateReady,
+		},
+	}); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	assertSessionWaitDependencyIndexSessions(t, index.SessionsForDependency("old-dependency"), nil)
+	assertSessionWaitDependencyIndexSessions(t, index.SessionsForDependency("dep-x"), []string{"session-a"})
+	assertSessionWaitDependencyIndexSessions(t, index.SessionsForDependency("dep-y"), []string{"session-a"})
+
+	if err := index.Rebuild(nil); err != nil {
+		t.Fatalf("Rebuild(empty): %v", err)
+	}
+	assertSessionWaitDependencyIndexSessions(t, index.SessionsForDependency("dep-x"), nil)
+}
+
+func TestSessionWaitDependencyIndex_RebuildRejectsInvalidCensusWithoutMutation(t *testing.T) {
+	index := newSessionWaitDependencyIndex()
+	prior := sessionpkg.WaitInfo{
+		ID:        "prior-wait",
+		SessionID: "prior-session",
+		Status:    "open",
+		Kind:      "deps",
+		State:     waitStatePending,
+		DepMode:   "all",
+		DepIDs:    []string{"prior-dependency"},
+	}
+	if err := index.Replace(prior); err != nil {
+		t.Fatalf("Replace(prior): %v", err)
+	}
+
+	for _, invalid := range []struct {
+		name      string
+		census    []sessionpkg.WaitInfo
+		errorText string
+	}{
+		{
+			name: "canonical ID validation precedes classification",
+			census: []sessionpkg.WaitInfo{
+				{ID: "unknown-state", Status: "open", Kind: "deps", State: "unknown"},
+				{ID: " invalid-id", Status: "closed", Kind: "deps", State: waitStatePending},
+			},
+			errorText: "wait ID",
+		},
+		{
+			name: "duplicate IDs including identical rows",
+			census: []sessionpkg.WaitInfo{
+				prior,
+				prior,
+			},
+			errorText: "duplicate wait ID",
+		},
+		{
+			name: "classification error",
+			census: []sessionpkg.WaitInfo{
+				{ID: "unknown-status", Status: "unknown", Kind: "deps", State: waitStatePending},
+			},
+			errorText: "unknown",
+		},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			err := index.Rebuild(invalid.census)
+			if err == nil || !strings.Contains(err.Error(), invalid.errorText) {
+				t.Fatalf("Rebuild error = %v, want context containing %q", err, invalid.errorText)
+			}
+			assertSessionWaitDependencyIndexSessions(t, index.SessionsForDependency("prior-dependency"), []string{"prior-session"})
+		})
+	}
+}
+
+func TestSessionWaitDependencyIndex_RebuildConcurrentReadersSeeCompleteSnapshots(t *testing.T) {
+	index := newSessionWaitDependencyIndex()
+	oldCensus := []sessionpkg.WaitInfo{
+		{ID: "old-a", SessionID: "session-a", Status: "open", Kind: "deps", State: waitStatePending, DepMode: "all", DepIDs: []string{"dep-x"}},
+		{ID: "old-b", SessionID: "session-b", Status: "open", Kind: "deps", State: waitStatePending, DepMode: "all", DepIDs: []string{"dep-x"}},
+	}
+	newCensus := []sessionpkg.WaitInfo{
+		{ID: "new-c", SessionID: "session-c", Status: "open", Kind: "deps", State: waitStatePending, DepMode: "all", DepIDs: []string{"dep-x"}},
+		{ID: "new-d", SessionID: "session-d", Status: "open", Kind: "deps", State: waitStatePending, DepMode: "all", DepIDs: []string{"dep-x"}},
+	}
+	if err := index.Rebuild(oldCensus); err != nil {
+		t.Fatalf("Rebuild(old): %v", err)
+	}
+
+	const readers = 4
+	const iterations = 40
+	errs := make(chan error, readers+1)
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	group.Add(1)
+	go func() {
+		defer group.Done()
+		<-start
+		for iteration := 0; iteration < iterations; iteration++ {
+			if err := index.Rebuild(newCensus); err != nil {
+				errs <- err
+				return
+			}
+			if err := index.Rebuild(oldCensus); err != nil {
+				errs <- err
+				return
+			}
+		}
+	}()
+	for reader := 0; reader < readers; reader++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			for iteration := 0; iteration < iterations; iteration++ {
+				got := index.SessionsForDependency("dep-x")
+				if !reflect.DeepEqual(got, []string{"session-a", "session-b"}) && !reflect.DeepEqual(got, []string{"session-c", "session-d"}) {
+					errs <- fmt.Errorf("SessionsForDependency returned partial snapshot %v", got)
+					return
+				}
+				got[0] = "mutated"
+			}
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent Rebuild: %v", err)
+	}
+}
+
 func assertSessionWaitDependencyIndexSessions(t *testing.T, got, want []string) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {

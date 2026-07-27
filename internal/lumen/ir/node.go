@@ -1,0 +1,161 @@
+package ir
+
+import "encoding/json"
+
+// Node is one emitted IR node. Kind/ID/Name/After/Origin are typed conveniences;
+// Raw preserves every field verbatim — including kind-specific payload and nested
+// child nodes (block members, dispatch arms, scatter bodies, …) — so decode then
+// encode is lossless. Typed per-kind payload structs are Phase 1 work, derived
+// from docs/spec/ir.lumen; the emitted node payload is open (schema
+// additionalProperties:true) for every kind except run.
+type Node struct {
+	Kind   NodeKind
+	ID     string
+	Name   string
+	After  []string
+	Origin Origin
+	Raw    map[string]json.RawMessage
+}
+
+// UnmarshalJSON preserves the full object in Raw and lifts the common envelope
+// fields into typed accessors.
+func (n *Node) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	n.Raw = raw
+	decodeField(raw, "kind", &n.Kind)
+	decodeField(raw, "id", &n.ID)
+	decodeField(raw, "name", &n.Name)
+	decodeField(raw, "after", &n.After)
+	decodeField(raw, "origin", &n.Origin)
+	return nil
+}
+
+// MarshalJSON re-emits the preserved object, guaranteeing lossless round-trip.
+func (n Node) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.Raw)
+}
+
+// IR is a decoded lumen.ir document. As with Node, Raw preserves the whole
+// document so encode is lossless; the typed fields are conveniences.
+type IR struct {
+	Contract Contract
+	Name     string
+	Input    InputDecl
+	Nodes    []Node
+	Origin   Origin
+	// Formulas is the optional flat sub-formula bundle keyed by formula name:
+	// every formula reachable via a run target, at any nesting depth, is present
+	// here by name. It is absent for a run-free document, in which case decode,
+	// encode, and irHash are byte-identical to a pre-bundle document (the bundle
+	// rides in Raw, so MarshalJSON round-trips it without special handling). The
+	// bundle is flat — a sub-doc must NOT itself carry a Formulas map (enforced by
+	// Validate), so a nested run's target resolves against this one closure.
+	Formulas map[string]*IR
+	Raw      map[string]json.RawMessage
+}
+
+// UnmarshalJSON decodes the envelope, typing the top-level nodes.
+func (ir *IR) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	ir.Raw = raw
+	if err := decodeFieldStrict(raw, "contract", &ir.Contract); err != nil {
+		return err
+	}
+	if err := decodeFieldStrict(raw, "nodes", &ir.Nodes); err != nil {
+		return err
+	}
+	// The optional sub-formula bundle. Strict: a malformed bundle is a decode
+	// error, never a silent nil. Each value decodes recursively through this same
+	// UnmarshalJSON, so a sub-doc gets its own typed Nodes and Raw passthrough.
+	if err := decodeFieldStrict(raw, "formulas", &ir.Formulas); err != nil {
+		return err
+	}
+	// input is decoded STRICTLY (like contract/nodes/formulas): a type-mismatched
+	// input decl must be a load error, not a silently-zeroed struct. It is
+	// load-bearing — decodeRunEnv validates a run's environment against a sub-
+	// formula's Input.Fields (required-unbound is a loud refusal), so a lenient
+	// decode that dropped `required` would defeat that guard and run the sub-graph
+	// with an unbound {{ref}}.
+	if err := decodeFieldStrict(raw, "input", &ir.Input); err != nil {
+		return err
+	}
+	decodeField(raw, "name", &ir.Name)
+	decodeField(raw, "origin", &ir.Origin)
+	return nil
+}
+
+// MarshalJSON re-emits the preserved document.
+func (ir IR) MarshalJSON() ([]byte, error) {
+	return json.Marshal(ir.Raw)
+}
+
+func decodeField(raw map[string]json.RawMessage, key string, dst any) {
+	if v, ok := raw[key]; ok {
+		_ = json.Unmarshal(v, dst)
+	}
+}
+
+func decodeFieldStrict(raw map[string]json.RawMessage, key string, dst any) error {
+	if v, ok := raw[key]; ok {
+		return json.Unmarshal(v, dst)
+	}
+	return nil
+}
+
+// WalkNodes visits every IR node in the document — the top-level nodes and all
+// nested nodes, regardless of the field they nest under — calling fn with each
+// node's raw object. It identifies a node structurally the same way as the
+// upstream companion validator: a JSON object carrying a string kind and an
+// array after. This distinguishes schedulable nodes from expression/type values,
+// while still letting validation report a nested node that is missing its id.
+func (ir *IR) WalkNodes(fn func(node map[string]json.RawMessage)) {
+	for i := range ir.Nodes {
+		walkRawObject(ir.Nodes[i].Raw, fn)
+	}
+}
+
+func walkRawObject(obj map[string]json.RawMessage, fn func(map[string]json.RawMessage)) {
+	var kind string
+	rawKind, hasKind := obj["kind"]
+	kindOK := hasKind && json.Unmarshal(rawKind, &kind) == nil
+	var after []json.RawMessage
+	rawAfter, hasAfter := obj["after"]
+	afterOK := hasAfter && json.Unmarshal(rawAfter, &after) == nil
+	if kindOK && afterOK {
+		fn(obj)
+	}
+	for _, v := range obj {
+		walkRawValue(v, fn)
+	}
+}
+
+func walkRawValue(v json.RawMessage, fn func(map[string]json.RawMessage)) {
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{':
+			var m map[string]json.RawMessage
+			if json.Unmarshal(v, &m) == nil {
+				walkRawObject(m, fn)
+			}
+			return
+		case '[':
+			var arr []json.RawMessage
+			if json.Unmarshal(v, &arr) == nil {
+				for _, e := range arr {
+					walkRawValue(e, fn)
+				}
+			}
+			return
+		default:
+			return
+		}
+	}
+}

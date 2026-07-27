@@ -1,0 +1,421 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://donbox.github.io/formula-language/schemas/lumen-ir-0.2.5.schema.json",
+  "$comment": "⚠️ IMPLEMENTATION-PRIVATE EMITTED IR ONLY. This schema validates the compatibility shape that `compileLumenFormulaLanguage` currently emits. It is not a published language contract, public semantic source, hand-authoring/conversion target, or downstream orchestration API. CANONICAL PUBLIC SEMANTIC SOURCE: the edition-pinned source pack, mechanically projected to `docs/spec/generated/public-ir.lumen`. `docs/spec/ir.lumen` owns residual public interchange plus private emitted/runtime support structures. Historical emitted-only kinds in this schema do not select public source forms. Private shape changes require internal migration and regenerated evidence where applicable, not downstream language-consumer notification.",
+  "title": "Private emitted Lumen IR compatibility shape (lumen.ir 0.2.5)",
+  "description": "Internal validation fixture for emitted compiler output; non-normative as an authoring, public-semantic, or downstream interchange target. The canonical intended language is the public source pack plus its checked docs/spec/generated/public-ir.lumen projection. This schema describes contract.version 0.2.5 of the current private compatibility output. The version pins one implementation shape for migration/regression purposes, not the language-release label or a public promise. Private shape changes require an explicit internal migration/version decision and regenerated goldens where applicable. Historical/private kinds remain compatibility facts, not selected public constructors.",
+  "type": "object",
+  "required": [
+    "contract",
+    "name",
+    "input",
+    "nodes",
+    "origin"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "contract": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "producer"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "const": "lumen.ir"
+        },
+        "version": {
+          "const": "0.2.5"
+        },
+        "producer": {
+          "type": "string"
+        }
+      }
+    },
+    "name": {
+      "type": "string"
+    },
+    "origin": {
+      "$ref": "#/definitions/origin"
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "name",
+        "fields",
+        "origin"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/field"
+          }
+        },
+        "origin": {
+          "$ref": "#/definitions/origin"
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/node"
+      }
+    }
+  },
+  "definitions": {
+    "origin": {
+      "type": "object",
+      "required": [
+        "uri",
+        "line",
+        "col"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "col": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "metadata": {
+      "description": "Descriptive declaration-layer metadata bag (ir.lumen `Metadata`). Non-semantic provenance/description data attached to a declaration-layer shape; it does not affect typechecking, scheduling, or runtime behavior. `title` and `description` are single-valued descriptive strings; the open `...: [string]` catch-all collects additional descriptive keys (e.g. `normative`, `review-note`, `review-todo`) into string lists in source order. Semantic authored keys (`form-id`, `manifest-check`, `form-status`, `syntax-*`, `lowers-*`, `body-field`, `self`) are NOT metadata and do not appear here; the `propertyNames` guard rejects those exact names and the `syntax-*`/`lowers-*` prefixes (and the reserved `origin` key) so a semantic key can never leak into the bag. `origin` is a sibling, not folded in. Replaces the pre-0.2.3 `description` field on declaration-layer shapes.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "propertyNames": {
+        "not": {
+          "anyOf": [
+            {
+              "enum": [
+                "form-id",
+                "manifest-check",
+                "form-status",
+                "body-field",
+                "self",
+                "origin"
+              ]
+            },
+            {
+              "pattern": "^syntax-"
+            },
+            {
+              "pattern": "^lowers-"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "type": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "atomic",
+            "alias",
+            "literal",
+            "union",
+            "array",
+            "record",
+            "channel",
+            "handle"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/definitions/type"
+        },
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null",
+            "array",
+            "object"
+          ]
+        },
+        "of": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/type"
+          }
+        },
+        "discriminant": {
+          "type": "string"
+        },
+        "element": {
+          "$ref": "#/definitions/type"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/field"
+          }
+        },
+        "additionalFields": {
+          "$ref": "#/definitions/type"
+        },
+        "payload": {
+          "$ref": "#/definitions/type"
+        },
+        "stream": {
+          "type": "boolean"
+        },
+        "capability": {
+          "enum": [
+            "source",
+            "sink",
+            "all"
+          ]
+        },
+        "origin": {
+          "$ref": "#/definitions/origin"
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": [
+        "name",
+        "type",
+        "required",
+        "body"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/definitions/type"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "default": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null",
+            "array",
+            "object"
+          ]
+        },
+        "metadata": {
+          "$ref": "#/definitions/metadata"
+        },
+        "body": {
+          "type": "boolean"
+        },
+        "origin": {
+          "$ref": "#/definitions/origin"
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "after",
+        "origin"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "description": "Closed set of node kinds in the implementation-private emitted 0.2.5 compatibility shape. This is not the accepted source surface, public semantic constructor catalog, or downstream contract; those are defined by the public source pack and projected to `generated/public-ir.lumen`. A new emitted node kind requires an internal schema/migration decision and regenerated evidence, not a public language-contract bump. The gate validates top-level nodes and recursion-gates nested nodes by signature. Most per-kind payloads remain descriptively open; the `run` payload is the principal closed exception. Historical/private lowering kinds such as `do`, `settle`, `for-each`, `scatter`, and `gather` remain here only because this compatibility lane describes what the current implementation can emit or validate. Their presence does not select or restore retired source forms. There is no emitted `reduce` node kind; current implementation compatibility represents collection reduction structurally on a map node.",
+          "enum": [
+            "async",
+            "await",
+            "block",
+            "cancel",
+            "channel",
+            "cleanup",
+            "close",
+            "dispatch",
+            "do",
+            "exec",
+            "fail-channel",
+            "for-each",
+            "gather",
+            "guard",
+            "interp",
+            "lit",
+            "map",
+            "quote",
+            "raise",
+            "recover",
+            "repeat",
+            "retry",
+            "run",
+            "scatter",
+            "settle",
+            "timeout"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "origin": {
+          "$ref": "#/definitions/origin"
+        }
+      },
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "run"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/definitions/runNode"
+      }
+    },
+    "runNode": {
+      "description": "Emitted node for the public `run` step (replaces the prior `apply` node-kind name). Closed payload: invokes `target` (by-name | by-ref) against a top-level `environment` record (formerly apply.input), with optional ambient `with` association and a `runInput` block carrying runEventSink/nudge/runMetadata/detached. `outcome` is `transparent` (the target's outcome flows through) EXCEPT for a detached run (`runInput.detached: true`), which evaluates to a RunHandle and so emits `outcome: \"handle\"`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "after",
+        "origin",
+        "target",
+        "outcome"
+      ],
+      "properties": {
+        "kind": {
+          "const": "run"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "origin": {
+          "$ref": "#/definitions/origin"
+        },
+        "target": {
+          "$ref": "#/definitions/runTarget"
+        },
+        "with": {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string"
+            }
+          }
+        },
+        "environment": {
+          "type": "object"
+        },
+        "runInput": {
+          "$ref": "#/definitions/runInput"
+        },
+        "outcome": {
+          "enum": [
+            "transparent",
+            "handle"
+          ]
+        }
+      }
+    },
+    "runTarget": {
+      "description": "What a `run` invokes — an extensible DU. `by-name` carries a resolved formula `name`; `by-ref` carries an `Expression` `ref` (e.g. a quote/handle value). Arbitrary-step targets slot in additively in a later release.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "by-name",
+            "by-ref"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "ref": {},
+        "origin": {
+          "$ref": "#/definitions/origin"
+        }
+      }
+    },
+    "runInput": {
+      "description": "The run step's own configuration — distinct from the target's `environment`. `runEventSink` is a resolved channel ref/facet for child run events; `nudge` requests an agent/session nudge after dispatch; `runMetadata` augments the resulting RunHandle's persistent record; `detached` (S4) mints a host-adopted top-level run (non-blocking, evaluates to a RunHandle, not drained at the spawner boundary; degrades to owned at a bare/terminal host).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runEventSink": {},
+        "nudge": {
+          "type": "boolean"
+        },
+        "runMetadata": {
+          "type": "object"
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "origin": {
+          "$ref": "#/definitions/origin"
+        }
+      }
+    }
+  }
+}

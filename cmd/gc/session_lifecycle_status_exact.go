@@ -18,10 +18,16 @@ type exactSessionLifecycleStatusReason string
 const (
 	exactSessionLifecycleStatusReasonCandidate               exactSessionLifecycleStatusReason = "candidate"
 	exactSessionLifecycleStatusReasonInvalidInput            exactSessionLifecycleStatusReason = "invalid_input"
-	exactSessionLifecycleStatusReasonContextAmbiguous        exactSessionLifecycleStatusReason = "context_ambiguous"
 	exactSessionLifecycleStatusReasonPrerequisiteUnavailable exactSessionLifecycleStatusReason = "prerequisite_unavailable"
 	exactSessionLifecycleStatusReasonNotObserved             exactSessionLifecycleStatusReason = "not_observed"
 	exactSessionLifecycleStatusReasonObservationUnavailable  exactSessionLifecycleStatusReason = "observation_unavailable"
+)
+
+type exactSessionLifecycleStatusContext uint8
+
+const (
+	exactSessionLifecycleStatusContextUnavailable exactSessionLifecycleStatusContext = iota
+	exactSessionLifecycleStatusContextDesired
 )
 
 type exactSessionLifecycleStatusDisposition string
@@ -39,12 +45,12 @@ type exactSessionLifecycleStatusResult struct {
 	ControllerGeneration uint64
 	RequestedID          string
 	LoadedID             string
+	Context              exactSessionLifecycleStatusContext
 	ObservedAt           time.Time
 	Disposition          exactSessionLifecycleStatusDisposition
 	Reason               exactSessionLifecycleStatusReason
 	Plan                 *sessionLifecycleStatusPlan
 	Error                string
-	ComparedToLegacy     bool
 }
 
 // exactSessionLifecycleStatusObserver receives a detached shadow-only result.
@@ -57,6 +63,7 @@ type exactSessionLifecycleStatusInput struct {
 	Admission            sessionStartAdmission
 	ControllerGeneration uint64
 	RequestedID          string
+	Context              exactSessionLifecycleStatusContext
 	Info                 session.Info
 	Observation          worker.LiveObservation
 	ObservedAt           time.Time
@@ -66,9 +73,8 @@ type exactSessionLifecycleStatusInput struct {
 	Error                string
 }
 
-// evaluateExactSessionLifecycleStatus accepts a status candidate only when
-// the desired and both legacy orphan contexts derive the identical plan from
-// the same durable row and runtime observation. It owns no store or provider.
+// evaluateExactSessionLifecycleStatus derives a status candidate only for a
+// desired-session observation. It owns no store or provider.
 func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput) exactSessionLifecycleStatusResult {
 	result := exactSessionLifecycleStatusResult{
 		Admission:            input.Admission,
@@ -76,11 +82,11 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		ControllerGeneration: input.ControllerGeneration,
 		RequestedID:          input.RequestedID,
 		LoadedID:             input.Info.ID,
+		Context:              input.Context,
 		ObservedAt:           input.ObservedAt,
 		Disposition:          exactSessionLifecycleStatusDispositionPark,
 		Reason:               exactSessionLifecycleStatusReasonInvalidInput,
 		Error:                input.Error,
-		ComparedToLegacy:     false,
 	}
 	if input.RequestedID == "" {
 		result.RequestedID = input.Admission.SessionID
@@ -91,7 +97,8 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		return result
 	}
 	if input.Info.Closed {
-		if !input.ObservedAt.IsZero() || input.UnavailableReason != "" || input.Error != "" {
+		if input.Context != exactSessionLifecycleStatusContextUnavailable ||
+			!input.ObservedAt.IsZero() || input.UnavailableReason != "" || input.Error != "" {
 			return result
 		}
 		plan := planSessionLifecycleStatus(sessionLifecycleShadowInput{Info: input.Info})
@@ -100,18 +107,18 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		result.Plan = ptrExactSessionLifecycleStatusPlan(plan)
 		return result
 	}
-	if input.UnavailableReason != "" {
-		if !input.ObservedAt.IsZero() {
-			return result
+	if input.Context == exactSessionLifecycleStatusContextUnavailable {
+		if input.UnavailableReason != "" {
+			result.Reason = input.UnavailableReason
 		}
-		result.Reason = input.UnavailableReason
 		return result
 	}
-	if !input.PrerequisitesReady || input.ObservedAt.IsZero() || input.Error != "" {
+	if input.Context != exactSessionLifecycleStatusContextDesired || input.UnavailableReason != "" ||
+		!input.PrerequisitesReady || input.ObservedAt.IsZero() || input.Error != "" {
 		return result
 	}
 
-	desired := planSessionLifecycleStatus(sessionLifecycleShadowInput{
+	plan := planSessionLifecycleStatus(sessionLifecycleShadowInput{
 		Info:              input.Info,
 		RuntimeObserved:   true,
 		RuntimeAlive:      input.Observation.Alive,
@@ -119,43 +126,15 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		StartupTimeout:    input.StartupTimeout,
 		RollbackAvailable: true,
 	})
-	orphanComplete := planSessionLifecycleStatus(sessionLifecycleShadowInput{
-		Info:              input.Info,
-		RuntimeObserved:   true,
-		RuntimeAlive:      input.Observation.Running,
-		ObservedAt:        input.ObservedAt,
-		StartupTimeout:    input.StartupTimeout,
-		RollbackAvailable: true,
-	})
-	orphanPartial := planSessionLifecycleStatus(sessionLifecycleShadowInput{
-		Info:              input.Info,
-		RuntimeObserved:   true,
-		RuntimeAlive:      input.Observation.Running,
-		ObservedAt:        input.ObservedAt,
-		StartupTimeout:    input.StartupTimeout,
-		RollbackAvailable: false,
-	})
-	if desired.Outcome == sessionLifecycleStatusPark ||
-		!sameExactSessionLifecycleStatusPlan(desired, orphanComplete) ||
-		!sameExactSessionLifecycleStatusPlan(desired, orphanPartial) {
-		result.Reason = exactSessionLifecycleStatusReasonContextAmbiguous
-		return result
-	}
 	result.Reason = exactSessionLifecycleStatusReasonCandidate
 	result.Disposition = exactSessionLifecycleStatusDispositionCandidate
-	plan := cloneSessionLifecycleStatusPlan(desired)
-	result.Plan = &plan
+	result.Plan = ptrExactSessionLifecycleStatusPlan(plan)
 	return result
 }
 
 func ptrExactSessionLifecycleStatusPlan(plan sessionLifecycleStatusPlan) *sessionLifecycleStatusPlan {
 	cloned := cloneSessionLifecycleStatusPlan(plan)
 	return &cloned
-}
-
-func sameExactSessionLifecycleStatusPlan(left, right sessionLifecycleStatusPlan) bool {
-	return left.Outcome == right.Outcome && left.Reason == right.Reason &&
-		sameSessionLifecycleStatusPatch(left.Patch, right.Patch)
 }
 
 const exactSessionLifecycleStatusPanicDiagnosticLimit = 4096

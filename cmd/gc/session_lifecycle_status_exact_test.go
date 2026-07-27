@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +26,7 @@ func TestEvaluateExactSessionLifecycleStatus(t *testing.T) {
 		Admission:            sessionStartAdmission{SessionID: "gcs-exact", Version: 4},
 		ControllerGeneration: 9,
 		RequestedID:          "gcs-exact",
+		Context:              exactSessionLifecycleStatusContextDesired,
 		Info: session.Info{
 			ID:            "gcs-exact",
 			State:         session.StateAwake,
@@ -36,31 +39,25 @@ func TestEvaluateExactSessionLifecycleStatus(t *testing.T) {
 	}
 
 	tests := []struct {
-		name             string
-		input            exactSessionLifecycleStatusInput
-		wantReason       exactSessionLifecycleStatusReason
-		wantPlan         bool
-		mutatePlan       bool
-		rollbackDiverges bool
+		name       string
+		input      exactSessionLifecycleStatusInput
+		mutatePlan bool
 	}{
 		{
-			name:       "all three status contexts agree",
+			name:       "desired context derives one plan",
 			input:      base,
-			wantReason: exactSessionLifecycleStatusReasonCandidate,
-			wantPlan:   true,
 			mutatePlan: true,
 		},
 		{
-			name: "alive and running disagree",
+			name: "desired context uses alive when running disagrees",
 			input: func() exactSessionLifecycleStatusInput {
 				in := base
 				in.Observation = worker.LiveObservation{Running: true, Alive: false}
 				return in
 			}(),
-			wantReason: exactSessionLifecycleStatusReasonContextAmbiguous,
 		},
 		{
-			name: "rollback sensitive creating state parks",
+			name: "desired context has rollback available",
 			input: func() exactSessionLifecycleStatusInput {
 				in := base
 				in.Info = session.Info{
@@ -76,44 +73,25 @@ func TestEvaluateExactSessionLifecycleStatus(t *testing.T) {
 				in.StartupTimeout = 5 * time.Minute
 				return in
 			}(),
-			wantReason:       exactSessionLifecycleStatusReasonContextAmbiguous,
-			rollbackDiverges: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.rollbackDiverges {
-				withRollback := planSessionLifecycleStatus(sessionLifecycleShadowInput{
-					Info:              tt.input.Info,
-					RuntimeObserved:   true,
-					RuntimeAlive:      tt.input.Observation.Running,
-					ObservedAt:        tt.input.ObservedAt,
-					StartupTimeout:    tt.input.StartupTimeout,
-					RollbackAvailable: true,
-				})
-				withoutRollback := planSessionLifecycleStatus(sessionLifecycleShadowInput{
-					Info:              tt.input.Info,
-					RuntimeObserved:   true,
-					RuntimeAlive:      tt.input.Observation.Running,
-					ObservedAt:        tt.input.ObservedAt,
-					StartupTimeout:    tt.input.StartupTimeout,
-					RollbackAvailable: false,
-				})
-				if sameExactSessionLifecycleStatusPlan(withRollback, withoutRollback) {
-					t.Fatalf("rollback fixture does not diverge: with=%#v without=%#v", withRollback, withoutRollback)
-				}
-			}
+			wantPlan := planSessionLifecycleStatus(sessionLifecycleShadowInput{
+				Info:              tt.input.Info,
+				RuntimeObserved:   true,
+				RuntimeAlive:      tt.input.Observation.Alive,
+				ObservedAt:        tt.input.ObservedAt,
+				StartupTimeout:    tt.input.StartupTimeout,
+				RollbackAvailable: true,
+			})
 			got := evaluateExactSessionLifecycleStatus(tt.input)
-			wantDisposition := exactSessionLifecycleStatusDispositionPark
-			if tt.wantPlan {
-				wantDisposition = exactSessionLifecycleStatusDispositionCandidate
+			if got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Reason != exactSessionLifecycleStatusReasonCandidate || got.Plan == nil || !reflect.DeepEqual(*got.Plan, wantPlan) {
+				t.Fatalf("evaluation = %#v, want desired candidate plan %#v", got, wantPlan)
 			}
-			if got.Disposition != wantDisposition || got.Reason != tt.wantReason || (got.Plan != nil) != tt.wantPlan {
-				t.Fatalf("evaluation = %#v, want disposition=%q reason=%q plan=%t", got, wantDisposition, tt.wantReason, tt.wantPlan)
-			}
-			if got.Admission != tt.input.Admission || got.AdmissionVersion != tt.input.Admission.Version || got.ControllerGeneration != tt.input.ControllerGeneration || got.RequestedID != tt.input.RequestedID || got.LoadedID != tt.input.Info.ID || !got.ObservedAt.Equal(now) || got.ComparedToLegacy {
-				t.Fatalf("evaluation identity = %#v, want detached exact context and no legacy comparison", got)
+			if got.Admission != tt.input.Admission || got.AdmissionVersion != tt.input.Admission.Version || got.ControllerGeneration != tt.input.ControllerGeneration || got.RequestedID != tt.input.RequestedID || got.LoadedID != tt.input.Info.ID || got.Context != exactSessionLifecycleStatusContextDesired || !got.ObservedAt.Equal(now) {
+				t.Fatalf("evaluation identity = %#v, want detached desired exact context", got)
 			}
 			if tt.mutatePlan {
 				got.Plan.Patch["state"] = "corrupt"
@@ -133,16 +111,94 @@ func TestEvaluateExactSessionLifecycleStatusClosedAndUnavailable(t *testing.T) {
 		RequestedID:          "gcs-exact",
 		Info:                 session.Info{ID: "gcs-exact"},
 	}
-	closed := base
-	closed.Info.Closed = true
-	if got := evaluateExactSessionLifecycleStatus(closed); got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusNoop || got.Plan.Reason != sessionLifecycleStatusReasonTerminal {
-		t.Fatalf("closed result = %#v, want terminal noop candidate", got)
+	const unknownContext exactSessionLifecycleStatusContext = 255
+	for _, tt := range []struct {
+		name            string
+		context         exactSessionLifecycleStatusContext
+		wantContext     exactSessionLifecycleStatusContext
+		wantDisposition exactSessionLifecycleStatusDisposition
+		wantReason      exactSessionLifecycleStatusReason
+		wantTerminal    bool
+	}{
+		{name: "unavailable", context: exactSessionLifecycleStatusContextUnavailable, wantContext: exactSessionLifecycleStatusContextUnavailable, wantDisposition: exactSessionLifecycleStatusDispositionCandidate, wantReason: exactSessionLifecycleStatusReasonCandidate, wantTerminal: true},
+		{name: "desired", context: exactSessionLifecycleStatusContextDesired, wantContext: exactSessionLifecycleStatusContextDesired, wantDisposition: exactSessionLifecycleStatusDispositionPark, wantReason: exactSessionLifecycleStatusReasonInvalidInput},
+		{name: "unknown", context: unknownContext, wantContext: unknownContext, wantDisposition: exactSessionLifecycleStatusDispositionPark, wantReason: exactSessionLifecycleStatusReasonInvalidInput},
+	} {
+		t.Run("closed/"+tt.name, func(t *testing.T) {
+			closed := base
+			closed.Context = tt.context
+			closed.Info.Closed = true
+			got := evaluateExactSessionLifecycleStatus(closed)
+			if got.Context != tt.wantContext || got.Disposition != tt.wantDisposition || got.Reason != tt.wantReason || (got.Plan != nil) != tt.wantTerminal {
+				t.Fatalf("closed result = %#v, want context=%d disposition=%q reason=%q terminal=%t", got, tt.wantContext, tt.wantDisposition, tt.wantReason, tt.wantTerminal)
+			}
+			if tt.wantTerminal && (got.Plan.Outcome != sessionLifecycleStatusNoop || got.Plan.Reason != sessionLifecycleStatusReasonTerminal) {
+				t.Fatalf("closed plan = %#v, want terminal noop", got.Plan)
+			}
+		})
 	}
 	unavailable := base
+	unavailable.Observation = worker.LiveObservation{Running: true, Alive: true}
+	unavailable.ObservedAt = time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	unavailable.PrerequisitesReady = true
 	unavailable.UnavailableReason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
-	if got := evaluateExactSessionLifecycleStatus(unavailable); got.Disposition != exactSessionLifecycleStatusDispositionPark || got.Reason != exactSessionLifecycleStatusReasonPrerequisiteUnavailable {
+	if got := evaluateExactSessionLifecycleStatus(unavailable); got.Context != exactSessionLifecycleStatusContextUnavailable || got.Disposition != exactSessionLifecycleStatusDispositionPark || got.Reason != exactSessionLifecycleStatusReasonPrerequisiteUnavailable || got.Plan != nil {
 		t.Fatalf("unavailable result = %#v, want prerequisite-unavailable park", got)
 	}
+}
+
+func TestReconcileExactSessionStartClosedStatusUsesOneReadWithoutEffects(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.Close(bead.ID); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	before := exactStatusStoreState(t, env.store)
+	store := newExactStatusCountingStore(t, env.store)
+	clk := &exactStatusCountingClock{now: env.clk.Now()}
+	observationCalls := 0
+	var reports []exactSessionLifecycleStatusResult
+	params := exactSessionStartTestParams(t, env)
+	params.Generation = 1
+	params.Store = store
+	params.Clock = clk
+	params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
+		observationCalls++
+		return worker.LiveObservation{}, nil
+	}
+	params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+		reports = append(reports, result)
+	}))
+
+	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionSocket,
+		Version:   1,
+	}, params)
+	if err != nil || owner != exactSessionStartUnowned {
+		t.Fatalf("owner/error = %d/%v, want unowned/nil", owner, err)
+	}
+	if store.gets != 1 || store.lists != 0 || clk.calls != 0 || observationCalls != 0 {
+		t.Fatalf("closed read/list/clock/observation costs = %d/%d/%d/%d, want 1/0/0/0", store.gets, store.lists, clk.calls, observationCalls)
+	}
+	if len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Plan == nil || reports[0].Plan.Outcome != sessionLifecycleStatusNoop || reports[0].Plan.Reason != sessionLifecycleStatusReasonTerminal {
+		t.Fatalf("closed reports = %#v, want one context-free terminal no-op", reports)
+	}
+	if calls := env.sp.SnapshotCalls(); len(calls) != 0 {
+		t.Fatalf("closed provider calls = %#v, want none", calls)
+	}
+	requireExactStatusStoreUnchanged(t, before, store)
+}
+
+type exactStatusCountingClock struct {
+	now   time.Time
+	calls int
+}
+
+func (c *exactStatusCountingClock) Now() time.Time {
+	c.calls++
+	return c.now
 }
 
 func TestReconcileExactSessionStartReportsWrappedIDCollision(t *testing.T) {
@@ -181,19 +237,20 @@ func TestReconcileExactSessionStartReportsWrappedIDCollision(t *testing.T) {
 
 func TestReconcileExactSessionStartReportsLoadedEarlyExitsOnce(t *testing.T) {
 	tests := []struct {
-		name       string
-		configure  func(*reconcilerTestEnv)
-		metadata   map[string]string
-		observeErr error
-		wantOwner  exactSessionStartOwner
-		wantReason exactSessionLifecycleStatusReason
-		wantErr    bool
-		wantDetail string
+		name             string
+		configure        func(*reconcilerTestEnv)
+		metadata         map[string]string
+		observeErr       error
+		wantOwner        exactSessionStartOwner
+		wantReason       exactSessionLifecycleStatusReason
+		wantErr          bool
+		wantDetail       string
+		wantObservations int
 	}{
 		{name: "empty template", configure: func(env *reconcilerTestEnv) {
 			env.cfg = &config.City{}
 		}, metadata: map[string]string{"template": "", "wake_request": string(session.WakeCauseExplicit)}, wantOwner: exactSessionStartKeyedOwner, wantReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, wantErr: true, wantDetail: "persisted template is empty"},
-		{name: "missing agent uses legacy helper", configure: func(env *reconcilerTestEnv) {
+		{name: "missing agent remains unavailable", configure: func(env *reconcilerTestEnv) {
 			env.cfg = &config.City{}
 		}, metadata: map[string]string{"wake_request": string(session.WakeCauseExplicit)}, wantOwner: exactSessionStartLegacyOwner, wantReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable},
 		{name: "suspended", configure: func(env *reconcilerTestEnv) {
@@ -208,9 +265,12 @@ func TestReconcileExactSessionStartReportsLoadedEarlyExitsOnce(t *testing.T) {
 		{name: "template resolution error", configure: func(env *reconcilerTestEnv) {
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", Upstream: "undeclared"}}}
 		}, metadata: map[string]string{"wake_request": string(session.WakeCauseExplicit)}, wantOwner: exactSessionStartKeyedOwner, wantReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, wantErr: true, wantDetail: "undeclared"},
+		{name: "provider resolution error", configure: func(env *reconcilerTestEnv) {
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", Provider: "undeclared"}}}
+		}, metadata: map[string]string{"wake_request": string(session.WakeCauseExplicit)}, wantOwner: exactSessionStartKeyedOwner, wantReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, wantErr: true, wantDetail: "undeclared"},
 		{name: "observation error", configure: func(env *reconcilerTestEnv) {
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
-		}, metadata: map[string]string{"wake_request": string(session.WakeCauseExplicit)}, observeErr: errors.New("observe unavailable"), wantOwner: exactSessionStartKeyedOwner, wantReason: exactSessionLifecycleStatusReasonObservationUnavailable, wantErr: true, wantDetail: "observe unavailable"},
+		}, metadata: map[string]string{"wake_request": string(session.WakeCauseExplicit)}, observeErr: errors.New("observe unavailable"), wantOwner: exactSessionStartKeyedOwner, wantReason: exactSessionLifecycleStatusReasonObservationUnavailable, wantErr: true, wantDetail: "observe unavailable", wantObservations: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -220,10 +280,10 @@ func TestReconcileExactSessionStartReportsLoadedEarlyExitsOnce(t *testing.T) {
 			env.setSessionMetadata(&bead, tt.metadata)
 			params := exactSessionStartTestParams(t, env)
 			params.Generation = 1
-			if tt.observeErr != nil {
-				params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
-					return worker.LiveObservation{}, tt.observeErr
-				}
+			observationCalls := 0
+			params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
+				observationCalls++
+				return worker.LiveObservation{}, tt.observeErr
 			}
 			var reports []exactSessionLifecycleStatusResult
 			params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
@@ -233,8 +293,14 @@ func TestReconcileExactSessionStartReportsLoadedEarlyExitsOnce(t *testing.T) {
 			if owner != tt.wantOwner || (err != nil) != tt.wantErr {
 				t.Fatalf("owner/error = %d/%v, want %d/error=%t", owner, err, tt.wantOwner, tt.wantErr)
 			}
-			if len(reports) != 1 || reports[0].Reason != tt.wantReason || !reports[0].ObservedAt.IsZero() {
+			if len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Reason != tt.wantReason || !reports[0].ObservedAt.IsZero() {
 				t.Fatalf("reports = %#v, want one %s with zero timestamp", reports, tt.wantReason)
+			}
+			if observationCalls != tt.wantObservations {
+				t.Fatalf("runtime observations = %d, want %d", observationCalls, tt.wantObservations)
+			}
+			if calls := env.sp.SnapshotCalls(); len(calls) != 0 {
+				t.Fatalf("pre-observation provider calls = %#v, want none", calls)
 			}
 			if tt.wantDetail != "" && (!strings.Contains(reports[0].Error, tt.wantDetail) || !strings.Contains(err.Error(), tt.wantDetail)) {
 				t.Fatalf("report/acting error = %q/%v, want detail %q", reports[0].Error, err, tt.wantDetail)
@@ -250,6 +316,11 @@ func TestReconcileExactSessionStartReportsNonClosedUnownedLoadedExitOnce(t *test
 	var reports []exactSessionLifecycleStatusResult
 	params := exactSessionStartTestParams(t, env)
 	params.Generation = 1
+	observationCalls := 0
+	params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
+		observationCalls++
+		return worker.LiveObservation{}, nil
+	}
 	params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
 		reports = append(reports, result)
 	}))
@@ -260,8 +331,14 @@ func TestReconcileExactSessionStartReportsNonClosedUnownedLoadedExitOnce(t *test
 	if err != nil || owner != exactSessionStartUnowned {
 		t.Fatalf("owner/error = %d/%v, want unowned/nil", owner, err)
 	}
-	if len(reports) != 1 || reports[0].Reason != exactSessionLifecycleStatusReasonCandidate || reports[0].LoadedID != bead.ID {
-		t.Fatalf("reports = %#v, want one candidate report for %q", reports, bead.ID)
+	if observationCalls != 0 {
+		t.Fatalf("unowned runtime observations = %d, want 0", observationCalls)
+	}
+	if calls := env.sp.SnapshotCalls(); len(calls) != 0 {
+		t.Fatalf("unowned provider calls = %#v, want none", calls)
+	}
+	if len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextUnavailable || reports[0].Reason != exactSessionLifecycleStatusReasonNotObserved || reports[0].Plan != nil || reports[0].LoadedID != bead.ID {
+		t.Fatalf("reports = %#v, want one unavailable report for %q", reports, bead.ID)
 	}
 }
 
@@ -330,7 +407,7 @@ func TestReconcileExactSessionStartReportsPostObservationExitOnce(t *testing.T) 
 				t.Fatalf("observations/get/list/start = %d/%d/%d/%d, want 1/%d/0/0", observations, store.gets, store.lists, env.sp.CountCalls("Start", "worker"), tt.wantGets)
 			}
 			requireExactStatusStoreUnchanged(t, before, store)
-			if len(reports) != 1 || reports[0].RequestedID != bead.ID || reports[0].LoadedID != bead.ID || reports[0].ObservedAt.IsZero() || reports[0].Error != "" {
+			if len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextDesired || reports[0].RequestedID != bead.ID || reports[0].LoadedID != bead.ID || reports[0].ObservedAt.IsZero() || reports[0].Error != "" {
 				t.Fatalf("reports = %#v, want one post-observation report for %q", reports, bead.ID)
 			}
 		})
@@ -415,6 +492,7 @@ func TestReconcileExactSessionStartStatusShadowPreservesOwnerAndEffects(t *testi
 		wantObservations int
 		wantReports      int
 		wantGets         int
+		wantContext      exactSessionLifecycleStatusContext
 		observerPanic    bool
 	}{
 		{
@@ -428,17 +506,61 @@ func TestReconcileExactSessionStartStatusShadowPreservesOwnerAndEffects(t *testi
 				})
 				return env.sessionInfo(bead.ID)
 			},
-			observe: true, wantOwner: exactSessionStartKeyedOwner, wantStarts: 1, wantObservations: 1, wantReports: 1, wantGets: -1,
+			observe: true, wantOwner: exactSessionStartKeyedOwner, wantStarts: 1, wantObservations: 1, wantReports: 1, wantGets: -1, wantContext: exactSessionLifecycleStatusContextDesired,
 		},
 		{
-			name: "legacy owner probes once without starting",
+			name: "legacy owner reports unavailable without probing",
 			setup: func(env *reconcilerTestEnv) session.Info {
 				env.cfg.Agents[0].DependsOn = []string{"dependency"}
 				bead := env.createSessionBead("worker", "worker")
 				env.setSessionMetadata(&bead, map[string]string{"wake_request": string(session.WakeCauseExplicit)})
 				return env.sessionInfo(bead.ID)
 			},
-			observe: true, wantOwner: exactSessionStartLegacyOwner, wantObservations: 1, wantReports: 1, wantGets: 1,
+			observe: true, wantOwner: exactSessionStartLegacyOwner, wantReports: 1, wantGets: 1, wantContext: exactSessionLifecycleStatusContextUnavailable,
+		},
+		{
+			name: "unowned row reports unavailable without probing",
+			setup: func(env *reconcilerTestEnv) session.Info {
+				bead := env.createSessionBead("worker", "worker")
+				return env.sessionInfo(bead.ID)
+			},
+			observe: true, wantOwner: exactSessionStartUnowned, wantReports: 1, wantGets: 1, wantContext: exactSessionLifecycleStatusContextUnavailable,
+		},
+		{
+			name: "named owner reports unavailable without probing",
+			setup: func(env *reconcilerTestEnv) session.Info {
+				bead := env.createSessionBead("worker", "worker")
+				env.setSessionMetadata(&bead, map[string]string{
+					"wake_request":             string(session.WakeCauseExplicit),
+					"configured_named_session": "true",
+				})
+				return env.sessionInfo(bead.ID)
+			},
+			observe: true, wantOwner: exactSessionStartLegacyOwner, wantReports: 1, wantGets: 1, wantContext: exactSessionLifecycleStatusContextUnavailable,
+		},
+		{
+			name: "pool owner reports unavailable without probing",
+			setup: func(env *reconcilerTestEnv) session.Info {
+				bead := env.createSessionBead("worker", "worker")
+				env.setSessionMetadata(&bead, map[string]string{
+					"wake_request": string(session.WakeCauseExplicit),
+					"pool_managed": "true",
+				})
+				return env.sessionInfo(bead.ID)
+			},
+			observe: true, wantOwner: exactSessionStartLegacyOwner, wantReports: 1, wantGets: 1, wantContext: exactSessionLifecycleStatusContextUnavailable,
+		},
+		{
+			name: "dependency-only owner reports unavailable without probing",
+			setup: func(env *reconcilerTestEnv) session.Info {
+				bead := env.createSessionBead("worker", "worker")
+				env.setSessionMetadata(&bead, map[string]string{
+					"wake_request":    string(session.WakeCauseExplicit),
+					"dependency_only": "true",
+				})
+				return env.sessionInfo(bead.ID)
+			},
+			observe: true, wantOwner: exactSessionStartLegacyOwner, wantReports: 1, wantGets: 1, wantContext: exactSessionLifecycleStatusContextUnavailable,
 		},
 		{
 			name: "nil observer keeps legacy owner zero probe",
@@ -451,7 +573,7 @@ func TestReconcileExactSessionStartStatusShadowPreservesOwnerAndEffects(t *testi
 			wantOwner: exactSessionStartLegacyOwner, wantGets: 1,
 		},
 		{
-			name: "closed reports parked without probe",
+			name: "closed reports terminal without probing",
 			setup: func(env *reconcilerTestEnv) session.Info {
 				bead := env.createSessionBead("worker", "worker")
 				if err := env.store.Close(bead.ID); err != nil {
@@ -459,7 +581,7 @@ func TestReconcileExactSessionStartStatusShadowPreservesOwnerAndEffects(t *testi
 				}
 				return env.sessionInfo(bead.ID)
 			},
-			observe: true, wantOwner: exactSessionStartUnowned, wantReports: 1, wantGets: 1,
+			observe: true, wantOwner: exactSessionStartUnowned, wantReports: 1, wantGets: 1, wantContext: exactSessionLifecycleStatusContextUnavailable,
 		},
 		{
 			name: "observer panic preserves legacy owner",
@@ -469,7 +591,7 @@ func TestReconcileExactSessionStartStatusShadowPreservesOwnerAndEffects(t *testi
 				env.setSessionMetadata(&bead, map[string]string{"wake_request": string(session.WakeCauseExplicit)})
 				return env.sessionInfo(bead.ID)
 			},
-			observe: true, observerPanic: true, wantOwner: exactSessionStartLegacyOwner, wantObservations: 1, wantGets: 1,
+			observe: true, observerPanic: true, wantOwner: exactSessionStartLegacyOwner, wantGets: 1, wantContext: exactSessionLifecycleStatusContextUnavailable,
 		},
 	}
 
@@ -515,8 +637,13 @@ func TestReconcileExactSessionStartStatusShadowPreservesOwnerAndEffects(t *testi
 				t.Fatalf("status reports = %d, want %d", len(reports), tt.wantReports)
 			}
 			for _, report := range reports {
-				if report.ComparedToLegacy {
-					t.Fatal("exact shadow report claimed legacy comparison")
+				if report.Context != tt.wantContext {
+					t.Fatalf("status context = %d, want %d", report.Context, tt.wantContext)
+				}
+			}
+			if tt.wantOwner != exactSessionStartKeyedOwner {
+				if calls := env.sp.SnapshotCalls(); len(calls) != 0 {
+					t.Fatalf("non-keyed provider calls = %#v, want none", calls)
 				}
 			}
 		})
@@ -548,16 +675,12 @@ func TestExactSessionStatusShadowOneKeyCostDoesNotGrowWithFleet(t *testing.T) {
 			if err != nil || owner != exactSessionStartLegacyOwner {
 				t.Fatalf("reconcile owner/error = %d/%v, want legacy/nil", owner, err)
 			}
-			if store.gets != 1 || store.lists != 0 || observationCalls != 1 {
-				t.Fatalf("fleet %d exact costs get/list/observation = %d/%d/%d, want 1/0/1", fleetSize, store.gets, store.lists, observationCalls)
+			if store.gets != 1 || store.lists != 0 || observationCalls != 0 {
+				t.Fatalf("fleet %d exact costs get/list/observation = %d/%d/%d, want 1/0/0", fleetSize, store.gets, store.lists, observationCalls)
 			}
 			requireExactStatusStoreUnchanged(t, before, store)
-			for _, call := range env.sp.SnapshotCalls() {
-				switch call.Method {
-				case "IsRunning", "ProcessAlive", "IsAttached", "GetLastActivity":
-				default:
-					t.Fatalf("fleet %d provider call = %#v, want read-only observation whitelist", fleetSize, call)
-				}
+			if calls := env.sp.SnapshotCalls(); len(calls) != 0 {
+				t.Fatalf("fleet %d provider calls = %#v, want none", fleetSize, calls)
 			}
 		})
 	}
@@ -572,13 +695,20 @@ func TestExactSessionStatusObserverOnOffCosts(t *testing.T) {
 		wantOffObs    int
 		wantOnObs     int
 		terminal      bool
+		wantContext   exactSessionLifecycleStatusContext
 	}{
 		{
 			name: "keyed", setup: func(env *reconcilerTestEnv) session.Info {
 				bead := env.createSessionBead("worker", "worker")
-				env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateCreating), "pending_create_claim": "true", "pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339)})
+				env.setSessionMetadata(&bead, map[string]string{
+					"state":                     string(session.StateCreating),
+					"pending_create_claim":      "true",
+					"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+					"instance_token":            "observer-equivalence-token",
+					"session_key":               "observer-equivalence-session-key",
+				})
 				return env.sessionInfo(bead.ID)
-			}, wantOwner: exactSessionStartKeyedOwner, wantOffObs: 1, wantOnObs: 1,
+			}, wantOwner: exactSessionStartKeyedOwner, wantOffObs: 1, wantOnObs: 1, wantContext: exactSessionLifecycleStatusContextDesired,
 		},
 		{
 			name: "legacy", setup: func(env *reconcilerTestEnv) session.Info {
@@ -586,7 +716,7 @@ func TestExactSessionStatusObserverOnOffCosts(t *testing.T) {
 				bead := env.createSessionBead("worker", "worker")
 				env.setSessionMetadata(&bead, map[string]string{"wake_request": string(session.WakeCauseExplicit)})
 				return env.sessionInfo(bead.ID)
-			}, wantOwner: exactSessionStartLegacyOwner, wantExactGets: true, wantOffObs: 0, wantOnObs: 1,
+			}, wantOwner: exactSessionStartLegacyOwner, wantExactGets: true, wantOffObs: 0, wantOnObs: 0, wantContext: exactSessionLifecycleStatusContextUnavailable,
 		},
 		{
 			name: "closed", setup: func(env *reconcilerTestEnv) session.Info {
@@ -595,18 +725,37 @@ func TestExactSessionStatusObserverOnOffCosts(t *testing.T) {
 					t.Fatalf("close: %v", err)
 				}
 				return env.sessionInfo(bead.ID)
-			}, wantOwner: exactSessionStartUnowned, wantExactGets: true, wantOffObs: 0, wantOnObs: 0, terminal: true,
+			}, wantOwner: exactSessionStartUnowned, wantExactGets: true, wantOffObs: 0, wantOnObs: 0, terminal: true, wantContext: exactSessionLifecycleStatusContextUnavailable,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			run := func(enabled bool) (int, int, int, int, exactSessionStartOwner, []exactSessionLifecycleStatusResult) {
+			type runResult struct {
+				gets, lists, observations, starts int
+				extraWrites                       int
+				owner                             exactSessionStartOwner
+				ordinaryCalls                     []beadstest.RecordedCall
+				providerCalls                     []runtime.Call
+				finalState                        session.Info
+				reports                           []exactSessionLifecycleStatusResult
+			}
+			cityPath := t.TempDir()
+			run := func(enabled bool) runResult {
 				env := newReconcilerTestEnv()
 				env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 				info := tt.setup(env)
+				seed, err := env.store.Get(info.ID)
+				if err != nil {
+					t.Fatalf("read seed: %v", err)
+				}
+				seed.CreatedAt = env.clk.Now()
+				seed.UpdatedAt = seed.CreatedAt
+				env.store = beads.NewMemStoreFrom(1, []beads.Bead{seed}, nil)
+				info = env.sessionInfo(info.ID)
 				store := newExactStatusCountingStore(t, env.store)
 				params := exactSessionStartTestParams(t, env)
 				params.Generation, params.Store = 1, store
+				params.CityPath = cityPath
 				observations := 0
 				params.ObserveLoadedSession = func(ctx context.Context, cityPath string, store beads.Store, provider runtime.Provider, cfg *config.City, loaded session.Info, processNames []string) (worker.LiveObservation, error) {
 					observations++
@@ -620,80 +769,169 @@ func TestExactSessionStatusObserverOnOffCosts(t *testing.T) {
 				if err != nil {
 					t.Fatalf("reconcile %s enabled=%t: %v", tt.name, enabled, err)
 				}
-				return store.gets, store.lists, observations, env.sp.CountCalls("Start", "worker"), owner, reports
+				return runResult{
+					gets:          store.gets,
+					lists:         store.lists,
+					observations:  observations,
+					starts:        env.sp.CountCalls("Start", "worker"),
+					extraWrites:   store.extraWrites,
+					owner:         owner,
+					ordinaryCalls: slices.Clone(store.Calls()),
+					providerCalls: slices.Clone(env.sp.SnapshotCalls()),
+					finalState:    env.sessionInfo(info.ID),
+					reports:       reports,
+				}
 			}
-			offGets, offLists, offObs, offStarts, offOwner, _ := run(false)
-			onGets, onLists, onObs, onStarts, onOwner, reports := run(true)
-			equalStoreCost := offGets == onGets && offLists == onLists
-			exactSmallCost := !tt.wantExactGets || (offGets == 1 && onGets == 1 && offLists == 0 && onLists == 0)
-			if offOwner != tt.wantOwner || onOwner != tt.wantOwner || !equalStoreCost || !exactSmallCost || offStarts != onStarts || offObs != tt.wantOffObs || onObs != tt.wantOnObs || len(reports) != 1 {
-				t.Fatalf("on/off costs owner=%d/%d get=%d/%d list=%d/%d obs=%d/%d starts=%d/%d reports=%d", offOwner, onOwner, offGets, onGets, offLists, onLists, offObs, onObs, offStarts, onStarts, len(reports))
+			off := run(false)
+			on := run(true)
+			offToken, onToken := off.finalState.InstanceToken, on.finalState.InstanceToken
+			if offToken == "" || onToken == "" {
+				t.Fatalf("final instance tokens = %q/%q, want both non-empty", offToken, onToken)
 			}
-			if tt.terminal && (reports[0].Plan == nil || reports[0].Plan.Outcome != sessionLifecycleStatusNoop || reports[0].Plan.Reason != sessionLifecycleStatusReasonTerminal) {
-				t.Fatalf("closed observer report = %#v, want terminal noop", reports[0])
+			offTouches := canonicalizeExactStatusRunToken(offToken, off.ordinaryCalls, off.providerCalls, &off.finalState)
+			onTouches := canonicalizeExactStatusRunToken(onToken, on.ordinaryCalls, on.providerCalls, &on.finalState)
+			wantTouches := exactStatusTokenTouches{finalState: 1}
+			if tt.wantOwner == exactSessionStartKeyedOwner {
+				wantTouches.ordinaryCalls = 1
+				wantTouches.runtimeCalls = 2
+			}
+			if offTouches != wantTouches || onTouches != wantTouches {
+				t.Fatalf("canonicalized token fields = %#v/%#v, want %#v", offTouches, onTouches, wantTouches)
+			}
+			exactSmallCost := !tt.wantExactGets || (off.gets == 1 && on.gets == 1 && off.lists == 0 && on.lists == 0)
+			if off.owner != tt.wantOwner || on.owner != tt.wantOwner || off.gets != on.gets || off.lists != on.lists || !exactSmallCost || off.starts != on.starts || off.observations != tt.wantOffObs || on.observations != tt.wantOnObs || len(on.reports) != 1 {
+				t.Fatalf("on/off costs owner=%d/%d get=%d/%d list=%d/%d obs=%d/%d starts=%d/%d reports=%d", off.owner, on.owner, off.gets, on.gets, off.lists, on.lists, off.observations, on.observations, off.starts, on.starts, len(on.reports))
+			}
+			if !reflect.DeepEqual(off.ordinaryCalls, on.ordinaryCalls) || off.extraWrites != on.extraWrites {
+				t.Fatalf("on/off store effects differ: ordinary=%#v/%#v extra=%d/%d", off.ordinaryCalls, on.ordinaryCalls, off.extraWrites, on.extraWrites)
+			}
+			if !reflect.DeepEqual(off.providerCalls, on.providerCalls) {
+				t.Fatalf("on/off runtime effects differ: off=%#v on=%#v", off.providerCalls, on.providerCalls)
+			}
+			if !reflect.DeepEqual(off.finalState, on.finalState) {
+				t.Fatalf("on/off final persisted state differs: off=%#v on=%#v", off.finalState, on.finalState)
+			}
+			if on.reports[0].Context != tt.wantContext {
+				t.Fatalf("observer context = %d, want %d", on.reports[0].Context, tt.wantContext)
+			}
+			if tt.terminal && (on.reports[0].Plan == nil || on.reports[0].Plan.Outcome != sessionLifecycleStatusNoop || on.reports[0].Plan.Reason != sessionLifecycleStatusReasonTerminal) {
+				t.Fatalf("closed observer report = %#v, want terminal noop", on.reports[0])
 			}
 		})
 	}
 }
 
-func TestExactSessionStatusLegacyObservationUsesInheritedProcessHints(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{
-		Workspace: config.Workspace{Name: "test-city", Provider: "test"},
-		Providers: map[string]config.ProviderSpec{
-			"test": {Command: "true", ProcessNames: []string{"inherited-agent"}},
-		},
-		Agents: []config.Agent{{Name: "worker", DependsOn: []string{"dependency"}}},
-	}
-	bead := env.createSessionBead("worker", "worker")
-	env.setSessionMetadata(&bead, map[string]string{"wake_request": string(session.WakeCauseExplicit), "state": string(session.StateAwake), "session_key": "resume"})
-	var gotHints []string
-	var gotObservation worker.LiveObservation
-	observe := func(_ context.Context, _ string, _ beads.Store, _ runtime.Provider, _ *config.City, _ session.Info, processNames []string) (worker.LiveObservation, error) {
-		gotHints = append([]string(nil), processNames...)
-		gotObservation = worker.LiveObservation{Running: true, Alive: len(processNames) > 0}
-		return gotObservation, nil
-	}
-	var reports []exactSessionLifecycleStatusResult
-	params := exactSessionStartTestParams(t, env)
-	params.Generation = 1
-	params.ObserveLoadedSession = observe
-	params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) { reports = append(reports, result) }))
-	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionExplicitWake, Version: 1}, params)
-	if err != nil || owner != exactSessionStartLegacyOwner || !reflect.DeepEqual(gotHints, []string{"inherited-agent"}) || !gotObservation.Alive || len(reports) != 1 {
-		t.Fatalf("owner/error/hints/observation/reports = %d/%v/%v/%#v/%#v, want legacy/nil/inherited/alive/one", owner, err, gotHints, gotObservation, reports)
-	}
+type exactStatusTokenTouches struct {
+	ordinaryCalls int
+	runtimeCalls  int
+	finalState    int
 }
 
-func TestExactSessionStatusLegacyObservationPreservesNilProcessHints(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "worker", DependsOn: []string{"dependency"}}},
+func canonicalizeExactStatusRunToken(
+	token string,
+	ordinaryCalls []beadstest.RecordedCall,
+	runtimeCalls []runtime.Call,
+	finalState *session.Info,
+) exactStatusTokenTouches {
+	const sentinel = "<exact-status-instance-token>"
+	var touches exactStatusTokenTouches
+	for i := range ordinaryCalls {
+		call := &ordinaryCalls[i]
+		call.Metadata = maps.Clone(call.Metadata)
+		touches.ordinaryCalls += canonicalizeExactStatusTokenMap(call.Metadata, token, sentinel)
 	}
-	bead := env.createSessionBead("worker", "worker")
-	env.setSessionMetadata(&bead, map[string]string{"wake_request": string(session.WakeCauseExplicit)})
-	observationCalls := 0
-	params := exactSessionStartTestParams(t, env)
-	params.Generation = 1
-	params.ObserveLoadedSession = func(_ context.Context, _ string, _ beads.Store, _ runtime.Provider, _ *config.City, _ session.Info, processNames []string) (worker.LiveObservation, error) {
-		observationCalls++
-		if processNames != nil {
-			t.Fatalf("process hints = %#v, want nil", processNames)
+	for i := range runtimeCalls {
+		call := &runtimeCalls[i]
+		call.Config.Env = maps.Clone(call.Config.Env)
+		touches.runtimeCalls += canonicalizeExactStatusTokenMap(call.Config.Env, token, sentinel)
+	}
+	if finalState != nil && finalState.InstanceToken == token {
+		finalState.InstanceToken = sentinel
+		touches.finalState++
+	}
+	return touches
+}
+
+func canonicalizeExactStatusTokenMap[M ~map[string]string](values M, token, sentinel string) int {
+	touches := 0
+	for key, value := range values {
+		if value == token {
+			values[key] = sentinel
+			touches++
 		}
-		return worker.LiveObservation{}, nil
 	}
-	var reports []exactSessionLifecycleStatusResult
-	params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
-		reports = append(reports, result)
-	}))
-	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
-		SessionID: bead.ID,
-		Source:    sessionStartAdmissionExplicitWake,
-		Version:   1,
-	}, params)
-	if err != nil || owner != exactSessionStartLegacyOwner || observationCalls != 1 || len(reports) != 1 {
-		t.Fatalf("owner/error/observations/reports = %d/%v/%d/%#v, want legacy/nil/1/one", owner, err, observationCalls, reports)
+	return touches
+}
+
+func TestExactSessionStatusDesiredObservationUsesResolvedProcessHints(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       *config.City
+		wantHints []string
+		wantNil   bool
+	}{
+		{
+			name: "explicit",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true", ProcessNames: []string{"explicit-agent"}}},
+			},
+			wantHints: []string{"explicit-agent"},
+		},
+		{
+			name: "inherited",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city", Provider: "test"},
+				Providers: map[string]config.ProviderSpec{
+					"test": {Command: "true", ProcessNames: []string{"inherited-agent"}},
+				},
+				Agents: []config.Agent{{Name: "worker"}},
+			},
+			wantHints: []string{"inherited-agent"},
+		},
+		{
+			name: "nil",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+			},
+			wantNil: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = tt.cfg
+			bead := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&bead, map[string]string{"wake_request": string(session.WakeCauseExplicit), "state": string(session.StateAwake), "session_key": "resume"})
+			var gotHints []string
+			gotHintsNil := false
+			observationCalls := 0
+			params := exactSessionStartTestParams(t, env)
+			params.Generation = 1
+			params.ObserveLoadedSession = func(_ context.Context, _ string, _ beads.Store, _ runtime.Provider, _ *config.City, _ session.Info, processNames []string) (worker.LiveObservation, error) {
+				observationCalls++
+				gotHintsNil = processNames == nil
+				if processNames == nil {
+					gotHints = nil
+				} else {
+					gotHints = append([]string{}, processNames...)
+				}
+				return worker.LiveObservation{Running: true, Alive: true}, nil
+			}
+			var reports []exactSessionLifecycleStatusResult
+			params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				reports = append(reports, result)
+			}))
+			owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+				SessionID: bead.ID,
+				Source:    sessionStartAdmissionExplicitWake,
+				Version:   1,
+			}, params)
+			if err != nil || owner != exactSessionStartKeyedOwner || observationCalls != 1 || gotHintsNil != tt.wantNil || !reflect.DeepEqual(gotHints, tt.wantHints) || len(reports) != 1 || reports[0].Context != exactSessionLifecycleStatusContextDesired {
+				t.Fatalf("owner/error/observations/hints-nil/hints/reports = %d/%v/%d/%t/%#v/%#v, want keyed/nil/1/%t/%#v/one desired", owner, err, observationCalls, gotHintsNil, gotHints, reports, tt.wantNil, tt.wantHints)
+			}
+		})
 	}
 }
 

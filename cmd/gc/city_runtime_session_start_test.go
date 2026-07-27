@@ -153,7 +153,7 @@ func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.
 	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatal("exact status observer did not receive the seeded reconciliation result")
 	}
-	if exactStatus.ControllerGeneration != 1 || exactStatus.AdmissionVersion == 0 || exactStatus.ComparedToLegacy {
+	if exactStatus.ControllerGeneration != 1 || exactStatus.AdmissionVersion == 0 || exactStatus.Context != exactSessionLifecycleStatusContextDesired {
 		t.Fatalf("exact status composition result = %#v, want one generation-1 shadow-only result", exactStatus)
 	}
 

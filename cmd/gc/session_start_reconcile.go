@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -237,11 +236,21 @@ func reconcileExactSessionStartWithOwner(
 	ownershipNow := clk.Now().UTC()
 	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, ownershipNow)
 	if owner != exactSessionStartKeyedOwner {
-		if startOpts.exactStatusObserver != nil {
-			statusResult = exactSessionLifecycleStatusForLoadedSession(
-				ctx, admission, params, observeLoadedSession, info, cfgAgent, clk,
-			)
+		reason := exactSessionLifecycleStatusReasonNotObserved
+		if owner == exactSessionStartLegacyOwner {
+			template := resolvedSessionTemplateInfo(info, params.Config)
+			if template == "" || findAgentByTemplate(params.Config, template) == nil {
+				reason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
+			}
 		}
+		retainStatus(exactSessionLifecycleStatusInput{
+			Admission:            admission,
+			ControllerGeneration: params.Generation,
+			RequestedID:          admission.SessionID,
+			Info:                 info,
+			Context:              exactSessionLifecycleStatusContextUnavailable,
+			UnavailableReason:    reason,
+		})
 		return owner, nil
 	}
 
@@ -281,6 +290,7 @@ func reconcileExactSessionStartWithOwner(
 		Admission:            admission,
 		ControllerGeneration: params.Generation,
 		RequestedID:          admission.SessionID,
+		Context:              exactSessionLifecycleStatusContextDesired,
 		Info:                 info,
 		Observation:          observation,
 		ObservedAt:           statusObservedAt,
@@ -363,50 +373,6 @@ func reconcileExactSessionStartWithOwner(
 		return owner, fmt.Errorf("reconciling exact session start %q: start result did not commit", info.ID)
 	}
 	return owner, nil
-}
-
-// exactSessionLifecycleStatusForLoadedSession performs the optional
-// legacy/unowned read-only observation and returns detached evidence. Failures
-// remain observational so the legacy owner keeps its original result.
-func exactSessionLifecycleStatusForLoadedSession(
-	ctx context.Context,
-	admission sessionStartAdmission,
-	params exactSessionStartParams,
-	observeLoadedSession exactLoadedSessionObserver,
-	info sessionpkg.Info,
-	cfgAgent *config.Agent,
-	clk clock.Clock,
-) *exactSessionLifecycleStatusResult {
-	input := exactSessionLifecycleStatusInput{
-		Admission:            admission,
-		ControllerGeneration: params.Generation,
-		RequestedID:          admission.SessionID,
-		Info:                 info,
-		StartupTimeout:       params.Config.Session.StartupTimeoutDuration(),
-	}
-	template := resolvedSessionTemplateInfo(info, params.Config)
-	if cfgAgent == nil {
-		cfgAgent = findAgentByTemplate(params.Config, template)
-	}
-	if cfgAgent == nil || template == "" {
-		input.UnavailableReason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
-		result := evaluateExactSessionLifecycleStatus(input)
-		return &result
-	}
-	observation, err := observeLoadedSession(
-		ctx, params.CityPath, params.Store, params.Provider, params.Config, info, config.AgentProcessNames(params.Config, *cfgAgent, exec.LookPath),
-	)
-	if err != nil {
-		input.UnavailableReason = exactSessionLifecycleStatusReasonObservationUnavailable
-		input.Error = err.Error()
-		result := evaluateExactSessionLifecycleStatus(input)
-		return &result
-	}
-	input.Observation = observation
-	input.ObservedAt = clk.Now().UTC()
-	input.PrerequisitesReady = true
-	result := evaluateExactSessionLifecycleStatus(input)
-	return &result
 }
 
 // resolveExactSessionStartOwnership projects the durable start family once and

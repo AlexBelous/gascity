@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -14,22 +15,35 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
+type exactLoadedSessionObserver func(
+	context.Context,
+	string,
+	beads.Store,
+	runtime.Provider,
+	*config.City,
+	sessionpkg.Info,
+	[]string,
+) (worker.LiveObservation, error)
+
 // exactSessionStartParams is one coherent runtime generation for exact-key
-// start reconciliation. Callers must capture Config, Provider, and Store
-// together before invoking reconcileExactSessionStart.
+// start reconciliation. Callers must capture Generation, Config, Provider,
+// and Store together before invoking reconcileExactSessionStart.
 type exactSessionStartParams struct {
-	CityPath     string
-	CityName     string
-	Config       *config.City
-	Provider     runtime.Provider
-	Store        beads.Store
-	Clock        clock.Clock
-	Recorder     events.Recorder
-	Stdout       io.Writer
-	Stderr       io.Writer
-	StartOptions []startExecutionOption
+	Generation           uint64
+	CityPath             string
+	CityName             string
+	Config               *config.City
+	Provider             runtime.Provider
+	Store                beads.Store
+	Clock                clock.Clock
+	Recorder             events.Recorder
+	Stdout               io.Writer
+	Stderr               io.Writer
+	ObserveLoadedSession exactLoadedSessionObserver
+	StartOptions         []startExecutionOption
 }
 
 type exactSessionStartOwner uint8
@@ -145,55 +159,141 @@ func reconcileExactSessionStartWithOwner(
 	if recorder == nil {
 		recorder = events.Discard
 	}
+	startOpts := startExecutionOptions{}
+	for _, apply := range params.StartOptions {
+		if apply != nil {
+			apply(&startOpts)
+		}
+	}
+	observeLoadedSession := params.ObserveLoadedSession
+	if observeLoadedSession == nil {
+		observeLoadedSession = workerObserveLoadedSessionWithRuntimeHintsWithConfig
+	}
+	var statusResult *exactSessionLifecycleStatusResult
+	retainStatus := func(input exactSessionLifecycleStatusInput) {
+		if startOpts.exactStatusObserver == nil {
+			return
+		}
+		result := evaluateExactSessionLifecycleStatus(input)
+		statusResult = &result
+	}
+	defer func() {
+		if statusResult != nil {
+			reportExactSessionLifecycleStatus(stderr, startOpts.exactStatusObserver, *statusResult)
+		}
+	}()
 
 	info, err := getAuthoritativeSessionStartInfo(params.Store, admission.SessionID)
 	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound) {
+		if errors.Is(err, beads.ErrIDCollision) {
+			retainStatus(exactSessionLifecycleStatusInput{
+				Admission:            admission,
+				ControllerGeneration: params.Generation,
+				RequestedID:          admission.SessionID,
+				Info:                 sessionpkg.Info{ID: admission.SessionID},
+				UnavailableReason:    exactSessionLifecycleStatusReasonInvalidInput,
+				Error:                err.Error(),
+			})
+			return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: authoritative ID collision: %w", admission.SessionID, err)
+		}
+		if errors.Is(err, beads.ErrNotFound) {
+			return exactSessionStartUnowned, nil
+		}
+		if errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			retainStatus(exactSessionLifecycleStatusInput{
+				Admission:            admission,
+				ControllerGeneration: params.Generation,
+				RequestedID:          admission.SessionID,
+				Info:                 sessionpkg.Info{ID: admission.SessionID},
+				UnavailableReason:    exactSessionLifecycleStatusReasonInvalidInput,
+				Error:                err.Error(),
+			})
 			return exactSessionStartUnowned, nil
 		}
 		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: %w", admission.SessionID, err)
 	}
+	if info.ID != admission.SessionID {
+		mismatchErr := fmt.Errorf("authoritative read returned %q", info.ID)
+		retainStatus(exactSessionLifecycleStatusInput{
+			Admission:            admission,
+			ControllerGeneration: params.Generation,
+			RequestedID:          admission.SessionID,
+			Info:                 info,
+			UnavailableReason:    exactSessionLifecycleStatusReasonInvalidInput,
+			Error:                mismatchErr.Error(),
+		})
+		return exactSessionStartUnowned, fmt.Errorf("reconciling exact session start %q: %w", admission.SessionID, mismatchErr)
+	}
 	if info.Closed {
+		retainStatus(exactSessionLifecycleStatusInput{
+			Admission:            admission,
+			ControllerGeneration: params.Generation,
+			RequestedID:          admission.SessionID,
+			Info:                 info,
+		})
 		return exactSessionStartUnowned, nil
 	}
 
-	now := clk.Now().UTC()
-	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, now)
+	ownershipNow := clk.Now().UTC()
+	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, ownershipNow)
 	if owner != exactSessionStartKeyedOwner {
+		if startOpts.exactStatusObserver != nil {
+			statusResult = exactSessionLifecycleStatusForLoadedSession(
+				ctx, admission, params, observeLoadedSession, info, cfgAgent, clk,
+			)
+		}
 		return owner, nil
 	}
 
 	template := resolvedSessionTemplateInfo(info, params.Config)
 	if template == "" {
-		return owner, fmt.Errorf("reconciling exact session start %q: persisted template is empty", info.ID)
+		templateErr := fmt.Errorf("persisted template is empty")
+		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: templateErr.Error()})
+		return owner, fmt.Errorf("reconciling exact session start %q: %w", info.ID, templateErr)
 	}
 	if cfgAgent == nil {
+		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable})
 		return owner, nil
 	}
 	if isAgentEffectivelySuspendedWith(params.Config, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
+		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonNotObserved})
 		return owner, nil
 	}
 	if lifecycle.HasBlocker(sessionpkg.BlockerHeld) || lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) {
+		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonNotObserved})
 		return owner, nil
 	}
 
 	tp, err := resolveExactSessionStartTemplate(params, info, cfgAgent, clk, stderr)
 	if err != nil {
+		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: err.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
 	}
-	observation, err := workerObserveLoadedSessionWithRuntimeHintsWithConfig(
+	observation, err := observeLoadedSession(
 		ctx, params.CityPath, params.Store, params.Provider, params.Config, info, tp.Hints.ProcessNames,
 	)
 	if err != nil {
+		retainStatus(exactSessionLifecycleStatusInput{Admission: admission, ControllerGeneration: params.Generation, RequestedID: admission.SessionID, Info: info, UnavailableReason: exactSessionLifecycleStatusReasonObservationUnavailable, Error: err.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: observing runtime: %w", info.ID, err)
 	}
+	statusObservedAt := clk.Now().UTC()
+	retainStatus(exactSessionLifecycleStatusInput{
+		Admission:            admission,
+		ControllerGeneration: params.Generation,
+		RequestedID:          admission.SessionID,
+		Info:                 info,
+		Observation:          observation,
+		ObservedAt:           statusObservedAt,
+		StartupTimeout:       params.Config.Session.StartupTimeoutDuration(),
+		PrerequisitesReady:   true,
+	})
 
 	startupTimeout := params.Config.Session.StartupTimeoutDuration()
 	circuitOpen := strings.TrimSpace(info.SessionCircuitState) == sessionpkg.SessionCircuitStateOpen
 	if cbCfg, enabled := sessionCircuitBreakerConfigFromCity(params.Config); enabled {
 		cb := defaultSessionCircuitBreaker()
 		cb.configure(cbCfg)
-		if identity := namedSessionIdentityInfo(info); identity != "" && cb.IsOpen(identity, now) {
+		if identity := namedSessionIdentityInfo(info); identity != "" && cb.IsOpen(identity, ownershipNow) {
 			circuitOpen = true
 		}
 	}
@@ -208,7 +308,7 @@ func reconcileExactSessionStartWithOwner(
 		ShouldWake:           true,
 		RuntimeObserved:      true,
 		RuntimeAlive:         runtimeObservationLive(observation),
-		ObservedAt:           now,
+		ObservedAt:           ownershipNow,
 		StartupTimeout:       startupTimeout,
 		CircuitOpen:          circuitOpen,
 		ProviderUnavailable:  providerUnavailable,
@@ -217,12 +317,6 @@ func reconcileExactSessionStartWithOwner(
 		return owner, nil
 	}
 
-	startOpts := startExecutionOptions{}
-	for _, apply := range params.StartOptions {
-		if apply != nil {
-			apply(&startOpts)
-		}
-	}
 	prepared, err := prepareExactStartCandidateForCity(
 		startCandidate{info: info, tp: tp},
 		params.CityPath,
@@ -269,6 +363,50 @@ func reconcileExactSessionStartWithOwner(
 		return owner, fmt.Errorf("reconciling exact session start %q: start result did not commit", info.ID)
 	}
 	return owner, nil
+}
+
+// exactSessionLifecycleStatusForLoadedSession performs the optional
+// legacy/unowned read-only observation and returns detached evidence. Failures
+// remain observational so the legacy owner keeps its original result.
+func exactSessionLifecycleStatusForLoadedSession(
+	ctx context.Context,
+	admission sessionStartAdmission,
+	params exactSessionStartParams,
+	observeLoadedSession exactLoadedSessionObserver,
+	info sessionpkg.Info,
+	cfgAgent *config.Agent,
+	clk clock.Clock,
+) *exactSessionLifecycleStatusResult {
+	input := exactSessionLifecycleStatusInput{
+		Admission:            admission,
+		ControllerGeneration: params.Generation,
+		RequestedID:          admission.SessionID,
+		Info:                 info,
+		StartupTimeout:       params.Config.Session.StartupTimeoutDuration(),
+	}
+	template := resolvedSessionTemplateInfo(info, params.Config)
+	if cfgAgent == nil {
+		cfgAgent = findAgentByTemplate(params.Config, template)
+	}
+	if cfgAgent == nil || template == "" {
+		input.UnavailableReason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
+		result := evaluateExactSessionLifecycleStatus(input)
+		return &result
+	}
+	observation, err := observeLoadedSession(
+		ctx, params.CityPath, params.Store, params.Provider, params.Config, info, config.AgentProcessNames(params.Config, *cfgAgent, exec.LookPath),
+	)
+	if err != nil {
+		input.UnavailableReason = exactSessionLifecycleStatusReasonObservationUnavailable
+		input.Error = err.Error()
+		result := evaluateExactSessionLifecycleStatus(input)
+		return &result
+	}
+	input.Observation = observation
+	input.ObservedAt = clk.Now().UTC()
+	input.PrerequisitesReady = true
+	result := evaluateExactSessionLifecycleStatus(input)
+	return &result
 }
 
 // resolveExactSessionStartOwnership projects the durable start family once and

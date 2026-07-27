@@ -111,6 +111,7 @@ func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.
 		t.Fatalf("request explicit wake: %v", err)
 	}
 	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto)
+	exactStatusCh := make(chan exactSessionLifecycleStatusResult, 1)
 	cr := &CityRuntime{
 		cityPath: t.TempDir(),
 		cityName: "test-city",
@@ -123,6 +124,9 @@ func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.
 		sessionStartOptions: []startExecutionOption{
 			withStartStabilityWaiter(immediateStartStabilityWaiter),
 			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+			withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				exactStatusCh <- result
+			}),
 		},
 	}
 	t.Cleanup(cr.stopSessionStartController)
@@ -143,8 +147,22 @@ func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.
 	if cr.sessionStartLegacyExclusionOption() == nil {
 		t.Fatal("keyed controller did not install legacy exclusion")
 	}
+	var exactStatus exactSessionLifecycleStatusResult
+	select {
+	case exactStatus = <-exactStatusCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("exact status observer did not receive the seeded reconciliation result")
+	}
+	if exactStatus.ControllerGeneration != 1 || exactStatus.AdmissionVersion == 0 || exactStatus.ComparedToLegacy {
+		t.Fatalf("exact status composition result = %#v, want one generation-1 shadow-only result", exactStatus)
+	}
 
 	cr.stopSessionStartController()
+	select {
+	case extra := <-exactStatusCh:
+		t.Fatalf("exact status observer received an extra result: %#v", extra)
+	default:
+	}
 	if cr.sessionStartOwnershipState() != sessionStartOwnershipLegacy {
 		t.Fatalf("ownership after stop = %v, want legacy for auto mode", cr.sessionStartOwnershipState())
 	}

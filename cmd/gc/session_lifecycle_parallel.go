@@ -304,6 +304,7 @@ type startExecutionOptions struct {
 	stabilityWaiter                startStabilityWaiter
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
 	statusComparisonObserver       sessionLifecycleStatusComparisonObserver
+	exactStatusObserver            exactSessionLifecycleStatusObserver
 	startSelectionObserver         sessionLifecycleStartSelectionComparisonObserver
 	startSelectionShadowObserver   func(sessionLifecycleStartShadowObservation)
 	legacyStartExcluded            func(sessionpkg.Info) bool
@@ -392,6 +393,12 @@ func withSessionStaleKeyDetectionWaiter(waiter sessionpkg.StaleKeyDetectionWaite
 func withSessionLifecycleStatusComparisonObserver(observer sessionLifecycleStatusComparisonObserver) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.statusComparisonObserver = observer
+	}
+}
+
+func withExactSessionLifecycleStatusObserver(observer exactSessionLifecycleStatusObserver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.exactStatusObserver = observer
 	}
 }
 

@@ -96,6 +96,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			}
 			defer release()
 			owner, reconcileErr := reconcileExactSessionStartWithOwner(reconcileCtx, admission, exactSessionStartParams{
+				Generation:   snapshot.Generation,
 				CityPath:     snapshot.CityPath,
 				CityName:     snapshot.CityName,
 				Config:       snapshot.Config,

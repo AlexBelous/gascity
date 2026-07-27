@@ -22,6 +22,32 @@ type rawDBGetter interface {
 	DB() *sql.DB
 }
 
+// nativeDoltMaxIdleTime bounds how long an idle pooled connection lingers before
+// the client proactively closes it. It sits well below a conservative floor for
+// the managed Dolt server's wait_timeout, so a scoped store that outlives its
+// work reaps its own socket rather than leaving the server to garbage-collect an
+// abandoned session at its own (longer) timeout — the socket accumulation the
+// managed-Dolt connection cure removes.
+const nativeDoltMaxIdleTime = 30 * time.Second
+
+// boundNativeDoltPool caps a scoped store's database/sql pool to a single open
+// and single idle connection with a bounded idle lifetime, so a per-command /
+// CLI-owned store holds at most one managed-Dolt connection and releases it
+// within nativeDoltMaxIdleTime even if the caller forgets CloseStore. It is
+// applied only to scoped/CLI stores (WithBoundedConnections): the long-lived
+// controller pool is intentionally NOT bounded here — it is the single shared
+// owner of the SQL pools and needs real concurrency, protected instead by the
+// claim-admission ceiling. Nil-safe: a backend that exposes no *sql.DB is a
+// quiet no-op.
+func boundNativeDoltPool(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxIdleTime(nativeDoltMaxIdleTime)
+}
+
 // idDefaultRepairTables lists the char(36) id columns whose DEFAULT (uuid())
 // some Dolt versions silently strip from the expression default that beads
 // migrations add via PREPARE/EXECUTE. Without the default, beadslib INSERTs
@@ -332,6 +358,33 @@ type NativeDoltStoreOption func(*NativeDoltStore)
 // fresh storage handle. See NativeDoltStore.reopen.
 func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
 	return func(s *NativeDoltStore) { s.reopen = reopen }
+}
+
+// WithBoundedConnections caps the store's underlying database/sql pool to a
+// single open and idle connection with a bounded idle lifetime (see
+// boundNativeDoltPool). Apply it to scoped/CLI-owned stores so a per-command
+// store cannot accumulate managed-Dolt sockets; do NOT apply it to the
+// controller's long-lived shared pool. On a backend that exposes no *sql.DB it
+// is a quiet no-op. A caller that also arms WithNativeReopen must bound the
+// reopened handle itself (BoundStorageConnections), since a reconnect swaps in a
+// fresh pool this open-time option cannot reach.
+func WithBoundedConnections() NativeDoltStoreOption {
+	return func(s *NativeDoltStore) {
+		if accessor, ok := s.storage.(rawDBGetter); ok {
+			boundNativeDoltPool(accessor.DB())
+		}
+	}
+}
+
+// BoundStorageConnections applies the scoped-store pool bound to a freshly
+// opened storage handle (e.g. the result of a WithNativeReopen reconnect) and
+// returns it, so a reconnected scoped store keeps its single-connection bound.
+// It is a quiet pass-through for a backend that exposes no *sql.DB.
+func BoundStorageConnections(storage NativeStorage) NativeStorage {
+	if accessor, ok := storage.(rawDBGetter); ok {
+		boundNativeDoltPool(accessor.DB())
+	}
+	return storage
 }
 
 var (

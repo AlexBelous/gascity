@@ -1423,9 +1423,22 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 				if rerr != nil {
 					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, rerr)
 				}
-				return beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
+				storage, oerr := beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
+				if oerr != nil {
+					return nil, oerr
+				}
+				// A reconnect swaps in a fresh pool the open-time WithBoundedConnections
+				// cannot reach; bound this scoped handle too so the single-connection
+				// posture survives a managed-Dolt rebind (managed-Dolt connection cure).
+				return beads.BoundStorageConnections(storage), nil
 			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, beads.WithNativeReopen(reopen))
+			// This is a scoped/CLI-owned native store (per gc command), not the
+			// controller's shared pool: cap it to one managed-Dolt connection so a
+			// fleet of concurrent gc commands cannot accumulate sockets on the shared
+			// server (managed-Dolt connection cure). CloseStore remains the immediate
+			// release; the bound is the leak backstop.
+			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env,
+				beads.WithNativeReopen(reopen), beads.WithBoundedConnections())
 		},
 	})
 	if err != nil {

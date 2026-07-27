@@ -32,6 +32,10 @@ type BeadListInput struct {
 type BeadReadyInput struct {
 	CityScope
 	BlockingParam
+	// Rig scopes the ready read to a single backing store — a rig name or the
+	// city name. Empty federates every store (the default). The hook fast path
+	// sets it to reproduce the legacy per-store work-query precedence.
+	Rig string `query:"rig" required:"false" doc:"Scope ready work to a single store (rig name or city name); empty federates all stores."`
 }
 
 // BeadGraphInput is the Huma input for GET /v0/city/{cityName}/beads/graph/{rootID}.

@@ -363,6 +363,12 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}
 
 	stores := s.state.BeadStores()
+	cityName := s.state.CityName()
+	// A scoped read federates only the one named store (a rig name or the city
+	// name), reproducing the legacy per-store work-query precedence for the hook
+	// fast path (invariant 2). An unknown scope federates nothing and returns an
+	// empty ready set, matching the legacy shell query against a missing store.
+	scopeRig := strings.TrimSpace(input.Rig)
 	rigNames := sortedRigNames(stores)
 	var all []beads.Bead
 	var pa partialAggregator
@@ -396,13 +402,18 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// beads) lives in the city store, so federate it explicitly first or HTTP
 	// `bd ready` would never surface it. In production BeadStores() also returns
 	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
-	// duplicate key in the rig loop below to avoid querying it twice.
-	federate("city", s.state.CityBeadStore())
-	cityName := s.state.CityName()
+	// duplicate key in the rig loop below to avoid querying it twice. A scoped
+	// read restricts this to the single named store.
+	if scopeRig == "" || scopeRig == cityName {
+		federate("city", s.state.CityBeadStore())
+	}
 	for _, rigName := range rigNames {
 		if rigName == cityName {
 			continue // city store already federated explicitly above; production
 			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
+		}
+		if scopeRig != "" && scopeRig != rigName {
+			continue // scoped read: only the named rig store
 		}
 		federate("rig "+rigName, stores[rigName])
 	}

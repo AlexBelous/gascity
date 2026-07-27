@@ -483,7 +483,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			if client, _ := maintenanceAPIClient(cityPath); client != nil {
 				identities := []string{sessionID, sessionName, alias}
 				origin := strings.TrimSpace(overrides["GC_SESSION_ORIGIN"])
-				if code, handled := claimHookWorkFastPath(client, identities, claimOpts.RouteTargets, origin, workDir, claimOpts, stdout, stderr); handled {
+				// Reproduce the legacy firstStoreWithWork STORE-outermost order so
+				// the controller-read fast path preserves cross-store precedence
+				// (invariant 2): rig-scoped agents read own-rig first then city,
+				// city-scoped agents read city then rigs in config order.
+				scopes := hookFastPathScopeOrder(cfg, &a, agentForQuery, cityName)
+				if code, handled := claimHookWorkFastPath(client, identities, claimOpts.RouteTargets, origin, scopes, workDir, claimOpts, stdout, stderr); handled {
 					return code
 				}
 				// handled=false means claimHookWorkFastPath already logged

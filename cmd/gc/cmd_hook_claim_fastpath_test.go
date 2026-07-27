@@ -7,17 +7,42 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // fakeFastPathReader is a controller-read stub honoring the same status/assignee
 // filter the real ListBeads pushes down, so the tier reproduction is exercised
 // against realistic responses without a live server.
+//
+// The flat inProgress/ready slices are the federated (empty-scope) response used
+// by the single-store tier tests. readyByScope/inProgressByScope, when set, make
+// the fake scope-aware: a read for scope S returns that scope's slice, which is
+// how the STORE-outermost precedence tests exercise cross-store ordering. A
+// scope with no map entry returns nothing (an empty store), matching the
+// server's behavior for an unknown or work-less store.
 type fakeFastPathReader struct {
-	inProgress []beads.Bead
-	ready      []beads.Bead
-	readyCalls int
-	listErr    error
-	readyErr   error
+	inProgress        []beads.Bead
+	ready             []beads.Bead
+	readyByScope      map[string][]beads.Bead
+	inProgressByScope map[string][]beads.Bead
+	readyCalls        int
+	readyScopes       []string
+	listErr           error
+	readyErr          error
+}
+
+func (f *fakeFastPathReader) inProgressFor(scope string) []beads.Bead {
+	if f.inProgressByScope != nil {
+		return f.inProgressByScope[scope]
+	}
+	return f.inProgress
+}
+
+func (f *fakeFastPathReader) readyFor(scope string) []beads.Bead {
+	if f.readyByScope != nil {
+		return f.readyByScope[scope]
+	}
+	return f.ready
 }
 
 func (f *fakeFastPathReader) ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[]beads.Bead], error) {
@@ -25,7 +50,7 @@ func (f *fakeFastPathReader) ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[
 		return api.CachedRead[[]beads.Bead]{}, f.listErr
 	}
 	var out []beads.Bead
-	for _, b := range f.inProgress {
+	for _, b := range f.inProgressFor(opts.Rig) {
 		if opts.Status != "" && b.Status != opts.Status {
 			continue
 		}
@@ -40,12 +65,13 @@ func (f *fakeFastPathReader) ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[
 	return api.CachedRead[[]beads.Bead]{Body: out}, nil
 }
 
-func (f *fakeFastPathReader) BeadsReady() (api.CachedRead[[]beads.Bead], error) {
+func (f *fakeFastPathReader) BeadsReady(scope string) (api.CachedRead[[]beads.Bead], error) {
 	f.readyCalls++
+	f.readyScopes = append(f.readyScopes, scope)
 	if f.readyErr != nil {
 		return api.CachedRead[[]beads.Bead]{}, f.readyErr
 	}
-	return api.CachedRead[[]beads.Bead]{Body: f.ready}, nil
+	return api.CachedRead[[]beads.Bead]{Body: f.readyFor(scope)}, nil
 }
 
 func routed(id, target string) beads.Bead {
@@ -60,7 +86,7 @@ func TestFastPathTier1AssignedInProgress(t *testing.T) {
 		inProgress: []beads.Bead{{ID: "gc-crash", Status: "in_progress", Assignee: "sess-name"}},
 		ready:      []beads.Bead{{ID: "gc-ready", Assignee: "sess-name"}},
 	}
-	got, err := fastPathClaimCandidates(r, []string{"", "sess-name", "alias-x"}, []string{"pool-x"}, "ephemeral")
+	got, err := fastPathClaimCandidates(r, []string{"", "sess-name", "alias-x"}, []string{"pool-x"}, "ephemeral", nil)
 	if err != nil {
 		t.Fatalf("fastPathClaimCandidates: %v", err)
 	}
@@ -81,7 +107,7 @@ func TestFastPathTier2AssignedReady(t *testing.T) {
 			{ID: "gc-mine", Assignee: "alias-x"},
 		},
 	}
-	got, err := fastPathClaimCandidates(r, []string{"sess-id", "sess-name", "alias-x"}, []string{"pool-x"}, "")
+	got, err := fastPathClaimCandidates(r, []string{"sess-id", "sess-name", "alias-x"}, []string{"pool-x"}, "", nil)
 	if err != nil {
 		t.Fatalf("fastPathClaimCandidates: %v", err)
 	}
@@ -101,7 +127,7 @@ func TestFastPathTier3RoutedPool(t *testing.T) {
 	match := routed("gc-pool", "pool-x")
 
 	r := &fakeFastPathReader{ready: []beads.Bead{epic, assigned, wrongPool, match}}
-	got, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "ephemeral")
+	got, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "ephemeral", nil)
 	if err != nil {
 		t.Fatalf("fastPathClaimCandidates: %v", err)
 	}
@@ -115,7 +141,7 @@ func TestFastPathTier3RoutedPool(t *testing.T) {
 // user-origin session never claims routed pool demand.
 func TestFastPathTier3OriginGated(t *testing.T) {
 	r := &fakeFastPathReader{ready: []beads.Bead{routed("gc-pool", "pool-x")}}
-	got, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "user")
+	got, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "user", nil)
 	if err != nil {
 		t.Fatalf("fastPathClaimCandidates: %v", err)
 	}
@@ -129,8 +155,146 @@ func TestFastPathTier3OriginGated(t *testing.T) {
 func TestFastPathReadErrorPropagates(t *testing.T) {
 	sentinel := errors.New("boom")
 	r := &fakeFastPathReader{readyErr: sentinel}
-	_, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "ephemeral")
+	_, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "ephemeral", nil)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want the sentinel read error propagated", err)
+	}
+}
+
+// TestFastPathScopeOrderRigOwnRigBeatsCityAssigned is the invariant-2 regression
+// oracle: a rig-scoped agent's own-rig routed pool work (tier 3 in the rig store)
+// must outrank an assigned-ready bead sitting in the city store (tier 2). The
+// legacy firstStoreWithWork is STORE-outermost — it runs the whole three-tier
+// query against the rig store first and short-circuits on any hit — so the rig's
+// tier 3 wins over the city's tier 2. A single federated read (tier-outermost)
+// would invert this and hand the agent city work ahead of its own rig work.
+func TestFastPathScopeOrderRigOwnRigBeatsCityAssigned(t *testing.T) {
+	r := &fakeFastPathReader{
+		readyByScope: map[string][]beads.Bead{
+			"frontend": {routed("gc-rig-pool", "frontend/polecat")},
+			"citytown": {{ID: "gc-city-assigned", Assignee: "frontend/polecat"}},
+		},
+	}
+	// Rig-scoped agent order: own rig first, then city.
+	scopes := []string{"frontend", "citytown"}
+	got, err := fastPathClaimCandidates(r, []string{"frontend/polecat"}, []string{"frontend/polecat"}, "ephemeral", scopes)
+	if err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-rig-pool" {
+		t.Fatalf("got %+v, want [gc-rig-pool]: own-rig routed work must beat city assigned work", got)
+	}
+	// The city store must never be read once the rig store yields work.
+	if len(r.readyScopes) != 1 || r.readyScopes[0] != "frontend" {
+		t.Errorf("ready reads = %v, want exactly [frontend] (city short-circuited)", r.readyScopes)
+	}
+}
+
+// TestFastPathScopeOrderCityFirstThenRigs proves a city-scoped (cross-store)
+// agent reads its city store first: a city-store assigned-ready bead outranks
+// routed pool work waiting in a rig store, mirroring the legacy own-store-first
+// federation order for city agents.
+func TestFastPathScopeOrderCityFirstThenRigs(t *testing.T) {
+	r := &fakeFastPathReader{
+		readyByScope: map[string][]beads.Bead{
+			"citytown": {{ID: "gc-city-mine", Assignee: "mayor"}},
+			"frontend": {routed("gc-rig-pool", "mayor")},
+		},
+	}
+	scopes := []string{"citytown", "frontend", "backend"}
+	got, err := fastPathClaimCandidates(r, []string{"mayor"}, []string{"mayor"}, "ephemeral", scopes)
+	if err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-city-mine" {
+		t.Fatalf("got %+v, want [gc-city-mine]: city store is read first for a city-scoped agent", got)
+	}
+}
+
+// TestFastPathScopeOrderConfigOrderAcrossRigs proves that when only rig stores
+// hold work, the FIRST rig in config order wins — the config-order precedence
+// the checkpoint requires preserved. The city store is empty, backend and
+// frontend both hold matching routed work, and scopes lists frontend before
+// backend, so frontend's bead is selected.
+func TestFastPathScopeOrderConfigOrderAcrossRigs(t *testing.T) {
+	r := &fakeFastPathReader{
+		readyByScope: map[string][]beads.Bead{
+			"frontend": {routed("gc-frontend-pool", "mayor")},
+			"backend":  {routed("gc-backend-pool", "mayor")},
+		},
+	}
+	scopes := []string{"citytown", "frontend", "backend"}
+	got, err := fastPathClaimCandidates(r, []string{"mayor"}, []string{"mayor"}, "ephemeral", scopes)
+	if err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-frontend-pool" {
+		t.Fatalf("got %+v, want [gc-frontend-pool]: first rig in config order wins", got)
+	}
+}
+
+// TestFastPathScopeOrderDedupesRepeatedScope proves a scope list carrying the
+// same store twice (the rig-scoped hookStore list holds the rig store as both
+// the primary and the agent's own rig-coordinate env) reads that store once.
+func TestFastPathScopeOrderDedupesRepeatedScope(t *testing.T) {
+	r := &fakeFastPathReader{
+		readyByScope: map[string][]beads.Bead{
+			"frontend": {routed("gc-rig-pool", "frontend/polecat")},
+		},
+	}
+	scopes := []string{"frontend", "frontend", "citytown"}
+	got, err := fastPathClaimCandidates(r, []string{"frontend/polecat"}, []string{"frontend/polecat"}, "ephemeral", scopes)
+	if err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-rig-pool" {
+		t.Fatalf("got %+v, want [gc-rig-pool]", got)
+	}
+	if len(r.readyScopes) != 1 || r.readyScopes[0] != "frontend" {
+		t.Errorf("ready reads = %v, want exactly [frontend] (duplicate scope collapsed)", r.readyScopes)
+	}
+}
+
+// TestHookFastPathScopeOrder pins the store scope order for each agent shape
+// against the legacy hookStore construction in cmd_hook.go.
+func TestHookFastPathScopeOrder(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "frontend"}, {Name: "backend"}}}
+	tests := []struct {
+		name     string
+		agent    *config.Agent
+		identity string
+		want     []string
+	}{
+		{
+			name:     "city-scoped: city first then rigs in config order",
+			agent:    &config.Agent{Scope: "city"},
+			identity: "mayor",
+			want:     []string{"citytown", "frontend", "backend"},
+		},
+		{
+			name:     "rig-scoped: own rig first then city",
+			agent:    &config.Agent{},
+			identity: "frontend/polecat",
+			want:     []string{"frontend", "citytown"},
+		},
+		{
+			name:     "plain agent: city store only",
+			agent:    &config.Agent{},
+			identity: "solo",
+			want:     []string{"citytown"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hookFastPathScopeOrder(cfg, tc.agent, tc.identity, "citytown")
+			if len(got) != len(tc.want) {
+				t.Fatalf("scope order = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("scope order = %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }

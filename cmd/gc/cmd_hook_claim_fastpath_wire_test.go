@@ -74,7 +74,7 @@ func TestClaimHookWorkFastPathFallsBackOnConnError(t *testing.T) {
 	client := api.NewCityScopedClient(url, "alpha")
 	var stdout, stderr bytes.Buffer
 	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"pool-x"}}
-	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", "/wt", opts, &stdout, &stderr)
+	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
 	if handled {
 		t.Fatal("handled = true on conn error, want false (fall back to shell)")
 	}
@@ -95,7 +95,7 @@ func TestClaimHookWorkFastPathFailsFastOnServerVerdict(t *testing.T) {
 	client := api.NewCityScopedClient(ts.URL, "alpha")
 	var stdout, stderr bytes.Buffer
 	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"pool-x"}}
-	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", "/wt", opts, &stdout, &stderr)
+	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
 	if !handled {
 		t.Fatal("handled = false on a server verdict, want true (fail fast, do not shell out)")
 	}
@@ -122,7 +122,7 @@ func TestClaimHookWorkFastPathClaimsRoutedBead(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"pool-x"}}
-	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", "/wt", opts, &stdout, &stderr)
+	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
 	if !handled {
 		t.Fatal("handled = false, want true")
 	}

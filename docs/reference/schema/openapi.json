@@ -26511,6 +26511,16 @@
               "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
               "type": "string"
             }
+          },
+          {
+            "description": "Scope ready work to a single store (rig name or city name); empty federates all stores.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Scope ready work to a single store (rig name or city name); empty federates all stores.",
+              "type": "string"
+            }
           }
         ],
         "responses": {

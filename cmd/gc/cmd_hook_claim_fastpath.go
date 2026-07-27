@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout"
 )
 
@@ -57,9 +58,9 @@ func hookFastPathEligible(flags rollout.Flags, workQuery, resolvedAgentName, pri
 //     ONLY fallback trigger (invariant 4). A non-connection controller error is a
 //     definite verdict: it is logged and returned as a terminal failure, never
 //     shelled out (which would multiply the connection pressure the cure removes).
-func claimHookWorkFastPath(client fastPathClient, identities, routeTargets []string, sessionOrigin, workDir string, claimOpts hookClaimOptions, stdout, stderr io.Writer) (int, bool) {
+func claimHookWorkFastPath(client fastPathClient, identities, routeTargets []string, sessionOrigin string, scopes []string, workDir string, claimOpts hookClaimOptions, stdout, stderr io.Writer) (int, bool) {
 	const cmdName = "hook --claim"
-	candidates, err := fastPathClaimCandidates(client, identities, routeTargets, sessionOrigin)
+	candidates, err := fastPathClaimCandidates(client, identities, routeTargets, sessionOrigin, scopes)
 	if err != nil {
 		if api.IsConnError(err) {
 			logRoute(stderr, cmdName, "fallback", "controller-unreachable")
@@ -152,9 +153,14 @@ func apiFastPathStampWorkMeta(client fastPathClaimer) hookStampWorkMetaFunc {
 // to reproduce the generated default work_query's three tiers over the running
 // controller instead of per-hook bd subprocesses. *api.Client satisfies it;
 // tests inject a fake.
+//
+// Both reads accept a store scope: a rig name or the city name selects a single
+// backing store, and an empty scope federates every store. Scope is how the fast
+// path reproduces the legacy firstStoreWithWork STORE-outermost precedence
+// (invariant 2) — see fastPathClaimCandidates.
 type fastPathReader interface {
 	ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[]beads.Bead], error)
-	BeadsReady() (api.CachedRead[[]beads.Bead], error)
+	BeadsReady(scope string) (api.CachedRead[[]beads.Bead], error)
 }
 
 // The production controller client is the fast-path reader; pin it so a client
@@ -179,10 +185,22 @@ func poolDemandOriginEligible(sessionOrigin string) bool {
 // tryHookClaim selection/adoption/route logic consumes it unchanged and a worker
 // hook never opens its own SQL connection to discover work.
 //
-// It mirrors the shell query's SHORT-CIRCUIT emit (workquery.go
+// It mirrors the legacy firstStoreWithWork STORE-outermost precedence
+// (cmd_hook.go): the generated query runs against each backing store IN ORDER
+// and the FIRST store with ready work wins — its three-tier result is returned
+// and later stores are never consulted. scopes is that store order (a rig name
+// or the city name per entry; see hookFastPathScopeOrder), which is what
+// preserves invariant 2 for BOTH agent shapes:
+//
+//   - a city-scoped (cross-store) agent reads its city store first, then each
+//     rig store in config order;
+//   - a rig-scoped agent reads its OWN rig store first, then the city store —
+//     so its own-rig routed pool work outranks city-store assigned work, which a
+//     single federated read (tier-outermost) would invert.
+//
+// Within each scope the three tiers keep their order (workquery.go
 // standardAssignedWorkQueryScript + the pool-demand probe): the first non-empty
-// tier wins, in this order, which is what preserves invariant 2 (the generated
-// query's tier/identity ordering):
+// tier wins:
 //
 //  1. assigned in_progress (crash recovery), per identity in the given order
 //     (session id > session name > alias), first hit — one bead;
@@ -200,7 +218,47 @@ func poolDemandOriginEligible(sessionOrigin string) bool {
 // Scope: this reproduces the STANDARD generated default query only. The caller
 // must not route legacy control-dispatcher targets or a custom work_query here —
 // those keep the subprocess path (see the fast-path gate at the call site).
-func fastPathClaimCandidates(r fastPathReader, identities, routeTargets []string, sessionOrigin string) ([]beads.Bead, error) {
+func fastPathClaimCandidates(r fastPathReader, identities, routeTargets []string, sessionOrigin string, scopes []string) ([]beads.Bead, error) {
+	for _, scope := range dedupeFastPathScopes(scopes) {
+		cands, err := fastPathScopeCandidates(r, scope, identities, routeTargets, sessionOrigin)
+		if err != nil {
+			return nil, err
+		}
+		if len(cands) > 0 {
+			return cands, nil
+		}
+	}
+	return nil, nil
+}
+
+// dedupeFastPathScopes normalizes the scope order, dropping duplicate entries
+// while preserving first-seen order (a rig-scoped agent's own store can appear
+// twice in the legacy hookStore list — as the rig primary and again as the
+// agent's own rig-coordinate env). An empty/absent scope list collapses to a
+// single federated pass ("") so a caller that cannot resolve store order still
+// reads every store, matching the pre-scope behavior.
+func dedupeFastPathScopes(scopes []string) []string {
+	if len(scopes) == 0 {
+		return []string{""}
+	}
+	seen := make(map[string]bool, len(scopes))
+	out := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		s = strings.TrimSpace(s)
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// fastPathScopeCandidates runs the three-tier reproduction against a SINGLE
+// store scope and returns the first non-empty tier's candidates, mirroring one
+// iteration of the legacy firstStoreWithWork loop. An empty scope reads every
+// store (federated), the pre-scope behavior.
+func fastPathScopeCandidates(r fastPathReader, scope string, identities, routeTargets []string, sessionOrigin string) ([]beads.Bead, error) {
 	// Tier 1: assigned in_progress, per identity, first hit. A dedicated bounded
 	// ListBeads per identity mirrors the shell's `bd list --status in_progress
 	// --assignee=$id --limit=1` and short-circuits before the ready read.
@@ -209,7 +267,7 @@ func fastPathClaimCandidates(r fastPathReader, identities, routeTargets []string
 		if id == "" {
 			continue
 		}
-		cr, err := r.ListBeads(api.ListBeadsOpts{Status: "in_progress", Assignee: id, Limit: 1})
+		cr, err := r.ListBeads(api.ListBeadsOpts{Status: "in_progress", Assignee: id, Rig: scope, Limit: 1})
 		if err != nil {
 			return nil, err
 		}
@@ -218,9 +276,9 @@ func fastPathClaimCandidates(r fastPathReader, identities, routeTargets []string
 		}
 	}
 
-	// Tiers 2 and 3 share a single federated ready read (the controller-side
-	// equivalent of `bd ready` across the city and every rig store).
-	ready, err := r.BeadsReady()
+	// Tiers 2 and 3 share a single ready read scoped to this store (the
+	// controller-side equivalent of `bd ready` against one store).
+	ready, err := r.BeadsReady(scope)
 	if err != nil {
 		return nil, err
 	}
@@ -256,4 +314,28 @@ func fastPathClaimCandidates(r fastPathReader, identities, routeTargets []string
 		}
 	}
 	return pool, nil
+}
+
+// hookFastPathScopeOrder returns the store scopes the fast path must read IN
+// ORDER to reproduce the legacy firstStoreWithWork precedence (cmd_hook.go's
+// `stores` construction). A city-scoped (cross-store) agent reads its city store
+// first, then every rig store in config declaration order; a rig-scoped agent
+// reads its own rig store first, then the city store. Any other agent reads only
+// the city store. cityName is the scope key the controller's BeadStores() uses
+// for the city store (api_state.go), matching the rig key for a rig store.
+func hookFastPathScopeOrder(cfg *config.City, a *config.Agent, agentIdentity, cityName string) []string {
+	cityName = strings.TrimSpace(cityName)
+	if agentIsCrossStoreEligible(a) {
+		scopes := []string{cityName}
+		if cfg != nil {
+			for i := range cfg.Rigs {
+				scopes = append(scopes, strings.TrimSpace(cfg.Rigs[i].Name))
+			}
+		}
+		return scopes
+	}
+	if rig := rigScopedHookRig(cfg, agentIdentity); rig != "" {
+		return []string{rig, cityName}
+	}
+	return []string{cityName}
 }

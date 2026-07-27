@@ -10469,6 +10469,10 @@ export type GetV0CityByCityNameBeadsReadyData = {
          * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
          */
         wait?: string;
+        /**
+         * Scope ready work to a single store (rig name or city name); empty federates all stores.
+         */
+        rig?: string;
     };
     url: '/v0/city/{cityName}/beads/ready';
 };

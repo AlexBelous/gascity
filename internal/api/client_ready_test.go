@@ -10,9 +10,10 @@ import (
 // TestClientBeadsReadySuccess proves the wrapper reads the per-city ready route
 // and maps the list body into []beads.Bead.
 func TestClientBeadsReadySuccess(t *testing.T) {
-	var gotPath string
+	var gotPath, gotRig string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotRig = r.URL.Query().Get("rig")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"items": []map[string]any{
@@ -25,12 +26,15 @@ func TestClientBeadsReadySuccess(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.BeadsReady()
+	got, err := c.BeadsReady("")
 	if err != nil {
 		t.Fatalf("BeadsReady: %v", err)
 	}
 	if gotPath != "/v0/city/alpha/beads/ready" {
 		t.Errorf("path = %q, want /v0/city/alpha/beads/ready", gotPath)
+	}
+	if gotRig != "" {
+		t.Errorf("rig query = %q, want empty for a federated read", gotRig)
 	}
 	if len(got.Body) != 2 {
 		t.Fatalf("got %d ready beads, want 2", len(got.Body))
@@ -51,11 +55,31 @@ func TestClientBeadsReadyConnErrorIsFallbackable(t *testing.T) {
 	ts.Close()
 
 	c := NewCityScopedClient(url, "alpha")
-	_, err := c.BeadsReady()
+	_, err := c.BeadsReady("")
 	if err == nil {
 		t.Fatal("BeadsReady err = nil on a dead server, want a transport error")
 	}
 	if !IsConnError(err) {
 		t.Fatalf("IsConnError = false for %v (%T), want true", err, err)
+	}
+}
+
+// TestClientBeadsReadyScopePassesRigParam proves a non-empty scope is sent as
+// the ?rig= query param so the controller federates only that one store.
+func TestClientBeadsReadyScopePassesRigParam(t *testing.T) {
+	var gotRig string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRig = r.URL.Query().Get("rig")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	if _, err := c.BeadsReady("frontend"); err != nil {
+		t.Fatalf("BeadsReady: %v", err)
+	}
+	if gotRig != "frontend" {
+		t.Errorf("rig query = %q, want frontend", gotRig)
 	}
 }

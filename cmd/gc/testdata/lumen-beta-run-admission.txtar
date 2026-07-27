@@ -1,0 +1,230 @@
+# A city must explicitly opt into the beta formula runtime before gc touches a
+# Lumen source, input, or durable runtime state.
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+! exec gc --city $WORK/omitted run $WORK/missing.lumen --input '{'
+stderr 'Lumen beta runtime is disabled'
+! stderr 'compiled IR'
+! stderr 'parsing --input'
+! exists omitted/.gc/lumen
+
+! exec gc --city $WORK/false run $WORK/missing.lumen --input '{'
+stderr 'Lumen beta runtime is disabled'
+! stderr 'compiled IR'
+! stderr 'parsing --input'
+! exists false/.gc/lumen
+
+# The opt-in does not replace or narrow the existing formula runtimes. Both
+# legacy v1 and graph v2 formulas still materialize with the flag omitted.
+exec gc --city $WORK/omitted formula cook legacy-v1
+stdout 'Created: 2'
+exec gc --city $WORK/omitted formula cook graph-v2
+stdout 'Created: 3'
+
+# An opted-in city runs compiled Lumen IR through its controller and keeps the
+# journal in the dedicated Lumen scope.
+exec gc start --controller $WORK/enabled &controller&
+exec sh wait-controller.sh $WORK/enabled
+
+# Opting in adds Lumen; it leaves the v1 and v2 paths intact.
+exec gc --city $WORK/enabled formula cook legacy-v1
+stdout 'Created: 2'
+exec gc --city $WORK/enabled formula cook graph-v2
+stdout 'Created: 3'
+
+exec gc --city $WORK/enabled run $WORK/hello.lumen
+stdout 'lumen run: hello'
+stdout 'greet.*\[exec\].*succeeded'
+stdout 'result: .*"outcome":"succeeded"'
+stdout 'outcome: succeeded'
+
+# Direct compiled-IR admission follows the same path and accepts JSON input.
+exec gc --city $WORK/enabled run $WORK/hello.lumen.json --input '{}'
+stdout 'lumen run: hello'
+stdout 'outcome: succeeded'
+
+exists enabled/.gc/lumen/journal.sqlite
+! exists enabled/.gc/store/graph/beads.sqlite
+exec gc stop $WORK/enabled
+wait controller
+
+-- omitted/.gc/.keep --
+-- omitted/city.toml --
+[workspace]
+name = "omitted"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+-- omitted/formulas/legacy-v1.toml --
+formula = "legacy-v1"
+
+[[steps]]
+id = "work"
+title = "Legacy work"
+description = "Exercise the formula v1 materializer."
+
+-- omitted/formulas/graph-v2.toml --
+formula = "graph-v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "work"
+title = "Graph work"
+description = "Exercise the formula v2 materializer."
+
+-- false/.gc/.keep --
+-- false/city.toml --
+[workspace]
+name = "false"
+
+[beads]
+provider = "file"
+
+[daemon]
+lumen_beta = false
+
+-- enabled/.gc/.keep --
+-- enabled/city.toml --
+[workspace]
+name = "enabled"
+
+[beads]
+provider = "file"
+
+[daemon]
+lumen_beta = true
+patrol_interval = "5s"
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+-- enabled/formulas/legacy-v1.toml --
+formula = "legacy-v1"
+
+[[steps]]
+id = "work"
+title = "Legacy work"
+description = "Exercise the formula v1 materializer."
+
+-- enabled/formulas/graph-v2.toml --
+formula = "graph-v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "work"
+title = "Graph work"
+description = "Exercise the formula v2 materializer."
+
+-- hello.lumen --
+exec greet {
+  echo "hello"
+}
+
+-- hello.lumen.json --
+{
+  "contract": {
+    "name": "lumen.ir",
+    "version": "0.2.5",
+    "producer": "test"
+  },
+  "name": "hello",
+  "input": {
+    "name": "hello.input",
+    "fields": [],
+    "origin": {
+      "uri": "hello.lumen",
+      "line": 0,
+      "col": 0
+    }
+  },
+  "nodes": [
+    {
+      "kind": "exec",
+      "id": "greet",
+      "name": "greet",
+      "after": [],
+      "origin": {
+        "uri": "hello.lumen",
+        "line": 1,
+        "col": 0
+      },
+      "interpreter": {
+        "kind": "shell",
+        "program": {
+          "kind": "exec"
+        },
+        "origin": {
+          "uri": "hello.lumen",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "body": {
+        "raw": "echo \"hello\"",
+        "template": {
+          "parts": [
+            {
+              "kind": "text",
+              "value": "echo \"hello\""
+            }
+          ]
+        },
+        "source": {
+          "kind": "inline"
+        },
+        "templated": true,
+        "language": "bash",
+        "syntax": "bare",
+        "origin": {
+          "uri": "hello.lumen",
+          "line": 1,
+          "col": 0
+        }
+      },
+      "exitMap": {
+        "pass": [0],
+        "retryable": []
+      }
+    }
+  ],
+  "origin": {
+    "uri": "hello.lumen",
+    "line": 0,
+    "col": 0
+  }
+}
+
+-- wait-controller.sh --
+city="$1"
+canonical="$(cd "$city" && pwd -P)"
+hash="$(printf '%s' "$canonical" | sha256sum | cut -d' ' -f1 | cut -c1-32)"
+legacy="$city/.gc/controller.sock"
+fallback="/tmp/gascity-controller/$hash.sock"
+
+for i in 1 2 3 4 5 6 7 8 9 10 \
+  11 12 13 14 15 16 17 18 19 20 \
+  21 22 23 24 25 26 27 28 29 30 \
+  31 32 33 34 35 36 37 38 39 40 \
+  41 42 43 44 45 46 47 48 49 50
+do
+  if [ -S "$legacy" ] || [ -S "$fallback" ]; then
+    exit 0
+  fi
+  sleep 0.1
+done
+
+echo "controller socket not found" >&2
+exit 1

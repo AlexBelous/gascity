@@ -70,6 +70,7 @@ gc [flags]
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
 | [gc rig](#gc-rig) | Manage rigs (projects) |
+| [gc run](#gc-run) | Run a formula through the beta Lumen runtime |
 | [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
@@ -3481,6 +3482,19 @@ gc rig suspend [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc run
+
+Run a formula through the beta Lumen runtime
+
+```
+gc run <formula.lumen|formula.lumen.json> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--input` | string |  | formula input as a JSON object |
+| `--route` | string |  | default agent route for unbound do steps |
 
 ## gc runtime
 

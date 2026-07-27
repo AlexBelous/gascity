@@ -393,6 +393,42 @@ func TestStoreRefusesSparsePersistedJournal(t *testing.T) {
 	}
 }
 
+func TestStoreReadRejectsCorruptionBeforeReusedCursor(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "journal.db"), Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	cleanupStore(t, store)
+	stream, err := NewStreamAddress("formula/run-reused-cursor-corrupt")
+	if err != nil {
+		t.Fatalf("NewStreamAddress: %v", err)
+	}
+	if _, err := store.Create(ctx, stream, mustRecord(t, 1, "kernel.command", `{}`)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	lease, err := store.AcquireLease(ctx, stream, "writer-a", time.Minute)
+	if err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	if _, err := store.Append(ctx, stream, CursorAt(1), lease, []Record{
+		mustRecord(t, 2, "kernel.observation", `{}`),
+		mustRecord(t, 3, "kernel.terminal", `{}`),
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DROP TRIGGER journal_no_delete`); err != nil {
+		t.Fatalf("DROP delete trigger: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM journal WHERE stream = ? AND sequence = 2`, stream.value); err != nil {
+		t.Fatalf("delete committed row: %v", err)
+	}
+
+	if _, err := store.Read(ctx, stream, CursorAt(3)); !errors.Is(err, ErrCorruptJournal) {
+		t.Fatalf("Read empty suffix after corrupted prefix error = %v, want ErrCorruptJournal", err)
+	}
+}
+
 func TestStoreRefusesSparseAndInvalidBatchesWithoutWriting(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "journal.db"), Options{})

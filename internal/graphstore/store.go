@@ -301,11 +301,14 @@ func insertRecord(ctx context.Context, tx *sql.Tx, stream StreamAddress, record 
 }
 
 func streamHead(ctx context.Context, tx *sql.Tx, stream StreamAddress) (uint64, error) {
-	var head uint64
+	var head, count uint64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(sequence), 0) FROM journal WHERE stream = ?`, stream.value,
-	).Scan(&head); err != nil {
+		`SELECT COALESCE(MAX(sequence), 0), COUNT(*) FROM journal WHERE stream = ?`, stream.value,
+	).Scan(&head, &count); err != nil {
 		return 0, fmt.Errorf("graphstore: read head %q: %w", stream.value, err)
+	}
+	if count != head {
+		return 0, fmt.Errorf("graphstore: stream %q: %w", stream.value, ErrCorruptJournal)
 	}
 	return head, nil
 }

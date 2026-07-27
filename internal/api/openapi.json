@@ -2219,6 +2219,7 @@
               "urn:gascity:error:patch-not-found",
               "urn:gascity:error:provider-not-found",
               "urn:gascity:error:rig-not-found",
+              "urn:gascity:error:run-detail-unavailable",
               "urn:gascity:error:run-not-found",
               "urn:gascity:error:scope-not-found",
               "urn:gascity:error:service-not-found",
@@ -2266,6 +2267,7 @@
               "urn:gascity:error:patch-not-found",
               "urn:gascity:error:provider-not-found",
               "urn:gascity:error:rig-not-found",
+              "urn:gascity:error:run-detail-unavailable",
               "urn:gascity:error:run-not-found",
               "urn:gascity:error:scope-not-found",
               "urn:gascity:error:service-not-found",
@@ -6717,6 +6719,471 @@
           "run_id",
           "status",
           "closed"
+        ],
+        "type": "object"
+      },
+      "RunDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "city": {
+            "description": "Concrete city that owns this run.",
+            "type": "string"
+          },
+          "edges": {
+            "description": "Directed execution relationships.",
+            "items": {
+              "$ref": "#/components/schemas/RunDetailEdge"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "formula": {
+            "$ref": "#/components/schemas/RunDetailFormula",
+            "description": "Formula identity and version."
+          },
+          "nodes": {
+            "description": "Semantic execution nodes.",
+            "items": {
+              "$ref": "#/components/schemas/RunDetailNode"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "root_bead_id": {
+            "description": "Authoritative run-root bead identifier.",
+            "type": "string"
+          },
+          "root_store_ref": {
+            "description": "Recorded authoritative root-store reference.",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "Canonical run identifier.",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/RunDetailScope",
+            "description": "Concrete run scope."
+          },
+          "source": {
+            "$ref": "#/components/schemas/RunDetailSource",
+            "description": "Topology provenance and completeness."
+          },
+          "status": {
+            "description": "Run-root lifecycle.",
+            "enum": [
+              "pending",
+              "ready",
+              "active",
+              "blocked",
+              "completed",
+              "failed",
+              "skipped",
+              "canceled",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "description": "Run title.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "root_bead_id",
+          "city",
+          "scope",
+          "title",
+          "status",
+          "formula",
+          "source",
+          "nodes",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "RunDetailControlBadge": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Backing control bead identifier.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Typed control construct.",
+            "enum": [
+              "scope-check",
+              "run-finalize",
+              "spec",
+              "control",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "label": {
+            "description": "Human-readable control label.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Control lifecycle.",
+            "enum": [
+              "pending",
+              "ready",
+              "active",
+              "blocked",
+              "completed",
+              "failed",
+              "skipped",
+              "canceled",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "label",
+          "status"
+        ],
+        "type": "object"
+      },
+      "RunDetailEdge": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "description": "Source semantic node identifier.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Typed relationship kind.",
+            "enum": [
+              "parent",
+              "blocks",
+              "waits-for",
+              "conditional-blocks",
+              "dependency",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "source_kind": {
+            "description": "Producer's original relationship kind.",
+            "type": "string"
+          },
+          "to": {
+            "description": "Target semantic node identifier.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "kind",
+          "source_kind"
+        ],
+        "type": "object"
+      },
+      "RunDetailExecution": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "description": "One-based attempt number, when tracked.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "description": "Backing bead identifier.",
+            "type": "string"
+          },
+          "current_iteration": {
+            "description": "Whether this execution belongs to the current iteration.",
+            "type": "boolean"
+          },
+          "dynamic": {
+            "description": "Whether runtime fragment expansion created this execution.",
+            "type": "boolean"
+          },
+          "historical": {
+            "description": "Whether this is retained historical execution.",
+            "type": "boolean"
+          },
+          "iteration": {
+            "description": "One-based loop iteration, when tracked.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "physical_id": {
+            "description": "Stable physical execution identifier.",
+            "type": "string"
+          },
+          "semantic_id": {
+            "description": "Semantic formula-step identifier.",
+            "type": "string"
+          },
+          "session": {
+            "$ref": "#/components/schemas/RunDetailSession",
+            "description": "Grounded session evidence."
+          },
+          "status": {
+            "description": "Execution lifecycle.",
+            "enum": [
+              "pending",
+              "ready",
+              "active",
+              "blocked",
+              "completed",
+              "failed",
+              "skipped",
+              "canceled",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "physical_id",
+          "bead_id",
+          "semantic_id",
+          "status",
+          "session",
+          "current_iteration",
+          "historical",
+          "dynamic"
+        ],
+        "type": "object"
+      },
+      "RunDetailFormula": {
+        "additionalProperties": false,
+        "properties": {
+          "contract": {
+            "description": "Formula execution contract.",
+            "type": "string"
+          },
+          "hash": {
+            "description": "Recorded formula content hash, when available.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Formula name, when recorded.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Recorded formula source, when available.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract"
+        ],
+        "type": "object"
+      },
+      "RunDetailNode": {
+        "additionalProperties": false,
+        "properties": {
+          "construct_kind": {
+            "description": "Typed formula/control construct.",
+            "enum": [
+              "run-root",
+              "step",
+              "retry",
+              "check-loop",
+              "scope",
+              "condition",
+              "fanout",
+              "expansion",
+              "control",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "control_badges": {
+            "description": "Hidden controls attached to this node.",
+            "items": {
+              "$ref": "#/components/schemas/RunDetailControlBadge"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "dynamic": {
+            "description": "Whether any physical execution was runtime-expanded.",
+            "type": "boolean"
+          },
+          "execution_kind": {
+            "description": "Producer-recorded execution kind.",
+            "type": "string"
+          },
+          "executions": {
+            "description": "Physical executions grouped under this semantic node.",
+            "items": {
+              "$ref": "#/components/schemas/RunDetailExecution"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "historical": {
+            "description": "Whether only historical executions remain.",
+            "type": "boolean"
+          },
+          "scope_ref": {
+            "description": "Node-specific scope reference, when present.",
+            "type": "string"
+          },
+          "semantic_id": {
+            "description": "Stable semantic formula-step identifier.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Aggregated node lifecycle.",
+            "enum": [
+              "pending",
+              "ready",
+              "active",
+              "blocked",
+              "completed",
+              "failed",
+              "skipped",
+              "canceled",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "description": "Node title.",
+            "type": "string"
+          },
+          "visible": {
+            "description": "Whether this semantic node belongs in the execution graph.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "semantic_id",
+          "title",
+          "status",
+          "execution_kind",
+          "construct_kind",
+          "visible",
+          "historical",
+          "dynamic",
+          "executions",
+          "control_badges"
+        ],
+        "type": "object"
+      },
+      "RunDetailScope": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "Scope kind.",
+            "enum": [
+              "city",
+              "rig"
+            ],
+            "type": "string"
+          },
+          "ref": {
+            "description": "Concrete scope reference.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "ref"
+        ],
+        "type": "object"
+      },
+      "RunDetailSession": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "description": "Recorded assignee, when available.",
+            "type": "string"
+          },
+          "availability": {
+            "description": "Session evidence availability.",
+            "enum": [
+              "attached",
+              "not_started",
+              "unresolved",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "description": "Durable session identifier, when attached.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Session display name, when attached.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "availability"
+        ],
+        "type": "object"
+      },
+      "RunDetailSource": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "description": "Whether the authoritative graph read succeeded.",
+            "type": "boolean"
+          },
+          "event_sequence": {
+            "description": "Latest city event sequence observed at response time; not a store snapshot token.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "description": "Authoritative producer.",
+            "enum": [
+              "gascity_bead_graph"
+            ],
+            "type": "string"
+          },
+          "partial": {
+            "description": "Whether the producer reported missing graph data.",
+            "type": "boolean"
+          },
+          "projection_version": {
+            "description": "Run detail projection schema version.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reasons": {
+            "description": "Explicit partial or truncation reasons.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "truncated": {
+            "description": "Whether graph data was capped.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "available",
+          "projection_version",
+          "partial",
+          "truncated",
+          "reasons"
         ],
         "type": "object"
       },
@@ -40171,6 +40638,123 @@
           }
         },
         "summary": "Post v0 city by city name runs by run ID cancel"
+      }
+    },
+    "/v0/city/{cityName}/runs/{run_id}/detail": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-runs-by-run-id-detail",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Run identifier.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "description": "Run identifier.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest city event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name runs by run ID detail"
       }
     },
     "/v0/city/{cityName}/runs/{run_id}/steps": {

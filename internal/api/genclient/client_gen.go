@@ -150,6 +150,318 @@ func (e RigCreateResponseBodyStatus) Valid() bool {
 	}
 }
 
+// Defines values for RunDetailStatus.
+const (
+	RunDetailStatusActive    RunDetailStatus = "active"
+	RunDetailStatusBlocked   RunDetailStatus = "blocked"
+	RunDetailStatusCanceled  RunDetailStatus = "canceled"
+	RunDetailStatusCompleted RunDetailStatus = "completed"
+	RunDetailStatusFailed    RunDetailStatus = "failed"
+	RunDetailStatusPending   RunDetailStatus = "pending"
+	RunDetailStatusReady     RunDetailStatus = "ready"
+	RunDetailStatusSkipped   RunDetailStatus = "skipped"
+	RunDetailStatusUnknown   RunDetailStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailStatus enum.
+func (e RunDetailStatus) Valid() bool {
+	switch e {
+	case RunDetailStatusActive:
+		return true
+	case RunDetailStatusBlocked:
+		return true
+	case RunDetailStatusCanceled:
+		return true
+	case RunDetailStatusCompleted:
+		return true
+	case RunDetailStatusFailed:
+		return true
+	case RunDetailStatusPending:
+		return true
+	case RunDetailStatusReady:
+		return true
+	case RunDetailStatusSkipped:
+		return true
+	case RunDetailStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailControlBadgeKind.
+const (
+	RunDetailControlBadgeKindControl     RunDetailControlBadgeKind = "control"
+	RunDetailControlBadgeKindRunFinalize RunDetailControlBadgeKind = "run-finalize"
+	RunDetailControlBadgeKindScopeCheck  RunDetailControlBadgeKind = "scope-check"
+	RunDetailControlBadgeKindSpec        RunDetailControlBadgeKind = "spec"
+	RunDetailControlBadgeKindUnknown     RunDetailControlBadgeKind = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailControlBadgeKind enum.
+func (e RunDetailControlBadgeKind) Valid() bool {
+	switch e {
+	case RunDetailControlBadgeKindControl:
+		return true
+	case RunDetailControlBadgeKindRunFinalize:
+		return true
+	case RunDetailControlBadgeKindScopeCheck:
+		return true
+	case RunDetailControlBadgeKindSpec:
+		return true
+	case RunDetailControlBadgeKindUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailControlBadgeStatus.
+const (
+	RunDetailControlBadgeStatusActive    RunDetailControlBadgeStatus = "active"
+	RunDetailControlBadgeStatusBlocked   RunDetailControlBadgeStatus = "blocked"
+	RunDetailControlBadgeStatusCanceled  RunDetailControlBadgeStatus = "canceled"
+	RunDetailControlBadgeStatusCompleted RunDetailControlBadgeStatus = "completed"
+	RunDetailControlBadgeStatusFailed    RunDetailControlBadgeStatus = "failed"
+	RunDetailControlBadgeStatusPending   RunDetailControlBadgeStatus = "pending"
+	RunDetailControlBadgeStatusReady     RunDetailControlBadgeStatus = "ready"
+	RunDetailControlBadgeStatusSkipped   RunDetailControlBadgeStatus = "skipped"
+	RunDetailControlBadgeStatusUnknown   RunDetailControlBadgeStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailControlBadgeStatus enum.
+func (e RunDetailControlBadgeStatus) Valid() bool {
+	switch e {
+	case RunDetailControlBadgeStatusActive:
+		return true
+	case RunDetailControlBadgeStatusBlocked:
+		return true
+	case RunDetailControlBadgeStatusCanceled:
+		return true
+	case RunDetailControlBadgeStatusCompleted:
+		return true
+	case RunDetailControlBadgeStatusFailed:
+		return true
+	case RunDetailControlBadgeStatusPending:
+		return true
+	case RunDetailControlBadgeStatusReady:
+		return true
+	case RunDetailControlBadgeStatusSkipped:
+		return true
+	case RunDetailControlBadgeStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailEdgeKind.
+const (
+	RunDetailEdgeKindBlocks            RunDetailEdgeKind = "blocks"
+	RunDetailEdgeKindConditionalBlocks RunDetailEdgeKind = "conditional-blocks"
+	RunDetailEdgeKindDependency        RunDetailEdgeKind = "dependency"
+	RunDetailEdgeKindParent            RunDetailEdgeKind = "parent"
+	RunDetailEdgeKindUnknown           RunDetailEdgeKind = "unknown"
+	RunDetailEdgeKindWaitsFor          RunDetailEdgeKind = "waits-for"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailEdgeKind enum.
+func (e RunDetailEdgeKind) Valid() bool {
+	switch e {
+	case RunDetailEdgeKindBlocks:
+		return true
+	case RunDetailEdgeKindConditionalBlocks:
+		return true
+	case RunDetailEdgeKindDependency:
+		return true
+	case RunDetailEdgeKindParent:
+		return true
+	case RunDetailEdgeKindUnknown:
+		return true
+	case RunDetailEdgeKindWaitsFor:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailExecutionStatus.
+const (
+	RunDetailExecutionStatusActive    RunDetailExecutionStatus = "active"
+	RunDetailExecutionStatusBlocked   RunDetailExecutionStatus = "blocked"
+	RunDetailExecutionStatusCanceled  RunDetailExecutionStatus = "canceled"
+	RunDetailExecutionStatusCompleted RunDetailExecutionStatus = "completed"
+	RunDetailExecutionStatusFailed    RunDetailExecutionStatus = "failed"
+	RunDetailExecutionStatusPending   RunDetailExecutionStatus = "pending"
+	RunDetailExecutionStatusReady     RunDetailExecutionStatus = "ready"
+	RunDetailExecutionStatusSkipped   RunDetailExecutionStatus = "skipped"
+	RunDetailExecutionStatusUnknown   RunDetailExecutionStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailExecutionStatus enum.
+func (e RunDetailExecutionStatus) Valid() bool {
+	switch e {
+	case RunDetailExecutionStatusActive:
+		return true
+	case RunDetailExecutionStatusBlocked:
+		return true
+	case RunDetailExecutionStatusCanceled:
+		return true
+	case RunDetailExecutionStatusCompleted:
+		return true
+	case RunDetailExecutionStatusFailed:
+		return true
+	case RunDetailExecutionStatusPending:
+		return true
+	case RunDetailExecutionStatusReady:
+		return true
+	case RunDetailExecutionStatusSkipped:
+		return true
+	case RunDetailExecutionStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailNodeConstructKind.
+const (
+	RunDetailNodeConstructKindCheckLoop RunDetailNodeConstructKind = "check-loop"
+	RunDetailNodeConstructKindCondition RunDetailNodeConstructKind = "condition"
+	RunDetailNodeConstructKindControl   RunDetailNodeConstructKind = "control"
+	RunDetailNodeConstructKindExpansion RunDetailNodeConstructKind = "expansion"
+	RunDetailNodeConstructKindFanout    RunDetailNodeConstructKind = "fanout"
+	RunDetailNodeConstructKindRetry     RunDetailNodeConstructKind = "retry"
+	RunDetailNodeConstructKindRunRoot   RunDetailNodeConstructKind = "run-root"
+	RunDetailNodeConstructKindScope     RunDetailNodeConstructKind = "scope"
+	RunDetailNodeConstructKindStep      RunDetailNodeConstructKind = "step"
+	RunDetailNodeConstructKindUnknown   RunDetailNodeConstructKind = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailNodeConstructKind enum.
+func (e RunDetailNodeConstructKind) Valid() bool {
+	switch e {
+	case RunDetailNodeConstructKindCheckLoop:
+		return true
+	case RunDetailNodeConstructKindCondition:
+		return true
+	case RunDetailNodeConstructKindControl:
+		return true
+	case RunDetailNodeConstructKindExpansion:
+		return true
+	case RunDetailNodeConstructKindFanout:
+		return true
+	case RunDetailNodeConstructKindRetry:
+		return true
+	case RunDetailNodeConstructKindRunRoot:
+		return true
+	case RunDetailNodeConstructKindScope:
+		return true
+	case RunDetailNodeConstructKindStep:
+		return true
+	case RunDetailNodeConstructKindUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailNodeStatus.
+const (
+	RunDetailNodeStatusActive    RunDetailNodeStatus = "active"
+	RunDetailNodeStatusBlocked   RunDetailNodeStatus = "blocked"
+	RunDetailNodeStatusCanceled  RunDetailNodeStatus = "canceled"
+	RunDetailNodeStatusCompleted RunDetailNodeStatus = "completed"
+	RunDetailNodeStatusFailed    RunDetailNodeStatus = "failed"
+	RunDetailNodeStatusPending   RunDetailNodeStatus = "pending"
+	RunDetailNodeStatusReady     RunDetailNodeStatus = "ready"
+	RunDetailNodeStatusSkipped   RunDetailNodeStatus = "skipped"
+	RunDetailNodeStatusUnknown   RunDetailNodeStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailNodeStatus enum.
+func (e RunDetailNodeStatus) Valid() bool {
+	switch e {
+	case RunDetailNodeStatusActive:
+		return true
+	case RunDetailNodeStatusBlocked:
+		return true
+	case RunDetailNodeStatusCanceled:
+		return true
+	case RunDetailNodeStatusCompleted:
+		return true
+	case RunDetailNodeStatusFailed:
+		return true
+	case RunDetailNodeStatusPending:
+		return true
+	case RunDetailNodeStatusReady:
+		return true
+	case RunDetailNodeStatusSkipped:
+		return true
+	case RunDetailNodeStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailScopeKind.
+const (
+	City RunDetailScopeKind = "city"
+	Rig  RunDetailScopeKind = "rig"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailScopeKind enum.
+func (e RunDetailScopeKind) Valid() bool {
+	switch e {
+	case City:
+		return true
+	case Rig:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailSessionAvailability.
+const (
+	RunDetailSessionAvailabilityAttached   RunDetailSessionAvailability = "attached"
+	RunDetailSessionAvailabilityNotStarted RunDetailSessionAvailability = "not_started"
+	RunDetailSessionAvailabilityUnknown    RunDetailSessionAvailability = "unknown"
+	RunDetailSessionAvailabilityUnresolved RunDetailSessionAvailability = "unresolved"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailSessionAvailability enum.
+func (e RunDetailSessionAvailability) Valid() bool {
+	switch e {
+	case RunDetailSessionAvailabilityAttached:
+		return true
+	case RunDetailSessionAvailabilityNotStarted:
+		return true
+	case RunDetailSessionAvailabilityUnknown:
+		return true
+	case RunDetailSessionAvailabilityUnresolved:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RunDetailSourceKind.
+const (
+	GascityBeadGraph RunDetailSourceKind = "gascity_bead_graph"
+)
+
+// Valid indicates whether the value is a known member of the RunDetailSourceKind enum.
+func (e RunDetailSourceKind) Valid() bool {
+	switch e {
+	case GascityBeadGraph:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RunRefKind.
 const (
 	Order RunRefKind = "order"
@@ -3308,6 +3620,226 @@ type RunCancelOutputBody struct {
 	// Status Closed lifecycle state of a run.
 	Status RunStatus `json:"status"`
 }
+
+// RunDetail defines model for RunDetail.
+type RunDetail struct {
+	// City Concrete city that owns this run.
+	City string `json:"city"`
+
+	// Edges Directed execution relationships.
+	Edges   *[]RunDetailEdge `json:"edges"`
+	Formula RunDetailFormula `json:"formula"`
+
+	// Nodes Semantic execution nodes.
+	Nodes *[]RunDetailNode `json:"nodes"`
+
+	// RootBeadId Authoritative run-root bead identifier.
+	RootBeadId string `json:"root_bead_id"`
+
+	// RootStoreRef Recorded authoritative root-store reference.
+	RootStoreRef *string `json:"root_store_ref,omitempty"`
+
+	// RunId Canonical run identifier.
+	RunId  string          `json:"run_id"`
+	Scope  RunDetailScope  `json:"scope"`
+	Source RunDetailSource `json:"source"`
+
+	// Status Run-root lifecycle.
+	Status RunDetailStatus `json:"status"`
+
+	// Title Run title.
+	Title string `json:"title"`
+}
+
+// RunDetailStatus Run-root lifecycle.
+type RunDetailStatus string
+
+// RunDetailControlBadge defines model for RunDetailControlBadge.
+type RunDetailControlBadge struct {
+	// Id Backing control bead identifier.
+	Id string `json:"id"`
+
+	// Kind Typed control construct.
+	Kind RunDetailControlBadgeKind `json:"kind"`
+
+	// Label Human-readable control label.
+	Label string `json:"label"`
+
+	// Status Control lifecycle.
+	Status RunDetailControlBadgeStatus `json:"status"`
+}
+
+// RunDetailControlBadgeKind Typed control construct.
+type RunDetailControlBadgeKind string
+
+// RunDetailControlBadgeStatus Control lifecycle.
+type RunDetailControlBadgeStatus string
+
+// RunDetailEdge defines model for RunDetailEdge.
+type RunDetailEdge struct {
+	// From Source semantic node identifier.
+	From string `json:"from"`
+
+	// Kind Typed relationship kind.
+	Kind RunDetailEdgeKind `json:"kind"`
+
+	// SourceKind Producer's original relationship kind.
+	SourceKind string `json:"source_kind"`
+
+	// To Target semantic node identifier.
+	To string `json:"to"`
+}
+
+// RunDetailEdgeKind Typed relationship kind.
+type RunDetailEdgeKind string
+
+// RunDetailExecution defines model for RunDetailExecution.
+type RunDetailExecution struct {
+	// Attempt One-based attempt number, when tracked.
+	Attempt *int64 `json:"attempt,omitempty"`
+
+	// BeadId Backing bead identifier.
+	BeadId string `json:"bead_id"`
+
+	// CurrentIteration Whether this execution belongs to the current iteration.
+	CurrentIteration bool `json:"current_iteration"`
+
+	// Dynamic Whether runtime fragment expansion created this execution.
+	Dynamic bool `json:"dynamic"`
+
+	// Historical Whether this is retained historical execution.
+	Historical bool `json:"historical"`
+
+	// Iteration One-based loop iteration, when tracked.
+	Iteration *int64 `json:"iteration,omitempty"`
+
+	// PhysicalId Stable physical execution identifier.
+	PhysicalId string `json:"physical_id"`
+
+	// SemanticId Semantic formula-step identifier.
+	SemanticId string           `json:"semantic_id"`
+	Session    RunDetailSession `json:"session"`
+
+	// Status Execution lifecycle.
+	Status RunDetailExecutionStatus `json:"status"`
+}
+
+// RunDetailExecutionStatus Execution lifecycle.
+type RunDetailExecutionStatus string
+
+// RunDetailFormula defines model for RunDetailFormula.
+type RunDetailFormula struct {
+	// Contract Formula execution contract.
+	Contract string `json:"contract"`
+
+	// Hash Recorded formula content hash, when available.
+	Hash *string `json:"hash,omitempty"`
+
+	// Name Formula name, when recorded.
+	Name *string `json:"name,omitempty"`
+
+	// Source Recorded formula source, when available.
+	Source *string `json:"source,omitempty"`
+}
+
+// RunDetailNode defines model for RunDetailNode.
+type RunDetailNode struct {
+	// ConstructKind Typed formula/control construct.
+	ConstructKind RunDetailNodeConstructKind `json:"construct_kind"`
+
+	// ControlBadges Hidden controls attached to this node.
+	ControlBadges *[]RunDetailControlBadge `json:"control_badges"`
+
+	// Dynamic Whether any physical execution was runtime-expanded.
+	Dynamic bool `json:"dynamic"`
+
+	// ExecutionKind Producer-recorded execution kind.
+	ExecutionKind string `json:"execution_kind"`
+
+	// Executions Physical executions grouped under this semantic node.
+	Executions *[]RunDetailExecution `json:"executions"`
+
+	// Historical Whether only historical executions remain.
+	Historical bool `json:"historical"`
+
+	// ScopeRef Node-specific scope reference, when present.
+	ScopeRef *string `json:"scope_ref,omitempty"`
+
+	// SemanticId Stable semantic formula-step identifier.
+	SemanticId string `json:"semantic_id"`
+
+	// Status Aggregated node lifecycle.
+	Status RunDetailNodeStatus `json:"status"`
+
+	// Title Node title.
+	Title string `json:"title"`
+
+	// Visible Whether this semantic node belongs in the execution graph.
+	Visible bool `json:"visible"`
+}
+
+// RunDetailNodeConstructKind Typed formula/control construct.
+type RunDetailNodeConstructKind string
+
+// RunDetailNodeStatus Aggregated node lifecycle.
+type RunDetailNodeStatus string
+
+// RunDetailScope defines model for RunDetailScope.
+type RunDetailScope struct {
+	// Kind Scope kind.
+	Kind RunDetailScopeKind `json:"kind"`
+
+	// Ref Concrete scope reference.
+	Ref string `json:"ref"`
+}
+
+// RunDetailScopeKind Scope kind.
+type RunDetailScopeKind string
+
+// RunDetailSession defines model for RunDetailSession.
+type RunDetailSession struct {
+	// Assignee Recorded assignee, when available.
+	Assignee *string `json:"assignee,omitempty"`
+
+	// Availability Session evidence availability.
+	Availability RunDetailSessionAvailability `json:"availability"`
+
+	// Id Durable session identifier, when attached.
+	Id *string `json:"id,omitempty"`
+
+	// Name Session display name, when attached.
+	Name *string `json:"name,omitempty"`
+}
+
+// RunDetailSessionAvailability Session evidence availability.
+type RunDetailSessionAvailability string
+
+// RunDetailSource defines model for RunDetailSource.
+type RunDetailSource struct {
+	// Available Whether the authoritative graph read succeeded.
+	Available bool `json:"available"`
+
+	// EventSequence Latest city event sequence observed at response time; not a store snapshot token.
+	EventSequence *int64 `json:"event_sequence,omitempty"`
+
+	// Kind Authoritative producer.
+	Kind RunDetailSourceKind `json:"kind"`
+
+	// Partial Whether the producer reported missing graph data.
+	Partial bool `json:"partial"`
+
+	// ProjectionVersion Run detail projection schema version.
+	ProjectionVersion int64 `json:"projection_version"`
+
+	// Reasons Explicit partial or truncation reasons.
+	Reasons *[]string `json:"reasons"`
+
+	// Truncated Whether graph data was capped.
+	Truncated bool `json:"truncated"`
+}
+
+// RunDetailSourceKind Authoritative producer.
+type RunDetailSourceKind string
 
 // RunLastError defines model for RunLastError.
 type RunLastError struct {
@@ -17300,6 +17832,9 @@ type ClientInterface interface {
 	// PostV0CityByCityNameRunsByRunIdCancel request
 	PostV0CityByCityNameRunsByRunIdCancel(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameRunsByRunIdDetail request
+	GetV0CityByCityNameRunsByRunIdDetail(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameRunsByRunIdSteps request
 	GetV0CityByCityNameRunsByRunIdSteps(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -19380,6 +19915,18 @@ func (c *Client) GetV0CityByCityNameRunsByRunId(ctx context.Context, cityName st
 
 func (c *Client) PostV0CityByCityNameRunsByRunIdCancel(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameRunsByRunIdCancelRequest(c.Server, cityName, runId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameRunsByRunIdDetail(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameRunsByRunIdDetailRequest(c.Server, cityName, runId)
 	if err != nil {
 		return nil, err
 	}
@@ -28002,6 +28549,47 @@ func NewPostV0CityByCityNameRunsByRunIdCancelRequest(server string, cityName str
 	return req, nil
 }
 
+// NewGetV0CityByCityNameRunsByRunIdDetailRequest generates requests for GetV0CityByCityNameRunsByRunIdDetail
+func NewGetV0CityByCityNameRunsByRunIdDetailRequest(server string, cityName string, runId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "run_id", runId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/runs/%s/detail", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameRunsByRunIdStepsRequest generates requests for GetV0CityByCityNameRunsByRunIdSteps
 func NewGetV0CityByCityNameRunsByRunIdStepsRequest(server string, cityName string, runId string) (*http.Request, error) {
 	var err error
@@ -30833,6 +31421,9 @@ type ClientWithResponsesInterface interface {
 
 	// PostV0CityByCityNameRunsByRunIdCancelWithResponse request
 	PostV0CityByCityNameRunsByRunIdCancelWithResponse(ctx context.Context, cityName string, runId string, params *PostV0CityByCityNameRunsByRunIdCancelParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRunsByRunIdCancelResponse, error)
+
+	// GetV0CityByCityNameRunsByRunIdDetailWithResponse request
+	GetV0CityByCityNameRunsByRunIdDetailWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdDetailResponse, error)
 
 	// GetV0CityByCityNameRunsByRunIdStepsWithResponse request
 	GetV0CityByCityNameRunsByRunIdStepsWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdStepsResponse, error)
@@ -34449,6 +35040,32 @@ func (r PostV0CityByCityNameRunsByRunIdCancelResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameRunsByRunIdDetailResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RunDetail
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameRunsByRunIdDetailResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameRunsByRunIdDetailResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameRunsByRunIdStepsResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -36831,6 +37448,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameRunsByRunIdCancelWithResponse(
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameRunsByRunIdCancelResponse(rsp)
+}
+
+// GetV0CityByCityNameRunsByRunIdDetailWithResponse request returning *GetV0CityByCityNameRunsByRunIdDetailResponse
+func (c *ClientWithResponses) GetV0CityByCityNameRunsByRunIdDetailWithResponse(ctx context.Context, cityName string, runId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRunsByRunIdDetailResponse, error) {
+	rsp, err := c.GetV0CityByCityNameRunsByRunIdDetail(ctx, cityName, runId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameRunsByRunIdDetailResponse(rsp)
 }
 
 // GetV0CityByCityNameRunsByRunIdStepsWithResponse request returning *GetV0CityByCityNameRunsByRunIdStepsResponse
@@ -45124,6 +45750,60 @@ func ParsePostV0CityByCityNameRunsByRunIdCancelResponse(rsp *http.Response) (*Po
 			return nil, err
 		}
 		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameRunsByRunIdDetailResponse parses an HTTP response from a GetV0CityByCityNameRunsByRunIdDetailWithResponse call
+func ParseGetV0CityByCityNameRunsByRunIdDetailResponse(rsp *http.Response) (*GetV0CityByCityNameRunsByRunIdDetailResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameRunsByRunIdDetailResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

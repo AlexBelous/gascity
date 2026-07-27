@@ -308,7 +308,7 @@ func constructKindFor(b runSnapshotBead, rootBeadID string) string {
 		return "expansion"
 	case "scope-check":
 		return "scope-check"
-	case "run-finalize":
+	case "run-finalize", beadmeta.KindWorkflowFinalize:
 		return "run-finalize"
 	case "spec":
 		return "spec"

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -435,6 +436,24 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 		return nil, apierr.InvalidRequest.Msg("rootID is required")
 	}
 
+	graph, err := s.readBeadGraph(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
+		}
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+
+	return &IndexOutput[BeadGraphResponse]{
+		Index: s.latestIndex(),
+		Body:  graph,
+	}, nil
+}
+
+// readBeadGraph resolves one root's authoritative store and reads its complete
+// run-rooted graph. HTTP projections map its errors for their own resource
+// vocabulary (for example bead-not-found versus run-not-found).
+func (s *Server) readBeadGraph(rootID string) (BeadGraphResponse, error) {
 	var root beads.Bead
 	var foundStore beads.Store
 	for _, store := range s.beadStoresForID(rootID) {
@@ -443,19 +462,19 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, apierr.Internal.Msg(err.Error())
+			return BeadGraphResponse{}, err
 		}
 		root = b
 		foundStore = store
 		break
 	}
 	if foundStore == nil {
-		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
+		return BeadGraphResponse{}, fmt.Errorf("bead %q: %w", rootID, beads.ErrNotFound)
 	}
 
 	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
 	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
+		return BeadGraphResponse{}, err
 	}
 	beadIndex := make(map[string]beads.Bead, len(graphBeads))
 	for _, b := range graphBeads {
@@ -464,17 +483,14 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 
 	deps, depPartial := collectWorkflowDeps(foundStore, beadIndex)
 	if depPartial {
-		return nil, apierr.Internal.Msg("listing bead graph dependencies failed")
+		return BeadGraphResponse{}, errors.New("listing bead graph dependencies failed")
 	}
 	deps = mergeWorkflowDeps(deps, parentEdges)
 
-	return &IndexOutput[BeadGraphResponse]{
-		Index: s.latestIndex(),
-		Body: BeadGraphResponse{
-			Root:  root,
-			Beads: graphBeads,
-			Deps:  deps,
-		},
+	return BeadGraphResponse{
+		Root:  root,
+		Beads: graphBeads,
+		Deps:  deps,
 	}, nil
 }
 

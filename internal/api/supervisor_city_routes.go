@@ -314,12 +314,13 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
 	cityDelete(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
-	// Canonical Run resource — the ONE typed run projection, sourced from the
-	// city event log.
+	// Canonical Run resource. Hot list, summary, and step reads use the city
+	// event projection; detail reads the authoritative run-rooted bead graph.
 	cityGet(sm, "/runs", (*Server).humaHandleRunsList, errorStatuses(http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/census", (*Server).humaHandleRunsCensus, errorStatuses(http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}", (*Server).humaHandleRunGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/runs/{run_id}/steps", (*Server).humaHandleRunSteps, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/runs/{run_id}/detail", (*Server).humaHandleRunDetail, errorStatuses(http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusServiceUnavailable))
 	cityPost(sm, "/runs/{run_id}/cancel", (*Server).humaHandleRunCancel, func(op *huma.Operation) {
 		op.DefaultStatus = http.StatusAccepted
 	}, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))

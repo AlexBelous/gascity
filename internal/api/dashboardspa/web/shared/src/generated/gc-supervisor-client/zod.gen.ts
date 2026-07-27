@@ -1396,6 +1396,159 @@ export const zRotatedPayload = z.object({
     prior_last_seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
+export const zRunDetailControlBadge = z.object({
+    id: z.string(),
+    kind: z.enum([
+        'scope-check',
+        'run-finalize',
+        'spec',
+        'control',
+        'unknown'
+    ]),
+    label: z.string(),
+    status: z.enum([
+        'pending',
+        'ready',
+        'active',
+        'blocked',
+        'completed',
+        'failed',
+        'skipped',
+        'canceled',
+        'unknown'
+    ])
+});
+
+export const zRunDetailEdge = z.object({
+    from: z.string(),
+    kind: z.enum([
+        'parent',
+        'blocks',
+        'waits-for',
+        'conditional-blocks',
+        'dependency',
+        'unknown'
+    ]),
+    source_kind: z.string(),
+    to: z.string()
+});
+
+export const zRunDetailFormula = z.object({
+    contract: z.string(),
+    hash: z.string().optional(),
+    name: z.string().optional(),
+    source: z.string().optional()
+});
+
+export const zRunDetailScope = z.object({
+    kind: z.enum(['city', 'rig']),
+    ref: z.string()
+});
+
+export const zRunDetailSession = z.object({
+    assignee: z.string().optional(),
+    availability: z.enum([
+        'attached',
+        'not_started',
+        'unresolved',
+        'unknown'
+    ]),
+    id: z.string().optional(),
+    name: z.string().optional()
+});
+
+export const zRunDetailExecution = z.object({
+    attempt: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    bead_id: z.string(),
+    current_iteration: z.boolean(),
+    dynamic: z.boolean(),
+    historical: z.boolean(),
+    iteration: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    physical_id: z.string(),
+    semantic_id: z.string(),
+    session: zRunDetailSession,
+    status: z.enum([
+        'pending',
+        'ready',
+        'active',
+        'blocked',
+        'completed',
+        'failed',
+        'skipped',
+        'canceled',
+        'unknown'
+    ])
+});
+
+export const zRunDetailNode = z.object({
+    construct_kind: z.enum([
+        'run-root',
+        'step',
+        'retry',
+        'check-loop',
+        'scope',
+        'condition',
+        'fanout',
+        'expansion',
+        'control',
+        'unknown'
+    ]),
+    control_badges: z.array(zRunDetailControlBadge).nullable(),
+    dynamic: z.boolean(),
+    execution_kind: z.string(),
+    executions: z.array(zRunDetailExecution).nullable(),
+    historical: z.boolean(),
+    scope_ref: z.string().optional(),
+    semantic_id: z.string(),
+    status: z.enum([
+        'pending',
+        'ready',
+        'active',
+        'blocked',
+        'completed',
+        'failed',
+        'skipped',
+        'canceled',
+        'unknown'
+    ]),
+    title: z.string(),
+    visible: z.boolean()
+});
+
+export const zRunDetailSource = z.object({
+    available: z.boolean(),
+    event_sequence: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    kind: z.enum(['gascity_bead_graph']),
+    partial: z.boolean(),
+    projection_version: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    reasons: z.array(z.string()).nullable(),
+    truncated: z.boolean()
+});
+
+export const zRunDetail = z.object({
+    city: z.string(),
+    edges: z.array(zRunDetailEdge).nullable(),
+    formula: zRunDetailFormula,
+    nodes: z.array(zRunDetailNode).nullable(),
+    root_bead_id: z.string(),
+    root_store_ref: z.string().optional(),
+    run_id: z.string(),
+    scope: zRunDetailScope,
+    source: zRunDetailSource,
+    status: z.enum([
+        'pending',
+        'ready',
+        'active',
+        'blocked',
+        'completed',
+        'failed',
+        'skipped',
+        'canceled',
+        'unknown'
+    ]),
+    title: z.string()
+});
+
 export const zRunLastError = z.object({
     code: z.string(),
     message: z.string().optional()
@@ -8105,6 +8258,16 @@ export const zPostV0CityByCityNameRunsByRunIdCancelPath = z.object({
  * Accepted
  */
 export const zPostV0CityByCityNameRunsByRunIdCancelResponse = zRunCancelOutputBody;
+
+export const zGetV0CityByCityNameRunsByRunIdDetailPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    run_id: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameRunsByRunIdDetailResponse = zRunDetail;
 
 export const zGetV0CityByCityNameRunsByRunIdStepsPath = z.object({
     cityName: z.string().min(1).regex(/\S/),

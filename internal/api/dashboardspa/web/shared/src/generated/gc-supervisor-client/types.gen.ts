@@ -2824,6 +2824,261 @@ export type RunCancelOutputBody = {
     status: RunStatus;
 };
 
+export type RunDetail = {
+    /**
+     * Concrete city that owns this run.
+     */
+    city: string;
+    /**
+     * Directed execution relationships.
+     */
+    edges: Array<RunDetailEdge> | null;
+    /**
+     * Formula identity and version.
+     */
+    formula: RunDetailFormula;
+    /**
+     * Semantic execution nodes.
+     */
+    nodes: Array<RunDetailNode> | null;
+    /**
+     * Authoritative run-root bead identifier.
+     */
+    root_bead_id: string;
+    /**
+     * Recorded authoritative root-store reference.
+     */
+    root_store_ref?: string;
+    /**
+     * Canonical run identifier.
+     */
+    run_id: string;
+    /**
+     * Concrete run scope.
+     */
+    scope: RunDetailScope;
+    /**
+     * Topology provenance and completeness.
+     */
+    source: RunDetailSource;
+    /**
+     * Run-root lifecycle.
+     */
+    status: 'pending' | 'ready' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped' | 'canceled' | 'unknown';
+    /**
+     * Run title.
+     */
+    title: string;
+};
+
+export type RunDetailControlBadge = {
+    /**
+     * Backing control bead identifier.
+     */
+    id: string;
+    /**
+     * Typed control construct.
+     */
+    kind: 'scope-check' | 'run-finalize' | 'spec' | 'control' | 'unknown';
+    /**
+     * Human-readable control label.
+     */
+    label: string;
+    /**
+     * Control lifecycle.
+     */
+    status: 'pending' | 'ready' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped' | 'canceled' | 'unknown';
+};
+
+export type RunDetailEdge = {
+    /**
+     * Source semantic node identifier.
+     */
+    from: string;
+    /**
+     * Typed relationship kind.
+     */
+    kind: 'parent' | 'blocks' | 'waits-for' | 'conditional-blocks' | 'dependency' | 'unknown';
+    /**
+     * Producer's original relationship kind.
+     */
+    source_kind: string;
+    /**
+     * Target semantic node identifier.
+     */
+    to: string;
+};
+
+export type RunDetailExecution = {
+    /**
+     * One-based attempt number, when tracked.
+     */
+    attempt?: number;
+    /**
+     * Backing bead identifier.
+     */
+    bead_id: string;
+    /**
+     * Whether this execution belongs to the current iteration.
+     */
+    current_iteration: boolean;
+    /**
+     * Whether runtime fragment expansion created this execution.
+     */
+    dynamic: boolean;
+    /**
+     * Whether this is retained historical execution.
+     */
+    historical: boolean;
+    /**
+     * One-based loop iteration, when tracked.
+     */
+    iteration?: number;
+    /**
+     * Stable physical execution identifier.
+     */
+    physical_id: string;
+    /**
+     * Semantic formula-step identifier.
+     */
+    semantic_id: string;
+    /**
+     * Grounded session evidence.
+     */
+    session: RunDetailSession;
+    /**
+     * Execution lifecycle.
+     */
+    status: 'pending' | 'ready' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped' | 'canceled' | 'unknown';
+};
+
+export type RunDetailFormula = {
+    /**
+     * Formula execution contract.
+     */
+    contract: string;
+    /**
+     * Recorded formula content hash, when available.
+     */
+    hash?: string;
+    /**
+     * Formula name, when recorded.
+     */
+    name?: string;
+    /**
+     * Recorded formula source, when available.
+     */
+    source?: string;
+};
+
+export type RunDetailNode = {
+    /**
+     * Typed formula/control construct.
+     */
+    construct_kind: 'run-root' | 'step' | 'retry' | 'check-loop' | 'scope' | 'condition' | 'fanout' | 'expansion' | 'control' | 'unknown';
+    /**
+     * Hidden controls attached to this node.
+     */
+    control_badges: Array<RunDetailControlBadge> | null;
+    /**
+     * Whether any physical execution was runtime-expanded.
+     */
+    dynamic: boolean;
+    /**
+     * Producer-recorded execution kind.
+     */
+    execution_kind: string;
+    /**
+     * Physical executions grouped under this semantic node.
+     */
+    executions: Array<RunDetailExecution> | null;
+    /**
+     * Whether only historical executions remain.
+     */
+    historical: boolean;
+    /**
+     * Node-specific scope reference, when present.
+     */
+    scope_ref?: string;
+    /**
+     * Stable semantic formula-step identifier.
+     */
+    semantic_id: string;
+    /**
+     * Aggregated node lifecycle.
+     */
+    status: 'pending' | 'ready' | 'active' | 'blocked' | 'completed' | 'failed' | 'skipped' | 'canceled' | 'unknown';
+    /**
+     * Node title.
+     */
+    title: string;
+    /**
+     * Whether this semantic node belongs in the execution graph.
+     */
+    visible: boolean;
+};
+
+export type RunDetailScope = {
+    /**
+     * Scope kind.
+     */
+    kind: 'city' | 'rig';
+    /**
+     * Concrete scope reference.
+     */
+    ref: string;
+};
+
+export type RunDetailSession = {
+    /**
+     * Recorded assignee, when available.
+     */
+    assignee?: string;
+    /**
+     * Session evidence availability.
+     */
+    availability: 'attached' | 'not_started' | 'unresolved' | 'unknown';
+    /**
+     * Durable session identifier, when attached.
+     */
+    id?: string;
+    /**
+     * Session display name, when attached.
+     */
+    name?: string;
+};
+
+export type RunDetailSource = {
+    /**
+     * Whether the authoritative graph read succeeded.
+     */
+    available: boolean;
+    /**
+     * Latest city event sequence observed at response time; not a store snapshot token.
+     */
+    event_sequence?: number;
+    /**
+     * Authoritative producer.
+     */
+    kind: 'gascity_bead_graph';
+    /**
+     * Whether the producer reported missing graph data.
+     */
+    partial: boolean;
+    /**
+     * Run detail projection schema version.
+     */
+    projection_version: number;
+    /**
+     * Explicit partial or truncation reasons.
+     */
+    reasons: Array<string> | null;
+    /**
+     * Whether graph data was capped.
+     */
+    truncated: boolean;
+};
+
 export type RunLastError = {
     /**
      * Machine-readable outcome code (e.g. fail, skipped, canceled).
@@ -15851,6 +16106,52 @@ export type PostV0CityByCityNameRunsByRunIdCancelResponses = {
 };
 
 export type PostV0CityByCityNameRunsByRunIdCancelResponse = PostV0CityByCityNameRunsByRunIdCancelResponses[keyof PostV0CityByCityNameRunsByRunIdCancelResponses];
+
+export type GetV0CityByCityNameRunsByRunIdDetailData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Run identifier.
+         */
+        run_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/runs/{run_id}/detail';
+};
+
+export type GetV0CityByCityNameRunsByRunIdDetailErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameRunsByRunIdDetailError = GetV0CityByCityNameRunsByRunIdDetailErrors[keyof GetV0CityByCityNameRunsByRunIdDetailErrors];
+
+export type GetV0CityByCityNameRunsByRunIdDetailResponses = {
+    /**
+     * OK
+     */
+    200: RunDetail;
+};
+
+export type GetV0CityByCityNameRunsByRunIdDetailResponse = GetV0CityByCityNameRunsByRunIdDetailResponses[keyof GetV0CityByCityNameRunsByRunIdDetailResponses];
 
 export type GetV0CityByCityNameRunsByRunIdStepsData = {
     body?: never;

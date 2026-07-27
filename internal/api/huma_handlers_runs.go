@@ -660,8 +660,8 @@ func normalizeRunsListLimit(limit int) int {
 	return limit
 }
 
-// runProjectionUnavailable wraps a fold/read failure as a 503 — reading the event
-// log is a backend availability concern the caller can retry.
+// runProjectionUnavailable wraps a retryable run projection read or fold
+// failure as a 503 without exposing backend details.
 func runProjectionUnavailable(err error) error {
 	log.Printf("gc api: run projection unavailable: %v", err)
 	return apierr.ServiceUnavailable.Msg("run projection unavailable")

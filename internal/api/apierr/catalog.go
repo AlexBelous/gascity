@@ -37,8 +37,9 @@ var (
 	PackNotFound    = Register(ProblemType{Code: "pack-not-found", Status: http.StatusNotFound, Title: "Pack Not Found"})
 
 	// Request validation.
-	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
-	ValidationFailed = Register(ProblemType{Code: "validation-failed", Status: http.StatusUnprocessableEntity, Title: "Validation Failed"})
+	InvalidRequest       = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
+	ValidationFailed     = Register(ProblemType{Code: "validation-failed", Status: http.StatusUnprocessableEntity, Title: "Validation Failed"})
+	RunDetailUnavailable = Register(ProblemType{Code: "run-detail-unavailable", Status: http.StatusUnprocessableEntity, Title: "Run Detail Unavailable"})
 	// InvalidCursor is a pagination token the server cannot parse (garbage,
 	// a legacy offset cursor, or the wrong kind for the endpoint). Clients
 	// recover by re-fetching the first page.

@@ -2,6 +2,23 @@ package runproj
 
 import "testing"
 
+func TestWorkflowFinalizeUsesFinalizeControlShape(t *testing.T) {
+	bead := runSnapshotBead{
+		id:       "run.workflow-finalize",
+		metadata: map[string]string{"gc.kind": "workflow-finalize"},
+	}
+	kind := constructKindFor(bead, "run")
+	if kind != "run-finalize" {
+		t.Fatalf("constructKindFor(workflow-finalize) = %q, want run-finalize", kind)
+	}
+	if !isHiddenConstruct(kind) {
+		t.Fatalf("workflow-finalize construct %q is visible, want hidden control badge", kind)
+	}
+	if label := badgeLabelFor(kind); label != "finalize" {
+		t.Fatalf("badgeLabelFor(%q) = %q, want finalize", kind, label)
+	}
+}
+
 // TestSemanticNodeIDForIterationStepRef is the regression test for the
 // iteration-at-index-0 bug: a step ref that reduces to ["iteration", <int>] makes
 // semanticIdFromStepRef return undefined in TS (plain semanticParts[-1]), so

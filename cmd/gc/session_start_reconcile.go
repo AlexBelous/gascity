@@ -104,8 +104,8 @@ func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmis
 	if err != nil {
 		return fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
 	}
-	observation, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(
-		params.CityPath, params.Store, params.Provider, params.Config, info.ID, tp.Hints.ProcessNames,
+	observation, err := workerObserveLoadedSessionWithRuntimeHintsWithConfig(
+		ctx, params.CityPath, params.Store, params.Provider, params.Config, info, tp.Hints.ProcessNames,
 	)
 	if err != nil {
 		return fmt.Errorf("reconciling exact session start %q: observing runtime: %w", info.ID, err)

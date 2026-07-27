@@ -64,6 +64,47 @@ func TestReconcileExactSessionStartStartsPendingCreateAndCommitsActive(t *testin
 	}
 }
 
+func TestReconcileExactSessionStartColdCacheBackingGetBudget(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	counting := &getCountingStore{Store: env.store}
+	cache := beads.NewCachingStore(counting, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("prime empty controller cache: %v", err)
+	}
+
+	// Create through the backing store after priming, reproducing a session
+	// written by another process immediately before its exact socket hint.
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state":                     string(session.StateCreating),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	counting.reset()
+
+	params := exactSessionStartTestParams(t, env)
+	params.Store = cache
+	if err := reconcileExactSessionStart(context.Background(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionPendingCreate,
+	}, params); err != nil {
+		t.Fatalf("reconcileExactSessionStart: %v", err)
+	}
+
+	// One authoritative admission read, one pre-wake freshness read, and the
+	// authoritative refresh after each of the pre-wake and final commit writes
+	// are the only backing reads needed. Runtime observation must reuse the
+	// admission's loaded session record.
+	const wantGets = 4
+	if got := counting.count(); got != wantGets {
+		t.Fatalf("cold-cache exact start issued %d backing store.Get calls, want %d", got, wantGets)
+	}
+}
+
 func TestReconcileExactSessionStartDoesNotDuplicateLiveRuntime(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

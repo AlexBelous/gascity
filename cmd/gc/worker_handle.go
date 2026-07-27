@@ -489,6 +489,22 @@ func workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath string, store
 	return worker.ObserveHandle(context.Background(), handle)
 }
 
+func workerObserveLoadedSessionWithRuntimeHintsWithConfig(
+	ctx context.Context,
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	info session.Info,
+	processNames []string,
+) (worker.LiveObservation, error) {
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return worker.LiveObservation{}, err
+	}
+	return factory.ObserveSessionInfo(ctx, info, processNames)
+}
+
 func workerSessionTargetRunningWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {
 	obs, err := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {

@@ -45,6 +45,12 @@ var ErrParentProjectionSuperseded = errors.New("parent projection superseded by 
 // release an assignment based on the current status and assignee.
 var ErrConditionalReleaseUnsupported = errors.New("conditional assignment release unsupported")
 
+// ErrAtomicClaimUnsupported reports that a store (or a CachingStore's backing)
+// does not implement AtomicClaimer, so the caller cannot perform an atomic
+// claim through it. It is a hard capability veto, distinct from a lost race:
+// callers treat it as a reason to fall back, never as "another actor won".
+var ErrAtomicClaimUnsupported = errors.New("atomic claim unsupported")
+
 // ErrConditionalWriteUnsupported reports that this store (or the bd behind it)
 // cannot perform conditional writes. Latching it per store instance is the
 // capability veto: no code path in internal/beads converts it into an

@@ -1357,6 +1357,19 @@ func bdSQLStringLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
+// ClaimBead satisfies AtomicClaimer by forwarding to the existing bd
+// update --claim path. A BdStore claims as the actor its CommandRunner was
+// constructed with (BEADS_ACTOR), not the actor argument: the actor is fixed at
+// store construction and cannot be varied per call. The fallback path builds
+// the store with BEADS_ACTOR equal to the actor it then passes here, so the two
+// agree. ctx is advisory — the bd subprocess is already bound to the runner's
+// context set at construction. See AtomicClaimer for the return contract.
+func (s *BdStore) ClaimBead(_ context.Context, id, _ string) (Bead, bool, error) {
+	return s.Claim(id)
+}
+
+var _ AtomicClaimer = (*BdStore)(nil)
+
 // Claim atomically claims an open bead through bd update --claim.
 //
 // It returns ok=false when bd reports that another actor won the claim race.

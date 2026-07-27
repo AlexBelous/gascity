@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -11,6 +12,66 @@ import (
 // (--exclude-type=epic): an unassigned parent epic has no executable spec, so a
 // pool worker claiming one does undefined work (see EffectiveWorkQuery docs).
 const epicIssueType = "epic"
+
+// fastPathClaimer is the narrow controller-mutation surface the fast path's
+// claim ops use. *api.Client satisfies it; tests inject the real client against
+// an httptest server.
+type fastPathClaimer interface {
+	ClaimBead(ctx context.Context, id, actor string) (beads.Bead, bool, error)
+	GetBead(id string) (api.CachedRead[beads.Bead], error)
+	UpdateBeadMetadata(ctx context.Context, id string, patch map[string]string) error
+}
+
+var _ fastPathClaimer = (*api.Client)(nil)
+
+// newAPIFastPathClaimOps builds the hookClaimOps whose claim-time MUTATIONS run
+// through the controller so a worker hook never opens its own SQL connection:
+// Claim uses the atomic controller claim, and StampWorkMeta (the claim-time
+// execution-identity write) uses the bead-update API.
+//
+// The remaining ops are left nil for applyDefaults to fill: DrainAck (runtime
+// API), EmitClaimRejected (event bus), ResolveWorkBranch (git), PublishRunMap
+// (filesystem) and Now open no bead SQL. ListContinuation / AssignContinuation
+// keep the bd defaults deliberately: continuation-group pre-assignment is a rare
+// non-hot-path sub-step the design defers ("do not migrate arbitrary gc bd
+// commands in this slice … rank remaining subprocess callers" after the hot path
+// is proven). The dominant per-tick discovery + claim + identity path is fully
+// controller-routed here; Runner is supplied by the caller (the fast-path
+// candidate list).
+func newAPIFastPathClaimOps(client fastPathClaimer) hookClaimOps {
+	return hookClaimOps{
+		Claim:         apiFastPathClaim(client),
+		StampWorkMeta: apiFastPathStampWorkMeta(client),
+	}
+}
+
+// apiFastPathClaim adapts the controller claim to hookClaimFunc. On a lost race
+// it re-reads the bead so the caller can name the winning claimant in the
+// bead.claim_rejected event (best-effort, mirroring hookClaimWithBdStore); a
+// read error degrades to the empty bead the claim already returned.
+func apiFastPathClaim(client fastPathClaimer) hookClaimFunc {
+	return func(ctx context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		bead, claimed, err := client.ClaimBead(ctx, beadID, assignee)
+		if err != nil {
+			return beads.Bead{}, false, err
+		}
+		if claimed {
+			return bead, true, nil
+		}
+		if cur, getErr := client.GetBead(beadID); getErr == nil {
+			return cur.Body, false, nil
+		}
+		return bead, false, nil
+	}
+}
+
+// apiFastPathStampWorkMeta adapts the identity-metadata write to
+// hookStampWorkMetaFunc via the bead-update API.
+func apiFastPathStampWorkMeta(client fastPathClaimer) hookStampWorkMetaFunc {
+	return func(ctx context.Context, _ string, _ []string, beadID, _ string, patch map[string]string) error {
+		return client.UpdateBeadMetadata(ctx, beadID, patch)
+	}
+}
 
 // fastPathReader is the narrow controller-read surface the hook fast path needs
 // to reproduce the generated default work_query's three tiers over the running

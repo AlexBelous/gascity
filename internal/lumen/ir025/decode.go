@@ -818,6 +818,9 @@ func rawBoolIR025(object map[string]json.RawMessage, key, path string) (bool, er
 }
 
 func decodeIR025(data []byte, destination any) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("null JSON value")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {

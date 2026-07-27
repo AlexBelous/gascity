@@ -1,6 +1,7 @@
 package ir025_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -40,6 +41,9 @@ func TestDecodeProjectsObservedFirstCohort(t *testing.T) {
 	}
 	if exec.ID() != "exec_1" || len(exec.Environment()) != 1 || len(exec.Script().Parts()) != 2 {
 		t.Fatalf("exec = %#v, want observed exec projection", exec)
+	}
+	if exec.CWD() != nil || exec.Stdin() != nil {
+		t.Fatalf("exec optional expressions = cwd:%#v stdin:%#v, want absent", exec.CWD(), exec.Stdin())
 	}
 	for index, want := range []string{"succeeded", "degraded", "failed", "skipped"} {
 		terminal, ok := steps[index+1].(program.Terminal)
@@ -134,12 +138,44 @@ func TestDecodeProjectsPinnedArtifactTerminalOutcomes(t *testing.T) {
 	}
 }
 
+func TestDecodeAllowsNullScalarLiteral(t *testing.T) {
+	decoded, err := ir025.Decode([]byte(observedCompilerResult(replace(observedFormula, `"value":1`, `"value":null`))))
+	if err != nil {
+		t.Fatalf("Decode null scalar literal: %v", err)
+	}
+	terminal, ok := decoded.Formula().Steps()[1].(program.Terminal)
+	if !ok {
+		t.Fatalf("step = %T, want program.Terminal", decoded.Formula().Steps()[1])
+	}
+	succeeded, ok := terminal.Outcome().(program.Succeeded)
+	if !ok {
+		t.Fatalf("outcome = %T, want program.Succeeded", terminal.Outcome())
+	}
+	record, ok := succeeded.Value().(program.Record)
+	if !ok {
+		t.Fatalf("value = %T, want program.Record", succeeded.Value())
+	}
+	array, ok := record.Entries()[0].Value().(program.Array)
+	if !ok {
+		t.Fatalf("entry = %T, want program.Array", record.Entries()[0].Value())
+	}
+	literal, ok := array.Elements()[0].(program.Literal)
+	if !ok {
+		t.Fatalf("element = %T, want program.Literal", array.Elements()[0])
+	}
+	if _, ok := literal.Value().(program.Null); !ok {
+		t.Fatalf("literal value = %T, want program.Null", literal.Value())
+	}
+}
+
 func TestDecodeFailsClosed(t *testing.T) {
 	malformedFormulaOrigin := strings.TrimSuffix(observedFormula, `,"origin":{"uri":"main.lumen","line":0,"col":0}}`)
 	if malformedFormulaOrigin == observedFormula {
 		t.Fatal("observed formula fixture lost its top-level origin suffix")
 	}
 	malformedFormulaOrigin += `,"origin":null}`
+	nullFormulaNodes := observedCompilerResult(nullJSONField(t, observedFormula, "nodes"))
+	nullInputFields := observedCompilerResult(nullJSONField(t, observedFormula, "input", "fields"))
 
 	tests := map[string]string{
 		"unknown top-level field":  replace(observedFirstCohort, `"diagnostics":[]`, `"diagnostics":[],"extra":true`),
@@ -150,6 +186,10 @@ func TestDecodeFailsClosed(t *testing.T) {
 		"unproved reference":       replace(observedFirstCohort, `"name":"message"`, `"name":"unproved"`),
 		"malformed required input": replace(observedFirstCohort, `"required":true`, `"required":"true"`),
 		"malformed formula origin": observedCompilerResult(malformedFormulaOrigin),
+		"null formula nodes":       nullFormulaNodes,
+		"null input fields":        nullInputFields,
+		"null step after":          replace(observedFirstCohort, `"id":"block_1","after":[]`, `"id":"block_1","after":null`),
+		"null diagnostics":         replace(observedFirstCohort, `"diagnostics":[]`, `"diagnostics":null`),
 	}
 	for name, payload := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -163,6 +203,28 @@ func TestDecodeFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func nullJSONField(t *testing.T, source string, path ...string) string {
+	t.Helper()
+	var value map[string]any
+	if err := json.Unmarshal([]byte(source), &value); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	object := value
+	for _, key := range path[:len(path)-1] {
+		next, ok := object[key].(map[string]any)
+		if !ok {
+			t.Fatalf("fixture path %q is not an object", key)
+		}
+		object = next
+	}
+	object[path[len(path)-1]] = nil
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	return string(encoded)
 }
 
 func usePinnedNode(t *testing.T) {

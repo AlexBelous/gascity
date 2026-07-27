@@ -1258,12 +1258,42 @@ func TestProxyProcessSurvivesHardParentExit(t *testing.T) {
 // test binary still alive right now. Every subprocess this package's tests
 // spawn is reaped by the code under test (Manager.Close / stopProcessGroup)
 // before the spawning test returns, so any survivor found after m.Run()
-// means a leak.
-//
-// TODO(ga-9br097 GREEN): not yet implemented — must walk /proc and match
-// direct children by parent pid. RED step only.
+// means a leak. Reuses the same /proc/<pid>/stat parent-pid lookup as
+// orphan_reap.go's processParentPID rather than reimplementing it.
 func livingTestChildren() []int {
-	return nil
+	self := os.Getpid()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		ppid, err := processParentPID(pid)
+		if err != nil || ppid != self {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+// TestMain runs the package's tests, then fails the run if any test left a
+// live direct child process behind (ga-9br097 ASK 3): every subprocess
+// these tests spawn is reaped by the code under test before its owning
+// test returns, so a survivor here is a real leak, not a slow child.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if pids := livingTestChildren(); len(pids) > 0 {
+		fmt.Fprintf(os.Stderr, "workspacesvc: %d live child process(es) leaked by tests: %v\n", len(pids), pids)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
 }
 
 // TestLivingTestChildrenDetectsSurvivor is the RED test for the TestMain

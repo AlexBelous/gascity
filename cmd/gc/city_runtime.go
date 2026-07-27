@@ -116,6 +116,7 @@ type CityRuntime struct {
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
+	lumen               *lumenRuntime                // beta formula runtime state; owned by the run goroutine
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
@@ -362,6 +363,7 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
 	defer cr.shutdown()
+	defer cr.closeLumenStore()
 
 	dirty := cr.configDirty
 	if dirty == nil {
@@ -661,6 +663,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		// previous value on exit so nested ticks don't lose context.
 		prev := beads.SetReconcilerTickTrigger(trigger)
 		defer beads.RestoreReconcilerTickTrigger(prev)
+		cr.safeTick(func() {
+			cr.lumenRunsTick(ctx)
+		}, "lumen-runs")
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)

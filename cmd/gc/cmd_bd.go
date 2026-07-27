@@ -31,6 +31,8 @@ const heartbeatMetadataKey = beadmeta.LastHeartbeatAtMetadataKey
 // the result to UTC, so an injected non-UTC clock still produces a UTC stamp.
 var bdHeartbeatNow = time.Now
 
+var bdClosePokeController = pokeController
+
 // bdSilentFallbackExitCode is the exit code gc bd emits when it detects
 // that bd silently fell back to on-disk auto-import mode (managed Dolt
 // unreachable). Distinct from bd's own exits so operators and CI can
@@ -355,6 +357,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if bdOutputIndicatesSilentFallback(stderrScan.String()) {
 		fmt.Fprintln(stderr, bdSilentFallbackUserMessage) //nolint:errcheck // best-effort stderr
 		return bdSilentFallbackExitCode
+	}
+
+	if cfg.Daemon.LumenBetaEnabled() {
+		if _, closes := workRecordCloseTargets(bdArgs); closes {
+			_ = bdClosePokeController(cityPath)
+		}
 	}
 
 	return 0

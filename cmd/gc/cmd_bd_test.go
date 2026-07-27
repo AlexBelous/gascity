@@ -1876,6 +1876,43 @@ exit 0
 	}
 }
 
+func TestGcBdBetaClosePokesControllerAfterPersistedSuccess(t *testing.T) {
+	const happyPathFakeBdScript = "#!/bin/sh\nexit 0\n"
+	silentFallbackTestSetup(t, happyPathFakeBdScript)
+	cityPath := os.Getenv("GC_CITY_PATH")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[daemon]
+lumen_beta = true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	originalPoke := bdClosePokeController
+	t.Cleanup(func() { bdClosePokeController = originalPoke })
+	var poked []string
+	bdClosePokeController = func(path string) error {
+		poked = append(poked, path)
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"update", "demo-abc", "--status", "closed"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(close) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if len(poked) != 1 || poked[0] != cityPath {
+		t.Fatalf("controller pokes = %v, want [%s]", poked, cityPath)
+	}
+
+	if got := doBd([]string{"update", "demo-abc", "--set-metadata", "k=v"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(non-close update) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if len(poked) != 1 {
+		t.Fatalf("controller pokes after non-close = %v, want one total", poked)
+	}
+}
+
 // TestGcBdProcessExitCodeMatchesSilentFallbackContract pins the process-
 // level exit code contract that the bdSilentFallbackExitCode = 4 doc
 // comment promises operators and CI. PR #2327 review found the previous

@@ -122,6 +122,9 @@ const (
 	LastFinalizeErrorMetadataKey         = "gc.last_finalize_error"
 	LastHeartbeatAtMetadataKey           = "gc.last_heartbeat_at"
 	LogicalBeadIDMetadataKey             = "gc.logical_bead_id"
+	LumenActivationMetadataKey           = "gc.lumen_activation"
+	LumenAttemptMetadataKey              = "gc.lumen_attempt"
+	LumenRunMetadataKey                  = "gc.lumen_run"
 	MaxAttemptsMetadataKey               = "gc.max_attempts"
 	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
 	ModelMetadataKey                     = "gc.model"
@@ -363,6 +366,9 @@ var KnownMetadataKeys = []string{
 	LastFinalizeErrorMetadataKey,
 	LastHeartbeatAtMetadataKey,
 	LogicalBeadIDMetadataKey,
+	LumenActivationMetadataKey,
+	LumenAttemptMetadataKey,
+	LumenRunMetadataKey,
 	MaxAttemptsMetadataKey,
 	MissingRootBeadIDMetadataKey,
 	ModelMetadataKey,

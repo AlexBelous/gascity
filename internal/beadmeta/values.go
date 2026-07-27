@@ -50,6 +50,10 @@ const (
 	// API (POST /runs/{id}/cancel). It is a distinct terminal outcome from fail
 	// and skipped so a client can tell an operator-canceled run apart.
 	OutcomeCanceled = "canceled"
+	// OutcomeDegraded records partial success from a Lumen work activation.
+	OutcomeDegraded = "degraded"
+	// OutcomePending records a non-consuming Lumen loop poll.
+	OutcomePending = "pending"
 
 	// OutcomeMissingRoot records a control bead closed because its workflow
 	// root vanished from the store (see closeOrphanedControl in

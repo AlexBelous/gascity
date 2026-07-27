@@ -251,6 +251,15 @@ func TestManagedDoltConnOracle_APIUnavailableBoundedFallback(t *testing.T) {
 // asserts the managed server's connection count stays bounded during the load and
 // returns to baseline after — the core cure property: a worker hook holds no
 // managed-Dolt socket, so a SIGKILLed worker strands nothing on the server.
+//
+// Killed clients are counted only when Process.Kill() actually succeeds, so a
+// kill that raced the process to a natural exit does not inflate the count. The
+// "after request" cohort is additionally proven to have reached the controller:
+// the load leaves some routed beads CLAIMED server-side even though every
+// after-submit client was killed before it could print its result, which is only
+// possible if the controller accepted and committed the claim the dead client
+// submitted. That makes the post-submit path a deterministic observable rather
+// than a timing hope.
 func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 	requireDoltIntegration(t)
 	city := setupConnOracleCity(t, true)
@@ -279,7 +288,7 @@ func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 	}()
 
 	var wg sync.WaitGroup
-	var killed int64
+	var killedBefore, killedAfter int64
 	sem := make(chan struct{}, oracleMaxInFlight)
 	for i := 0; i < procs; i++ {
 		wg.Add(1)
@@ -296,17 +305,21 @@ func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 			}
 			// Kill every third hook: half "before request" (immediately) and half
 			// "after request" (a brief delay lets it reach/submit the claim). The
-			// rest run to completion.
+			// rest run to completion. A kill is counted only when Kill() reports no
+			// error, so a process that already exited on its own is not miscounted
+			// as a killed client.
 			switch i % 3 {
 			case 0: // before request submission
-				_ = cmd.Process.Kill()
-				atomic.AddInt64(&killed, 1)
+				if err := cmd.Process.Kill(); err == nil {
+					atomic.AddInt64(&killedBefore, 1)
+				}
 				_, _ = cmd.Process.Wait()
 				return
 			case 1: // after request submission
 				time.Sleep(15 * time.Millisecond)
-				_ = cmd.Process.Kill()
-				atomic.AddInt64(&killed, 1)
+				if err := cmd.Process.Kill(); err == nil {
+					atomic.AddInt64(&killedAfter, 1)
+				}
 				_, _ = cmd.Process.Wait()
 				return
 			default:
@@ -319,9 +332,10 @@ func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 	sampler.Wait()
 
 	peakConns := int(atomic.LoadInt64(&peak))
-	t.Logf("killed clients: killed=%d/%d peakConns=%d baseline=%d", atomic.LoadInt64(&killed), procs, peakConns, baseline)
-	if atomic.LoadInt64(&killed) == 0 {
-		t.Fatalf("no hook was killed; the case was not exercised")
+	kBefore, kAfter := atomic.LoadInt64(&killedBefore), atomic.LoadInt64(&killedAfter)
+	t.Logf("killed clients: before=%d after=%d peakConns=%d baseline=%d", kBefore, kAfter, peakConns, baseline)
+	if kBefore == 0 || kAfter == 0 {
+		t.Fatalf("kill cohorts not both exercised: before=%d after=%d", kBefore, kAfter)
 	}
 	if peakConns >= oracleMaxConnections {
 		t.Fatalf("killed-client load peaked at %d connections, reaching the %d cap", peakConns, oracleMaxConnections)
@@ -329,10 +343,276 @@ func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 	if peakConns > oracleFastPathConnCap {
 		t.Fatalf("killed-client load peaked at %d connections, above the bounded-pool cap %d; a killed worker leaked a server connection", peakConns, oracleFastPathConnCap)
 	}
+	// Deterministic post-submit observable: despite every after-submit client
+	// being killed before printing, the controller committed claims for the
+	// requests it accepted, so some seeded beads are now owned server-side. A
+	// worker that held its own SQL socket would have stranded the mutation on
+	// SIGKILL; the controller-owned pool commits it regardless of client death.
+	if claimed := countClaimedRoutedBeads(t, city); claimed == 0 {
+		t.Fatalf("no routed bead was claimed server-side; the after-submit kill cohort never reached the controller")
+	}
 	final := waitThreadsConnectedSettle(t, city.observer, baseline+2, 20*time.Second)
 	if final > baseline+2 {
 		t.Fatalf("connections did not return to baseline after killed clients: %d > baseline %d(+2)", final, baseline)
 	}
+}
+
+// countClaimedRoutedBeads reports how many of the routed pool beads are now
+// assigned+in_progress (claimed) as observed through the controller — the
+// server-side evidence that submitted claims committed even when the submitting
+// client died before printing.
+func countClaimedRoutedBeads(t *testing.T, city *connOracleCity) int {
+	t.Helper()
+	out, err := runGCWithEnv(city.env, city.dir, "bd", "list", "--status", "in_progress", "--json", "--limit=0")
+	if err != nil {
+		t.Fatalf("list in_progress beads: %v\n%s", err, out)
+	}
+	return countRoutedReady(out, oraclePoolAgent)
+}
+
+// seedRigRoutedDemand creates one unassigned bead in the named RIG store routed
+// to the pool worker and waits for it to become ready in that rig's scope, so the
+// rig-scoped fast path's tier-3 read surfaces it. It returns the seeded bead ID.
+func seedRigRoutedDemand(t *testing.T, city *connOracleCity, rig, title string) string {
+	t.Helper()
+	out, err := runGCWithEnv(city.env, city.dir, "bd", "--rig", rig, "create", "--json", title)
+	if err != nil {
+		t.Fatalf("create rig %s bead %q: %v\n%s", rig, title, err, out)
+	}
+	id := beadIDFromJSON(out)
+	if id == "" {
+		t.Fatalf("create rig %s bead %q: no id in output:\n%s", rig, title, out)
+	}
+	if o, err := runGCWithEnv(city.env, city.dir, "bd", "--rig", rig, "update", id, "--set-metadata", "gc.routed_to="+oraclePoolAgent); err != nil {
+		t.Fatalf("route rig %s bead %s: %v\n%s", rig, id, err, o)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		o, err := runGCWithEnv(city.env, city.dir, "bd", "--rig", rig, "ready", "--json", "--limit=0")
+		if err == nil && countRoutedReady(o, oraclePoolAgent) >= 1 {
+			return id
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rig %s routed bead %s never became ready within 20s (last err=%v)", rig, id, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// rigScopedHookActorEnv builds the env for a RIG-SCOPED pool-worker hook: its
+// GC_ALIAS carries the "<rig>/<name>" identity, which drives the fast path's
+// store scope order to own-rig-first-then-city (hookFastPathScopeOrder). The
+// claim assignee is still the distinct GC_SESSION_NAME, and GC_TEMPLATE resolves
+// the generated-default pool agent so the hook takes the fast path.
+func rigScopedHookActorEnv(city *connOracleCity, rig, actor string) []string {
+	env := filterEnvMany(commandEnvForDir(city.dir, true),
+		"GC_SESSION_ID", "GC_INSTANCE_TOKEN", "GC_SESSION_NAME", "GC_ALIAS", "GC_SESSION_ORIGIN", "GC_TEMPLATE", "GC_AGENT", "GC_DEBUG")
+	return append(env,
+		"GC_SESSION_NAME="+actor,
+		"GC_ALIAS="+rig+"/"+actor,
+		"GC_SESSION_ORIGIN=ephemeral",
+		"GC_TEMPLATE="+oraclePoolAgent,
+		"GC_DEBUG=1",
+	)
+}
+
+// TestManagedDoltConnOracle_RigScopePrecedenceOwnRigBeatsCity is the end-to-end
+// invariant-2 proof over real managed Dolt across multiple rig stores: a
+// rig-scoped agent with an assigned-ready bead waiting in the CITY store and
+// routed pool demand waiting in its OWN rig store claims the rig work first. The
+// legacy firstStoreWithWork reads the rig store before the city store, so the
+// rig's tier-3 routed work outranks the city's tier-2 assigned work; a federated
+// (tier-outermost) read would invert this and hand the agent city work instead.
+func TestManagedDoltConnOracle_RigScopePrecedenceOwnRigBeatsCity(t *testing.T) {
+	requireDoltIntegration(t)
+	city := setupConnOracleCity(t, true)
+
+	const actor = "fe-precedence-actor"
+	// City store: an assigned-ready bead the agent owns (tier 2, city scope).
+	cityID := seedAssignedBead(t, city, "city-assigned-ready", actor, false)
+	// Own rig store (frontend): routed pool demand (tier 3, rig scope).
+	rigID := seedRigRoutedDemand(t, city, "frontend", "frontend-routed-demand")
+	// A second rig (backend) also holds routed demand, proving >=2 rigs are seeded
+	// and that the rig-scoped agent does not reach into a rig that is not its own.
+	backendID := seedRigRoutedDemand(t, city, "backend", "backend-routed-demand")
+
+	out, _ := runGCWithEnv(rigScopedHookActorEnv(city, "frontend", actor), city.dir, "hook", "--claim", "--json")
+	assertRouteAPI(t, "rig-scope precedence", out)
+	claimedID, asg := heldBeadAndAssignee(out)
+	if claimedID != rigID || asg != actor {
+		t.Fatalf("rig-scope precedence: claimed (%s,%s), want own-rig routed (%s,%s); city assigned %s must not win, backend %s must not be reached\n%s",
+			claimedID, asg, rigID, actor, cityID, backendID, out)
+	}
+}
+
+// TestManagedDoltConnOracle_ContinuationGroupPreassigned proves the fast-path
+// claim still pre-assigns continuation-group siblings: claiming a routed bead
+// that carries gc.root_bead_id + gc.continuation_group assigns its open,
+// route-matching sibling in the same group to the same actor, so a multi-step
+// continuation stays with one worker. The fast path leaves continuation
+// list/assign on the bd defaults by design, so this exercises that sub-step end
+// to end through a fast-path claim.
+func TestManagedDoltConnOracle_ContinuationGroupPreassigned(t *testing.T) {
+	requireDoltIntegration(t)
+	city := setupConnOracleCity(t, true)
+
+	const root = "gc-cont-root"
+	const group = "conn-oracle-cont"
+	a := seedRoutedBeadWithMeta(t, city, "continuation-step-a", map[string]string{
+		beadmetaRootKey:  root,
+		beadmetaGroupKey: group,
+	})
+	b := seedRoutedBeadWithMeta(t, city, "continuation-step-b", map[string]string{
+		beadmetaRootKey:  root,
+		beadmetaGroupKey: group,
+	})
+	waitRoutedReadyCount(t, city, 2)
+
+	out, _ := runGCWithEnv(hookActorEnv(city, "continuation-actor"), city.dir, "hook", "--claim", "--json")
+	assertRouteAPI(t, "continuation", out)
+
+	claimedID, asg := heldBeadAndAssignee(out)
+	if asg != "continuation-actor" || (claimedID != a && claimedID != b) {
+		t.Fatalf("continuation: claimed (%s,%s), want one of (%s,%s) by continuation-actor\n%s", claimedID, asg, a, b, out)
+	}
+	// The sibling not claimed must have been pre-assigned to the same actor.
+	sibling := a
+	if claimedID == a {
+		sibling = b
+	}
+	if !continuationAssignedContains(out, sibling) {
+		t.Fatalf("continuation: sibling %s not in continuation_assigned after claiming %s\n%s", sibling, claimedID, out)
+	}
+	if owner := beadAssignee(t, city, sibling); owner != "continuation-actor" {
+		t.Fatalf("continuation: sibling %s owned by %q, want continuation-actor", sibling, owner)
+	}
+}
+
+// TestManagedDoltConnOracle_CustomWorkQueryRoutesCustomShell proves invariant 3's
+// observability: an agent with an explicit work_query never takes the fast path
+// and logs route=custom-shell, so the custom-query lane is visible rather than
+// silently indistinguishable from a controller outage fallback.
+func TestManagedDoltConnOracle_CustomWorkQueryRoutesCustomShell(t *testing.T) {
+	requireDoltIntegration(t)
+	city := setupConnOracleCity(t, true)
+
+	env := filterEnvMany(commandEnvForDir(city.dir, true),
+		"GC_SESSION_ID", "GC_INSTANCE_TOKEN", "GC_SESSION_NAME", "GC_ALIAS", "GC_SESSION_ORIGIN", "GC_TEMPLATE", "GC_AGENT", "GC_DEBUG")
+	env = append(env,
+		"GC_SESSION_NAME=custom-actor",
+		"GC_SESSION_ORIGIN=ephemeral",
+		"GC_TEMPLATE="+oracleCustomAgent,
+		"GC_DEBUG=1",
+	)
+	out, _ := runGCWithEnv(env, city.dir, "hook", "--claim", "--json")
+	if strings.Contains(out, "route=api") {
+		t.Fatalf("custom work_query took the fast path (route=api); invariant 3 violated:\n%s", out)
+	}
+	if !strings.Contains(out, "route=custom-shell") {
+		t.Fatalf("custom work_query hook did not log route=custom-shell:\n%s", out)
+	}
+}
+
+// metadata keys duplicated as test constants so the oracle does not import the
+// production beadmeta package (the integration test binary stays decoupled from
+// internal packages); their values are pinned by beadmeta.keys.go.
+const (
+	beadmetaRootKey  = "gc.root_bead_id"
+	beadmetaGroupKey = "gc.continuation_group"
+)
+
+// seedRoutedBeadWithMeta creates one city-scoped bead routed to the pool worker
+// with additional metadata (e.g. continuation root/group) and returns its ID.
+func seedRoutedBeadWithMeta(t *testing.T, city *connOracleCity, title string, meta map[string]string) string {
+	t.Helper()
+	out, err := runGCWithEnv(city.env, city.dir, "bd", "create", "--json", title)
+	if err != nil {
+		t.Fatalf("create bead %q: %v\n%s", title, err, out)
+	}
+	id := beadIDFromJSON(out)
+	if id == "" {
+		t.Fatalf("create bead %q: no id in output:\n%s", title, out)
+	}
+	set := func(kv string) {
+		if o, err := runGCWithEnv(city.env, city.dir, "bd", "update", id, "--set-metadata", kv); err != nil {
+			t.Fatalf("set %s on %s: %v\n%s", kv, id, err, o)
+		}
+	}
+	set("gc.routed_to=" + oraclePoolAgent)
+	for k, v := range meta {
+		set(k + "=" + v)
+	}
+	return id
+}
+
+// waitRoutedReadyCount polls until at least n routed pool beads are ready to the
+// controller, so a race started immediately after does not read a cold cache.
+func waitRoutedReadyCount(t *testing.T, city *connOracleCity, n int) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		out, err := runGCWithEnv(city.env, city.dir, "bd", "ready", "--json", "--limit=0")
+		if err == nil && countRoutedReady(out, oraclePoolAgent) >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("routed demand did not reach %d ready within 20s (last err=%v)", n, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// continuationAssignedContains reports whether the hook JSON's
+// continuation_assigned list includes id.
+func continuationAssignedContains(out, id string) bool {
+	var res struct {
+		ContinuationAssigned []string `json:"continuation_assigned"`
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		if err := json.Unmarshal([]byte(line), &res); err != nil {
+			continue
+		}
+		for _, a := range res.ContinuationAssigned {
+			if a == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// beadAssignee returns the current assignee of a bead as observed through the
+// controller. bd show --json emits a single-bead array ([{...}]); the scan
+// tolerates leading log lines in the combined output.
+func beadAssignee(t *testing.T, city *connOracleCity, id string) string {
+	t.Helper()
+	out, err := runGCWithEnv(city.env, city.dir, "bd", "show", id, "--json")
+	if err != nil {
+		t.Fatalf("show bead %s: %v\n%s", id, err, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			var arr []struct {
+				Assignee string `json:"assignee"`
+			}
+			if err := json.Unmarshal([]byte(line), &arr); err == nil && len(arr) > 0 {
+				return strings.TrimSpace(arr[0].Assignee)
+			}
+		} else if strings.HasPrefix(line, "{") {
+			var one struct {
+				Assignee string `json:"assignee"`
+			}
+			if err := json.Unmarshal([]byte(line), &one); err == nil {
+				return strings.TrimSpace(one.Assignee)
+			}
+		}
+	}
+	return ""
 }
 
 // This file adds the AC-3 failure-path subtests that layer onto the core

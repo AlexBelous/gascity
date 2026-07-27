@@ -57,6 +57,10 @@ const (
 	// oraclePoolAgent is the generated-default pool worker whose route the seeded
 	// demand targets. It carries no work_query, so hooks take the fast path.
 	oraclePoolAgent = "polecat"
+	// oracleCustomAgent carries an explicit work_query, so its hook must stay on
+	// the subprocess adapter (invariant 3) and log route=custom-shell rather than
+	// route=api. It exercises the custom-query lane's explicit observability.
+	oracleCustomAgent = "custom-shell-worker"
 )
 
 // connOracleCity is a running managed-Dolt city wired for the oracle: a live
@@ -253,8 +257,11 @@ func setupConnOracleCityWithReadTimeout(t *testing.T, fastpath bool, readTimeout
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	cityDir := filepath.Join(root, "c")
 	feDir := filepath.Join(root, "fe")
-	if err := os.MkdirAll(feDir, 0o755); err != nil {
-		t.Fatalf("mkdir rig dir: %v", err)
+	beDir := filepath.Join(root, "be")
+	for _, d := range []string{feDir, beDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir rig dir %s: %v", d, err)
+		}
 	}
 
 	// The pool worker carries max_active_sessions = 0 so it does NOT support
@@ -291,11 +298,22 @@ name = "frontend"
 path = %q
 prefix = "fe"
 
+[[rigs]]
+name = "backend"
+path = %q
+prefix = "be"
+
 [[agent]]
 name = %q
 start_command = "sleep 3600"
 max_active_sessions = 0
-`, fastpath, oracleMaxConnections, readTimeoutMillis, feDir, oraclePoolAgent)
+
+[[agent]]
+name = %q
+work_query = "bd ready --json --limit=0"
+start_command = "sleep 3600"
+max_active_sessions = 0
+`, fastpath, oracleMaxConnections, readTimeoutMillis, feDir, beDir, oraclePoolAgent, oracleCustomAgent)
 	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
 		t.Fatalf("write conn-oracle config: %v", err)
 	}

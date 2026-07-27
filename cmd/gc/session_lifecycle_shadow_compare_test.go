@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -150,30 +153,47 @@ func TestCompareSessionLifecycleStatusDetachesPlansAndPatches(t *testing.T) {
 
 func TestReconcileSessionBeadsReportsStatusComparisonAtBothHealSites(t *testing.T) {
 	tests := []struct {
-		name    string
-		desired bool
-		want    sessionLifecycleStatusHealSite
+		name               string
+		desired            bool
+		storeQueryPartial  bool
+		pendingCreateClaim bool
+		wantSite           sessionLifecycleStatusHealSite
+		wantPatch          session.MetadataPatch
 	}{
 		{
-			name:    "orphan arm",
-			desired: false,
-			want:    sessionLifecycleStatusHealSiteOrphan,
+			name:               "orphan partial inventory preserves stale creating lease",
+			desired:            false,
+			storeQueryPartial:  true,
+			pendingCreateClaim: true,
+			wantSite:           sessionLifecycleStatusHealSiteOrphan,
+			wantPatch:          session.MetadataPatch{"state": string(session.StateAsleep)},
 		},
 		{
-			name:    "desired arm",
-			desired: true,
-			want:    sessionLifecycleStatusHealSiteDesired,
+			name:      "desired site observes prepass-converged noop",
+			desired:   true,
+			wantSite:  sessionLifecycleStatusHealSiteDesired,
+			wantPatch: nil,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			env := newReconcilerTestEnv()
-			env.addDesired("worker", "worker", true)
+			env.cfg.Agents = []config.Agent{{Name: "worker"}}
+			env.addDesired("worker", "worker", false)
 			if !tt.desired {
 				delete(env.desiredState, "worker")
 			}
 			sessionBead := env.createSessionBead("worker", "worker")
+			metadata := map[string]string{
+				"state":        string(session.StateCreating),
+				"last_woke_at": env.clk.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+			}
+			if tt.pendingCreateClaim {
+				metadata["pending_create_claim"] = "true"
+				metadata["pending_create_started_at"] = env.clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)
+			}
+			env.setSessionMetadata(&sessionBead, metadata)
 			var comparisons []sessionLifecycleStatusComparison
 			env.startOptions = append(env.startOptions,
 				withSessionLifecycleStatusComparisonObserver(func(comparison sessionLifecycleStatusComparison) {
@@ -181,14 +201,19 @@ func TestReconcileSessionBeadsReportsStatusComparisonAtBothHealSites(t *testing.
 				}),
 			)
 
-			env.reconcile([]beads.Bead{sessionBead})
+			cfgNames := configuredSessionNames(env.cfg, "", env.store)
+			reconcileSessionBeads(
+				context.Background(), []beads.Bead{sessionBead}, env.desiredState, cfgNames, env.cfg, env.sp,
+				env.store, nil, nil, nil, env.dt, map[string]int{"worker": 1}, tt.storeQueryPartial, nil, "",
+				nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...,
+			)
 
 			if len(comparisons) != 1 {
 				t.Fatalf("comparison count = %d, want 1; comparisons=%+v stderr=%q", len(comparisons), comparisons, env.stderr.String())
 			}
 			got := comparisons[0]
-			if got.Site != tt.want {
-				t.Fatalf("site = %q, want %q", got.Site, tt.want)
+			if got.Site != tt.wantSite {
+				t.Fatalf("site = %q, want %q", got.Site, tt.wantSite)
 			}
 			if got.Outcome != sessionLifecycleStatusComparisonMatched {
 				t.Fatalf("comparison = %+v, want matched", got)
@@ -196,57 +221,10 @@ func TestReconcileSessionBeadsReportsStatusComparisonAtBothHealSites(t *testing.
 			if got.Candidate.SessionID != sessionBead.ID {
 				t.Fatalf("candidate session = %q, want %q", got.Candidate.SessionID, sessionBead.ID)
 			}
-			if got.Candidate.Patch["state"] != string(session.StateAwake) {
-				t.Fatalf("candidate patch = %#v, want state=awake", got.Candidate.Patch)
-			}
-			if got.LegacyPatch["state"] != string(session.StateAwake) {
-				t.Fatalf("legacy patch = %#v, want state=awake", got.LegacyPatch)
+			if !reflect.DeepEqual(got.Candidate.Patch, tt.wantPatch) || !reflect.DeepEqual(got.LegacyPatch, tt.wantPatch) {
+				t.Fatalf("comparison patches = candidate:%#v legacy:%#v, want exact %#v", got.Candidate.Patch, got.LegacyPatch, tt.wantPatch)
 			}
 		})
-	}
-}
-
-func TestReconcileSessionBeadsReportsLegacyHealErrorAsIncomparable(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.addDesired("worker", "worker", false)
-	sessionBead := env.createSessionBead("worker", "worker")
-	env.setSessionMetadata(&sessionBead, map[string]string{
-		"state":                     string(session.StateCreating),
-		"pending_create_started_at": env.clk.Now().Add(-2 * time.Minute).Format(time.RFC3339),
-		"session_key":               "conversation-1",
-		"started_config_hash":       "config-1",
-	})
-	writeErr := errors.New("ambiguous heal write")
-	env.store = &failSessionHealStore{
-		Store:     env.store,
-		sessionID: sessionBead.ID,
-		err:       writeErr,
-	}
-	var comparisons []sessionLifecycleStatusComparison
-	env.startOptions = append(env.startOptions,
-		withSessionLifecycleStatusComparisonObserver(func(comparison sessionLifecycleStatusComparison) {
-			comparisons = append(comparisons, comparison)
-		}),
-	)
-
-	env.reconcile([]beads.Bead{sessionBead})
-
-	if len(comparisons) != 1 {
-		t.Fatalf("comparison count = %d, want 1; comparisons=%+v stderr=%q", len(comparisons), comparisons, env.stderr.String())
-	}
-	got := comparisons[0]
-	if got.Site != sessionLifecycleStatusHealSiteDesired {
-		t.Fatalf("site = %q, want desired", got.Site)
-	}
-	if got.Outcome != sessionLifecycleStatusComparisonIncomparable ||
-		got.Reason != sessionLifecycleStatusComparisonReasonLegacyError {
-		t.Fatalf("comparison = %+v, want incomparable legacy error", got)
-	}
-	if got.LegacyError != writeErr.Error() {
-		t.Fatalf("legacy error = %q, want %q", got.LegacyError, writeErr.Error())
-	}
-	if got.LegacyPatch != nil {
-		t.Fatalf("legacy patch = %#v, want nil after failed write", got.LegacyPatch)
 	}
 }
 

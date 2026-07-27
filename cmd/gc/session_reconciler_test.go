@@ -187,19 +187,22 @@ type failRateLimitHoldStore struct {
 	rateLimitHoldCalls int
 }
 
-type failSessionHealStore struct {
+type applyThenErrorSessionHealStore struct {
 	beads.Store
 	sessionID string
 	err       error
 	attempts  int
 }
 
-func (s *failSessionHealStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if id == s.sessionID && kvs["state"] == string(sessionpkg.StateAsleep) {
-		s.attempts++
-		return s.err
+func (s *applyThenErrorSessionHealStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id != s.sessionID || kvs["state"] != string(sessionpkg.StateAsleep) {
+		return s.Store.SetMetadataBatch(id, kvs)
 	}
-	return s.Store.SetMetadataBatch(id, kvs)
+	s.attempts++
+	if err := s.Store.SetMetadataBatch(id, kvs); err != nil {
+		return err
+	}
+	return s.err
 }
 
 func (s *failRateLimitHoldStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -471,13 +474,18 @@ func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session before reconcile: %v", err)
 	}
+	beforeInfo := env.sessionInfo(session.ID)
 	writeErr := errors.New("ambiguous heal write")
-	failing := &failSessionHealStore{
+	failing := &applyThenErrorSessionHealStore{
 		Store:     env.store,
 		sessionID: session.ID,
 		err:       writeErr,
 	}
 	env.store = failing
+	var comparisons []sessionLifecycleStatusComparison
+	env.startOptions = append(env.startOptions, withSessionLifecycleStatusComparisonObserver(func(comparison sessionLifecycleStatusComparison) {
+		comparisons = append(comparisons, comparison)
+	}))
 
 	if woken := env.reconcile([]beads.Bead{before}); woken != 0 {
 		t.Fatalf("wake attempts after failed heal = %d, want 0", woken)
@@ -489,8 +497,29 @@ func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get session after reconcile: %v", err)
 	}
-	if !reflect.DeepEqual(after, before) {
-		t.Fatalf("failed heal changed persisted session:\n got: %#v\nwant: %#v", after, before)
+	wantPatch := sessionpkg.MetadataPatch{
+		"continuation_reset_pending": "true",
+		"primed_at":                  "",
+		"priming_attempted_at":       "",
+		"prompt_hash":                "",
+		"session_key":                "",
+		"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
+		"started_config_hash":        "",
+		"state":                      string(sessionpkg.StateAsleep),
+	}
+	afterInfo := env.sessionInfo(session.ID)
+	if wantInfo := beforeInfo.ApplyPatch(wantPatch); !reflect.DeepEqual(afterInfo, wantInfo) {
+		t.Fatalf("persisted status-heal row = %#v, want committed patch %#v", afterInfo, wantInfo)
+	}
+	if after.Status != "open" {
+		t.Fatalf("persisted status = %q, want open after failed heal", after.Status)
+	}
+	if len(comparisons) != 1 {
+		t.Fatalf("comparison count = %d, want 1; comparisons=%+v", len(comparisons), comparisons)
+	}
+	comparison := comparisons[0]
+	if comparison.Site != sessionLifecycleStatusHealSiteDesired || comparison.Outcome != sessionLifecycleStatusComparisonIncomparable || comparison.Reason != sessionLifecycleStatusComparisonReasonLegacyError || comparison.LegacyPatch != nil || comparison.LegacyError != writeErr.Error() {
+		t.Fatalf("comparison = %+v, want desired/incomparable/legacy_error with nil legacy patch", comparison)
 	}
 	if drain := env.dt.get(session.ID); drain != nil {
 		t.Fatalf("failed heal started a drain: %#v", drain)
@@ -7946,7 +7975,10 @@ func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLas
 	}
 }
 
-func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
+// Complete stale-create claims are consumed by the legacy rollback prepasses,
+// so a positive through-reconciler emission is unreachable; this direct test
+// honestly owns the production Info trace callee.
+func TestTraceHealClearedPendingCreateLeaseInfoRecordsDecision(t *testing.T) {
 	trace := &sessionReconcilerTraceCycle{
 		tracer: &SessionReconcilerTracer{
 			detail: map[string]TraceSource{"helper": TraceSourceManual},
@@ -7962,15 +7994,15 @@ func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
 		reasonCounts:      map[string]int{},
 		outcomeCounts:     map[string]int{},
 	}
-	session := makeBead("b1", map[string]string{
+	info := sessiontest.InfoFromMeta(t, map[string]string{
 		"session_name": "helper",
 		"state":        "asleep",
 		"template":     "helper",
 	})
 
-	traceHealClearedPendingCreateLease(
+	traceHealClearedPendingCreateLeaseInfo(
 		trace,
-		session,
+		info,
 		&config.City{Agents: []config.Agent{{Name: "helper"}}},
 		"",
 		"",

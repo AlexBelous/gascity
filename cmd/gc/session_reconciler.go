@@ -1841,37 +1841,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// storeQueryPartial=true the formal rollback is deferred, so the
 			// heal path must also preserve pending_create_claim to avoid a
 			// half-applied rollback that races the next complete tick.
-			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
-			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
-			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-			var statusCandidate *sessionLifecycleStatusPlan
-			if reconcileOpts.statusComparisonObserver != nil {
-				candidate := planSessionLifecycleStatus(sessionLifecycleShadowInput{
-					Info:              infoByID[id],
-					RuntimeObserved:   livenessErr == nil,
-					RuntimeAlive:      providerAlive,
-					ObservedAt:        clk.Now().UTC(),
-					StartupTimeout:    startupTimeout,
-					RollbackAvailable: !storeQueryPartial,
-				})
-				statusCandidate = &candidate
-			}
-			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
-			if statusCandidate != nil {
-				reconcileOpts.statusComparisonObserver(compareSessionLifecycleStatus(
-					sessionLifecycleStatusHealSiteOrphan,
-					*statusCandidate,
-					healBatch,
-					healErr,
-				))
-			}
+			infoBeforeHeal := infoByID[id]
+			stateBeforeHeal := strings.TrimSpace(infoBeforeHeal.MetadataState)
+			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.PendingCreateStartedAt)
+			lastWokeAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.LastWokeAt)
+			healBatch, healErr := applySessionLifecycleStatusHeal(tick, id, sessionLifecycleStatusHealContext{
+				Site:              sessionLifecycleStatusHealSiteOrphan,
+				RuntimeObserved:   livenessErr == nil,
+				RuntimeAlive:      providerAlive,
+				RollbackAvailable: !storeQueryPartial,
+			}, sessFront, clk, startupTimeout, reconcileOpts.statusComparisonObserver)
 			if healErr != nil {
 				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 				continue
 			}
 			traceHealClearedPendingCreateLeaseInfo(
 				trace,
-				infoByID[id],
+				infoBeforeHeal,
 				cfg,
 				"",
 				name,
@@ -1881,28 +1867,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				providerAlive,
 				healBatch,
 			)
-			// Post-heal refresh: healStateWithRollbackInfo (above) persists healBatch
-			// via sessFront.ApplyPatch and returns it, but does NOT mirror onto the raw
-			// *session bead (WI-6 R3 dropped the raw-bead mirror). The top-of-loop
-			// `info` (from the snapshot at loop entry) is now stale for this switch, and
-			// nothing updates the raw bead post-heal — so this write-returns-Info fold
-			// (Step 6d) is the ONLY same-tick source of the healed state.
-			// healStateWithRollbackInfo returns exactly the batch it persisted, and nil
-			// when it healed nothing (ApplyPatch(nil) is a no-op). infoByID[id]
-			// is coherent here: the top-of-loop snapshot entry, unmutated on the path
-			// that reaches the heal (the pre-heal checkRateLimitStability/rollback/
-			// failed-create-close sites all `continue`). The trace call above takes
-			// the bead by value (cannot mutate), and Go switch cases do not fall
-			// through, so both the preserveNamed body and the
-			// pendingCreateSessionStillLeasedInfo guard/body below read the same
-			// post-heal snapshot. This fold is LOAD-BEARING: the
-			// pendingCreateSessionStillLeasedInfo guard below reads the healed
-			// MetadataState off infoPostHeal, and the downstream zombie refresh is
-			// ApplyPatch(terminalErrBatch) — a no-op when there is no terminal error —
-			// so the healed state must reach that guard (and the post-zombie rollback
-			// read on the preserveNamed fall-through) through this fold alone. Guarded
-			// by TestReconcileSessionBeads_HealStateReflectedOnSnapshot.
-			tick.apply(id, healBatch)
+			// The helper folds the successful legacy write before this trace and every
+			// same-tick reader below. The trace intentionally receives infoBeforeHeal.
 			infoPostHeal := infoByID[id]
 			switch {
 			case preserveNamed:
@@ -2637,37 +2603,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Heal advisory state metadata.
-		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
-		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
-		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		var statusCandidate *sessionLifecycleStatusPlan
-		if reconcileOpts.statusComparisonObserver != nil {
-			candidate := planSessionLifecycleStatus(sessionLifecycleShadowInput{
-				Info:              infoByID[id],
-				RuntimeObserved:   sp != nil && strings.TrimSpace(name) != "",
-				RuntimeAlive:      alive,
-				ObservedAt:        clk.Now().UTC(),
-				StartupTimeout:    startupTimeout,
-				RollbackAvailable: true,
-			})
-			statusCandidate = &candidate
-		}
-		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, sessFront, clk, startupTimeout, true)
-		if statusCandidate != nil {
-			reconcileOpts.statusComparisonObserver(compareSessionLifecycleStatus(
-				sessionLifecycleStatusHealSiteDesired,
-				*statusCandidate,
-				healBatch,
-				healErr,
-			))
-		}
+		infoBeforeHeal := infoByID[id]
+		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoBeforeHeal.MetadataState))
+		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.PendingCreateStartedAt)
+		lastWokeAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.LastWokeAt)
+		healBatch, healErr := applySessionLifecycleStatusHeal(tick, id, sessionLifecycleStatusHealContext{
+			Site:              sessionLifecycleStatusHealSiteDesired,
+			RuntimeObserved:   sp != nil && strings.TrimSpace(name) != "",
+			RuntimeAlive:      alive,
+			RollbackAvailable: true,
+		}, sessFront, clk, startupTimeout, reconcileOpts.statusComparisonObserver)
 		if healErr != nil {
 			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 			continue
 		}
 		traceHealClearedPendingCreateLeaseInfo(
 			trace,
-			infoByID[id],
+			infoBeforeHeal,
 			cfg,
 			tp.TemplateName,
 			name,
@@ -2677,14 +2629,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			alive,
 			healBatch,
 		)
-		// Fold heal#2's batch onto the snapshot (Step 6d write-returns-Info),
-		// identical to the heal#1 fold above (~1713): healStateWithRollback returns
-		// exactly the batch it mirrored (nil ⇒ ApplyPatch no-op). The base is
-		// coherent here — the pre-heal rate-limit gate `continue`s on hit and the
-		// restart/drain-ack blocks above either `continue` or self-refresh. This is
-		// one of the forward-pass writers the blanket pre-pass still masks; folding it
-		// is a prerequisite for that pre-pass's deletion (STEP6-PREPASS-AUDIT group 4).
-		tick.apply(id, healBatch)
+		// The helper folded the successful legacy write before this trace and the
+		// same-tick readers below; the trace above intentionally used infoBeforeHeal.
 		if recoverPendingIdleSleepInfo(infoByID[id], sessFront, running, clk) {
 			alive = false
 			// Fold the idle-stop-pending recovery sleep onto the snapshot (Step 6d).
@@ -5200,56 +5146,8 @@ func configDriftTracePayload(storedHash, currentHash string, driftedFields []str
 	return payload
 }
 
-func traceHealClearedPendingCreateLease(
-	trace *sessionReconcilerTraceCycle,
-	session beads.Bead,
-	cfg *config.City,
-	template string,
-	name string,
-	stateBeforeHeal string,
-	pendingCreateStartedAtBeforeHeal string,
-	lastWokeAtBeforeHeal string,
-	providerAlive bool,
-	batch map[string]string,
-) {
-	if trace == nil || !pendingCreateQueuedOrCreatingState(stateBeforeHeal) {
-		return
-	}
-	if cleared, ok := batch["pending_create_claim"]; !ok || cleared != "" {
-		return
-	}
-	template = strings.TrimSpace(template)
-	if template == "" {
-		template = normalizedSessionTemplate(session, cfg)
-	}
-	if template == "" {
-		template = session.Metadata["template"]
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		name = session.Metadata["session_name"]
-	}
-	// state_after is the healed state. Heal no longer mirrors onto the raw bead
-	// (WI-6 R3), so read it off the batch it returned (batch["state"] when the
-	// heal changed state, else the pre-heal state).
-	stateAfter := stateBeforeHeal
-	if s, ok := batch["state"]; ok {
-		stateAfter = s
-	}
-	trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonHealClearedStaleLease, TraceOutcomeApplied, template, name, traceRecordPayload{
-		"last_woke_at":              lastWokeAtBeforeHeal,
-		"pending_create_started_at": pendingCreateStartedAtBeforeHeal,
-		"provider_alive":            providerAlive,
-		"state_after":               stateAfter,
-		"state_before":              stateBeforeHeal,
-	})
-}
-
-// traceHealClearedPendingCreateLeaseInfo is the session.Info form of
-// traceHealClearedPendingCreateLease: the template/name fallbacks read Info
-// (normalizedSessionTemplateInfo, Info.Template, Info.SessionNameMetadata) instead
-// of cracking the raw bead; every other read is a plain argument, so it is
-// byte-identical to the raw form.
+// traceHealClearedPendingCreateLeaseInfo records a stale pending-create lease
+// clear, resolving missing template and session names from the typed snapshot.
 func traceHealClearedPendingCreateLeaseInfo(
 	trace *sessionReconcilerTraceCycle,
 	info sessionpkg.Info,

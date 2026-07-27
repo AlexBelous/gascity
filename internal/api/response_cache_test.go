@@ -176,7 +176,23 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 	}
 }
 
-func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
+// TestHandleAgentListCachesAcrossEventChurn pins the ga-gnwpu6 fix: /agents
+// keys its response cache on a wall-clock TTL bucket, not the event
+// sequence, so a busy city (whose sequence advances on every poll) still
+// hits the cache instead of rebuilding the full roster on every request.
+// Recording an event must NOT bust the /agents cache within the TTL window
+// — this test replaces the former TestHandleAgentListCachesUntilIndexChanges,
+// which encoded the opposite (buggy) expectation.
+func TestHandleAgentListCachesAcrossEventChurn(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentsResponseTTLFloor
+	agentsResponseTTLFloor = 0
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentsResponseTTLFloor = oldFloor
+	})
+
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
@@ -194,19 +210,99 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
-
 	if store.listByAssigneeCalls != 2 {
 		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 2", store.listByAssigneeCalls)
 	}
 
-	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	// A moving event sequence — the busy-city scenario — must keep hitting
+	// the time-bucketed cache, not force a rebuild.
+	for i := 0; i < 5; i++ {
+		state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("agents after event %d = %d, want 200", i, rec.Code)
+		}
+	}
+	if store.listByAssigneeCalls != 2 {
+		t.Fatalf("ListByAssignee calls after %d index changes = %d, want 2 (time-bucketed cache must survive sequence churn)", 5, store.listByAssigneeCalls)
+	}
+}
+
+// TestHandleAgentListBlockingBypassesTimeCache verifies the strict-freshness
+// path is preserved: a blocking ?index=&wait= request must rebuild the
+// roster (reflecting the event it waited for) instead of being served a
+// time-bucketed cache entry built before that event.
+func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	// Prime the time-bucketed cache with a non-blocking request.
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("priming agents = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls != 2 {
+		t.Fatalf("ListByAssignee calls after priming = %d, want 2", store.listByAssigneeCalls)
+	}
+
+	// A blocking request (index=0 returns immediately since the sequence is
+	// already ahead) must bypass the time cache and rebuild.
+	blockReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents?index=0&wait=1s"), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, blockReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blocking agents = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls != 4 {
+		t.Fatalf("ListByAssignee calls after blocking request = %d, want 4 (blocking must bypass time cache)", store.listByAssigneeCalls)
+	}
+}
+
+// TestHandleAgentListRebuildsAfterFloorExpires pins the worst-case staleness
+// bound: once both the time bucket has rolled over AND the
+// agentsResponseTTLFloor window has lapsed, the next /agents request must
+// rebuild rather than keep serving an arbitrarily old body.
+func TestHandleAgentListRebuildsAfterFloorExpires(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Millisecond
+	oldFloor := agentsResponseTTLFloor
+	agentsResponseTTLFloor = 2 * time.Millisecond
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentsResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first agents = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls != 2 {
+		t.Fatalf("ListByAssignee calls after first request = %d, want 2", store.listByAssigneeCalls)
+	}
+
+	// Sleep past both the bucket TTL and the floor so neither tier can serve
+	// a cached body; the next request must rebuild.
+	time.Sleep(5 * time.Millisecond)
+
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("third agents = %d, want 200", rec.Code)
+		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
 	if store.listByAssigneeCalls != 4 {
-		t.Fatalf("ListByAssignee calls after index change = %d, want 4", store.listByAssigneeCalls)
+		t.Fatalf("ListByAssignee calls after floor expiry = %d, want 4 (rebuild expected once floor lapses)", store.listByAssigneeCalls)
 	}
 }
 

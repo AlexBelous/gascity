@@ -1,0 +1,1792 @@
+{
+  "schema": "gascity.lumen.support/v1",
+  "upstream": {
+    "commit": "faff38c7a04e41815d6e63051ff126137d5820b9"
+  },
+  "artifacts": [
+    {
+      "path": "docs/recovery/specification/corpus-manifest.json",
+      "sha256": "2ac80f0a12761080ebf92abc786b4aa010920aea0b21c28401c009db4ea5f2b1"
+    },
+    {
+      "path": "docs/spec/syntax.lumen",
+      "sha256": "b2d0d68ae311ca50d2127a1e83a017dbc6b18848eaff9fd10a5b045ee50f6c75"
+    },
+    {
+      "path": "docs/spec/ir.lumen",
+      "sha256": "358ab65c56e5d0be305623dc93c0c0a41aef762bea118a6a7b75426ad1f52eb2"
+    },
+    {
+      "path": "docs/spec/prelude.lumen",
+      "sha256": "c47e19d611d7864d135182aa454ae11094cdba2f970a056f2d7486530d9a95b6"
+    },
+    {
+      "path": "docs/spec/modules.md",
+      "sha256": "bd3c21a5db2cef200315bbeba992e898c9c62deb925312c4a679561c9e6838ea"
+    },
+    {
+      "path": "docs/spec/types.md",
+      "sha256": "ef3383f6f6f66d62978595a69aedd89a6682cfbc7bef335ee312601d993c6666"
+    },
+    {
+      "path": "docs/spec/expressions.md",
+      "sha256": "e4783b4dd71429009699f0e928b23680b11dbb863bbe133ba681e20d0f07a90e"
+    },
+    {
+      "path": "docs/spec/execution-model.md",
+      "sha256": "4fb45b062e0347eab1708366836e3afaafe85c4ffb327920af6cc355d44dd1da"
+    },
+    {
+      "path": "docs/spec/interactions.md",
+      "sha256": "7137e1053e0f5c122a58de1c405ea68b405979dbd277230a89e535c97dbfb275"
+    },
+    {
+      "path": "docs/spec/agents.md",
+      "sha256": "16b860e68fc774b7817b2c2a337b3ebf18a04bbf443cb6a4fc8a7ef1d2bb2068"
+    },
+    {
+      "path": "docs/spec/metaprogramming.md",
+      "sha256": "4f07b4c53296e1cd929c8d971f42b58595e5ad301e00b4067ad7e7ae2cae3a34"
+    },
+    {
+      "path": "docs/spec/packages.md",
+      "sha256": "a04f222c9b59939fea04730558cbc636ff9457dd950a87d5a23077ebf0b81497"
+    },
+    {
+      "path": "docs/spec/runtime.md",
+      "sha256": "8e4c2cd3193925e1ecd0fa492a3d5ee84cfefa150adc619769f82ec0fd6d9100"
+    },
+    {
+      "path": "docs/spec/specifying-lumen.md",
+      "sha256": "1d296b9d5e380a1e227c1af89b0a626e22bf138a8efdfcce9a3b4d8f2d8edb15"
+    },
+    {
+      "path": "docs/spec/syntax-ir-derivation-contract.md",
+      "sha256": "c05dfa66605ba6898c72a5a15e8b776a4f8a17b8ea2cca749e1e857d12e6a4b5"
+    },
+    {
+      "path": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json",
+      "sha256": "6a16bde3c4426e420d3b04d3e2c71eff1a0a84a2e3f584fe07d52982e6c9229c"
+    },
+    {
+      "path": "scripts/check-lumen-selected-surface-manifest.mjs",
+      "sha256": "917945d5415d656241c4a7403a598d63995796d70986576bf5e02c4e3d42ea5b"
+    }
+  ],
+  "rows": [
+    {
+      "id": "binding.let",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:binding.let",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "channel.close",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:channel.close",
+      "planKey": "B12",
+      "proofKind": "go"
+    },
+    {
+      "id": "channel.fail",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:channel.fail",
+      "planKey": "B12",
+      "proofKind": "go"
+    },
+    {
+      "id": "clause.collector.begin",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:clause.collector.begin",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "clause.collector.collect",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:clause.collector.collect",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "clause.collector.end",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:clause.collector.end",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "clause.reduce.attached",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:clause.reduce.attached",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.agent",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.agent",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.agent-default",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.agent-default",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.agent-field-override",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.agent-field-override",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.agent.extern",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.agent.extern",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.channel",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.channel",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.export-explicit",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.export-explicit",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.export-wildcard",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.export-wildcard",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.formula",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.formula",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.function",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.function",
+      "planKey": "B19F",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.module-block",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.module-block",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.module-header",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.module-header",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.override-agent",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.override-agent",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.package",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.package",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.session",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.session",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.step.extern",
+      "status": "deferred",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.step.extern",
+      "nonClaim": "upstream-deferred"
+    },
+    {
+      "id": "decl.step.intrinsic",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.step.intrinsic",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.step.macro",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.step.macro",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.type-alias",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.type-alias",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.type-handle",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.type-handle",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.type.macro",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.type.macro",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.use-package",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.use-package",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.visibility-internal",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:decl.visibility-internal",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "event.send",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:event.send",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.array",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.array",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.builtins",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.builtins",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.channel-sink",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.channel-sink",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.channel-source",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.channel-source",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.du-construct",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.du-construct",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.array",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.array",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.bool",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.bool",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.indexOf",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.indexOf",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.isFinite",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.isFinite",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.isNaN",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.isNaN",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.join",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.join",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.json",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.json",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.length",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.length",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.lines",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.lines",
+      "planKey": "B11L",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.number",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.number",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.parseJson",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.parseJson",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.record",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.record",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.split",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.split",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.string",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.fn.string",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.handle-construct",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.handle-construct",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.include",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.include",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "expr.index",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.index",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.interpolated-text",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.interpolated-text",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.literal",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.literal",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.member",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.member",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.add-or-concat",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.add-or-concat",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.as",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.as",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.conditional",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.conditional",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.divide",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.divide",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.equals",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.equals",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.greater-than",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.greater-than",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.greater-than-or-equal",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.greater-than-or-equal",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.is",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.is",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.less-than",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.less-than",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.less-than-or-equal",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.less-than-or-equal",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.logical-and",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.logical-and",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.logical-not",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.logical-not",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.logical-or",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.logical-or",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.membership",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.membership",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.modulo",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.modulo",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.multiply",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.multiply",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.negate",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.negate",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.not-equals",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.not-equals",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.nullish-coalescing",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.nullish-coalescing",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.optional-chaining",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.optional-chaining",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.optional-index",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.optional-index",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.subtract",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operator.subtract",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operators",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.operators",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.outcomeof",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.outcomeof",
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.record",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.record",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.ref",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:expr.ref",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "handler.cleanup",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:handler.cleanup",
+      "planKey": "B7",
+      "proofKind": "go"
+    },
+    {
+      "id": "handler.recover",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:handler.recover",
+      "planKey": "B7",
+      "proofKind": "go"
+    },
+    {
+      "id": "outcome.degrade",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:outcome.degrade",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "outcome.fail",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:outcome.fail",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "outcome.skip",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:outcome.skip",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "outcome.succeed",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:outcome.succeed",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "scheduler.after",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:scheduler.after",
+      "planKey": "B4",
+      "proofKind": "go"
+    },
+    {
+      "id": "scheduler.async",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:scheduler.async",
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "scheduler.detach",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:scheduler.detach",
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "scheduler.if",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:scheduler.if",
+      "planKey": "B4",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.await",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:step.await",
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.block",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:step.block",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.dispatch",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:step.dispatch",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.exec",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:step.exec",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.map",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:step.map",
+      "planKey": "B15",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.prompt",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:step.prompt",
+      "planKey": "B5",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.receive",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:step.receive",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.reduce",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:step.reduce",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.repeat",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:step.repeat",
+      "planKey": "B6",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.retry",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:step.retry",
+      "planKey": "B6",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.run",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:step.run",
+      "planKey": "B13",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.timeout",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:step.timeout",
+      "planKey": "B6",
+      "proofKind": "go"
+    },
+    {
+      "id": "syntax.apply",
+      "status": "retired-diagnostic",
+      "citation": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json#syntax.apply",
+      "nonClaim": "retired-diagnostic"
+    },
+    {
+      "id": "syntax.bash-step-keyword",
+      "status": "retired-diagnostic",
+      "citation": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json#syntax.bash-step-keyword",
+      "nonClaim": "retired-diagnostic"
+    },
+    {
+      "id": "syntax.cancel-source-keyword",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:syntax.cancel-source-keyword",
+      "planKey": "B10",
+      "proofKind": "go"
+    },
+    {
+      "id": "syntax.do-prefix",
+      "status": "retired-diagnostic",
+      "citation": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json#syntax.do-prefix",
+      "nonClaim": "retired-diagnostic"
+    },
+    {
+      "id": "syntax.for-each",
+      "status": "retired-diagnostic",
+      "citation": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json#syntax.for-each",
+      "nonClaim": "retired-diagnostic"
+    },
+    {
+      "id": "syntax.gather-standalone",
+      "status": "retired-diagnostic",
+      "citation": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json#syntax.gather-standalone",
+      "nonClaim": "retired-diagnostic"
+    },
+    {
+      "id": "syntax.interpolation.quoted",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:syntax.interpolation.quoted",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "syntax.interpolation.raw",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:syntax.interpolation.raw",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "syntax.on-subscription",
+      "status": "retired-diagnostic",
+      "citation": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json#syntax.on-subscription",
+      "nonClaim": "retired-diagnostic"
+    },
+    {
+      "id": "syntax.qualified-name",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:syntax.qualified-name",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "syntax.reduce-standalone",
+      "status": "retired-diagnostic",
+      "citation": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json#syntax.reduce-standalone",
+      "nonClaim": "retired-diagnostic"
+    },
+    {
+      "id": "syntax.scope-anchor.caller",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:syntax.scope-anchor.caller",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "syntax.scope-anchor.global",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:syntax.scope-anchor.global",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "syntax.settle",
+      "status": "retired-diagnostic",
+      "citation": "docs/workstreams/lumen-0.2.3-selected-surface-manifest.json#syntax.settle",
+      "nonClaim": "retired-diagnostic"
+    },
+    {
+      "id": "type.any",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.any",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.array",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.array",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.atomic",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.atomic",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.channel",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:type.channel",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.du-variant",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:type.du-variant",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.formula",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.formula",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.handle",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.handle",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.literal",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.literal",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.macro-application",
+      "status": "selected-unimplemented",
+      "citation": "docs/spec/syntax.lumen#form-id:type.macro-application",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "type.record",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.record",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.ref",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.ref",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.union",
+      "status": "selected",
+      "citation": "docs/spec/syntax.lumen#form-id:type.union",
+      "planKey": "B1",
+      "proofKind": "go"
+    }
+  ],
+  "engineLaws": [
+    {
+      "id": "engine.identity.fresh",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#fresh-runtime-identity"
+      ],
+      "planKey": "A8",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.outcome.four-arm-projection",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#outcome",
+        "docs/spec/execution-model.md#value-outcome-skip-failure"
+      ],
+      "planKey": "A6",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.value.subshape-binding",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/types.md#the-type-discipline",
+        "docs/spec/expressions.md#environments-and-names",
+        "docs/spec/types.md#the-value-matches-type-predicate"
+      ],
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.outcome.authored-scope",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#outcome-authors-and-outcome-scope"
+      ],
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.expression.scalar-pure",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/expressions.md#intrinsic-functions",
+        "docs/spec/expressions.md#operators",
+        "docs/spec/expressions.md#type-conversion"
+      ],
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.expression.structural-ordered",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/expressions.md#text-and-interpolation",
+        "docs/spec/expressions.md#array",
+        "docs/spec/expressions.md#record",
+        "docs/spec/expressions.md#intrinsic-functions"
+      ],
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.scheduling.prefix-after",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#scheduler-prefix-composition",
+        "docs/spec/execution-model.md#ordering-after-await-and-sequential-edges",
+        "docs/spec/execution-model.md#sequential-blocks",
+        "docs/spec/execution-model.md#if-and-timeout"
+      ],
+      "planKey": "B4",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.prompt.render-or-invoke",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/agents.md#sessions-and-prompt-targets",
+        "docs/spec/execution-model.md#hosts",
+        "docs/spec/execution-model.md#deterministic-runtime"
+      ],
+      "planKey": "B5",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.loop.retry-repeat-timeout",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#loops",
+        "docs/spec/execution-model.md#if-and-timeout"
+      ],
+      "planKey": "B6",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.handlers.recover-cleanup",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#where-recover--retry-sit",
+        "docs/spec/execution-model.md#cleanup"
+      ],
+      "planKey": "B7",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.dispatch.first-match-exhaustive",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#dispatch",
+        "docs/spec/types.md#discriminated-unions"
+      ],
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.async.await-detach",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#outcomeof-async-and-detach-one-launchprojection-mode",
+        "docs/spec/execution-model.md#the-async-handle",
+        "docs/spec/execution-model.md#detached-runs-uniform-scheduler-prefix"
+      ],
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.ownership.draining-freeze",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#freeze-at-draining",
+        "docs/spec/execution-model.md#scheduling-ownership-and-draining"
+      ],
+      "planKey": "B10",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.cancellation.advisory-terminal-wins",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#cancellation"
+      ],
+      "planKey": "B10",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.channel.delivery-cardinality",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#channels",
+        "docs/spec/interactions.md#consumption",
+        "docs/spec/interactions.md#directional-channel-facets",
+        "docs/spec/interactions.md#channel-runtime-law-boundary"
+      ],
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.channel.terminal-owner-quiescence",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/interactions.md#channel-runtime-law-boundary",
+        "docs/spec/execution-model.md#channels"
+      ],
+      "planKey": "B12",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.channel.lines-framing",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/expressions.md#intrinsic-functions",
+        "docs/spec/syntax.lumen#form-id:expr.fn.lines",
+        "docs/spec/interactions.md#built-in-channel-forms"
+      ],
+      "planKey": "B11L",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.run.target-environment-input",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "planKey": "B13",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.run.durability-mode",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/runtime.md#durable-by-default-execution"
+      ],
+      "planKey": "B13D",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.run.metadata",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "planKey": "B14",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.map.structural-outcome-order",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#map-and-reduce-runtime",
+        "docs/spec/execution-model.md#map-ordered-value-land-structure-preserving"
+      ],
+      "planKey": "B15",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.reduce.collector-lifecycle",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#map-and-reduce-runtime",
+        "docs/spec/execution-model.md#reduce-folds-anything-that-terminates",
+        "docs/spec/execution-model.md#collect-is-a-streaming-fold-in-structural-order",
+        "docs/spec/execution-model.md#reading-a-channel"
+      ],
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.agent-session.prompt-target",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/agents.md#agent-declarations",
+        "docs/spec/agents.md#sessions-and-prompt-targets",
+        "docs/spec/agents.md#package-composition-defaults",
+        "docs/spec/agents.md#package-composition-overrides"
+      ],
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.module-package.binding",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/modules.md#one-package-level-declaration-graph",
+        "docs/spec/packages.md#import-graph",
+        "docs/spec/modules.md#qualification-and-lookup",
+        "docs/spec/modules.md#visibility",
+        "docs/spec/modules.md#module-and-package-exports",
+        "docs/spec/packages.md#edition-and-compatibility-identity"
+      ],
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "engine.macro-include.normalization",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/metaprogramming.md#macros",
+        "docs/spec/syntax-ir-derivation-contract.md",
+        "docs/spec/metaprogramming.md#type-macros",
+        "docs/spec/metaprogramming.md#step-macros"
+      ],
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "engine.function.call-default-scope",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/expressions.md#user-defined-functions"
+      ],
+      "planKey": "B19F",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.evaluation.resource-budget",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#evaluation-resource-budgets",
+        "docs/spec/runtime.md#evaluation-resource-policy"
+      ],
+      "planKey": "B20",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.exec.batch-result",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#exec--batch-not-streaming"
+      ],
+      "planKey": "A7",
+      "proofKind": "go"
+    }
+  ],
+  "hostLaws": [
+    {
+      "id": "host.journal.committed-prefix",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#storage-provider-contract"
+      ],
+      "planKey": "A4",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.journal.single-writer-recovery",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#project-runtime-profile",
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "planKey": "C3",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.capture.inline-by-value",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#durable-record-capture"
+      ],
+      "planKey": "A8",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.recovery.private-host-run-key",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation",
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "planKey": "C3",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.controller.exclusive-admission",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#lifecycle-and-admission"
+      ],
+      "planKey": "A8",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.attached-run.explicit-formula-typed-sse",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#host-submission-and-attachment",
+        "docs/spec/runtime.md#process-model-and-daemon-lifecycle"
+      ],
+      "planKey": "A9",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.outcome.shell-status",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#shell-outcome-mapping"
+      ],
+      "planKey": "A9",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.cancellation.private-in-language",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#cancellation",
+        "docs/spec/runtime.md#cancellation-ownership"
+      ],
+      "planKey": "B10",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.detach.ownership",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#detached-runs-uniform-scheduler-prefix",
+        "docs/spec/runtime.md#detached-scheduling"
+      ],
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.nested-run.modes",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#durable-by-default-execution",
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "planKey": "B13D",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.effect.exec-live",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#exec--batch-not-streaming",
+        "docs/spec/runtime.md#live-and-deterministic-hosts"
+      ],
+      "planKey": "A7",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.effect.prompt-durable",
+      "kind": "host",
+      "citations": [
+        "docs/spec/agents.md#sessions-and-prompt-targets",
+        "docs/spec/runtime.md#live-and-deterministic-hosts"
+      ],
+      "planKey": "B5",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.effect.commit-window-honesty",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "planKey": "C3",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.effect.sealed-deterministic",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#deterministic-runtime",
+        "docs/spec/runtime.md#live-and-deterministic-hosts"
+      ],
+      "planKey": "C4",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.budget.durable-capture",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#evaluation-resource-budgets",
+        "docs/spec/runtime.md#durable-record-capture",
+        "docs/spec/runtime.md#evaluation-resource-policy"
+      ],
+      "planKey": "B20",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.package.immutable-snapshot",
+      "kind": "host",
+      "citations": [
+        "docs/spec/packages.md#package-manager-and-loader-boundary",
+        "docs/spec/packages.md#import-graph",
+        "docs/spec/packages.md#edition-and-compatibility-identity"
+      ],
+      "planKey": "B18P",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.telemetry.private-authored",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#authored-execution-telemetry"
+      ],
+      "planKey": "B1",
+      "proofKind": "go"
+    }
+  ],
+  "nonClaims": [
+    {
+      "id": "async-handle.render.direct",
+      "citations": [
+        "docs/spec/types.md#handle-types",
+        "docs/spec/expressions.md#converting-to-and-from-string",
+        "docs/spec/syntax.lumen"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B2",
+      "reason": "equal-authority conflict"
+    },
+    {
+      "id": "async-handle.render.nested",
+      "citations": [
+        "docs/spec/types.md#handle-types",
+        "docs/spec/expressions.md#converting-to-and-from-string",
+        "docs/spec/syntax.lumen"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B2",
+      "reason": "equal-authority conflict"
+    },
+    {
+      "id": "async-handle.render.interpolated",
+      "citations": [
+        "docs/spec/types.md#handle-types",
+        "docs/spec/expressions.md#converting-to-and-from-string",
+        "docs/spec/syntax.lumen"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B2",
+      "reason": "equal-authority conflict"
+    },
+    {
+      "id": "split.empty-separator",
+      "citations": [
+        "docs/spec/expressions.md#intrinsic-functions",
+        "docs/spec/syntax.lumen",
+        "docs/spec/interactions.md#built-in-channel-forms"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B3",
+      "reason": "equal-authority conflict"
+    },
+    {
+      "id": "parseLumen",
+      "citations": [
+        "docs/spec/metaprogramming.md#parselumen"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "A2",
+      "reason": "language-visible reflection facade excluded from this host cohort"
+    },
+    {
+      "id": "channel.tee",
+      "citations": [
+        "docs/spec/execution-model.md#vocabulary-materialization-status"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B11",
+      "reason": "declaration/result carrier unresolved"
+    },
+    {
+      "id": "channel.isClosed",
+      "citations": [
+        "docs/spec/execution-model.md#vocabulary-materialization-status"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B11",
+      "reason": "declaration/result carrier unresolved"
+    },
+    {
+      "id": "channel.isFailed",
+      "citations": [
+        "docs/spec/execution-model.md#vocabulary-materialization-status"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B11",
+      "reason": "declaration/result carrier unresolved"
+    },
+    {
+      "id": "channel.top-level-runtime-identity",
+      "citations": [
+        "docs/spec/execution-model.md#vocabulary-materialization-status"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B12",
+      "reason": "top-level channel identity and lifetime unresolved"
+    },
+    {
+      "id": "public.run-id",
+      "citations": [
+        "docs/spec/runtime.md#host-submission-and-attachment",
+        "docs/spec/execution-model.md#run-ids--structural-paths"
+      ],
+      "disposition": "not-exposed",
+      "reason": "public RunId is not fabricated"
+    },
+    {
+      "id": "public.run-event",
+      "citations": [
+        "docs/spec/execution-model.md#run-events"
+      ],
+      "disposition": "not-exposed",
+      "reason": "public RunEvent is not fabricated"
+    },
+    {
+      "id": "public.run-edition-pin",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed",
+      "reason": "public RunEditionPin is not fabricated"
+    },
+    {
+      "id": "public.provenance",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed",
+      "reason": "public provenance is not fabricated"
+    },
+    {
+      "id": "public.attach",
+      "citations": [
+        "docs/spec/runtime.md#host-submission-and-attachment"
+      ],
+      "disposition": "not-exposed",
+      "reason": "public attach is not claimed"
+    },
+    {
+      "id": "public.replay",
+      "citations": [
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "disposition": "not-exposed",
+      "reason": "public replay is not claimed"
+    },
+    {
+      "id": "run.with-agent",
+      "citations": [
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B13",
+      "reason": "run-with-agent is not claimed"
+    },
+    {
+      "id": "run.with-session",
+      "citations": [
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B13",
+      "reason": "run-with-session is not claimed"
+    },
+    {
+      "id": "detached-root.address",
+      "citations": [
+        "docs/spec/runtime.md#detached-scheduling"
+      ],
+      "disposition": "not-exposed",
+      "reason": "detached-root address is not claimed"
+    },
+    {
+      "id": "events.subscription.events-equals",
+      "citations": [
+        "docs/spec/execution-model.md#routing--ownership--optional-in-language-subscription",
+        "docs/spec/interactions.md#the-runevent-channel--optional-subscription-sink"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B14",
+      "reason": "events= subscription is not claimed"
+    },
+    {
+      "id": "cli.detach",
+      "citations": [
+        "docs/spec/runtime.md#process-model-and-daemon-lifecycle"
+      ],
+      "disposition": "not-exposed",
+      "reason": "CLI detach is not claimed"
+    },
+    {
+      "id": "cli.reattach",
+      "citations": [
+        "docs/spec/runtime.md#host-submission-and-attachment",
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed",
+      "reason": "CLI reattach is not claimed"
+    },
+    {
+      "id": "cli.sigint-host-cancellation",
+      "citations": [
+        "docs/spec/runtime.md#process-model-and-daemon-lifecycle"
+      ],
+      "disposition": "not-exposed",
+      "reason": "CLI SIGINT host cancellation is not claimed"
+    },
+    {
+      "id": "daemon.auto-start",
+      "citations": [
+        "docs/spec/runtime.md#process-model-and-daemon-lifecycle"
+      ],
+      "disposition": "not-exposed",
+      "reason": "daemon auto-start is not claimed"
+    },
+    {
+      "id": "portable.runtime-state",
+      "citations": [
+        "docs/spec/runtime.md#project-runtime-profile"
+      ],
+      "disposition": "not-exposed",
+      "reason": "portable .lumen-runtime-state is not claimed"
+    },
+    {
+      "id": "cli.lumen-serve",
+      "citations": [
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed",
+      "reason": "lumen serve is not claimed"
+    },
+    {
+      "id": "cli.lumen-repl",
+      "citations": [
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed",
+      "reason": "lumen repl is not claimed"
+    },
+    {
+      "id": "cli.lumen-c",
+      "citations": [
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed",
+      "reason": "lumen -c is not claimed"
+    },
+    {
+      "id": "cli.lumen-runtime",
+      "citations": [
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed",
+      "reason": "lumen runtime is not claimed"
+    },
+    {
+      "id": "operator.cancel",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol",
+        "docs/spec/runtime.md#cancellation-ownership"
+      ],
+      "disposition": "not-exposed",
+      "reason": "operator cancel is not claimed"
+    },
+    {
+      "id": "operator.suspend",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol",
+        "docs/spec/runtime.md#host-controlled-durable-suspension"
+      ],
+      "disposition": "not-exposed",
+      "reason": "operator suspend is not claimed"
+    },
+    {
+      "id": "operator.resume",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol",
+        "docs/spec/runtime.md#host-controlled-durable-suspension"
+      ],
+      "disposition": "not-exposed",
+      "reason": "operator resume is not claimed"
+    },
+    {
+      "id": "operator.recovery",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol",
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "disposition": "not-exposed",
+      "reason": "operator recovery is not claimed"
+    },
+    {
+      "id": "public.telemetry",
+      "citations": [
+        "docs/spec/runtime.md#authored-execution-telemetry"
+      ],
+      "disposition": "not-exposed",
+      "reason": "public telemetry is not claimed"
+    },
+    {
+      "id": "public.control",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol"
+      ],
+      "disposition": "not-exposed",
+      "reason": "public control is not claimed"
+    },
+    {
+      "id": "privacy.encrypted-carrier",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed",
+      "reason": "encrypted privacy carrier is not claimed"
+    },
+    {
+      "id": "privacy.external-carrier",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed",
+      "reason": "external privacy carrier is not claimed"
+    },
+    {
+      "id": "privacy.redacted-carrier",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed",
+      "reason": "redacted privacy carrier is not claimed"
+    },
+    {
+      "id": "capacity.pending",
+      "citations": [
+        "docs/spec/runtime.md#lifecycle-and-admission"
+      ],
+      "disposition": "not-exposed",
+      "reason": "pending capacity protocol is not claimed"
+    },
+    {
+      "id": "capacity.scheduled",
+      "citations": [
+        "docs/spec/runtime.md#lifecycle-and-admission"
+      ],
+      "disposition": "not-exposed",
+      "reason": "scheduled capacity protocol is not claimed"
+    },
+    {
+      "id": "capacity.suspended",
+      "citations": [
+        "docs/spec/runtime.md#lifecycle-and-admission"
+      ],
+      "disposition": "not-exposed",
+      "reason": "suspended capacity protocol is not claimed"
+    },
+    {
+      "id": "public.run-event.seven-arm-lifecycle",
+      "citations": [
+        "docs/spec/execution-model.md#run-events"
+      ],
+      "disposition": "not-exposed",
+      "reason": "seven-arm public RunEvent lifecycle is not claimed"
+    }
+  ]
+}

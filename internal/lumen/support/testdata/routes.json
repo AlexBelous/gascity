@@ -1,0 +1,1425 @@
+{
+  "routes": [
+    {
+      "id": "binding.let",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "channel.close",
+      "planKey": "B12",
+      "proofKind": "go"
+    },
+    {
+      "id": "channel.fail",
+      "planKey": "B12",
+      "proofKind": "go"
+    },
+    {
+      "id": "clause.collector.begin",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "clause.collector.collect",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "clause.collector.end",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "clause.reduce.attached",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.agent",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.agent-default",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.agent-field-override",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.agent.extern",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.channel",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.export-explicit",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.export-wildcard",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.formula",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.function",
+      "planKey": "B19F",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.module-block",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.module-header",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.override-agent",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.package",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.session",
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.step.intrinsic",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.step.macro",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.type-alias",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.type-handle",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "decl.type.macro",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.use-package",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "decl.visibility-internal",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "event.send",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.array",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.builtins",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.channel-sink",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.channel-source",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.du-construct",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.array",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.bool",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.indexOf",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.isFinite",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.isNaN",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.join",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.json",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.length",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.lines",
+      "planKey": "B11L",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.number",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.parseJson",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.record",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.split",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.fn.string",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.handle-construct",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.include",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "expr.index",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.interpolated-text",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.literal",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.member",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.add-or-concat",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.as",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.conditional",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.divide",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.equals",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.greater-than",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.greater-than-or-equal",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.is",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.less-than",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.less-than-or-equal",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.logical-and",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.logical-not",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.logical-or",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.membership",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.modulo",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.multiply",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.negate",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.not-equals",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.nullish-coalescing",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.optional-chaining",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.optional-index",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operator.subtract",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.operators",
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.outcomeof",
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.record",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "expr.ref",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "handler.cleanup",
+      "planKey": "B7",
+      "proofKind": "go"
+    },
+    {
+      "id": "handler.recover",
+      "planKey": "B7",
+      "proofKind": "go"
+    },
+    {
+      "id": "outcome.degrade",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "outcome.fail",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "outcome.skip",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "outcome.succeed",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "scheduler.after",
+      "planKey": "B4",
+      "proofKind": "go"
+    },
+    {
+      "id": "scheduler.async",
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "scheduler.detach",
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "scheduler.if",
+      "planKey": "B4",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.await",
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.block",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.dispatch",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.exec",
+      "planKey": "A5",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.map",
+      "planKey": "B15",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.prompt",
+      "planKey": "B5",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.receive",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.reduce",
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.repeat",
+      "planKey": "B6",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.retry",
+      "planKey": "B6",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.run",
+      "planKey": "B13",
+      "proofKind": "go"
+    },
+    {
+      "id": "step.timeout",
+      "planKey": "B6",
+      "proofKind": "go"
+    },
+    {
+      "id": "syntax.cancel-source-keyword",
+      "planKey": "B10",
+      "proofKind": "go"
+    },
+    {
+      "id": "syntax.interpolation.quoted",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "syntax.interpolation.raw",
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "syntax.qualified-name",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "syntax.scope-anchor.caller",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "syntax.scope-anchor.global",
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "type.any",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.array",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.atomic",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.channel",
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.du-variant",
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.formula",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.handle",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.literal",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.macro-application",
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "type.record",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.ref",
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "type.union",
+      "planKey": "B1",
+      "proofKind": "go"
+    }
+  ],
+  "engineLaws": [
+    {
+      "id": "engine.identity.fresh",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#fresh-runtime-identity"
+      ],
+      "planKey": "A8",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.outcome.four-arm-projection",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#outcome",
+        "docs/spec/execution-model.md#value-outcome-skip-failure"
+      ],
+      "planKey": "A6",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.value.subshape-binding",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/types.md#the-type-discipline",
+        "docs/spec/expressions.md#environments-and-names",
+        "docs/spec/types.md#the-value-matches-type-predicate"
+      ],
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.outcome.authored-scope",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#outcome-authors-and-outcome-scope"
+      ],
+      "planKey": "B1",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.expression.scalar-pure",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/expressions.md#intrinsic-functions",
+        "docs/spec/expressions.md#operators",
+        "docs/spec/expressions.md#type-conversion"
+      ],
+      "planKey": "B2",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.expression.structural-ordered",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/expressions.md#text-and-interpolation",
+        "docs/spec/expressions.md#array",
+        "docs/spec/expressions.md#record",
+        "docs/spec/expressions.md#intrinsic-functions"
+      ],
+      "planKey": "B3",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.scheduling.prefix-after",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#scheduler-prefix-composition",
+        "docs/spec/execution-model.md#ordering-after-await-and-sequential-edges",
+        "docs/spec/execution-model.md#sequential-blocks",
+        "docs/spec/execution-model.md#if-and-timeout"
+      ],
+      "planKey": "B4",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.prompt.render-or-invoke",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/agents.md#sessions-and-prompt-targets",
+        "docs/spec/execution-model.md#hosts",
+        "docs/spec/execution-model.md#deterministic-runtime"
+      ],
+      "planKey": "B5",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.loop.retry-repeat-timeout",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#loops",
+        "docs/spec/execution-model.md#if-and-timeout"
+      ],
+      "planKey": "B6",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.handlers.recover-cleanup",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#where-recover--retry-sit",
+        "docs/spec/execution-model.md#cleanup"
+      ],
+      "planKey": "B7",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.dispatch.first-match-exhaustive",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#dispatch",
+        "docs/spec/types.md#discriminated-unions"
+      ],
+      "planKey": "B8",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.async.await-detach",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#outcomeof-async-and-detach-one-launchprojection-mode",
+        "docs/spec/execution-model.md#the-async-handle",
+        "docs/spec/execution-model.md#detached-runs-uniform-scheduler-prefix"
+      ],
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.ownership.draining-freeze",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#freeze-at-draining",
+        "docs/spec/execution-model.md#scheduling-ownership-and-draining"
+      ],
+      "planKey": "B10",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.cancellation.advisory-terminal-wins",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#cancellation"
+      ],
+      "planKey": "B10",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.channel.delivery-cardinality",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#channels",
+        "docs/spec/interactions.md#consumption",
+        "docs/spec/interactions.md#directional-channel-facets",
+        "docs/spec/interactions.md#channel-runtime-law-boundary"
+      ],
+      "planKey": "B11",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.channel.terminal-owner-quiescence",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/interactions.md#channel-runtime-law-boundary",
+        "docs/spec/execution-model.md#channels"
+      ],
+      "planKey": "B12",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.channel.lines-framing",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/expressions.md#intrinsic-functions",
+        "docs/spec/syntax.lumen#form-id:expr.fn.lines",
+        "docs/spec/interactions.md#built-in-channel-forms"
+      ],
+      "planKey": "B11L",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.run.target-environment-input",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "planKey": "B13",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.run.durability-mode",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/runtime.md#durable-by-default-execution"
+      ],
+      "planKey": "B13D",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.run.metadata",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "planKey": "B14",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.map.structural-outcome-order",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#map-and-reduce-runtime",
+        "docs/spec/execution-model.md#map-ordered-value-land-structure-preserving"
+      ],
+      "planKey": "B15",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.reduce.collector-lifecycle",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#map-and-reduce-runtime",
+        "docs/spec/execution-model.md#reduce-folds-anything-that-terminates",
+        "docs/spec/execution-model.md#collect-is-a-streaming-fold-in-structural-order",
+        "docs/spec/execution-model.md#reading-a-channel"
+      ],
+      "planKey": "B16",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.agent-session.prompt-target",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/agents.md#agent-declarations",
+        "docs/spec/agents.md#sessions-and-prompt-targets",
+        "docs/spec/agents.md#package-composition-defaults",
+        "docs/spec/agents.md#package-composition-overrides"
+      ],
+      "planKey": "B17",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.module-package.binding",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/modules.md#one-package-level-declaration-graph",
+        "docs/spec/packages.md#import-graph",
+        "docs/spec/modules.md#qualification-and-lookup",
+        "docs/spec/modules.md#visibility",
+        "docs/spec/modules.md#module-and-package-exports",
+        "docs/spec/packages.md#edition-and-compatibility-identity"
+      ],
+      "planKey": "B18",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "engine.macro-include.normalization",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/metaprogramming.md#macros",
+        "docs/spec/syntax-ir-derivation-contract.md",
+        "docs/spec/metaprogramming.md#type-macros",
+        "docs/spec/metaprogramming.md#step-macros"
+      ],
+      "planKey": "B19",
+      "proofKind": "compiler"
+    },
+    {
+      "id": "engine.function.call-default-scope",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/expressions.md#user-defined-functions"
+      ],
+      "planKey": "B19F",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.evaluation.resource-budget",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#evaluation-resource-budgets",
+        "docs/spec/runtime.md#evaluation-resource-policy"
+      ],
+      "planKey": "B20",
+      "proofKind": "go"
+    },
+    {
+      "id": "engine.exec.batch-result",
+      "kind": "engine",
+      "citations": [
+        "docs/spec/execution-model.md#exec--batch-not-streaming"
+      ],
+      "planKey": "A7",
+      "proofKind": "go"
+    }
+  ],
+  "hostLaws": [
+    {
+      "id": "host.journal.committed-prefix",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#storage-provider-contract"
+      ],
+      "planKey": "A4",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.journal.single-writer-recovery",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#project-runtime-profile",
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "planKey": "C3",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.capture.inline-by-value",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#durable-record-capture"
+      ],
+      "planKey": "A8",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.recovery.private-host-run-key",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation",
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "planKey": "C3",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.controller.exclusive-admission",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#lifecycle-and-admission"
+      ],
+      "planKey": "A8",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.attached-run.explicit-formula-typed-sse",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#host-submission-and-attachment",
+        "docs/spec/runtime.md#process-model-and-daemon-lifecycle"
+      ],
+      "planKey": "A9",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.outcome.shell-status",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#shell-outcome-mapping"
+      ],
+      "planKey": "A9",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.cancellation.private-in-language",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#cancellation",
+        "docs/spec/runtime.md#cancellation-ownership"
+      ],
+      "planKey": "B10",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.detach.ownership",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#detached-runs-uniform-scheduler-prefix",
+        "docs/spec/runtime.md#detached-scheduling"
+      ],
+      "planKey": "B9",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.nested-run.modes",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#durable-by-default-execution",
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "planKey": "B13D",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.effect.exec-live",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#exec--batch-not-streaming",
+        "docs/spec/runtime.md#live-and-deterministic-hosts"
+      ],
+      "planKey": "A7",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.effect.prompt-durable",
+      "kind": "host",
+      "citations": [
+        "docs/spec/agents.md#sessions-and-prompt-targets",
+        "docs/spec/runtime.md#live-and-deterministic-hosts"
+      ],
+      "planKey": "B5",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.effect.commit-window-honesty",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "planKey": "C3",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.effect.sealed-deterministic",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#deterministic-runtime",
+        "docs/spec/runtime.md#live-and-deterministic-hosts"
+      ],
+      "planKey": "C4",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.budget.durable-capture",
+      "kind": "host",
+      "citations": [
+        "docs/spec/execution-model.md#evaluation-resource-budgets",
+        "docs/spec/runtime.md#durable-record-capture",
+        "docs/spec/runtime.md#evaluation-resource-policy"
+      ],
+      "planKey": "B20",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.package.immutable-snapshot",
+      "kind": "host",
+      "citations": [
+        "docs/spec/packages.md#package-manager-and-loader-boundary",
+        "docs/spec/packages.md#import-graph",
+        "docs/spec/packages.md#edition-and-compatibility-identity"
+      ],
+      "planKey": "B18P",
+      "proofKind": "go"
+    },
+    {
+      "id": "host.telemetry.private-authored",
+      "kind": "host",
+      "citations": [
+        "docs/spec/runtime.md#authored-execution-telemetry"
+      ],
+      "planKey": "B1",
+      "proofKind": "go"
+    }
+  ],
+  "nonClaims": [
+    {
+      "id": "async-handle.render.direct",
+      "reason": "equal-authority conflict",
+      "citations": [
+        "docs/spec/types.md#handle-types",
+        "docs/spec/expressions.md#converting-to-and-from-string",
+        "docs/spec/syntax.lumen"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B2"
+    },
+    {
+      "id": "async-handle.render.nested",
+      "reason": "equal-authority conflict",
+      "citations": [
+        "docs/spec/types.md#handle-types",
+        "docs/spec/expressions.md#converting-to-and-from-string",
+        "docs/spec/syntax.lumen"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B2"
+    },
+    {
+      "id": "async-handle.render.interpolated",
+      "reason": "equal-authority conflict",
+      "citations": [
+        "docs/spec/types.md#handle-types",
+        "docs/spec/expressions.md#converting-to-and-from-string",
+        "docs/spec/syntax.lumen"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B2"
+    },
+    {
+      "id": "split.empty-separator",
+      "reason": "equal-authority conflict",
+      "citations": [
+        "docs/spec/expressions.md#intrinsic-functions",
+        "docs/spec/syntax.lumen",
+        "docs/spec/interactions.md#built-in-channel-forms"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B3"
+    },
+    {
+      "id": "parseLumen",
+      "reason": "language-visible reflection facade excluded from this host cohort",
+      "citations": [
+        "docs/spec/metaprogramming.md#parselumen"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "A2"
+    },
+    {
+      "id": "channel.tee",
+      "reason": "declaration/result carrier unresolved",
+      "citations": [
+        "docs/spec/execution-model.md#vocabulary-materialization-status"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B11"
+    },
+    {
+      "id": "channel.isClosed",
+      "reason": "declaration/result carrier unresolved",
+      "citations": [
+        "docs/spec/execution-model.md#vocabulary-materialization-status"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B11"
+    },
+    {
+      "id": "channel.isFailed",
+      "reason": "declaration/result carrier unresolved",
+      "citations": [
+        "docs/spec/execution-model.md#vocabulary-materialization-status"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B11"
+    },
+    {
+      "id": "channel.top-level-runtime-identity",
+      "reason": "top-level channel identity and lifetime unresolved",
+      "citations": [
+        "docs/spec/execution-model.md#vocabulary-materialization-status"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B12"
+    },
+    {
+      "id": "public.run-id",
+      "reason": "public RunId is not fabricated",
+      "citations": [
+        "docs/spec/runtime.md#host-submission-and-attachment",
+        "docs/spec/execution-model.md#run-ids--structural-paths"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "public.run-event",
+      "reason": "public RunEvent is not fabricated",
+      "citations": [
+        "docs/spec/execution-model.md#run-events"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "public.run-edition-pin",
+      "reason": "public RunEditionPin is not fabricated",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "public.provenance",
+      "reason": "public provenance is not fabricated",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "public.attach",
+      "reason": "public attach is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#host-submission-and-attachment"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "public.replay",
+      "reason": "public replay is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "run.with-agent",
+      "reason": "run-with-agent is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B13"
+    },
+    {
+      "id": "run.with-session",
+      "reason": "run-with-session is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#run-environment-and-policy"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B13"
+    },
+    {
+      "id": "detached-root.address",
+      "reason": "detached-root address is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#detached-scheduling"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "events.subscription.events-equals",
+      "reason": "events= subscription is not claimed",
+      "citations": [
+        "docs/spec/execution-model.md#routing--ownership--optional-in-language-subscription",
+        "docs/spec/interactions.md#the-runevent-channel--optional-subscription-sink"
+      ],
+      "disposition": "reject-before-genesis",
+      "rejectingPlanKey": "B14"
+    },
+    {
+      "id": "cli.detach",
+      "reason": "CLI detach is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#process-model-and-daemon-lifecycle"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "cli.reattach",
+      "reason": "CLI reattach is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#host-submission-and-attachment",
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "cli.sigint-host-cancellation",
+      "reason": "CLI SIGINT host cancellation is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#process-model-and-daemon-lifecycle"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "daemon.auto-start",
+      "reason": "daemon auto-start is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#process-model-and-daemon-lifecycle"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "portable.runtime-state",
+      "reason": "portable .lumen-runtime-state is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#project-runtime-profile"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "cli.lumen-serve",
+      "reason": "lumen serve is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "cli.lumen-repl",
+      "reason": "lumen repl is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "cli.lumen-c",
+      "reason": "lumen -c is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "cli.lumen-runtime",
+      "reason": "lumen runtime is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#normative-cli-reference"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "operator.cancel",
+      "reason": "operator cancel is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol",
+        "docs/spec/runtime.md#cancellation-ownership"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "operator.suspend",
+      "reason": "operator suspend is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol",
+        "docs/spec/runtime.md#host-controlled-durable-suspension"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "operator.resume",
+      "reason": "operator resume is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol",
+        "docs/spec/runtime.md#host-controlled-durable-suspension"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "operator.recovery",
+      "reason": "operator recovery is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol",
+        "docs/spec/runtime.md#recoverability--replay-not-re-execution"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "public.telemetry",
+      "reason": "public telemetry is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#authored-execution-telemetry"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "public.control",
+      "reason": "public control is not claimed",
+      "citations": [
+        "docs/spec/runtime.md#run-control-protocol"
+      ],
+      "disposition": "not-exposed"
+    },
+    {
+      "id": "privacy.encrypted-carrier",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed",
+      "reason": "encrypted privacy carrier is not claimed"
+    },
+    {
+      "id": "privacy.external-carrier",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed",
+      "reason": "external privacy carrier is not claimed"
+    },
+    {
+      "id": "privacy.redacted-carrier",
+      "citations": [
+        "docs/spec/runtime.md#run-provenance-and-host-observation"
+      ],
+      "disposition": "not-exposed",
+      "reason": "redacted privacy carrier is not claimed"
+    },
+    {
+      "id": "capacity.pending",
+      "citations": [
+        "docs/spec/runtime.md#lifecycle-and-admission"
+      ],
+      "disposition": "not-exposed",
+      "reason": "pending capacity protocol is not claimed"
+    },
+    {
+      "id": "capacity.scheduled",
+      "citations": [
+        "docs/spec/runtime.md#lifecycle-and-admission"
+      ],
+      "disposition": "not-exposed",
+      "reason": "scheduled capacity protocol is not claimed"
+    },
+    {
+      "id": "capacity.suspended",
+      "citations": [
+        "docs/spec/runtime.md#lifecycle-and-admission"
+      ],
+      "disposition": "not-exposed",
+      "reason": "suspended capacity protocol is not claimed"
+    },
+    {
+      "id": "public.run-event.seven-arm-lifecycle",
+      "citations": [
+        "docs/spec/execution-model.md#run-events"
+      ],
+      "disposition": "not-exposed",
+      "reason": "seven-arm public RunEvent lifecycle is not claimed"
+    }
+  ],
+  "schemaVersion": "gascity.lumen.routes/v1"
+}

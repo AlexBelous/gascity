@@ -237,6 +237,15 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 // and returns a *sql.DB connected to a fresh database on it. Skips the test
 // when the dolt binary is unavailable.
 func startTestDoltServer(t *testing.T) *sql.DB {
+	db, _ := startTestDoltServerWithPort(t)
+	return db
+}
+
+// startTestDoltServerWithPort is startTestDoltServer that also returns the
+// server's TCP port, so a test can open a second, server-backed connection or
+// store (e.g. a NativeDoltStore with its own multi-connection pool) against the
+// same live server.
+func startTestDoltServerWithPort(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -286,7 +295,7 @@ func startTestDoltServer(t *testing.T) *sql.DB {
 		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return db, strconv.Itoa(port)
 }
 
 // TestRepairIDDefaultAgainstDoltServer exercises the SHOW COLUMNS-based probe

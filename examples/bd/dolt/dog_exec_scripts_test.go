@@ -3330,6 +3330,39 @@ func TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease(t *testin
 	}
 }
 
+func TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+	secondOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "integrity quarantine marker exists") {
+		t.Fatalf("second compact missing quarantine explanation:\n%s", secondOut)
+	}
+	thirdOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("third compact succeeded despite quarantine:\n%s", thirdOut)
+	}
+
+	// Two consecutive compact runs over an unchanged quarantine condition
+	// must send exactly one operator mail — a stable, correct quarantine
+	// should not page forever. The event stays unconditional (one per
+	// cycle) so downstream automation can still observe every check.
+	log := readCompactGCLog(t, fixture)
+	mailLines := compactGCLogLinesWithPrefix(log, "gc mail send ")
+	if len(mailLines) != 1 {
+		t.Fatalf("three compact runs over an unchanged quarantine condition should send exactly one operator mail, got %d\nlog:\n%s", len(mailLines), log)
+	}
+	eventLines := compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")
+	if len(eventLines) != 3 {
+		t.Fatalf("each compact cycle should still emit a dolt.compact.quarantine event even when the mail is suppressed, got %d\nlog:\n%s", len(eventLines), log)
+	}
+}
+
 func TestCompactScriptFreshQuarantineMarkerAlertsDefaultMayor(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")

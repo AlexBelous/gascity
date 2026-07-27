@@ -130,6 +130,47 @@ name = "bright-lights"
 	}
 }
 
+func TestParseDefaultsLumenBetaDisabled(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.LumenBetaEnabled() {
+		t.Fatal("Daemon.LumenBetaEnabled() = true, want false when lumen_beta is omitted")
+	}
+}
+
+func TestParsePreservesExplicitLumenBeta(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("%t", enabled), func(t *testing.T) {
+			cfg, err := Parse([]byte(fmt.Sprintf(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+lumen_beta = %t
+`, enabled)))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := cfg.Daemon.LumenBetaEnabled(); got != enabled {
+				t.Fatalf("Daemon.LumenBetaEnabled() = %v, want %v", got, enabled)
+			}
+			data, err := cfg.Marshal()
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			want := fmt.Sprintf("lumen_beta = %t", enabled)
+			if !strings.Contains(string(data), want) {
+				t.Fatalf("Marshal output missing %q:\n%s", want, data)
+			}
+		})
+	}
+}
+
 func TestParsePreservesExplicitFormulaV2False(t *testing.T) {
 	cfg, err := Parse([]byte(`
 [workspace]
@@ -3854,6 +3895,17 @@ func TestMarshalDefaultCityOmitsFormulaV2Default(t *testing.T) {
 	}
 	if !cfg.Daemon.FormulaV2Enabled() {
 		t.Errorf("round-trip of default city.toml should be formula-v2 enabled")
+	}
+}
+
+func TestMarshalDefaultCityOmitsLumenBeta(t *testing.T) {
+	c := DefaultCity("test")
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "lumen_beta") {
+		t.Errorf("default city.toml should omit lumen_beta (default-off):\n%s", data)
 	}
 }
 

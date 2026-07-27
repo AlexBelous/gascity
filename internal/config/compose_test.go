@@ -106,6 +106,57 @@ patrol_interval = "1m"
 	}
 }
 
+func TestLoadWithIncludesPreservesLumenBetaAcrossDaemonFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+lumen_beta = true
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+patrol_interval = "1m"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if !cfg.Daemon.LumenBetaEnabled() {
+		t.Fatal("Daemon.LumenBetaEnabled() = false, want root opt-in to survive daemon fragment")
+	}
+	if cfg.Daemon.PatrolInterval != "1m" {
+		t.Fatalf("Daemon.PatrolInterval = %q, want fragment field", cfg.Daemon.PatrolInterval)
+	}
+}
+
+func TestLoadWithIncludesLumenBetaFragmentOverridesRoot(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+lumen_beta = true
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+lumen_beta = false
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Daemon.LumenBetaEnabled() {
+		t.Fatal("Daemon.LumenBetaEnabled() = true, want explicit fragment false to win")
+	}
+}
+
 func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

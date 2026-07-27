@@ -2439,6 +2439,10 @@ func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 
 // DaemonConfig holds controller daemon settings.
 type DaemonConfig struct {
+	// LumenBeta enables the beta Lumen formula runtime for this city. It is
+	// disabled when omitted. A higher-priority config layer can explicitly
+	// disable an inherited opt-in.
+	LumenBeta *bool `toml:"lumen_beta,omitempty" jsonschema:"default=false"`
 	// FormulaV2 enables formula compiler v2 workflow infrastructure:
 	// compiler-v2 workflow compilation, batch graph-apply bead creation, and
 	// routing to the core pack's control-dispatcher worker.
@@ -4565,6 +4569,12 @@ func validateGuardedRelease(raw string) error {
 		return fmt.Errorf("beads.guarded_release: %w", err)
 	}
 	return nil
+}
+
+// LumenBetaEnabled reports whether this city explicitly opted into the beta
+// Lumen formula runtime. Omission is disabled.
+func (d DaemonConfig) LumenBetaEnabled() bool {
+	return d.LumenBeta != nil && *d.LumenBeta
 }
 
 // FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by

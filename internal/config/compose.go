@@ -1051,8 +1051,12 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		base.Formulas = fragment.Formulas
 	}
 	if fragMeta.IsDefined("daemon") {
+		lumenBeta := base.Daemon.LumenBeta
 		formulaV2 := base.Daemon.FormulaV2
 		base.Daemon = fragment.Daemon
+		if !fragMeta.IsDefined("daemon", "lumen_beta") {
+			base.Daemon.LumenBeta = lumenBeta
+		}
 		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
 			base.Daemon.FormulaV2 = formulaV2
 		}

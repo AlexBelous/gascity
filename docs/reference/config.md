@@ -312,6 +312,7 @@ DaemonConfig holds controller daemon settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `lumen_beta` | boolean |  | `false` | LumenBeta enables the beta Lumen formula runtime for this city. It is disabled when omitted. A higher-priority config layer can explicitly disable an inherited opt-in. |
 | `formula_v2` | boolean |  | `true` | FormulaV2 enables formula compiler v2 workflow infrastructure: compiler-v2 workflow compilation, batch graph-apply bead creation, and routing to the core pack's control-dispatcher worker. Requires bd with --graph support. Default: ENABLED. A nil pointer means the default-on behavior and is OMITTED from generated configs (so auto-generated city.toml files never pin the default and never accidentally write formula_v2=false); an explicit formula_v2=false (or the deprecated graph_workflows=false alias) is preserved as a non-nil false. Read the effective value via FormulaV2Enabled(), never the field. |
 | `graph_workflows` | boolean |  |  | GraphWorkflows is the deprecated predecessor of FormulaV2. Retained for backwards compatibility as an alias. Explicit formula_v2 wins. |
 | `patrol_interval` | string |  | `30s` | PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s". |

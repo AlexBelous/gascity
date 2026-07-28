@@ -12,7 +12,6 @@ package acceptance_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,9 +36,7 @@ func lifecycleWorktreeSetupScript(t *testing.T) string {
 // (investigations/ga-58xwg1/repro_gascity_clean.sh) evaluates it.
 func runLifecycleScript(t *testing.T, script, repoDir, wt, agent string) {
 	t.Helper()
-	cmd := exec.Command("sh", script, repoDir, wt, agent, "--sync")
-	cmd.Env = os.Environ()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runScriptCommand(script, repoDir, wt, agent); err != nil {
 		t.Logf("worktree-setup.sh exited non-zero (tracked separately, not asserted here): %v\n%s", err, out)
 	}
 }

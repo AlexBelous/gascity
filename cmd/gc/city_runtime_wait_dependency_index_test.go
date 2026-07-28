@@ -2,26 +2,35 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type sessionWaitShadowReadAuditStore struct {
 	beads.Store
 	listCalls atomic.Int64
+	getCalls  atomic.Int64
 }
 
 func (s *sessionWaitShadowReadAuditStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.listCalls.Add(1)
 	return s.Store.List(query)
+}
+
+func (s *sessionWaitShadowReadAuditStore) Get(id string) (beads.Bead, error) {
+	s.getCalls.Add(1)
+	return s.Store.Get(id)
 }
 
 func sessionWaitShadowBead(sessionID, dependencyID string) beads.Bead {
@@ -128,6 +137,7 @@ func TestSessionWaitDependencyShadowPreservesPolicyTierAndPerformsNoBackingEffec
 		t.Fatalf("PrimeActive: %v", err)
 	}
 	primeListCalls := audited.listCalls.Load()
+	primeGetCalls := audited.getCalls.Load()
 	recording.Reset()
 
 	rawCensus, err := observeSessionWaitCensus(beads.SessionStore{Store: cache})
@@ -160,6 +170,9 @@ func TestSessionWaitDependencyShadowPreservesPolicyTierAndPerformsNoBackingEffec
 	)
 	if got := audited.listCalls.Load(); got != primeListCalls {
 		t.Fatalf("backing List calls after PrimeActive = %d, want unchanged %d", got, primeListCalls)
+	}
+	if got := audited.getCalls.Load(); got != primeGetCalls {
+		t.Fatalf("backing Get calls after PrimeActive = %d, want unchanged %d", got, primeGetCalls)
 	}
 	if calls := recording.Calls(); len(calls) != 0 {
 		t.Fatalf("backing mutations during observe/install = %#v, want none", calls)
@@ -202,6 +215,9 @@ func TestSessionWaitDependencyShadowRejectsCappedCensusWithoutReplacingIndex(t *
 		[]string{"sentinel-session"},
 	)
 	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-overflow"), nil)
+	if id := rows[len(rows)-1].ID; !cityRuntime.sessionWaitDependencyContainsWait(id) {
+		t.Fatalf("capped census did not retain overflow wait identity %q", id)
+	}
 }
 
 func TestSessionWaitDependencyShadowRejectsMalformedActiveCensusWithoutReplacingIndex(t *testing.T) {
@@ -294,4 +310,614 @@ func TestSessionWaitDependencyShadowStartupErrorsAreBestEffort(t *testing.T) {
 	if output := stderr.String(); output != "" {
 		t.Fatalf("unavailable-cache startup diagnostic = %q, want silent best-effort disable", output)
 	}
+}
+
+func newSessionWaitDependencyEventShadow(
+	t *testing.T,
+) (*CityRuntime, *controllerState, *beads.CachingStore, *beads.MemStore, *bytes.Buffer) {
+	t.Helper()
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	cfg := &config.City{}
+	cs := &controllerState{
+		cfg:           cfg,
+		cityBeadStore: cache,
+		pokeCh:        make(chan struct{}, 16),
+	}
+	var stderr bytes.Buffer
+	cityRuntime := &CityRuntime{
+		cs:        cs,
+		cfg:       cfg,
+		logPrefix: "gc start",
+		stderr:    &stderr,
+	}
+	cityRuntime.startSessionWaitDependencyShadow()
+	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
+	return cityRuntime, cs, cache, backing, &stderr
+}
+
+func beadSnapshotEvent(t *testing.T, eventType string, bead beads.Bead) events.Event {
+	t.Helper()
+	payload, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatalf("marshal bead snapshot: %v", err)
+	}
+	return events.Event{
+		Type:    eventType,
+		Actor:   "bd-hook",
+		Subject: bead.ID,
+		Payload: payload,
+	}
+}
+
+func TestSessionWaitDependencyShadowConvergesFromPostCacheEvents(t *testing.T) {
+	previousDispatch := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(func()) {}
+	t.Cleanup(func() { beadCloseAutocloseDispatch = previousDispatch })
+
+	cityRuntime, cs, _, backing, _ := newSessionWaitDependencyEventShadow(t)
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-a"), nil)
+
+	wait, err := backing.Create(sessionWaitShadowBead("session-a", "dep-a"))
+	if err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadCreated, wait))
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-a"),
+		[]string{"session-a"},
+	)
+
+	if err := backing.Update(wait.ID, beads.UpdateOpts{Metadata: map[string]string{"dep_ids": "dep-b"}}); err != nil {
+		t.Fatalf("Update wait dependency: %v", err)
+	}
+	wait, err = backing.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get updated wait: %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadUpdated, wait))
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-a"), nil)
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-b"),
+		[]string{"session-a"},
+	)
+
+	if err := backing.Close(wait.ID); err != nil {
+		t.Fatalf("Close wait: %v", err)
+	}
+	wait, err = backing.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get closed wait: %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadClosed, wait))
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-b"), nil)
+
+	wait, err = backing.Create(sessionWaitShadowBead("session-b", "dep-c"))
+	if err != nil {
+		t.Fatalf("Create second wait: %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadCreated, wait))
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-c"),
+		[]string{"session-b"},
+	)
+	if err := backing.Delete(wait.ID); err != nil {
+		t.Fatalf("Delete wait: %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadDeleted, wait))
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-c"), nil)
+}
+
+func TestSessionWaitDependencyShadowRemovesWaitThatLosesIdentity(t *testing.T) {
+	cityRuntime, cs, _, backing, _ := newSessionWaitDependencyEventShadow(t)
+	wait, err := backing.Create(sessionWaitShadowBead("session-a", "dep-a"))
+	if err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadCreated, wait))
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-a"),
+		[]string{"session-a"},
+	)
+
+	nonWaitType := "task"
+	if err := backing.Update(wait.ID, beads.UpdateOpts{
+		Type:         &nonWaitType,
+		RemoveLabels: []string{sessionpkg.WaitBeadLabel},
+	}); err != nil {
+		t.Fatalf("remove wait identity: %v", err)
+	}
+	nonWait, err := backing.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get non-wait: %v", err)
+	}
+	if sessionpkg.IsWaitBead(nonWait) {
+		t.Fatalf("updated bead = %#v, want non-wait test precondition", nonWait)
+	}
+
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadUpdated, nonWait))
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-a"), nil)
+}
+
+func TestSessionWaitDependencyShadowDeterministicErrorAwaitsRelevantChange(t *testing.T) {
+	backing := beads.NewMemStore()
+	wait, err := backing.Create(sessionWaitShadowBead("candidate-session", "candidate-dependency"))
+	if err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	cfg := &config.City{}
+	cs := &controllerState{
+		cfg:           cfg,
+		cityBeadStore: cache,
+		pokeCh:        make(chan struct{}, 4),
+	}
+	var stderr bytes.Buffer
+	cityRuntime := &CityRuntime{
+		cs:        cs,
+		cfg:       cfg,
+		logPrefix: "gc start",
+		stderr:    &stderr,
+	}
+	cityRuntime.startSessionWaitDependencyShadow()
+	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("candidate-dependency"),
+		[]string{"candidate-session"},
+	)
+
+	malformedStatus := "in_progress"
+	if err := cache.Update(wait.ID, beads.UpdateOpts{Status: &malformedStatus}); err != nil {
+		t.Fatalf("make cached wait malformed: %v", err)
+	}
+	malformed, err := cache.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get malformed wait: %v", err)
+	}
+	cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadUpdated, malformed))
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("candidate-dependency"),
+		[]string{"candidate-session"},
+	)
+	for index := 0; index < 3; index++ {
+		cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadUpdated, beads.Bead{
+			ID:     fmt.Sprintf("unrelated-task-%d", index),
+			Type:   "task",
+			Status: "open",
+		}))
+	}
+	if got := strings.Count(stderr.String(), "session-wait shadow refresh:"); got != 1 {
+		t.Fatalf("refresh diagnostics = %d in %q, want one malformed-census episode", got, stderr.String())
+	}
+
+	open := "open"
+	if err := cache.Update(wait.ID, beads.UpdateOpts{
+		Status:   &open,
+		Metadata: map[string]string{"dep_ids": "repaired-dependency"},
+	}); err != nil {
+		t.Fatalf("repair cached wait: %v", err)
+	}
+	cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadUpdated, beads.Bead{
+		ID:     "unrelated-task",
+		Type:   "task",
+		Status: "open",
+	}))
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("candidate-dependency"),
+		[]string{"candidate-session"},
+	)
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("repaired-dependency"), nil)
+
+	repaired, err := cache.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get repaired wait: %v", err)
+	}
+	cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadUpdated, repaired))
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("candidate-dependency"), nil)
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("repaired-dependency"),
+		[]string{"candidate-session"},
+	)
+}
+
+func TestSessionWaitDependencyShadowDeterministicBlockerIdentityRemovalRearms(t *testing.T) {
+	cityRuntime, cs, cache, backing, stderr := newSessionWaitDependencyEventShadow(t)
+
+	indexed, err := backing.Create(sessionWaitShadowBead("indexed-session", "dep-old"))
+	if err != nil {
+		t.Fatalf("Create(indexed wait): %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadCreated, indexed))
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-old"),
+		[]string{"indexed-session"},
+	)
+
+	malformedBead := sessionWaitShadowBead("blocked-session", "dep-blocked")
+	malformed, err := cache.Create(malformedBead)
+	if err != nil {
+		t.Fatalf("Create(malformed wait): %v", err)
+	}
+	malformedStatus := "in_progress"
+	if err := cache.Update(malformed.ID, beads.UpdateOpts{Status: &malformedStatus}); err != nil {
+		t.Fatalf("make wait malformed: %v", err)
+	}
+	malformed, err = cache.Get(malformed.ID)
+	if err != nil {
+		t.Fatalf("Get malformed wait: %v", err)
+	}
+	cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadCreated, malformed))
+	if !strings.Contains(stderr.String(), `unsupported status "in_progress"`) {
+		t.Fatalf("refresh diagnostic = %q, want malformed blocker", stderr.String())
+	}
+	if !cityRuntime.sessionWaitDependencyContainsWait(malformed.ID) {
+		t.Fatal("rejected census did not retain malformed wait identity")
+	}
+
+	if err := backing.Update(indexed.ID, beads.UpdateOpts{
+		Metadata: map[string]string{"dep_ids": "dep-new"},
+	}); err != nil {
+		t.Fatalf("Update indexed wait behind blocker: %v", err)
+	}
+	indexed, err = backing.Get(indexed.ID)
+	if err != nil {
+		t.Fatalf("Get updated indexed wait: %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadUpdated, indexed))
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-old"),
+		[]string{"indexed-session"},
+	)
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-new"), nil)
+
+	nonWaitType := "task"
+	if err := cache.Update(malformed.ID, beads.UpdateOpts{
+		Type:         &nonWaitType,
+		RemoveLabels: []string{sessionpkg.WaitBeadLabel},
+	}); err != nil {
+		t.Fatalf("remove blocker wait identity: %v", err)
+	}
+	nonWait, err := cache.Get(malformed.ID)
+	if err != nil {
+		t.Fatalf("Get repaired non-wait: %v", err)
+	}
+	if sessionpkg.IsWaitBead(nonWait) {
+		t.Fatalf("repaired cache row = %#v, want non-wait", nonWait)
+	}
+	cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadUpdated, nonWait))
+
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-old"), nil)
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-new"),
+		[]string{"indexed-session"},
+	)
+	if cityRuntime.sessionWaitDependencyContainsWait(malformed.ID) {
+		t.Fatal("successful recovery retained rejected non-wait identity")
+	}
+}
+
+func TestSessionWaitDependencyShadowStaleRejectedCensusCannotReplaceNewerBlocker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("PrimeActive: %v", err)
+		}
+		first, err := cache.Create(sessionWaitShadowBead("first-session", "first-dependency"))
+		if err != nil {
+			t.Fatalf("Create(first wait): %v", err)
+		}
+		malformedStatus := "in_progress"
+		if err := cache.Update(first.ID, beads.UpdateOpts{Status: &malformedStatus}); err != nil {
+			t.Fatalf("make first wait malformed: %v", err)
+		}
+
+		cityRuntime := &CityRuntime{}
+		cs := &controllerState{}
+		firstBuilt := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		firstReturned := make(chan struct{})
+		var calls atomic.Int64
+		if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
+			attempt := calls.Add(1)
+			census, _, buildErr := buildObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
+			if buildErr == nil {
+				t.Errorf("build rejected census attempt %d returned nil error", attempt)
+				return sessionWaitShadowRetry
+			}
+			if attempt == 1 {
+				close(firstBuilt)
+				<-releaseFirst
+			}
+			retained, retainErr := cityRuntime.publishRejectedSessionWaitDependencyCensus(census)
+			if retainErr != nil {
+				t.Errorf("publish rejected census attempt %d: %v", attempt, retainErr)
+				return sessionWaitShadowRetry
+			}
+			if retained {
+				return sessionWaitShadowAwaitRelevant
+			}
+			return sessionWaitShadowRetry
+		}, cityRuntime.sessionWaitDependencyContainsWait); err != nil {
+			t.Fatalf("install admission: %v", err)
+		}
+		t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
+
+		go func() {
+			cs.requestSessionWaitDependencyShadowRefreshForBead(beads.Bead{}, true)
+			close(firstReturned)
+		}()
+		synctest.Wait()
+		select {
+		case <-firstBuilt:
+		default:
+			t.Fatal("first rejected census did not build")
+		}
+
+		nonWaitType := "task"
+		if err := cache.Update(first.ID, beads.UpdateOpts{
+			Type:         &nonWaitType,
+			RemoveLabels: []string{sessionpkg.WaitBeadLabel},
+		}); err != nil {
+			t.Fatalf("remove first wait identity: %v", err)
+		}
+		second, err := cache.Create(sessionWaitShadowBead("second-session", "second-dependency"))
+		if err != nil {
+			t.Fatalf("Create(second wait): %v", err)
+		}
+		if err := cache.Update(second.ID, beads.UpdateOpts{Status: &malformedStatus}); err != nil {
+			t.Fatalf("make second wait malformed: %v", err)
+		}
+
+		cs.requestSessionWaitDependencyShadowRefreshForBead(beads.Bead{}, true)
+		if !cityRuntime.sessionWaitDependencyContainsWait(second.ID) {
+			t.Fatal("newer rejected census did not retain its malformed wait")
+		}
+		if cityRuntime.sessionWaitDependencyContainsWait(first.ID) {
+			t.Fatal("newer rejected census retained removed first wait")
+		}
+
+		close(releaseFirst)
+		synctest.Wait()
+		select {
+		case <-firstReturned:
+		default:
+			t.Fatal("older rejected census did not return")
+		}
+		if !cityRuntime.sessionWaitDependencyContainsWait(second.ID) {
+			t.Fatal("older rejected census replaced the newer malformed wait identity")
+		}
+		if cityRuntime.sessionWaitDependencyContainsWait(first.ID) {
+			t.Fatal("older rejected census reintroduced the removed first wait identity")
+		}
+	})
+}
+
+func TestSessionWaitDependencyShadowRetriesUnavailableStartupAfterCacheHeals(t *testing.T) {
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(sessionWaitShadowBead("session-a", "dep-a")); err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	cfg := &config.City{}
+	cs := &controllerState{
+		cfg:           cfg,
+		cityBeadStore: cache,
+		pokeCh:        make(chan struct{}, 2),
+	}
+	var stderr bytes.Buffer
+	cityRuntime := &CityRuntime{
+		cs:        cs,
+		cfg:       cfg,
+		logPrefix: "gc start",
+		stderr:    &stderr,
+	}
+
+	cityRuntime.startSessionWaitDependencyShadow()
+	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-a"), nil)
+	if stderr.String() != "" {
+		t.Fatalf("unavailable startup diagnostic = %q, want silent pending retry", stderr.String())
+	}
+
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive after startup: %v", err)
+	}
+	cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadUpdated, beads.Bead{
+		ID:     "unrelated-task",
+		Type:   "task",
+		Status: "open",
+	}))
+
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-a"),
+		[]string{"session-a"},
+	)
+}
+
+func TestSessionWaitDependencyShadowUsesCacheTruthAfterRejectedStalePayload(t *testing.T) {
+	cityRuntime, cs, cache, backing, _ := newSessionWaitDependencyEventShadow(t)
+	wait, err := backing.Create(sessionWaitShadowBead("session-a", "dep-original"))
+	if err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadCreated, wait))
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-original"),
+		[]string{"session-a"},
+	)
+
+	stale := sessionWaitShadowBead("session-a", "dep-stale")
+	stale.ID = wait.ID
+	if err := cache.Update(wait.ID, beads.UpdateOpts{
+		Metadata: map[string]string{"dep_ids": "dep-live"},
+	}); err != nil {
+		t.Fatalf("update cached wait: %v", err)
+	}
+
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadUpdated, stale))
+
+	cached, err := cache.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get cached wait: %v", err)
+	}
+	if got := cached.Metadata["dep_ids"]; got != "dep-live" {
+		t.Fatalf("cached dependency after stale payload = %q, want dep-live", got)
+	}
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-original"), nil)
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-stale"), nil)
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("dep-live"),
+		[]string{"session-a"},
+	)
+}
+
+func TestSessionWaitDependencyShadowRetriesRealStaleObservationOnUnrelatedEvent(t *testing.T) {
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(sessionWaitShadowBead("candidate-session", "candidate-dependency")); err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	cityRuntime := &CityRuntime{}
+	installSessionWaitShadowSentinel(t, cityRuntime)
+	cs := &controllerState{}
+	var calls int
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
+		calls++
+		census, candidate, buildErr := buildObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
+		if buildErr != nil {
+			t.Errorf("build observed candidate: %v", buildErr)
+			return sessionWaitShadowRetry
+		}
+		if calls == 1 {
+			if primeErr := cache.PrimeActive(); primeErr != nil {
+				t.Errorf("PrimeActive invalidation: %v", primeErr)
+				return sessionWaitShadowRetry
+			}
+		}
+		installed, publishErr := cityRuntime.publishObservedSessionWaitDependencyIndex(census, candidate)
+		if publishErr != nil {
+			t.Errorf("publish observed candidate: %v", publishErr)
+			return sessionWaitShadowRetry
+		}
+		if installed {
+			return sessionWaitShadowConverged
+		}
+		return sessionWaitShadowRetry
+	}, cityRuntime.sessionWaitDependencyContainsWait); err != nil {
+		t.Fatalf("install admission: %v", err)
+	}
+	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
+
+	cs.requestSessionWaitDependencyShadowRefreshForBead(beads.Bead{}, true)
+	if calls != 1 {
+		t.Fatalf("refresh calls after stale publication = %d, want 1", calls)
+	}
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("sentinel-dependency"),
+		[]string{"sentinel-session"},
+	)
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("candidate-dependency"), nil)
+
+	cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadUpdated, beads.Bead{
+		ID:     "unrelated-task",
+		Type:   "task",
+		Status: "open",
+	}))
+	if calls != 2 {
+		t.Fatalf("refresh calls after unrelated retry signal = %d, want 2", calls)
+	}
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("sentinel-dependency"), nil)
+	assertSessionWaitDependencyIndexSessions(
+		t,
+		cityRuntime.sessionWaitDependencySessions("candidate-dependency"),
+		[]string{"candidate-session"},
+	)
+}
+
+func TestSessionWaitDependencyShadowBootstrapIdentityRemovalRaceConverges(t *testing.T) {
+	backing := beads.NewMemStore()
+	wait, err := backing.Create(sessionWaitShadowBead("candidate-session", "candidate-dependency"))
+	if err != nil {
+		t.Fatalf("Create(wait): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	cs := &controllerState{
+		cityBeadStore: cache,
+		pokeCh:        make(chan struct{}, 2),
+	}
+	cityRuntime := &CityRuntime{}
+	var calls int
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
+		calls++
+		census, candidate, buildErr := buildObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
+		if buildErr != nil {
+			t.Errorf("build observed candidate: %v", buildErr)
+			return sessionWaitShadowRetry
+		}
+		if calls == 1 {
+			nonWaitType := "task"
+			if updateErr := backing.Update(wait.ID, beads.UpdateOpts{
+				Type:         &nonWaitType,
+				RemoveLabels: []string{sessionpkg.WaitBeadLabel},
+			}); updateErr != nil {
+				t.Errorf("remove wait identity: %v", updateErr)
+				return sessionWaitShadowRetry
+			}
+			nonWait, getErr := backing.Get(wait.ID)
+			if getErr != nil {
+				t.Errorf("Get non-wait: %v", getErr)
+				return sessionWaitShadowRetry
+			}
+			cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadUpdated, nonWait))
+		}
+		installed, publishErr := cityRuntime.publishObservedSessionWaitDependencyIndex(census, candidate)
+		if publishErr != nil {
+			t.Errorf("publish observed candidate: %v", publishErr)
+			return sessionWaitShadowRetry
+		}
+		if installed {
+			return sessionWaitShadowConverged
+		}
+		return sessionWaitShadowRetry
+	}, cityRuntime.sessionWaitDependencyContainsWait); err != nil {
+		t.Fatalf("install admission: %v", err)
+	}
+	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
+
+	cs.requestSessionWaitDependencyShadowRefreshForBead(beads.Bead{}, true)
+
+	if calls != 2 {
+		t.Fatalf("refresh calls = %d, want stale first census plus converged post-event census", calls)
+	}
+	if index := sessionWaitShadowIndex(cityRuntime); index == nil {
+		t.Fatal("bootstrap race left the shadow index uninstalled")
+	}
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("candidate-dependency"), nil)
 }

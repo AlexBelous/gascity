@@ -38,20 +38,21 @@ func observeSessionWaitCensus(store beads.SessionStore) (observedSessionWaitCens
 	if !ok {
 		return observedSessionWaitCensus{}, fmt.Errorf("observing session waits: %w", beads.ErrCacheUnavailable)
 	}
-	if len(rows) > sessionpkg.SessionWaitLookupLimit {
-		return observedSessionWaitCensus{}, fmt.Errorf("observing session waits: %w", beads.LookupLimitError{
-			Kind:  "wait",
-			Label: sessionpkg.WaitBeadLabel,
-			Limit: sessionpkg.SessionWaitLookupLimit,
-		})
-	}
 	waits := make([]sessionpkg.WaitInfo, 0, len(rows))
 	for _, row := range rows {
 		if sessionpkg.IsWaitBead(row) {
 			waits = append(waits, sessionpkg.WaitInfoFromBead(row))
 		}
 	}
-	return observedSessionWaitCensus{cache: cache, observation: observation, waits: waits}, nil
+	census := observedSessionWaitCensus{cache: cache, observation: observation, waits: waits}
+	if len(rows) > sessionpkg.SessionWaitLookupLimit {
+		return census, fmt.Errorf("observing session waits: %w", beads.LookupLimitError{
+			Kind:  "wait",
+			Label: sessionpkg.WaitBeadLabel,
+			Limit: sessionpkg.SessionWaitLookupLimit,
+		})
+	}
+	return census, nil
 }
 
 // This file is the controller/CLI-side seam of the per-class store refactor.

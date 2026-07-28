@@ -135,6 +135,16 @@ type controllerState struct {
 	sessionStartEventAdmissionStopping bool
 	sessionStartEventAdmissionWG       sync.WaitGroup
 
+	// sessionWaitShadowAdmission is a read-only, joined refresh callback for
+	// the private dependency-wait index. Events only mark the projection
+	// pending; the callback rebuilds from the observed cache.
+	sessionWaitShadowAdmission         func() sessionWaitShadowRefreshResult
+	sessionWaitShadowMayContain        func(string) bool
+	sessionWaitShadowAdmissionStopping bool
+	sessionWaitShadowAdmissionWG       sync.WaitGroup
+	sessionWaitShadowPending           bool
+	sessionWaitShadowGeneration        uint64
+
 	// sessionStartLeaseMu fences state swaps against exact-start work that has
 	// captured the previous generation. New leases fail fast while a swap is
 	// pending; the swap waits for existing leases before replacing or closing
@@ -608,6 +618,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
 	}
+	cs.admitSessionWaitDependencyShadowEvent(evt)
 }
 
 // autocloseStoreRefLocked returns the storeRef string for the store that owns

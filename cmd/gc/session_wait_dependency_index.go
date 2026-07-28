@@ -110,6 +110,13 @@ func (i *sessionWaitDependencyIndex) SessionsForDependency(depID string) []strin
 	return result
 }
 
+func (i *sessionWaitDependencyIndex) containsWait(id string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	_, ok := i.byWaitID[id]
+	return ok
+}
+
 func waitDependencyRegistrationFrom(wait sessionpkg.WaitInfo) (waitDependencyRegistration, bool, error) {
 	if wait.Kind != "deps" {
 		return waitDependencyRegistration{}, false, nil

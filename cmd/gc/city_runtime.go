@@ -120,6 +120,9 @@ type CityRuntime struct {
 
 	sessionWaitDependencyMu    sync.RWMutex
 	sessionWaitDependencyIndex *sessionWaitDependencyIndex
+	// Rejected-census IDs come from the bounded lookup census and let a
+	// wait that repairs itself by losing wait identity re-arm convergence.
+	sessionWaitDependencyRejectedCensusIDs map[string]struct{}
 
 	sessionStartMu         sync.Mutex
 	sessionStartController *sessionStartController
@@ -3624,6 +3627,9 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		if cr.cs != nil {
+			cr.cs.stopSessionWaitDependencyShadowAdmission()
+		}
 		cr.stopSessionStartController()
 		cr.stopSessionLifecycleShadowWorker()
 		asyncStartsDrained := cr.waitForAsyncStarts()

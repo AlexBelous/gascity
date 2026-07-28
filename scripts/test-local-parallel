@@ -194,10 +194,11 @@ if [[ ${#jobspecs[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Each outer job's `go test` binary defaults to -p=1 internally; when fewer
-# jobspecs are running concurrently than the outer budget allows, that
-# surplus goes unused. Divide the outer budget across the concurrent jobs so
-# each claims its fair share instead of leaving slots idle (ga-04m84s).
+# Each outer job's `go test` binary defaults its internal -p to
+# GOMAXPROCS, so concurrent shards independently oversubscribe the
+# machine. Divide the outer budget across the concurrent jobs so each
+# claims only its fair share (see inner-parallelism.sh for the -p vs
+# -parallel scope caveat) (ga-04m84s).
 inner_p="$(gc_inner_parallelism "$local_jobs" "${#jobspecs[@]}")"
 export GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=${inner_p}"
 

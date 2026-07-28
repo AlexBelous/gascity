@@ -3,11 +3,19 @@
 # launched by each outer test-local-parallel job (ga-04m84s).
 #
 # The outer job count (test-local-job-count) sizes concurrent shard
-# processes; when the shard count for a mode is smaller than that outer
-# budget, the surplus slots go unused because each shard's `go test` binary
-# defaults to -p=1 internally. gc_inner_parallelism divides the outer budget
-# across however many shards are actually running concurrently so each one
-# claims its fair share instead of leaving slots idle.
+# processes; each shard's `go test` binary defaults its internal -p to
+# GOMAXPROCS, so when multiple shards run concurrently they each
+# independently try to claim the whole machine, oversubscribing it.
+# gc_inner_parallelism divides the outer budget across however many
+# shards are actually running concurrently so each one's -p is capped to
+# its fair share instead.
+#
+# Scope: -p only bounds cross-package build/test-binary concurrency, not
+# within-package t.Parallel() fan-out (that's the separate -parallel flag,
+# also defaulting to GOMAXPROCS, which this fix does not set). Shards that
+# invoke go test against a single package -- most of cmd/gc's job list --
+# get -p bounded only for their dependency-build phase, not their
+# t.Parallel() run phase; the multi-package jobs get the full benefit.
 #
 # Source this file in other scripts:
 #   source "$repo_root/scripts/lib/inner-parallelism.sh"

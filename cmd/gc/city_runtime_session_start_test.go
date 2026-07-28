@@ -299,18 +299,26 @@ func TestCityRuntimeSessionStartEventStartsWithoutFleetTick(t *testing.T) {
 		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
 	}
 	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto)
+	cityPath := t.TempDir()
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	status := make(chan exactSessionLifecycleStatusResult, 1)
 	cr := &CityRuntime{
-		cityPath: t.TempDir(),
+		cityPath: cityPath,
 		cityName: "test-city",
 		cfg:      env.cfg,
 		sp:       env.sp,
 		cs:       cs,
+		trace:    trace,
 		rec:      events.Discard,
 		stdout:   io.Discard,
 		stderr:   io.Discard,
 		sessionStartOptions: []startExecutionOption{
 			withStartStabilityWaiter(immediateStartStabilityWaiter),
 			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+			withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				status <- result
+			}),
 		},
 	}
 	t.Cleanup(cr.stopSessionStartController)
@@ -333,6 +341,217 @@ func TestCityRuntimeSessionStartEventStartsWithoutFleetTick(t *testing.T) {
 	}, "event-admitted exact wake to commit active")
 	if got := env.sp.CountCalls("Start", "worker"); got != 1 {
 		t.Fatalf("provider Start calls = %d, want 1 without a fleet tick", got)
+	}
+	var exactStatus exactSessionLifecycleStatusResult
+	select {
+	case exactStatus = <-status:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("event-admitted exact start did not report status")
+	}
+	if exactStatus.Plan == nil || exactStatus.Plan.Outcome != sessionLifecycleStatusNoop ||
+		exactStatus.Plan.Reason != sessionLifecycleStatusReasonConverged {
+		t.Fatalf("missing-runtime exact status = %#v, want converged no-op before provider start", exactStatus)
+	}
+	if exactStatus.RuntimeLive {
+		t.Fatalf("missing-runtime exact status = %#v, want runtime_live=false", exactStatus)
+	}
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read start trace: %v", err)
+	}
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && record.SiteCode == TraceSiteLifecycleStatusShadow {
+			t.Fatalf("start event emitted false no-effect status witness: %#v", record)
+		}
+	}
+}
+
+func TestCityRuntimeSessionStartEventRecordsConvergedStatusShadowWithoutEffects(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(bead.ID, map[string]string{
+		"state":        string(session.StateAwake),
+		"wake_request": string(session.WakeCauseExplicit),
+	}); err != nil {
+		t.Fatalf("configure active wake: %v", err)
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("seed live runtime: %v", err)
+	}
+	before := exactStatusStoreState(t, env.store)
+	store := newExactStatusCountingStore(t, env.store)
+	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, store, rollout.Auto)
+	status := make(chan exactSessionLifecycleStatusResult, 1)
+	cityPath := t.TempDir()
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg:      env.cfg,
+		sp:       env.sp,
+		cs:       cs,
+		trace:    trace,
+		rec:      events.Discard,
+		stdout:   io.Discard,
+		stderr:   io.Discard,
+		sessionStartOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+			withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				status <- result
+			}),
+		},
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	beforeCalls := len(env.sp.SnapshotCalls())
+	eventBead, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read post-commit event bead: %v", err)
+	}
+	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, eventBead))
+
+	var got exactSessionLifecycleStatusResult
+	select {
+	case got = <-status:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("event-admitted converged status did not report")
+	}
+	if got.Admission.Source != sessionStartAdmissionInProcess || got.AdmissionVersion == 0 || got.ControllerGeneration != 1 ||
+		!got.RuntimeLive || got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Plan == nil ||
+		got.Plan.Outcome != sessionLifecycleStatusNoop || got.Plan.Reason != sessionLifecycleStatusReasonConverged {
+		t.Fatalf("status result = %#v, want event-admitted converged no-op candidate", got)
+	}
+	if store.lists != 0 {
+		t.Fatalf("store List calls = %d, want 0", store.lists)
+	}
+	requireExactStatusStoreUnchanged(t, before, store)
+	readOnlyProviderCalls := map[string]bool{
+		"GetLastActivity": true,
+		"IsAttached":      true,
+		"IsRunning":       true,
+	}
+	for _, call := range env.sp.SnapshotCalls()[beforeCalls:] {
+		if !readOnlyProviderCalls[call.Method] {
+			t.Fatalf("provider call after event = %#v, want only read-only observation", call)
+		}
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read detached shadow trace: %v", err)
+	}
+	var witnesses []SessionReconcilerTraceRecord
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && record.SiteCode == TraceSiteLifecycleStatusShadow {
+			witnesses = append(witnesses, record)
+		}
+	}
+	if len(witnesses) != 1 {
+		t.Fatalf("status-shadow witnesses = %#v, want one", witnesses)
+	}
+	witness := witnesses[0]
+	if witness.OutcomeCode != TraceOutcomeNoChange || witness.Fields["session_id"] != bead.ID ||
+		witness.Fields["admission"] != string(sessionStartAdmissionInProcess) ||
+		witness.Fields["admission_version"] != float64(got.AdmissionVersion) ||
+		witness.Fields["generation"] != float64(got.ControllerGeneration) ||
+		witness.Fields["status_outcome"] != "noop" ||
+		witness.Fields["status_reason"] != string(sessionLifecycleStatusReasonConverged) ||
+		witness.Fields["effect_applied"] != false {
+		t.Fatalf("status-shadow witness = %#v, want converged detached event witness", witness)
+	}
+}
+
+func TestRecordExactSessionLifecycleStatusShadowUsesAdmissionToObservationLatency(t *testing.T) {
+	cityPath := t.TempDir()
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		trace:    trace,
+		stderr:   io.Discard,
+	}
+	admittedAt := time.Now().UTC().Add(-time.Second)
+	observedAt := admittedAt.Add(137 * time.Millisecond)
+	result := exactSessionLifecycleStatusResult{
+		Admission: sessionStartAdmission{
+			SessionID:  "gcs-latency",
+			Source:     sessionStartAdmissionInProcess,
+			Version:    3,
+			AdmittedAt: admittedAt,
+		},
+		AdmissionVersion:     3,
+		ControllerGeneration: 7,
+		RequestedID:          "gcs-latency",
+		LoadedID:             "gcs-latency",
+		Context:              exactSessionLifecycleStatusContextDesired,
+		ObservedAt:           observedAt,
+		RuntimeLive:          true,
+		Disposition:          exactSessionLifecycleStatusDispositionCandidate,
+		Reason:               exactSessionLifecycleStatusReasonCandidate,
+		Plan: &sessionLifecycleStatusPlan{
+			SessionID: "gcs-latency",
+			Outcome:   sessionLifecycleStatusNoop,
+			Reason:    sessionLifecycleStatusReasonConverged,
+		},
+	}
+	cr.recordExactSessionLifecycleStatusShadow(&config.City{}, result)
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read status latency trace: %v", err)
+	}
+	var cycleStart, witness *SessionReconcilerTraceRecord
+	for i := range records {
+		switch {
+		case records[i].RecordType == TraceRecordCycleStart:
+			cycleStart = &records[i]
+		case records[i].RecordType == TraceRecordOperation && records[i].SiteCode == TraceSiteLifecycleStatusShadow:
+			witness = &records[i]
+		}
+	}
+	if cycleStart == nil || witness == nil {
+		t.Fatalf("latency trace records = %#v, want cycle start and status witness", records)
+	}
+	if !cycleStart.Ts.Equal(admittedAt) {
+		t.Fatalf("status-shadow cycle start = %s, want admission %s", cycleStart.Ts, admittedAt)
+	}
+	if witness.DurationMS != 137 {
+		t.Fatalf("status-shadow duration_ms = %d, want admission-to-observation 137", witness.DurationMS)
+	}
+
+	for _, timing := range []struct {
+		admittedAt time.Time
+		observedAt time.Time
+	}{
+		{observedAt: observedAt},
+		{admittedAt: admittedAt},
+		{admittedAt: observedAt, observedAt: admittedAt},
+	} {
+		result.Admission.AdmittedAt = timing.admittedAt
+		result.ObservedAt = timing.observedAt
+		cr.recordExactSessionLifecycleStatusShadow(&config.City{}, result)
+	}
+	records, err = ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read status trace after invalid timing: %v", err)
+	}
+	witnesses := 0
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && record.SiteCode == TraceSiteLifecycleStatusShadow {
+			witnesses++
+		}
+	}
+	if witnesses != 1 {
+		t.Fatalf("status-shadow witnesses after invalid timing = %d, want original valid witness only", witnesses)
 	}
 }
 

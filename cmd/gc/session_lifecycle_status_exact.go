@@ -48,6 +48,7 @@ type exactSessionLifecycleStatusResult struct {
 	LoadedRevision       int64
 	Context              exactSessionLifecycleStatusContext
 	ObservedAt           time.Time
+	RuntimeLive          bool
 	Disposition          exactSessionLifecycleStatusDisposition
 	Reason               exactSessionLifecycleStatusReason
 	Plan                 *sessionLifecycleStatusPlan
@@ -120,6 +121,7 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		!input.PrerequisitesReady || input.ObservedAt.IsZero() || input.Error != "" {
 		return result
 	}
+	result.RuntimeLive = runtimeObservationLive(input.Observation)
 
 	plan := planSessionLifecycleStatus(sessionLifecycleShadowInput{
 		Info:              input.Info,

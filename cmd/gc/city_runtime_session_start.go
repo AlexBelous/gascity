@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -96,6 +97,13 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				return acquireErr
 			}
 			defer release()
+			startOptions := cr.sessionStartOptions
+			if admission.Source == sessionStartAdmissionInProcess {
+				startOptions = append([]startExecutionOption(nil), startOptions...)
+				startOptions = append(startOptions, withAdditionalExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+					cr.recordExactSessionLifecycleStatusShadow(snapshot.Config, result)
+				}))
+			}
 			statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(snapshot.Store)
 			owner, reconcileErr := reconcileExactSessionStartWithOwner(reconcileCtx, admission, exactSessionStartParams{
 				Generation:        snapshot.Generation,
@@ -109,7 +117,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				Recorder:          snapshot.Recorder,
 				Stdout:            cr.sessionStartStdout(),
 				Stderr:            cr.sessionStartStderr(),
-				StartOptions:      cr.sessionStartOptions,
+				StartOptions:      startOptions,
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				cr.requestLegacySessionStartFallback()
@@ -159,6 +167,63 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 	cr.sessionStartController = controller
 	cr.sessionStartOwnership = sessionStartOwnershipKeyed
 	return nil
+}
+
+func withAdditionalExactSessionLifecycleStatusObserver(observer exactSessionLifecycleStatusObserver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		existing := opts.exactStatusObserver
+		opts.exactStatusObserver = func(result exactSessionLifecycleStatusResult) {
+			if observer != nil {
+				observer(result)
+			}
+			if existing != nil {
+				existing(result)
+			}
+		}
+	}
+}
+
+func (cr *CityRuntime) recordExactSessionLifecycleStatusShadow(cfg *config.City, result exactSessionLifecycleStatusResult) {
+	if cr == nil || cr.trace == nil || result.Admission.Source != sessionStartAdmissionInProcess ||
+		!result.RuntimeLive || result.Disposition != exactSessionLifecycleStatusDispositionCandidate || result.Plan == nil ||
+		result.Plan.Outcome != sessionLifecycleStatusNoop || result.Plan.Reason != sessionLifecycleStatusReasonConverged {
+		return
+	}
+	admittedAt := result.Admission.AdmittedAt
+	observedAt := result.ObservedAt
+	if admittedAt.IsZero() || observedAt.IsZero() || observedAt.Before(admittedAt) {
+		return
+	}
+	trace := cr.trace
+	cycle := trace.BeginCycle(TraceTickTriggerControl, "session_lifecycle_status_shadow", admittedAt, cfg)
+	if cycle == nil {
+		return
+	}
+	cycle.RecordControllerOperation(TraceSiteLifecycleStatusShadow, TraceReasonRetained, TraceOutcomeNoChange, "session_lifecycle_status_shadow", observedAt.Sub(admittedAt), map[string]any{
+		"session_id":        result.RequestedID,
+		"admission":         string(result.Admission.Source),
+		"admission_version": result.AdmissionVersion,
+		"generation":        result.ControllerGeneration,
+		"status_outcome":    exactSessionLifecycleStatusOutcomeTraceValue(result.Plan.Outcome),
+		"status_reason":     string(result.Plan.Reason),
+		"effect_applied":    false,
+	})
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: session lifecycle status shadow trace: %v\n", cr.sessionStartLogPrefix(), err) //nolint:errcheck // tracing must not affect reconciliation
+	}
+}
+
+func exactSessionLifecycleStatusOutcomeTraceValue(outcome sessionLifecycleStatusOutcome) string {
+	switch outcome {
+	case sessionLifecycleStatusNoop:
+		return "noop"
+	case sessionLifecycleStatusHeal:
+		return "heal"
+	case sessionLifecycleStatusPark:
+		return "park"
+	default:
+		return "unknown"
+	}
 }
 
 func (cr *CityRuntime) sessionStartActivationFailure(mode rollout.Mode, err error) error {

@@ -58,6 +58,9 @@ type sessionWaitDependencyShadowJourneyTraceRecord struct {
 		StartReason   string `json:"start_reason"`
 		WaitID        string `json:"wait_id"`
 		SessionID     string `json:"session_id"`
+		Admission     string `json:"admission"`
+		StatusOutcome string `json:"status_outcome"`
+		StatusReason  string `json:"status_reason"`
 		EffectApplied *bool  `json:"effect_applied"`
 	} `json:"fields"`
 }

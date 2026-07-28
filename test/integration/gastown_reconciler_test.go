@@ -135,6 +135,13 @@ func setupReconcilerCityWithDaemon(t *testing.T, agentBlocks, daemonSettings str
 		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
 			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
 		}
+		if !usingSubprocess() {
+			if out, err := runCommand("", env, integrationSupervisorStopTimeout,
+				"tmux", "-L", filepath.Base(cityDir), "kill-server"); err != nil &&
+				!strings.Contains(strings.ToLower(out), "no server running") {
+				t.Logf("cleanup: tmux socket %q: %v\n%s", filepath.Base(cityDir), err, out)
+			}
+		}
 		fixRootOwnedFiles(cityDir)
 	})
 

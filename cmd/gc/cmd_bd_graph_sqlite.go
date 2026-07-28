@@ -329,8 +329,50 @@ func bdGraphReadRefusal(cityPath string, cfg *config.City, bdArgs []string, stde
 	if !routed {
 		return 0, false
 	}
+	if bdWriteMentionsGraphOnlyInValues(bdArgs, prefix) {
+		return 0, false
+	}
 	fmt.Fprintf(stderr, "gc bd: %q mentions a graph-class (%s-) id, which lives in the embedded graph store bd cannot read; federated forms: `gc bd show <id> [--json]`, `gc bd close/update/release-if-current <id>`, or the controller API /beads endpoints\n", strings.Join(bdArgs, " "), prefix) //nolint:errcheck // best-effort stderr
 	return 1, true
+}
+
+// bdWriteMentionsGraphOnlyInValues reports whether bdArgs is a write verb
+// whose TARGET id(s) are not graph-class, so a graph-prefix mention can only
+// sit in value position (metadata values, descriptions, titles). bd stores
+// those as opaque strings and performs no graph read, so exec'ing bd is
+// correct — refusing would break legitimate writes like the pr-review
+// router stamping pr_review.workflow_root_id=gcg-… onto a work-store source
+// bead. Graph-targeted forms of these verbs were already served by the
+// mutation arm upstream; an unparseable or graph-targeted invocation keeps
+// the fail-closed refusal.
+func bdWriteMentionsGraphOnlyInValues(bdArgs []string, prefix string) bool {
+	if len(bdArgs) == 0 {
+		return false
+	}
+	isGraphID := func(id string) bool { return strings.Contains(id, prefix+"-") }
+	switch bdArgs[0] {
+	case "create":
+		// create has no target bead; every mention is value-position.
+		return true
+	case "update":
+		id, _, err := parseBdGraphUpdateArgs(bdArgs[1:])
+		return err == nil && !isGraphID(id)
+	case "close":
+		ids, _, err := parseBdGraphCloseArgs(bdArgs[1:])
+		if err != nil || len(ids) == 0 {
+			return false
+		}
+		for _, id := range ids {
+			if isGraphID(id) {
+				return false
+			}
+		}
+		return true
+	case "release-if-current":
+		id, _, ok, err := parseBdReleaseIfCurrentArgs(bdArgs)
+		return err == nil && ok && !isGraphID(id)
+	}
+	return false
 }
 
 // bdGraphMutationTargetsGraphStore reports whether a routed city's

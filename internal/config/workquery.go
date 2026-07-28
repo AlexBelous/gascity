@@ -179,15 +179,20 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 }
 
 // inProgressBlockedByEnrichmentScript hardens the in_progress "crash recovery"
-// work-query tier against re-serving a bead that cannot progress.
+// work-query tier against re-serving a bead that cannot progress. It is
+// shared by the `bd list`-backed standard/legacy-control tiers and by
+// ephemeralAssignedInProgressProbeScript's `bd query` candidate — every
+// in_progress crash-recovery source wraps its candidate through the one
+// helper rather than reimplementing the check.
 //
-// `bd list --status in_progress` does no readiness computation: unlike
-// `bd ready` it emits neither blocked_by nor is_blocked. That makes the
-// defensive hook-side filter (filterUnreadyHookCandidates ->
-// isDepBlockedHookCandidate) a structural no-op for this tier, because an
-// absent blocked_by is correctly read as "not blocked". A step that is
-// in_progress + assigned but held by an open gate or an unclosed blocking
-// dependency is therefore re-served on every hook tick, forever.
+// Neither `bd list --status in_progress` nor the ephemeral probe's `bd
+// query` does readiness computation: unlike `bd ready` they emit neither
+// blocked_by nor is_blocked. That makes the defensive hook-side filter
+// (filterUnreadyHookCandidates -> isDepBlockedHookCandidate) a structural
+// no-op for these tiers, because an absent blocked_by is correctly read as
+// "not blocked". A step that is in_progress + assigned but held by an open
+// gate or an unclosed blocking dependency is therefore re-served on every
+// hook tick, forever.
 //
 // `bd ready` cannot be substituted here: it excludes in_progress by design,
 // so it would return nothing and defeat crash recovery entirely. Instead we
@@ -280,7 +285,9 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralRea
 	_ = includeEphemeralReady
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
 		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; `
 }
 
 func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bool) string {

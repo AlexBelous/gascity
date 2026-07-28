@@ -157,10 +157,13 @@ func apiFastPathStampWorkMeta(client fastPathClaimer) hookStampWorkMetaFunc {
 // Both reads accept a store scope: a rig name or the city name selects a single
 // backing store, and an empty scope federates every store. Scope is how the fast
 // path reproduces the legacy firstStoreWithWork STORE-outermost precedence
-// (invariant 2) — see fastPathClaimCandidates.
+// (invariant 2) — see fastPathClaimCandidates. BeadsReady also takes an
+// includeEphemeral flag; the fast path always sets it (and ListBeads.IncludeEphemeral)
+// so ephemeral molecule/wisp work stays visible, matching the generated query's
+// --include-ephemeral probes.
 type fastPathReader interface {
 	ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[]beads.Bead], error)
-	BeadsReady(scope string) (api.CachedRead[[]beads.Bead], error)
+	BeadsReady(scope string, includeEphemeral bool) (api.CachedRead[[]beads.Bead], error)
 }
 
 // The production controller client is the fast-path reader; pin it so a client
@@ -267,7 +270,7 @@ func fastPathScopeCandidates(r fastPathReader, scope string, identities, routeTa
 		if id == "" {
 			continue
 		}
-		cr, err := r.ListBeads(api.ListBeadsOpts{Status: "in_progress", Assignee: id, Rig: scope, Limit: 1})
+		cr, err := r.ListBeads(api.ListBeadsOpts{Status: "in_progress", Assignee: id, Rig: scope, Limit: 1, IncludeEphemeral: true})
 		if err != nil {
 			return nil, err
 		}
@@ -277,8 +280,9 @@ func fastPathScopeCandidates(r fastPathReader, scope string, identities, routeTa
 	}
 
 	// Tiers 2 and 3 share a single ready read scoped to this store (the
-	// controller-side equivalent of `bd ready` against one store).
-	ready, err := r.BeadsReady(scope)
+	// controller-side equivalent of `bd ready` against one store). It spans both
+	// tiers (includeEphemeral) so ephemeral ready work is not silently dropped.
+	ready, err := r.BeadsReady(scope, true)
 	if err != nil {
 		return nil, err
 	}

@@ -27,6 +27,8 @@ type fakeFastPathReader struct {
 	inProgressByScope map[string][]beads.Bead
 	readyCalls        int
 	readyScopes       []string
+	readyEphemeral    []bool
+	listEphemeral     []bool
 	listErr           error
 	readyErr          error
 }
@@ -46,6 +48,7 @@ func (f *fakeFastPathReader) readyFor(scope string) []beads.Bead {
 }
 
 func (f *fakeFastPathReader) ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[]beads.Bead], error) {
+	f.listEphemeral = append(f.listEphemeral, opts.IncludeEphemeral)
 	if f.listErr != nil {
 		return api.CachedRead[[]beads.Bead]{}, f.listErr
 	}
@@ -65,9 +68,10 @@ func (f *fakeFastPathReader) ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[
 	return api.CachedRead[[]beads.Bead]{Body: out}, nil
 }
 
-func (f *fakeFastPathReader) BeadsReady(scope string) (api.CachedRead[[]beads.Bead], error) {
+func (f *fakeFastPathReader) BeadsReady(scope string, includeEphemeral bool) (api.CachedRead[[]beads.Bead], error) {
 	f.readyCalls++
 	f.readyScopes = append(f.readyScopes, scope)
+	f.readyEphemeral = append(f.readyEphemeral, includeEphemeral)
 	if f.readyErr != nil {
 		return api.CachedRead[[]beads.Bead]{}, f.readyErr
 	}
@@ -299,6 +303,34 @@ func TestFastPathScopeOrderDedupesRepeatedScope(t *testing.T) {
 	}
 	if len(r.readyScopes) != 1 || r.readyScopes[0] != "frontend" {
 		t.Errorf("ready reads = %v, want exactly [frontend] (duplicate scope collapsed)", r.readyScopes)
+	}
+}
+
+// TestFastPathReadsIncludeEphemeral proves both fast-path reads opt into the
+// ephemeral tier: tier-1 ListBeads sets IncludeEphemeral and the ready read
+// passes includeEphemeral=true. The generated query always probes ephemeral work
+// (--include-ephemeral), so a fast path that read only the durable tier would
+// strand ephemeral molecule/wisp workers when the flag is enabled.
+func TestFastPathReadsIncludeEphemeral(t *testing.T) {
+	r := &fakeFastPathReader{} // empty: forces both the list and ready reads
+	if _, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "ephemeral", nil); err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	if len(r.listEphemeral) == 0 {
+		t.Fatal("tier-1 ListBeads was never called")
+	}
+	for i, e := range r.listEphemeral {
+		if !e {
+			t.Fatalf("ListBeads call %d had IncludeEphemeral=false; every fast-path tier-1 read must span both tiers", i)
+		}
+	}
+	if len(r.readyEphemeral) == 0 {
+		t.Fatal("ready read was never called")
+	}
+	for i, e := range r.readyEphemeral {
+		if !e {
+			t.Fatalf("BeadsReady call %d had includeEphemeral=false; the fast-path ready read must span both tiers", i)
+		}
 	}
 }
 

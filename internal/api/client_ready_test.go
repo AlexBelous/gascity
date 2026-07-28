@@ -26,7 +26,7 @@ func TestClientBeadsReadySuccess(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.BeadsReady("")
+	got, err := c.BeadsReady("", false)
 	if err != nil {
 		t.Fatalf("BeadsReady: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestClientBeadsReadyConnErrorIsFallbackable(t *testing.T) {
 	ts.Close()
 
 	c := NewCityScopedClient(url, "alpha")
-	_, err := c.BeadsReady("")
+	_, err := c.BeadsReady("", false)
 	if err == nil {
 		t.Fatal("BeadsReady err = nil on a dead server, want a transport error")
 	}
@@ -76,10 +76,39 @@ func TestClientBeadsReadyScopePassesRigParam(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	if _, err := c.BeadsReady("frontend"); err != nil {
+	if _, err := c.BeadsReady("frontend", false); err != nil {
 		t.Fatalf("BeadsReady: %v", err)
 	}
 	if gotRig != "frontend" {
 		t.Errorf("rig query = %q, want frontend", gotRig)
+	}
+}
+
+// TestClientBeadsReadyIncludeEphemeralPassesParam proves includeEphemeral=true is
+// sent as ?include_ephemeral=true so the controller reads both tiers; false omits
+// it, preserving the historical default for other callers.
+func TestClientBeadsReadyIncludeEphemeralPassesParam(t *testing.T) {
+	var gotEph string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEph = r.URL.Query().Get("include_ephemeral")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	if _, err := c.BeadsReady("", true); err != nil {
+		t.Fatalf("BeadsReady: %v", err)
+	}
+	if gotEph != "true" {
+		t.Errorf("include_ephemeral query = %q, want true", gotEph)
+	}
+
+	gotEph = ""
+	if _, err := c.BeadsReady("", false); err != nil {
+		t.Fatalf("BeadsReady: %v", err)
+	}
+	if gotEph != "" {
+		t.Errorf("include_ephemeral query = %q, want empty when not requested", gotEph)
 	}
 }

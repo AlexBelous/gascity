@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -15,9 +16,22 @@ import (
 // would otherwise collide on gc-1.
 func readyTitles(t *testing.T, h http.Handler, state State, scope string) map[string]bool {
 	t.Helper()
+	return readyTitlesQuery(t, h, state, scope, false)
+}
+
+// readyTitlesQuery is readyTitles with an explicit include_ephemeral toggle.
+func readyTitlesQuery(t *testing.T, h http.Handler, state State, scope string, includeEphemeral bool) map[string]bool {
+	t.Helper()
 	url := cityURL(state, "/beads/ready")
+	var q []string
 	if scope != "" {
-		url += "?rig=" + scope
+		q = append(q, "rig="+scope)
+	}
+	if includeEphemeral {
+		q = append(q, "include_ephemeral=true")
+	}
+	if len(q) > 0 {
+		url += "?" + strings.Join(q, "&")
 	}
 	req := httptest.NewRequest(http.MethodGet, url, nil)
 	rec := httptest.NewRecorder()
@@ -100,6 +114,42 @@ func TestBeadReadyScopeFiltersToSingleStore(t *testing.T) {
 		titles := readyTitles(t, h, state, "does-not-exist")
 		if len(titles) != 0 {
 			t.Fatalf("unknown scope titles = %v, want empty", titles)
+		}
+	})
+}
+
+// TestBeadReadyIncludeEphemeralSurfacesWispWork proves the include_ephemeral
+// query param actually reads the ephemeral wisps tier: an ephemeral ready bead
+// is invisible to the default read (TierIssues) and visible only when
+// include_ephemeral=true (TierBoth). This is the server half of the fast path's
+// ephemeral-visibility fix — without it, the generated query's --include-ephemeral
+// probes would find work the fast path could not.
+func TestBeadReadyIncludeEphemeralSurfacesWispWork(t *testing.T) {
+	state := newFakeState(t)
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Type: "task", Title: "durable ready"}); err != nil {
+		t.Fatalf("seed durable: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Type: "task", Title: "ephemeral ready", Ephemeral: true}); err != nil {
+		t.Fatalf("seed ephemeral: %v", err)
+	}
+	state.stores = map[string]beads.Store{"myrig": store}
+	state.cityBeadStore = beads.NewMemStore()
+	h := newTestCityHandler(t, state)
+
+	t.Run("default read omits ephemeral", func(t *testing.T) {
+		titles := readyTitlesQuery(t, h, state, "", false)
+		if !titles["durable ready"] {
+			t.Fatalf("default read titles = %v, want the durable bead", titles)
+		}
+		if titles["ephemeral ready"] {
+			t.Fatalf("default read titles = %v, want ephemeral EXCLUDED (TierIssues)", titles)
+		}
+	})
+	t.Run("include_ephemeral surfaces the wisp", func(t *testing.T) {
+		titles := readyTitlesQuery(t, h, state, "", true)
+		if !titles["durable ready"] || !titles["ephemeral ready"] {
+			t.Fatalf("include_ephemeral titles = %v, want BOTH durable and ephemeral", titles)
 		}
 	})
 }

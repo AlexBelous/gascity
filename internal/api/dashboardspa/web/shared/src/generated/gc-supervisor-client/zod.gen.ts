@@ -6709,7 +6709,8 @@ export const zGetV0CityByCityNameBeadsQuery = z.object({
     label: z.string().optional(),
     assignee: z.string().optional(),
     rig: z.string().optional(),
-    all: z.boolean().optional()
+    all: z.boolean().optional(),
+    include_ephemeral: z.boolean().optional()
 });
 
 /**
@@ -6750,7 +6751,8 @@ export const zGetV0CityByCityNameBeadsReadyPath = z.object({
 export const zGetV0CityByCityNameBeadsReadyQuery = z.object({
     index: z.string().optional(),
     wait: z.string().optional(),
-    rig: z.string().optional()
+    rig: z.string().optional(),
+    include_ephemeral: z.boolean().optional()
 });
 
 /**

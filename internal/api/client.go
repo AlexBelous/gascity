@@ -1030,6 +1030,10 @@ type ListBeadsOpts struct {
 	// the same coverage. A positive value stops paginating once reached.
 	Limit int
 	All   bool
+	// IncludeEphemeral reads both the durable issues tier and the ephemeral wisps
+	// tier. The hook fast path sets it so assigned ephemeral in_progress work is
+	// visible to tier-1 crash recovery.
+	IncludeEphemeral bool
 }
 
 // maxBeadDrainPages hard-bounds the cursor-drain loop. The seenCursors guard
@@ -1066,6 +1070,10 @@ func listBeadsParams(opts ListBeadsOpts) *genclient.GetV0CityByCityNameBeadsPara
 	if opts.All {
 		t := true
 		params.All = &t
+	}
+	if opts.IncludeEphemeral {
+		t := true
+		params.IncludeEphemeral = &t
 	}
 	return params
 }

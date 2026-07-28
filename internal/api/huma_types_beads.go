@@ -26,6 +26,11 @@ type BeadListInput struct {
 	Assignee string `query:"assignee" required:"false" doc:"Filter by assignee."`
 	Rig      string `query:"rig" required:"false" doc:"Filter by rig."`
 	All      bool   `query:"all" required:"false" doc:"Include closed beads."`
+	// IncludeEphemeral reads both the durable issues tier and the ephemeral
+	// wisps tier (TierBoth). Empty/false keeps the caller's default tier. The
+	// hook fast path sets it so ephemeral molecule/wisp work stays visible,
+	// matching the generated query's --include-ephemeral probes.
+	IncludeEphemeral bool `query:"include_ephemeral" required:"false" doc:"Include ephemeral (wisp) beads alongside durable ones."`
 }
 
 // BeadReadyInput is the Huma input for GET /v0/city/{cityName}/beads/ready.
@@ -36,6 +41,11 @@ type BeadReadyInput struct {
 	// city name. Empty federates every store (the default). The hook fast path
 	// sets it to reproduce the legacy per-store work-query precedence.
 	Rig string `query:"rig" required:"false" doc:"Scope ready work to a single store (rig name or city name); empty federates all stores."`
+	// IncludeEphemeral reads both the durable issues tier and the ephemeral
+	// wisps tier (TierBoth). Empty/false keeps the historical TierIssues default
+	// for other callers. The hook fast path sets it so ephemeral molecule/wisp
+	// ready work stays visible, matching the generated query's --include-ephemeral.
+	IncludeEphemeral bool `query:"include_ephemeral" required:"false" doc:"Include ephemeral (wisp) ready work alongside durable ready work."`
 }
 
 // BeadGraphInput is the Huma input for GET /v0/city/{cityName}/beads/graph/{rootID}.

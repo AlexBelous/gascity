@@ -8185,6 +8185,9 @@ type GetV0CityByCityNameBeadsParams struct {
 
 	// All Include closed beads.
 	All *bool `form:"all,omitempty" json:"all,omitempty"`
+
+	// IncludeEphemeral Include ephemeral (wisp) beads alongside durable ones.
+	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
 }
 
 // CreateBeadParams defines parameters for CreateBead.
@@ -8206,6 +8209,9 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 
 	// Rig Scope ready work to a single store (rig name or city name); empty federates all stores.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// IncludeEphemeral Include ephemeral (wisp) ready work alongside durable ready work.
+	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
 }
 
 // DeleteV0CityByCityNameConvoyByIdParams defines parameters for DeleteV0CityByCityNameConvoyById.
@@ -21809,6 +21815,22 @@ func NewGetV0CityByCityNameBeadsRequest(server string, cityName string, params *
 
 		}
 
+		if params.IncludeEphemeral != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_ephemeral", *params.IncludeEphemeral, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -21996,6 +22018,22 @@ func NewGetV0CityByCityNameBeadsReadyRequest(server string, cityName string, par
 		if params.Rig != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "rig", *params.Rig, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeEphemeral != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_ephemeral", *params.IncludeEphemeral, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

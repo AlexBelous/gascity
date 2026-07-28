@@ -21,15 +21,24 @@ import (
 // precedence (invariant 2). An empty scope federates every store, the default
 // `bd ready` behavior.
 //
+// includeEphemeral spans both the durable issues tier and the ephemeral wisps
+// tier, so ephemeral molecule/wisp ready work stays visible; the fast path sets
+// it to match the generated query's --include-ephemeral probes. Other callers
+// leave it false to keep the historical tier.
+//
 // A pre-request transport failure surfaces as a *connError (IsConnError true),
 // the signal the fast path uses to fall back to the subprocess shell reads.
-func (c *Client) BeadsReady(scope string) (CachedRead[[]beads.Bead], error) {
+func (c *Client) BeadsReady(scope string, includeEphemeral bool) (CachedRead[[]beads.Bead], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]beads.Bead]{}, err
 	}
 	params := &genclient.GetV0CityByCityNameBeadsReadyParams{}
 	if s := strings.TrimSpace(scope); s != "" {
 		params.Rig = &s
+	}
+	if includeEphemeral {
+		t := true
+		params.IncludeEphemeral = &t
 	}
 	resp, err := c.cw.GetV0CityByCityNameBeadsReadyWithResponse(
 		context.Background(), c.cityName, params)

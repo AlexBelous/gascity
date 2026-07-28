@@ -26072,6 +26072,16 @@
               "description": "Include closed beads.",
               "type": "boolean"
             }
+          },
+          {
+            "description": "Include ephemeral (wisp) beads alongside durable ones.",
+            "explode": false,
+            "in": "query",
+            "name": "include_ephemeral",
+            "schema": {
+              "description": "Include ephemeral (wisp) beads alongside durable ones.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -26520,6 +26530,16 @@
             "schema": {
               "description": "Scope ready work to a single store (rig name or city name); empty federates all stores.",
               "type": "string"
+            }
+          },
+          {
+            "description": "Include ephemeral (wisp) ready work alongside durable ready work.",
+            "explode": false,
+            "in": "query",
+            "name": "include_ephemeral",
+            "schema": {
+              "description": "Include ephemeral (wisp) ready work alongside durable ready work.",
+              "type": "boolean"
             }
           }
         ],

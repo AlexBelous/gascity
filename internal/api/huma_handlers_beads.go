@@ -122,6 +122,13 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				// arbitrary, per-call-different subset (#3208).
 				Sort: beads.SortCreatedDesc,
 			}
+			// An explicit include_ephemeral read spans the durable issues tier and
+			// the ephemeral wisps tier, so the fast path's assigned-in_progress
+			// tier-1 sees ephemeral crash-recovery work; the default keeps the
+			// caller's historical TierIssues behavior.
+			if input.IncludeEphemeral {
+				query.TierMode = beads.TierBoth
+			}
 			if !query.HasFilter() {
 				query.AllowScan = true
 			}
@@ -370,6 +377,15 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// empty ready set, matching the legacy shell query against a missing store.
 	scopeRig := strings.TrimSpace(input.Rig)
 	rigNames := sortedRigNames(stores)
+	// An explicit include_ephemeral read spans both the durable issues tier and
+	// the ephemeral wisps tier, so ephemeral molecule/wisp ready work stays
+	// visible; the default keeps the caller's historical tier. Passing TierBoth
+	// is a no-op for policy-wrapped stores (which already expand to TierBoth) and
+	// makes non-policy stores ephemeral-inclusive too.
+	var readyQuery []beads.ReadyQuery
+	if input.IncludeEphemeral {
+		readyQuery = []beads.ReadyQuery{{TierMode: beads.TierBoth}}
+	}
 	var all []beads.Bead
 	var pa partialAggregator
 	seen := make(map[string]bool)
@@ -378,7 +394,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready()
+		ready, err := beads.HandlesFor(store).Live.Ready(readyQuery...)
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)

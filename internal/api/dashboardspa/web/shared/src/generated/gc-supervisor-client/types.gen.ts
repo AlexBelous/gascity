@@ -10308,6 +10308,10 @@ export type GetV0CityByCityNameBeadsData = {
          * Include closed beads.
          */
         all?: boolean;
+        /**
+         * Include ephemeral (wisp) beads alongside durable ones.
+         */
+        include_ephemeral?: boolean;
     };
     url: '/v0/city/{cityName}/beads';
 };
@@ -10473,6 +10477,10 @@ export type GetV0CityByCityNameBeadsReadyData = {
          * Scope ready work to a single store (rig name or city name); empty federates all stores.
          */
         rig?: string;
+        /**
+         * Include ephemeral (wisp) ready work alongside durable ready work.
+         */
+        include_ephemeral?: boolean;
     };
     url: '/v0/city/{cityName}/beads/ready';
 };

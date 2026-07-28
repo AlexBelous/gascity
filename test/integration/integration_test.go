@@ -1407,7 +1407,11 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 	cmd := exec.CommandContext(ctx, gcBinary, "supervisor", "run")
 	configureIntegrationSupervisorCommand(cmd)
 	cmd.Dir = gcHome
-	cmd.Env = env
+	// gc register performs an idempotent supervisor install after adding the
+	// city. Mark this directly launched isolated supervisor as warm-refresh
+	// capable so that install does not refuse the first post-start registration
+	// and leave a partially initialized test city behind.
+	cmd.Env = append(append([]string(nil), env...), "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL=1")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {

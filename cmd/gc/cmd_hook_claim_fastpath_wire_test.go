@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -69,7 +68,7 @@ func TestHookFastPathEligible(t *testing.T) {
 // working set.
 func TestClaimHookWorkFastPathFailsClosedOnConnError(t *testing.T) {
 	t.Setenv("GC_DEBUG", "1")
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := newGCClientTestServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := ts.URL
 	ts.Close() // nothing listening → real *connError from the client reads.
 
@@ -89,7 +88,7 @@ func TestClaimHookWorkFastPathFailsClosedOnConnError(t *testing.T) {
 // verdict (a 500, not a connection failure) is handled terminally and never
 // shelled out — shelling would multiply the connection pressure the cure removes.
 func TestClaimHookWorkFastPathFailsFastOnServerVerdict(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := newGCClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer ts.Close()

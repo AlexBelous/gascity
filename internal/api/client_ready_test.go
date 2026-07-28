@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -11,7 +10,7 @@ import (
 // and maps the list body into []beads.Bead.
 func TestClientBeadsReadySuccess(t *testing.T) {
 	var gotPath, gotRig string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotRig = r.URL.Query().Get("rig")
 		w.Header().Set("Content-Type", "application/json")
@@ -50,7 +49,7 @@ func TestClientBeadsReadySuccess(t *testing.T) {
 // TestClientBeadsReadyConnErrorIsClassified proves a transport failure
 // surfaces as a *connError so the fast path can fail closed.
 func TestClientBeadsReadyConnErrorIsClassified(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := newAPIClientTestServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := ts.URL
 	ts.Close()
 
@@ -68,7 +67,7 @@ func TestClientBeadsReadyConnErrorIsClassified(t *testing.T) {
 // the ?rig= query param so the controller federates only that one store.
 func TestClientBeadsReadyScopePassesRigParam(t *testing.T) {
 	var gotRig string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotRig = r.URL.Query().Get("rig")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck
@@ -92,7 +91,7 @@ func TestClientBeadsReadyScopePassesRigParam(t *testing.T) {
 // serialization.
 func TestClientBeadsReadyQuerySerializesBoundedParams(t *testing.T) {
 	var gotQuery map[string][]string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck
@@ -149,7 +148,7 @@ func TestClientBeadsReadyQuerySerializesBoundedParams(t *testing.T) {
 // it, preserving the historical default for other callers.
 func TestClientBeadsReadyIncludeEphemeralPassesParam(t *testing.T) {
 	var gotEph string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEph = r.URL.Query().Get("include_ephemeral")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck

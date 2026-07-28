@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +15,7 @@ import (
 // TestAPIFastPathClaimSuccess proves the API-backed Claim op returns the claimed
 // bead through the controller claim route.
 func TestAPIFastPathClaimSuccess(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newGCClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/claim") {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
@@ -51,7 +50,7 @@ func TestAPIFastPathClaimAmbiguousTimeoutRetriesSameBeadActor(t *testing.T) {
 		actors []string
 		calls  int
 	)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newGCClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Actor string `json:"actor"`
 		}
@@ -107,7 +106,7 @@ func TestAPIFastPathClaimAmbiguousRetryFailureStopsCandidateWalk(t *testing.T) {
 		paths  []string
 		actors []string
 	)
-	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	ts := newGCClientTestServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Actor string `json:"actor"`
 		}
@@ -150,7 +149,7 @@ func TestAPIFastPathClaimAmbiguousRetryFailureStopsCandidateWalk(t *testing.T) {
 // re-reads the bead so the caller can surface who won in the claim_rejected
 // event, mirroring the bd path.
 func TestAPIFastPathClaimLostRaceReReadsOwner(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newGCClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/claim") {
 			json.NewEncoder(w).Encode(map[string]any{"claimed": false, "bead": map[string]any{}}) //nolint:errcheck
@@ -182,7 +181,7 @@ func TestAPIFastPathClaimLostRaceReReadsOwner(t *testing.T) {
 func TestAPIFastPathStampWorkMeta(t *testing.T) {
 	var gotBody map[string]any
 	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newGCClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
 		w.Header().Set("Content-Type", "application/json")

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -15,7 +14,7 @@ func TestClientClaimBeadSuccess(t *testing.T) {
 	var gotMethod, gotPath, gotCSRF string
 	var gotBody map[string]any
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotCSRF = r.Header.Get("X-GC-Request")
@@ -60,7 +59,7 @@ func TestClientClaimBeadSuccess(t *testing.T) {
 // TestClientClaimBeadLostRace proves a not-claimed result is (Bead{}, false,
 // nil): losing a claim race is never an error.
 func TestClientClaimBeadLostRace(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"claimed": false,
@@ -86,7 +85,7 @@ func TestClientClaimBeadLostRace(t *testing.T) {
 // failure surfaces as a *connError so the hook can distinguish transport
 // ambiguity while still failing closed.
 func TestClientClaimBeadConnErrorIsClassified(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := newAPIClientTestServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := ts.URL
 	ts.Close() // nothing listening: the request cannot connect.
 
@@ -107,7 +106,7 @@ func TestClientClaimBeadConnErrorIsClassified(t *testing.T) {
 // (503) is a definite server verdict, NOT a transport failure: the fast path
 // must fail fast on it rather than shelling out and multiplying pressure.
 func TestClientClaimBeadAdmission503IsNotConnError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck

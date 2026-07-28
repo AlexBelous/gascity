@@ -63,6 +63,14 @@ var cityCommandEnv sync.Map
 
 var runIntegrationSupervisorStopCommand = exec.CommandContext
 
+func integrationTestCommand(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...)
+}
+
+func integrationTestPollPause(delay time.Duration) {
+	time.Sleep(delay)
+}
+
 const (
 	integrationGCCommandTimeout      = 60 * time.Second
 	integrationGCLifecycleTimeout    = 120 * time.Second
@@ -187,7 +195,7 @@ func TestMain(m *testing.M) {
 		}
 	} else {
 		gcBinary = filepath.Join(integrationToolBinDir, "gc")
-		buildCmd := exec.Command("go", "build", "-o", gcBinary, "./cmd/gc")
+		buildCmd := integrationTestCommand("go", "build", "-o", gcBinary, "./cmd/gc")
 		buildCmd.Dir = findModuleRoot()
 		buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if out, err := buildCmd.CombinedOutput(); err != nil {
@@ -547,7 +555,7 @@ func waitForPIDsReaped(killSet map[int]bool) {
 		if !alive {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		integrationTestPollPause(50 * time.Millisecond)
 	}
 }
 

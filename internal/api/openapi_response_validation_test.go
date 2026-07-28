@@ -12,6 +12,10 @@ import (
 	validator "github.com/pb33f/libopenapi-validator"
 )
 
+func newAPIClientTestServer(handler http.Handler) *httptest.Server {
+	return httptest.NewServer(handler)
+}
+
 // TestResponseBodiesMatchSpec drives a curated list of simple GET
 // operations against a real supervisor-backed handler and validates
 // each response against the operation's schema in the committed
@@ -41,7 +45,7 @@ func TestResponseBodiesMatchSpec(t *testing.T) {
 
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
-	ts := httptest.NewServer(h)
+	ts := newAPIClientTestServer(h)
 	t.Cleanup(ts.Close)
 
 	cases := []struct {

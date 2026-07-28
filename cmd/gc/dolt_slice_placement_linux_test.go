@@ -8,10 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime/systemdscope"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // managedDoltPlacementTestSlice is the slice the placement integration tests
@@ -35,11 +33,11 @@ func requireTransientUserScopes(t *testing.T) {
 }
 
 func managedDoltPlacementSystemctl(args ...string) *exec.Cmd {
-	return exec.Command("systemctl", args...)
+	return managedDoltTestCommand("systemctl", args...)
 }
 
 func managedDoltPlacementSelfCommand(args ...string) *exec.Cmd {
-	return exec.Command(os.Args[0], args...)
+	return managedDoltTestCommand(os.Args[0], args...)
 }
 
 func readProcCgroup(t *testing.T, pid int) string {
@@ -62,16 +60,7 @@ func readProcCgroup(t *testing.T, pid int) string {
 // but a test must wait for it rather than sample it.
 func waitForManagedDoltTestCondition(t *testing.T, description string, ready func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(testutil.ExecRaceTimeout)
-	for {
-		if ready() {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", description)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	awaitCond(t, ready, description)
 }
 
 func waitForCgroupPlacement(t *testing.T, pid int) {

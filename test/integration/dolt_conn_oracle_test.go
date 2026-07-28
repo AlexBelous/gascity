@@ -587,7 +587,7 @@ func waitAssignedOracleBeadCached(t *testing.T, city *connOracleCity, id, assign
 			t.Fatalf("assigned bead %s did not enter controller cache within 20s (in_progress=%t last_rows=%v last_err=%v)",
 				id, inProgress, rows, lastErr)
 		}
-		time.Sleep(100 * time.Millisecond)
+		integrationTestPollPause(100 * time.Millisecond)
 	}
 }
 
@@ -621,7 +621,7 @@ func waitRoutedPoolCache(t *testing.T, city *connOracleCity, scope string, n int
 			t.Fatalf("routed demand did not enter strict controller cache within 20s (scope=%s want=%d last_count=%d last_err=%v)",
 				scope, want, lastCount, lastErr)
 		}
-		time.Sleep(250 * time.Millisecond)
+		integrationTestPollPause(250 * time.Millisecond)
 	}
 }
 
@@ -926,7 +926,7 @@ func waitThreadsConnectedSettle(t *testing.T, db *sql.DB, target int, timeout ti
 		if last <= target {
 			return last
 		}
-		time.Sleep(250 * time.Millisecond)
+		integrationTestPollPause(250 * time.Millisecond)
 	}
 	return last
 }

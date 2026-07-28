@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+func managedDoltTestCommand(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...)
+}
+
 func TestManagedDoltScopeGone(t *testing.T) {
 	dir := t.TempDir()
 	existing := filepath.Join(dir, "dolt-config.yaml")
@@ -107,7 +111,7 @@ func TestManagedDoltScopeWatchdogKillsServerWhenScopeDeleted(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
+	cmd := managedDoltTestCommand(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
 	cmd.Env = sanitizedBaseEnv(
 		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
 		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,

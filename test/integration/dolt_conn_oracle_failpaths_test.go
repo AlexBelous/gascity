@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -292,7 +291,7 @@ func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			actor := fmt.Sprintf("killable-%03d", i)
-			cmd := exec.Command(gcBinary, "hook", "--claim", "--json")
+			cmd := integrationTestCommand(gcBinary, "hook", "--claim", "--json")
 			cmd.Dir = city.dir
 			cmd.Env = hookActorEnv(city, actor)
 			if err := cmd.Start(); err != nil {
@@ -311,7 +310,7 @@ func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 				_, _ = cmd.Process.Wait()
 				return
 			case 1: // after request submission
-				time.Sleep(15 * time.Millisecond)
+				integrationTestPollPause(15 * time.Millisecond)
 				if err := cmd.Process.Kill(); err == nil {
 					atomic.AddInt64(&killedAfter, 1)
 				}
@@ -386,7 +385,7 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 		if time.Now().After(deadline) {
 			t.Fatalf("marker %s did not appear within %s: the hook never reached the continuation-list read (the claim may not have taken the fast path, or the bead lacked root/group metadata)", path, timeout)
 		}
-		time.Sleep(50 * time.Millisecond)
+		integrationTestPollPause(50 * time.Millisecond)
 	}
 }
 
@@ -460,7 +459,7 @@ exec %q "$@"
 		t.Fatalf("write continuation-list bd wrapper: %v", err)
 	}
 
-	cmd := exec.Command(gcBinary, "hook", "--claim", "--json")
+	cmd := integrationTestCommand(gcBinary, "hook", "--claim", "--json")
 	cmd.Dir = city.dir
 	cmd.Env = wrappedPathEnv(hookActorEnv(city, actor), wrapDir)
 	if err := cmd.Start(); err != nil {
@@ -487,7 +486,7 @@ exec %q "$@"
 				t.Errorf("wrapper exited marker %s not written within 30s after release; the wrapper child may be lingering", exited)
 				return
 			}
-			time.Sleep(50 * time.Millisecond)
+			integrationTestPollPause(50 * time.Millisecond)
 		}
 	})
 

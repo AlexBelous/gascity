@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -13,7 +12,7 @@ import (
 func TestClientUpdateBeadMetadataSuccess(t *testing.T) {
 	var gotMethod, gotPath, gotCSRF string
 	var gotBody map[string]any
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotCSRF = r.Header.Get("X-GC-Request")
@@ -45,7 +44,7 @@ func TestClientUpdateBeadMetadataSuccess(t *testing.T) {
 // controller.
 func TestClientUpdateBeadMetadataEmptyPatchNoRequest(t *testing.T) {
 	called := false
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := newAPIClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -63,7 +62,7 @@ func TestClientUpdateBeadMetadataEmptyPatchNoRequest(t *testing.T) {
 // TestClientUpdateBeadMetadataConnError proves a transport failure surfaces as a
 // *connError.
 func TestClientUpdateBeadMetadataConnError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := newAPIClientTestServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := ts.URL
 	ts.Close()
 

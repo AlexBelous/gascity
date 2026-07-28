@@ -1317,9 +1317,13 @@ type testEventRoutes struct {
 	supervisorStream func(http.ResponseWriter, *http.Request)
 }
 
+func newGCClientTestServer(handler http.Handler) *httptest.Server {
+	return httptest.NewServer(handler)
+}
+
 func newEventsTestServer(t *testing.T, routes testEventRoutes) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newGCClientTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v0/city/mc-city/events":
 			if routes.cityEvents == nil {

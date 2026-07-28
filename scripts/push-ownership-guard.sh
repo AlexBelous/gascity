@@ -122,7 +122,9 @@ _pog_read_with_retry() {
 # If both resolve and disagree, the branch match wins (it's the more
 # specific signal) and a warning goes to stderr — this is a best-effort
 # cross-check, not a hard failure, since branch-naming habits can
-# legitimately drift from bd's bookkeeping.
+# legitimately drift from bd's bookkeeping. EXCEPTION: deploy/*-gate
+# branches (see below) embed the id of the bead being gated, not the bead
+# this push is for, so for that branch shape the live assignee wins instead.
 #
 # KNOWN LIMITATION of path 2 (confirmed by manual repro, not yet filed as
 # its own bead): the fallback query itself filters on --status=in_progress,
@@ -160,6 +162,19 @@ _pog_resolve_bead_id() {
         if [[ -n "$list_json" ]]; then
             assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
         fi
+    fi
+
+    # deploy/*-gate branches embed the id of the bead being GATED, not the
+    # bead this push is for -- that gated bead is routinely closed by the
+    # time its deploy-gate branch is pushed (that's the whole point of a
+    # deploy gate: ga-wwswme). For this branch shape the live in-progress
+    # assignment is the correct id and must win over the branch-derived id.
+    if [[ "$branch" == deploy/*-gate ]]; then
+        if [[ -n "$branch_id" && -n "$assignee_id" && "$branch_id" != "$assignee_id" ]]; then
+            echo "push-ownership-guard: NOTE deploy-gate branch resolves to $branch_id (the gated bead, not this push's bead); using this session's in-progress assignment $assignee_id instead" >&2
+        fi
+        printf '%s' "$assignee_id"
+        return
     fi
 
     if [[ -n "$branch_id" && -n "$assignee_id" && "$branch_id" != "$assignee_id" ]]; then

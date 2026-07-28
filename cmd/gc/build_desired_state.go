@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionsdb "github.com/gastownhall/gascity/internal/classdb/sessions"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -1887,7 +1888,13 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
 	query.TierMode = beads.TierBoth
 	handles := beads.HandlesFor(store)
-	return handles.Live.Ready(query)
+	rows, err := handles.Live.Ready(query)
+	if errors.Is(err, sessionsdb.ErrUnsupported) {
+		// See liveSnapshot: outside-surface class stores have no claimable
+		// rows by contract — empty set, not an error.
+		return nil, nil
+	}
+	return rows, err
 }
 
 // readyDemandCache memoizes the unfiltered ready reads for a single reconcile
@@ -1976,6 +1983,12 @@ func (c *readyDemandCache) liveSnapshot(store beads.Store) ([]beads.Bead, error)
 	e := c.entry(c.live, store)
 	e.once.Do(func() {
 		e.rows, e.err = beads.HandlesFor(store).Live.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		if errors.Is(e.err, sessionsdb.ErrUnsupported) {
+			// A class store outside the claimable surface (sessions/messaging/
+			// nudges) holds zero ready rows by contract; unsupported Ready is
+			// the empty set, not a partial store failure.
+			e.rows, e.err = nil, nil
+		}
 	})
 	return e.rows, e.err
 }

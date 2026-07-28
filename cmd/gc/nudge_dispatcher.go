@@ -113,6 +113,13 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // This is a no-op when the dispatcher is configured for "legacy" mode —
 // the per-session `gc nudge poll` processes own delivery in that case.
 func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
+	return dispatchAllQueuedNudgesExcept(cityPath, cfg, store, sessStore, sp, sessionBeads, nil)
+}
+
+// dispatchAllQueuedNudgesExcept preserves legacy delivery for every target
+// except exact session IDs currently scheduled by the keyed controller. Queue
+// claiming remains the physical cross-path delivery fence.
+func dispatchAllQueuedNudgesExcept(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, excludedSessionIDs map[string]struct{}) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
@@ -123,6 +130,12 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if err != nil {
 		return 0, fmt.Errorf("loading nudge queue: %w", err)
 	}
+	return dispatchAllQueuedNudgesFromState(cityPath, cfg, store, sessStore, sp, sessionBeads, excludedSessionIDs, state)
+}
+
+// dispatchAllQueuedNudgesFromState uses the state snapshot already loaded by
+// keyed admission, avoiding a second queue read on the mixed legacy path.
+func dispatchAllQueuedNudgesFromState(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, excludedSessionIDs map[string]struct{}, state nudgequeue.State) (int, error) {
 	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
 		return 0, nil
 	}
@@ -194,7 +207,10 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		if !obs.Running {
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		ok, err := tryDeliverQueuedNudgesByPollerMatching(target, store, sessStore, sp, defaultNudgePollQuiescence, obs, func(item queuedNudge) bool {
+			_, excluded := excludedSessionIDs[item.SessionID]
+			return !excluded
+		})
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}

@@ -1309,6 +1309,14 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 }
 
 func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	return tryDeliverQueuedNudgesByPollerMatching(target, store, sessStore, sp, quiescence, obs, nil)
+}
+
+// tryDeliverQueuedNudgesByPollerMatching is the delivery helper with an
+// optional queue-item ownership filter. The filter is applied inside the
+// atomic claim, not after it, so keyed and legacy schedulers cannot steal each
+// other's work before the physical claim fence.
+func tryDeliverQueuedNudgesByPollerMatching(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation, include func(queuedNudge) bool) (bool, error) {
 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
 	if err != nil || !matches {
 		return false, err
@@ -1316,7 +1324,9 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
-	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
+	items, err := claimDueQueuedNudgesMatching(target.cityPath, time.Now(), func(item queuedNudge) bool {
+		return queuedNudgeClaimableForTarget(target, item) && (include == nil || include(item))
+	})
 	if err != nil || len(items) == 0 {
 		return false, err
 	}

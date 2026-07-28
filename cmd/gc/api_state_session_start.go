@@ -18,6 +18,7 @@ type controllerSessionStartSnapshot struct {
 	Config     *config.City
 	Provider   runtime.Provider
 	Store      beads.Store
+	NudgeStore beads.Store
 	Recorder   events.Recorder
 }
 
@@ -38,6 +39,7 @@ func (cs *controllerState) sessionStartSnapshot() (controllerSessionStartSnapsho
 		Config:     cs.cfg,
 		Provider:   cs.sp,
 		Store:      resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
+		NudgeStore: resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
 		Recorder:   cs.eventProv,
 	}
 	switch {

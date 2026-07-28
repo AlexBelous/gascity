@@ -136,6 +136,12 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			return reconcileErr
 		},
 		Observer: func(result sessionStartReconcileResult) {
+			if result.Outcome == sessionStartReconcileSucceeded {
+				// A queued nudge can arrive while this exact session is still
+				// starting. Once lifecycle work completes, re-poke the nudge
+				// dispatcher; it rereads durable queue authority before any effect.
+				cr.signalNudgeKeyWake()
+			}
 			if result.Outcome == sessionStartReconcileExhausted {
 				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start reconciliation exhausted for %s: %v; authoritative audit requested\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // terminal retry diagnostic
 			}

@@ -134,6 +134,10 @@ type CityRuntime struct {
 	sessionStartController *sessionStartController
 	sessionStartOwnership  sessionStartOwnership
 	sessionStartMode       rollout.Mode
+	nudgeKeyMu             sync.Mutex
+	nudgeKeyController     *nudgeKeyController
+	nudgeKeyFallback       map[string]struct{}
+	nudgeKeyMode           rollout.Mode
 	// sessionStartOptions is empty in production. Focused tests install the
 	// existing deterministic start waiters here so composition tests prove the
 	// real exact-start path without wall-clock stability delays.
@@ -640,6 +644,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 		if err := cr.ensureSessionStartController(ctx, sessionBeads); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: session-start controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
+			return
+		}
+		if err := cr.ensureNudgeKeyController(ctx); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: keyed nudge controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
 			return
 		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
@@ -3159,11 +3167,43 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	if store.Store == nil {
 		return
 	}
+	if !cr.nudgeKeyControllerActive() {
+		sessionBeads := cr.loadSessionBeadSnapshot()
+		if sessionBeads == nil {
+			return
+		}
+		if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
+		}
+		return
+	}
+	excluded, legacyNeeded, state, admissionErr := cr.admitDueExactNudges(time.Now())
+	if admissionErr != nil {
+		cr.requestNudgeKeyAudit()
+		cr.nudgeKeyMu.Lock()
+		mode := cr.nudgeKeyMode
+		cr.nudgeKeyMu.Unlock()
+		if mode != rollout.Auto {
+			fmt.Fprintf(cr.stderr, "%s: keyed nudge queue load failed in require mode; leaving queue pending\n", cr.logPrefix) //nolint:errcheck
+			return
+		}
+		sessionBeads := cr.loadSessionBeadSnapshot()
+		if sessionBeads == nil {
+			return
+		}
+		if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher fallback: %v\n", cr.logPrefix, err) //nolint:errcheck
+		}
+		return
+	}
+	if !legacyNeeded {
+		return
+	}
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	if sessionBeads == nil {
 		return
 	}
-	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads); err != nil {
+	if _, err := dispatchAllQueuedNudgesFromState(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, excluded, state); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 }
@@ -3672,6 +3712,7 @@ func (cr *CityRuntime) shutdown() {
 		}
 		cr.stopSessionWaitDependencyProducer()
 		cr.stopSessionStartController()
+		cr.stopNudgeKeyController()
 		cr.stopSessionLifecycleShadowWorker()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()

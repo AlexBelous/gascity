@@ -556,6 +556,51 @@ test_bead_id_fallback_used_when_branch_no_match() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression (ga-wwswme): deploy/*-gate branches embed the id of the bead
+# being GATED, which is routinely CLOSED by the time the gate branch is
+# pushed (that's the whole point of a deploy gate) — the plain branch-wins
+# rule misresolved these pushes to the closed gated bead and blocked them.
+# Real repro pinned here verbatim: PR #4731 pushed from deploy/ga-g5ihlp-gate
+# by gascity/investigator, whose actual live claim was ga-mit0gh (assigned,
+# in_progress) — the guard resolved to the closed ga-g5ihlp and blocked it.
+# Needs an id-aware fake bd (unlike the other resolve/* tests, which don't
+# care what id `bd show` was called with) because the real discriminator
+# here is the downstream effect — allowed vs blocked — not just which id
+# the resolver's message happens to name.
+test_bead_id_deploy_gate_branch_prefers_live_assignee() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "deploy/ga-g5ihlp-gate")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    mkdir -p "$fbd/fake-bd-state"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    case "$2" in
+      ga-g5ihlp) printf '[{"id":"ga-g5ihlp","status":"closed","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      ga-mit0gh) printf '[{"id":"ga-mit0gh","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"ga-mit0gh"}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "resolve/deploy-gate-branch-prefers-live-assignee (rc=0, live assignee ga-mit0gh used instead of closed gated bead ga-g5ihlp)"
+    else
+        record_fail "resolve/deploy-gate-branch-prefers-live-assignee" "expected rc=0 (live assignee ga-mit0gh must win over closed gated bead ga-g5ihlp), got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_retry_recovers_bead_id_fallback_from_transient_failure() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
@@ -764,6 +809,7 @@ run_all() {
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_fallback_used_when_branch_no_match
+    test_bead_id_deploy_gate_branch_prefers_live_assignee
     test_retry_recovers_bead_id_fallback_from_transient_failure
     test_allow_when_no_bead_id_resolvable
     test_fallback_cannot_detect_staleness_after_status_leaves_in_progress

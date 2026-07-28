@@ -2052,14 +2052,34 @@ const (
 
 // CheckedMarkdownBlock returns the single generated inventory block.
 func CheckedMarkdownBlock(document string) (string, error) {
-	if strings.Count(document, markdownBegin) != 1 || strings.Count(document, markdownEnd) != 1 {
-		return "", errors.New("TESTING.md must contain exactly one checked test resource ledger marker pair")
+	start, end, err := markdownBlockSpan(document)
+	if err != nil {
+		return "", err
 	}
-	start := strings.Index(document, markdownBegin)
-	end := strings.Index(document, markdownEnd)
+	return document[start:end], nil
+}
+
+// ReplaceMarkdownBlock returns document with its single checked test resource
+// ledger block replaced by replacement. Content outside the marker pair is
+// preserved byte-for-byte. Pass RenderMarkdown's output as replacement to
+// regenerate the block from a Ledger.
+func ReplaceMarkdownBlock(document, replacement string) (string, error) {
+	start, end, err := markdownBlockSpan(document)
+	if err != nil {
+		return "", err
+	}
+	return document[:start] + replacement + document[end:], nil
+}
+
+func markdownBlockSpan(document string) (start, end int, err error) {
+	if strings.Count(document, markdownBegin) != 1 || strings.Count(document, markdownEnd) != 1 {
+		return 0, 0, errors.New("TESTING.md must contain exactly one checked test resource ledger marker pair")
+	}
+	start = strings.Index(document, markdownBegin)
+	end = strings.Index(document, markdownEnd)
 	if end < start {
-		return "", errors.New("TESTING.md resource ledger end marker precedes begin marker")
+		return 0, 0, errors.New("TESTING.md resource ledger end marker precedes begin marker")
 	}
 	end += len(markdownEnd)
-	return document[start:end], nil
+	return start, end, nil
 }

@@ -1852,8 +1852,18 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 	query.TierMode = beads.TierBoth
 	handles := beads.HandlesFor(store)
 	rows, err := handles.Cached.Ready(query)
+	if errors.Is(err, sessionsdb.ErrUnsupported) {
+		// Outside-surface class stores (sessions/messaging/nudges) hold zero
+		// claimable rows by contract; unsupported Ready is the empty demand
+		// set, not a partial store failure.
+		return nil, nil
+	}
 	if errors.Is(err, beads.ErrCacheUnavailable) {
-		return handles.Live.Ready(query)
+		rows, err = handles.Live.Ready(query)
+		if errors.Is(err, sessionsdb.ErrUnsupported) {
+			return nil, nil
+		}
+		return rows, err
 	}
 	if _, hasExplicitHandles := store.(interface {
 		Handles() beads.StoreHandles
@@ -2000,6 +2010,11 @@ func (c *readyDemandCache) cachedSnapshot(store beads.Store) ([]beads.Bead, erro
 	e := c.entry(c.cached, store)
 	e.once.Do(func() {
 		e.rows, e.err = beads.HandlesFor(store).Cached.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		if errors.Is(e.err, sessionsdb.ErrUnsupported) {
+			// See liveSnapshot: outside-surface class stores hold zero
+			// claimable rows by contract — empty set, not a store failure.
+			e.rows, e.err = nil, nil
+		}
 	})
 	return e.rows, e.err
 }

@@ -222,16 +222,30 @@ func poolDemandOriginEligible(sessionOrigin string) bool {
 // must not route legacy control-dispatcher targets or a custom work_query here —
 // those keep the subprocess path (see the fast-path gate at the call site).
 func fastPathClaimCandidates(r fastPathReader, identities, routeTargets []string, sessionOrigin string, scopes []string) ([]beads.Bead, error) {
-	for _, scope := range dedupeFastPathScopes(scopes) {
+	// Reproduce legacy firstStoreWithWork's exact primary/secondary error contract
+	// (hook_cross_store.go): an error on the agent's OWN store — the FIRST scope in
+	// STORE-outermost order — is REMEMBERED, not fatal. Later stores are still
+	// consulted, and if one has work that work wins, so a transient own-store outage
+	// never masks real work waiting in a federated store. The remembered own-store
+	// error is surfaced only when NO scope yields work, so it reaches the caller (a
+	// pre-request conn failure -> fallback; a real store outage -> terminal) instead
+	// of being silently read as a false no-work drain. An error on a FEDERATED
+	// secondary store is best-effort discovery and is dropped, so one flaky or
+	// absent rig store cannot wedge the hook.
+	var primaryErr error
+	for i, scope := range dedupeFastPathScopes(scopes) {
 		cands, err := fastPathScopeCandidates(r, scope, identities, routeTargets, sessionOrigin)
 		if err != nil {
-			return nil, err
+			if i == 0 {
+				primaryErr = err
+			}
+			continue
 		}
 		if len(cands) > 0 {
 			return cands, nil
 		}
 	}
-	return nil, nil
+	return nil, primaryErr
 }
 
 // dedupeFastPathScopes normalizes the scope order, dropping duplicate entries

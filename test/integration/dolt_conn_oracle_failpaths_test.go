@@ -252,14 +252,16 @@ func TestManagedDoltConnOracle_APIUnavailableBoundedFallback(t *testing.T) {
 // returns to baseline after — the core cure property: a worker hook holds no
 // managed-Dolt socket, so a SIGKILLed worker strands nothing on the server.
 //
-// Killed clients are counted only when Process.Kill() actually succeeds, so a
-// kill that raced the process to a natural exit does not inflate the count. The
-// "after request" cohort is additionally proven to have reached the controller:
-// the load leaves some routed beads CLAIMED server-side even though every
-// after-submit client was killed before it could print its result, which is only
-// possible if the controller accepted and committed the claim the dead client
-// submitted. That makes the post-submit path a deterministic observable rather
-// than a timing hope.
+// Scope: this proves the CONNECTION property only (bounded peak + return to
+// baseline under a mixed kill cohort). Killed clients are counted only when
+// Process.Kill() actually succeeds, so a kill that raced the process to a natural
+// exit does not inflate the count. The per-cohort commit-durability observable —
+// that an after-submit killed client's claim commits and stays owned server-side
+// — is proven deterministically in
+// TestManagedDoltConnOracle_KilledAfterSubmitCommitIsDurable, not here: the ~40
+// always-run i%3==2 clients in this load would leave routed beads claimed
+// regardless of the killed cohort, so a claim-count assertion here would be
+// vacuous.
 func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 	requireDoltIntegration(t)
 	city := setupConnOracleCity(t, true)
@@ -343,31 +345,189 @@ func TestManagedDoltConnOracle_KilledClientsReturnToBaseline(t *testing.T) {
 	if peakConns > oracleFastPathConnCap {
 		t.Fatalf("killed-client load peaked at %d connections, above the bounded-pool cap %d; a killed worker leaked a server connection", peakConns, oracleFastPathConnCap)
 	}
-	// Deterministic post-submit observable: despite every after-submit client
-	// being killed before printing, the controller committed claims for the
-	// requests it accepted, so some seeded beads are now owned server-side. A
-	// worker that held its own SQL socket would have stranded the mutation on
-	// SIGKILL; the controller-owned pool commits it regardless of client death.
-	if claimed := countClaimedRoutedBeads(t, city); claimed == 0 {
-		t.Fatalf("no routed bead was claimed server-side; the after-submit kill cohort never reached the controller")
-	}
+	// This test proves the CONNECTION property only: killed clients strand no
+	// server socket, so the peak stays bounded and settles to baseline. The
+	// per-cohort commit-durability observable — that an after-submit killed
+	// client's claim commits server-side — is proven deterministically in
+	// TestManagedDoltConnOracle_KilledAfterSubmitCommitIsDurable, not here (where
+	// the ~40 always-run i%3==2 clients would guarantee a claim regardless of the
+	// killed cohort, making a claim-count assertion vacuous).
 	final := waitThreadsConnectedSettle(t, city.observer, baseline+2, 20*time.Second)
 	if final > baseline+2 {
 		t.Fatalf("connections did not return to baseline after killed clients: %d > baseline %d(+2)", final, baseline)
 	}
 }
 
-// countClaimedRoutedBeads reports how many of the routed pool beads are now
-// assigned+in_progress (claimed) as observed through the controller — the
-// server-side evidence that submitted claims committed even when the submitting
-// client died before printing.
-func countClaimedRoutedBeads(t *testing.T, city *connOracleCity) int {
-	t.Helper()
-	out, err := runGCWithEnv(city.env, city.dir, "bd", "list", "--status", "in_progress", "--json", "--limit=0")
-	if err != nil {
-		t.Fatalf("list in_progress beads: %v\n%s", err, out)
+// wrappedPathEnv returns base with prependDir placed at the front of PATH, so a
+// subprocess launched with it resolves an intercepting binary there before the
+// harness tool bin. It rewrites the existing PATH entry in place (rather than
+// appending a duplicate, whose precedence is exec-implementation-defined).
+func wrappedPathEnv(base []string, prependDir string) []string {
+	out := make([]string, 0, len(base))
+	replaced := false
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "PATH=") {
+			out = append(out, "PATH="+prependDir+string(os.PathListSeparator)+strings.TrimPrefix(kv, "PATH="))
+			replaced = true
+			continue
+		}
+		out = append(out, kv)
 	}
-	return countRoutedReady(out, oraclePoolAgent)
+	if !replaced {
+		out = append(out, "PATH="+prependDir)
+	}
+	return out
+}
+
+// waitForFile blocks until path exists or timeout elapses, failing the test on
+// timeout. It is the deterministic liveness barrier for the killed-after test:
+// the wrapper touches the marker immediately before sleeping, so its appearance
+// means the hook is blocked (hence alive) at the continuation-list read.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("marker %s did not appear within %s: the hook never reached the continuation-list read (the claim may not have taken the fast path, or the bead lacked root/group metadata)", path, timeout)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestManagedDoltConnOracle_KilledAfterSubmitCommitIsDurable is the deterministic
+// killed-after-submit observable the locked acceptance requires. The earlier form
+// polled until the claim committed and then killed the client — but by then the
+// hook had usually already exited on its own, so Kill() operated on a dead
+// process and the "killed AFTER submit" property was never actually exercised
+// (finding 4: a successful kill of an already-exited process proves nothing).
+//
+// This form makes the kill land on a provably LIVE client. The claimed bead
+// carries continuation root+group metadata, so after the fast-path claim commits
+// server-side the hook proceeds into the post-claim continuation-list read. A
+// PATH-wrapped bd intercepts exactly that read (matched by the unique group
+// sentinel) and PARKS there — touching a "reached" marker, then waiting for the
+// test's "release" marker before touching "exited" and returning; every other bd
+// call forwards to the harness bd untouched. When "reached" appears the hook is
+// parked in that read — alive, with its claim already committed — so the kill is
+// attributable to a live post-submit client and Kill() MUST return nil. The
+// committed claim then outlives the killed worker because the worker held no
+// managed-Dolt socket: a worker that owned its SQL client could have stranded or
+// rolled back the mutation on SIGKILL. The release/exited handshake makes cleanup
+// deterministic: killing the gc parent orphans the wrapper child, so the test
+// releases it and waits for "exited" rather than leaving a timed sleep to linger.
+func TestManagedDoltConnOracle_KilledAfterSubmitCommitIsDurable(t *testing.T) {
+	requireDoltIntegration(t)
+	city := setupConnOracleCity(t, true)
+
+	// One routed pool bead carrying continuation root+group metadata: one bead and
+	// one hook make the claim target unambiguous and attributable to this exact
+	// actor, and the group metadata is what drives the post-claim continuation-list
+	// read the wrapper parks on.
+	const (
+		actor    = "killed-after-actor"
+		sentinel = "connoraclekillwrapgroup"
+		root     = "connoraclekillwraproot"
+	)
+	want := seedRoutedBeadWithMeta(t, city, "killed-after-step", map[string]string{
+		beadmetaRootKey:  root,
+		beadmetaGroupKey: sentinel,
+	})
+	waitRoutedReadyCount(t, city, 1)
+
+	// Continuation-list PATH wrapper: park ONLY on the continuation-list read for
+	// our sentinel group (issued after the claim commits), forwarding every other bd
+	// call to the harness bd so identity stamping and the claim path are unchanged.
+	// The park waits for the release marker (bounded 60s backstop so a crashed test
+	// cannot orphan this child) and writes the exited marker on the way out.
+	wrapDir := t.TempDir()
+	reached := filepath.Join(wrapDir, "continuation-reached")
+	release := filepath.Join(wrapDir, "release")
+	exited := filepath.Join(wrapDir, "wrapper-exited")
+	shim := fmt.Sprintf(`#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    *%s*)
+      : > %q
+      i=0
+      while [ ! -f %q ] && [ "$i" -lt 600 ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+      : > %q
+      exit 0
+      ;;
+  esac
+done
+exec %q "$@"
+`, sentinel, reached, release, exited, bdBinary)
+	if err := os.WriteFile(filepath.Join(wrapDir, "bd"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write continuation-list bd wrapper: %v", err)
+	}
+
+	cmd := exec.Command(gcBinary, "hook", "--claim", "--json")
+	cmd.Dir = city.dir
+	cmd.Env = wrappedPathEnv(hookActorEnv(city, actor), wrapDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start hook client: %v", err)
+	}
+	// Safety net: if any assertion below fails before the explicit release, still
+	// release a parked wrapper and wait for it to exit, so a failed run never leaves
+	// the wrapper child lingering for its 60s backstop. Idempotent with the
+	// normal-path release/wait below (writing release twice is harmless).
+	t.Cleanup(func() {
+		if _, err := os.Stat(reached); err != nil {
+			return // wrapper never parked; nothing to release
+		}
+		_ = os.WriteFile(release, nil, 0o644)
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			if _, err := os.Stat(exited); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				// A parked wrapper that never wrote its exited marker is a lingering
+				// child — the no-orphan gate is not satisfied, so fail loudly rather
+				// than let a silent timeout pass.
+				t.Errorf("wrapper exited marker %s not written within 30s after release; the wrapper child may be lingering", exited)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+
+	// Barrier: the hook is parked in the wrapper at the continuation-list read, which
+	// runs only after the claim commits — so the claim is durable server-side
+	// already. Assert that before the kill so "committed" is proven.
+	waitForFile(t, reached, 30*time.Second)
+	if owner := beadAssignee(t, city, want); owner != actor {
+		t.Fatalf("before kill, bead %s owned by %q, want %s: the claim did not commit before the continuation-list read", want, owner, actor)
+	}
+
+	// Kill the still-parked (hence provably live) client. Kill() MUST return nil: a
+	// process parked in the wrapper cannot have already exited, so a non-nil error
+	// would mean the barrier attributed the commit to a client that was no longer
+	// running — the exact liveness gap finding 4 rejected.
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("killing the parked hook client returned %v, want nil: the after-submit kill was not attributable to a live client", err)
+	}
+	_, _ = cmd.Process.Wait()
+
+	// Deterministic cleanup: killing the gc parent orphaned the wrapper child, so
+	// release it and wait for its exited marker — the test leaves no lingering
+	// wrapper process.
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatalf("write wrapper release marker: %v", err)
+	}
+	waitForFile(t, exited, 30*time.Second)
+
+	// The committed claim outlives the killed client and is still owned by the exact
+	// killed actor: the controller-owned commit does not depend on the worker.
+	if owner := beadAssignee(t, city, want); owner != actor {
+		t.Fatalf("after killing the submitting client, bead %s owned by %q, want %s: the committed claim was not durable", want, owner, actor)
+	}
 }
 
 // seedRigRoutedDemand creates one unassigned bead in the named RIG store routed
@@ -585,32 +745,33 @@ func continuationAssignedContains(out, id string) bool {
 	return false
 }
 
-// beadAssignee returns the current assignee of a bead as observed through the
-// controller. bd show --json emits a single-bead array ([{...}]); the scan
-// tolerates leading log lines in the combined output.
+// beadAssignee returns the current assignee of a bead. bd show --json emits a
+// single-bead array, which may be pretty-printed across many lines, so this
+// decodes the whole JSON value starting at the first bracket (a json.Decoder
+// stops after one value, tolerating trailing log lines) rather than scanning
+// line by line.
 func beadAssignee(t *testing.T, city *connOracleCity, id string) string {
 	t.Helper()
 	out, err := runGCWithEnv(city.env, city.dir, "bd", "show", id, "--json")
 	if err != nil {
 		t.Fatalf("show bead %s: %v\n%s", id, err, out)
 	}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "[") {
-			var arr []struct {
-				Assignee string `json:"assignee"`
-			}
-			if err := json.Unmarshal([]byte(line), &arr); err == nil && len(arr) > 0 {
-				return strings.TrimSpace(arr[0].Assignee)
-			}
-		} else if strings.HasPrefix(line, "{") {
-			var one struct {
-				Assignee string `json:"assignee"`
-			}
-			if err := json.Unmarshal([]byte(line), &one); err == nil {
-				return strings.TrimSpace(one.Assignee)
-			}
-		}
+	start := strings.IndexAny(out, "[{")
+	if start < 0 {
+		t.Fatalf("show bead %s: no JSON in output:\n%s", id, out)
+	}
+	payload := out[start:]
+	var arr []struct {
+		Assignee string `json:"assignee"`
+	}
+	if err := json.NewDecoder(strings.NewReader(payload)).Decode(&arr); err == nil && len(arr) > 0 {
+		return strings.TrimSpace(arr[0].Assignee)
+	}
+	var one struct {
+		Assignee string `json:"assignee"`
+	}
+	if err := json.NewDecoder(strings.NewReader(payload)).Decode(&one); err == nil {
+		return strings.TrimSpace(one.Assignee)
 	}
 	return ""
 }
@@ -696,7 +857,7 @@ func TestManagedDoltConnOracle_AdmissionSaturationFailsFastWithoutRecovery(t *te
 	}
 
 	start := time.Now()
-	result := runHookLoad(t, city, oracleHookProcs)
+	result := runHookLoad(t, city, oracleHookProcs, "polecat-oracle")
 	elapsed := time.Since(start)
 	t.Logf("admission saturation: saturated=%d claims=%d apiRoutes=%d rejections=%d peakConns=%d elapsed=%s",
 		result.saturated, len(result.claims), result.apiRoutes, result.rejections, result.peakConns, elapsed)
@@ -758,7 +919,7 @@ func TestManagedDoltConnOracle_LongReadTimeoutStillBounds(t *testing.T) {
 	seedRoutedPoolDemand(t, city, oracleSeedBeads)
 	baseline := sampleThreadsConnected(t, city.observer)
 
-	result := runHookLoad(t, city, oracleHookProcs)
+	result := runHookLoad(t, city, oracleHookProcs, "polecat-oracle")
 	t.Logf("long read_timeout: peakConns=%d claims=%d apiRoutes=%d rejections=%d (baseline=%d)",
 		result.peakConns, len(result.claims), result.apiRoutes, result.rejections, baseline)
 
@@ -777,5 +938,19 @@ func TestManagedDoltConnOracle_LongReadTimeoutStillBounds(t *testing.T) {
 	}
 	if result.peakConns > oracleFastPathConnCap {
 		t.Fatalf("peak Threads_connected=%d exceeds the bounded-pool cap %d with a long read_timeout; the bound depended on fast reaping", result.peakConns, oracleFastPathConnCap)
+	}
+
+	// Return to baseline under the long read_timeout. The bounded ON peak is only
+	// half the contract; the count must also settle back once the load drains,
+	// proving the workers left no server socket for the server to reap. Because the
+	// controller's pool caps idle lifetime BELOW the server wait_timeout, the
+	// settle is driven by client-side idle-close, not the 10-minute server reaping —
+	// so a return to baseline here is exactly the finding-6 evidence that the cure
+	// does not depend on the server promptly reaping idle sockets. The earlier
+	// revision recorded baseline and peak but never asserted the count came back
+	// down under a long timeout.
+	final := waitThreadsConnectedSettle(t, city.observer, baseline+2, 30*time.Second)
+	if final > baseline+2 {
+		t.Fatalf("long read_timeout: Threads_connected=%d did not return to baseline %d(+2) after the load drained; the connection bound depended on server-side reaping", final, baseline)
 	}
 }

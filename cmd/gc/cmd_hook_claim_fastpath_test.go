@@ -31,6 +31,10 @@ type fakeFastPathReader struct {
 	listEphemeral     []bool
 	listErr           error
 	readyErr          error
+	// readyErrByScope makes a specific scope's ready read fail (an own-store /
+	// secondary outage), so the STORE-outermost primary/secondary error contract can
+	// be exercised per scope. It takes precedence over readyErr when set for a scope.
+	readyErrByScope map[string]error
 }
 
 func (f *fakeFastPathReader) inProgressFor(scope string) []beads.Bead {
@@ -72,6 +76,9 @@ func (f *fakeFastPathReader) BeadsReady(scope string, includeEphemeral bool) (ap
 	f.readyCalls++
 	f.readyScopes = append(f.readyScopes, scope)
 	f.readyEphemeral = append(f.readyEphemeral, includeEphemeral)
+	if err, ok := f.readyErrByScope[scope]; ok {
+		return api.CachedRead[[]beads.Bead]{}, err
+	}
 	if f.readyErr != nil {
 		return api.CachedRead[[]beads.Bead]{}, f.readyErr
 	}
@@ -375,5 +382,60 @@ func TestHookFastPathScopeOrder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestFastPathPrimaryErrorDeferredWhenLaterScopeHasWork proves the legacy
+// firstStoreWithWork contract: an error on the PRIMARY (first) scope is remembered
+// but not fatal — a later scope with work still wins and the primary error is
+// swallowed. A worker whose own store is transiently outaged must still claim real
+// work waiting in a federated store.
+func TestFastPathPrimaryErrorDeferredWhenLaterScopeHasWork(t *testing.T) {
+	cityWork := routed("gc-city-pool", "pool-x")
+	r := &fakeFastPathReader{
+		readyByScope:    map[string][]beads.Bead{"city": {cityWork}},
+		readyErrByScope: map[string]error{"own": errors.New("own-store outage")},
+	}
+	got, err := fastPathClaimCandidates(r, []string{"", "sess-name", "alias-x"}, []string{"pool-x"}, "ephemeral", []string{"own", "city"})
+	if err != nil {
+		t.Fatalf("primary error must be deferred when a later scope has work, got err=%v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-city-pool" {
+		t.Fatalf("got %+v, want the later-scope work [gc-city-pool]", got)
+	}
+}
+
+// TestFastPathPrimaryErrorSurfacedWhenNoWork proves the remembered primary-scope
+// error is returned when NO scope yields work, so an own-store outage reaches the
+// caller (classified there as fallback/terminal) instead of being read as a false
+// no-work drain.
+func TestFastPathPrimaryErrorSurfacedWhenNoWork(t *testing.T) {
+	wantErr := errors.New("own-store outage")
+	r := &fakeFastPathReader{
+		readyErrByScope: map[string]error{"own": wantErr}, // "city" absent -> empty, no error
+	}
+	got, err := fastPathClaimCandidates(r, []string{"", "sess-name"}, []string{"pool-x"}, "ephemeral", []string{"own", "city"})
+	if got != nil {
+		t.Fatalf("got %+v, want nil candidates", got)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want the remembered primary-scope error %v", err, wantErr)
+	}
+}
+
+// TestFastPathSecondaryErrorIgnored proves an error on a FEDERATED secondary scope
+// is best-effort discovery: dropped, not surfaced, so one flaky/absent rig store
+// cannot wedge the hook. Primary empty + secondary erroring yields a clean no-work
+// drain (nil, nil).
+func TestFastPathSecondaryErrorIgnored(t *testing.T) {
+	r := &fakeFastPathReader{
+		readyErrByScope: map[string]error{"city": errors.New("secondary rig outage")}, // "own" absent -> empty
+	}
+	got, err := fastPathClaimCandidates(r, []string{"", "sess-name"}, []string{"pool-x"}, "ephemeral", []string{"own", "city"})
+	if err != nil {
+		t.Fatalf("secondary-scope error must be ignored, got err=%v", err)
+	}
+	if got != nil {
+		t.Fatalf("got %+v, want nil candidates (clean no-work drain)", got)
 	}
 }

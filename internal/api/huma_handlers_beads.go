@@ -3,12 +3,43 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// scopedStoreOutage reports an outage error when a SCOPED bead read names a
+// CONFIGURED store that is currently unavailable, and nil otherwise. A configured
+// store whose open failed is a present map entry (or city store) with a nil value;
+// a genuinely UNKNOWN scope is simply absent from the store set. The distinction
+// matters because a scoped read of an outaged own store must surface the outage
+// rather than federate nothing and return an empty 200 — the hook fast path reads
+// that empty as a false no-work drain on its own store (legacy firstStoreWithWork
+// surfaces an own-store error for exactly this reason). An empty scope (federated
+// read) and a truly unknown scope both return nil here: the former is handled by
+// the per-store partialAggregator, the latter correctly stays an empty 200.
+func scopedStoreOutage(cityStore beads.Store, stores map[string]beads.Store, cityName, scopeRig string) error {
+	if scopeRig == "" {
+		return nil
+	}
+	if scopeRig == cityName {
+		if cityStore == nil {
+			return scopedStoreUnavailableError(scopeRig)
+		}
+		return nil
+	}
+	if st, ok := stores[scopeRig]; ok && st == nil {
+		return scopedStoreUnavailableError(scopeRig)
+	}
+	return nil
+}
+
+func scopedStoreUnavailableError(scope string) error {
+	return apierr.ServiceUnavailable.Msg(fmt.Sprintf("scope %q store is not currently available", scope))
+}
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
 //
@@ -68,6 +99,14 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 
 	stores := s.state.BeadStores()
+	// A CONFIGURED-but-unavailable scoped store is a present map entry (or city
+	// store) with a nil value; selecting it into rigNames below would call
+	// store.List on nil. Surface it as an outage instead, so a scoped tier-1 read
+	// on the hook fast path does not panic or read as a false no-work drain. A
+	// genuinely unknown scope stays absent and correctly yields an empty page.
+	if err := scopedStoreOutage(cityStore, stores, s.state.CityName(), strings.TrimSpace(input.Rig)); err != nil {
+		return nil, err
+	}
 	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
 	var rigNames []string
 	if input.Rig != "" {
@@ -379,9 +418,14 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	cityName := s.state.CityName()
 	// A scoped read federates only the one named store (a rig name or the city
 	// name), reproducing the legacy per-store work-query precedence for the hook
-	// fast path (invariant 2). An unknown scope federates nothing and returns an
-	// empty ready set, matching the legacy shell query against a missing store.
+	// fast path (invariant 2). A genuinely UNKNOWN scope federates nothing and
+	// returns an empty ready set, matching the legacy shell query against a missing
+	// store; a CONFIGURED-but-unavailable scope is surfaced as an outage instead so
+	// the fast path does not read it as a false no-work drain (scopedStoreOutage).
 	scopeRig := strings.TrimSpace(input.Rig)
+	if err := scopedStoreOutage(s.state.CityBeadStore(), stores, cityName, scopeRig); err != nil {
+		return nil, err
+	}
 	rigNames := sortedRigNames(stores)
 	// An explicit include_ephemeral read spans both the durable issues tier and
 	// the ephemeral wisps tier, so ephemeral molecule/wisp ready work stays

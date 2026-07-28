@@ -37,10 +37,13 @@ const (
 	// oracleHookProcs is the concurrent generated-default hook process count the
 	// design mandates ("at least 200").
 	oracleHookProcs = 200
-	// oracleMaxInFlight bounds how many `gc` forks run at once. The point of the
-	// oracle is server-connection accumulation, not host fork-bomb tolerance;
-	// peak sampling still observes the worst case because forks overlap.
-	oracleMaxInFlight = 40
+	// oracleMaxInFlight bounds how many `gc` forks run at once. The design mandates
+	// at least 200 TRULY-concurrent hooks: the per-worker connection storm the cure
+	// removes only materializes when all workers overlap, so a lower cap (an earlier
+	// revision used 40) made the concurrency claim vacuous. It therefore matches
+	// oracleHookProcs — every seeded hook runs at once. The protected runner
+	// (scix-batch --mem-high 8G --mem-max 12G) is provisioned for the fork load.
+	oracleMaxInFlight = oracleHookProcs
 	// oracleSeedBeads is the routed-pool demand seeded for the claim race. Fewer
 	// beads than hooks guarantees real contention: many hooks find no work, and
 	// every claimed bead must have exactly one winner.
@@ -111,44 +114,88 @@ func TestManagedDoltConnOracle_FastPathBoundsConnectionsUnderHookLoad(t *testing
 	onBaseline := sampleThreadsConnected(t, on.observer)
 	t.Logf("fastpath ON: baseline Threads_connected=%d, seeded=%d beads", onBaseline, len(onSeed))
 
-	onResult := runHookLoad(t, on, oracleHookProcs)
-	onBeads, onActors, onWorstBead, onWorstDistinct := claimAssigneeStats(onResult.claims)
-	t.Logf("fastpath ON: peakConns=%d claims=%d distinctBeads=%d distinctAssignees=%d apiRoutes=%d fallbackRoutes=%d rejections=%d",
-		onResult.peakConns, len(onResult.claims), onBeads, onActors, onResult.apiRoutes, onResult.fallbackRoutes, onResult.rejections)
+	// Drain the pool under repeated 200-concurrent bursts. One SIMULTANEOUS burst of
+	// 200 single-shot hooks against 80 beads does not claim every bead: the
+	// controller's bounded claim admission (a design invariant, invariant 5) sheds
+	// excess concurrent claims as a retryable-degraded result, so a fraction of hooks
+	// drain without claiming while beads still remain. That is correct behavior, not
+	// a cure defect — the pool drains over successive hook ticks. So run the genuine
+	// 200-concurrent burst (oracleMaxInFlight == oracleHookProcs) in rounds until
+	// every seeded bead is claimed, accumulate the claims, and hold the per-burst
+	// connection/route discipline on EVERY round.
+	const onMaxRounds = 8
+	var (
+		onClaims []hookClaim
+		onPeak   int
+		claimed  = make(map[string]bool, oracleSeedBeads)
+	)
+	for round := 1; ; round++ {
+		// A per-round actor prefix makes every round's 200 actors globally distinct,
+		// so a bead's winner is unique across all rounds (round-2 actors are new
+		// identities, never re-adopting a round-1 claim) and the distinct-winner
+		// evidence below stays exact.
+		res := runHookLoad(t, on, oracleHookProcs, fmt.Sprintf("polecat-oracle-r%d", round))
+		if res.peakConns > onPeak {
+			onPeak = res.peakConns
+		}
+		// Healthy-controller semantics hold on EVERY round: the controller serves
+		// every hook over the API with zero fallback and zero rejection, no matter how
+		// many hooks drain empty in a late round. A loose "apiRoutes>0" bar would pass
+		// a run where 199 hooks silently shelled out and one claimed — the storm the
+		// cure removes.
+		if res.apiRoutes != oracleHookProcs {
+			t.Fatalf("fastpath ON round %d: %d/%d hooks took route=api; a healthy controller must serve every hook", round, res.apiRoutes, oracleHookProcs)
+		}
+		if res.fallbackRoutes != 0 {
+			t.Fatalf("fastpath ON round %d: %d hook(s) fell back to the subprocess path against a healthy controller, want 0", round, res.fallbackRoutes)
+		}
+		if res.rejections != 0 {
+			t.Fatalf("fastpath ON round %d: %d hook(s) saw a connection rejection / max-waiting-connections error, want 0", round, res.rejections)
+		}
+		onClaims = append(onClaims, res.claims...)
+		for _, c := range res.claims {
+			claimed[c.beadID] = true
+		}
+		t.Logf("fastpath ON round %d: peakConns=%d roundClaims=%d cumulativeClaimed=%d/%d apiRoutes=%d fallbackRoutes=%d rejections=%d",
+			round, res.peakConns, len(res.claims), len(claimed), oracleSeedBeads, res.apiRoutes, res.fallbackRoutes, res.rejections)
+		if len(claimed) >= oracleSeedBeads {
+			break
+		}
+		if round >= onMaxRounds {
+			t.Fatalf("fastpath ON: only %d/%d beads claimed after %d rounds of %d-concurrent hooks; claimable pool work is being stranded",
+				len(claimed), oracleSeedBeads, onMaxRounds, oracleHookProcs)
+		}
+	}
+
+	// Invariant 1 (atomic claim), across every round: no bead was handed to two
+	// DISTINCT actors, and every recorded claim is by its intended distinct actor.
+	// Holding the orphan reconciler (max_active_sessions=0) means a bead claimed in
+	// an early round stays claimed, so a later round cannot legitimately re-hand it
+	// to a different actor — any such collision would be a real double-claim.
+	assertUniqueClaims(t, onClaims)
+	onBeads, onActors, onWorstBead, onWorstDistinct := claimAssigneeStats(onClaims)
 	if onWorstDistinct > 1 {
 		t.Logf("fastpath ON: worst bead %s won by %d DISTINCT assignees (invariant-1 violation)", onWorstBead, onWorstDistinct)
 	}
-
-	// The fast path must actually be taken; otherwise the connection bound is a
-	// property of the subprocess path and the oracle proves nothing about the cure.
-	if onResult.apiRoutes == 0 {
-		t.Fatalf("fastpath ON: no hook took the controller route (route=api); the cure was never exercised")
-	}
-	if onResult.fallbackRoutes*2 > oracleHookProcs {
-		t.Fatalf("fastpath ON: %d/%d hooks fell back to the subprocess path; the controller route did not dominate",
-			onResult.fallbackRoutes, oracleHookProcs)
-	}
-
-	// Invariant 1 (atomic claim): no bead was handed to two DISTINCT actors.
-	assertUniqueClaims(t, onResult.claims)
-	if len(onResult.claims) == 0 {
-		t.Fatalf("fastpath ON: no bead was claimed under load; the claim race never ran")
+	// Completeness + exact distinct-winner evidence: every seeded bead ends up
+	// claimed exactly once (claims == distinct beads == seed count), and because each
+	// round uses a globally-distinct actor set, every bead's winner is a distinct
+	// actor too (distinct assignees == seed count). No claimable pool work is
+	// stranded, and no bead was double-claimed (assertUniqueClaims above).
+	if len(onClaims) != oracleSeedBeads || onBeads != oracleSeedBeads || onActors != oracleSeedBeads {
+		t.Fatalf("fastpath ON: claims=%d distinctBeads=%d distinctAssignees=%d across all rounds, want all %d seeded beads won exactly once by %d globally-distinct actors",
+			len(onClaims), onBeads, onActors, oracleSeedBeads, oracleSeedBeads)
 	}
 
-	// No client was rejected: the whole point of removing per-worker SQL clients.
-	if onResult.rejections != 0 {
-		t.Fatalf("fastpath ON: %d hook(s) saw a connection rejection / max-waiting-connections error, want 0", onResult.rejections)
+	// Invariant 6 / 7: the bounded controller pools cap server connections far below
+	// the listener limit across every round, and 200 worker processes per round never
+	// move it.
+	if onPeak >= oracleMaxConnections {
+		t.Fatalf("fastpath ON: peak Threads_connected=%d reached the %d-connection listener cap under load", onPeak, oracleMaxConnections)
 	}
-
-	// Invariant 6 / 7: the bounded controller pools cap server connections far
-	// below the listener limit, and adding 200 worker processes does not move it.
-	if onResult.peakConns >= oracleMaxConnections {
-		t.Fatalf("fastpath ON: peak Threads_connected=%d reached the %d-connection listener cap under load",
-			onResult.peakConns, oracleMaxConnections)
-	}
-	if onResult.peakConns > oracleFastPathConnCap {
+	if onPeak > oracleFastPathConnCap {
 		t.Fatalf("fastpath ON: peak Threads_connected=%d exceeds the bounded-pool cap %d; a pool is unbounded or the fast path leaked worker connections",
-			onResult.peakConns, oracleFastPathConnCap)
+			onPeak, oracleFastPathConnCap)
 	}
 
 	// Return to baseline: with no worker sockets to reap, connections settle back
@@ -165,15 +212,24 @@ func TestManagedDoltConnOracle_FastPathBoundsConnectionsUnderHookLoad(t *testing
 	off := setupConnOracleCity(t, false)
 	seedRoutedPoolDemand(t, off, oracleSeedBeads)
 	offBaseline := sampleThreadsConnected(t, off.observer)
-	offResult := runHookLoad(t, off, oracleHookProcs)
+	offResult := runHookLoad(t, off, oracleHookProcs, "polecat-oracle")
 	t.Logf("fastpath OFF: baseline=%d peakConns=%d claims=%d (control)", offBaseline, offResult.peakConns, len(offResult.claims))
 
-	// The OFF control must accumulate visibly more connections than the ON run;
-	// otherwise the load did not overlap and the ON bound is vacuous (mirrors the
-	// bounded/unbounded control in the store-level oracle).
-	if offResult.peakConns <= onResult.peakConns {
+	// The OFF control must accumulate MATERIALLY more connections than the ON run —
+	// not a one-connection edge a jittery sampler could produce without real
+	// per-worker clients. With the fast path off, each of the 200 overlapping hooks
+	// opens its own managed-Dolt client, so the OFF peak must climb above
+	// oracleFastPathConnCap, the bound the ON run is required to stay under.
+	// Separating OFF (> cap) from ON (<= cap) proves the load genuinely stresses
+	// connections and that the fast path, not a quiet load, is what keeps them
+	// bounded (mirrors the bounded/unbounded control in the store-level oracle).
+	if offResult.peakConns <= onPeak {
 		t.Fatalf("fastpath OFF control peaked at %d connections, not above the fastpath-ON peak %d; the load did not overlap, so the ON bound is vacuous",
-			offResult.peakConns, onResult.peakConns)
+			offResult.peakConns, onPeak)
+	}
+	if offResult.peakConns <= oracleFastPathConnCap {
+		t.Fatalf("fastpath OFF control peaked at only %d connections, not above the bounded-pool cap %d the ON run stays under; the per-worker-client pressure the cure removes was not material",
+			offResult.peakConns, oracleFastPathConnCap)
 	}
 
 	// Atomic claim (invariant 1) must hold on the rollback path too: disabling the
@@ -390,9 +446,12 @@ func seedRoutedPoolDemand(t *testing.T, city *connOracleCity, n int) []string {
 }
 
 // runHookLoad launches procs concurrent generated-default `gc hook --claim`
-// processes, each a distinct ephemeral actor racing for the routed pool demand,
-// while sampling the managed server's peak Threads_connected throughout.
-func runHookLoad(t *testing.T, city *connOracleCity, procs int) hookLoadResult {
+// processes, each a distinct ephemeral actor (actorPrefix-NNN) racing for the
+// routed pool demand, while sampling the managed server's peak Threads_connected
+// throughout. actorPrefix namespaces the actors so a multi-round drain gives every
+// round a globally-distinct actor set — a bead's winner is unique across all
+// rounds, so distinct-winner evidence stays exact.
+func runHookLoad(t *testing.T, city *connOracleCity, procs int, actorPrefix string) hookLoadResult {
 	t.Helper()
 
 	var peak int64
@@ -432,7 +491,7 @@ func runHookLoad(t *testing.T, city *connOracleCity, procs int) hookLoadResult {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			actor := fmt.Sprintf("polecat-oracle-%03d", i)
+			actor := fmt.Sprintf("%s-%03d", actorPrefix, i)
 			out, _ := runHookClaim(city, actor)
 
 			mu.Lock()

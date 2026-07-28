@@ -21,7 +21,7 @@ import (
 //
 // A merely-unset max_active_sessions is deliberately NOT treated as an
 // implicit pool: it is the ordinary shape of a default singleton/
-// named-session agent (the ubiquitous `[[agent]] name = "mayor"` minimal
+// named-session agent (the ubiquitous `[[agent]] name = "example-agent"` minimal
 // config), and nothing in today's system spontaneously creates a second
 // concurrent instance for such an agent absent one of the explicit signals
 // above.

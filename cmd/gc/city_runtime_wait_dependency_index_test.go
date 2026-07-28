@@ -226,11 +226,125 @@ func TestSessionWaitDependencyLivePendingRetainsTargetUntilAuthoritativeClose(t 
 	cs.admitSessionWaitDependencyShadowEvent(closeEvent)
 	awaitClose(t, targetRead, "authoritative closed dependency evaluation")
 	cr.stopSessionWaitDependencyProducer()
-	if _, ok := cr.sessionWaitDependencyTarget(wait.ID); ok {
-		t.Fatal("successfully evaluated wait remained in private dependency index")
+	if _, ok := cr.sessionWaitDependencyTarget(wait.ID); !ok {
+		t.Fatal("read-only dependency evaluation retired the still-open durable wait target")
 	}
 	if got := env.sp.CountCalls("IsRunning", "worker"); got != 1 {
 		t.Fatalf("runtime observations after authoritative close = %d, want 1", got)
+	}
+}
+
+func TestSessionWaitDependencyDelayedWaitCommitRetainsTargetUntilDurableWaitClose(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	dependency, err := env.store.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.Close(dependency.ID); err != nil {
+		t.Fatal(err)
+	}
+	target := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&target, map[string]string{
+		"state":                     string(sessionpkg.StateCreating),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	cache := beads.NewCachingStoreForTest(env.store, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	cityPath := t.TempDir()
+	tracer := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = tracer.Close() })
+	cs := &controllerState{
+		cfg: env.cfg, sp: env.sp, cityPath: cityPath, cityBeadStore: cache,
+		eventProv: events.NewFake(), pokeCh: make(chan struct{}, 2),
+		rolloutFlags:           rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+		sessionStartGeneration: 1, sessionStartStoreGeneration: 1,
+	}
+	cr := &CityRuntime{
+		cs: cs, cfg: env.cfg, stderr: io.Discard, trace: tracer,
+		sessionStartOwnership: sessionStartOwnershipKeyed,
+	}
+	cr.startSessionWaitDependencyShadowWithContext(t.Context())
+	t.Cleanup(func() { cs.stopSessionWaitDependencyShadowAdmission(); cr.stopSessionWaitDependencyProducer() })
+	// Drain the startup census before admitting the delayed wait.created event;
+	// this keeps the wait_commit outcome independent of startup work.
+	cr.stopSessionWaitDependencyProducer()
+	if !cr.startSessionWaitDependencyProducer() {
+		t.Fatal("restart wait dependency producer after startup census")
+	}
+
+	// The delayed wait.created arrives only after the cache and durable store
+	// already agree the dependency is closed.
+	wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadCreated, wait))
+	cr.stopSessionWaitDependencyProducer()
+	if _, ok := cr.sessionWaitDependencyTarget(wait.ID); !ok {
+		t.Fatal("read-only wait-commit retired the still-open durable wait target")
+	}
+	if got := env.sp.CountCalls("IsRunning", "worker"); got != 1 {
+		t.Fatalf("runtime observations after wait-commit = %d, want 1", got)
+	}
+	storedWait, err := env.store.Get(wait.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedWait.Status != "open" || storedWait.Metadata["state"] != waitStatePending {
+		t.Fatalf("durable wait = status %q state %q, want open pending", storedWait.Status, storedWait.Metadata["state"])
+	}
+	if !cr.startSessionWaitDependencyProducer() {
+		t.Fatal("restart wait dependency producer for dependency-commit")
+	}
+
+	closed, err := env.store.Get(dependency.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadClosed, closed))
+	cr.stopSessionWaitDependencyProducer()
+	if _, ok := cr.sessionWaitDependencyTarget(wait.ID); !ok {
+		t.Fatal("dependency-commit retired the still-open durable wait target")
+	}
+	if got := env.sp.CountCalls("IsRunning", "worker"); got != 2 {
+		t.Fatalf("runtime observations after dependency-commit = %d, want 2", got)
+	}
+
+	if err := env.store.Close(wait.ID); err != nil {
+		t.Fatal(err)
+	}
+	closedWait, err := env.store.Get(wait.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadClosed, closedWait))
+	if _, ok := cr.sessionWaitDependencyTarget(wait.ID); ok {
+		t.Fatal("durable wait close did not remove the wait target from the private index")
+	}
+
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("close trace: %v", err)
+	}
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	causes := make([]string, 0, 2)
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && record.Fields["operation_name"] == "wait_dependency_shadow" && record.Fields["wait_id"] == wait.ID {
+			causes = append(causes, record.Fields["cause"].(string))
+		}
+	}
+	if !slices.Contains(causes, string(sessionWaitDependencyCauseWaitCommit)) ||
+		!slices.Contains(causes, string(sessionWaitDependencyCauseDependency)) {
+		t.Fatalf("shadow evaluation causes = %v, want wait_commit and dependency_commit", causes)
 	}
 }
 
@@ -333,8 +447,8 @@ func testSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarge
 	cs.admitSessionWaitDependencyShadowEvent(event)
 	awaitClose(t, readA, "installed dependency sink exact target read")
 	cr.stopSessionWaitDependencyProducer()
-	if _, ok := cr.sessionWaitDependencyTarget(wait.ID); ok {
-		t.Fatal("successfully evaluated wait remained in private dependency index")
+	if _, ok := cr.sessionWaitDependencyTarget(wait.ID); !ok {
+		t.Fatal("read-only dependency evaluation retired the still-open durable wait target")
 	}
 	if got := env.sp.CountCalls("IsRunning", "worker"); got != 1 {
 		t.Fatalf("target runtime observations = %d, want 1", got)

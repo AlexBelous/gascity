@@ -26,6 +26,10 @@ import (
 // ticks and the file bead store (no dolt dependency). The patrol_interval
 // is set to 100ms so convergence happens quickly in tests.
 func renderReconcilerToml(cityName string, agentBlocks string) string {
+	return renderReconcilerTomlWithDaemon(cityName, agentBlocks, `patrol_interval = "100ms"`)
+}
+
+func renderReconcilerTomlWithDaemon(cityName, agentBlocks, daemonSettings string) string {
 	return fmt.Sprintf(`[workspace]
 name = %s
 
@@ -33,11 +37,11 @@ name = %s
 provider = "file"
 
 [daemon]
-patrol_interval = "100ms"
+%s
 
 %s
 %s
-`, quote(cityName), agentBlocks, reconcilerNamedSessions(agentBlocks))
+`, quote(cityName), daemonSettings, agentBlocks, reconcilerNamedSessions(agentBlocks))
 }
 
 var (
@@ -97,12 +101,17 @@ func writeReconcilerToml(t *testing.T, cityDir, cityName string, agentBlocks str
 // fail with "standalone controller already running".
 func setupReconcilerCity(t *testing.T, agentBlocks string) string {
 	t.Helper()
+	return setupReconcilerCityWithDaemon(t, agentBlocks, `patrol_interval = "100ms"`)
+}
+
+func setupReconcilerCityWithDaemon(t *testing.T, agentBlocks, daemonSettings string) string {
+	t.Helper()
 	env := newIsolatedCommandEnv(t, false)
 
 	cityName := uniqueCityName()
 	cityDir := filepath.Join(t.TempDir(), cityName)
 	configPath := filepath.Join(t.TempDir(), cityName+".toml")
-	if err := os.WriteFile(configPath, []byte(renderReconcilerToml(cityName, agentBlocks)), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(renderReconcilerTomlWithDaemon(cityName, agentBlocks, daemonSettings)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
 	}
 

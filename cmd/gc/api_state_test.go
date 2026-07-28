@@ -2061,6 +2061,76 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 	}
 }
 
+func TestControllerStateAppliesTypedExternalBeadEventsThroughPolicyWrappedCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := wrapWithCachingStore(
+		context.Background(),
+		wrapStoreWithBeadPolicies(backing, &config.City{}),
+		nil,
+		false,
+	)
+	inner, _, wrapped := unwrapBeadPolicyStore(store)
+	if !wrapped {
+		t.Fatalf("store type = %T, want production policy wrapper", store)
+	}
+	cached, ok := inner.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("policy inner store type = %T, want *beads.CachingStore", inner)
+	}
+
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"alpha": store},
+		pokeCh:     make(chan struct{}, 2),
+	}
+	snapshot, err := backing.Create(beads.Bead{
+		Title:  "external bead",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create external bead: %v", err)
+	}
+	apply := func(eventType string) {
+		t.Helper()
+		payload, err := json.Marshal(api.BeadEventPayload{Bead: snapshot})
+		if err != nil {
+			t.Fatalf("marshal typed bead payload: %v", err)
+		}
+		cs.applyBeadEventToStores(events.Event{
+			Type:    eventType,
+			Actor:   "bd-hook",
+			Subject: snapshot.ID,
+			Payload: payload,
+		})
+	}
+
+	apply(events.BeadCreated)
+	items, err := cached.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List after typed bead.created: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != snapshot.ID || items[0].Status != "open" {
+		t.Fatalf("cache after typed bead.created = %+v, want %s open", items, snapshot.ID)
+	}
+
+	inProgress := "in_progress"
+	if err := backing.Update(snapshot.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("update external bead: %v", err)
+	}
+	snapshot, err = backing.Get(snapshot.ID)
+	if err != nil {
+		t.Fatalf("get updated external bead: %v", err)
+	}
+	apply(events.BeadUpdated)
+	items, err = cached.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List after typed bead.updated: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != snapshot.ID || items[0].Status != "in_progress" {
+		t.Fatalf("cache after typed bead.updated = %+v, want %s in_progress", items, snapshot.ID)
+	}
+}
+
 func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 	backing := beads.NewMemStore()
 	created, err := backing.Create(beads.Bead{Title: "non-bd backing"})

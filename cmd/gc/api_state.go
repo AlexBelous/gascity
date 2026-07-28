@@ -610,7 +610,8 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	cs.mu.RUnlock()
 
 	for _, store := range stores {
-		if cached, ok := store.(*beads.CachingStore); ok {
+		inner, _, _ := unwrapBeadPolicyStore(store)
+		if cached, ok := inner.(*beads.CachingStore); ok {
 			cached.ApplyEvent(evt.Type, evt.Payload)
 		}
 	}

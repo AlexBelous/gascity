@@ -224,7 +224,7 @@ func (cr *CityRuntime) enableSessionWaitDependencyLifecycleShadowSink(ctx contex
 		})
 		startOutcome, startReason = sessionLifecycleStartSelectionTraceOutcome(plan.Outcome), string(plan.Reason)
 		traceFailed = err != nil
-		return err == nil, err
+		return false, err
 	}
 }
 

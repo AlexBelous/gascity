@@ -118,6 +118,9 @@ type CityRuntime struct {
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 	lifecycleShadowWorker *sessionLifecycleShadowWorker
 
+	sessionWaitDependencyMu    sync.RWMutex
+	sessionWaitDependencyIndex *sessionWaitDependencyIndex
+
 	sessionStartMu         sync.Mutex
 	sessionStartController *sessionStartController
 	sessionStartOwnership  sessionStartOwnership
@@ -689,6 +692,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	cr.startSessionWaitDependencyShadow()
 
 	// Mark city as started only after all retry-critical startup work has
 	// completed. Publishing readiness before bead reconciliation or

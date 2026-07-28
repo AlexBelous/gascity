@@ -1,12 +1,58 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+type observedSessionWaitCensus struct {
+	cache       *beads.CachingStore
+	observation beads.CacheObservation
+	waits       []sessionpkg.WaitInfo
+}
+
+// observeSessionWaitCensus reads the complete active session-wait census from
+// the session cache without falling back to backing-store I/O.
+func observeSessionWaitCensus(store beads.SessionStore) (observedSessionWaitCensus, error) {
+	raw, _, wrapped := unwrapBeadPolicyStore(store.Store)
+	cache, ok := raw.(*beads.CachingStore)
+	if !ok || cache == nil {
+		return observedSessionWaitCensus{}, fmt.Errorf("observing session waits: %w", beads.ErrCacheUnavailable)
+	}
+	query := beads.ListQuery{
+		Label:    sessionpkg.WaitBeadLabel,
+		TierMode: beads.TierIssues,
+		Sort:     beads.SortCreatedDesc,
+		Limit:    sessionpkg.SessionWaitLookupLimit + 1,
+	}
+	if wrapped {
+		query = expandPolicyReadTier(query)
+	}
+	rows, observation, ok := cache.ObservedList(query)
+	if !ok {
+		return observedSessionWaitCensus{}, fmt.Errorf("observing session waits: %w", beads.ErrCacheUnavailable)
+	}
+	if len(rows) > sessionpkg.SessionWaitLookupLimit {
+		return observedSessionWaitCensus{}, fmt.Errorf("observing session waits: %w", beads.LookupLimitError{
+			Kind:  "wait",
+			Label: sessionpkg.WaitBeadLabel,
+			Limit: sessionpkg.SessionWaitLookupLimit,
+		})
+	}
+	waits := make([]sessionpkg.WaitInfo, 0, len(rows))
+	for _, row := range rows {
+		if sessionpkg.IsWaitBead(row) {
+			waits = append(waits, sessionpkg.WaitInfoFromBead(row))
+		}
+	}
+	return observedSessionWaitCensus{cache: cache, observation: observation, waits: waits}, nil
+}
 
 // This file is the controller/CLI-side seam of the per-class store refactor.
 // It gives each coordination class a named accessor so a future per-class

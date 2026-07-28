@@ -195,11 +195,20 @@ func TestMain(m *testing.M) {
 		}
 	} else {
 		gcBinary = filepath.Join(integrationToolBinDir, "gc")
-		buildCmd := integrationTestCommand("go", "build", "-o", gcBinary, "./cmd/gc")
+		// The managed-Dolt lifecycle deliberately propagates its test watchdog
+		// authorization only from a Go test binary. Build the real helper with
+		// that marker, then keep the public "gc" path as a shim so integration
+		// commands exercise the normal CLI name without relying on an ambient
+		// GC_MANAGED_DOLT_TEST_MODE value that production correctly strips.
+		gcTestBinary := filepath.Join(integrationToolBinDir, "gc.test")
+		buildCmd := integrationTestCommand("go", "build", "-o", gcTestBinary, "./cmd/gc")
 		buildCmd.Dir = findModuleRoot()
 		buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			panic("integration: building gc binary: " + err.Error() + "\n" + string(out))
+		}
+		if err := writeExecShim(gcBinary, gcTestBinary); err != nil {
+			panic("integration: writing gc shim: " + err.Error())
 		}
 	}
 

@@ -427,7 +427,8 @@ max_active_sessions = 0
 	// supervisor explicitly only after init returns successfully below.
 	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--no-start", "--file", configPath, cityDir)
 	if err != nil {
-		t.Fatalf("gc init conn-oracle city: %v\noutput: %s", err, out)
+		t.Fatalf("gc init conn-oracle city: %v\noutput: %s\nmanaged Dolt diagnostics:\n%s",
+			err, out, connOracleInitDiagnostics(cityDir))
 	}
 	registerCityCommandEnv(cityDir, env)
 	startIsolatedSupervisor(t, env, gcHome)
@@ -488,6 +489,29 @@ max_active_sessions = 0
 		readyAPI: readyAPI,
 		seedAPI:  seedAPI,
 	}
+}
+
+func connOracleInitDiagnostics(cityDir string) string {
+	paths := []string{
+		filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt.log"),
+		filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json"),
+		filepath.Join(cityDir, ".beads", "dolt-server.port"),
+		filepath.Join(cityDir, ".beads", "dolt", ".dolt", "sql-server.info"),
+	}
+	var diagnostic strings.Builder
+	for _, path := range paths {
+		fmt.Fprintf(&diagnostic, "%s:\n", path)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(&diagnostic, "  <unavailable: %v>\n", err)
+			continue
+		}
+		diagnostic.Write(data)
+		if len(data) == 0 || data[len(data)-1] != '\n' {
+			diagnostic.WriteByte('\n')
+		}
+	}
+	return diagnostic.String()
 }
 
 // createOracleBead writes a fixture through the isolated supervisor so the

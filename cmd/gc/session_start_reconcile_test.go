@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -65,6 +67,48 @@ func TestReconcileExactSessionStartStartsPendingCreateAndCommitsActive(t *testin
 	}
 	if got.PendingCreateClaim {
 		t.Fatal("pending_create_claim remained set after successful start")
+	}
+}
+
+func TestResolveExactSessionStartTemplateEmptyPromptDoesNotInvokeGit(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	params := exactSessionStartTestParams(t, env)
+	params.CityPath = t.TempDir()
+	env.cfg.Agents[0].WorkDir = params.CityPath
+	marker := filepath.Join(t.TempDir(), "git-invoked")
+	fakeGitDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeGitDir, "git"), []byte("#!/bin/sh\nprintf 'git\\n' >> \"$GC_TEST_GIT_MARKER\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_MARKER", marker)
+	t.Setenv("PATH", fakeGitDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("find fake git: %v", err)
+	}
+	if want := filepath.Join(fakeGitDir, "git"); gitPath != want {
+		t.Fatalf("git path = %q, want fake %q", gitPath, want)
+	}
+
+	tp, err := resolveExactSessionStartTemplate(params, env.sessionInfo(bead.ID), &env.cfg.Agents[0], env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve exact session start template: %v", err)
+	}
+	if tp.Command != "true" || tp.SessionName != "worker" {
+		t.Fatalf("template = %+v, want worker true command", tp)
+	}
+	if tp.WorkDir != params.CityPath {
+		t.Fatalf("template workdir = %q, want existing city path %q", tp.WorkDir, params.CityPath)
+	}
+	if calls, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("empty-prompt exact template resolution invoked git:\n%s", calls)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read fake git marker: %v", err)
 	}
 }
 

@@ -526,6 +526,11 @@ func reconcileExactSessionStartWithOwner(
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: err.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
 	}
+	if admission.Source == sessionStartAdmissionInProcess {
+		if invalidator, ok := params.Provider.(runtime.LivenessInvalidator); ok {
+			invalidator.InvalidateLiveness(info.SessionName)
+		}
+	}
 	observation, err := observeLoadedSession(
 		ctx, params.CityPath, params.Store, params.Provider, params.Config, info, tp.Hints.ProcessNames,
 	)
@@ -542,7 +547,7 @@ func reconcileExactSessionStartWithOwner(
 		PrerequisitesReady: true,
 	})
 	if (params.StatusWriter != nil || params.StatusWriterError != nil) &&
-		statusResult != nil && statusResult.Plan != nil && statusResult.Plan.Outcome == sessionLifecycleStatusHeal {
+		statusResult != nil && statusResult.RuntimeLive && statusResult.Plan != nil && statusResult.Plan.Outcome == sessionLifecycleStatusHeal {
 		if params.StatusWriterError != nil {
 			return owner, fmt.Errorf("reconciling exact session start %q: resolving session-status writer: %w", info.ID, params.StatusWriterError)
 		}
@@ -556,6 +561,7 @@ func reconcileExactSessionStartWithOwner(
 		if err := params.StatusWriter.UpdateIfMatch(statusResult.RequestedID, statusResult.LoadedRevision, beads.UpdateOpts{Metadata: plan.Patch}); err != nil {
 			return owner, fmt.Errorf("reconciling exact session start %q: applying session-status heal: %w", info.ID, err)
 		}
+		statusResult.EffectApplied = true
 	}
 
 	startupTimeout := params.Config.Session.StartupTimeoutDuration()

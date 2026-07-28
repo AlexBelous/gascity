@@ -76,6 +76,48 @@ func TestSessionStartControllerCoalescesQueuedHintsAndReplaysInFlightUpdates(t *
 	}
 }
 
+func TestSessionStartControllerPreservesInProcessAdmissionAcrossAntiEntropy(t *testing.T) {
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	reconciled := make(chan sessionStartAdmission, 2)
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 2,
+		MaxRetries:  1,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == "gcs-blocker1" {
+				close(blockerStarted)
+				<-releaseBlocker
+			}
+			reconciled <- admission
+			return nil
+		},
+	})
+	if _, err := controller.Admit("gcs-blocker1", sessionStartAdmissionExplicitWake); err != nil {
+		t.Fatalf("admit blocker: %v", err)
+	}
+	awaitClose(t, blockerStarted, "blocker reconcile start")
+	if _, err := controller.Admit("gcs-target1", sessionStartAdmissionInProcess); err != nil {
+		t.Fatalf("admit in-process target: %v", err)
+	}
+	original, ok := controller.readAdmission("gcs-target1")
+	if !ok {
+		t.Fatal("in-process admission missing before anti-entropy coalesce")
+	}
+	if outcome, err := controller.Admit("gcs-target1", sessionStartAdmissionSocket); err != nil || outcome != sessionStartAdmissionCoalesced {
+		t.Fatalf("coalesce socket = %q, %v", outcome, err)
+	}
+	if outcome, err := controller.Admit("gcs-target1", sessionStartAdmissionAntiEntropy); err != nil || outcome != sessionStartAdmissionCoalesced {
+		t.Fatalf("coalesce anti-entropy = %q, %v", outcome, err)
+	}
+	close(releaseBlocker)
+	_ = receiveSessionStartAdmission(t, reconciled)
+	got := receiveSessionStartAdmission(t, reconciled)
+	if got.Source != sessionStartAdmissionInProcess || !got.AdmittedAt.Equal(original.AdmittedAt) || got.Version <= original.Version {
+		t.Fatalf("queued reconciliation = %+v from %+v, want preserved in-process source/time with newer version", got, original)
+	}
+}
+
 func TestSessionStartControllerOverflowRequestsAudit(t *testing.T) {
 	t.Parallel()
 

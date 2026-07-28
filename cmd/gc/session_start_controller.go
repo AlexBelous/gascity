@@ -170,7 +170,7 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 	if !c.accepting || c.stopped {
 		return "", fmt.Errorf("admitting session start %q: controller is stopped", id)
 	}
-	_, existed := c.admissions[id]
+	previous, existed := c.admissions[id]
 	if !existed && len(c.admissions) >= c.maxDistinct {
 		c.auditPending = true
 		return sessionStartAdmissionOverflow, nil
@@ -180,11 +180,17 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 		c.auditPending = true
 		return "", fmt.Errorf("admitting session start %q: admission version exhausted", id)
 	}
+	admittedAt := c.now()
+	if existed && (source == sessionStartAdmissionAntiEntropy ||
+		(previous.Source == sessionStartAdmissionInProcess && source != sessionStartAdmissionInProcess)) {
+		source = previous.Source
+		admittedAt = previous.AdmittedAt
+	}
 	c.admissions[id] = sessionStartAdmission{
 		SessionID:  id,
 		Source:     source,
 		Version:    c.nextVersion,
-		AdmittedAt: c.now(),
+		AdmittedAt: admittedAt,
 	}
 	c.queue.Add(id)
 	if existed {

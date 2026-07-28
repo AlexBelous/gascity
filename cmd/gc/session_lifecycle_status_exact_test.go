@@ -106,6 +106,76 @@ func TestEvaluateExactSessionLifecycleStatus(t *testing.T) {
 	}
 }
 
+func TestReconcileExactSessionStartInProcessInvalidatesCachedLiveness(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadata(bead.ID, "wake_request", string(session.WakeCauseExplicit)); err != nil {
+		t.Fatalf("configure exact start ownership: %v", err)
+	}
+	before := env.sessionInfo(bead.ID)
+	provider := &exactStartCachedLivenessProvider{Fake: env.sp}
+	if err := provider.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("seed live runtime: %v", err)
+	}
+	beforeCalls := len(provider.SnapshotCalls())
+	var reports []exactSessionLifecycleStatusResult
+	params := exactSessionStartTestParams(t, env)
+	params.Generation = 1
+	params.Provider = provider
+	statusWriter, ok := env.store.(beads.ConditionalWriter)
+	if !ok {
+		t.Fatalf("session store %T does not implement conditional writes", env.store)
+	}
+	params.StatusWriter = statusWriter
+	params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+		reports = append(reports, result)
+	}))
+
+	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionInProcess,
+		Version:   1,
+	}, params)
+	if err != nil || owner != exactSessionStartKeyedOwner {
+		t.Fatalf("owner/error = %d/%v, want keyed/nil after refreshing cached liveness", owner, err)
+	}
+	if !reflect.DeepEqual(provider.invalidations, []string{"worker"}) {
+		t.Fatalf("liveness invalidations = %#v, want one exact session name", provider.invalidations)
+	}
+	if len(reports) != 1 || !reports[0].RuntimeLive || !reports[0].EffectApplied || reports[0].Plan == nil || reports[0].Plan.Outcome != sessionLifecycleStatusHeal {
+		t.Fatalf("status reports = %#v, want one applied live status heal", reports)
+	}
+	for _, call := range provider.SnapshotCalls()[beforeCalls:] {
+		if call.Method == "Start" || call.Method == "Stop" || call.Method == "Nudge" {
+			t.Fatalf("provider effect after exact observation = %#v, want none", call)
+		}
+	}
+	after := env.sessionInfo(bead.ID)
+	if after.MetadataState != string(session.StateAwake) || after.Generation != before.Generation || after.InstanceToken != before.InstanceToken || after.SessionName != before.SessionName {
+		t.Fatalf("healed session = %#v from %#v, want state-only lifecycle update", after, before)
+	}
+}
+
+type exactStartCachedLivenessProvider struct {
+	*runtime.Fake
+	invalidations []string
+}
+
+func (p *exactStartCachedLivenessProvider) InvalidateLiveness(name string) {
+	p.invalidations = append(p.invalidations, name)
+}
+
+func (p *exactStartCachedLivenessProvider) ObserveLiveness(_ string, _ []string) runtime.Liveness {
+	if len(p.invalidations) == 0 {
+		return runtime.Liveness{}
+	}
+	return runtime.Liveness{Running: true, Alive: true}
+}
+
 func TestEvaluateExactSessionLifecycleStatusRequiresRevisionOnlyForHeal(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	heal := exactSessionLifecycleStatusInput{

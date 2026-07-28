@@ -26,22 +26,23 @@ import (
 // ticks and the file bead store (no dolt dependency). The patrol_interval
 // is set to 100ms so convergence happens quickly in tests.
 func renderReconcilerToml(cityName string, agentBlocks string) string {
-	return renderReconcilerTomlWithDaemon(cityName, agentBlocks, `patrol_interval = "100ms"`)
+	return renderReconcilerTomlWithDaemon(cityName, agentBlocks, `patrol_interval = "100ms"`, "")
 }
 
-func renderReconcilerTomlWithDaemon(cityName, agentBlocks, daemonSettings string) string {
+func renderReconcilerTomlWithDaemon(cityName, agentBlocks, daemonSettings, beadsSettings string) string {
 	return fmt.Sprintf(`[workspace]
 name = %s
 
 [beads]
 provider = "file"
+%s
 
 [daemon]
 %s
 
 %s
 %s
-`, quote(cityName), daemonSettings, agentBlocks, reconcilerNamedSessions(agentBlocks))
+`, quote(cityName), beadsSettings, daemonSettings, agentBlocks, reconcilerNamedSessions(agentBlocks))
 }
 
 var (
@@ -101,17 +102,17 @@ func writeReconcilerToml(t *testing.T, cityDir, cityName string, agentBlocks str
 // fail with "standalone controller already running".
 func setupReconcilerCity(t *testing.T, agentBlocks string) string {
 	t.Helper()
-	return setupReconcilerCityWithDaemon(t, agentBlocks, `patrol_interval = "100ms"`)
+	return setupReconcilerCityWithDaemon(t, agentBlocks, `patrol_interval = "100ms"`, "")
 }
 
-func setupReconcilerCityWithDaemon(t *testing.T, agentBlocks, daemonSettings string) string {
+func setupReconcilerCityWithDaemon(t *testing.T, agentBlocks, daemonSettings, beadsSettings string) string {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, false)
 
 	cityName := uniqueCityName()
 	cityDir := filepath.Join(t.TempDir(), cityName)
 	configPath := filepath.Join(t.TempDir(), cityName+".toml")
-	if err := os.WriteFile(configPath, []byte(renderReconcilerTomlWithDaemon(cityName, agentBlocks, daemonSettings)), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(renderReconcilerTomlWithDaemon(cityName, agentBlocks, daemonSettings, beadsSettings)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
 	}
 

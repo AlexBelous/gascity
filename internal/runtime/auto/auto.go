@@ -32,6 +32,7 @@ var (
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
+	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 )
 
@@ -176,6 +177,17 @@ func (p *Provider) IsRunning(name string) bool {
 		return p.defaultSP.IsRunning(name)
 	}
 	return p.acpSP.IsRunning(name)
+}
+
+// InvalidateLiveness invalidates both backends because a stale route table
+// must not hide the backend that actually hosts the session.
+func (p *Provider) InvalidateLiveness(name string) {
+	if invalidator, ok := p.defaultSP.(runtime.LivenessInvalidator); ok {
+		invalidator.InvalidateLiveness(name)
+	}
+	if invalidator, ok := p.acpSP.(runtime.LivenessInvalidator); ok {
+		invalidator.InvalidateLiveness(name)
+	}
 }
 
 // IsDeadRuntimeSession checks both backends for a positive dead-artifact

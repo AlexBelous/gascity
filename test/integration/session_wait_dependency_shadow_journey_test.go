@@ -77,7 +77,7 @@ name = "worker"
 start_command = "sleep 3600"
 `, `patrol_interval = "1m"
 tick_debounce = "30s"
-`)
+`, "")
 	waitForExpectedTmuxSessions(t, cityDir, []string{"worker"})
 
 	session := sessionWaitDependencyShadowJourneySession(t, cityDir)
@@ -392,7 +392,7 @@ func sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID
 }
 
 func sessionWaitDependencyShadowJourneyTrace(cityDir string) (sessionWaitDependencyShadowJourneyTraceShow, error) {
-	out, err := gc(cityDir, "trace", "show", "--type", "operation", "--json")
+	out, err := gc(cityDir, "trace", "show", "--json")
 	if err != nil {
 		return sessionWaitDependencyShadowJourneyTraceShow{}, fmt.Errorf("gc trace show: %w: %s", err, out)
 	}

@@ -101,6 +101,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			if admission.Source == sessionStartAdmissionInProcess {
 				startOptions = append([]startExecutionOption(nil), startOptions...)
 				startOptions = append(startOptions, withAdditionalExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+					cr.recordExactSessionLifecycleStatusApplied(snapshot.Config, result)
 					cr.recordExactSessionLifecycleStatusShadow(snapshot.Config, result)
 				}))
 			}
@@ -183,10 +184,40 @@ func withAdditionalExactSessionLifecycleStatusObserver(observer exactSessionLife
 	}
 }
 
+func (cr *CityRuntime) recordExactSessionLifecycleStatusApplied(cfg *config.City, result exactSessionLifecycleStatusResult) {
+	if cr == nil || cr.trace == nil || result.Admission.Source != sessionStartAdmissionInProcess ||
+		!result.RuntimeLive || result.Disposition != exactSessionLifecycleStatusDispositionCandidate || result.Plan == nil ||
+		result.Plan.Outcome != sessionLifecycleStatusHeal || !result.EffectApplied {
+		return
+	}
+	admittedAt := result.Admission.AdmittedAt
+	observedAt := result.ObservedAt
+	if admittedAt.IsZero() || observedAt.IsZero() || observedAt.Before(admittedAt) {
+		return
+	}
+	trace := cr.trace
+	cycle := trace.BeginCycle(TraceTickTriggerControl, "session_lifecycle_status_heal", admittedAt, cfg)
+	if cycle == nil {
+		return
+	}
+	cycle.RecordMutation(TraceSiteMutationBeadMetadata, TraceReasonUnknown, TraceOutcomeApplied, "session", result.RequestedID, "update_if_match", map[string]any{
+		"session_id":        result.RequestedID,
+		"admission":         string(result.Admission.Source),
+		"admission_version": result.AdmissionVersion,
+		"generation":        result.ControllerGeneration,
+		"status_outcome":    exactSessionLifecycleStatusOutcomeTraceValue(result.Plan.Outcome),
+		"status_reason":     string(result.Plan.Reason),
+		"effect_applied":    true,
+	})
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: session lifecycle status heal trace: %v\n", cr.sessionStartLogPrefix(), err) //nolint:errcheck // tracing must not affect reconciliation
+	}
+}
+
 func (cr *CityRuntime) recordExactSessionLifecycleStatusShadow(cfg *config.City, result exactSessionLifecycleStatusResult) {
 	if cr == nil || cr.trace == nil || result.Admission.Source != sessionStartAdmissionInProcess ||
 		!result.RuntimeLive || result.Disposition != exactSessionLifecycleStatusDispositionCandidate || result.Plan == nil ||
-		result.Plan.Outcome != sessionLifecycleStatusNoop || result.Plan.Reason != sessionLifecycleStatusReasonConverged {
+		result.Plan.Outcome != sessionLifecycleStatusNoop || result.Plan.Reason != sessionLifecycleStatusReasonConverged || result.EffectApplied {
 		return
 	}
 	admittedAt := result.Admission.AdmittedAt

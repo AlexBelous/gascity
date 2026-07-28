@@ -240,7 +240,7 @@ func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.
 		fenceBead := fenceEnv.createSessionBead("worker", "worker")
 		fenceEnv.setSessionMetadata(&fenceBead, map[string]string{
 			"wake_request": string(session.WakeCauseExplicit),
-			"state":        string(session.StateAwake),
+			"state":        string(session.StateAsleep),
 			"session_key":  "resume",
 		})
 		initial, err := fenceEnv.store.Get(fenceBead.ID)
@@ -254,7 +254,7 @@ func TestCityRuntimeSessionStartControllerStartsAndCommitsSeededWake(t *testing.
 			if err := fenceEnv.store.Update(fenceBead.ID, beads.UpdateOpts{Metadata: map[string]string{"state": string(session.StateQuarantined)}}); err != nil {
 				t.Fatalf("commit concurrent update: %v", err)
 			}
-			return worker.LiveObservation{}, nil
+			return worker.LiveObservation{Running: true, Alive: true}, nil
 		}
 		owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
 			SessionID: fenceBead.ID, Source: sessionStartAdmissionExplicitWake, Version: 1,
@@ -466,6 +466,119 @@ func TestCityRuntimeSessionStartEventRecordsConvergedStatusShadowWithoutEffects(
 		witness.Fields["status_reason"] != string(sessionLifecycleStatusReasonConverged) ||
 		witness.Fields["effect_applied"] != false {
 		t.Fatalf("status-shadow witness = %#v, want converged detached event witness", witness)
+	}
+}
+
+func TestCityRuntimeSessionStartEventAppliesOneFencedStatusHeal(t *testing.T) {
+	env := newReconcilerTestEnv()
+	opened, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		Provider:          "file",
+		ConditionalWrites: gate.Auto,
+		OpenFileStore: func() (beads.Store, error) {
+			return beads.NewMemStore(), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("open conditional-write store: %v", err)
+	}
+	env.store = opened.Store
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadata(bead.ID, "wake_request", string(session.WakeCauseExplicit)); err != nil {
+		t.Fatalf("configure exact start ownership: %v", err)
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("seed live runtime: %v", err)
+	}
+	before, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read stale session: %v", err)
+	}
+	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto)
+	status := make(chan exactSessionLifecycleStatusResult, 1)
+	cityPath := t.TempDir()
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg:      env.cfg,
+		sp:       env.sp,
+		cs:       cs,
+		trace:    trace,
+		rec:      events.Discard,
+		stdout:   io.Discard,
+		stderr:   io.Discard,
+		sessionStartOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+			withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				status <- result
+			}),
+		},
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	beforeCalls := len(env.sp.SnapshotCalls())
+	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, bead))
+
+	var got exactSessionLifecycleStatusResult
+	select {
+	case got = <-status:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("event-admitted stale status did not report")
+	}
+	if got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusHeal || got.Plan.Reason != sessionLifecycleStatusReasonHeal {
+		t.Fatalf("status result = %#v, want live stale heal candidate", got)
+	}
+	if !got.EffectApplied {
+		t.Fatalf("status result = %#v, want successful fenced heal to retain EffectApplied", got)
+	}
+	after, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read healed session: %v", err)
+	}
+	if after.Revision != before.Revision+1 || after.Metadata["state"] != string(session.StateAwake) {
+		t.Fatalf("healed revision/state = %d/%q from %d, want one awake heal", after.Revision, after.Metadata["state"], before.Revision)
+	}
+	readOnlyProviderCalls := map[string]bool{
+		"GetLastActivity": true,
+		"IsAttached":      true,
+		"IsRunning":       true,
+	}
+	for _, call := range env.sp.SnapshotCalls()[beforeCalls:] {
+		if !readOnlyProviderCalls[call.Method] {
+			t.Fatalf("provider call after status heal = %#v, want only read-only observation", call)
+		}
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read applied status trace: %v", err)
+	}
+	var witnesses []SessionReconcilerTraceRecord
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && record.SiteCode == TraceSiteLifecycleStatusShadow {
+			t.Fatalf("applied status heal emitted shadow witness: %#v", record)
+		}
+		if record.RecordType == TraceRecordMutation && record.SiteCode == TraceSiteMutationBeadMetadata &&
+			record.Fields["session_id"] == bead.ID && record.Fields["effect_applied"] == true {
+			witnesses = append(witnesses, record)
+		}
+	}
+	if len(witnesses) != 1 {
+		t.Fatalf("applied status witnesses = %#v, want exactly one", witnesses)
+	}
+	witness := witnesses[0]
+	if witness.OutcomeCode != TraceOutcomeApplied || witness.Fields["admission"] != string(sessionStartAdmissionInProcess) ||
+		witness.Fields["admission_version"] != float64(got.AdmissionVersion) || witness.Fields["generation"] != float64(got.ControllerGeneration) ||
+		witness.Fields["status_outcome"] != "heal" || witness.Fields["status_reason"] != string(sessionLifecycleStatusReasonHeal) {
+		t.Fatalf("applied status witness = %#v, want fenced applied event metadata mutation", witness)
 	}
 }
 

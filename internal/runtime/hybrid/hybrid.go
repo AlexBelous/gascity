@@ -24,6 +24,7 @@ var (
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
+	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 )
 
@@ -58,6 +59,14 @@ func (p *Provider) Interrupt(name string) error {
 // IsRunning delegates to the routed backend.
 func (p *Provider) IsRunning(name string) bool {
 	return p.route(name).IsRunning(name)
+}
+
+// InvalidateLiveness forwards to the backend selected for name when it caches
+// liveness observations.
+func (p *Provider) InvalidateLiveness(name string) {
+	if invalidator, ok := p.route(name).(runtime.LivenessInvalidator); ok {
+		invalidator.InvalidateLiveness(name)
+	}
 }
 
 // IsDeadRuntimeSession delegates to the routed backend when it can positively

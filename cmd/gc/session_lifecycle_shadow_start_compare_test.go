@@ -170,6 +170,7 @@ func TestReconcileSessionBeadsStartSelectionCopiesLegacyProviderHealthResult(t *
 		newProviderHealthGate(),
 		map[string]int{"worker": 1},
 		nil,
+		nil,
 		false,
 		nil,
 		"",

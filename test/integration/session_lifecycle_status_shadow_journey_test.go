@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,9 +25,9 @@ type sessionLifecycleStatusShadowJourneyBead struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
-// TestSessionLifecycleStatusShadowExactBinaryJourney proves that a typed
-// session-bead update independently produces the no-effect status witness;
-// the one-minute patrol cadence cannot explain the result.
+// TestSessionLifecycleStatusShadowExactBinaryJourney proves that typed
+// session-bead updates independently produce both a no-effect status witness
+// and a fenced stale-status heal; the one-minute patrol cannot explain either.
 func TestSessionLifecycleStatusShadowExactBinaryJourney(t *testing.T) {
 	if usingSubprocess() {
 		t.Skip("exact lifecycle-status shadow journey requires tmux")
@@ -37,7 +39,7 @@ name = "worker"
 start_command = "sleep 3600"
 `, `patrol_interval = "1m"
 tick_debounce = "30s"
-	`)
+	`, `conditional_writes = "auto"`)
 	waitForExpectedTmuxSessions(t, cityDir, []string{"worker"})
 	out, err := gc(cityDir, "session", "new", "worker", "--no-attach", "--json")
 	if err != nil {
@@ -84,7 +86,7 @@ tick_debounce = "30s"
 	if !emitted.HasPayload || !emitted.Submitted {
 		t.Fatalf("typed session update = %+v, want submitted payload", emitted)
 	}
-	trace, latency, err := sessionLifecycleStatusShadowJourneyWaitForStatusWitness(t.Context(), cityDir, created.SessionID, sessionLifecycleStatusShadowJourneyLastSeq(beforeTrace), sessionLifecycleStatusShadowJourneyWitnessTimeout)
+	trace, latency, err := sessionLifecycleStatusShadowJourneyWaitForWitness(t.Context(), cityDir, created.SessionID, sessionLifecycleStatusShadowJourneyLastSeq(beforeTrace), sessionLifecycleStatusShadowJourneyWitnessTimeout, "shadow", sessionLifecycleStatusShadowJourneyStatusWitnesses)
 	if err != nil {
 		t.Fatalf(
 			"lifecycle status shadow witness did not converge: %v\n%s",
@@ -108,6 +110,68 @@ tick_debounce = "30s"
 	if afterIdentity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, created.SessionName); afterIdentity != beforeIdentity {
 		t.Fatalf("tmux identity changed across pure shadow event: before=%q after=%q", beforeIdentity, afterIdentity)
 	}
+
+	// Keep the same live tmux session while making its durable lifecycle state
+	// stale. A second typed event must commit one fenced metadata heal rather
+	// than wait for the one-minute patrol.
+	out, err = runCommand(cityDir, replaceEnv(commandEnvForDir(cityDir, false), "GC_BEADS", "file"), integrationBDCommandTimeout,
+		bdBinary, "update", created.SessionID, "--set-metadata", "state=asleep")
+	if err != nil {
+		t.Fatalf("stage stale live lifecycle state: %v\n%s", err, out)
+	}
+	staleBead := sessionLifecycleStatusShadowJourneyReadBead(t, cityDir, created.SessionID)
+	if staleBead.Metadata["state"] != "asleep" {
+		t.Fatalf("stale live session state = %q, want asleep", staleBead.Metadata["state"])
+	}
+	staleRevision := sessionLifecycleStatusShadowJourneyRevision(t, cityDir, created.SessionID)
+	beforeAppliedTrace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+	if err != nil {
+		t.Fatalf("read operation trace before stale event: %v", err)
+	}
+	out, err = gc(cityDir, "event", "emit", "bead.updated", "--subject", created.SessionID,
+		"--bead-payload", created.SessionID, "--actor", "bd-hook", "--json")
+	if err != nil {
+		t.Fatalf("emit typed stale session update: %v\n%s", err, out)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &emitted); err != nil {
+		t.Fatalf("decode typed stale session update: %v\n%s", err, out)
+	}
+	if !emitted.HasPayload || !emitted.Submitted {
+		t.Fatalf("typed stale session update = %+v, want submitted payload", emitted)
+	}
+	appliedTrace, appliedLatency, err := sessionLifecycleStatusShadowJourneyWaitForWitness(t.Context(), cityDir, created.SessionID, sessionLifecycleStatusShadowJourneyLastSeq(beforeAppliedTrace), sessionLifecycleStatusShadowJourneyWitnessTimeout, "applied", sessionLifecycleStatusShadowJourneyAppliedWitnesses)
+	if err != nil {
+		t.Fatalf(
+			"lifecycle status applied witness did not converge: %v\n%s",
+			err,
+			sessionWaitDependencyShadowJourneyDiagnostics(cityDir, created.SessionID, created.SessionID),
+		)
+	}
+	t.Logf("lifecycle-status applied witness observed after %s", appliedLatency)
+	appliedWitnesses := sessionLifecycleStatusShadowJourneyAppliedWitnesses(appliedTrace, created.SessionID, sessionLifecycleStatusShadowJourneyLastSeq(beforeAppliedTrace))
+	if len(appliedWitnesses) != 1 {
+		t.Fatalf("lifecycle status applied witnesses = %d, want exactly 1: %+v", len(appliedWitnesses), appliedWitnesses)
+	}
+	applied := appliedWitnesses[0]
+	if applied.RecordType != "mutation" || applied.OutcomeCode != "applied" || applied.Fields.Admission != "in_process" || applied.Fields.StatusOutcome != "heal" || applied.Fields.StatusReason != "heal" || applied.Fields.EffectApplied == nil || !*applied.Fields.EffectApplied {
+		t.Fatalf("lifecycle status applied witness = %+v, want in-process fenced heal metadata mutation", applied)
+	}
+	healedBead := sessionLifecycleStatusShadowJourneyReadBead(t, cityDir, created.SessionID)
+	healedRevision := sessionLifecycleStatusShadowJourneyRevision(t, cityDir, created.SessionID)
+	if healedRevision != staleRevision+1 {
+		t.Fatalf("stale event revision = %d from %d, want exactly one fenced heal", healedRevision, staleRevision)
+	}
+	wantHealedMetadata := make(map[string]string, len(staleBead.Metadata))
+	for key, value := range staleBead.Metadata {
+		wantHealedMetadata[key] = value
+	}
+	wantHealedMetadata["state"] = "awake"
+	if !reflect.DeepEqual(healedBead.Metadata, wantHealedMetadata) {
+		t.Fatalf("stale event metadata = %+v, want only state heal from %+v", healedBead.Metadata, staleBead.Metadata)
+	}
+	if afterIdentity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, created.SessionName); afterIdentity != beforeIdentity {
+		t.Fatalf("tmux identity changed across stale status heal: before=%q after=%q", beforeIdentity, afterIdentity)
+	}
 }
 
 func sessionLifecycleStatusShadowJourneyReadBead(t *testing.T, cityDir, sessionID string) sessionLifecycleStatusShadowJourneyBead {
@@ -124,6 +188,25 @@ func sessionLifecycleStatusShadowJourneyReadBead(t *testing.T, cityDir, sessionI
 	return bead
 }
 
+func sessionLifecycleStatusShadowJourneyRevision(t *testing.T, cityDir, sessionID string) int64 {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(cityDir, ".gc", "beads.json"))
+	if err != nil {
+		t.Fatalf("read persisted revisions: %v", err)
+	}
+	var persisted struct {
+		Revisions map[string]int64 `json:"revisions"`
+	}
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("decode persisted revisions: %v", err)
+	}
+	revision, ok := persisted.Revisions[sessionID]
+	if !ok {
+		t.Fatalf("persisted revisions missing session %s: %+v", sessionID, persisted.Revisions)
+	}
+	return revision
+}
+
 func sessionLifecycleStatusShadowJourneyLastSeq(trace sessionWaitDependencyShadowJourneyTraceShow) uint64 {
 	var max uint64
 	for _, record := range trace.Records {
@@ -134,7 +217,9 @@ func sessionLifecycleStatusShadowJourneyLastSeq(trace sessionWaitDependencyShado
 	return max
 }
 
-func sessionLifecycleStatusShadowJourneyWaitForStatusWitness(ctx context.Context, cityDir, sessionID string, afterSeq uint64, timeout time.Duration) (sessionWaitDependencyShadowJourneyTraceShow, time.Duration, error) {
+type sessionLifecycleStatusShadowJourneyWitnessFinder func(sessionWaitDependencyShadowJourneyTraceShow, string, uint64) []sessionWaitDependencyShadowJourneyTraceRecord
+
+func sessionLifecycleStatusShadowJourneyWaitForWitness(ctx context.Context, cityDir, sessionID string, afterSeq uint64, timeout time.Duration, label string, find sessionLifecycleStatusShadowJourneyWitnessFinder) (sessionWaitDependencyShadowJourneyTraceShow, time.Duration, error) {
 	started := time.Now()
 	deadline, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -149,22 +234,23 @@ func sessionLifecycleStatusShadowJourneyWaitForStatusWitness(ctx context.Context
 		} else {
 			lastTrace = trace
 			lastErr = nil
-			matches := sessionLifecycleStatusShadowJourneyStatusWitnesses(trace, sessionID, afterSeq)
+			matches := find(trace, sessionID, afterSeq)
 			if len(matches) == 1 {
 				return trace, time.Since(started), nil
 			}
 			if len(matches) > 1 {
-				return trace, time.Since(started), fmt.Errorf("lifecycle status shadow witnesses = %d, want exactly 1: %+v", len(matches), matches)
+				return trace, time.Since(started), fmt.Errorf("lifecycle status %s witnesses = %d, want exactly 1: %+v", label, len(matches), matches)
 			}
 		}
 		select {
 		case <-deadline.Done():
 			return lastTrace, time.Since(started), fmt.Errorf(
-				"waiting for lifecycle status shadow witness for session %s: %w; last error: %v; status records: %+v",
+				"waiting for lifecycle status %s witness for session %s: %w; last error: %v; status records: %+v",
+				label,
 				sessionID,
 				deadline.Err(),
 				lastErr,
-				sessionLifecycleStatusShadowJourneyStatusWitnesses(lastTrace, sessionID, afterSeq),
+				find(lastTrace, sessionID, afterSeq),
 			)
 		case <-ticker.C:
 		}
@@ -175,6 +261,17 @@ func sessionLifecycleStatusShadowJourneyStatusWitnesses(trace sessionWaitDepende
 	var matches []sessionWaitDependencyShadowJourneyTraceRecord
 	for _, record := range trace.Records {
 		if record.Seq > afterSeq && record.SiteCode == "lifecycle.status.shadow" && record.Fields.SessionID == sessionID {
+			matches = append(matches, record)
+		}
+	}
+	return matches
+}
+
+func sessionLifecycleStatusShadowJourneyAppliedWitnesses(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, afterSeq uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
+	var matches []sessionWaitDependencyShadowJourneyTraceRecord
+	for _, record := range trace.Records {
+		if record.Seq > afterSeq && record.SiteCode == "bead_metadata" && record.Fields.SessionID == sessionID &&
+			record.Fields.StatusOutcome == "heal" && record.Fields.StatusReason == "heal" && record.Fields.EffectApplied != nil && *record.Fields.EffectApplied {
 			matches = append(matches, record)
 		}
 	}

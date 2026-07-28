@@ -37,8 +37,8 @@ const (
 	exactSessionLifecycleStatusDispositionPark      exactSessionLifecycleStatusDisposition = "park"
 )
 
-// exactSessionLifecycleStatusResult is an effect-free report from one
-// authoritative exact-key read and at most one runtime observation.
+// exactSessionLifecycleStatusResult is a detached report from one authoritative
+// exact-key read, at most one runtime observation, and an optional fenced heal.
 type exactSessionLifecycleStatusResult struct {
 	Admission            sessionStartAdmission
 	AdmissionVersion     uint64
@@ -52,10 +52,11 @@ type exactSessionLifecycleStatusResult struct {
 	Disposition          exactSessionLifecycleStatusDisposition
 	Reason               exactSessionLifecycleStatusReason
 	Plan                 *sessionLifecycleStatusPlan
+	EffectApplied        bool
 	Error                string
 }
 
-// exactSessionLifecycleStatusObserver receives a detached shadow-only result.
+// exactSessionLifecycleStatusObserver receives a detached exact-status result.
 // Its return value is intentionally absent: it cannot affect start ownership.
 type exactSessionLifecycleStatusObserver func(exactSessionLifecycleStatusResult)
 

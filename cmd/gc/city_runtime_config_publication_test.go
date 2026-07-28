@@ -135,7 +135,7 @@ func TestCityRuntimeReloadRejectsRevisionSupersededDuringPreparation(t *testing.
 	cr.setControllerState(cs)
 
 	oldCfg, oldProvider, oldDops, oldRevision := cr.cfg, cr.sp, cr.dops, cr.configRev
-	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 
 	previousLifecycle := cityRuntimeStartBeadsLifecycle
 	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {

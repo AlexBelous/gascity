@@ -55,7 +55,7 @@ func TestCmdInit_NoArgsNonTerminalRefuses(t *testing.T) {
 	t.Chdir(dir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdInitWithOptions(nil, "", "", "", &stdout, &stderr, true, false)
+	code := cmdInitWithOptions(nil, "", "", &stdout, &stderr, true)
 
 	if code == 0 {
 		t.Fatalf("cmdInitWithOptions code = 0; want non-zero. stdout=%q stderr=%q", stdout.String(), stderr.String())
@@ -86,7 +86,7 @@ func TestCmdInit_ExplicitPathNonTerminalStillWorks(t *testing.T) {
 
 	target := filepath.Join(t.TempDir(), "bright-lights")
 	var stdout, stderr bytes.Buffer
-	code := cmdInitWithOptions([]string{target}, "codex", "", "", &stdout, &stderr, true, false)
+	code := cmdInitWithOptions([]string{target}, "codex", "", &stdout, &stderr, true)
 
 	if code != 0 {
 		t.Fatalf("cmdInitWithOptions code = %d, want 0. stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -116,7 +116,7 @@ func TestCmdInit_NoArgsTerminalUnchanged(t *testing.T) {
 	t.Chdir(dir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdInitWithOptions(nil, "codex", "", "", &stdout, &stderr, true, false)
+	code := cmdInitWithOptions(nil, "codex", "", &stdout, &stderr, true)
 
 	if code != 0 {
 		t.Fatalf("cmdInitWithOptions code = %d, want 0. stdout=%q stderr=%q", code, stdout.String(), stderr.String())

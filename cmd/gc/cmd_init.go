@@ -473,7 +473,7 @@ func initTargetPath(args []string) (string, error) {
 	if len(args) > 0 {
 		return filepath.Abs(args[0])
 	}
-	return os.Getwd()
+	return resolveImplicitCWD()
 }
 
 // cmdInit initializes a new city at the given path (or cwd if no path given).
@@ -481,11 +481,11 @@ func initTargetPath(args []string) (string, error) {
 // Creates the runtime scaffold and city.toml. If the bead provider is "bd", also
 // runs bd init.
 func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, stderr io.Writer) int {
-	return cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, "", stdout, stderr, false, false)
+	return cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, stdout, stderr, false)
 }
 
-func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
-	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
+	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, "", stdout, stderr, skipProviderReadiness, false, false)
 }
 
 func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
@@ -518,7 +518,7 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1104,7 +1104,7 @@ func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverr
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1736,7 +1736,7 @@ func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverri
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

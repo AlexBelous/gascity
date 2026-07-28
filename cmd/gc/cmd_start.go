@@ -573,7 +573,7 @@ func resolveStartDir(args []string) (string, error) {
 	case cityFlag != "":
 		return resolveStartDirRef(cityFlag)
 	default:
-		return os.Getwd()
+		return resolveImplicitCWD()
 	}
 }
 

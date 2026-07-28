@@ -31,9 +31,11 @@ func IsTerminalStatus(status string) bool {
 // whose dep-add must resolve both endpoints in one store's dep table.
 //
 // For backward compatibility with dep-based readers and dep-graph views, TrackItem
-// ALSO adds the legacy `tracks` dep, but ONLY when convoy and item are both resident
-// in store (same-store). A cross-store pair skips the dep — the metadata ref is
-// authoritative and a cross-store dep-add is exactly the failure this replaces.
+// ALSO adds the legacy `tracks` dep, best-effort, when convoy and item appear
+// same-store. A cross-store pair skips or tolerates the dep failure — the metadata
+// ref is authoritative and a cross-store dep-add is exactly the failure this
+// replaces (a federating handle can make a cross-store convoy readable, so
+// Get-success alone cannot prove physical same-store residence).
 // memberStores is variadic so same-store callers pass nothing and behave as before,
 // minus the added metadata stamp.
 func TrackItem(store beads.Store, convoyID, itemID string, memberStores ...beads.Store) error {
@@ -44,11 +46,14 @@ func TrackItem(store beads.Store, convoyID, itemID string, memberStores ...beads
 	if err := owner.SetMetadata(itemID, beadmeta.TrackingConvoyIDMetadataKey, convoyID); err != nil {
 		return fmt.Errorf("stamping tracking convoy %s on item %s: %w", convoyID, itemID, err)
 	}
+	// Legacy same-store compat dep, best-effort. Through a federating handle
+	// (e.g. the cmd/gc policy store whose Get spans work+graph) the convoy can be
+	// READABLE while physically living in another store, and the backend dep-add
+	// then fails to resolve it in one dep table. The ref-by-id above is
+	// authoritative, so a failed dep-add is skipped, never fatal.
 	if owner == store {
 		if _, err := store.Get(convoyID); err == nil {
-			if err := store.DepAdd(convoyID, itemID, TrackingDepType); err != nil {
-				return fmt.Errorf("adding %s dependency %s -> %s: %w", TrackingDepType, convoyID, itemID, err)
-			}
+			_ = store.DepAdd(convoyID, itemID, TrackingDepType) //nolint:errcheck // best-effort legacy compat; ref-by-id is authoritative
 		}
 	}
 	return nil

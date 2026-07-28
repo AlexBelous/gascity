@@ -1,6 +1,7 @@
 package convoy
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -155,5 +156,49 @@ func TestTrackItem_PolicyStoreTopologySkipsCrossStoreDep(t *testing.T) {
 	}
 	if len(members) != 1 || members[0].ID != member.ID {
 		t.Fatalf("Members = %v, want [%s] via metadata", members, member.ID)
+	}
+}
+
+// federatedGetStore simulates a policy-style handle whose Get federates across
+// stores while DepAdd stays on the primary backend: a cross-store convoy is
+// readable, but the dep-add cannot resolve it. TrackItem must treat the legacy
+// dep as best-effort and still succeed on the authoritative ref-by-id.
+type federatedGetStore struct {
+	beads.Store
+	foreign map[string]beads.Bead
+}
+
+func (f *federatedGetStore) Get(id string) (beads.Bead, error) {
+	if b, ok := f.foreign[id]; ok {
+		return b, nil
+	}
+	return f.Store.Get(id)
+}
+
+func (f *federatedGetStore) DepAdd(fromID, toID, depType string) error {
+	if _, ok := f.foreign[fromID]; ok {
+		return fmt.Errorf("resolving issue ID %s: no issue found matching %q", fromID, fromID)
+	}
+	return f.Store.DepAdd(fromID, toID, depType)
+}
+
+func TestTrackItemBestEffortDepThroughFederatingHandle(t *testing.T) {
+	work := beads.NewMemStore()
+	item, err := work.Create(beads.Bead{Title: "work item", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	convoy := beads.Bead{ID: "gcg-777", Title: "graph convoy", Type: "convoy", Status: "open"}
+	store := &federatedGetStore{Store: work, foreign: map[string]beads.Bead{convoy.ID: convoy}}
+
+	if err := TrackItem(store, convoy.ID, item.ID); err != nil {
+		t.Fatalf("TrackItem through federating handle must not fail on the legacy dep: %v", err)
+	}
+	got, err := work.Get(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[beadmeta.TrackingConvoyIDMetadataKey] != convoy.ID {
+		t.Fatalf("ref-by-id not stamped: %v", got.Metadata)
 	}
 }

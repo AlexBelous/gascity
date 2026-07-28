@@ -46,11 +46,23 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	}
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
+
+	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
+	// (city) cwd/env, so resolve the store that actually owns the bead across
+	// the city and every rig, so rig-store closes autoclose their attached
+	// wisps instead of silently no-op'ing (#3411).
+	// Graph arm (gap G37): attached wisps are graph-class post-flip.
+	graphStore := autocloseGraphStore(cityPath)
+	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
+		doWispAutocloseWith(store, beadID, stdout, graphStore)
+		return
+	}
+
 	store, err := openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	doWispAutocloseWith(store, beadID, stdout, autocloseGraphStore(store, cityPath))
+	doWispAutocloseWith(store, beadID, stdout, graphStore)
 }
 
 // doWispAutocloseWith closes any open attached molecule/workflow roots and
@@ -62,35 +74,35 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // hook fires for closed and ephemeral-tier beads that cached or tier-narrow
 // raw reads can miss, and an attachment missed here outlives its parent — the
 // leak class this hook exists to drain.
-//
-// graphStore (optional) is the dedicated graph-class store (cr.graphBeadStore /
-// autocloseGraphStore). A wisp/workflow attachment is ClassGraph: its root and
-// step beads live in the graph store once the graph class is relocated, so the
-// subtree close MUST land there rather than on the (just-closed) parent's work
-// store. The parent work bead and its attachment-pointer reads stay on store;
-// each attachment's subtree is closed on whichever of [store, graphStore]
-// physically owns it (storeref). When graphStore is omitted or equal to store
-// (graph=bd default) every route collapses to store — byte-identical.
-func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphStore ...beads.Store) {
-	graph := autocloseGraphStoreArg(store, graphStore)
-	storeSet := autocloseStoreSet(store, graph)
+// doWispAutocloseWith reads the just-closed bead from store (the store that owns
+// it) and resolves/closes its attached molecule/workflow roots through the
+// graph-class store. A closed work bead in a rig store can own graph-workflow
+// attachments that live in the graph store, so the attachment collection,
+// parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
+// graph store. The graph store is supplied as an optional trailing argument;
+// when omitted it collapses to store, so single-store CLI and test callers
+// behave exactly as before the per-class seam.
+func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphStoreOpt ...beads.Store) {
+	graphStore := store
+	if len(graphStoreOpt) > 0 && graphStoreOpt[0] != nil {
+		graphStore = graphStoreOpt[0]
+	}
 	parent, err := beads.HandlesFor(store).Live.Get(beadID)
 	if err != nil {
 		return
 	}
-	attachments, err := collectAttachedBeads(parent, store, beads.HandlesFor(store).Live)
+	attachments, err := collectAttachedBeads(parent, graphStore, beads.HandlesFor(graphStore).Live)
 	seen := make(map[string]bool, len(attachments))
 	for _, attached := range attachments {
 		seen[attached.ID] = true
 	}
-	attachments = append(attachments, collectInputConvoyWorkflowRoots(graph, store, parent, seen)...)
+	attachments = append(attachments, collectInputConvoyWorkflowRoots(graphStore, store, parent, seen)...)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
-			owner := autocloseOwningStore(attached.ID, storeSet, store)
-			if attachedMoleculeIsParked(owner, attached) {
+			if attachedMoleculeIsParked(graphStore, attached) {
 				continue
 			}
-			closed, err := closeAttachedWispSubtree(owner, attached)
+			closed, err := closeAttachedWispSubtree(graphStore, attached)
 			if err != nil || closed == 0 {
 				continue
 			}
@@ -100,8 +112,7 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	if parent.Status != "closed" || !sourceworkflow.IsWorkflowRoot(parent) {
 		return
 	}
-	parentOwner := autocloseOwningStore(parent.ID, storeSet, store)
-	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(parentOwner, parent.ID, "")
+	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(graphStore, parent.ID, "")
 	if err != nil || closed == 0 {
 		return
 	}
@@ -153,27 +164,19 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) bool {
 // attachedMoleculeIsParked guard, so an orchestrated workflow whose step beads
 // are still in flight stays open and closes later via its workflow-finalize
 // control instead.
-//
-// The synthetic tracking convoy, its tracks dep edge, and the graph.v2 root are
-// all ClassGraph, so once the graph class is relocated they live on the dedicated
-// graph store, not the just-closed parent's work store. Discovery therefore runs
-// against graph (cr.graphBeadStore / autocloseGraphStore). At graph=bd graph ==
-// store, so this is byte-identical to the prior single-store discovery.
-func collectInputConvoyWorkflowRoots(graph beads.Store, store beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
-	if graph == nil {
-		graph = store
-	}
-	// parent is the just-closed WORK bead; in a split store its gc.tracking_convoy_id
-	// ref-by-id lives on the parent in its own (work) store, while the synthetic
-	// convoy it points at is ClassGraph on `graph`. Pass both so the ref resolves
-	// end to end (at graph == store this is byte-identical to the single-store read).
-	convoys, err := convoycore.TrackingConvoysForItem(graph, parent.ID, store)
+// The parent is the just-closed WORK bead: with cross-store tracking the
+// gc.tracking_convoy_id ref-by-id lives on the parent in its own (work) store,
+// while the synthetic convoy it points at is ClassGraph on `store`. workStore is
+// passed as a member store so the ref resolves end to end; at graph == work this
+// is byte-identical to the single-store read.
+func collectInputConvoyWorkflowRoots(store beads.Store, workStore beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
+	convoys, err := convoycore.TrackingConvoysForItem(store, parent.ID, workStore)
 	if err != nil {
 		return nil
 	}
 	var roots []beads.Bead
 	for _, convoy := range convoys {
-		matches, err := graph.ListByMetadata(
+		matches, err := store.ListByMetadata(
 			map[string]string{beadmeta.InputConvoyIDMetadataKey: convoy.ID},
 			0, beads.WithBothTiers,
 		)

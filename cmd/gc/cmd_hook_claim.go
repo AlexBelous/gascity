@@ -1224,6 +1224,26 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	return false
 }
 
+// hookClaimCanonicalRouteMatch reports whether the candidate matches a route
+// target via its CANONICAL gc.routed_to, as opposed to the legacy gc.run_target
+// migration fallback that hookClaimMatchesRoute also accepts. The fast path uses
+// it to preserve the shell probe's canonical-before-migration precedence
+// (poolDemandFirstRowFunctionScript reads canonical routed demand first and only
+// falls through to the run_target migration when none exists), which a single
+// ready-order pass over hookClaimMatchesRoute would otherwise lose.
+func hookClaimCanonicalRouteMatch(candidate beads.Bead, routeTargets []string) bool {
+	routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey])
+	if routedTo == "" {
+		return false
+	}
+	for _, target := range routeTargets {
+		if strings.TrimSpace(target) == routedTo {
+			return true
+		}
+	}
+	return false
+}
+
 func hookClaimRoute(candidate beads.Bead) string {
 	if routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 		return routedTo

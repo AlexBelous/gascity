@@ -298,10 +298,17 @@ func fastPathScopeCandidates(r fastPathReader, scope string, identities, routeTa
 
 	// Tier 3: routed pool demand. Origin-gated exactly as the shell query is; a
 	// non-eligible origin never claims pool demand.
+	//
+	// The shell probe (poolDemandFirstRowFunctionScript) reads CANONICAL
+	// gc.routed_to demand first and only falls through to the legacy
+	// gc.run_target migration when no canonical demand exists. Preserve that
+	// precedence: collect canonical and migration matches separately in ready
+	// order, and return the canonical set whenever it is non-empty so a
+	// migration-only bead earlier in ready order never outranks a canonical one.
 	if !poolDemandOriginEligible(sessionOrigin) {
 		return nil, nil
 	}
-	var pool []beads.Bead
+	var canonical, migration []beads.Bead
 	for _, b := range ready.Body {
 		if strings.TrimSpace(b.Assignee) != "" {
 			continue // pool demand is unassigned work only
@@ -309,11 +316,19 @@ func fastPathScopeCandidates(r fastPathReader, scope string, identities, routeTa
 		if b.Type == epicIssueType {
 			continue // --exclude-type=epic
 		}
-		if hookClaimMatchesRoute(b, routeTargets) {
-			pool = append(pool, b)
+		if !hookClaimMatchesRoute(b, routeTargets) {
+			continue
+		}
+		if hookClaimCanonicalRouteMatch(b, routeTargets) {
+			canonical = append(canonical, b)
+		} else {
+			migration = append(migration, b)
 		}
 	}
-	return pool, nil
+	if len(canonical) > 0 {
+		return canonical, nil
+	}
+	return migration, nil
 }
 
 // hookFastPathScopeOrder returns the store scopes the fast path must read IN

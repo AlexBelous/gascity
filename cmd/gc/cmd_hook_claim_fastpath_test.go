@@ -136,6 +136,53 @@ func TestFastPathTier3RoutedPool(t *testing.T) {
 	}
 }
 
+// runTargetRouted builds a legacy migration candidate: no canonical gc.routed_to,
+// a workflow kind, and a gc.run_target matching the pool. hookClaimMatchesRoute
+// accepts it only through the migration fallback.
+func runTargetRouted(id, target string) beads.Bead {
+	return beads.Bead{
+		ID:   id,
+		Type: "task",
+		Metadata: beads.StringMap{
+			beadmeta.RunTargetMetadataKey: target,
+			beadmeta.KindMetadataKey:      beadmeta.KindWorkflow,
+		},
+	}
+}
+
+// TestFastPathTier3CanonicalRouteBeatsMigration proves the shell probe's
+// canonical-before-migration precedence: a canonical gc.routed_to match must be
+// selected ahead of a legacy gc.run_target migration match even when the
+// migration bead appears EARLIER in ready order. A single ready-order pass would
+// have returned the migration bead first, diverging from
+// poolDemandFirstRowFunctionScript.
+func TestFastPathTier3CanonicalRouteBeatsMigration(t *testing.T) {
+	migrationFirst := runTargetRouted("gc-migration", "pool-x")
+	canonicalLater := routed("gc-canonical", "pool-x")
+	r := &fakeFastPathReader{ready: []beads.Bead{migrationFirst, canonicalLater}}
+	got, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "ephemeral", nil)
+	if err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-canonical" {
+		t.Fatalf("got %+v, want [gc-canonical]: canonical routed_to must outrank an earlier run_target migration bead", got)
+	}
+}
+
+// TestFastPathTier3MigrationWhenNoCanonical proves the migration fallback still
+// serves demand when no canonical routed_to bead exists — matching the shell's
+// fall-through to the run_target probe.
+func TestFastPathTier3MigrationWhenNoCanonical(t *testing.T) {
+	r := &fakeFastPathReader{ready: []beads.Bead{runTargetRouted("gc-migration", "pool-x")}}
+	got, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-x"}, "ephemeral", nil)
+	if err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-migration" {
+		t.Fatalf("got %+v, want [gc-migration]: migration fallback must serve demand when no canonical exists", got)
+	}
+}
+
 // TestFastPathTier3OriginGated proves a non-ephemeral, non-empty session origin
 // disables the pool tier — matching the shell's GC_SESSION_ORIGIN gate — so a
 // user-origin session never claims routed pool demand.

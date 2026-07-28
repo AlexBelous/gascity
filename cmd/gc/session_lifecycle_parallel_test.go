@@ -246,10 +246,16 @@ func TestGatedStartProviderWaitForStartsSurvivesDelayPastOldFixedDeadline(t *tes
 		}
 
 		p := newGatedStartProvider()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			<-time.After(oldFixedDeadline + time.Second)
+			select {
+			case <-time.After(oldFixedDeadline + time.Second):
+			case <-ctx.Done():
+				return
+			}
 			p.startSignals <- "late-start"
 		}()
 

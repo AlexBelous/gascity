@@ -122,3 +122,51 @@ LOCAL_TEST_JOBS=16 CMD_GC_PROCESS_TOTAL=6 ./scripts/test-local-parallel fast
 All non-test-suite commands above were run directly on gate SHA 288dc0de3.
 The fast-suite retry's clean result (9/9 jobs, `EXIT:0`) is the evidence
 cited for gate criterion 3.
+
+## Round 3 (maintainer test-bound)
+
+Rounds 1 and 2 above are retained as written; this section appends the
+changes that landed after them rather than restating them.
+
+**What changed.** After Round 2, the proof test
+`TestGatedStartProviderWaitForStartsSurvivesDelayPastOldFixedDeadline` was
+rewritten to run inside a `testing/synctest` bubble (`179c91bb`, "test(cmd/gc):
+run waitForStarts hangBudget fence under synctest"), and `t.Parallel()` was
+dropped — a bubbled test may not be parallel. A subsequent maintainer
+test-only follow-up gives the bubble's sender goroutine a
+`context.WithCancel` escape, so that on a real regression `waitForStarts`'s
+`t.Fatalf` exits the bubble root and the parked sender returns instead of
+leaving the bubble with a blocked goroutine (which `synctest` reports as
+`panic: deadlock`, aborting the rest of the package binary and taking that
+shard's other results with it). The green path is unchanged.
+
+**Why `synctest`.** As originally written the fence slept a real 4s to step
+past the old 3s literal. TESTING.md (§ hang budgets) is explicit that a
+safety deadline must not set a normal test's duration: these waits "return the
+instant their condition is met, so raising the budget does not slow a passing
+run." A fence that spends 4s of real wall-clock to prove a 60s budget is in
+force violates that in the other direction. Under `synctest` the 4s is fake
+time, so the test proves the same property in ~0s real. Confirmed still
+load-bearing: restoring `time.After(3 * time.Second)` in `waitForStarts` turns
+the test red (`timed out waiting for 1 starts, got []`), so the bubble did not
+retire the fence.
+
+**Criterion 3 evidence, corrected.** The Round 2 local
+`test-local-parallel fast` run cited above was made on `288dc0de3`, which
+predates the `synctest` rewrite and is therefore stale as evidence for what
+merges. It is superseded by green GitHub CI on `179c91bb`. The maintainer
+follow-up on top of that SHA is test-only and was verified with:
+
+```text
+gofmt -l cmd/gc/session_lifecycle_parallel_test.go
+go vet ./cmd/gc/
+go test ./cmd/gc/ -run 'TestGatedStartProviderWaitForStartsSurvivesDelayPastOldFixedDeadline|TestHangBudget' -count=2
+```
+
+**Criterion 7, corrected.** The Round 2 table asserts the branch "touch[es]
+exactly one file … 1 file changed, 25 insertions, 1 deletion." That was true
+of the original red/green pair and is no longer true of the branch: it now
+touches **two** files — `cmd/gc/session_lifecycle_parallel_test.go` (the
+`waitForStarts` deflake, its proof test, and the `synctest` wrap) and this
+gate document. The single-feature-theme finding still holds; only the file
+count was wrong. No production code is touched by any commit on this branch.

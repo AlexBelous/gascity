@@ -1,12 +1,15 @@
 package workdir
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+var knownRoleNames = []string{"builder", "mayor", "deacon", "polecat", "supervisor"}
 
 func demoRigs(cityPath string) []config.Rig {
 	return []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
@@ -270,9 +273,38 @@ func TestValidatePoolWorkDirIsolationErrorDoesNotHardcodeARoleName(t *testing.T)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	for _, role := range []string{"builder", "mayor", "deacon", "polecat", "supervisor"} {
+	for _, role := range knownRoleNames {
 		if strings.Contains(strings.ToLower(err.Error()), role) {
 			t.Fatalf("error message hardcodes role name %q: %v", role, err.Error())
+		}
+	}
+}
+
+// TestPackageSourceDoesNotHardcodeARoleName guards AGENTS.md's ZERO-hardcoded-
+// roles invariant at the source-text level, not just runtime error output: a
+// role name can leak into a doc comment (never exercised by any assertion on
+// behavior) just as easily as into an error message.
+func TestPackageSourceDoesNotHardcodeARoleName(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("globbing package source files: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no source files found — glob pattern is broken")
+	}
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		lower := strings.ToLower(string(src))
+		for _, role := range knownRoleNames {
+			if strings.Contains(lower, role) {
+				t.Errorf("%s hardcodes role name %q (AGENTS.md: \"if a line of Go references a specific role name, it's a bug\")", path, role)
+			}
 		}
 	}
 }

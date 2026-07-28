@@ -140,7 +140,7 @@ func TestFilterReadyByRouteRequiresUnassignedAndSortsOldestFirst(t *testing.T) {
 		{ID: "ga-epic-routed", CreatedAt: older, Type: "epic", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
 		{ID: "ga-other-route", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "other"}},
 	}
-	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher", workflowServeScanLimit)
+	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
 	want := []string{"ga-older", "ga-newer"}
 	if !stringSlicesEqual(beadIDs(got), want) {
 		t.Fatalf("filterReadyByRoute = %#v, want %#v", beadIDs(got), want)
@@ -159,7 +159,7 @@ func TestFilterReadyByRouteExcludesHoldMayorLabel(t *testing.T) {
 		{ID: "ga-routed", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
 		{ID: "ga-held", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{"hold:mayor"}},
 	}
-	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher", workflowServeScanLimit)
+	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
 	want := []string{"ga-routed"}
 	if !stringSlicesEqual(beadIDs(got), want) {
 		t.Fatalf("filterReadyByRoute = %#v, want %#v (hold:mayor bead ga-held must be excluded from automatic pool routing)", beadIDs(got), want)

@@ -47,6 +47,15 @@ const controlReadyQueryMarkerPrefix = "BD_EXPORT_AUTO=false GC_CONTROL_TARGET="
 // controlReadyExcludeType mirrors the shell script's --exclude-type=epic.
 const controlReadyExcludeType = "epic"
 
+// controlReadyHoldMayorLabel gates the routed_to/run_target pool-routing
+// tier: a bead parked on hold:mayor is intentionally waiting on mayor
+// attention and must not be picked up by ambient control-dispatcher
+// discovery (ga-amdg7f). This is the only sanctioned hold label that applies
+// here -- hold:external beads are not control-dispatcher work in the first
+// place, and a bead already targeted by assignee has been deliberately
+// dispatched, so filterReadyByAssignee does not gate on this label.
+const controlReadyHoldMayorLabel = "hold:mayor"
+
 // controlReadyFallbackLimit bounds the single batched bd ready call issued
 // when the cache can't answer. It must be generous enough that per-candidate/
 // per-route filtering in Go (each capped at workflowServeScanLimit) is never
@@ -202,7 +211,7 @@ func filterReadyByAssignee(ready []beads.Bead, assignee string, limit int) []bea
 }
 
 // filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --sort oldest --limit=N`.
-func filterReadyByRoute(ready []beads.Bead, metadataKey, route string, limit int) []beads.Bead {
+func filterReadyByRoute(ready []beads.Bead, metadataKey, route string) []beads.Bead {
 	var matched []beads.Bead
 	for _, b := range ready {
 		if b.Assignee != "" || b.Type == controlReadyExcludeType {
@@ -211,11 +220,14 @@ func filterReadyByRoute(ready []beads.Bead, metadataKey, route string, limit int
 		if b.Metadata[metadataKey] != route {
 			continue
 		}
+		if beadLabelsContain(b.Labels, controlReadyHoldMayorLabel) {
+			continue
+		}
 		matched = append(matched, b)
 	}
 	beads.SortBeads(matched, beads.SortCreatedAsc)
-	if limit > 0 && len(matched) > limit {
-		matched = matched[:limit]
+	if len(matched) > workflowServeScanLimit {
+		matched = matched[:workflowServeScanLimit]
 	}
 	return matched
 }
@@ -256,8 +268,8 @@ func evaluateControlReady(ready []beads.Bead, parsed parsedControlReadyQuery, en
 		groups = append(groups, filterReadyByAssignee(ready, cand, workflowServeScanLimit))
 	}
 	for _, route := range controlReadyRoutes(parsed) {
-		groups = append(groups, filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, route, workflowServeScanLimit))
-		groups = append(groups, filterReadyByRoute(ready, beadmeta.RoutedToMetadataKey, route, workflowServeScanLimit))
+		groups = append(groups, filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, route))
+		groups = append(groups, filterReadyByRoute(ready, beadmeta.RoutedToMetadataKey, route))
 	}
 	return mergeControlReadyGroups(groups...)
 }

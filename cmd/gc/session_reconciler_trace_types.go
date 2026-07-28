@@ -108,6 +108,7 @@ const (
 	TraceSiteLifecycleStartRollback         TraceSiteCode = "reconciler.start.rollback_pending"
 	TraceSiteLifecycleStartFailed           TraceSiteCode = "reconciler.start.failed"
 	TraceSiteLifecycleStartRun              TraceSiteCode = "reconciler.start.execute"
+	TraceSiteWaitDependencyShadow           TraceSiteCode = "lifecycle.wait_dependency.shadow"
 	TraceSiteLifecycleStartPrepare          TraceSiteCode = "lifecycle.start.prepare"
 	TraceSiteLifecycleStartExecute          TraceSiteCode = "lifecycle.start.execute"
 	TraceSiteLifecycleStartCommit           TraceSiteCode = "lifecycle.start.commit"

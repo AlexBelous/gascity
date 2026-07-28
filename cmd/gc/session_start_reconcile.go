@@ -211,6 +211,13 @@ func (s authoritativeSessionStartReadStore) Get(id string) (beads.Bead, error) {
 	return s.live.Get(id)
 }
 
+func (s authoritativeSessionStartReadStore) IDPrefix() string {
+	if prefixed, ok := s.Store.(interface{ IDPrefix() string }); ok {
+		return prefixed.IDPrefix()
+	}
+	return ""
+}
+
 // getAuthoritativeSessionStartRecord reads one persisted session through the
 // typed session front door while bypassing an eventual-consistency cache. An
 // external CLI can commit a wake and send its socket hint before the matching
@@ -229,6 +236,111 @@ func getAuthoritativeSessionStartRecord(store beads.Store, id string) (sessionpk
 		return sessionpkg.Info{}, 0, err
 	}
 	return info, response.Revision, nil
+}
+
+// sessionWaitDependencyEvaluation is the durable wait result observed by the
+// effect-free dependency shadow immediately before lifecycle planning.
+type sessionWaitDependencyEvaluation string
+
+const (
+	sessionWaitDependencyEvaluationReady             sessionWaitDependencyEvaluation = "ready"
+	sessionWaitDependencyEvaluationPending           sessionWaitDependencyEvaluation = "pending"
+	sessionWaitDependencyEvaluationStaleEpoch        sessionWaitDependencyEvaluation = "stale_epoch"
+	sessionWaitDependencyEvaluationClosedSession     sessionWaitDependencyEvaluation = "closed_session"
+	sessionWaitDependencyEvaluationExpired           sessionWaitDependencyEvaluation = "expired"
+	sessionWaitDependencyEvaluationMissingDependency sessionWaitDependencyEvaluation = "missing_dependency"
+	sessionWaitDependencyEvaluationNoopTerminal      sessionWaitDependencyEvaluation = "noop_terminal"
+	sessionWaitDependencyEvaluationParkReadError     sessionWaitDependencyEvaluation = "park_read_error"
+	sessionWaitDependencyEvaluationStaleTarget       sessionWaitDependencyEvaluation = "stale_target"
+)
+
+// getAuthoritativeSessionWait reads a single durable wait through the same
+// live store handle used for exact lifecycle admission.
+func getAuthoritativeSessionWait(store beads.Store, id string) (sessionpkg.WaitInfo, error) {
+	if store == nil {
+		return sessionpkg.WaitInfo{}, fmt.Errorf("session store is nil")
+	}
+	readStore := authoritativeSessionStartReadStore{
+		Store: store,
+		live:  beads.HandlesFor(store).Live,
+	}
+	return sessionFrontDoor(readStore).GetWait(id)
+}
+
+// validateExactSessionWaitDependencyShadow mirrors the read-only portion of
+// the legacy wait ladder for one certified target. It never repairs or
+// advances durable state: legacy reconciliation remains the sole mutator.
+func validateExactSessionWaitDependencyShadow(
+	store beads.Store,
+	target sessionWaitDependencyTarget,
+	dependencies waitDependencyReader,
+	now time.Time,
+) (sessionWaitDependencyEvaluation, error) {
+	wait, err := getAuthoritativeSessionWait(store, target.WaitID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrNotAWait) {
+			return sessionWaitDependencyEvaluationNoopTerminal, nil
+		}
+		return sessionWaitDependencyEvaluationParkReadError, fmt.Errorf("%w: reading dependency wait %q: %w", errSessionWaitDependencyTargetReadUnavailable, target.WaitID, err)
+	}
+	if wait.Status != "open" || sessionpkg.IsWaitTerminalState(wait.State) {
+		return sessionWaitDependencyEvaluationNoopTerminal, nil
+	}
+	if wait.State != waitStatePending {
+		return sessionWaitDependencyEvaluationPending, nil
+	}
+	registration, indexable, err := waitDependencyRegistrationFrom(wait)
+	if err != nil {
+		return sessionWaitDependencyEvaluationParkReadError, fmt.Errorf("validating dependency wait %q: %w", target.WaitID, err)
+	}
+	if !indexable || !sameSessionWaitDependencyTarget(sessionWaitDependencyTarget{
+		WaitID: target.WaitID, SessionID: registration.sessionID, DepIDs: registration.depIDs, DepMode: registration.depMode,
+	}, target) {
+		return sessionWaitDependencyEvaluationStaleTarget, nil
+	}
+	info, _, err := getAuthoritativeSessionStartRecord(store, target.SessionID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			return sessionWaitDependencyEvaluationNoopTerminal, nil
+		}
+		return sessionWaitDependencyEvaluationParkReadError, fmt.Errorf("%w: reading dependency wait session %q: %w", errSessionWaitDependencyTargetReadUnavailable, target.SessionID, err)
+	}
+	if wait.RegisteredEpoch != "" && info.ContinuationEpoch != "" && wait.RegisteredEpoch != info.ContinuationEpoch {
+		return sessionWaitDependencyEvaluationStaleEpoch, nil
+	}
+	if info.Closed {
+		return sessionWaitDependencyEvaluationClosedSession, nil
+	}
+	if wait.ExpiresAt != "" {
+		expiresAt, err := time.Parse(time.RFC3339, wait.ExpiresAt)
+		if err == nil && !expiresAt.After(now) {
+			return sessionWaitDependencyEvaluationExpired, nil
+		}
+	}
+	ready, err := depsWaitReadyDetailedFrom(dependencies, wait)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return sessionWaitDependencyEvaluationMissingDependency, nil
+		}
+		return sessionWaitDependencyEvaluationParkReadError, fmt.Errorf("%w: reading dependency wait %q dependencies: %w", errSessionWaitDependencyTargetReadUnavailable, target.WaitID, err)
+	}
+	if !ready {
+		return sessionWaitDependencyEvaluationPending, nil
+	}
+	return sessionWaitDependencyEvaluationReady, nil
+}
+
+func sessionLifecycleStartSelectionTraceOutcome(outcome sessionLifecycleStartSelectionOutcome) string {
+	switch outcome {
+	case sessionLifecycleStartSelectionNoop:
+		return "noop"
+	case sessionLifecycleStartSelectionPrepare:
+		return "prepare"
+	case sessionLifecycleStartSelectionPark:
+		return "park"
+	default:
+		return ""
+	}
 }
 
 func getAuthoritativeExactSessionStartInfoBeforeWake(

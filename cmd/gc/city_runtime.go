@@ -119,7 +119,7 @@ type CityRuntime struct {
 	lifecycleShadowWorker *sessionLifecycleShadowWorker
 	// waitDependencyEnqueue is an opt-in private shadow sink. It stays nil
 	// until the lifecycle adapter owns a real downstream consumer.
-	waitDependencyEnqueue  func(string, sessionWaitDependencyCause) error
+	waitDependencyEnqueue  func(sessionWaitDependencyTarget, sessionWaitDependencyCause) (retire bool, err error)
 	waitDependencyProducer *sessionWaitDependencyProducer
 
 	sessionWaitDependencyMu                sync.RWMutex

@@ -77,12 +77,24 @@ func normalizeManagedDoltBindHost(host string) string {
 }
 
 const (
-	managedDoltTestModeEnv      = "GC_MANAGED_DOLT_TEST_MODE"
-	managedDoltTestParentPIDEnv = "GC_MANAGED_DOLT_TEST_PARENT_PID"
-	managedDoltTestWatchdogArg  = "__gc-managed-dolt-test-watchdog"
+	managedDoltTestModeEnv          = "GC_MANAGED_DOLT_TEST_MODE"
+	managedDoltTestParentPIDEnv     = "GC_MANAGED_DOLT_TEST_PARENT_PID"
+	managedDoltTestWatchdogArg      = "__gc-managed-dolt-test-watchdog"
+	managedDoltProcessSentinelEnv   = "GC_MANAGED_DOLT_PROCESS"
+	managedDoltProcessSentinelValue = "1"
 	// The first ExtraFiles entry is exposed to the child as fd 3.
 	managedDoltTestParentPipeFD = 3
 )
+
+var managedDoltSessionAttributionEnvKeys = []string{
+	"GC_SESSION_ID",
+	"GC_RUNTIME_EPOCH",
+	"GC_SESSION_NAME",
+	"GC_ALIAS",
+	"GC_AGENT",
+	"GC_TEMPLATE",
+	"GC_SESSION_ORIGIN",
+}
 
 var (
 	managedDoltTestMode                 = isTestBinary
@@ -426,14 +438,46 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	if managedDoltScopeWatchdogEnabled() {
 		return startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath, logFile)
 	}
-	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
+	// Watchdog-free spawn (GC_DOLT_SCOPE_WATCHDOG=0), so this is the only
+	// chance to place the server in the managed-dolt slice.
+	argv, err := wrapManagedDoltArgv([]string{"dolt", "sql-server", "--config", configFile})
+	if err != nil {
+		return managedDoltStartedProcess{}, err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
-	if err := cmd.Start(); err != nil {
-		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", err)
+	// Attempt to hand the server a lower oom_score_adj across the fork, then
+	// put our own back. The watchdog path can simply keep the lowered value because it is a
+	// process dedicated to this one server; the caller here is a
+	// general-purpose gc invocation whose badness must not be permanently
+	// rewritten as a side effect of starting dolt. Restoring immediately after
+	// Start keeps the window to the fork itself — a concurrent fork elsewhere
+	// in this process during that window would also inherit the lowered value,
+	// which is harmless (it only makes a process less attractive to the OOM
+	// killer, never more).
+	// Held across the fork so a concurrent spawn in this process cannot observe
+	// or restore the lowered value mid-sequence.
+	managedDoltOOMScoreAdjMu.Lock()
+	previousOOMScoreAdj, loweredOOMScoreAdj, err := applyManagedDoltOOMScoreAdj()
+	switch {
+	case err != nil:
+		fmt.Fprintf(logFile, "gc: could not clear inherited oom_score_adj (%v); the dolt sql-server keeps the inherited value\n", err) //nolint:errcheck
+	case !loweredOOMScoreAdj:
+		fmt.Fprintf(logFile, "gc: oom_score_adj already at or below %d; the dolt sql-server inherits it unchanged\n", managedDoltOOMScoreAdj) //nolint:errcheck
+	}
+	startErr := cmd.Start()
+	if loweredOOMScoreAdj {
+		if restoreErr := restoreManagedDoltOOMScoreAdj(previousOOMScoreAdj); restoreErr != nil {
+			fmt.Fprintf(logFile, "gc: could not restore this process's oom_score_adj: %v\n", restoreErr) //nolint:errcheck
+		}
+	}
+	managedDoltOOMScoreAdjMu.Unlock()
+	if startErr != nil {
+		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", startErr)
 	}
 	// Snapshot the child's OS-level start identity while it is still definitely
 	// alive — before the reap goroutine below can Wait() it and free the PID.
@@ -1259,6 +1303,11 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 // sql-server we launch.
 func doltServerEnv(cityPath string, parent []string) []string {
 	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
+	for _, key := range managedDoltSessionAttributionEnvKeys {
+		env = removeEnvKey(env, key)
+	}
+	env = removeEnvKey(env, managedDoltProcessSentinelEnv)
+	env = append(env, managedDoltProcessSentinelEnv+"="+managedDoltProcessSentinelValue)
 	if managedDoltDisableEventFlush(cityPath) {
 		// Disable Dolt usage telemetry for managed servers by default. The
 		// `dolt send-metrics` event-flush reporter spawns transient

@@ -134,7 +134,20 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
-	cmd := exec.Command(watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
+	// Place the watchdog in the managed-dolt slice. Placing the watchdog is
+	// enough to place the server: the watchdog spawns dolt by fork, and cgroup
+	// membership is inherited, so both land in the same slice — which is also
+	// what we want operationally, since a watchdog is only useful while it
+	// shares the fate of the server it guards. `systemd-run --scope` execs in
+	// place, so cmd.Process.Pid below is still the watchdog's own PID and the
+	// WatchdogPID bookkeeping is unaffected.
+	argv, err := wrapManagedDoltArgv([]string{
+		watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath,
+	})
+	if err != nil {
+		return managedDoltStartedProcess{}, err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()

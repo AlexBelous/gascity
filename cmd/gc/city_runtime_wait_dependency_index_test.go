@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -119,6 +121,263 @@ func TestSessionWaitDependencyShadowInstallsAndReplacesObservedCensus(t *testing
 	}
 }
 
+func TestSessionWaitDependencyProducerStartupAllTargetsThenSteadyWaitExact(t *testing.T) {
+	backing := beads.NewMemStore()
+	depA, err := backing.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Close(depA.ID); err != nil {
+		t.Fatal(err)
+	}
+	depB, err := backing.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Close(depB.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitA, err := backing.Create(sessionWaitShadowBead("session-a", depA.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = backing.Create(sessionWaitShadowBead("session-b", depB.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{cfg: &config.City{}, cityBeadStore: cache, pokeCh: make(chan struct{}, 8)}
+	admissions := make(chan string, 4)
+	cr := &CityRuntime{cs: cs, cfg: &config.City{}, logPrefix: "test", stderr: io.Discard, waitDependencyEnqueue: func(id string, _ sessionWaitDependencyCause) error { admissions <- id; return nil }}
+	cr.startSessionWaitDependencyShadow()
+	t.Cleanup(func() { cs.stopSessionWaitDependencyShadowAdmission(); cr.stopSessionWaitDependencyProducer() })
+	got := []string{
+		receiveString(t, admissions, "first startup admission"),
+		receiveString(t, admissions, "second startup admission"),
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"session-a", "session-b"}) {
+		t.Fatalf("startup=%v", got)
+	}
+	if err := backing.Update(waitA.ID, beads.UpdateOpts{Metadata: map[string]string{"note": "changed"}}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := backing.Get(waitA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadUpdated, changed))
+	if got := receiveString(t, admissions, "steady exact admission"); got != "session-a" {
+		t.Fatalf("steady=%q", got)
+	}
+	select {
+	case extra := <-admissions:
+		t.Fatalf("unexpected steady admission %q", extra)
+	default:
+	}
+}
+
+func TestSessionWaitDependencyProducerStartupCensusWaitsForFirstSuccessfulInstall(t *testing.T) {
+	backing := beads.NewMemStore()
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		dependency, err := backing.Create(beads.Bead{Status: "closed"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := backing.Close(dependency.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backing.Create(sessionWaitShadowBead(sessionID, dependency.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	cs := &controllerState{cfg: &config.City{}, cityBeadStore: cache, pokeCh: make(chan struct{}, 2)}
+	admissions := make(chan string, 3)
+	cr := &CityRuntime{cs: cs, cfg: &config.City{}, stderr: io.Discard, waitDependencyEnqueue: func(id string, _ sessionWaitDependencyCause) error { admissions <- id; return nil }}
+	cr.startSessionWaitDependencyShadow()
+	t.Cleanup(func() { cs.stopSessionWaitDependencyShadowAdmission(); cr.stopSessionWaitDependencyProducer() })
+	select {
+	case got := <-admissions:
+		t.Fatalf("admitted before initial cache install: %q", got)
+	default:
+	}
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadUpdated, beads.Bead{ID: "unrelated", Type: "task", Status: "closed"}))
+	got := []string{receiveString(t, admissions, "first delayed startup admission"), receiveString(t, admissions, "second delayed startup admission")}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"session-a", "session-b"}) {
+		t.Fatalf("delayed startup admissions = %v", got)
+	}
+	select {
+	case extra := <-admissions:
+		t.Fatalf("startup census replayed: %q", extra)
+	default:
+	}
+}
+
+func TestSessionWaitDependencyProducerRejectedPublicationKeepsStartupCensusDebt(t *testing.T) {
+	store := beads.NewMemStore()
+	dependency, err := store.Create(beads.Bead{Status: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(dependency.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(sessionWaitShadowBead("session-a", dependency.ID)); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStoreForTest(store, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	census, index, err := buildObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissions := make(chan string, 1)
+	cr := &CityRuntime{
+		cfg:                                    &config.City{},
+		stderr:                                 io.Discard,
+		standaloneCityStore:                    store,
+		sessionWaitDependencyIndex:             index,
+		sessionWaitDependencyIndexGeneration:   1,
+		sessionWaitDependencyStartupCensusOwed: true,
+		waitDependencyEnqueue: func(id string, _ sessionWaitDependencyCause) error {
+			admissions <- id
+			return nil
+		},
+	}
+	if !cr.startSessionWaitDependencyProducer() {
+		t.Fatal("producer did not start")
+	}
+	t.Cleanup(cr.stopSessionWaitDependencyProducer)
+
+	cr.submitSessionWaitDependencyStartupCensus()
+	if got := receiveString(t, admissions, "initial startup census"); got != "session-a" {
+		t.Fatalf("initial admission = %q, want session-a", got)
+	}
+	if cr.sessionWaitDependencyStartupCensusOwed {
+		t.Fatal("initial census retained startup debt")
+	}
+	if published, err := cr.publishRejectedSessionWaitDependencyCensus(census); err != nil || !published {
+		t.Fatalf("publish rejected census = %v, %v", published, err)
+	}
+	if !cr.sessionWaitDependencyStartupCensusOwed {
+		t.Fatal("rejected publication did not re-arm startup debt")
+	}
+	cr.submitSessionWaitDependencyStartupCensus()
+	select {
+	case got := <-admissions:
+		t.Fatalf("rejected census admitted %q", got)
+	default:
+	}
+	if !cr.sessionWaitDependencyStartupCensusOwed {
+		t.Fatal("rejected census cleared startup debt")
+	}
+
+	if published, err := cr.publishObservedSessionWaitDependencyIndex(census, index); err != nil || !published {
+		t.Fatalf("publish recovered census = %v, %v", published, err)
+	}
+	cr.submitSessionWaitDependencyStartupCensus()
+	if got := receiveString(t, admissions, "recovered startup census"); got != "session-a" {
+		t.Fatalf("recovered admission = %q, want session-a", got)
+	}
+	if cr.sessionWaitDependencyStartupCensusOwed {
+		t.Fatal("successful census retained startup debt")
+	}
+}
+
+func TestSessionWaitDependencyProducerDependencyEventAdmitsOnlyExactSession(t *testing.T) {
+	backing := beads.NewMemStore()
+	depA, err := backing.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	depB, err := backing.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backing.Create(sessionWaitShadowBead("session-a", depA.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backing.Create(sessionWaitShadowBead("session-b", depB.ID)); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{cfg: &config.City{}, cityBeadStore: cache, pokeCh: make(chan struct{}, 2)}
+	admissions := make(chan string, 2)
+	cr := &CityRuntime{cs: cs, cfg: &config.City{}, stderr: io.Discard, waitDependencyEnqueue: func(id string, _ sessionWaitDependencyCause) error { admissions <- id; return nil }}
+	cr.startSessionWaitDependencyShadow()
+	t.Cleanup(func() { cs.stopSessionWaitDependencyShadowAdmission(); cr.stopSessionWaitDependencyProducer() })
+	if err := backing.Close(depA.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := backing.Get(depA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadClosed, closed))
+	if got := receiveString(t, admissions, "exact dependency admission"); got != "session-a" {
+		t.Fatalf("admitted session = %q, want session-a", got)
+	}
+	select {
+	case extra := <-admissions:
+		t.Fatalf("unrelated dependency admitted %q", extra)
+	default:
+	}
+}
+
+func TestSessionWaitDependencyRegistrationRecheckRecoversDependencyEventBeforePublication(t *testing.T) {
+	backing := beads.NewMemStore()
+	dep, err := backing.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{cfg: &config.City{}, cityBeadStore: cache, pokeCh: make(chan struct{}, 1)}
+	sink := make(chan string, 1)
+	cr := &CityRuntime{cs: cs, cfg: &config.City{}, stderr: io.Discard, waitDependencyEnqueue: func(id string, _ sessionWaitDependencyCause) error { sink <- id; return nil }}
+	cr.startSessionWaitDependencyShadow()
+	t.Cleanup(func() { cs.stopSessionWaitDependencyShadowAdmission(); cr.stopSessionWaitDependencyProducer() })
+
+	if err := backing.Close(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := backing.Get(dep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The dependency transition arrives while the authoritative index is empty.
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadClosed, closed))
+	select {
+	case got := <-sink:
+		t.Fatalf("pre-publication sink=%q", got)
+	default:
+	}
+
+	wait, err := backing.Create(sessionWaitShadowBead("session-a", dep.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadCreated, wait))
+	if got := receiveString(t, sink, "registration recheck"); got != "session-a" {
+		t.Fatalf("sink=%q, want session-a for wait %q", got, wait.ID)
+	}
+}
+
 func TestSessionWaitDependencyShadowPreservesPolicyTierAndPerformsNoBackingEffects(t *testing.T) {
 	recording := beadstest.NewRecordingStore(nil)
 	durable, err := recording.Create(sessionWaitShadowBead("session-b", "dep-shared"))
@@ -204,16 +463,16 @@ func TestSessionWaitDependencyShadowRejectsCappedCensusWithoutReplacingIndex(t *
 	}
 	cityRuntime := &CityRuntime{}
 	installSessionWaitShadowSentinel(t, cityRuntime)
+	sentinel := sessionWaitShadowIndex(cityRuntime)
 
 	installed, err := cityRuntime.installObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
 	if installed || !beads.IsLookupLimitError(err) {
 		t.Fatalf("install capped census = %v, %v; want false, LookupLimitError", installed, err)
 	}
-	assertSessionWaitDependencyIndexSessions(
-		t,
-		cityRuntime.sessionWaitDependencySessions("sentinel-dependency"),
-		[]string{"sentinel-session"},
-	)
+	if got := sessionWaitShadowIndex(cityRuntime); got != sentinel {
+		t.Fatal("capped census replaced the retained index")
+	}
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("sentinel-dependency"), nil)
 	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-overflow"), nil)
 	if id := rows[len(rows)-1].ID; !cityRuntime.sessionWaitDependencyContainsWait(id) {
 		t.Fatalf("capped census did not retain overflow wait identity %q", id)
@@ -231,16 +490,16 @@ func TestSessionWaitDependencyShadowRejectsMalformedActiveCensusWithoutReplacing
 	}
 	cityRuntime := &CityRuntime{}
 	installSessionWaitShadowSentinel(t, cityRuntime)
+	sentinel := sessionWaitShadowIndex(cityRuntime)
 
 	installed, err := cityRuntime.installObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
 	if installed || err == nil || !strings.Contains(err.Error(), `unsupported status "in_progress"`) {
 		t.Fatalf("install malformed census = %v, %v; want false and unsupported-status error", installed, err)
 	}
-	assertSessionWaitDependencyIndexSessions(
-		t,
-		cityRuntime.sessionWaitDependencySessions("sentinel-dependency"),
-		[]string{"sentinel-session"},
-	)
+	if got := sessionWaitShadowIndex(cityRuntime); got != sentinel {
+		t.Fatal("malformed census replaced the retained index")
+	}
+	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("sentinel-dependency"), nil)
 	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("candidate-dependency"), nil)
 }
 
@@ -301,7 +560,7 @@ func TestSessionWaitDependencyShadowStartupErrorsAreBestEffort(t *testing.T) {
 	assertSessionWaitDependencyIndexSessions(
 		t,
 		cityRuntime.sessionWaitDependencySessions("sentinel-dependency"),
-		[]string{"sentinel-session"},
+		nil,
 	)
 
 	stderr.Reset()
@@ -489,7 +748,7 @@ func TestSessionWaitDependencyShadowDeterministicErrorAwaitsRelevantChange(t *te
 	assertSessionWaitDependencyIndexSessions(
 		t,
 		cityRuntime.sessionWaitDependencySessions("candidate-dependency"),
-		[]string{"candidate-session"},
+		nil,
 	)
 	for index := 0; index < 3; index++ {
 		cs.admitSessionWaitDependencyShadowEvent(beadSnapshotEvent(t, events.BeadUpdated, beads.Bead{
@@ -517,7 +776,7 @@ func TestSessionWaitDependencyShadowDeterministicErrorAwaitsRelevantChange(t *te
 	assertSessionWaitDependencyIndexSessions(
 		t,
 		cityRuntime.sessionWaitDependencySessions("candidate-dependency"),
-		[]string{"candidate-session"},
+		nil,
 	)
 	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("repaired-dependency"), nil)
 
@@ -582,7 +841,7 @@ func TestSessionWaitDependencyShadowDeterministicBlockerIdentityRemovalRearms(t 
 	assertSessionWaitDependencyIndexSessions(
 		t,
 		cityRuntime.sessionWaitDependencySessions("dep-old"),
-		[]string{"indexed-session"},
+		nil,
 	)
 	assertSessionWaitDependencyIndexSessions(t, cityRuntime.sessionWaitDependencySessions("dep-new"), nil)
 

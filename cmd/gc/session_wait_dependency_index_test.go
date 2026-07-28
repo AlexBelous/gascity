@@ -56,6 +56,31 @@ func TestSessionWaitDependencyIndex_IndexesExactDependenciesDeterministically(t 
 	assertSessionWaitDependencyIndexSessions(t, index.SessionsForDependency("dep-y"), []string{"session-a", "session-b"})
 }
 
+func TestSessionWaitDependencyIndex_TargetSnapshotsAreDetachedAndSorted(t *testing.T) {
+	index := newSessionWaitDependencyIndex()
+	for _, wait := range []sessionpkg.WaitInfo{
+		{ID: "wait-b", SessionID: "session-b", Status: "open", Kind: "deps", State: waitStatePending, DepMode: "all", DepIDs: []string{"dep-a", "dep-b"}},
+		{ID: "wait-a", SessionID: "session-a", Status: "open", Kind: "deps", State: waitStatePending, DepMode: "any", DepIDs: []string{"dep-a"}},
+	} {
+		if err := index.Replace(wait); err != nil {
+			t.Fatal(err)
+		}
+	}
+	targets := index.TargetsForDependency("dep-a")
+	if got := []string{targets[0].WaitID, targets[1].WaitID}; !reflect.DeepEqual(got, []string{"wait-a", "wait-b"}) {
+		t.Fatalf("targets=%v", got)
+	}
+	targets[0].DepIDs[0] = "mutated"
+	again, ok := index.TargetForWait("wait-a")
+	if !ok || again.DepIDs[0] != "dep-a" {
+		t.Fatalf("target was not detached: %+v", again)
+	}
+	all := index.AllTargets()
+	if got := []string{all[0].WaitID, all[1].WaitID}; !reflect.DeepEqual(got, []string{"wait-a", "wait-b"}) {
+		t.Fatalf("all=%v", got)
+	}
+}
+
 func TestSessionWaitDependencyIndex_ReplaceRemovesOnlyPriorWaitEdges(t *testing.T) {
 	index := newSessionWaitDependencyIndex()
 	for _, wait := range []sessionpkg.WaitInfo{

@@ -140,10 +140,13 @@ type controllerState struct {
 	// pending; the callback rebuilds from the observed cache.
 	sessionWaitShadowAdmission         func() sessionWaitShadowRefreshResult
 	sessionWaitShadowMayContain        func(string) bool
+	sessionWaitShadowProducerAdmission func(sessionWaitDependencyProducerRequest)
 	sessionWaitShadowAdmissionStopping bool
 	sessionWaitShadowAdmissionWG       sync.WaitGroup
 	sessionWaitShadowPending           bool
 	sessionWaitShadowGeneration        uint64
+	sessionWaitShadowPendingRequests   map[string]sessionWaitDependencyProducerRequest
+	sessionWaitShadowPendingOverflow   bool
 
 	// sessionStartLeaseMu fences state swaps against exact-start work that has
 	// captured the previous generation. New leases fail fast while a swap is

@@ -117,9 +117,15 @@ type CityRuntime struct {
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 	lifecycleShadowWorker *sessionLifecycleShadowWorker
+	// waitDependencyEnqueue is an opt-in private shadow sink. It stays nil
+	// until the lifecycle adapter owns a real downstream consumer.
+	waitDependencyEnqueue  func(string, sessionWaitDependencyCause) error
+	waitDependencyProducer *sessionWaitDependencyProducer
 
-	sessionWaitDependencyMu    sync.RWMutex
-	sessionWaitDependencyIndex *sessionWaitDependencyIndex
+	sessionWaitDependencyMu                sync.RWMutex
+	sessionWaitDependencyIndex             *sessionWaitDependencyIndex
+	sessionWaitDependencyIndexGeneration   uint64
+	sessionWaitDependencyStartupCensusOwed bool
 	// Rejected-census IDs come from the bounded lookup census and let a
 	// wait that repairs itself by losing wait identity re-arm convergence.
 	sessionWaitDependencyRejectedCensusIDs map[string]struct{}
@@ -3630,6 +3636,7 @@ func (cr *CityRuntime) shutdown() {
 		if cr.cs != nil {
 			cr.cs.stopSessionWaitDependencyShadowAdmission()
 		}
+		cr.stopSessionWaitDependencyProducer()
 		cr.stopSessionStartController()
 		cr.stopSessionLifecycleShadowWorker()
 		asyncStartsDrained := cr.waitForAsyncStarts()

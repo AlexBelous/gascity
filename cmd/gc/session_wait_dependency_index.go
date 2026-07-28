@@ -9,6 +9,16 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
+// sessionWaitDependencyTarget is the detached durable identity needed to
+// reread one dependency wait. It contains no store or runtime capability.
+type sessionWaitDependencyTarget struct {
+	WaitID     string
+	SessionID  string
+	DepIDs     []string
+	DepMode    string
+	generation uint64
+}
+
 // sessionWaitDependencyIndex maps each pending dependency wait to the session
 // it should wake when an exact dependency becomes ready.
 type sessionWaitDependencyIndex struct {
@@ -20,6 +30,72 @@ type sessionWaitDependencyIndex struct {
 type waitDependencyRegistration struct {
 	sessionID string
 	depIDs    []string
+	depMode   string
+}
+
+// TargetsForDependency returns detached exact wait targets for one dependency.
+// The returned order is stable by wait ID so a caller can schedule without
+// inheriting map iteration nondeterminism.
+func (i *sessionWaitDependencyIndex) TargetsForDependency(depID string) []sessionWaitDependencyTarget {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	edges := i.byDependency[depID]
+	if len(edges) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(edges))
+	for waitID := range edges {
+		ids = append(ids, waitID)
+	}
+	sort.Strings(ids)
+	return i.targetsLocked(ids)
+}
+
+// TargetForWait returns a detached exact target when the wait is currently
+// indexed.
+func (i *sessionWaitDependencyIndex) TargetForWait(waitID string) (sessionWaitDependencyTarget, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	registration, ok := i.byWaitID[waitID]
+	if !ok {
+		return sessionWaitDependencyTarget{}, false
+	}
+	return sessionWaitDependencyTarget{
+		WaitID:    waitID,
+		SessionID: registration.sessionID,
+		DepIDs:    append([]string(nil), registration.depIDs...),
+		DepMode:   registration.depMode,
+	}, true
+}
+
+// AllTargets returns a detached, canonically ordered snapshot of the index.
+func (i *sessionWaitDependencyIndex) AllTargets() []sessionWaitDependencyTarget {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	ids := make([]string, 0, len(i.byWaitID))
+	for waitID := range i.byWaitID {
+		ids = append(ids, waitID)
+	}
+	sort.Strings(ids)
+	return i.targetsLocked(ids)
+}
+
+func (i *sessionWaitDependencyIndex) targetsLocked(ids []string) []sessionWaitDependencyTarget {
+	targets := make([]sessionWaitDependencyTarget, 0, len(ids))
+	for _, waitID := range ids {
+		registration, ok := i.byWaitID[waitID]
+		if !ok {
+			continue
+		}
+		targets = append(targets, sessionWaitDependencyTarget{
+			WaitID:    waitID,
+			SessionID: registration.sessionID,
+			DepIDs:    append([]string(nil), registration.depIDs...),
+			DepMode:   registration.depMode,
+		})
+	}
+	return targets
 }
 
 func newSessionWaitDependencyIndex() *sessionWaitDependencyIndex {
@@ -163,7 +239,8 @@ func waitDependencyRegistrationFrom(wait sessionpkg.WaitInfo) (waitDependencyReg
 		seen[depID] = struct{}{}
 		depIDs = append(depIDs, depID)
 	}
-	return waitDependencyRegistration{sessionID: wait.SessionID, depIDs: depIDs}, true, nil
+	sort.Strings(depIDs)
+	return waitDependencyRegistration{sessionID: wait.SessionID, depIDs: depIDs, depMode: wait.DepMode}, true, nil
 }
 
 func validateWaitDependencyIndexID(field, value string) error {

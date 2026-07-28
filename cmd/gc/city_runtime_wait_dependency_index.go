@@ -3,9 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+var errSessionWaitDependencyStaleCertification = errors.New("wait dependency target is no longer certified")
 
 // buildObservedSessionWaitDependencyIndex builds a private candidate from one
 // observed census without changing runtime state.
@@ -24,11 +28,15 @@ func buildObservedSessionWaitDependencyIndex(store beads.SessionStore) (observed
 // publishObservedSessionWaitDependencyIndex replaces the runtime's private
 // index only while the cache observation that supplied its census is current.
 func (cr *CityRuntime) publishObservedSessionWaitDependencyIndex(census observedSessionWaitCensus, candidate *sessionWaitDependencyIndex) (bool, error) {
+	if candidate == nil {
+		return false, fmt.Errorf("publishing session wait dependency index: candidate is nil")
+	}
 	return census.cache.WithCurrentObservation(census.observation, func() error {
 		cr.sessionWaitDependencyMu.Lock()
+		defer cr.sessionWaitDependencyMu.Unlock()
+		cr.sessionWaitDependencyIndexGeneration++
 		cr.sessionWaitDependencyIndex = candidate
 		cr.sessionWaitDependencyRejectedCensusIDs = nil
-		cr.sessionWaitDependencyMu.Unlock()
 		return nil
 	})
 }
@@ -62,8 +70,10 @@ func (cr *CityRuntime) publishRejectedSessionWaitDependencyCensus(census observe
 	}
 	return census.cache.WithCurrentObservation(census.observation, func() error {
 		cr.sessionWaitDependencyMu.Lock()
+		defer cr.sessionWaitDependencyMu.Unlock()
+		cr.sessionWaitDependencyIndexGeneration++
 		cr.sessionWaitDependencyRejectedCensusIDs = ids
-		cr.sessionWaitDependencyMu.Unlock()
+		cr.sessionWaitDependencyStartupCensusOwed = true
 		return nil
 	})
 }
@@ -72,12 +82,21 @@ func (cr *CityRuntime) publishRejectedSessionWaitDependencyCensus(census observe
 // requesting the initial census. Cache unavailability and stale observations
 // remain pending; deterministic census errors wait for a relevant wait change.
 func (cr *CityRuntime) startSessionWaitDependencyShadow() {
+	cr.sessionWaitDependencyMu.Lock()
+	cr.sessionWaitDependencyStartupCensusOwed = true
+	cr.sessionWaitDependencyMu.Unlock()
+	producerStarted := cr.startSessionWaitDependencyProducer()
 	armed := false
 	if cr.cs != nil {
-		if err := cr.cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
+		var producerAdmission func(sessionWaitDependencyProducerRequest)
+		if producerStarted {
+			producerAdmission = cr.submitSessionWaitDependencyProducerRequest
+		}
+		if err := cr.cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
 			installed, refreshErr := cr.installObservedSessionWaitDependencyIndex(cr.sessionsBeadStore())
 			switch {
 			case installed:
+				cr.submitSessionWaitDependencyStartupCensus()
 				return sessionWaitShadowConverged
 			case refreshErr == nil || errors.Is(refreshErr, beads.ErrCacheUnavailable):
 				return sessionWaitShadowRetry
@@ -85,19 +104,209 @@ func (cr *CityRuntime) startSessionWaitDependencyShadow() {
 				fmt.Fprintf(cr.stderr, "%s: session-wait shadow refresh: %v\n", cr.logPrefix, refreshErr) //nolint:errcheck
 				return sessionWaitShadowAwaitRelevant
 			}
-		}, cr.sessionWaitDependencyContainsWait); err != nil {
+		}, cr.sessionWaitDependencyContainsWait, producerAdmission); err != nil {
+			if producerStarted {
+				cr.stopSessionWaitDependencyProducer()
+			}
 			fmt.Fprintf(cr.stderr, "%s: session-wait shadow admission: %v\n", cr.logPrefix, err) //nolint:errcheck
 		} else {
 			armed = true
-			cr.cs.requestSessionWaitDependencyShadowRefreshForBead(beads.Bead{}, true)
+			cr.submitSessionWaitDependencyProducerRequests(cr.cs.requestSessionWaitDependencyShadowRefreshForBead(beads.Bead{}, true))
 		}
 	}
 	if !armed {
-		if _, err := cr.installObservedSessionWaitDependencyIndex(cr.sessionsBeadStore()); err != nil &&
+		installed, err := cr.installObservedSessionWaitDependencyIndex(cr.sessionsBeadStore())
+		if err != nil &&
 			!errors.Is(err, beads.ErrCacheUnavailable) {
 			fmt.Fprintf(cr.stderr, "%s: session-wait shadow index: %v\n", cr.logPrefix, err) //nolint:errcheck // inert best-effort shadow setup
 		}
+		if installed {
+			cr.submitSessionWaitDependencyStartupCensus()
+		}
 	}
+}
+
+func (cr *CityRuntime) submitSessionWaitDependencyStartupCensus() {
+	cr.sessionWaitDependencyMu.Lock()
+	if !cr.sessionWaitDependencyStartupCensusOwed ||
+		cr.sessionWaitDependencyIndex == nil ||
+		cr.sessionWaitDependencyRejectedCensusIDs != nil {
+		cr.sessionWaitDependencyMu.Unlock()
+		return
+	}
+	targets := cr.sessionWaitDependencyIndex.AllTargets()
+	for n := range targets {
+		targets[n].generation = cr.sessionWaitDependencyIndexGeneration
+	}
+	cr.sessionWaitDependencyStartupCensusOwed = false
+	cr.sessionWaitDependencyMu.Unlock()
+	cr.submitSessionWaitDependencyTargets(targets, sessionWaitDependencyCauseRegistration)
+}
+
+func (cr *CityRuntime) startSessionWaitDependencyProducer() bool {
+	if cr == nil || cr.waitDependencyEnqueue == nil || cr.waitDependencyProducer != nil {
+		return false
+	}
+	producer, err := newSessionWaitDependencyProducer(sessionWaitDependencyProducerOptions{
+		MaxDistinct: sessionpkg.SessionWaitLookupLimit,
+		TargetForWait: func(waitID string) (sessionWaitDependencyTarget, bool) {
+			return cr.sessionWaitDependencyTarget(waitID)
+		},
+		Dependencies: func() waitDependencyReader {
+			return newWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores())
+		},
+		EnqueueSession: func(plan sessionWaitDependencyPlan, cause sessionWaitDependencyCause) error {
+			cr.sessionWaitDependencyMu.RLock()
+			defer cr.sessionWaitDependencyMu.RUnlock()
+			if !cr.sessionWaitDependencyTargetCertifiedLocked(plan.Target) {
+				return fmt.Errorf("%w: %s", errSessionWaitDependencyStaleCertification, plan.Target.WaitID)
+			}
+			return cr.waitDependencyEnqueue(plan.Target.SessionID, cause)
+		},
+		ReportError: func(err error) {
+			fmt.Fprintf(cr.stderr, "%s: wait dependency producer: %v\n", cr.logPrefix, err) //nolint:errcheck
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: wait dependency producer disabled: %v\n", cr.logPrefix, err) //nolint:errcheck
+		return false
+	}
+	if err := producer.Start(); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: wait dependency producer disabled: %v\n", cr.logPrefix, err) //nolint:errcheck
+		return false
+	}
+	cr.sessionWaitDependencyMu.Lock()
+	cr.waitDependencyProducer = producer
+	cr.sessionWaitDependencyMu.Unlock()
+	return true
+}
+
+func (cr *CityRuntime) stopSessionWaitDependencyProducer() {
+	if cr == nil {
+		return
+	}
+	cr.sessionWaitDependencyMu.Lock()
+	producer := cr.waitDependencyProducer
+	cr.waitDependencyProducer = nil
+	cr.sessionWaitDependencyMu.Unlock()
+	if producer != nil {
+		producer.Stop()
+	}
+}
+
+func (cr *CityRuntime) sessionWaitDependencyTarget(waitID string) (sessionWaitDependencyTarget, bool) {
+	cr.sessionWaitDependencyMu.RLock()
+	index := cr.sessionWaitDependencyIndex
+	generation := cr.sessionWaitDependencyIndexGeneration
+	rejected := cr.sessionWaitDependencyRejectedCensusIDs != nil
+	cr.sessionWaitDependencyMu.RUnlock()
+	if rejected || index == nil {
+		return sessionWaitDependencyTarget{}, false
+	}
+	target, ok := index.TargetForWait(waitID)
+	target.generation = generation
+	return target, ok
+}
+
+func (cr *CityRuntime) sessionWaitDependencyAllTargets() []sessionWaitDependencyTarget {
+	cr.sessionWaitDependencyMu.RLock()
+	index, generation := cr.sessionWaitDependencyIndex, cr.sessionWaitDependencyIndexGeneration
+	rejected := cr.sessionWaitDependencyRejectedCensusIDs != nil
+	cr.sessionWaitDependencyMu.RUnlock()
+	if index == nil || rejected {
+		return nil
+	}
+	targets := index.AllTargets()
+	for n := range targets {
+		targets[n].generation = generation
+	}
+	return targets
+}
+
+func (cr *CityRuntime) sessionWaitDependencyTargetsForDependency(depID string) []sessionWaitDependencyTarget {
+	cr.sessionWaitDependencyMu.RLock()
+	index, generation := cr.sessionWaitDependencyIndex, cr.sessionWaitDependencyIndexGeneration
+	rejected := cr.sessionWaitDependencyRejectedCensusIDs != nil
+	cr.sessionWaitDependencyMu.RUnlock()
+	if index == nil || rejected {
+		return nil
+	}
+	targets := index.TargetsForDependency(depID)
+	for n := range targets {
+		targets[n].generation = generation
+	}
+	return targets
+}
+
+func (cr *CityRuntime) submitSessionWaitDependencyTargets(targets []sessionWaitDependencyTarget, cause sessionWaitDependencyCause) {
+	cr.sessionWaitDependencyMu.RLock()
+	producer := cr.waitDependencyProducer
+	cr.sessionWaitDependencyMu.RUnlock()
+	if producer == nil {
+		return
+	}
+	for _, target := range targets {
+		if err := producer.Admit(target, cause); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: wait dependency producer admission: %v\n", cr.logPrefix, err) //nolint:errcheck
+		}
+	}
+}
+
+func (cr *CityRuntime) submitSessionWaitDependencyProducerRequest(request sessionWaitDependencyProducerRequest) {
+	type targetAdmission struct {
+		target sessionWaitDependencyTarget
+		cause  sessionWaitDependencyCause
+	}
+	byWaitID := make(map[string]targetAdmission)
+	add := func(targets []sessionWaitDependencyTarget, cause sessionWaitDependencyCause) {
+		for _, target := range targets {
+			current, exists := byWaitID[target.WaitID]
+			if !exists || target.generation > current.target.generation {
+				byWaitID[target.WaitID] = targetAdmission{target: target, cause: cause}
+				continue
+			}
+			if target.generation == current.target.generation {
+				current.cause = mergeSessionWaitDependencyCause(current.cause, cause)
+				byWaitID[target.WaitID] = current
+			}
+		}
+	}
+	if request.fullCensus {
+		add(cr.sessionWaitDependencyAllTargets(), sessionWaitDependencyCauseRegistration)
+	}
+	if request.waitHint {
+		if target, ok := cr.sessionWaitDependencyTarget(request.beadID); ok {
+			add([]sessionWaitDependencyTarget{target}, sessionWaitDependencyCauseWaitCommit)
+		}
+	}
+	if request.beadID != "" {
+		add(cr.sessionWaitDependencyTargetsForDependency(request.beadID), sessionWaitDependencyCauseDependency)
+	}
+	waitIDs := make([]string, 0, len(byWaitID))
+	for waitID := range byWaitID {
+		waitIDs = append(waitIDs, waitID)
+	}
+	slices.Sort(waitIDs)
+	for _, waitID := range waitIDs {
+		admission := byWaitID[waitID]
+		cr.submitSessionWaitDependencyTargets([]sessionWaitDependencyTarget{admission.target}, admission.cause)
+	}
+}
+
+func (cr *CityRuntime) submitSessionWaitDependencyProducerRequests(requests []sessionWaitDependencyProducerRequest) {
+	for _, request := range requests {
+		cr.submitSessionWaitDependencyProducerRequest(request)
+	}
+}
+
+func (cr *CityRuntime) sessionWaitDependencyTargetCertifiedLocked(target sessionWaitDependencyTarget) bool {
+	index, generation := cr.sessionWaitDependencyIndex, cr.sessionWaitDependencyIndexGeneration
+	rejected := cr.sessionWaitDependencyRejectedCensusIDs != nil
+	if rejected || index == nil || generation != target.generation {
+		return false
+	}
+	current, ok := index.TargetForWait(target.WaitID)
+	return ok && current.SessionID == target.SessionID && current.DepMode == target.DepMode && slices.Equal(current.DepIDs, target.DepIDs)
 }
 
 func (cr *CityRuntime) sessionWaitDependencyContainsWait(id string) bool {
@@ -113,8 +322,9 @@ func (cr *CityRuntime) sessionWaitDependencyContainsWait(id string) bool {
 func (cr *CityRuntime) sessionWaitDependencySessions(depID string) []string {
 	cr.sessionWaitDependencyMu.RLock()
 	index := cr.sessionWaitDependencyIndex
+	rejected := cr.sessionWaitDependencyRejectedCensusIDs != nil
 	cr.sessionWaitDependencyMu.RUnlock()
-	if index == nil {
+	if index == nil || rejected {
 		return nil
 	}
 	return index.SessionsForDependency(depID)

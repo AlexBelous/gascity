@@ -23,7 +23,6 @@ import (
 
 const (
 	reconcilerPerfStartTemplate = "perf-template"
-	reconcilerPerfStartWorkload = "fresh-pending-create-sequential-v1"
 	reconcilerPerfArmTimeout    = 30 * time.Second
 )
 
@@ -85,7 +84,7 @@ func runPerfReconcilerCompare(
 	if stdout == nil {
 		return fmt.Errorf("gc perf reconciler-compare: stdout is nil")
 	}
-	report, err := measureReconcilerPerfStart(ctx, opts.iter, opts.warmup, cityPath, provenance)
+	report, err := measureReconcilerPerfCompare(ctx, opts.iter, opts.warmup, cityPath, provenance)
 	if err != nil {
 		return fmt.Errorf("gc perf reconciler-compare: %w", err)
 	}
@@ -106,68 +105,53 @@ type reconcilerPerfStartMeasurement struct {
 	windowNS int64
 }
 
-func measureReconcilerPerfStart(
+func measureReconcilerPerfCompare(
 	ctx context.Context,
 	iterations int,
 	warmup int,
 	cityPath string,
 	provenance reconcilerPerfProvenance,
 ) (reconcilerPerfReport, error) {
-	switch {
-	case ctx == nil:
+	if ctx == nil {
 		return reconcilerPerfReport{}, fmt.Errorf("context is nil")
-	case iterations <= 0:
+	}
+	if iterations <= 0 {
 		return reconcilerPerfReport{}, fmt.Errorf("iterations must be positive")
-	case warmup < 0:
+	}
+	if warmup < 0 {
 		return reconcilerPerfReport{}, fmt.Errorf("warmup must be non-negative")
-	case strings.TrimSpace(cityPath) == "":
+	}
+	if strings.TrimSpace(cityPath) == "" {
 		return reconcilerPerfReport{}, fmt.Errorf("workspace path is empty")
 	}
-
-	provenance.Store = "beads.MemStore"
+	provenance.Store = "synthetic:beads.MemStore"
 	provenance.StoreSchema = "none"
-	provenance.Runtime = "runtime.Fake"
-	provenance.Workload = reconcilerPerfStartWorkload
-	pairs := make([]reconcilerPerfPairSample, 0, iterations)
-	var legacyWindowNS, keyedWindowNS int64
-	for sequence := 0; sequence < warmup+iterations; sequence++ {
-		if err := ctx.Err(); err != nil {
-			return reconcilerPerfReport{}, err
-		}
-		measuredIndex := sequence - warmup + 1
-		pairID := fmt.Sprintf("warmup-%06d", sequence+1)
-		if measuredIndex > 0 {
-			pairID = fmt.Sprintf("start-%06d", measuredIndex)
-		}
-
-		var legacy, keyed reconcilerPerfStartMeasurement
-		var err error
-		if sequence%2 == 0 {
-			legacy, err = measureLegacyReconcilerPerfStart(ctx, cityPath, pairID)
-			if err == nil {
-				keyed, err = measureKeyedReconcilerPerfStart(ctx, cityPath, pairID)
-			}
-		} else {
-			keyed, err = measureKeyedReconcilerPerfStart(ctx, cityPath, pairID)
-			if err == nil {
-				legacy, err = measureLegacyReconcilerPerfStart(ctx, cityPath, pairID)
-			}
-		}
-		if err != nil {
-			return reconcilerPerfReport{}, fmt.Errorf("measuring pair %q: %w", pairID, err)
-		}
-		if measuredIndex <= 0 {
-			continue
-		}
-		pairs = append(pairs, reconcilerPerfPairSample{
-			PairID: pairID,
-			Legacy: legacy.sample,
-			Keyed:  keyed.sample,
+	provenance.Runtime = "synthetic:runtime.Fake"
+	provenance.Workload = "synthetic-fresh-pending-create-and-drain-ack-stop-sequential-v1"
+	start, err := measureReconcilerPerfCohort(ctx, iterations, warmup, cityPath, reconcilerPerfActionStart,
+		func(ctx context.Context, cityPath, pairID string) (reconcilerPerfArmSample, int64, error) {
+			measurement, err := measureLegacyReconcilerPerfStart(ctx, cityPath, pairID)
+			return measurement.sample, measurement.windowNS, err
+		},
+		func(ctx context.Context, cityPath, pairID string) (reconcilerPerfArmSample, int64, error) {
+			measurement, err := measureKeyedReconcilerPerfStart(ctx, cityPath, pairID)
+			return measurement.sample, measurement.windowNS, err
 		})
-		legacyWindowNS += legacy.windowNS
-		keyedWindowNS += keyed.windowNS
+	if err != nil {
+		return reconcilerPerfReport{}, fmt.Errorf("measuring start cohort: %w", err)
 	}
-
+	stop, err := measureReconcilerPerfCohort(ctx, iterations, warmup, cityPath, reconcilerPerfActionStop,
+		func(ctx context.Context, cityPath, pairID string) (reconcilerPerfArmSample, int64, error) {
+			measurement, err := measureLegacyReconcilerPerfStop(ctx, cityPath, pairID)
+			return measurement.sample, measurement.windowNS, err
+		},
+		func(ctx context.Context, cityPath, pairID string) (reconcilerPerfArmSample, int64, error) {
+			measurement, err := measureKeyedReconcilerPerfStop(ctx, cityPath, pairID)
+			return measurement.sample, measurement.windowNS, err
+		})
+	if err != nil {
+		return reconcilerPerfReport{}, fmt.Errorf("measuring stop cohort: %w", err)
+	}
 	return buildReconcilerPerfReport(reconcilerPerfReportInput{
 		Provenance: provenance,
 		Warmup: reconcilerPerfWarmupPolicy{
@@ -175,13 +159,66 @@ func measureReconcilerPerfStart(
 			Excluded:       true,
 			ExecutionOrder: "alternating_first_arm_legacy_first",
 		},
-		Cohorts: []reconcilerPerfActionCohort{{
-			Action:         reconcilerPerfActionStart,
-			LegacyWindowNS: legacyWindowNS,
-			KeyedWindowNS:  keyedWindowNS,
-			Pairs:          pairs,
-		}},
+		Cohorts: []reconcilerPerfActionCohort{start, stop},
 	})
+}
+
+func measureReconcilerPerfCohort(
+	ctx context.Context,
+	iterations int,
+	warmup int,
+	cityPath string,
+	action reconcilerPerfAction,
+	legacyRunner func(context.Context, string, string) (reconcilerPerfArmSample, int64, error),
+	keyedRunner func(context.Context, string, string) (reconcilerPerfArmSample, int64, error),
+) (reconcilerPerfActionCohort, error) {
+	pairs := make([]reconcilerPerfPairSample, 0, iterations)
+	var legacyWindowNS, keyedWindowNS int64
+	for sequence := 0; sequence < warmup+iterations; sequence++ {
+		if err := ctx.Err(); err != nil {
+			return reconcilerPerfActionCohort{}, err
+		}
+		measuredIndex := sequence - warmup + 1
+		pairID := fmt.Sprintf("warmup-%s-%06d", action, sequence+1)
+		if measuredIndex > 0 {
+			pairID = fmt.Sprintf("%s-%06d", action, measuredIndex)
+		}
+
+		var legacy, keyed reconcilerPerfArmSample
+		var legacyWindow, keyedWindow int64
+		var err error
+		if sequence%2 == 0 {
+			legacy, legacyWindow, err = legacyRunner(ctx, cityPath, pairID)
+			if err == nil {
+				keyed, keyedWindow, err = keyedRunner(ctx, cityPath, pairID)
+			}
+		} else {
+			keyed, keyedWindow, err = keyedRunner(ctx, cityPath, pairID)
+			if err == nil {
+				legacy, legacyWindow, err = legacyRunner(ctx, cityPath, pairID)
+			}
+		}
+		if err != nil {
+			return reconcilerPerfActionCohort{}, fmt.Errorf("measuring pair %q: %w", pairID, err)
+		}
+		if measuredIndex <= 0 {
+			continue
+		}
+		pairs = append(pairs, reconcilerPerfPairSample{
+			PairID: pairID,
+			Legacy: legacy,
+			Keyed:  keyed,
+		})
+		legacyWindowNS += legacyWindow
+		keyedWindowNS += keyedWindow
+	}
+
+	return reconcilerPerfActionCohort{
+		Action:         action,
+		LegacyWindowNS: legacyWindowNS,
+		KeyedWindowNS:  keyedWindowNS,
+		Pairs:          pairs,
+	}, nil
 }
 
 type reconcilerPerfStartCall struct {
@@ -468,4 +505,240 @@ func (f *reconcilerPerfStartFixture) finish(
 		sample:   sample,
 		windowNS: finishedAt.Sub(neededAt).Nanoseconds(),
 	}
+}
+
+type reconcilerPerfStopMeasurement struct {
+	sample   reconcilerPerfArmSample
+	windowNS int64
+}
+
+type reconcilerPerfStopCall struct {
+	enteredAt time.Time
+	err       error
+}
+
+type reconcilerPerfStopProvider struct {
+	*gcruntime.Fake
+
+	mu      sync.Mutex
+	calls   []reconcilerPerfStopCall
+	block   <-chan struct{}
+	entered chan<- struct{}
+	now     func() time.Time
+}
+
+func (p *reconcilerPerfStopProvider) Stop(name string) error {
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	call := reconcilerPerfStopCall{enteredAt: now().UTC()}
+	if p.entered != nil {
+		select {
+		case p.entered <- struct{}{}:
+		default:
+		}
+	}
+	if p.block != nil {
+		<-p.block
+	}
+	call.err = p.Fake.Stop(name)
+	p.mu.Lock()
+	p.calls = append(p.calls, call)
+	p.mu.Unlock()
+	return call.err
+}
+
+func (p *reconcilerPerfStopProvider) snapshotCalls() []reconcilerPerfStopCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]reconcilerPerfStopCall(nil), p.calls...)
+}
+
+type reconcilerPerfStopFixture struct {
+	cityPath    string
+	sessionName string
+	info        sessionpkg.Info
+	cfg         *config.City
+	store       beads.Store
+	provider    *reconcilerPerfStopProvider
+}
+
+func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopFixture, error) {
+	const cityName = "reconciler-perf"
+	sessionName := "gc-reconciler-perf-stop-" + pairID
+	token := "perf-stop-token-" + pairID
+	store := beads.NewMemStore()
+	provider := &reconcilerPerfStopProvider{Fake: gcruntime.NewFake()}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: cityName},
+		Agents: []config.Agent{{
+			Name:         reconcilerPerfStartTemplate,
+			StartCommand: "true",
+		}},
+	}
+	info, err := sessionFrontDoor(store).CreateSessionInfo(sessionpkg.CreateSpec{
+		Title:     pairID,
+		AgentName: reconcilerPerfStartTemplate,
+		Metadata: map[string]string{
+			"session_name":   sessionName,
+			"agent_name":     reconcilerPerfStartTemplate,
+			"template":       reconcilerPerfStartTemplate,
+			"generation":     "1",
+			"instance_token": token,
+			"state":          string(sessionpkg.StateDraining),
+			"state_reason":   sessionpkg.DrainAckStopPendingReason,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating drain-ack stop session: %w", err)
+	}
+	if err := provider.Start(context.Background(), sessionName, gcruntime.Config{Command: "true"}); err != nil {
+		return nil, fmt.Errorf("starting drain-ack stop runtime: %w", err)
+	}
+	if err := provider.SetMeta(sessionName, "GC_INSTANCE_TOKEN", token); err != nil {
+		return nil, fmt.Errorf("setting drain-ack stop runtime token: %w", err)
+	}
+	return &reconcilerPerfStopFixture{
+		cityPath: cityPath, sessionName: sessionName, info: info, cfg: cfg, store: store, provider: provider,
+	}, nil
+}
+
+func waitReconcilerPerfStopTracker(ctx context.Context, tracker *asyncStartTracker, timeout time.Duration) error {
+	drained := tracker.waitUntil(timeout, func() bool { return ctx.Err() != nil })
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !drained {
+		return fmt.Errorf("async stop tracker timed out after %s", timeout)
+	}
+	return nil
+}
+
+func reconcilerPerfStopResultError(result sessionStartReconcileResult) error {
+	if result.Err != nil {
+		return result.Err
+	}
+	if result.Outcome != sessionStartReconcileSucceeded {
+		return fmt.Errorf("keyed reconciliation outcome = %s", result.Outcome)
+	}
+	return nil
+}
+
+func measureLegacyReconcilerPerfStop(ctx context.Context, cityPath, pairID string) (reconcilerPerfStopMeasurement, error) {
+	fixture, err := newReconcilerPerfStopFixture(cityPath, pairID)
+	if err != nil {
+		return reconcilerPerfStopMeasurement{}, err
+	}
+	tracker := &asyncStartTracker{}
+	neededAt := time.Now().UTC()
+	finalizeDrainAckStopPendingSessions(
+		fixture.cityPath, fixture.cfg, fixture.provider, beads.SessionStore{Store: fixture.store}, nil,
+		[]sessionpkg.Info{fixture.info}, newDrainOps(fixture.provider), newDrainTracker(), tracker, clock.Real{}, events.Discard, io.Discard,
+	)
+	if err := waitReconcilerPerfStopTracker(ctx, tracker, reconcilerPerfArmTimeout); err != nil {
+		return fixture.finish(neededAt, time.Now().UTC(), fmt.Errorf("legacy async stop: %w", err)), nil
+	}
+	return fixture.finish(neededAt, time.Now().UTC(), nil), nil
+}
+
+func measureKeyedReconcilerPerfStop(ctx context.Context, cityPath, pairID string) (reconcilerPerfStopMeasurement, error) {
+	fixture, err := newReconcilerPerfStopFixture(cityPath, pairID)
+	if err != nil {
+		return reconcilerPerfStopMeasurement{}, err
+	}
+	tracker := &asyncStartTracker{}
+	results := make(chan sessionStartReconcileResult, 1)
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers: 1, MaxDistinct: 1, MaxRetries: 0,
+		Reconcile: func(reconcileCtx context.Context, admission sessionStartAdmission) error {
+			return reconcileExactSessionStart(reconcileCtx, admission, exactSessionStartParams{
+				CityPath: fixture.cityPath, Config: fixture.cfg, Provider: fixture.provider, Store: fixture.store,
+				Clock: clock.Real{}, Recorder: events.Discard, Stdout: io.Discard, Stderr: io.Discard, AsyncStopTracker: tracker,
+			})
+		},
+		Observer: func(result sessionStartReconcileResult) { results <- result }, Stderr: io.Discard,
+	})
+	if err != nil {
+		return reconcilerPerfStopMeasurement{}, fmt.Errorf("creating keyed stop controller: %w", err)
+	}
+	if err := controller.Start(ctx); err != nil {
+		controller.Stop()
+		return reconcilerPerfStopMeasurement{}, fmt.Errorf("starting keyed stop controller: %w", err)
+	}
+	defer controller.Stop()
+	neededAt := time.Now().UTC()
+	if _, err := controller.Admit(fixture.info.ID, sessionStartAdmissionInProcess); err != nil {
+		return fixture.finish(neededAt, time.Now().UTC(), fmt.Errorf("admitting keyed stop: %w", err)), nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, reconcilerPerfArmTimeout)
+	defer cancel()
+	for {
+		select {
+		case result := <-results:
+			if result.Outcome == sessionStartReconcileRetrying {
+				continue
+			}
+			resultErr := reconcilerPerfStopResultError(result)
+			if result.Outcome != sessionStartReconcileSucceeded || resultErr != nil {
+				return fixture.finish(neededAt, time.Now().UTC(), resultErr), nil
+			}
+			if err := waitReconcilerPerfStopTracker(ctx, tracker, reconcilerPerfArmTimeout); err != nil {
+				return fixture.finish(neededAt, time.Now().UTC(), fmt.Errorf("keyed async stop: %w", err)), nil
+			}
+			return fixture.finish(neededAt, time.Now().UTC(), nil), nil
+		case <-waitCtx.Done():
+			return fixture.finish(neededAt, time.Now().UTC(), waitCtx.Err()), nil
+		}
+	}
+}
+
+func (f *reconcilerPerfStopFixture) finish(neededAt, finishedAt time.Time, reconcileErr error) reconcilerPerfStopMeasurement {
+	calls := f.provider.snapshotCalls()
+	problems := make([]error, 0, 5)
+	if reconcileErr != nil {
+		problems = append(problems, reconcileErr)
+	}
+	if len(calls) != 1 {
+		problems = append(problems, fmt.Errorf("provider Stop calls = %d, want 1", len(calls)))
+	}
+	var latency *int64
+	outcome := "not_stopped"
+	if len(calls) > 0 {
+		value := calls[0].enteredAt.Sub(neededAt).Nanoseconds()
+		latency = &value
+		outcome = "stop_entered"
+		if value < 0 {
+			problems = append(problems, fmt.Errorf("provider Stop preceded action-needed timestamp"))
+		}
+		if calls[0].err != nil {
+			outcome = "provider_error"
+			problems = append(problems, calls[0].err)
+		}
+	}
+	if f.provider.IsRunning(f.sessionName) {
+		problems = append(problems, fmt.Errorf("runtime %q remains running", f.sessionName))
+	}
+	info, err := sessionFrontDoor(f.store).Get(f.info.ID)
+	if err != nil {
+		problems = append(problems, fmt.Errorf("reading stopped session: %w", err))
+	} else {
+		bead, beadErr := f.store.Get(f.info.ID)
+		if beadErr != nil {
+			problems = append(problems, fmt.Errorf("reading stopped session bead: %w", beadErr))
+		} else if bead.Status != "open" {
+			problems = append(problems, fmt.Errorf("session bead status = %q, want open", bead.Status))
+		}
+		if !isDrainAckStopPendingInfo(info) {
+			problems = append(problems, fmt.Errorf("persisted stop-pending marker was not retained"))
+		}
+	}
+	if len(problems) == 0 {
+		outcome = "stopped_runtime_dead_pending_finalize"
+	}
+	sample := reconcilerPerfArmSample{LatencyNS: latency, Outcome: outcome}
+	if joined := errors.Join(problems...); joined != nil {
+		sample.Error = joined.Error()
+	}
+	return reconcilerPerfStopMeasurement{sample: sample, windowNS: finishedAt.Sub(neededAt).Nanoseconds()}
 }

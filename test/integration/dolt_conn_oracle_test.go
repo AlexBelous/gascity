@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/beads"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -72,8 +76,11 @@ const (
 type connOracleCity struct {
 	dir      string
 	env      []string
+	cityName string
 	port     string
 	observer *sql.DB
+	readyAPI *api.Client
+	seedAPI  *genclient.ClientWithResponses
 }
 
 // TestManagedDoltConnOracle_Diagnostic is a fast (small-count) probe used to
@@ -94,6 +101,19 @@ func TestManagedDoltConnOracle_Diagnostic(t *testing.T) {
 
 	hookOut, hookErr := runHookClaim(city, "polecat-diag")
 	t.Logf("diagnostic: `gc hook --claim` err=%v\n--- output ---\n%s\n--- end ---", hookErr, hookOut)
+	if hookErr != nil {
+		t.Fatalf("diagnostic hook claim: %v", hookErr)
+	}
+	if !strings.Contains(hookOut, "route=api") {
+		t.Fatalf("diagnostic hook did not use controller API:\n%s", hookOut)
+	}
+	id, assignee := claimedBeadAndAssignee(hookOut)
+	if id == "" {
+		t.Fatalf("diagnostic hook did not claim seeded work:\n%s", hookOut)
+	}
+	if assignee != "polecat-diag" {
+		t.Fatalf("diagnostic claim assignee = %q, want polecat-diag", assignee)
+	}
 }
 
 // TestManagedDoltConnOracle_FastPathBoundsConnectionsUnderHookLoad is the AC-3
@@ -138,32 +158,48 @@ func TestManagedDoltConnOracle_FastPathBoundsConnectionsUnderHookLoad(t *testing
 		if res.peakConns > onPeak {
 			onPeak = res.peakConns
 		}
+		onClaims = append(onClaims, res.claims...)
+		for _, c := range res.claims {
+			claimed[c.beadID] = true
+		}
+		// Log the FULL round classification BEFORE any assertion, so even a FATAL
+		// round is attributable — a route collapse, a fallback-reason storm, a
+		// no-route process error, admission saturation. The earlier oracle discarded
+		// the command error and logged nothing on the fatal path, so the 6/200 route
+		// collapse could not be explained.
+		t.Logf("fastpath ON round %d: peakConns=%d roundClaims=%d cumulativeClaimed=%d/%d api=%d fallback=%d(reasons=%v) noRoute=%d procErr=%d rejections=%d saturated=%d",
+			round, res.peakConns, len(res.claims), len(claimed), oracleSeedBeads,
+			res.apiRoutes, res.fallbackRoutes, res.fallbackReasons, res.noRoute, res.processErrors, res.rejections, res.saturated)
+		for _, s := range res.samples {
+			t.Logf("fastpath ON round %d exceptional sample: %s", round, s)
+		}
+
 		// Healthy-controller semantics hold on EVERY round: the controller serves
 		// every hook over the API with zero fallback and zero rejection, no matter how
 		// many hooks drain empty in a late round. A loose "apiRoutes>0" bar would pass
 		// a run where 199 hooks silently shelled out and one claimed — the storm the
 		// cure removes.
 		if res.apiRoutes != oracleHookProcs {
-			t.Fatalf("fastpath ON round %d: %d/%d hooks took route=api; a healthy controller must serve every hook", round, res.apiRoutes, oracleHookProcs)
+			t.Fatalf("fastpath ON round %d: %d/%d hooks took route=api (fallback=%d procErr=%d noRoute=%d reasons=%v); a healthy controller must serve every hook",
+				round, res.apiRoutes, oracleHookProcs, res.fallbackRoutes, res.processErrors, res.noRoute, res.fallbackReasons)
 		}
 		if res.fallbackRoutes != 0 {
-			t.Fatalf("fastpath ON round %d: %d hook(s) fell back to the subprocess path against a healthy controller, want 0", round, res.fallbackRoutes)
+			t.Fatalf("fastpath ON round %d: %d hook(s) fell back to the subprocess path (reasons=%v) against a healthy controller, want 0", round, res.fallbackRoutes, res.fallbackReasons)
 		}
 		if res.rejections != 0 {
 			t.Fatalf("fastpath ON round %d: %d hook(s) saw a connection rejection / max-waiting-connections error, want 0", round, res.rejections)
 		}
-		onClaims = append(onClaims, res.claims...)
-		for _, c := range res.claims {
-			claimed[c.beadID] = true
-		}
-		t.Logf("fastpath ON round %d: peakConns=%d roundClaims=%d cumulativeClaimed=%d/%d apiRoutes=%d fallbackRoutes=%d rejections=%d",
-			round, res.peakConns, len(res.claims), len(claimed), oracleSeedBeads, res.apiRoutes, res.fallbackRoutes, res.rejections)
 		if len(claimed) >= oracleSeedBeads {
 			break
 		}
 		if round >= onMaxRounds {
-			t.Fatalf("fastpath ON: only %d/%d beads claimed after %d rounds of %d-concurrent hooks; claimable pool work is being stranded",
-				len(claimed), oracleSeedBeads, onMaxRounds, oracleHookProcs)
+			// Before declaring stranding, query the seeded beads' canonical final
+			// state: a bead can be ASSIGNED server-side while its claiming hook's
+			// response was lost (committed-but-unobserved), which is NOT the same as
+			// claimable work stranded behind stale candidates (unassigned).
+			assignedN, assignees := assignedSeededCount(t, on, onSeed)
+			t.Fatalf("fastpath ON: only %d/%d beads OBSERVED claimed after %d rounds of %d-concurrent hooks; server-side ASSIGNED=%d/%d (unassigned => truly stranded; assigned-but-unobserved => committed-response-lost). assignees=%v",
+				len(claimed), oracleSeedBeads, onMaxRounds, oracleHookProcs, assignedN, oracleSeedBeads, assignees)
 		}
 	}
 
@@ -289,7 +325,18 @@ type hookLoadResult struct {
 	fallbackRoutes int
 	rejections     int
 	saturated      int
+	// Diagnostic classification so a stranded/undiagnosable round is attributable
+	// rather than silent (the earlier oracle discarded the command error and never
+	// recorded a no-route result, so a 6/200 route collapse could not be explained).
+	processErrors   int            // runHookClaim returned a non-nil command error
+	noRoute         int            // output logged no route class (api/fallback/custom-shell)
+	fallbackReasons map[string]int // route=fallback reason token -> count
+	samples         []string       // bounded sample of non-API routes or any command error
 }
+
+// oracleDiagSampleCap bounds how many non-API hook outputs a round retains for
+// diagnosis, so a fatal round can be inspected without dumping 200 outputs.
+const oracleDiagSampleCap = 8
 
 // setupConnOracleCity initializes and starts a managed-Dolt city with the claim
 // fast path set to fastpath, a max_connections=32 listener, and a generated-
@@ -305,7 +352,7 @@ func setupConnOracleCity(t *testing.T, fastpath bool) *connOracleCity {
 func setupConnOracleCityWithReadTimeout(t *testing.T, fastpath bool, readTimeoutMillis int) *connOracleCity {
 	t.Helper()
 
-	env := newIsolatedCommandEnv(t, true)
+	env, gcHome := newUnstartedIsolatedCommandEnv(t, true)
 	root, err := os.MkdirTemp("/tmp", "conn-oracle-*")
 	if err != nil {
 		t.Fatalf("mktemp conn-oracle root: %v", err)
@@ -374,15 +421,27 @@ max_active_sessions = 0
 		t.Fatalf("write conn-oracle config: %v", err)
 	}
 
-	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	// --no-start is essential here: gc init otherwise registers and starts the
+	// supervisor before all rig bead schemas finish initializing, reintroducing
+	// the init/reconcile race this harness must exclude. Start the isolated
+	// supervisor explicitly only after init returns successfully below.
+	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--no-start", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init conn-oracle city: %v\noutput: %s", err, out)
 	}
 	registerCityCommandEnv(cityDir, env)
+	startIsolatedSupervisor(t, env, gcHome)
+	if out, err := runGCDoltWithEnv(env, "", "register", "--yes", cityDir); err != nil {
+		t.Fatalf("register initialized conn-oracle city: %v\noutput: %s", err, out)
+	}
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
-		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+		if out, err := runGCDoltWithEnv(env, "", "stop", cityDir); err != nil {
+			t.Errorf("cleanup gc stop %s: %v\noutput: %s", cityDir, err, out)
+		}
+		if out, err := runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+			t.Errorf("cleanup supervisor stop: %v\noutput: %s", err, out)
+		}
 	})
 
 	if _, err := waitForManagedDoltCityReady(env, cityDir, 30*time.Second); err != nil {
@@ -405,7 +464,165 @@ max_active_sessions = 0
 	observer.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = observer.Close() })
 
-	return &connOracleCity{dir: cityDir, env: env, port: port, observer: observer}
+	supervisorPort := readSupervisorPortFromConfig(t, gcHome)
+	// `gc init --file <template> <target>` names the initialized workspace from
+	// the target directory, so the registration and supervisor route are `c`
+	// here rather than the template's source workspace name.
+	cityName := filepath.Base(cityDir)
+	readyAPI := api.NewCityScopedClient(
+		fmt.Sprintf("http://127.0.0.1:%s", supervisorPort),
+		cityName,
+	)
+	seedAPI, err := genclient.NewClientWithResponses(
+		fmt.Sprintf("http://127.0.0.1:%s", supervisorPort),
+	)
+	if err != nil {
+		t.Fatalf("build oracle seed API client: %v", err)
+	}
+	return &connOracleCity{
+		dir:      cityDir,
+		env:      env,
+		cityName: cityName,
+		port:     port,
+		observer: observer,
+		readyAPI: readyAPI,
+		seedAPI:  seedAPI,
+	}
+}
+
+// createOracleBead writes a fixture through the isolated supervisor so the
+// controller-owned CachingStore and managed Dolt backing advance together. A
+// direct `gc bd create/update` would bypass that cache and make strict-cache
+// oracle cases wait for the 30-second reconciliation watchdog.
+func createOracleBead(t *testing.T, city *connOracleCity, title, rig, assignee string, metadata map[string]string) string {
+	t.Helper()
+	issueType := "task"
+	body := genclient.CreateBeadJSONRequestBody{
+		Title: title,
+		Type:  &issueType,
+	}
+	if rig != "" {
+		body.Rig = &rig
+	}
+	if assignee != "" {
+		body.Assignee = &assignee
+	}
+	if len(metadata) != 0 {
+		body.Metadata = &metadata
+	}
+	resp, err := city.seedAPI.CreateBeadWithResponse(
+		context.Background(),
+		city.cityName,
+		&genclient.CreateBeadParams{XGCRequest: "true"},
+		body,
+	)
+	if err != nil {
+		t.Fatalf("seed bead %q through controller: %v", title, err)
+	}
+	if resp == nil || resp.StatusCode() != 201 || resp.JSON201 == nil || resp.JSON201.Id == "" {
+		var status int
+		var responseBody []byte
+		if resp != nil {
+			status = resp.StatusCode()
+			responseBody = resp.Body
+		}
+		t.Fatalf("seed bead %q through controller: status=%d body=%s", title, status, responseBody)
+	}
+	return resp.JSON201.Id
+}
+
+func setOracleBeadStatus(t *testing.T, city *connOracleCity, id, status string) {
+	t.Helper()
+	resp, err := city.seedAPI.PostV0CityByCityNameBeadByIdUpdateWithResponse(
+		context.Background(),
+		city.cityName,
+		id,
+		&genclient.PostV0CityByCityNameBeadByIdUpdateParams{XGCRequest: "true"},
+		genclient.PostV0CityByCityNameBeadByIdUpdateJSONRequestBody{Status: &status},
+	)
+	if err != nil {
+		t.Fatalf("set bead %s status=%s through controller: %v", id, status, err)
+	}
+	if resp == nil || resp.StatusCode() != 200 {
+		var code int
+		var body []byte
+		if resp != nil {
+			code = resp.StatusCode()
+			body = resp.Body
+		}
+		t.Fatalf("set bead %s status=%s through controller: status=%d body=%s", id, status, code, body)
+	}
+}
+
+func waitAssignedOracleBeadCached(t *testing.T, city *connOracleCity, id, assignee string, inProgress bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for {
+		var rows []beads.Bead
+		if inProgress {
+			read, err := city.readyAPI.ListBeads(api.ListBeadsOpts{
+				Status:           "in_progress",
+				Assignee:         assignee,
+				Rig:              city.cityName,
+				Limit:            1,
+				IncludeEphemeral: true,
+			})
+			lastErr = err
+			rows = read.Body
+		} else {
+			read, err := city.readyAPI.BeadsReadyQuery(api.ReadyReadOpts{
+				Scope:            city.cityName,
+				IncludeEphemeral: true,
+				Assignee:         assignee,
+				Limit:            1,
+			})
+			lastErr = err
+			rows = read.Body
+		}
+		if lastErr == nil && len(rows) == 1 && rows[0].ID == id {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("assigned bead %s did not enter controller cache within 20s (in_progress=%t last_rows=%v last_err=%v)",
+				id, inProgress, rows, lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func waitRoutedPoolCache(t *testing.T, city *connOracleCity, scope string, n int) {
+	t.Helper()
+	want := n
+	if want > 20 {
+		want = 20
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	var (
+		lastCount int
+		lastErr   error
+	)
+	for {
+		read, err := city.readyAPI.BeadsReadyQuery(api.ReadyReadOpts{
+			Scope:            scope,
+			IncludeEphemeral: true,
+			Limit:            20,
+			RouteTarget:      oraclePoolAgent,
+			RouteMode:        api.RouteModeCanonical,
+		})
+		lastErr = err
+		if err == nil {
+			lastCount = len(read.Body)
+		}
+		if err == nil && lastCount >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("routed demand did not enter strict controller cache within 20s (scope=%s want=%d last_count=%d last_err=%v)",
+				scope, want, lastCount, lastErr)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // seedRoutedPoolDemand creates n unassigned city-scoped beads routed to the pool
@@ -416,32 +633,19 @@ func seedRoutedPoolDemand(t *testing.T, city *connOracleCity, n int) []string {
 	ids := make([]string, 0, n)
 	for i := 0; i < n; i++ {
 		title := fmt.Sprintf("conn-oracle-demand-%03d", i)
-		out, err := runGCWithEnv(city.env, city.dir, "bd", "create", "--json", title)
-		if err != nil {
-			t.Fatalf("seed bead %q: %v\n%s", title, err, out)
-		}
-		id := beadIDFromJSON(out)
-		if id == "" {
-			t.Fatalf("seed bead %q: no id in create output:\n%s", title, out)
-		}
-		if _, err := runGCWithEnv(city.env, city.dir, "bd", "update", id, "--set-metadata", "gc.routed_to="+oraclePoolAgent); err != nil {
-			t.Fatalf("route seed bead %s: %v", id, err)
-		}
-		ids = append(ids, id)
+		ids = append(ids, createOracleBead(t, city, title, "", "",
+			map[string]string{"gc.routed_to": oraclePoolAgent}))
 	}
-	// Wait for the controller's federated ready cache to surface the seeded
-	// demand before the race, so a cold cache does not read as no-work.
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		out, err := runGCWithEnv(city.env, city.dir, "bd", "ready", "--json", "--limit=0")
-		if err == nil && countRoutedReady(out, oraclePoolAgent) >= n {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("seeded routed demand did not become ready within 20s (last err=%v)", err)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
+	// Wait for the exact strict-cache route query used by the hook's tier-3
+	// fast path to surface the seeded demand. The previous oracle polled
+	// `gc bd ready`, which is the historical zero-parameter live-store read; it
+	// could report the seeds while the strict controller cache was still cold,
+	// then let every hook return no_work and make the process oracle vacuous.
+	//
+	// The production tier-3 probe is deliberately capped at 20. Seeing that
+	// full bounded page proves the cache path and route index are live without
+	// weakening the production query merely to inspect all 80 oracle seeds.
+	waitRoutedPoolCache(t, city, city.cityName, n)
 	return ids
 }
 
@@ -475,12 +679,16 @@ func runHookLoad(t *testing.T, city *connOracleCity, procs int, actorPrefix stri
 	}()
 
 	var (
-		mu         sync.Mutex
-		claims     []hookClaim
-		apiRoutes  int
-		fallbacks  int
-		rejections int
-		saturated  int
+		mu              sync.Mutex
+		claims          []hookClaim
+		apiRoutes       int
+		fallbacks       int
+		rejections      int
+		saturated       int
+		processErrors   int
+		noRoute         int
+		fallbackReasons = map[string]int{}
+		samples         []string
 	)
 	sem := make(chan struct{}, oracleMaxInFlight)
 	var wg sync.WaitGroup
@@ -492,15 +700,31 @@ func runHookLoad(t *testing.T, city *connOracleCity, procs int, actorPrefix stri
 			defer func() { <-sem }()
 
 			actor := fmt.Sprintf("%s-%03d", actorPrefix, i)
-			out, _ := runHookClaim(city, actor)
+			out, cmdErr := runHookClaim(city, actor)
+
+			isAPI := strings.Contains(out, "route=api")
+			isFallback := strings.Contains(out, "route=fallback")
+			isCustom := strings.Contains(out, "route=custom-shell")
 
 			mu.Lock()
 			defer mu.Unlock()
-			if strings.Contains(out, "route=api") {
-				apiRoutes++
+			// Route and process outcome are independent axes: an API-routed hook can
+			// still exit nonzero after the request (for example, a committed claim
+			// whose response is lost). Count that error instead of hiding it behind
+			// the route marker, while keeping route classes mutually exclusive.
+			if cmdErr != nil {
+				processErrors++
 			}
-			if strings.Contains(out, "route=fallback") {
+			switch {
+			case isAPI:
+				apiRoutes++
+			case isFallback:
 				fallbacks++
+				fallbackReasons[fallbackReasonFromOutput(out)]++
+			case isCustom:
+				// custom-shell is a legitimate non-fast-path lane; not a no-route.
+			default:
+				noRoute++
 			}
 			if isConnectionRejection(out) {
 				rejections++
@@ -511,6 +735,15 @@ func runHookLoad(t *testing.T, city *connOracleCity, procs int, actorPrefix stri
 			if id, assignee := claimedBeadAndAssignee(out); id != "" {
 				claims = append(claims, hookClaim{beadID: id, assignee: assignee, actor: actor})
 			}
+			// Retain a bounded diagnostic sample of anything that was NOT a clean API
+			// success, so a committed-but-unobserved claim can be attributed without
+			// a 200-line dump.
+			expectedSaturation := isAPI && strings.Contains(strings.ToLower(out), "admission saturated")
+			expectedNoWork := isAPI && strings.Contains(out, `"action":"drain"`) &&
+				strings.Contains(out, `"reason":"no_work"`)
+			if (!isAPI || (cmdErr != nil && !expectedSaturation && !expectedNoWork)) && len(samples) < oracleDiagSampleCap {
+				samples = append(samples, fmt.Sprintf("actor=%s cmdErr=%v out=%q", actor, cmdErr, truncateForSample(out)))
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -518,13 +751,64 @@ func runHookLoad(t *testing.T, city *connOracleCity, procs int, actorPrefix stri
 	sampler.Wait()
 
 	return hookLoadResult{
-		peakConns:      int(atomic.LoadInt64(&peak)),
-		claims:         claims,
-		apiRoutes:      apiRoutes,
-		fallbackRoutes: fallbacks,
-		rejections:     rejections,
-		saturated:      saturated,
+		peakConns:       int(atomic.LoadInt64(&peak)),
+		claims:          claims,
+		apiRoutes:       apiRoutes,
+		fallbackRoutes:  fallbacks,
+		rejections:      rejections,
+		saturated:       saturated,
+		processErrors:   processErrors,
+		noRoute:         noRoute,
+		fallbackReasons: fallbackReasons,
+		samples:         samples,
 	}
+}
+
+// fallbackReasonFromOutput extracts the reason token from a `route=fallback
+// reason=<x>` audit line, or "unknown" when none is present. Route classes carry
+// their reason so a fallback storm is attributable to a cause (dial-failed,
+// controller-unavailable) rather than an opaque count.
+func fallbackReasonFromOutput(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "route=fallback") {
+			continue
+		}
+		for _, tok := range strings.Fields(line) {
+			if r, ok := strings.CutPrefix(tok, "reason="); ok {
+				return r
+			}
+		}
+	}
+	return "unknown"
+}
+
+// truncateForSample caps a retained diagnostic output so a sample stays readable.
+func truncateForSample(s string) string {
+	s = strings.TrimSpace(s)
+	const max = 300
+	if len(s) > max {
+		return s[:max] + "…(truncated)"
+	}
+	return s
+}
+
+// assignedSeededCount reports how many of the seeded bead IDs are ASSIGNED
+// server-side (a non-empty assignee observed through the controller), with the
+// per-bead assignees. It is the authoritative completeness signal that does not
+// depend on a hook self-reporting its claim: a claim can commit while the client's
+// response is lost, so a bead can be assigned without any recorded hook claim. Use
+// it to distinguish claimable work stranded behind stale candidates (unassigned)
+// from committed claims whose responses were lost (assigned, no recorded claim)
+// before concluding that work was stranded.
+func assignedSeededCount(t *testing.T, city *connOracleCity, seeded []string) (int, map[string]string) {
+	t.Helper()
+	assignees := make(map[string]string, len(seeded))
+	for _, id := range seeded {
+		if a := beadAssignee(t, city, id); a != "" {
+			assignees[id] = a
+		}
+	}
+	return len(assignees), assignees
 }
 
 // hookActorEnv builds the environment for one generated-default pool-worker hook

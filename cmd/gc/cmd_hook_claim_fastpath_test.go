@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -28,6 +29,7 @@ type fakeFastPathReader struct {
 	readyCalls        int
 	readyScopes       []string
 	readyEphemeral    []bool
+	readyOpts         []api.ReadyReadOpts
 	listEphemeral     []bool
 	listErr           error
 	readyErr          error
@@ -72,17 +74,54 @@ func (f *fakeFastPathReader) ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[
 	return api.CachedRead[[]beads.Bead]{Body: out}, nil
 }
 
-func (f *fakeFastPathReader) BeadsReady(scope string, includeEphemeral bool) (api.CachedRead[[]beads.Bead], error) {
+// BeadsReadyQuery reproduces the server's bounded strict-cache read semantics:
+// the assignee / routed-pool filters apply BEFORE the limit, a routed probe
+// keeps only unassigned non-epic rows matching the requested mode (canonical
+// gc.routed_to vs migration gc.run_target-workflow-without-routed_to), and the
+// routed order is oldest-first (fixtures share a zero CreatedAt, so the stable
+// sort preserves seeding order).
+func (f *fakeFastPathReader) BeadsReadyQuery(opts api.ReadyReadOpts) (api.CachedRead[[]beads.Bead], error) {
 	f.readyCalls++
-	f.readyScopes = append(f.readyScopes, scope)
-	f.readyEphemeral = append(f.readyEphemeral, includeEphemeral)
-	if err, ok := f.readyErrByScope[scope]; ok {
+	f.readyScopes = append(f.readyScopes, opts.Scope)
+	f.readyEphemeral = append(f.readyEphemeral, opts.IncludeEphemeral)
+	f.readyOpts = append(f.readyOpts, opts)
+	if err, ok := f.readyErrByScope[opts.Scope]; ok {
 		return api.CachedRead[[]beads.Bead]{}, err
 	}
 	if f.readyErr != nil {
 		return api.CachedRead[[]beads.Bead]{}, f.readyErr
 	}
-	return api.CachedRead[[]beads.Bead]{Body: f.readyFor(scope)}, nil
+	var out []beads.Bead
+	for _, b := range f.readyFor(opts.Scope) {
+		if opts.Assignee != "" && strings.TrimSpace(b.Assignee) != opts.Assignee {
+			continue
+		}
+		if opts.RouteTarget != "" {
+			if strings.TrimSpace(b.Assignee) != "" || b.Type == "epic" {
+				continue
+			}
+			routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
+			switch opts.RouteMode {
+			case api.RouteModeCanonical:
+				if routedTo != opts.RouteTarget {
+					continue
+				}
+			case api.RouteModeMigration:
+				if routedTo != "" ||
+					strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindWorkflow ||
+					strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey]) != opts.RouteTarget {
+					continue
+				}
+			default:
+				continue
+			}
+		}
+		out = append(out, b)
+		if opts.Limit > 0 && len(out) >= opts.Limit {
+			break
+		}
+	}
+	return api.CachedRead[[]beads.Bead]{Body: out}, nil
 }
 
 func routed(id, target string) beads.Bead {
@@ -209,7 +248,7 @@ func TestFastPathTier3OriginGated(t *testing.T) {
 }
 
 // TestFastPathReadErrorPropagates proves a read error is surfaced (not
-// swallowed) so the caller can classify a connection failure and fall back.
+// swallowed) so the caller can fail closed.
 func TestFastPathReadErrorPropagates(t *testing.T) {
 	sentinel := errors.New("boom")
 	r := &fakeFastPathReader{readyErr: sentinel}
@@ -242,9 +281,17 @@ func TestFastPathScopeOrderRigOwnRigBeatsCityAssigned(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "gc-rig-pool" {
 		t.Fatalf("got %+v, want [gc-rig-pool]: own-rig routed work must beat city assigned work", got)
 	}
-	// The city store must never be read once the rig store yields work.
-	if len(r.readyScopes) != 1 || r.readyScopes[0] != "frontend" {
-		t.Errorf("ready reads = %v, want exactly [frontend] (city short-circuited)", r.readyScopes)
+	// The city store must never be read once the rig store yields work; the rig
+	// store itself now takes multiple bounded probes (per-identity assigned-ready,
+	// then routed), all scoped to frontend.
+	if len(r.readyScopes) == 0 {
+		t.Fatal("no ready reads recorded")
+	}
+	for _, s := range r.readyScopes {
+		if s != "frontend" {
+			t.Errorf("ready reads = %v, want only frontend scopes (city short-circuited)", r.readyScopes)
+			break
+		}
 	}
 }
 
@@ -308,8 +355,18 @@ func TestFastPathScopeOrderDedupesRepeatedScope(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "gc-rig-pool" {
 		t.Fatalf("got %+v, want [gc-rig-pool]", got)
 	}
-	if len(r.readyScopes) != 1 || r.readyScopes[0] != "frontend" {
-		t.Errorf("ready reads = %v, want exactly [frontend] (duplicate scope collapsed)", r.readyScopes)
+	// The duplicate scope must collapse to ONE pass: with work in the rig store,
+	// the bounded probes are one assigned-ready probe for the single identity plus
+	// one routed canonical probe, all scoped to frontend — a second frontend pass
+	// or a citytown read means the dedupe failed.
+	if len(r.readyScopes) != 2 {
+		t.Errorf("ready reads = %v, want one frontend pass (assigned probe + routed probe)", r.readyScopes)
+	}
+	for _, s := range r.readyScopes {
+		if s != "frontend" {
+			t.Errorf("ready reads = %v, want only frontend scopes", r.readyScopes)
+			break
+		}
 	}
 }
 
@@ -407,8 +464,7 @@ func TestFastPathPrimaryErrorDeferredWhenLaterScopeHasWork(t *testing.T) {
 
 // TestFastPathPrimaryErrorSurfacedWhenNoWork proves the remembered primary-scope
 // error is returned when NO scope yields work, so an own-store outage reaches the
-// caller (classified there as fallback/terminal) instead of being read as a false
-// no-work drain.
+// caller's fail-closed path instead of being read as a false no-work drain.
 func TestFastPathPrimaryErrorSurfacedWhenNoWork(t *testing.T) {
 	wantErr := errors.New("own-store outage")
 	r := &fakeFastPathReader{
@@ -437,5 +493,77 @@ func TestFastPathSecondaryErrorIgnored(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("got %+v, want nil candidates (clean no-work drain)", got)
+	}
+}
+
+// TestFastPathTier2ProbeShapeIdentityOrder pins the assigned-ready tier's
+// bounded probe shape: ONE probe per identity, in the given identity order
+// (session id > session name > alias), each with the assignee filter and
+// limit=1 — never an unbounded federated ready read.
+func TestFastPathTier2ProbeShapeIdentityOrder(t *testing.T) {
+	r := &fakeFastPathReader{
+		ready: []beads.Bead{
+			{ID: "gc-alias", Assignee: "alias-x"},
+			{ID: "gc-name", Assignee: "sess-name"},
+		},
+	}
+	got, err := fastPathClaimCandidates(r, []string{"sess-id", "sess-name", "alias-x"}, []string{"pool-x"}, "", nil)
+	if err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	// sess-id has no work, so its probe comes first and misses; sess-name hits
+	// second and short-circuits before alias-x is ever probed.
+	if len(got) != 1 || got[0].ID != "gc-name" {
+		t.Fatalf("got %+v, want [gc-name] (identity order sess-id, sess-name, alias-x)", got)
+	}
+	if len(r.readyOpts) != 2 {
+		t.Fatalf("ready probes = %+v, want exactly 2 (sess-id miss, sess-name hit)", r.readyOpts)
+	}
+	for i, wantAssignee := range []string{"sess-id", "sess-name"} {
+		p := r.readyOpts[i]
+		if p.Assignee != wantAssignee || p.Limit != 1 || p.RouteTarget != "" {
+			t.Fatalf("probe %d = %+v, want assignee=%q limit=1 and no route filter", i, p, wantAssignee)
+		}
+	}
+}
+
+// TestFastPathTier3RouteTargetOuterOrder pins the legacy OUTER-loop route-target
+// precedence: the FIRST route target with demand wins even when a later target's
+// demand is older or canonical. pool-a holds only migration demand and pool-b
+// holds canonical demand; the legacy per-target probe order (targets outermost,
+// canonical then migration within each target) selects pool-a's migration bead.
+func TestFastPathTier3RouteTargetOuterOrder(t *testing.T) {
+	r := &fakeFastPathReader{ready: []beads.Bead{
+		routed("gc-b-canonical", "pool-b"),
+		runTargetRouted("gc-a-migration", "pool-a"),
+	}}
+	got, err := fastPathClaimCandidates(r, []string{"sess-name"}, []string{"pool-a", "pool-b"}, "ephemeral", nil)
+	if err != nil {
+		t.Fatalf("fastPathClaimCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-a-migration" {
+		t.Fatalf("got %+v, want [gc-a-migration]: first route target's demand wins (outer-loop order)", got)
+	}
+	// Probe order after the assigned-ready miss: pool-a canonical (miss), pool-a
+	// migration (hit) — pool-b is never probed once pool-a yields demand.
+	var routedProbes []api.ReadyReadOpts
+	for _, p := range r.readyOpts {
+		if p.RouteTarget != "" {
+			routedProbes = append(routedProbes, p)
+		}
+	}
+	if len(routedProbes) != 2 {
+		t.Fatalf("routed probes = %+v, want exactly [pool-a canonical, pool-a migration]", routedProbes)
+	}
+	if routedProbes[0].RouteTarget != "pool-a" || routedProbes[0].RouteMode != api.RouteModeCanonical {
+		t.Fatalf("first routed probe = %+v, want pool-a canonical", routedProbes[0])
+	}
+	if routedProbes[1].RouteTarget != "pool-a" || routedProbes[1].RouteMode != api.RouteModeMigration {
+		t.Fatalf("second routed probe = %+v, want pool-a migration", routedProbes[1])
+	}
+	for _, p := range routedProbes {
+		if p.Limit != routedPoolProbeLimit {
+			t.Fatalf("routed probe %+v limit = %d, want the legacy bound %d", p, p.Limit, routedPoolProbeLimit)
+		}
 	}
 }

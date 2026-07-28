@@ -810,6 +810,24 @@ func (e GetV0CityByCityNameAgentsParamsRunning) Valid() bool {
 	}
 }
 
+// Defines values for GetV0CityByCityNameBeadsReadyParamsRouteMode.
+const (
+	Canonical GetV0CityByCityNameBeadsReadyParamsRouteMode = "canonical"
+	Migration GetV0CityByCityNameBeadsReadyParamsRouteMode = "migration"
+)
+
+// Valid indicates whether the value is a known member of the GetV0CityByCityNameBeadsReadyParamsRouteMode enum.
+func (e GetV0CityByCityNameBeadsReadyParamsRouteMode) Valid() bool {
+	switch e {
+	case Canonical:
+		return true
+	case Migration:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for GetV0CityByCityNameExtmsgTranscriptParamsOrder.
 const (
 	Asc  GetV0CityByCityNameExtmsgTranscriptParamsOrder = "asc"
@@ -8212,7 +8230,22 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 
 	// IncludeEphemeral Include ephemeral (wisp) ready work alongside durable ready work.
 	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
+
+	// Assignee Restrict ready work to this assignee.
+	Assignee *string `form:"assignee,omitempty" json:"assignee,omitempty"`
+
+	// Limit Maximum ready beads returned per store; the filter is applied before the limit. 0 = unbounded.
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// RouteTarget Routed-pool target; returns only unassigned non-epic ready work routed here, oldest-first.
+	RouteTarget *string `form:"route_target,omitempty" json:"route_target,omitempty"`
+
+	// RouteMode Routed-pool match mode for route_target: canonical (gc.routed_to) or migration (gc.run_target workflow root).
+	RouteMode *GetV0CityByCityNameBeadsReadyParamsRouteMode `form:"route_mode,omitempty" json:"route_mode,omitempty"`
 }
+
+// GetV0CityByCityNameBeadsReadyParamsRouteMode defines parameters for GetV0CityByCityNameBeadsReady.
+type GetV0CityByCityNameBeadsReadyParamsRouteMode string
 
 // DeleteV0CityByCityNameConvoyByIdParams defines parameters for DeleteV0CityByCityNameConvoyById.
 type DeleteV0CityByCityNameConvoyByIdParams struct {
@@ -22034,6 +22067,70 @@ func NewGetV0CityByCityNameBeadsReadyRequest(server string, cityName string, par
 		if params.IncludeEphemeral != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_ephemeral", *params.IncludeEphemeral, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Assignee != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "assignee", *params.Assignee, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.RouteTarget != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "route_target", *params.RouteTarget, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.RouteMode != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "route_mode", *params.RouteMode, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

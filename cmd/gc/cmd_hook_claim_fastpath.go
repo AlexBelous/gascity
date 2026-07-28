@@ -49,26 +49,21 @@ func hookFastPathEligible(flags rollout.Flags, workQuery, resolvedAgentName, pri
 // (no worker SQL), then runs the shared tryHookClaim selection with API-backed
 // claim ops so the claim and identity stamp also avoid a worker-side connection.
 //
-// Return contract:
-//   - (code, true): the fast path handled the claim — a claim was written, or a
-//     clean no-work drain, or a real controller verdict failed fast. code is the
-//     process exit code.
-//   - (0, false): a PRE-REQUEST connection failure means the controller was
-//     unreachable; the caller must fall back to the subprocess path. This is the
-//     ONLY fallback trigger (invariant 4). A non-connection controller error is a
-//     definite verdict: it is logged and returned as a terminal failure, never
-//     shelled out (which would multiply the connection pressure the cure removes).
-func claimHookWorkFastPath(client fastPathClient, identities, routeTargets []string, sessionOrigin string, scopes []string, workDir string, claimOpts hookClaimOptions, stdout, stderr io.Writer) (int, bool) {
+// Controller loss fails closed. Independently opened BdStore working sets do not
+// provide an atomic cross-process claim boundary under managed Dolt, so work
+// remains queued until the controller returns instead of falling back to a
+// subprocess path that can overwrite another actor's claim.
+func claimHookWorkFastPath(client fastPathClient, identities, routeTargets []string, sessionOrigin string, scopes []string, workDir string, claimOpts hookClaimOptions, stdout, stderr io.Writer) int {
 	const cmdName = "hook --claim"
 	candidates, err := fastPathClaimCandidates(client, identities, routeTargets, sessionOrigin, scopes)
 	if err != nil {
-		if api.IsConnError(err) {
-			logRoute(stderr, cmdName, "fallback", "controller-unreachable")
-			return 0, false
+		reason := "controller-read-failed"
+		if api.IsDialFailure(err) {
+			reason = "controller-dial-failed"
 		}
-		logRoute(stderr, cmdName, "api", "read-error")
+		logRoute(stderr, cmdName, "fail-closed", reason)
 		fmt.Fprintf(stderr, "gc hook --claim: controller read failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1, true
+		return 1
 	}
 	payload, err := json.Marshal(candidates)
 	if err != nil || len(candidates) == 0 {
@@ -79,15 +74,13 @@ func claimHookWorkFastPath(client fastPathClient, identities, routeTargets []str
 	logRoute(stderr, cmdName, "api", "")
 	ops := newAPIFastPathClaimOps(client)
 	ops.Runner = func(string, string) (string, error) { return string(payload), nil }
-	return doHookClaim(cmdName, workDir, claimOpts, ops, stdout, stderr), true
+	return doHookClaim(cmdName, workDir, claimOpts, ops, stdout, stderr)
 }
 
-// fastPathReader is the narrow controller-read surface the hook fast path needs
-
-// epicIssueType is the bead type the generated routed-pool query excludes
-// (--exclude-type=epic): an unassigned parent epic has no executable spec, so a
-// pool worker claiming one does undefined work (see EffectiveWorkQuery docs).
-const epicIssueType = "epic"
+// routedPoolProbeLimit bounds each routed-pool probe to the legacy generated
+// query's candidate window (`bd ready --sort oldest --limit 20`,
+// config/workquery.go). The server applies the route filter BEFORE this limit.
+const routedPoolProbeLimit = 20
 
 // fastPathClaimer is the narrow controller-mutation surface the fast path's
 // claim ops use. *api.Client satisfies it; tests inject the real client against
@@ -129,12 +122,37 @@ func apiFastPathClaim(client fastPathClaimer) hookClaimFunc {
 	return func(ctx context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 		bead, claimed, err := client.ClaimBead(ctx, beadID, assignee)
 		if err != nil {
-			return beads.Bead{}, false, err
+			// A timeout, mid-response EOF, or other post-dial transport error is
+			// ambiguous: the controller may have committed the claim even though
+			// this worker did not receive the response. The canonical design permits
+			// exactly one recovery action here — retry the SAME bead as the SAME
+			// actor, relying on ClaimIssue's same-actor idempotence. Returning an
+			// ordinary candidate error would let the caller try a different bead
+			// while the first request can still commit.
+			if api.IsConnError(err) && !api.IsDialFailure(err) {
+				retryCtx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+				defer cancel()
+				bead, claimed, err = client.ClaimBead(retryCtx, beadID, assignee)
+				if err != nil {
+					// Mark the outcome may-have-committed so tryHookClaim stops
+					// instead of moving to another candidate. The hook exits loud;
+					// the same actor's next tick can retry this bead idempotently.
+					return beads.Bead{}, true, fmt.Errorf("claim response ambiguous; same-actor retry failed: %w", err)
+				}
+			} else {
+				return beads.Bead{}, false, err
+			}
 		}
 		if claimed {
 			return bead, true, nil
 		}
 		if cur, getErr := client.GetBead(beadID); getErr == nil {
+			if strings.TrimSpace(cur.Body.Assignee) == strings.TrimSpace(assignee) &&
+				strings.EqualFold(strings.TrimSpace(cur.Body.Status), "in_progress") {
+				// Defensive idempotence: an older controller can report
+				// claimed=false while the canonical row already names this actor.
+				return cur.Body, true, nil
+			}
 			return cur.Body, false, nil
 		}
 		return bead, false, nil
@@ -157,13 +175,15 @@ func apiFastPathStampWorkMeta(client fastPathClaimer) hookStampWorkMetaFunc {
 // Both reads accept a store scope: a rig name or the city name selects a single
 // backing store, and an empty scope federates every store. Scope is how the fast
 // path reproduces the legacy firstStoreWithWork STORE-outermost precedence
-// (invariant 2) — see fastPathClaimCandidates. BeadsReady also takes an
-// includeEphemeral flag; the fast path always sets it (and ListBeads.IncludeEphemeral)
+// (invariant 2) — see fastPathClaimCandidates. Every probe sets IncludeEphemeral
 // so ephemeral molecule/wisp work stays visible, matching the generated query's
-// --include-ephemeral probes.
+// --include-ephemeral probes. The ready probes are BOUNDED, tier-specific reads
+// (assignee+limit=1 for assigned-ready; route target+mode, oldest-first,
+// limit=20 for the routed pool) served strictly from the controller cache, so a
+// hook never triggers an unbounded live backing read.
 type fastPathReader interface {
 	ListBeads(opts api.ListBeadsOpts) (api.CachedRead[[]beads.Bead], error)
-	BeadsReady(scope string, includeEphemeral bool) (api.CachedRead[[]beads.Bead], error)
+	BeadsReadyQuery(opts api.ReadyReadOpts) (api.CachedRead[[]beads.Bead], error)
 }
 
 // The production controller client is the fast-path reader; pin it so a client
@@ -208,15 +228,16 @@ func poolDemandOriginEligible(sessionOrigin string) bool {
 //  1. assigned in_progress (crash recovery), per identity in the given order
 //     (session id > session name > alias), first hit — one bead;
 //  2. assigned ready, same identity order, first hit — one bead;
-//  3. routed pool: origin-gated, unassigned, non-epic ready beads whose route
-//     matches a target via hookClaimMatchesRoute (which includes the
-//     run_target/workflow migration fallback), in ready order.
+//  3. routed pool: origin-gated; route targets are OUTERMOST (the first target
+//     with demand wins), probing canonical gc.routed_to before the gc.run_target
+//     migration fallback per target. Each probe is a server-side bounded read —
+//     unassigned, non-epic, route-filtered BEFORE the limit — ordered
+//     oldest-first with limit 20.
 //
 // identities is the raw [GC_SESSION_ID, GC_SESSION_NAME, GC_ALIAS] set the shell
 // assigned tiers iterate (empties skipped); routeTargets is the pool route set.
-// Any read error propagates so the caller can classify a pre-request connection
-// failure (IsConnError) and fall back to the subprocess path; a non-connection
-// error is a real controller verdict and must not silently shell out.
+// Any read error propagates so the caller fails closed. Generated-default work
+// never shells out on controller loss.
 //
 // Scope: this reproduces the STANDARD generated default query only. The caller
 // must not route legacy control-dispatcher targets or a custom work_query here —
@@ -227,9 +248,8 @@ func fastPathClaimCandidates(r fastPathReader, identities, routeTargets []string
 	// STORE-outermost order — is REMEMBERED, not fatal. Later stores are still
 	// consulted, and if one has work that work wins, so a transient own-store outage
 	// never masks real work waiting in a federated store. The remembered own-store
-	// error is surfaced only when NO scope yields work, so it reaches the caller (a
-	// pre-request conn failure -> fallback; a real store outage -> terminal) instead
-	// of being silently read as a false no-work drain. An error on a FEDERATED
+	// error is surfaced only when NO scope yields work, so it reaches the caller's
+	// fail-closed path instead of being silently read as a false no-work drain. An error on a FEDERATED
 	// secondary store is best-effort discovery and is dropped, so one flaky or
 	// absent rig store cannot wedge the hook.
 	var primaryErr error
@@ -293,60 +313,60 @@ func fastPathScopeCandidates(r fastPathReader, scope string, identities, routeTa
 		}
 	}
 
-	// Tiers 2 and 3 share a single ready read scoped to this store (the
-	// controller-side equivalent of `bd ready` against one store). It spans both
-	// tiers (includeEphemeral) so ephemeral ready work is not silently dropped.
-	ready, err := r.BeadsReady(scope, true)
-	if err != nil {
-		return nil, err
-	}
-
-	// Tier 2: assigned ready, per identity, first hit.
+	// Tier 2: assigned ready, per identity, first hit. Each identity gets its own
+	// BOUNDED probe — assignee filter with limit 1, mirroring the shell's
+	// `bd ready --assignee=$id --limit 1` — served strictly from the controller
+	// cache, so the full ready set never crosses the wire per hook.
 	for _, id := range identities {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
 		}
-		for _, b := range ready.Body {
-			if strings.TrimSpace(b.Assignee) == id {
-				return []beads.Bead{b}, nil
-			}
+		cr, err := r.BeadsReadyQuery(api.ReadyReadOpts{Scope: scope, IncludeEphemeral: true, Assignee: id, Limit: 1})
+		if err != nil {
+			return nil, err
+		}
+		if len(cr.Body) > 0 {
+			return []beads.Bead{cr.Body[0]}, nil
 		}
 	}
 
 	// Tier 3: routed pool demand. Origin-gated exactly as the shell query is; a
 	// non-eligible origin never claims pool demand.
 	//
-	// The shell probe (poolDemandFirstRowFunctionScript) reads CANONICAL
-	// gc.routed_to demand first and only falls through to the legacy
-	// gc.run_target migration when no canonical demand exists. Preserve that
-	// precedence: collect canonical and migration matches separately in ready
-	// order, and return the canonical set whenever it is non-empty so a
-	// migration-only bead earlier in ready order never outranks a canonical one.
+	// Route targets keep the legacy OUTER-loop order
+	// (poolDemandFirstRowFunctionScript iterates targets and returns the first
+	// target with demand), and each target probes CANONICAL gc.routed_to demand
+	// before the legacy gc.run_target migration fallback, so a stale divergent
+	// migration route never outranks canonical routing. Each probe is bounded to
+	// the legacy 20 oldest candidates (`--sort oldest --limit 20`), with the
+	// route/unassigned/non-epic filter applied server-side BEFORE the limit so an
+	// eligible routed row buried behind unrelated ready work is still found.
 	if !poolDemandOriginEligible(sessionOrigin) {
 		return nil, nil
 	}
-	var canonical, migration []beads.Bead
-	for _, b := range ready.Body {
-		if strings.TrimSpace(b.Assignee) != "" {
-			continue // pool demand is unassigned work only
-		}
-		if b.Type == epicIssueType {
-			continue // --exclude-type=epic
-		}
-		if !hookClaimMatchesRoute(b, routeTargets) {
+	for _, target := range routeTargets {
+		target = strings.TrimSpace(target)
+		if target == "" {
 			continue
 		}
-		if hookClaimCanonicalRouteMatch(b, routeTargets) {
-			canonical = append(canonical, b)
-		} else {
-			migration = append(migration, b)
+		for _, mode := range []string{api.RouteModeCanonical, api.RouteModeMigration} {
+			cr, err := r.BeadsReadyQuery(api.ReadyReadOpts{
+				Scope:            scope,
+				IncludeEphemeral: true,
+				Limit:            routedPoolProbeLimit,
+				RouteTarget:      target,
+				RouteMode:        mode,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if len(cr.Body) > 0 {
+				return cr.Body, nil
+			}
 		}
 	}
-	if len(canonical) > 0 {
-		return canonical, nil
-	}
-	return migration, nil
+	return nil, nil
 }
 
 // hookFastPathScopeOrder returns the store scopes the fast path must read IN

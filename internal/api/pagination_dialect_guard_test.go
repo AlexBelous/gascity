@@ -93,6 +93,11 @@ var boundedLimitOnlyFeeds = map[string]bool{
 	"GET /v0/city/{cityName}/orders/feed":          true,
 	"GET /v0/city/{cityName}/runs":                 true,
 	"GET /v0/events":                               true,
+	// Reviewed with gc-2h7b.2.3 (connection-cure P1-2): `limit` here is the hook
+	// fast path's per-store probe bound (assigned-ready limit=1, routed-pool
+	// limit=20 after filtering), not a page size — there is deliberately no
+	// cursor because a work probe re-reads the current head, never walks history.
+	"GET /v0/city/{cityName}/beads/ready": true,
 }
 
 type specParam struct {

@@ -36,6 +36,10 @@ func (s *recordingPolicyReadStore) ReadyContext(ctx context.Context, query ...be
 	return s.Ready(query...)
 }
 
+func (s *recordingPolicyReadStore) ReadyCachedContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return s.ReadyContext(ctx, query...)
+}
+
 func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
 	backing := &recordingPolicyReadStore{MemStore: beads.NewMemStore()}
 	store := wrapStoreWithBeadPolicies(backing, &config.City{})
@@ -293,5 +297,21 @@ func TestBeadPolicyStoreContextReadyIsPolicyAware(t *testing.T) {
 	}
 	if len(backing.readyQueries) != 1 || backing.readyQueries[0].TierMode != beads.TierBoth {
 		t.Fatalf("ReadyContext queries = %#v, want one TierBoth query", backing.readyQueries)
+	}
+}
+
+func TestBeadPolicyStoreCachedReadyContextIsPolicyAware(t *testing.T) {
+	backing := &recordingPolicyReadStore{MemStore: beads.NewMemStore()}
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	reader, ok := store.(beads.CacheReadyContextReader)
+	if !ok {
+		t.Fatalf("policy store type %T does not preserve CacheReadyContextReader", store)
+	}
+
+	if _, err := reader.ReadyCachedContext(context.Background()); err != nil {
+		t.Fatalf("ReadyCachedContext: %v", err)
+	}
+	if len(backing.readyQueries) != 1 || backing.readyQueries[0].TierMode != beads.TierBoth {
+		t.Fatalf("ReadyCachedContext queries = %#v, want one TierBoth query", backing.readyQueries)
 	}
 }

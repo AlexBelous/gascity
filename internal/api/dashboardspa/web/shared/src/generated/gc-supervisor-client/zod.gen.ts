@@ -6752,7 +6752,11 @@ export const zGetV0CityByCityNameBeadsReadyQuery = z.object({
     index: z.string().optional(),
     wait: z.string().optional(),
     rig: z.string().optional(),
-    include_ephemeral: z.boolean().optional()
+    include_ephemeral: z.boolean().optional(),
+    assignee: z.string().optional(),
+    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    route_target: z.string().optional(),
+    route_mode: z.enum(['canonical', 'migration']).optional()
 });
 
 /**

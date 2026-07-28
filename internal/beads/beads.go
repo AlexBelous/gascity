@@ -702,6 +702,20 @@ type ContextReadyReader interface {
 	ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error)
 }
 
+// CacheReadyContextReader is an optional cache-only Ready capability for
+// deadline-sensitive callers that must NEVER trigger backing-store I/O.
+// ReadyCachedContext answers from an already-populated active cache — partial
+// (PrimeActive) or fully live — but only when every returned candidate's
+// dependency coverage is provable from the cache itself; otherwise it fails
+// with ErrCacheUnavailable. Implementations must not prime, refresh, or fall
+// back to a live read, and must stop all work started by ReadyCachedContext
+// before returning after ctx cancellation. ContextReadyReader.ReadyContext
+// remains the stricter capability requiring the live, globally
+// dependency-complete projection.
+type CacheReadyContextReader interface {
+	ReadyCachedContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error)
+}
+
 // StorageClass selects the physical bead storage tier for adapters that
 // support table-specific creates. It is adapter plumbing, not a domain-level
 // behavior knob; normal callers should use Store.Create and let the policy

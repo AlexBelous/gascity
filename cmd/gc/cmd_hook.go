@@ -473,34 +473,28 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		}
 		// Controller claim fast path (opt-in, beads.hook_claim_fastpath): route
 		// generated-default discovery and atomic claim through the running
-		// controller's pooled store so this hook opens no MySQL connection. Only a
-		// pre-request connection failure falls through to the subprocess path
-		// below (handled=false); a real controller verdict is terminal there. When
-		// the gate is off, the query is custom, the target is legacy control, or no
-		// controller client resolves, this is skipped and the subprocess path runs.
+		// controller's pooled store so this hook opens no MySQL connection.
+		// Controller loss is terminal: independently opened BdStore working sets can
+		// overwrite each other's claims under managed Dolt, so generated-default
+		// work stays queued until the controller returns. When the gate is off, the
+		// query is custom, or the target is legacy control, the subprocess path
+		// remains unchanged.
 		flags, ferr := rollout.Resolve(cfg, rollout.ResolveOptions{})
 		if ferr == nil && hookFastPathEligible(flags, a.WorkQuery, resolvedAgentName, hookClaimPrimaryRouteTarget(&a)) {
-			if client, _ := maintenanceAPIClient(cityPath); client != nil {
-				identities := []string{sessionID, sessionName, alias}
-				origin := strings.TrimSpace(overrides["GC_SESSION_ORIGIN"])
-				// Reproduce the legacy firstStoreWithWork STORE-outermost order so
-				// the controller-read fast path preserves cross-store precedence
-				// (invariant 2): rig-scoped agents read own-rig first then city,
-				// city-scoped agents read city then rigs in config order.
-				scopes := hookFastPathScopeOrder(cfg, &a, agentForQuery, cityName)
-				if code, handled := claimHookWorkFastPath(client, identities, claimOpts.RouteTargets, origin, scopes, workDir, claimOpts, stdout, stderr); handled {
-					return code
-				}
-				// handled=false means claimHookWorkFastPath already logged
-				// route=fallback for a pre-request connection failure; fall through.
-			} else {
-				// Eligible for the fast path but no controller client resolved: the
-				// controller is unavailable before the request, so the subprocess
-				// adapter is the fallback. Surface it (invariant 7's route vocabulary)
-				// so a fallback is observable, not inferred from the absence of
-				// route=api.
-				logRoute(stderr, "hook --claim", "fallback", "controller-unavailable")
+			client, _ := maintenanceAPIClient(cityPath)
+			if client == nil {
+				logRoute(stderr, "hook --claim", "fail-closed", "controller-unavailable")
+				fmt.Fprintln(stderr, "gc hook --claim: controller unavailable; leaving work queued") //nolint:errcheck // best-effort stderr
+				return 1
 			}
+			identities := []string{sessionID, sessionName, alias}
+			origin := strings.TrimSpace(overrides["GC_SESSION_ORIGIN"])
+			// Reproduce the legacy firstStoreWithWork STORE-outermost order so
+			// the controller-read fast path preserves cross-store precedence
+			// (invariant 2): rig-scoped agents read own-rig first then city,
+			// city-scoped agents read city then rigs in config order.
+			scopes := hookFastPathScopeOrder(cfg, &a, agentForQuery, cityName)
+			return claimHookWorkFastPath(client, identities, claimOpts.RouteTargets, origin, scopes, workDir, claimOpts, stdout, stderr)
 		} else if strings.TrimSpace(a.WorkQuery) != "" {
 			// A custom work_query is never protected by the fast path (invariant 3);
 			// it stays on the subprocess adapter. Report it as route=custom-shell so

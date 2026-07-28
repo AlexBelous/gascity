@@ -388,6 +388,13 @@ func (m *MemStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bea
 	return m.readyLocked(ctx, readyQueryFromArgs(query))
 }
 
+// ReadyCachedContext implements CacheReadyContextReader by delegating to the
+// in-memory ReadyContext: the whole store IS the in-memory read model, so the
+// cache-only contract (no backing I/O) holds trivially.
+func (m *MemStore) ReadyCachedContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
+	return m.ReadyContext(ctx, query...)
+}
+
 func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error) {
 	cancellable := ctx != nil && ctx.Done() != nil
 	contextErr := func() error {
@@ -417,6 +424,9 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 		if q.Assignee != "" && b.Assignee != q.Assignee {
 			continue
 		}
+		if !q.matchesExtra(b) {
+			continue
+		}
 		blocked := false
 		for _, dep := range m.deps {
 			if err := contextErr(); err != nil {
@@ -437,9 +447,20 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 		}
 		if !blocked {
 			result = append(result, cloneBead(b))
-			if q.Limit > 0 && len(result) >= q.Limit {
+			if !q.isRouted() && q.Limit > 0 && len(result) >= q.Limit {
 				break
 			}
+		}
+	}
+	if q.isRouted() {
+		// The routed-pool tier is oldest-first (created_asc), not insertion order,
+		// and its Limit cuts the sorted prefix — matching the cache-served strict
+		// read so file/mem-backed cities see the same routed candidates.
+		if err := sortBeadsCreatedAscContext(ctx, result); err != nil {
+			return nil, err
+		}
+		if q.Limit > 0 && len(result) > q.Limit {
+			result = result[:q.Limit]
 		}
 	}
 	return result, nil

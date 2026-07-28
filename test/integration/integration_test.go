@@ -1109,6 +1109,17 @@ func newIsolatedToolEnv(t *testing.T, useDolt bool) []string {
 func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 	t.Helper()
 
+	env, gcHome := newUnstartedIsolatedCommandEnv(t, useDolt)
+	startIsolatedSupervisor(t, env, gcHome)
+	return env
+}
+
+// newUnstartedIsolatedCommandEnv builds the command environment and service
+// shims without starting the supervisor. Tests that must initialize a city
+// before reconciliation begins use this to avoid an init/supervisor race.
+func newUnstartedIsolatedCommandEnv(t *testing.T, useDolt bool) ([]string, string) {
+	t.Helper()
+
 	gcHome, _, env := newIsolatedEnvRoot(t, useDolt)
 
 	root := filepath.Dir(gcHome)
@@ -1124,8 +1135,7 @@ func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 	}
 	envMap := parseEnvList(env)
 	env = replaceEnv(env, "PATH", prependPath(shimDir, envMap["PATH"]))
-	startIsolatedSupervisor(t, env, gcHome)
-	return env
+	return env, gcHome
 }
 
 func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {

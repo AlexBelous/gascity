@@ -15,13 +15,11 @@ import (
 //   - (bead, true, nil): actor now owns the bead. Idempotent for the same actor.
 //   - (Bead{}, false, nil): another actor won or the bead was not claimable — a
 //     lost race is never an error.
-//   - (Bead{}, false, err): a hard failure. A *connError (IsConnError true) is a
-//     pre-request transport failure and the ONLY error the hook fast path may
-//     treat as controller-unavailable and fall back to BdStore. Every other
-//     error — an admission-saturation 503, a 409, a 500 — is a definite server
-//     verdict: the fast path must fail fast on it, never shell out (which would
-//     multiply connection pressure) and never replay the claim as a different
-//     actor.
+//   - (Bead{}, false, err): a hard failure. The hook fast path fails closed for
+//     every error and never opens an independent BdStore. A transport error
+//     after dial is ambiguous and may be retried only for the same bead and
+//     actor; an admission-saturation 503, a 409, or a 500 is a definite server
+//     verdict and must not be replayed.
 func (c *Client) ClaimBead(ctx context.Context, id, actor string) (beads.Bead, bool, error) {
 	if err := c.requireCityScope(); err != nil {
 		return beads.Bead{}, false, err

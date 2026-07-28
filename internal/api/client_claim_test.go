@@ -82,10 +82,10 @@ func TestClientClaimBeadLostRace(t *testing.T) {
 	}
 }
 
-// TestClientClaimBeadConnErrorIsFallbackable proves a pre-request transport
-// failure surfaces as a *connError, the ONLY error the hook fast path may treat
-// as controller-unavailable and fall back to BdStore.
-func TestClientClaimBeadConnErrorIsFallbackable(t *testing.T) {
+// TestClientClaimBeadConnErrorIsClassified proves a pre-request transport
+// failure surfaces as a *connError so the hook can distinguish transport
+// ambiguity while still failing closed.
+func TestClientClaimBeadConnErrorIsClassified(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := ts.URL
 	ts.Close() // nothing listening: the request cannot connect.
@@ -99,7 +99,7 @@ func TestClientClaimBeadConnErrorIsFallbackable(t *testing.T) {
 		t.Fatal("claimed = true on transport failure, want false")
 	}
 	if !IsConnError(err) {
-		t.Fatalf("IsConnError = false for err %v (%T), want true (fast path must be able to fall back)", err, err)
+		t.Fatalf("IsConnError = false for err %v (%T), want true", err, err)
 	}
 }
 

@@ -10481,6 +10481,22 @@ export type GetV0CityByCityNameBeadsReadyData = {
          * Include ephemeral (wisp) ready work alongside durable ready work.
          */
         include_ephemeral?: boolean;
+        /**
+         * Restrict ready work to this assignee.
+         */
+        assignee?: string;
+        /**
+         * Maximum ready beads returned per store; the filter is applied before the limit. 0 = unbounded.
+         */
+        limit?: number;
+        /**
+         * Routed-pool target; returns only unassigned non-epic ready work routed here, oldest-first.
+         */
+        route_target?: string;
+        /**
+         * Routed-pool match mode for route_target: canonical (gc.routed_to) or migration (gc.run_target workflow root).
+         */
+        route_mode?: 'canonical' | 'migration';
     };
     url: '/v0/city/{cityName}/beads/ready';
 };

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -407,6 +408,96 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	return q
 }
 
+// readyRouteExcludeType is the bead type the routed-pool tier always excludes:
+// an unassigned parent epic has no executable spec, so a pool worker claiming
+// one does undefined work. It mirrors the legacy routed probe's
+// --exclude-type=epic (config/workquery.go).
+const readyRouteExcludeType = "epic"
+
+// beadReadyQueryFromInput builds the cache-served ready query from the typed
+// input and validates the routed-pool parameters. The routed tier is the only
+// mode that implies unassigned + non-epic + oldest ordering, so those are set
+// here (policy) rather than exposed as independent params (the generic ready
+// endpoint has no other caller that would want a routed read to include
+// assigned or epic work).
+func beadReadyQueryFromInput(input *BeadReadyInput) (beads.ReadyQuery, error) {
+	q := beads.ReadyQuery{
+		Assignee: strings.TrimSpace(input.Assignee),
+		Limit:    input.Limit,
+	}
+	if input.Limit < 0 {
+		return beads.ReadyQuery{}, apierr.InvalidRequest.Msg("limit must be >= 0")
+	}
+	if input.IncludeEphemeral {
+		q.TierMode = beads.TierBoth
+	}
+	target := strings.TrimSpace(input.RouteTarget)
+	mode := strings.TrimSpace(input.RouteMode)
+	switch mode {
+	case "":
+		if target != "" {
+			return beads.ReadyQuery{}, apierr.InvalidRequest.Msg("route_target requires route_mode (canonical|migration)")
+		}
+		return q, nil
+	case "canonical", "migration":
+		if target == "" {
+			return beads.ReadyQuery{}, apierr.InvalidRequest.Msg("route_mode requires route_target")
+		}
+		q.Route = target
+		q.Unassigned = true
+		q.ExcludeType = readyRouteExcludeType
+		if mode == "canonical" {
+			q.RouteMode = beads.RouteCanonical
+		} else {
+			q.RouteMode = beads.RouteMigration
+		}
+		return q, nil
+	default:
+		return beads.ReadyQuery{}, apierr.InvalidRequest.Msg("invalid route_mode: " + strconv.Quote(mode))
+	}
+}
+
+// beadReadyStrictShape reports whether the request uses the bounded fast-path
+// query shape (assignee, limit, or routed-pool params). That shape is new with
+// P1-2, so it has no historical caller and gets STRICT cache-only semantics:
+// served from the controller-owned cache, failing closed (503) when the cache
+// cannot answer, never priming and never falling back to a live backing (SQL)
+// read. The zero-value/default shape (optionally with include_ephemeral) keeps
+// its historical live-read behavior for existing raw HTTP callers.
+func beadReadyStrictShape(input *BeadReadyInput) bool {
+	return strings.TrimSpace(input.Assignee) != "" || input.Limit != 0 ||
+		strings.TrimSpace(input.RouteTarget) != "" || strings.TrimSpace(input.RouteMode) != ""
+}
+
+// strictCacheReady serves a bounded fast-path ready read strictly from the
+// store's cache-only context reader. CacheReadyContextReader is the ONLY
+// acceptable path here: CachingStore.ReadyCachedContext answers purely from
+// the already-primed active cache — a PrimeActive partial prime suffices, so a
+// resumed rig serves hooks during its async full prime — with per-candidate
+// dependency coverage, and fails with ErrCacheUnavailable otherwise. The
+// Cached handle (cachedStoreReader.Ready) calls ensureFullPrime — a backing
+// read the hook fast path must never trigger at per-hook frequency. A store
+// without the capability is a fail-closed outage, not a live fallback.
+func strictCacheReady(ctx context.Context, store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := store.(beads.CacheReadyContextReader)
+	if !ok {
+		return nil, beads.ErrReadyContextUnsupported
+	}
+	return reader.ReadyCachedContext(ctx, query)
+}
+
+// strictCacheReadyError maps a strict cache-only read failure to its API error:
+// cache-unavailable and capability-unsupported both surface as a retryable 503
+// (the caller retries against a warm controller; it must NOT be tempted into a
+// live read), and anything else passes through unchanged (a context error stays
+// a context error).
+func strictCacheReadyError(label string, err error) error {
+	if errors.Is(err, beads.ErrCacheUnavailable) || errors.Is(err, beads.ErrReadyContextUnsupported) {
+		return apierr.StoreUnavailable.Msg(fmt.Sprintf("%s: cache-only ready read unavailable: %v", label, err))
+	}
+	return err
+}
+
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
 func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()
@@ -427,34 +518,62 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		return nil, err
 	}
 	rigNames := sortedRigNames(stores)
-	// An explicit include_ephemeral read spans both the durable issues tier and
-	// the ephemeral wisps tier, so ephemeral molecule/wisp ready work stays
-	// visible; the default keeps the caller's historical tier. Passing TierBoth
-	// is a no-op for policy-wrapped stores (which already expand to TierBoth) and
-	// makes non-policy stores ephemeral-inclusive too.
-	var readyQuery []beads.ReadyQuery
-	if input.IncludeEphemeral {
-		readyQuery = []beads.ReadyQuery{{TierMode: beads.TierBoth}}
+	// Build the ready query from the typed input, and split serving mode on the
+	// request shape. The bounded fast-path shape (assignee / limit / route) is
+	// STRICT cache-only: the hook fast path drives it at high concurrency, and a
+	// per-hook live backing (SQL) Ready read is exactly the connection pressure
+	// the managed-Dolt cure removes. The filter is applied BEFORE the limit so a
+	// routed candidate buried behind non-matching ready work is not cut, and a
+	// cache that cannot answer fails closed as a retryable 503 — it never primes
+	// and never falls back to a live read (managed-dolt-connection-boundary
+	// invariants 5-6). The zero-value/default shape keeps its historical live
+	// read so existing raw HTTP callers see unchanged behavior.
+	readyQuery, qerr := beadReadyQueryFromInput(input)
+	if qerr != nil {
+		return nil, qerr
 	}
+	strict := beadReadyStrictShape(input)
 	var all []beads.Bead
 	var pa partialAggregator
+	var strictErr error
 	seen := make(map[string]bool)
 	federate := func(label string, store beads.Store) {
-		if store == nil {
+		if store == nil || strictErr != nil {
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready(readyQuery...)
-		if err != nil {
-			if beads.IsPartialResult(err) && len(ready) > 0 {
-				pa.record(label, err)
-				pa.success()
-			} else {
-				pa.record(label, err)
+		var ready []beads.Bead
+		var err error
+		if strict {
+			ready, err = strictCacheReady(ctx, store, readyQuery)
+			if err != nil {
+				// Strict mode fails the whole request closed: a partial answer that
+				// silently dropped a store would read as a false no-work drain on
+				// exactly the store the hook was probing.
+				strictErr = strictCacheReadyError(label, err)
 				return
 			}
-		} else {
 			pa.success()
+		} else {
+			// Historical live read for the zero-value/default shape. An explicit
+			// include_ephemeral spans both tiers (TierBoth); otherwise the caller's
+			// historical tier is preserved.
+			var liveQuery []beads.ReadyQuery
+			if input.IncludeEphemeral {
+				liveQuery = []beads.ReadyQuery{{TierMode: beads.TierBoth}}
+			}
+			ready, err = beads.HandlesFor(store).Live.Ready(liveQuery...)
+			if err != nil {
+				if beads.IsPartialResult(err) && len(ready) > 0 {
+					pa.record(label, err)
+					pa.success()
+				} else {
+					pa.record(label, err)
+					return
+				}
+			} else {
+				pa.success()
+			}
 		}
 		for _, b := range ready {
 			if seen[b.ID] {
@@ -482,6 +601,9 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			continue // scoped read: only the named rig store
 		}
 		federate("rig "+rigName, stores[rigName])
+	}
+	if strictErr != nil {
+		return nil, strictErr
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()

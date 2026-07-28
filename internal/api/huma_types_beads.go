@@ -46,6 +46,22 @@ type BeadReadyInput struct {
 	// for other callers. The hook fast path sets it so ephemeral molecule/wisp
 	// ready work stays visible, matching the generated query's --include-ephemeral.
 	IncludeEphemeral bool `query:"include_ephemeral" required:"false" doc:"Include ephemeral (wisp) ready work alongside durable ready work."`
+	// Assignee restricts the cache-served read to ready work assigned to this
+	// identity. The hook fast path sets it (with Limit=1) to reproduce the
+	// assigned-ready tier per identity/alias without shipping the full ready set.
+	Assignee string `query:"assignee" required:"false" doc:"Restrict ready work to this assignee."`
+	// Limit bounds the number of ready beads returned per store. The assignee /
+	// route filter is applied BEFORE the limit so a routed candidate buried
+	// behind non-matching ready work is not cut. Zero means unbounded.
+	Limit int `query:"limit" required:"false" minimum:"0" doc:"Maximum ready beads returned per store; the filter is applied before the limit. 0 = unbounded."`
+	// RouteTarget selects the routed-pool tier: only unassigned, non-epic ready
+	// beads routed to this target, ordered oldest-first. RouteMode picks
+	// canonical (gc.routed_to) vs migration (gc.run_target + gc.kind=workflow
+	// with no gc.routed_to). Empty leaves the routed filter off.
+	RouteTarget string `query:"route_target" required:"false" doc:"Routed-pool target; returns only unassigned non-epic ready work routed here, oldest-first."`
+	// RouteMode selects how RouteTarget is matched. It is only honored with a
+	// non-empty RouteTarget; empty leaves the routed filter off.
+	RouteMode string `query:"route_mode" required:"false" enum:"canonical,migration" doc:"Routed-pool match mode for route_target: canonical (gc.routed_to) or migration (gc.run_target workflow root)."`
 }
 
 // BeadGraphInput is the Huma input for GET /v0/city/{cityName}/beads/graph/{rootID}.

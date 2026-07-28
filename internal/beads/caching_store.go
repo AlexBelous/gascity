@@ -701,10 +701,12 @@ func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]st
 	return fetched, nil
 }
 
-// PrimeActive loads the common active bead statuses (open + in_progress) across
-// both persistent issues and ephemeral wisps into the cache. These are fast indexed
-// queries that populate enough data for
-// startup paths without waiting for a full scan. The cache enters
+// PrimeActive loads Gas City's complete nonclosed status projection (open +
+// in_progress) across both persistent issues and ephemeral wisps into the
+// cache. "open" is the normalized Gas City status for every upstream
+// nonterminal status other than in_progress; managed NativeDoltStore implements
+// that indexed query by excluding closed and in_progress. These fast queries
+// populate enough data for startup paths without waiting for a full scan. The cache enters
 // cachePartial state: filtered active queries and Get hit cache for primed
 // beads, while closed-bead queries still delegate to the backing store.
 func (c *CachingStore) PrimeActive() error {
@@ -1232,6 +1234,14 @@ type cacheDependencySnapshotStore interface {
 
 type readyProjectionEnrichmentStore interface {
 	enrichReadyProjectionForCache([]Bead) ([]Bead, error)
+}
+
+// partialReadyCacheUnsafe marks a backing whose PrimeActive status queries do
+// not prove the complete nonclosed dependency-target set and whose rows carry
+// no equivalent denormalized blocked projection. Such a backing may use
+// ReadyCachedContext after a full prime, but must fail closed while cachePartial.
+type partialReadyCacheUnsafe interface {
+	partialReadyCacheUnsafe()
 }
 
 func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {

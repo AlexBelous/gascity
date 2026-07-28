@@ -808,6 +808,13 @@ func (s *DoltliteReadStore) enrichReadyProjectionForCache(items []Bead) ([]Bead,
 	return items, nil
 }
 
+// partialReadyCacheUnsafe keeps cache-only readiness fail-closed after
+// PrimeActive. DoltLite's status="open" SQL is literal, so it omits raw
+// blocked/deferred targets; unlike BdStore it also carries no denormalized
+// is_blocked projection. A full prime remains safe because it loads every
+// nonclosed target and a complete dependency snapshot.
+func (s *DoltliteReadStore) partialReadyCacheUnsafe() {}
+
 func (s *DoltliteReadStore) queryDeps(where, value string) ([]Dep, error) {
 	var deps []Dep
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {

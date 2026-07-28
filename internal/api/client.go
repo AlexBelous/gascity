@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -48,6 +49,33 @@ func (e *connError) Unwrap() error { return e.err }
 func IsConnError(err error) bool {
 	var ce *connError
 	return errors.As(err, &ce)
+}
+
+// IsDialFailure reports whether err is a PROVABLE pre-request connection failure:
+// the transport failed at the dial phase, so no request byte could have been
+// delivered and the controller cannot have accepted anything. The hook fast
+// path uses this narrow distinction for diagnostics; managed-Dolt controller
+// loss still fails closed rather than opening an independent subprocess store.
+//
+// A response/overall timeout or a mid-response EOF is deliberately NOT a dial
+// failure: an alive-but-slow controller can time out many workers at once, and
+// treating that as pre-request-unavailable would turn one controller slowdown into
+// a fleet of bd subprocesses — the connection-pressure multiplication this cure
+// removes. Those ambiguous classes also fail fast. IsConnError stays the broad
+// transport-vs-API-verdict check; this is the narrow subset that proves a
+// request was never accepted.
+func IsDialFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Only a dial-phase net.OpError (connection refused, host unreachable, a
+	// missing unix socket, or even a connect timeout) proves the connection was
+	// never established. A bare syscall errno (ECONNREFUSED, ENOENT) carries no
+	// phase evidence — ENOENT in particular can surface from entirely non-dial
+	// paths — so it is deliberately NOT accepted: without the dial OpError wrapper
+	// the failure is not provably pre-request.
+	var oe *net.OpError
+	return errors.As(err, &oe) && oe.Op == "dial"
 }
 
 // readOnlyError indicates the API server rejected a mutation because it's

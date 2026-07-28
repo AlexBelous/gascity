@@ -110,6 +110,18 @@ func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.Ready
 	return reader.ReadyContext(ctx, expandPolicyReadyQuery(query...))
 }
 
+// ReadyCachedContext preserves the policy-expanded read tier for the strict
+// cache-only Ready projection, expanding TierMode exactly like ReadyContext.
+// Optional capabilities are hidden by the embedded Store interface, so forward
+// explicitly just like ReadyContext and Count.
+func (s *beadPolicyStore) ReadyCachedContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := s.Store.(beads.CacheReadyContextReader)
+	if !ok {
+		return nil, fmt.Errorf("reading cached ready beads through policy store: %w", beads.ErrReadyContextUnsupported)
+	}
+	return reader.ReadyCachedContext(ctx, expandPolicyReadyQuery(query...))
+}
+
 // Count implements beads.Counter with the same read-tier expansion as List.
 // The embedded Store interface does not promote optional capabilities, so
 // the delegation must be explicit. Inner stores without a Counter report

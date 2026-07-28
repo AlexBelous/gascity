@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,39 +22,23 @@ import (
 // recovery) and assigned-ready (tier 2) hook cases.
 func seedAssignedBead(t *testing.T, city *connOracleCity, title, assignee string, inProgress bool) string {
 	t.Helper()
-	out, err := runGCWithEnv(city.env, city.dir, "bd", "create", "--json", title, "--assignee", assignee)
+	// Synthetic oracle actors have no open session bead, so the normal assign
+	// mutation rejects them. The atomic claim endpoint is the production path
+	// that authoritatively binds such a hook actor and updates the controller
+	// cache. Reopen with a status-only update for the assigned-ready tier.
+	id := createOracleBead(t, city, title, "", "", nil)
+	claimedBead, claimed, err := city.readyAPI.ClaimBead(context.Background(), id, assignee)
 	if err != nil {
-		t.Fatalf("create assigned bead %q: %v\n%s", title, err, out)
+		t.Fatalf("claim assigned fixture %s as %s: %v", id, assignee, err)
 	}
-	id := beadIDFromJSON(out)
-	if id == "" {
-		t.Fatalf("create assigned bead %q: no id in output:\n%s", title, out)
+	if !claimed || claimedBead.ID != id || claimedBead.Assignee != assignee {
+		t.Fatalf("claim assigned fixture %s as %s: claimed=%t bead=%+v", id, assignee, claimed, claimedBead)
 	}
-	if inProgress {
-		if o, err := runGCWithEnv(city.env, city.dir, "bd", "update", id, "--status", "in_progress", "--assignee", assignee); err != nil {
-			t.Fatalf("move bead %s to in_progress: %v\n%s", id, err, o)
-		}
+	if !inProgress {
+		setOracleBeadStatus(t, city, id, "open")
 	}
-	waitBeadVisible(t, city, id)
+	waitAssignedOracleBeadCached(t, city, id, assignee, inProgress)
 	return id
-}
-
-// waitBeadVisible polls until the controller reports the bead (its write has
-// propagated into the controller's cache), so a claim immediately afterward does
-// not read a cold cache as no-work.
-func waitBeadVisible(t *testing.T, city *connOracleCity, id string) {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		out, err := runGCWithEnv(city.env, city.dir, "bd", "show", id, "--json")
-		if err == nil && strings.Contains(out, id) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("bead %s never became visible within 20s (last err=%v)", id, err)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
 }
 
 // assertRouteAPI fails unless the hook output shows the controller fast path was
@@ -131,26 +116,21 @@ func TestManagedDoltConnOracle_SameActorRetryIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestManagedDoltConnOracle_APIUnavailableBoundedFallback proves the failure
-// semantics: when the controller is unavailable to a worker hook before the
-// request (GC_NO_API), the hook falls back to the bd subprocess adapter and still
-// atomically CLAIMS unassigned routed pool demand — the mutation path, not merely
-// re-adoption of already-owned work — exercised separately at BOUNDED concurrency
-// so the fallback's per-worker SQL clients stay well under the listener cap. It
-// asserts the explicit route=fallback marker (invariant 7), a fresh reason=claimed
-// per hook, and that every intended actor owns exactly one DISTINCT bead.
-func TestManagedDoltConnOracle_APIUnavailableBoundedFallback(t *testing.T) {
+// TestManagedDoltConnOracle_APIUnavailableFailsClosed proves the managed-Dolt
+// failure boundary: when a generated-default worker hook cannot use the
+// controller before its request (GC_NO_API), it leaves routed demand queued and
+// exits terminally. It must never open an independent BdStore working set,
+// because separately opened Dolt working sets can overwrite another actor's
+// claim even when hook processes are serialized.
+func TestManagedDoltConnOracle_APIUnavailableFailsClosed(t *testing.T) {
 	requireDoltIntegration(t)
 	city := setupConnOracleCity(t, true)
 
 	const n = 12
-	// Unassigned routed pool demand: the fallback must exercise the atomic claim
-	// mutation, so each hook freshly claims one of these rather than adopting
-	// pre-assigned work.
-	seedRoutedPoolDemand(t, city, n)
+	ids := seedRoutedPoolDemand(t, city, n)
 	actors := make([]string, n)
 	for i := 0; i < n; i++ {
-		actors[i] = fmt.Sprintf("fallback-actor-%02d", i)
+		actors[i] = fmt.Sprintf("fail-closed-actor-%02d", i)
 	}
 
 	var peak int64
@@ -174,28 +154,31 @@ func TestManagedDoltConnOracle_APIUnavailableBoundedFallback(t *testing.T) {
 	}()
 
 	var (
-		mu            sync.Mutex
-		routeFallback int
-		routeAPI      int
-		rejections    int
-		freshClaims   []hookClaim // reason=claimed only
+		mu              sync.Mutex
+		routeFailClosed int
+		routeFallback   int
+		routeAPI        int
+		rejections      int
+		unexpectedOK    int
+		freshClaims     []hookClaim
+		hookOutputs     = make(map[string]string, n)
 	)
-	sem := make(chan struct{}, 6) // bounded concurrency
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(actor string) {
 			defer wg.Done()
-			defer func() { <-sem }()
 			// GC_NO_API makes the controller unavailable to this hook before the
-			// request, forcing the bd subprocess (BdStore) fallback; GC_DEBUG (from
-			// hookActorEnv) turns on the route diagnostics.
+			// request. GC_DEBUG (from hookActorEnv) turns on route diagnostics.
 			env := append(hookActorEnv(city, actor), "GC_NO_API=1")
-			out, _ := runGCWithEnv(env, city.dir, "hook", "--claim", "--json")
-			id, asg := claimedBeadAndAssignee(out) // strict: reason=claimed (fresh mutation)
+			out, err := runGCWithEnv(env, city.dir, "hook", "--claim", "--json")
+			id, asg := claimedBeadAndAssignee(out)
 			mu.Lock()
 			defer mu.Unlock()
+			hookOutputs[actor] = out
+			if strings.Contains(out, "route=fail-closed reason=controller-unavailable") {
+				routeFailClosed++
+			}
 			if strings.Contains(out, "route=fallback") {
 				routeFallback++
 			}
@@ -204,6 +187,9 @@ func TestManagedDoltConnOracle_APIUnavailableBoundedFallback(t *testing.T) {
 			}
 			if isConnectionRejection(out) {
 				rejections++
+			}
+			if err == nil {
+				unexpectedOK++
 			}
 			if id != "" {
 				freshClaims = append(freshClaims, hookClaim{beadID: id, assignee: asg, actor: actor})
@@ -215,34 +201,41 @@ func TestManagedDoltConnOracle_APIUnavailableBoundedFallback(t *testing.T) {
 	sampler.Wait()
 
 	peakConns := int(atomic.LoadInt64(&peak))
-	t.Logf("API-unavailable fallback: freshClaims=%d/%d route=fallback=%d route=api=%d rejections=%d peakConns=%d",
-		len(freshClaims), n, routeFallback, routeAPI, rejections, peakConns)
+	t.Logf("API-unavailable fail-closed: freshClaims=%d route=fail-closed=%d route=fallback=%d route=api=%d unexpectedOK=%d rejections=%d peakConns=%d",
+		len(freshClaims), routeFailClosed, routeFallback, routeAPI, unexpectedOK, rejections, peakConns)
 
-	// Explicit fallback evidence (invariant 7): every hook logged route=fallback,
-	// none took the fast path.
+	if routeFailClosed != n {
+		for _, actor := range actors {
+			t.Logf("fail-closed detail: actor=%s output=%q", actor, hookOutputs[actor])
+		}
+		t.Fatalf("only %d/%d hooks logged route=fail-closed; controller loss was not uniformly terminal", routeFailClosed, n)
+	}
 	if routeAPI != 0 {
 		t.Fatalf("%d hook(s) took route=api despite the controller being unavailable", routeAPI)
 	}
-	if routeFallback != n {
-		t.Fatalf("only %d/%d hooks logged route=fallback; the controller-unavailable fallback was not uniformly exercised", routeFallback, n)
+	if routeFallback != 0 {
+		t.Fatalf("%d hook(s) opened the forbidden subprocess fallback", routeFallback)
 	}
-	// Fresh atomic claim by every intended actor, exact 1:1 ownership.
-	if len(freshClaims) != n {
-		t.Fatalf("fallback freshly claimed %d/%d beads (reason=claimed); the subprocess mutation path did not serve every actor", len(freshClaims), n)
+	if unexpectedOK != 0 {
+		t.Fatalf("%d hook(s) exited successfully despite controller unavailability", unexpectedOK)
 	}
-	assertUniqueClaims(t, freshClaims) // no bead won by two actors; assignee==actor exactly
-	seenBead := map[string]struct{}{}
-	for _, c := range freshClaims {
-		if _, dup := seenBead[c.beadID]; dup {
-			t.Fatalf("bead %s claimed by more than one fallback actor", c.beadID)
+	if len(freshClaims) != 0 {
+		t.Fatalf("%d hook(s) reported a fresh claim while controller routing was disabled: %+v", len(freshClaims), freshClaims)
+	}
+	for _, id := range ids {
+		read, err := city.readyAPI.GetBead(id)
+		if err != nil {
+			t.Fatalf("read fail-closed bead %s through controller: %v", id, err)
 		}
-		seenBead[c.beadID] = struct{}{}
+		if read.Body.Assignee != "" || read.Body.Status != "open" {
+			t.Fatalf("bead %s changed during fail-closed controller loss: status=%q assignee=%q", id, read.Body.Status, read.Body.Assignee)
+		}
 	}
 	if rejections != 0 {
-		t.Fatalf("%d fallback hook(s) saw a connection rejection", rejections)
+		t.Fatalf("%d fail-closed hook(s) saw a connection rejection", rejections)
 	}
 	if peakConns >= oracleMaxConnections {
-		t.Fatalf("bounded fallback peaked at %d connections, reaching the %d cap", peakConns, oracleMaxConnections)
+		t.Fatalf("fail-closed controller outage peaked at %d connections, reaching the %d cap", peakConns, oracleMaxConnections)
 	}
 }
 
@@ -535,28 +528,10 @@ exec %q "$@"
 // rig-scoped fast path's tier-3 read surfaces it. It returns the seeded bead ID.
 func seedRigRoutedDemand(t *testing.T, city *connOracleCity, rig, title string) string {
 	t.Helper()
-	out, err := runGCWithEnv(city.env, city.dir, "bd", "--rig", rig, "create", "--json", title)
-	if err != nil {
-		t.Fatalf("create rig %s bead %q: %v\n%s", rig, title, err, out)
-	}
-	id := beadIDFromJSON(out)
-	if id == "" {
-		t.Fatalf("create rig %s bead %q: no id in output:\n%s", rig, title, out)
-	}
-	if o, err := runGCWithEnv(city.env, city.dir, "bd", "--rig", rig, "update", id, "--set-metadata", "gc.routed_to="+oraclePoolAgent); err != nil {
-		t.Fatalf("route rig %s bead %s: %v\n%s", rig, id, err, o)
-	}
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		o, err := runGCWithEnv(city.env, city.dir, "bd", "--rig", rig, "ready", "--json", "--limit=0")
-		if err == nil && countRoutedReady(o, oraclePoolAgent) >= 1 {
-			return id
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("rig %s routed bead %s never became ready within 20s (last err=%v)", rig, id, err)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
+	id := createOracleBead(t, city, title, rig, "",
+		map[string]string{"gc.routed_to": oraclePoolAgent})
+	waitRoutedPoolCache(t, city, rig, 1)
+	return id
 }
 
 // rigScopedHookActorEnv builds the env for a RIG-SCOPED pool-worker hook: its
@@ -685,41 +660,18 @@ const (
 // with additional metadata (e.g. continuation root/group) and returns its ID.
 func seedRoutedBeadWithMeta(t *testing.T, city *connOracleCity, title string, meta map[string]string) string {
 	t.Helper()
-	out, err := runGCWithEnv(city.env, city.dir, "bd", "create", "--json", title)
-	if err != nil {
-		t.Fatalf("create bead %q: %v\n%s", title, err, out)
-	}
-	id := beadIDFromJSON(out)
-	if id == "" {
-		t.Fatalf("create bead %q: no id in output:\n%s", title, out)
-	}
-	set := func(kv string) {
-		if o, err := runGCWithEnv(city.env, city.dir, "bd", "update", id, "--set-metadata", kv); err != nil {
-			t.Fatalf("set %s on %s: %v\n%s", kv, id, err, o)
-		}
-	}
-	set("gc.routed_to=" + oraclePoolAgent)
+	allMeta := map[string]string{"gc.routed_to": oraclePoolAgent}
 	for k, v := range meta {
-		set(k + "=" + v)
+		allMeta[k] = v
 	}
-	return id
+	return createOracleBead(t, city, title, "", "", allMeta)
 }
 
 // waitRoutedReadyCount polls until at least n routed pool beads are ready to the
 // controller, so a race started immediately after does not read a cold cache.
 func waitRoutedReadyCount(t *testing.T, city *connOracleCity, n int) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		out, err := runGCWithEnv(city.env, city.dir, "bd", "ready", "--json", "--limit=0")
-		if err == nil && countRoutedReady(out, oraclePoolAgent) >= n {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("routed demand did not reach %d ready within 20s (last err=%v)", n, err)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
+	waitRoutedPoolCache(t, city, city.cityName, n)
 }
 
 // continuationAssignedContains reports whether the hook JSON's
@@ -859,13 +811,21 @@ func TestManagedDoltConnOracle_AdmissionSaturationFailsFastWithoutRecovery(t *te
 	start := time.Now()
 	result := runHookLoad(t, city, oracleHookProcs, "polecat-oracle")
 	elapsed := time.Since(start)
-	t.Logf("admission saturation: saturated=%d claims=%d apiRoutes=%d rejections=%d peakConns=%d elapsed=%s",
-		result.saturated, len(result.claims), result.apiRoutes, result.rejections, result.peakConns, elapsed)
+	t.Logf("admission saturation: saturated=%d claims=%d api=%d fallback=%d(reasons=%v) noRoute=%d procErr=%d rejections=%d peakConns=%d elapsed=%s",
+		result.saturated, len(result.claims), result.apiRoutes, result.fallbackRoutes, result.fallbackReasons, result.noRoute, result.processErrors, result.rejections, result.peakConns, elapsed)
+	for _, s := range result.samples {
+		t.Logf("admission saturation exceptional sample: %s", s)
+	}
 
-	// The fast path must be exercised, and the one-slot admitter must actually
-	// saturate under 200 concurrent claimants (otherwise the invariant is untested).
-	if result.apiRoutes == 0 {
-		t.Fatalf("no hook took the controller route; admission was never exercised")
+	// Discovery is not admission-bounded (only the claim mutation is), so a healthy
+	// controller still serves EVERY hook over the API with zero fallback — saturation
+	// shows up as a retryable claim result, never as a per-worker subprocess fallback.
+	if result.apiRoutes != oracleHookProcs {
+		t.Fatalf("admission saturation: %d/%d hooks took route=api (fallback=%d procErr=%d noRoute=%d); a healthy controller must serve every hook",
+			result.apiRoutes, oracleHookProcs, result.fallbackRoutes, result.processErrors, result.noRoute)
+	}
+	if result.fallbackRoutes != 0 {
+		t.Fatalf("admission saturation: %d hook(s) fell back (reasons=%v); saturation must not become a subprocess-fallback storm", result.fallbackRoutes, result.fallbackReasons)
 	}
 	if result.saturated == 0 {
 		t.Fatalf("no hook was admission-saturated with a single admission slot under %d concurrent claimants", oracleHookProcs)
@@ -920,11 +880,21 @@ func TestManagedDoltConnOracle_LongReadTimeoutStillBounds(t *testing.T) {
 	baseline := sampleThreadsConnected(t, city.observer)
 
 	result := runHookLoad(t, city, oracleHookProcs, "polecat-oracle")
-	t.Logf("long read_timeout: peakConns=%d claims=%d apiRoutes=%d rejections=%d (baseline=%d)",
-		result.peakConns, len(result.claims), result.apiRoutes, result.rejections, baseline)
+	t.Logf("long read_timeout: peakConns=%d claims=%d api=%d fallback=%d(reasons=%v) noRoute=%d procErr=%d rejections=%d (baseline=%d)",
+		result.peakConns, len(result.claims), result.apiRoutes, result.fallbackRoutes, result.fallbackReasons, result.noRoute, result.processErrors, result.rejections, baseline)
+	for _, s := range result.samples {
+		t.Logf("long read_timeout exceptional sample: %s", s)
+	}
 
-	if result.apiRoutes == 0 {
-		t.Fatalf("no hook took the controller route; the cure was not exercised")
+	// A long server read_timeout must not change the healthy-controller contract:
+	// every hook takes the API route with zero fallback. A loose "apiRoutes>0" bar
+	// would let the cure silently degrade to the subprocess path here.
+	if result.apiRoutes != oracleHookProcs {
+		t.Fatalf("long read_timeout: %d/%d hooks took route=api (fallback=%d procErr=%d noRoute=%d); a healthy controller must serve every hook",
+			result.apiRoutes, oracleHookProcs, result.fallbackRoutes, result.processErrors, result.noRoute)
+	}
+	if result.fallbackRoutes != 0 {
+		t.Fatalf("long read_timeout: %d hook(s) fell back to the subprocess path, want 0 (reasons=%v)", result.fallbackRoutes, result.fallbackReasons)
 	}
 	assertUniqueClaims(t, result.claims)
 	if len(result.claims) == 0 {

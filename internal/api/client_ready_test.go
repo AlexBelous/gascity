@@ -47,9 +47,9 @@ func TestClientBeadsReadySuccess(t *testing.T) {
 	}
 }
 
-// TestClientBeadsReadyConnErrorIsFallbackable proves a transport failure
-// surfaces as a *connError so the fast path can fall back to the shell reads.
-func TestClientBeadsReadyConnErrorIsFallbackable(t *testing.T) {
+// TestClientBeadsReadyConnErrorIsClassified proves a transport failure
+// surfaces as a *connError so the fast path can fail closed.
+func TestClientBeadsReadyConnErrorIsClassified(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := ts.URL
 	ts.Close()
@@ -81,6 +81,66 @@ func TestClientBeadsReadyScopePassesRigParam(t *testing.T) {
 	}
 	if gotRig != "frontend" {
 		t.Errorf("rig query = %q, want frontend", gotRig)
+	}
+}
+
+// TestClientBeadsReadyQuerySerializesBoundedParams pins the exact wire shape of
+// the bounded fast-path read: every ReadyReadOpts field maps to its query param
+// verbatim (rig, include_ephemeral, assignee, limit, route_target, route_mode),
+// and the zero value sends none of them, preserving the historical unbounded
+// read. Route-shape validation stays server-side (Huma) — the client only pins
+// serialization.
+func TestClientBeadsReadyQuerySerializesBoundedParams(t *testing.T) {
+	var gotQuery map[string][]string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck
+	}))
+	defer ts.Close()
+	c := NewCityScopedClient(ts.URL, "alpha")
+
+	if _, err := c.BeadsReadyQuery(ReadyReadOpts{
+		Scope:            "myrig",
+		IncludeEphemeral: true,
+		Assignee:         "worker-1",
+		Limit:            20,
+		RouteTarget:      "pool-x",
+		RouteMode:        RouteModeCanonical,
+	}); err != nil {
+		t.Fatalf("BeadsReadyQuery(full opts): %v", err)
+	}
+	want := map[string]string{
+		"rig":               "myrig",
+		"include_ephemeral": "true",
+		"assignee":          "worker-1",
+		"limit":             "20",
+		"route_target":      "pool-x",
+		"route_mode":        "canonical",
+	}
+	if len(gotQuery) != len(want) {
+		t.Fatalf("query params = %v, want exactly %v", gotQuery, want)
+	}
+	for k, v := range want {
+		if got := gotQuery[k]; len(got) != 1 || got[0] != v {
+			t.Errorf("query %s = %v, want [%s]", k, got, v)
+		}
+	}
+
+	gotQuery = nil
+	if _, err := c.BeadsReadyQuery(ReadyReadOpts{}); err != nil {
+		t.Fatalf("BeadsReadyQuery(zero opts): %v", err)
+	}
+	if len(gotQuery) != 0 {
+		t.Errorf("zero-value opts sent params %v, want none (historical unbounded read)", gotQuery)
+	}
+
+	gotQuery = nil
+	if _, err := c.BeadsReadyQuery(ReadyReadOpts{Limit: -3}); err != nil {
+		t.Fatalf("BeadsReadyQuery(negative limit): %v", err)
+	}
+	if len(gotQuery) != 0 {
+		t.Errorf("nonpositive limit sent params %v, want limit omitted", gotQuery)
 	}
 }
 

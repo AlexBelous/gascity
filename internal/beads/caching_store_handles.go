@@ -267,6 +267,9 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 		if query.Assignee != "" && b.Assignee != query.Assignee {
 			continue
 		}
+		if !query.matchesExtra(b) {
+			continue
+		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
 	depsByID := make(map[string][]Dep, len(openBeads))
@@ -284,6 +287,80 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 	return cachedReadyRows(ctx, query, statusByID, openBeads, depsByID, true)
 }
 
+// cachedReadyPrimedOnly is the cache-only ready snapshot behind
+// ReadyCachedContext. It accepts the partial (PrimeActive) state as well as
+// live, but keeps every other strict-read guard from cachedReadyCompleteOnly:
+// no backing I/O ever, TryRLock (a cache-only deadline-sensitive read must not
+// wait behind a writer), a clean prime (primePartialErr nil), no dirty rows,
+// ctx observed throughout, and a consistent copied snapshot released before
+// the CPU-bound sort. PrimeActive's normalized open + in_progress snapshot
+// contains every nonclosed dependency target, while dependency-edge coverage
+// is proven per candidate: only deps rows actually present in the cache enter
+// the snapshot, and the cache's real depsComplete flag is passed through, so a
+// candidate with no cached deps row fails ErrCacheUnavailable in
+// cachedReadyRows instead of being served as dependency-free.
+func (c *CachingStore) cachedReadyPrimedOnly(ctx context.Context, query ReadyQuery) ([]Bead, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !c.mu.TryRLock() {
+		return nil, fmt.Errorf("reading primed ready projection from busy cache: %w", ErrCacheUnavailable)
+	}
+	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("reading primed ready projection from cache: %w", ErrCacheUnavailable)
+	}
+	if c.state == cachePartial {
+		if _, unsafe := c.backing.(partialReadyCacheUnsafe); unsafe {
+			c.mu.RUnlock()
+			return nil, fmt.Errorf("reading partial ready projection from unsafe backing: %w", ErrCacheUnavailable)
+		}
+	}
+
+	depsComplete := c.depsComplete
+	statusByID := make(map[string]string, len(c.beads))
+	openBeads := make([]Bead, 0, len(c.beads))
+	now := time.Now().UTC()
+	for _, b := range c.beads {
+		if err := ctx.Err(); err != nil {
+			c.mu.RUnlock()
+			return nil, err
+		}
+		statusByID[b.ID] = b.Status
+		if !IsReadyCandidateForTier(b, now, query.TierMode) {
+			continue
+		}
+		if query.Assignee != "" && b.Assignee != query.Assignee {
+			continue
+		}
+		if !query.matchesExtra(b) {
+			continue
+		}
+		openBeads = append(openBeads, cloneBead(b))
+	}
+	depsByID := make(map[string][]Dep, len(openBeads))
+	for _, b := range openBeads {
+		if err := ctx.Err(); err != nil {
+			c.mu.RUnlock()
+			return nil, err
+		}
+		// Preserve per-row presence: only a deps row the cache actually holds
+		// enters the snapshot, so a candidate with unknown coverage fails
+		// closed below rather than being treated as dependency-free.
+		if deps, ok := c.deps[b.ID]; ok {
+			depsByID[b.ID] = cloneDeps(deps)
+		}
+	}
+	c.mu.RUnlock()
+
+	// The maps above are a consistent snapshot, so sorting and dependency
+	// evaluation need not hold the cache lock or delay writers.
+	return cachedReadyRows(ctx, query, statusByID, openBeads, depsByID, depsComplete)
+}
+
 func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
 		return nil, fmt.Errorf("reading ready beads from cache: %w", ErrCacheUnavailable)
@@ -298,6 +375,9 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 			continue
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {
+			continue
+		}
+		if !query.matchesExtra(b) {
 			continue
 		}
 		openBeads = append(openBeads, cloneBead(b))
@@ -317,10 +397,23 @@ func cachedReadyRows(
 	// Sort candidates before the limit-bounded loop below: the cache source is
 	// a map, so without this a Limit cuts an arbitrary subset. The context-aware
 	// path remains interruptible throughout this CPU work.
-	if !cancellable {
+	switch {
+	case query.isRouted():
+		// The routed-pool tier is ordered oldest-first (created_asc), matching the
+		// legacy `bd ready --sort oldest --limit 20` demand probe, NOT ready
+		// priority order — so a filter-before-limit read cuts the oldest routed
+		// candidates a worker would have claimed, regardless of priority. The
+		// cancellation-aware form keeps the deadline-sensitive strict cache path
+		// interruptible through this CPU work too.
+		if err := sortBeadsCreatedAscContext(ctx, openBeads); err != nil {
+			return nil, err
+		}
+	case !cancellable:
 		sortBeadsReadyOrder(openBeads)
-	} else if err := sortBeadsReadyOrderContext(ctx, openBeads); err != nil {
-		return nil, err
+	default:
+		if err := sortBeadsReadyOrderContext(ctx, openBeads); err != nil {
+			return nil, err
+		}
 	}
 
 	result := make([]Bead, 0, len(openBeads))

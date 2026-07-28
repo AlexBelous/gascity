@@ -26541,6 +26541,52 @@
               "description": "Include ephemeral (wisp) ready work alongside durable ready work.",
               "type": "boolean"
             }
+          },
+          {
+            "description": "Restrict ready work to this assignee.",
+            "explode": false,
+            "in": "query",
+            "name": "assignee",
+            "schema": {
+              "description": "Restrict ready work to this assignee.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum ready beads returned per store; the filter is applied before the limit. 0 = unbounded.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum ready beads returned per store; the filter is applied before the limit. 0 = unbounded.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Routed-pool target; returns only unassigned non-epic ready work routed here, oldest-first.",
+            "explode": false,
+            "in": "query",
+            "name": "route_target",
+            "schema": {
+              "description": "Routed-pool target; returns only unassigned non-epic ready work routed here, oldest-first.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Routed-pool match mode for route_target: canonical (gc.routed_to) or migration (gc.run_target workflow root).",
+            "explode": false,
+            "in": "query",
+            "name": "route_mode",
+            "schema": {
+              "description": "Routed-pool match mode for route_target: canonical (gc.routed_to) or migration (gc.run_target workflow root).",
+              "enum": [
+                "canonical",
+                "migration"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {

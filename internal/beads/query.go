@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sort"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // ErrQueryRequiresScan reports that a query would require an explicit scan.
@@ -151,9 +153,33 @@ func (q ListQuery) Validate() error {
 	return nil
 }
 
+// RouteMatchMode selects how a ReadyQuery.Route target is matched against a
+// bead's routing metadata for the hook fast path's routed-pool tier. It stays a
+// plain int so ReadyQuery remains a comparable struct (CachingStore.Ready gates
+// on `!= (ReadyQuery{})`), and so the cache-served read can filter routed pool
+// demand BEFORE applying Limit — reproducing the legacy `bd ready
+// --metadata-field ... --unassigned --exclude-type=epic --sort oldest --limit 20`
+// tier without shipping the full ready set over the wire.
+type RouteMatchMode int
+
+const (
+	// RouteNone disables routed-pool matching; Route is ignored.
+	RouteNone RouteMatchMode = iota
+	// RouteCanonical matches the canonical persisted routing key: a bead whose
+	// gc.routed_to metadata equals Route.
+	RouteCanonical
+	// RouteMigration matches the retirement-window legacy routing shape: a
+	// workflow-root bead (gc.kind=workflow) whose gc.run_target equals Route and
+	// which does NOT yet carry a gc.routed_to stamp. It mirrors the workquery
+	// migration probe (poolDemandMigrationFilterJQ), so a stale divergent
+	// gc.run_target cannot outrank a canonical gc.routed_to match.
+	RouteMigration
+)
+
 // ReadyQuery describes optional filters for ready-work lookup. A zero-value
 // query preserves Ready's historical behavior: all open, unblocked actionable
-// work.
+// work. Every field is a comparable scalar so the struct stays usable with
+// `==`/`!=` (CachingStore.Ready gates cache vs backing on `!= (ReadyQuery{})`).
 type ReadyQuery struct {
 	Assignee string
 	Limit    int
@@ -163,6 +189,51 @@ type ReadyQuery struct {
 	// default Ready reads to TierBoth so no-history and ephemeral policy rows
 	// remain reachable under bd 1.0.4.
 	TierMode TierMode
+	// Unassigned, when true, keeps only unassigned (assignee=="") ready beads.
+	// The hook fast path sets it for the routed-pool tier, which claims only
+	// unassigned work.
+	Unassigned bool
+	// ExcludeType drops ready beads of this bead type. The hook fast path sets
+	// it to "epic" so a pool worker never claims an unassigned parent epic
+	// (which has no executable spec), matching the legacy --exclude-type=epic.
+	ExcludeType string
+	// Route, when non-empty, keeps only routed-pool demand for this target and
+	// (via RouteMode) selects canonical vs migration matching. A routed read is
+	// sorted oldest-first (created_asc), not by ready priority, matching the
+	// legacy routed tier's `--sort oldest`. The filter is applied before Limit.
+	Route     string
+	RouteMode RouteMatchMode
+}
+
+// isRouted reports whether this query selects the routed-pool tier.
+func (q ReadyQuery) isRouted() bool {
+	return q.Route != "" && q.RouteMode != RouteNone
+}
+
+// matchesExtra reports whether b passes the Unassigned, ExcludeType, and
+// routed-pool filters this query adds on top of base readiness. Base readiness
+// (open, unblocked, tier, defer_until) and Assignee are evaluated by the
+// caller; this covers only the fields introduced for the hook fast path.
+func (q ReadyQuery) matchesExtra(b Bead) bool {
+	if q.Unassigned && b.Assignee != "" {
+		return false
+	}
+	if q.ExcludeType != "" && b.Type == q.ExcludeType {
+		return false
+	}
+	if !q.isRouted() {
+		return true
+	}
+	switch q.RouteMode {
+	case RouteCanonical:
+		return b.Metadata[beadmeta.RoutedToMetadataKey] == q.Route
+	case RouteMigration:
+		return b.Metadata[beadmeta.RunTargetMetadataKey] == q.Route &&
+			b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow &&
+			b.Metadata[beadmeta.RoutedToMetadataKey] == ""
+	default:
+		return false
+	}
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {
@@ -351,6 +422,26 @@ func sortBeadsReadyOrderContext(ctx context.Context, items []Bead) error {
 		sortBeadsReadyOrder(items)
 		return nil
 	}
+	return sortBeadsLessContext(ctx, items, beadReadyLess)
+}
+
+// sortBeadsCreatedAscContext is the cancellation-aware (created_at, id)
+// ascending sort used by the routed-pool cache projection, whose oldest-first
+// order (matching the legacy `bd ready --sort oldest` probe) must stay
+// interruptible for the same reason as the ready-order sort above.
+func sortBeadsCreatedAscContext(ctx context.Context, items []Bead) error {
+	if ctx == nil || ctx.Done() == nil {
+		sortBeadsForQuery(items, SortCreatedAsc)
+		return nil
+	}
+	return sortBeadsLessContext(ctx, items, beadCreatedAscLess)
+}
+
+// sortBeadsLessContext merge-sorts items by less with cancellation checks
+// inside both comparison and copy work, so a deadline-sensitive caller never
+// abandons an uninterruptible sort goroutine when ctx expires. Callers must
+// pass a cancellable ctx (Done non-nil).
+func sortBeadsLessContext(ctx context.Context, items []Bead, less func(a, b Bead) bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -387,7 +478,7 @@ func sortBeadsReadyOrderContext(ctx context.Context, items []Bead) error {
 			case j == hi:
 				scratch[k] = items[i]
 				i++
-			case beadReadyLess(items[j], items[i]):
+			case less(items[j], items[i]):
 				scratch[k] = items[j]
 				j++
 			default:
@@ -404,6 +495,16 @@ func sortBeadsReadyOrderContext(ctx context.Context, items []Bead) error {
 		return nil
 	}
 	return mergeSort(0, len(items))
+}
+
+// beadCreatedAscLess is the (created_at, id) ascending total order shared by
+// sortBeadsForQuery's SortCreatedAsc branch and the cancellation-aware routed
+// sort, so both paths cut the same deterministic oldest-first prefix.
+func beadCreatedAscLess(a, b Bead) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
 
 func beadReadyLess(a, b Bead) bool {
@@ -428,10 +529,7 @@ func sortBeadsForQuery(items []Bead, order SortOrder) {
 	switch order {
 	case SortCreatedAsc:
 		sort.Slice(items, func(i, j int) bool {
-			if items[i].CreatedAt.Equal(items[j].CreatedAt) {
-				return items[i].ID < items[j].ID
-			}
-			return items[i].CreatedAt.Before(items[j].CreatedAt)
+			return beadCreatedAscLess(items[i], items[j])
 		})
 	case SortCreatedDesc:
 		sort.Slice(items, func(i, j int) bool {

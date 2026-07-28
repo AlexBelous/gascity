@@ -528,6 +528,34 @@ func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([
 	return rows, nil
 }
 
+// ReadyCachedContext implements CacheReadyContextReader: it answers only from
+// the already-populated active cache — partial (PrimeActive) or fully live —
+// and NEVER touches the backing store. Unlike ReadyContext, it does not demand
+// the globally dependency-complete live projection: PrimeActive installs the
+// normalized complete nonclosed target-status set and a deps row for every
+// primed active bead, so coverage is proven per candidate instead. A missing
+// dependency target is therefore closed. Backings that cannot prove that
+// invariant (such as DoltLite's literal status="open" partial scan) are marked
+// unsafe and fail closed until the full prime. A candidate whose own deps row
+// is missing likewise fails with ErrCacheUnavailable (see
+// cachedReadyPrimedOnly). It never primes and never falls back to a live read.
+func (c *CachingStore) ReadyCachedContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := c.cachedReadyPrimedOnly(ctx, readyQueryFromArgs(query))
+	if err != nil {
+		return rows, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // CachedReady returns ready beads from the in-memory active read model.
 // The boolean reports whether the cache was initialized enough to answer
 // without touching the backing store. Unlike Ready, this can answer from a

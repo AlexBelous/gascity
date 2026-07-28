@@ -64,9 +64,11 @@ func TestHookFastPathEligible(t *testing.T) {
 	}
 }
 
-// TestClaimHookWorkFastPathFallsBackOnConnError proves a pre-request connection
-// failure returns handled=false so the caller runs the subprocess path.
-func TestClaimHookWorkFastPathFallsBackOnConnError(t *testing.T) {
+// TestClaimHookWorkFastPathFailsClosedOnConnError proves a pre-request
+// connection failure is terminal and never opens an independent BdStore
+// working set.
+func TestClaimHookWorkFastPathFailsClosedOnConnError(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := ts.URL
 	ts.Close() // nothing listening → real *connError from the client reads.
@@ -74,12 +76,12 @@ func TestClaimHookWorkFastPathFallsBackOnConnError(t *testing.T) {
 	client := api.NewCityScopedClient(url, "alpha")
 	var stdout, stderr bytes.Buffer
 	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"pool-x"}}
-	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
-	if handled {
-		t.Fatal("handled = true on conn error, want false (fall back to shell)")
+	code := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("code = 0 on conn error, want non-zero terminal failure")
 	}
-	if code != 0 {
-		t.Errorf("code = %d on fallback, want 0", code)
+	if !strings.Contains(stderr.String(), "route=fail-closed reason=controller-dial-failed") {
+		t.Errorf("stderr = %q, want fail-closed route marker", stderr.String())
 	}
 }
 
@@ -95,10 +97,7 @@ func TestClaimHookWorkFastPathFailsFastOnServerVerdict(t *testing.T) {
 	client := api.NewCityScopedClient(ts.URL, "alpha")
 	var stdout, stderr bytes.Buffer
 	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"pool-x"}}
-	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
-	if !handled {
-		t.Fatal("handled = false on a server verdict, want true (fail fast, do not shell out)")
-	}
+	code := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
 	if code == 0 {
 		t.Error("code = 0 on controller error, want a non-zero terminal failure")
 	}
@@ -122,10 +121,7 @@ func TestClaimHookWorkFastPathClaimsRoutedBead(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"pool-x"}}
-	code, handled := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
-	if !handled {
-		t.Fatal("handled = false, want true")
-	}
+	code := claimHookWorkFastPath(client, []string{"worker-1"}, opts.RouteTargets, "ephemeral", nil, "/wt", opts, &stdout, &stderr)
 	if code != 0 {
 		t.Errorf("code = %d, want 0 on successful claim; stderr=%s", code, stderr.String())
 	}

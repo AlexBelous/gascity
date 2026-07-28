@@ -1261,6 +1261,7 @@ func (cr *CityRuntime) tick(
 			clock.Real{},
 			cr.rec,
 			cr.stderr,
+			cr.sessionStartLegacyExclusionPredicate(),
 		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "finalize_drain_ack_stop_pending", phaseStart, map[string]any{
@@ -2041,9 +2042,26 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	if providerChanged {
 		// The keyed child owns provider Start calls independently of the fleet
-		// tick. Drain it before observing or stopping the old provider so no old-
-		// generation start can appear behind the provider-swap census.
+		// tick. Stop its admissions and workers before observing the old provider.
+		// An in-flight drain-ack stop keeps the old provider generation live, so
+		// defer that swap and restore the keyed child instead of waiting here.
 		cr.stopSessionStartController()
+		if hasInFlightDrainAckStops(&cr.asyncStops) {
+			err := errors.New("config reload: provider swap deferred while a drain-ack stop is in progress")
+			if restartErr := cr.restartSessionStartController(ctx); restartErr != nil {
+				err = errors.Join(err, fmt.Errorf("restoring session-start controller after deferred provider swap: %w", restartErr))
+			}
+			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
+			if trace != nil {
+				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+			}
+			return reloadControlReply{
+				Outcome:  reloadOutcomeFailed,
+				Error:    err.Error(),
+				Warnings: warnings,
+			}
+		}
 		running, lErr := cr.sp.ListRunning("")
 		if lErr != nil {
 			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
@@ -2228,6 +2246,21 @@ func (cr *CityRuntime) reloadConfigTraced(
 		Revision: result.Revision,
 		Warnings: warnings,
 	}
+}
+
+// hasInFlightDrainAckStops reports whether a keyed drain-ack stop still owns
+// provider work. It does not mutate the tracker, so a deferred provider reload
+// leaves the existing async-stop path available to finish normally.
+func hasInFlightDrainAckStops(tracker *asyncStartTracker) bool {
+	if tracker == nil {
+		return false
+	}
+	active := false
+	tracker.drainAckStopKeys.Range(func(_, _ any) bool {
+		active = true
+		return false
+	})
+	return active
 }
 
 func (cr *CityRuntime) applySoftReloadAcceptance(

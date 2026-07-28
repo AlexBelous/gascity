@@ -96,7 +96,12 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			if acquireErr != nil {
 				return acquireErr
 			}
-			defer release()
+			leaseTransferred := false
+			defer func() {
+				if !leaseTransferred {
+					release()
+				}
+			}()
 			startOptions := cr.sessionStartOptions
 			if admission.Source == sessionStartAdmissionInProcess {
 				startOptions = append([]startExecutionOption(nil), startOptions...)
@@ -107,18 +112,23 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			}
 			statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(snapshot.Store)
 			owner, reconcileErr := reconcileExactSessionStartWithOwner(reconcileCtx, admission, exactSessionStartParams{
-				Generation:        snapshot.Generation,
-				CityPath:          snapshot.CityPath,
-				CityName:          snapshot.CityName,
-				Config:            snapshot.Config,
-				Provider:          snapshot.Provider,
-				Store:             snapshot.Store,
-				StatusWriter:      statusWriter,
-				StatusWriterError: statusWriterErr,
-				Recorder:          snapshot.Recorder,
-				Stdout:            cr.sessionStartStdout(),
-				Stderr:            cr.sessionStartStderr(),
-				StartOptions:      startOptions,
+				Generation:          snapshot.Generation,
+				CityPath:            snapshot.CityPath,
+				CityName:            snapshot.CityName,
+				Config:              snapshot.Config,
+				Provider:            snapshot.Provider,
+				Store:               snapshot.Store,
+				StatusWriter:        statusWriter,
+				StatusWriterError:   statusWriterErr,
+				Recorder:            snapshot.Recorder,
+				Stdout:              cr.sessionStartStdout(),
+				Stderr:              cr.sessionStartStderr(),
+				StartOptions:        startOptions,
+				AsyncStopTracker:    &cr.asyncStops,
+				AsyncStopCompletion: release,
+				AsyncStopQueued: func() {
+					leaseTransferred = true
+				},
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				cr.requestLegacySessionStartFallback()
@@ -286,7 +296,7 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 		if validateSessionStartAdmission(info.ID, sessionStartAdmissionAntiEntropy) != nil {
 			continue
 		}
-		owned := resolveExactSessionStartOwnership(info, stateSnapshot.Config, now)
+		owned := resolveExactSessionStartOrDrainAckStopOwnership(info, stateSnapshot.Config, now)
 		if !owned {
 			continue
 		}
@@ -404,42 +414,15 @@ func (cr *CityRuntime) requestLegacySessionStartFallback() {
 }
 
 func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption {
-	if cr == nil {
+	excluded := cr.sessionStartLegacyExclusionPredicate()
+	if excluded == nil {
 		return nil
-	}
-	cr.sessionStartMu.Lock()
-	state := cr.sessionStartOwnership
-	mode := cr.sessionStartMode
-	cr.sessionStartMu.Unlock()
-	if state != sessionStartOwnershipKeyed && state != sessionStartOwnershipRequiredBlocked {
-		return nil
-	}
-	if state == sessionStartOwnershipKeyed && mode == rollout.Auto && cr.cs != nil && cr.cs.configMutationPending.Load() {
-		// updateWithPendingConfigMutation only sets this marker after the
-		// generation fence has drained old keyed work. New keyed snapshots fail
-		// closed until the runtime loop applies the same revision, so legacy is
-		// the sole available owner during this bounded handoff.
-		return nil
-	}
-	excluded := func(info sessionpkg.Info) bool {
-		if validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) != nil {
-			return false
-		}
-		snapshot, err := cr.cs.sessionStartSnapshot()
-		if err != nil {
-			// Once ownership has transferred, an incoherent state generation must
-			// stall its start family rather than let both writers enter.
-			input := sessionpkg.LifecycleInputFromInfo(info)
-			input.Now = time.Now().UTC()
-			input.CreatedAt = info.CreatedAt
-			input.StaleCreatingAfter = staleCreatingStateTimeout
-			lifecycle := sessionpkg.ProjectLifecycle(input)
-			return !info.Closed && !lifecycle.Terminal &&
-				(lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) || lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit))
-		}
-		return resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
 	}
 	startOption := withLegacyStartExclusion(excluded)
+
+	cr.sessionStartMu.Lock()
+	state := cr.sessionStartOwnership
+	cr.sessionStartMu.Unlock()
 	if state != sessionStartOwnershipKeyed {
 		return startOption
 	}
@@ -458,6 +441,47 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 	return func(opts *startExecutionOptions) {
 		startOption(opts)
 		statusOption(opts)
+	}
+}
+
+// sessionStartLegacyExclusionPredicate is the single ownership predicate used
+// by legacy start and drain-ack stop entry points while keyed reconciliation is
+// active. Legacy still finalizes a confirmed-dead drain-ack session.
+func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.Info) bool {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	state := cr.sessionStartOwnership
+	mode := cr.sessionStartMode
+	cr.sessionStartMu.Unlock()
+	if state != sessionStartOwnershipKeyed && state != sessionStartOwnershipRequiredBlocked {
+		return nil
+	}
+	if state == sessionStartOwnershipKeyed && mode == rollout.Auto && cr.cs != nil && cr.cs.configMutationPending.Load() {
+		// updateWithPendingConfigMutation only sets this marker after the
+		// generation fence has drained old keyed work. New keyed snapshots fail
+		// closed until the runtime loop applies the same revision, so legacy is
+		// the sole available owner during this bounded handoff.
+		return nil
+	}
+	return func(info sessionpkg.Info) bool {
+		if validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) != nil {
+			return false
+		}
+		snapshot, err := cr.cs.sessionStartSnapshot()
+		if err != nil {
+			// Once ownership has transferred, an incoherent state generation must
+			// stall its start family rather than let both writers enter.
+			input := sessionpkg.LifecycleInputFromInfo(info)
+			input.Now = time.Now().UTC()
+			input.CreatedAt = info.CreatedAt
+			input.StaleCreatingAfter = staleCreatingStateTimeout
+			lifecycle := sessionpkg.ProjectLifecycle(input)
+			return !info.Closed && (!lifecycle.Terminal || isDrainAckStopPendingInfo(info)) &&
+				(isDrainAckStopPendingInfo(info) || lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) || lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit))
+		}
+		return resolveExactSessionStartOrDrainAckStopOwnership(info, snapshot.Config, time.Now().UTC())
 	}
 }
 

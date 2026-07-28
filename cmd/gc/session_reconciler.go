@@ -285,9 +285,17 @@ var (
 )
 
 func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer) {
+	_ = queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, tracker, stderr, false, nil)
+}
+
+func queueExactDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer, onComplete func()) bool {
+	return queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, tracker, stderr, true, onComplete)
+}
+
+func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer, strictTokenFence bool, onComplete func()) bool {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
-		return
+		return false
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -295,7 +303,7 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 	key := drainAckAsyncStopKey(sessionID, name)
 	done, tracking := tracker.startDrainAckStop(key)
 	if !tracking {
-		return
+		return false
 	}
 	// Bind the poke seam on the caller's goroutine, at queue time. The async
 	// goroutine below may outlive its reconcile invocation (see the poke
@@ -309,6 +317,9 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 			if r := recover(); r != nil {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n%s", name, r, debug.Stack()) //nolint:errcheck
 			}
+			if onComplete != nil {
+				onComplete()
+			}
 			done()
 		}()
 		// Token fence (mirrors verifiedStop): this kill targets the session by
@@ -319,7 +330,11 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// live token means "cannot verify" and falls through to the kill,
 		// matching verifiedStop's conservative posture.
 		if expectedToken != "" {
-			if actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actualToken != "" && actualToken != expectedToken {
+			actualToken, tokenErr := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+			if strictTokenFence && (tokenErr != nil || strings.TrimSpace(actualToken) == "" || strings.TrimSpace(actualToken) != expectedToken) {
+				return
+			}
+			if !strictTokenFence && actualToken != "" && actualToken != expectedToken {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
 				return
 			}
@@ -336,7 +351,7 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// (the reassigned next step stays runtime-missing). The expected token is
 		// threaded through so each re-kill stays fenced against a re-woken
 		// same-name replacement. Mirrors #4089's confirm-dead contract.
-		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr)
+		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, strictTokenFence)
 		// The runtime session is now confirmed dead (or the confirm-dead
 		// deadline passed and we proceed best-effort), but its pool session
 		// bead stays open (occupying the pool slot) until
@@ -351,6 +366,7 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// patrol tick regardless.
 		_ = poke(cityPath)
 	}()
+	return true
 }
 
 // confirmDrainAckRuntimeDead re-observes a killed runtime and re-issues the
@@ -364,7 +380,8 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 // when a definite token mismatch shows the name now belongs to a replacement —
 // and false if it outlived the deadline (caller proceeds best-effort). Mirrors
 // #4089's confirm-dead contract.
-func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer) bool {
+func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer, strictTokenFence ...bool) bool {
+	strict := len(strictTokenFence) > 0 && strictTokenFence[0]
 	deadline := time.Now().Add(drainAckStopConfirmDeadTimeout)
 	for {
 		running, alive := observeRuntimeProviderLiveness(sp, name, processNames)
@@ -385,7 +402,11 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 		// killing the replacement. An empty expected or live token means "cannot
 		// verify" and falls through to the re-kill, matching verifiedStop.
 		if expectedToken != "" {
-			if actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actualToken != "" && actualToken != expectedToken {
+			actualToken, tokenErr := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+			if strict && (tokenErr != nil || strings.TrimSpace(actualToken) == "" || strings.TrimSpace(actualToken) != expectedToken) {
+				return false
+			}
+			if !strict && actualToken != "" && actualToken != expectedToken {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s confirm-dead skipped re-kill: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
 				return true
 			}
@@ -654,6 +675,7 @@ func reconcileDrainAckStopPending(
 	clk clock.Clock,
 	rec events.Recorder,
 	stderr io.Writer,
+	legacyExcluded func(sessionpkg.Info) bool,
 ) (bool, drainAckFinalizeResult) {
 	if info.ID == "" || !isDrainAckStopPendingInfo(info) {
 		return false, drainAckFinalizeResult{}
@@ -661,6 +683,9 @@ func reconcileDrainAckStopPending(
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, tp.Hints.ProcessNames)
 	if err != nil || obs.Running || obs.Alive {
+		if legacyExcluded != nil && legacyExcluded(info) {
+			return true, drainAckFinalizeResult{}
+		}
 		// Async-stop: queueDrainAckAsyncStop takes the session ID and mutates only
 		// the async tracker, so the snapshot stays coherent — a zero result (applyTo
 		// no-op) matches the unmutated session. The token fence reads the typed
@@ -706,6 +731,7 @@ func finalizeDrainAckStopPendingSessions(
 	clk clock.Clock,
 	rec events.Recorder,
 	stderr io.Writer,
+	legacyExcluded ...func(sessionpkg.Info) bool,
 ) int {
 	// Session class typed at the boundary; the drain-ack helpers below take the
 	// unwrapped beads.Store. Same underlying store value, behavior unchanged. This
@@ -716,6 +742,10 @@ func finalizeDrainAckStopPendingSessions(
 		return 0
 	}
 	finalized := 0
+	var excluded func(sessionpkg.Info) bool
+	if len(legacyExcluded) > 0 {
+		excluded = legacyExcluded[0]
+	}
 	for _, info := range infos {
 		if !isDrainAckStopPendingInfo(info) {
 			continue
@@ -731,6 +761,9 @@ func finalizeDrainAckStopPendingSessions(
 		processNames := drainAckStopPendingProcessNames(cfg, info)
 		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
 		if err != nil || obs.Running || obs.Alive {
+			if excluded != nil && excluded(info) {
+				continue
+			}
 			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
 			continue
 		}
@@ -1364,6 +1397,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	maxAgeTr := reconcileOpts.maxSessionAgeTr
 	assignedWorkDeferTr := reconcileOpts.assignedWorkDeferTr
 	asyncStopTracker := reconcileOpts.asyncStopTracker
+	legacyDrainAckStopExcluded := reconcileOpts.legacyStartExcluded
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
 			trace.RecordControllerOperation(site, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
@@ -1600,7 +1634,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			dt.clearSuspendDeferral(id)
 		}
 
-		if handled, result := reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr); handled {
+		if handled, result := reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr, legacyDrainAckStopExcluded); handled {
 			// finalizeDrainAckStoppedSession (inside reconcileDrainAckStopPending)
 			// may close the bead in memory (Status=closed) on this true/continue
 			// path; fold that close onto the snapshot so the cross-session min-floor
@@ -1967,7 +2001,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Token fence off the typed snapshot: the stop-pending fold
 								// preserves instance_token, so infoByID[id].InstanceToken is the
 								// token we intend to stop (mirrors verifiedStop).
-								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+								if legacyDrainAckStopExcluded == nil || !legacyDrainAckStopExcluded(infoByID[id]) {
+									queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+								}
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
@@ -2350,7 +2386,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							clearDrainTrackerForStopPending(id, dt)
 							// Token fence off the typed snapshot (mirrors verifiedStop); the
 							// stop-pending fold preserves instance_token.
-							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+							if legacyDrainAckStopExcluded == nil || !legacyDrainAckStopExcluded(infoByID[id]) {
+								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+							}
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}

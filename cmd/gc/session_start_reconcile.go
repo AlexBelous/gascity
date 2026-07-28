@@ -46,6 +46,9 @@ type exactSessionStartParams struct {
 	Stderr               io.Writer
 	ObserveLoadedSession exactLoadedSessionObserver
 	StartOptions         []startExecutionOption
+	AsyncStopTracker     *asyncStartTracker
+	AsyncStopCompletion  func()
+	AsyncStopQueued      func()
 }
 
 // planExactSessionWaitDependencyStartShadow reads one dependency-ready session
@@ -353,6 +356,9 @@ func getAuthoritativeExactSessionStartInfoBeforeWake(
 	if err != nil {
 		return sessionpkg.Info{}, err
 	}
+	if isDrainAckStopPendingInfo(info) {
+		return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartKeyedOwner}
+	}
 	lifecycle, _, owner := classifyExactSessionStartOwnership(info, cfg, now)
 	if owner != exactSessionStartKeyedOwner {
 		return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: owner}
@@ -483,6 +489,34 @@ func reconcileExactSessionStartWithOwner(
 	if info.Closed {
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{})
 		return exactSessionStartUnowned, nil
+	}
+	if isDrainAckStopPendingInfo(info) {
+		if strings.TrimSpace(info.SessionNameMetadata) == "" || strings.TrimSpace(info.InstanceToken) == "" || params.AsyncStopTracker == nil {
+			return exactSessionStartKeyedOwner, nil
+		}
+		liveToken, tokenErr := params.Provider.GetMeta(info.SessionNameMetadata, "GC_INSTANCE_TOKEN")
+		if tokenErr != nil {
+			return exactSessionStartKeyedOwner, fmt.Errorf("reconciling exact drain-ack stop %q: reading runtime instance token: %w", info.ID, tokenErr)
+		}
+		if strings.TrimSpace(liveToken) != strings.TrimSpace(info.InstanceToken) {
+			return exactSessionStartKeyedOwner, nil
+		}
+		if queueExactDrainAckAsyncStop(
+			params.CityPath,
+			params.Store,
+			params.Provider,
+			params.Config,
+			info.ID,
+			info.SessionNameMetadata,
+			info.InstanceToken,
+			drainAckStopPendingProcessNames(params.Config, info),
+			params.AsyncStopTracker,
+			stderr,
+			params.AsyncStopCompletion,
+		) && params.AsyncStopQueued != nil {
+			params.AsyncStopQueued()
+		}
+		return exactSessionStartKeyedOwner, nil
 	}
 
 	ownershipNow := clk.Now().UTC()
@@ -653,6 +687,14 @@ func resolveExactSessionStartOwnership(
 	return owner == exactSessionStartKeyedOwner
 }
 
+func resolveExactSessionStartOrDrainAckStopOwnership(
+	info sessionpkg.Info,
+	cfg *config.City,
+	now time.Time,
+) bool {
+	return isDrainAckStopPendingInfo(info) || resolveExactSessionStartOwnership(info, cfg, now)
+}
+
 func classifyExactSessionStartOwnership(
 	info sessionpkg.Info,
 	cfg *config.City,
@@ -663,9 +705,12 @@ func classifyExactSessionStartOwnership(
 	lifecycleInput.CreatedAt = info.CreatedAt
 	lifecycleInput.StaleCreatingAfter = staleCreatingStateTimeout
 	lifecycle := sessionpkg.ProjectLifecycle(lifecycleInput)
+	if info.Closed {
+		return lifecycle, nil, exactSessionStartUnowned
+	}
 	ownedCause := lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) ||
 		lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit)
-	if info.Closed || !ownedCause || lifecycle.Terminal {
+	if !ownedCause || lifecycle.Terminal {
 		return lifecycle, nil, exactSessionStartUnowned
 	}
 	// Named-session canonicalization and pool capacity/slot validation are fleet

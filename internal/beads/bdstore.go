@@ -1362,10 +1362,27 @@ func bdSQLStringLiteral(value string) string {
 // constructed with (BEADS_ACTOR), not the actor argument: the actor is fixed at
 // store construction and cannot be varied per call. The fallback path builds
 // the store with BEADS_ACTOR equal to the actor it then passes here, so the two
-// agree. ctx is advisory — the bd subprocess is already bound to the runner's
-// context set at construction. See AtomicClaimer for the return contract.
-func (s *BdStore) ClaimBead(_ context.Context, id, _ string) (Bead, bool, error) {
-	return s.Claim(id)
+// normally agree. ctx is advisory — the bd subprocess is already bound to the
+// runner's context set at construction. See AtomicClaimer for the return contract.
+//
+// The AtomicClaimer contract makes the passed actor authoritative, so this FAILS
+// CLOSED on divergence: if the bd invocation claimed the bead for a different
+// actor than requested (a store built with a mismatched BEADS_ACTOR — e.g. a
+// controller store reused across callers), the mutation is reported as a lost
+// race (Bead{}, false, nil), never a successful wrong-owner claim. Without this
+// guard the flag path could accept actor B at the API while the runner's fixed
+// BEADS_ACTOR committed the bead to A and returned success.
+func (s *BdStore) ClaimBead(_ context.Context, id, actor string) (Bead, bool, error) {
+	claimed, ok, err := s.Claim(id)
+	if err != nil || !ok {
+		return claimed, ok, err
+	}
+	if want := strings.TrimSpace(actor); want != "" && strings.TrimSpace(claimed.Assignee) != want {
+		// bd claimed for a different actor than requested; the caller did not win
+		// this bead for the actor it asked for. Fail closed.
+		return Bead{}, false, nil
+	}
+	return claimed, ok, err
 }
 
 var _ AtomicClaimer = (*BdStore)(nil)

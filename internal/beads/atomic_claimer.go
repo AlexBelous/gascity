@@ -23,11 +23,12 @@ import (
 //     only by the same actor for the same bead (upstream ClaimIssue is
 //     idempotent for the same actor and rejects a different one).
 //
-// The actor argument is authoritative for NativeDoltStore and CachingStore. A
-// BdStore claims as the actor its CommandRunner was constructed with
-// (BEADS_ACTOR); its implementation forwards to the existing Claim and requires
-// the passed actor to equal that configured actor, which the fallback path
-// guarantees by building the store with the same identity.
+// The actor argument is authoritative for every implementation. NativeDoltStore
+// and CachingStore claim for exactly the passed actor. A BdStore claims as the
+// actor its CommandRunner was constructed with (BEADS_ACTOR); it forwards to the
+// existing Claim and then FAILS CLOSED when the resulting owner differs from the
+// requested actor, so a store whose configured identity diverges from the caller
+// reports a lost race rather than a successful wrong-owner claim.
 type AtomicClaimer interface {
 	ClaimBead(ctx context.Context, id, actor string) (Bead, bool, error)
 }

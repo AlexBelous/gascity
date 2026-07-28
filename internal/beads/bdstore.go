@@ -1357,35 +1357,17 @@ func bdSQLStringLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
-// ClaimBead satisfies AtomicClaimer by forwarding to the existing bd
-// update --claim path. A BdStore claims as the actor its CommandRunner was
-// constructed with (BEADS_ACTOR), not the actor argument: the actor is fixed at
-// store construction and cannot be varied per call. The fallback path builds
-// the store with BEADS_ACTOR equal to the actor it then passes here, so the two
-// normally agree. ctx is advisory — the bd subprocess is already bound to the
-// runner's context set at construction. See AtomicClaimer for the return contract.
-//
-// The AtomicClaimer contract makes the passed actor authoritative, so this FAILS
-// CLOSED on divergence: if the bd invocation claimed the bead for a different
-// actor than requested (a store built with a mismatched BEADS_ACTOR — e.g. a
-// controller store reused across callers), the mutation is reported as a lost
-// race (Bead{}, false, nil), never a successful wrong-owner claim. Without this
-// guard the flag path could accept actor B at the API while the runner's fixed
-// BEADS_ACTOR committed the bead to A and returned success.
-func (s *BdStore) ClaimBead(_ context.Context, id, actor string) (Bead, bool, error) {
-	claimed, ok, err := s.Claim(id)
-	if err != nil || !ok {
-		return claimed, ok, err
-	}
-	if want := strings.TrimSpace(actor); want != "" && strings.TrimSpace(claimed.Assignee) != want {
-		// bd claimed for a different actor than requested; the caller did not win
-		// this bead for the actor it asked for. Fail closed.
-		return Bead{}, false, nil
-	}
-	return claimed, ok, err
-}
-
-var _ AtomicClaimer = (*BdStore)(nil)
+// BdStore deliberately does NOT implement AtomicClaimer. bd update --claim
+// commits to the runner's fixed BEADS_ACTOR, which cannot be varied per call, so
+// a ClaimBead(id, actor) forward could not honor the actor the AtomicClaimer
+// contract makes authoritative — it would either mutate the bead to the wrong
+// owner before any check, or (with a post-hoc guard) leave a phantom wrong-owner
+// claim committed while reporting a lost race. A controller store that resolves
+// to a BdStore therefore fails closed (CachingStore/beadPolicyStore return
+// ErrAtomicClaimUnsupported and the controller claim handler surfaces a terminal
+// error) rather than claim as the wrong actor. The worker-side fallback still
+// claims through Claim below, where the store is constructed with BEADS_ACTOR
+// equal to the claiming worker, so the actor is bound by construction.
 
 // Claim atomically claims an open bead through bd update --claim.
 //

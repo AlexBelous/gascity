@@ -153,3 +153,18 @@ func TestBeadReadyIncludeEphemeralSurfacesWispWork(t *testing.T) {
 		}
 	})
 }
+
+// TestBeadListCountQueryMatchesRowTierForEphemeral proves the bounded-count query
+// spans the same tier as the row query when include_ephemeral is set, so the
+// all=true Total and pagination boundary cannot disagree with the listed rows
+// (a TierBoth row read paired with a TierIssues count would undercount).
+func TestBeadListCountQueryMatchesRowTierForEphemeral(t *testing.T) {
+	withEph := beadListCountQuery("worker-1", &BeadListInput{All: true, IncludeEphemeral: true})
+	if withEph.TierMode != beads.TierBoth {
+		t.Fatalf("count TierMode = %v with include_ephemeral, want TierBoth to match the row query", withEph.TierMode)
+	}
+	withoutEph := beadListCountQuery("worker-1", &BeadListInput{All: true})
+	if withoutEph.TierMode != beads.TierIssues {
+		t.Fatalf("count TierMode = %v without include_ephemeral, want the default TierIssues", withoutEph.TierMode)
+	}
+}

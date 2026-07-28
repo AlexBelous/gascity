@@ -356,6 +356,12 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 		IncludeClosed: input.All,
 		Live:          input.Status == "in_progress",
 	}
+	// Match the row query's tier: an include_ephemeral list spans TierBoth, so
+	// the bounded Total must count both tiers too or the count/rows and the
+	// pagination boundary would disagree.
+	if input.IncludeEphemeral {
+		q.TierMode = beads.TierBoth
+	}
 	if !q.HasFilter() {
 		q.AllowScan = true
 	}

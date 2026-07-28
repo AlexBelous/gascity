@@ -111,28 +111,6 @@ func TestNativeDoltStoreClaimBeadNotFoundIsError(t *testing.T) {
 	}
 }
 
-func TestBdStoreClaimBeadForwardsToClaim(t *testing.T) {
-	var gotArgs []string
-	runner := func(_, name string, args ...string) ([]byte, error) {
-		if name != "bd" {
-			t.Fatalf("name = %q, want bd", name)
-		}
-		gotArgs = append([]string(nil), args...)
-		return []byte(`[{"id":"bd-7","title":"t","status":"in_progress","assignee":"worker-9","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
-	}
-	store := NewBdStore("/city", runner)
-	claimed, ok, err := store.ClaimBead(context.Background(), "bd-7", "worker-9")
-	if err != nil || !ok {
-		t.Fatalf("ClaimBead ok=%v err=%v, want true nil", ok, err)
-	}
-	if claimed.ID != "bd-7" || claimed.Assignee != "worker-9" {
-		t.Fatalf("claimed = %+v, want bd-7 assigned worker-9", claimed)
-	}
-	if len(gotArgs) == 0 || gotArgs[0] != "update" {
-		t.Fatalf("bd args = %v, want an update --claim invocation", gotArgs)
-	}
-}
-
 func TestCachingStoreClaimBeadForwardsAndRefreshes(t *testing.T) {
 	backing := newNativeDoltStoreForTest(newNativeDoltMemStorage())
 	seed := seedOpenBead(t, backing, "cached claim")

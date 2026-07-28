@@ -1482,3 +1482,84 @@ func TestEnrichFormulaNotFoundErrorNoOpWhenNowhereFound(t *testing.T) {
 		t.Fatalf("enrichFormulaNotFoundError = %v, want unchanged %v", got, baseErr)
 	}
 }
+
+// TestFormulaCookStandaloneNotFoundNamesOwningRig drives newFormulaCookCmd
+// end-to-end — no --attach — for a formula that exists only in another
+// rig's own layer, and asserts the not-found diagnostic names the owning
+// rig and suggests --rig. The standalone cook branch is the most common
+// invocation and the one that most needs the hint now that list/cook share
+// the narrower resolved scope; enrichment was previously wired only into
+// the --attach branch.
+func TestFormulaCookStandaloneNotFoundNamesOwningRig(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	// Reuse the --all fixture's on-disk layout: "alpha-only" lives solely in
+	// rig alpha's own formula dir, never in the city layer.
+	cityPath, _ := formulaAllCity(t)
+
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[[rigs]]
+name = "alpha"
+formulas_dir = "packs/alpha/formulas"
+
+[[rigs]]
+name = "beta"
+formulas_dir = "packs/beta/formulas"
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	// Rig paths belong in .gc/site.toml, not city.toml.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir .gc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "site.toml"), []byte(fmt.Sprintf(`
+workspace_name = "my-city"
+
+[[rig]]
+name = "alpha"
+path = %q
+
+[[rig]]
+name = "beta"
+path = %q
+`, filepath.Join(cityPath, "alpha"), filepath.Join(cityPath, "beta"))), 0o644); err != nil {
+		t.Fatalf("write site.toml: %v", err)
+	}
+
+	// cwd = city root: outside every declared rig, so cook resolves the
+	// city-only scope and cannot see alpha's layer.
+	t.Chdir(cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = ""
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"alpha-only"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("formula cook alpha-only succeeded, want not-found error\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+
+	got := stderr.String()
+	if !strings.Contains(got, `"alpha"`) {
+		t.Errorf("cook error does not name owning rig %q: %s", "alpha", got)
+	}
+	if !strings.Contains(got, "--rig") {
+		t.Errorf("cook error does not suggest --rig: %s", got)
+	}
+	if strings.Contains(got, `"beta"`) {
+		t.Errorf("cook error should not name beta, which does not define alpha-only: %s", got)
+	}
+}

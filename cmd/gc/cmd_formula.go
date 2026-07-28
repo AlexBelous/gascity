@@ -962,7 +962,7 @@ conflicting live workflow from the same source is an error.`,
 
 			isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
 			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], enrichFormulaNotFoundError(err, cfg, args[0])))
 			}
 			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {

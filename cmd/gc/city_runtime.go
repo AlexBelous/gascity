@@ -701,7 +701,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	cr.startSessionWaitDependencyShadow()
+	cr.startSessionWaitDependencyShadowWithContext(ctx)
 
 	// Mark city as started only after all retry-critical startup work has
 	// completed. Publishing readiness before bead reconciliation or
@@ -2335,6 +2335,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	}
 	cr.seedActiveSessionStartController(sessionBeads)
+	cr.submitSessionWaitDependencyStartupCensus()
 	// Emit any due compute usage facts by reusing the open-session snapshot this
 	// tick already loaded, rather than issuing a second redundant store scan. The
 	// boot pass covers the whole fleet at once on the readiness path, so it takes

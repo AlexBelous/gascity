@@ -4,15 +4,19 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func TestReconcileExactSessionStartStartsPendingCreateAndCommitsActive(t *testing.T) {
@@ -679,6 +683,158 @@ func TestReconcileExactSessionStartIgnoresNonActionableKeys(t *testing.T) {
 				t.Fatalf("provider Start calls = %d, want 0", got)
 			}
 		})
+	}
+}
+
+func TestPlanExactSessionWaitDependencyStartShadowReadsAndObservesOnlyReadySession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+	}
+	ready := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&ready, map[string]string{
+		"state":                     string(session.StateCreating),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	unrelated := env.createSessionBead("unrelated", "worker")
+
+	store := &getCountingStore{Store: env.store}
+	params := exactSessionStartTestParams(t, env)
+	params.Store = store
+	var observed []string
+	params.ObserveLoadedSession = func(_ context.Context, _ string, _ beads.Store, _ runtime.Provider, _ *config.City, info session.Info, _ []string) (worker.LiveObservation, error) {
+		observed = append(observed, info.ID)
+		return worker.LiveObservation{}, nil
+	}
+
+	plan, err := planExactSessionWaitDependencyStartShadow(t.Context(), ready.ID, params)
+	if err != nil {
+		t.Fatalf("planExactSessionWaitDependencyStartShadow: %v", err)
+	}
+	if plan.Outcome != sessionLifecycleStartSelectionPrepare || plan.Reason != sessionLifecycleStartSelectionReasonReady {
+		t.Fatalf("plan = %+v, want ready prepare", plan)
+	}
+	if got := observed; len(got) != 1 || got[0] != ready.ID {
+		t.Fatalf("observed sessions = %v, want [%q]", got, ready.ID)
+	}
+	if got := store.count(); got != 1 {
+		t.Fatalf("authoritative Get calls = %d, want 1", got)
+	}
+	if got := env.sp.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0", got)
+	}
+	if got := env.sessionInfo(unrelated.ID); got.ID != unrelated.ID {
+		t.Fatalf("unrelated session %q was not retained", unrelated.ID)
+	}
+}
+
+func TestPlanExactSessionWaitDependencyStartShadowStopsBeforeReadWhenCanceled(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	store := &getCountingStore{Store: env.store}
+	params := exactSessionStartTestParams(t, env)
+	params.Store = store
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	plan, err := planExactSessionWaitDependencyStartShadow(ctx, bead.ID, params)
+	if err != nil {
+		t.Fatalf("planExactSessionWaitDependencyStartShadow: %v", err)
+	}
+	if plan.Outcome != sessionLifecycleStartSelectionPark || plan.Reason != sessionLifecycleStartSelectionReasonRuntimeUnknown {
+		t.Fatalf("plan = %+v, want runtime-unknown park", plan)
+	}
+	if got := store.count(); got != 0 {
+		t.Fatalf("authoritative Get calls after cancellation = %d, want 0", got)
+	}
+}
+
+func TestPlanExactSessionWaitDependencyStartShadowParksSuspendedTargetWithoutObservation(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", Suspended: true}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state":                     string(session.StateCreating),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	params := exactSessionStartTestParams(t, env)
+	observed := false
+	params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
+		observed = true
+		return worker.LiveObservation{}, nil
+	}
+
+	plan, err := planExactSessionWaitDependencyStartShadow(t.Context(), bead.ID, params)
+	if err != nil {
+		t.Fatalf("planExactSessionWaitDependencyStartShadow: %v", err)
+	}
+	if plan.Outcome != sessionLifecycleStartSelectionPark || plan.Reason != sessionLifecycleStartSelectionReasonRuntimeUnknown {
+		t.Fatalf("plan = %+v, want runtime-unknown park", plan)
+	}
+	if observed {
+		t.Fatal("suspended target was observed")
+	}
+}
+
+func TestPlanExactSessionWaitDependencyStartShadowDoesNotInstallHooksOrRouteACP(t *testing.T) {
+	env := newReconcilerTestEnv()
+	cityPath := t.TempDir()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{InstallAgentHooks: []string{"claude"}},
+		Agents: []config.Agent{{
+			Name: "worker", StartCommand: "true", Session: config.SessionTransportACP,
+		}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state": string(session.StateCreating), "pending_create_claim": "true",
+		"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	defaultProvider, acpProvider := runtime.NewFake(), runtime.NewFake()
+	provider := sessionauto.New(defaultProvider, acpProvider)
+	before, err := os.ReadDir(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.CityPath, params.Provider = cityPath, provider
+	recording := beadstest.NewRecordingStore(env.store)
+	recording.Reset()
+	params.Store = recording
+	recorder := events.NewFake()
+	params.Recorder = recorder
+
+	if _, err := planExactSessionWaitDependencyStartShadow(t.Context(), bead.ID, params); err != nil {
+		t.Fatalf("planExactSessionWaitDependencyStartShadow: %v", err)
+	}
+	after, err := os.ReadDir(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("shadow planner created files: before=%v after=%v", before, after)
+	}
+	if got := defaultProvider.CountCalls("IsRunning", "worker"); got == 0 {
+		t.Fatal("shadow liveness did not observe the default backend first")
+	}
+	if got := defaultProvider.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("default Start calls = %d, want 0", got)
+	}
+	if got := acpProvider.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("ACP Start calls = %d, want 0", got)
+	}
+	if calls := recording.Calls(); len(calls) != 0 {
+		t.Fatalf("store effects = %#v, want none", calls)
+	}
+	if got := len(recorder.Events); got != 0 {
+		t.Fatalf("emitted events = %d, want 0", got)
 	}
 }
 

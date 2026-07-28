@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -45,6 +46,140 @@ type exactSessionStartParams struct {
 	Stderr               io.Writer
 	ObserveLoadedSession exactLoadedSessionObserver
 	StartOptions         []startExecutionOption
+}
+
+// planExactSessionWaitDependencyStartShadow reads one dependency-ready session
+// and evaluates the existing start-selection planner without retaining a plan
+// or performing a lifecycle effect.
+func planExactSessionWaitDependencyStartShadow(
+	ctx context.Context,
+	sessionID string,
+	params exactSessionStartParams,
+) (sessionLifecycleStartSelectionPlan, error) {
+	plan := sessionLifecycleStartSelectionPlan{SessionID: sessionID}
+	if ctx == nil || ctx.Err() != nil {
+		plan.Outcome = sessionLifecycleStartSelectionPark
+		plan.Reason = sessionLifecycleStartSelectionReasonRuntimeUnknown
+		return plan, nil
+	}
+	if sessionID == "" || strings.TrimSpace(sessionID) != sessionID {
+		plan.Outcome = sessionLifecycleStartSelectionPark
+		plan.Reason = sessionLifecycleStartSelectionReasonInvalidInput
+		return plan, nil
+	}
+	if params.Config == nil || params.Provider == nil || params.Store == nil {
+		plan.Outcome = sessionLifecycleStartSelectionPark
+		plan.Reason = sessionLifecycleStartSelectionReasonConfigSuppressed
+		return plan, nil
+	}
+	clk := params.Clock
+	if clk == nil {
+		clk = clock.Real{}
+	}
+	info, _, err := getAuthoritativeSessionStartRecord(params.Store, sessionID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			plan.Outcome = sessionLifecycleStartSelectionNoop
+			plan.Reason = sessionLifecycleStartSelectionReasonTerminal
+			return plan, nil
+		}
+		return plan, fmt.Errorf("%w: planning exact dependency session start %q: %w", errSessionWaitDependencyTargetReadUnavailable, sessionID, err)
+	}
+	if info.ID != sessionID {
+		return plan, fmt.Errorf("planning exact dependency session start %q: authoritative read returned %q", sessionID, info.ID)
+	}
+	if info.Closed {
+		return planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{Info: info}), nil
+	}
+	template := resolvedSessionTemplateInfo(info, params.Config)
+	cfgAgent := findAgentByTemplate(params.Config, template)
+	if cfgAgent == nil {
+		return planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
+			Info:             info,
+			ConfigSuppressed: true,
+		}), nil
+	}
+	if isAgentEffectivelySuspendedWith(params.Config, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
+		return planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
+			Info:                 info,
+			WakeDecisionObserved: true,
+			ShouldWake:           true,
+			ConfigSuppressed:     true,
+		}), nil
+	}
+	resolvedProvider, err := config.ResolveProvider(cfgAgent, &params.Config.Workspace, params.Config.Providers, exec.LookPath)
+	if err != nil {
+		return planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
+			Info:                 info,
+			WakeDecisionObserved: true,
+			ShouldWake:           true,
+			ConfigSuppressed:     true,
+		}), nil
+	}
+	observeLoadedSession := params.ObserveLoadedSession
+	if observeLoadedSession == nil {
+		observeLoadedSession = observeExactSessionWaitDependencyShadowRuntime
+	}
+	observation, err := observeLoadedSession(ctx, params.CityPath, params.Store, params.Provider, params.Config, info, resolvedProvider.ProcessNames)
+	if err != nil {
+		return planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
+			Info:                 info,
+			WakeDecisionObserved: true,
+			ShouldWake:           true,
+		}), nil
+	}
+	now := clk.Now().UTC()
+	circuitOpen := strings.TrimSpace(info.SessionCircuitState) == sessionpkg.SessionCircuitStateOpen
+	if cbCfg, enabled := sessionCircuitBreakerConfigFromCity(params.Config); enabled {
+		cb := defaultSessionCircuitBreaker()
+		cb.configure(cbCfg)
+		if identity := namedSessionIdentityInfo(info); identity != "" && cb.IsOpen(identity, now) {
+			circuitOpen = true
+		}
+	}
+	providerUnavailable := false
+	if resolvedProvider != nil {
+		healthy, present := loadProviderHealthSnapshot(params.CityPath).check(resolvedProvider.Name)
+		providerUnavailable = present && !healthy
+	}
+	return planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
+		Info:                 info,
+		WakeDecisionObserved: true,
+		ShouldWake:           true,
+		RuntimeObserved:      true,
+		RuntimeAlive:         runtimeObservationLive(observation),
+		ObservedAt:           now,
+		StartupTimeout:       params.Config.Session.StartupTimeoutDuration(),
+		CircuitOpen:          circuitOpen,
+		ProviderUnavailable:  providerUnavailable,
+	}), nil
+}
+
+// observeExactSessionWaitDependencyShadowRuntime performs the one liveness
+// observation needed by the effect-free dependency shadow. It deliberately
+// avoids worker/session construction, which can register ACP routing.
+func observeExactSessionWaitDependencyShadowRuntime(
+	ctx context.Context,
+	_ string,
+	_ beads.Store,
+	provider runtime.Provider,
+	_ *config.City,
+	info sessionpkg.Info,
+	processNames []string,
+) (worker.LiveObservation, error) {
+	if ctx == nil {
+		return worker.LiveObservation{}, fmt.Errorf("observing dependency shadow session: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return worker.LiveObservation{}, err
+	}
+	if provider == nil {
+		return worker.LiveObservation{}, fmt.Errorf("observing dependency shadow session: runtime provider is nil")
+	}
+	liveness := runtime.ObserveLiveness(provider, info.SessionName, processNames)
+	return worker.LiveObservation{
+		Running: liveness.Running, Alive: liveness.Alive, SessionID: info.ID, RuntimeSessionID: info.ID, SessionName: info.SessionName,
+	}, nil
 }
 
 type exactSessionStartOwner uint8

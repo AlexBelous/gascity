@@ -1,15 +1,21 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-var errSessionWaitDependencyStaleCertification = errors.New("wait dependency target is no longer certified")
+var (
+	errSessionWaitDependencyStaleCertification    = errors.New("wait dependency target is no longer certified")
+	errSessionWaitDependencySnapshotUnavailable   = errors.New("wait dependency session snapshot is unavailable")
+	errSessionWaitDependencyTargetReadUnavailable = errors.New("wait dependency target read is unavailable")
+)
 
 // buildObservedSessionWaitDependencyIndex builds a private candidate from one
 // observed census without changing runtime state.
@@ -82,6 +88,11 @@ func (cr *CityRuntime) publishRejectedSessionWaitDependencyCensus(census observe
 // requesting the initial census. Cache unavailability and stale observations
 // remain pending; deterministic census errors wait for a relevant wait change.
 func (cr *CityRuntime) startSessionWaitDependencyShadow() {
+	cr.startSessionWaitDependencyShadowWithContext(context.Background())
+}
+
+func (cr *CityRuntime) startSessionWaitDependencyShadowWithContext(ctx context.Context) {
+	cr.enableSessionWaitDependencyLifecycleShadowSink(ctx)
 	cr.sessionWaitDependencyMu.Lock()
 	cr.sessionWaitDependencyStartupCensusOwed = true
 	cr.sessionWaitDependencyMu.Unlock()
@@ -126,6 +137,49 @@ func (cr *CityRuntime) startSessionWaitDependencyShadow() {
 	}
 }
 
+// enableSessionWaitDependencyLifecycleShadowSink connects certified
+// dependency-ready waits to a read/observe/plan-only shadow evaluation. The
+// rollout gate is boot-latched, and legacy reconciliation remains the sole
+// owner of every session, provider, and store mutation.
+func (cr *CityRuntime) enableSessionWaitDependencyLifecycleShadowSink(ctx context.Context) {
+	if cr == nil || cr.waitDependencyEnqueue != nil || cr.cs == nil {
+		return
+	}
+	mode := cr.cs.RolloutFlags().SessionReconciler()
+	if mode != rollout.Auto && mode != rollout.Require {
+		return
+	}
+	if cr.sessionStartOwnershipState() != sessionStartOwnershipKeyed {
+		return
+	}
+	_, release, err := cr.cs.acquireSessionStartSnapshot()
+	if err != nil {
+		return
+	}
+	release()
+	cr.waitDependencyEnqueue = func(sessionID string, _ sessionWaitDependencyCause) error {
+		cr.sessionStartMu.Lock()
+		defer cr.sessionStartMu.Unlock()
+		if cr.sessionStartOwnership != sessionStartOwnershipKeyed {
+			return nil
+		}
+		snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+		if err != nil {
+			return fmt.Errorf("%w: %w", errSessionWaitDependencySnapshotUnavailable, err)
+		}
+		defer release()
+		_, err = planExactSessionWaitDependencyStartShadow(ctx, sessionID, exactSessionStartParams{
+			Generation: snapshot.Generation,
+			CityPath:   snapshot.CityPath,
+			CityName:   snapshot.CityName,
+			Config:     snapshot.Config,
+			Provider:   snapshot.Provider,
+			Store:      snapshot.Store,
+		})
+		return err
+	}
+}
+
 func (cr *CityRuntime) submitSessionWaitDependencyStartupCensus() {
 	cr.sessionWaitDependencyMu.Lock()
 	if !cr.sessionWaitDependencyStartupCensusOwed ||
@@ -157,11 +211,25 @@ func (cr *CityRuntime) startSessionWaitDependencyProducer() bool {
 		},
 		EnqueueSession: func(plan sessionWaitDependencyPlan, cause sessionWaitDependencyCause) error {
 			cr.sessionWaitDependencyMu.RLock()
-			defer cr.sessionWaitDependencyMu.RUnlock()
 			if !cr.sessionWaitDependencyTargetCertifiedLocked(plan.Target) {
+				cr.sessionWaitDependencyMu.RUnlock()
 				return fmt.Errorf("%w: %s", errSessionWaitDependencyStaleCertification, plan.Target.WaitID)
 			}
-			return cr.waitDependencyEnqueue(plan.Target.SessionID, cause)
+			enqueue := cr.waitDependencyEnqueue
+			err := enqueue(plan.Target.SessionID, cause)
+			cr.sessionWaitDependencyMu.RUnlock()
+			if !errors.Is(err, errSessionWaitDependencySnapshotUnavailable) &&
+				!errors.Is(err, errSessionWaitDependencyTargetReadUnavailable) {
+				return err
+			}
+			cr.sessionWaitDependencyMu.Lock()
+			cr.sessionWaitDependencyStartupCensusOwed = true
+			cr.sessionWaitDependencyMu.Unlock()
+			if errors.Is(err, errSessionWaitDependencySnapshotUnavailable) {
+				cr.requestLegacySessionStartFallback()
+				return nil
+			}
+			return err
 		},
 		ReportError: func(err error) {
 			fmt.Fprintf(cr.stderr, "%s: wait dependency producer: %v\n", cr.logPrefix, err) //nolint:errcheck

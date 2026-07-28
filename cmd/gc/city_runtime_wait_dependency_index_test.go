@@ -11,11 +11,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/rollout"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -23,6 +25,12 @@ type sessionWaitShadowReadAuditStore struct {
 	beads.Store
 	listCalls atomic.Int64
 	getCalls  atomic.Int64
+	onGet     func(string)
+	blockID   string
+	entered   chan<- struct{}
+	release   <-chan struct{}
+	failID    string
+	failErr   error
 }
 
 func (s *sessionWaitShadowReadAuditStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -32,6 +40,16 @@ func (s *sessionWaitShadowReadAuditStore) List(query beads.ListQuery) ([]beads.B
 
 func (s *sessionWaitShadowReadAuditStore) Get(id string) (beads.Bead, error) {
 	s.getCalls.Add(1)
+	if s.onGet != nil {
+		s.onGet(id)
+	}
+	if id == s.blockID && s.entered != nil {
+		s.entered <- struct{}{}
+		<-s.release
+	}
+	if id == s.failID && s.failErr != nil {
+		return beads.Bead{}, s.failErr
+	}
 	return s.Store.Get(id)
 }
 
@@ -79,6 +97,312 @@ func sessionWaitShadowWaitIDs(waits []sessionpkg.WaitInfo) map[string]bool {
 		ids[wait.ID] = true
 	}
 	return ids
+}
+
+func TestSessionWaitDependencyLifecycleShadowSinkFollowsSessionReconcilerRollout(t *testing.T) {
+	off := &CityRuntime{cs: &controllerState{}}
+	off.enableSessionWaitDependencyLifecycleShadowSink(t.Context())
+	if off.waitDependencyEnqueue != nil {
+		t.Fatal("default/off session reconciler installed a dependency shadow sink")
+	}
+
+	autoDegraded := &CityRuntime{cs: &controllerState{
+		rolloutFlags: rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+	}}
+	autoDegraded.enableSessionWaitDependencyLifecycleShadowSink(t.Context())
+	if autoDegraded.waitDependencyEnqueue != nil {
+		t.Fatal("auto session reconciler without keyed ownership installed a dependency shadow sink")
+	}
+}
+
+func TestSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarget(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	dependency, err := env.store.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&a, map[string]string{
+		"state":                     string(sessionpkg.StateCreating),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	env.createSessionBead("unrelated", "worker")
+	if _, err := env.store.Create(sessionWaitShadowBead(a.ID, dependency.ID)); err != nil {
+		t.Fatal(err)
+	}
+	readA := make(chan struct{}, 1)
+	audited := &sessionWaitShadowReadAuditStore{Store: env.store, onGet: func(id string) {
+		if id == a.ID {
+			readA <- struct{}{}
+		}
+	}}
+	cache := beads.NewCachingStoreForTest(audited, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{
+		cfg:                         env.cfg,
+		sp:                          env.sp,
+		cityPath:                    t.TempDir(),
+		cityBeadStore:               cache,
+		eventProv:                   events.NewFake(),
+		pokeCh:                      make(chan struct{}, 2),
+		rolloutFlags:                rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+		sessionStartGeneration:      1,
+		sessionStartStoreGeneration: 1,
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cs:                    cs,
+		cfg:                   env.cfg,
+		stderr:                &stderr,
+		sessionStartOwnership: sessionStartOwnershipKeyed,
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("wait dependency stderr: %s", stderr.String())
+		}
+	})
+	cr.startSessionWaitDependencyShadowWithContext(t.Context())
+	if cr.waitDependencyEnqueue == nil {
+		t.Fatal("production lifecycle shadow sink was not installed")
+	}
+	t.Cleanup(func() { cs.stopSessionWaitDependencyShadowAdmission(); cr.stopSessionWaitDependencyProducer() })
+
+	if err := env.store.Close(dependency.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := env.store.Get(dependency.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := beadSnapshotEvent(t, events.BeadClosed, closed)
+	cs.applyBeadEventToStores(event)
+	awaitClose(t, readA, "installed dependency sink exact target read")
+	cr.stopSessionWaitDependencyProducer()
+	if got := env.sp.CountCalls("IsRunning", "worker"); got != 1 {
+		t.Fatalf("target runtime observations = %d, want 1", got)
+	}
+	if got := env.sp.CountCalls("IsRunning", "unrelated"); got != 0 {
+		t.Fatalf("unrelated runtime observations = %d, want 0", got)
+	}
+	if got := env.sp.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0", got)
+	}
+	if got := audited.getCalls.Load(); got < 2 {
+		t.Fatalf("exact event reads = %d, want dependency and target reads", got)
+	}
+}
+
+func TestSessionWaitDependencySnapshotSwapRearmsCensusUntilExactTargetEvaluates(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	dependency, err := env.store.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&target, map[string]string{
+		"state": string(sessionpkg.StateCreating), "pending_create_claim": "true",
+		"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetRead := make(chan struct{}, 1)
+	audited := &sessionWaitShadowReadAuditStore{Store: env.store, onGet: func(id string) {
+		if id == target.ID {
+			targetRead <- struct{}{}
+		}
+	}}
+	cache := beads.NewCachingStoreForTest(audited, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{
+		cfg: env.cfg, sp: env.sp, cityPath: t.TempDir(), cityBeadStore: cache,
+		eventProv: events.NewFake(), pokeCh: make(chan struct{}, 1),
+		rolloutFlags:           rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+		sessionStartGeneration: 1, sessionStartStoreGeneration: 1,
+	}
+	cr := &CityRuntime{cs: cs, cfg: env.cfg, stderr: io.Discard, sessionStartOwnership: sessionStartOwnershipKeyed}
+	cr.startSessionWaitDependencyShadowWithContext(t.Context())
+	t.Cleanup(func() { cs.stopSessionWaitDependencyShadowAdmission(); cr.stopSessionWaitDependencyProducer() })
+
+	releaseSwap := cs.beginSessionStartGenerationSwap()
+	if err := env.store.Close(dependency.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := env.store.Get(dependency.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := beadSnapshotEvent(t, events.BeadClosed, closed)
+	cache.ApplyEvent(event.Type, event.Payload)
+	exactTarget, ok := cr.sessionWaitDependencyTarget(wait.ID)
+	if !ok {
+		t.Fatal("installed dependency index did not retain exact wait target")
+	}
+	cr.submitSessionWaitDependencyTargets([]sessionWaitDependencyTarget{exactTarget}, sessionWaitDependencyCauseDependency)
+	awaitClose(t, cs.pokeCh, "snapshot-unavailable recovery poke")
+	cr.sessionWaitDependencyMu.RLock()
+	owed := cr.sessionWaitDependencyStartupCensusOwed
+	cr.sessionWaitDependencyMu.RUnlock()
+	if !owed {
+		t.Fatal("snapshot-unavailable sink did not retain startup census debt")
+	}
+	if got := env.sp.CountCalls("IsRunning", "worker"); got != 0 {
+		t.Fatalf("target observed during swap = %d, want 0", got)
+	}
+
+	releaseSwap()
+	cr.submitSessionWaitDependencyStartupCensus()
+	awaitClose(t, targetRead, "exact target evaluation after swap recovery")
+	cr.stopSessionWaitDependencyProducer()
+	cr.sessionWaitDependencyMu.RLock()
+	owed = cr.sessionWaitDependencyStartupCensusOwed
+	cr.sessionWaitDependencyMu.RUnlock()
+	if owed {
+		t.Fatal("successful recovery retained startup census debt")
+	}
+	if got := env.sp.CountCalls("IsRunning", "worker"); got != 1 {
+		t.Fatalf("target observations after recovery = %d, want 1", got)
+	}
+}
+
+func TestSessionWaitDependencyTargetReadFailureRearmsWithoutPokeThenRecovers(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	dep, err := env.store.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&target, map[string]string{"state": string(sessionpkg.StateCreating), "pending_create_claim": "true", "pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339)})
+	wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dep.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := make(chan struct{}, 1)
+	audited := &sessionWaitShadowReadAuditStore{Store: env.store, failID: target.ID, failErr: errors.New("target unavailable"), onGet: func(id string) {
+		if id == target.ID {
+			read <- struct{}{}
+		}
+	}}
+	cache := beads.NewCachingStoreForTest(audited, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{cfg: env.cfg, sp: env.sp, cityPath: t.TempDir(), cityBeadStore: cache, eventProv: events.NewFake(), pokeCh: make(chan struct{}, 1), rolloutFlags: rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)), sessionStartGeneration: 1, sessionStartStoreGeneration: 1}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{cs: cs, cfg: env.cfg, stderr: &stderr, sessionStartOwnership: sessionStartOwnershipKeyed}
+	cr.startSessionWaitDependencyShadowWithContext(t.Context())
+	t.Cleanup(func() { cs.stopSessionWaitDependencyShadowAdmission(); cr.stopSessionWaitDependencyProducer() })
+	if err := env.store.Close(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := env.store.Get(dep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := beadSnapshotEvent(t, events.BeadClosed, closed)
+	cache.ApplyEvent(event.Type, event.Payload)
+	exact, ok := cr.sessionWaitDependencyTarget(wait.ID)
+	if !ok {
+		t.Fatal("missing exact wait target")
+	}
+	cr.submitSessionWaitDependencyTargets([]sessionWaitDependencyTarget{exact}, sessionWaitDependencyCauseDependency)
+	awaitClose(t, read, "failed target read")
+	cr.stopSessionWaitDependencyProducer()
+	if stderr.Len() == 0 {
+		t.Fatal("target read failure was not reported by the producer")
+	}
+	cr.sessionWaitDependencyMu.RLock()
+	owed := cr.sessionWaitDependencyStartupCensusOwed
+	cr.sessionWaitDependencyMu.RUnlock()
+	if !owed {
+		t.Fatal("target read failure did not rearm census debt")
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("target read failure self-triggered poke")
+	default:
+	}
+	audited.failErr = nil
+	cr.startSessionWaitDependencyProducer()
+	cr.submitSessionWaitDependencyStartupCensus()
+	awaitClose(t, read, "recovered target evaluation")
+	cr.stopSessionWaitDependencyProducer()
+	if got := env.sp.CountCalls("IsRunning", "worker"); got != 1 {
+		t.Fatalf("successful target observations = %d, want 1", got)
+	}
+	cr.sessionWaitDependencyMu.RLock()
+	owed = cr.sessionWaitDependencyStartupCensusOwed
+	cr.sessionWaitDependencyMu.RUnlock()
+	if owed {
+		t.Fatal("recovered target retained census debt")
+	}
+}
+
+func TestSessionWaitDependencySinkFencesOwnershipTransitionAcrossExactRead(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	target := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&target, map[string]string{
+		"state": string(sessionpkg.StateCreating), "pending_create_claim": "true",
+		"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+	})
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	audited := &sessionWaitShadowReadAuditStore{Store: env.store, blockID: target.ID, entered: entered, release: release}
+	cs := &controllerState{
+		cfg: env.cfg, sp: env.sp, cityPath: t.TempDir(), cityBeadStore: audited,
+		eventProv: events.NewFake(), rolloutFlags: rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+		sessionStartGeneration: 1, sessionStartStoreGeneration: 1,
+	}
+	cr := &CityRuntime{cs: cs, cfg: env.cfg, stderr: io.Discard, sessionStartOwnership: sessionStartOwnershipKeyed}
+	cr.enableSessionWaitDependencyLifecycleShadowSink(t.Context())
+	if cr.waitDependencyEnqueue == nil {
+		t.Fatal("production lifecycle shadow sink was not installed")
+	}
+
+	sinkDone := make(chan struct{})
+	go func() {
+		defer close(sinkDone)
+		if err := cr.waitDependencyEnqueue(target.ID, sessionWaitDependencyCauseDependency); err != nil {
+			t.Errorf("waitDependencyEnqueue: %v", err)
+		}
+	}()
+	awaitClose(t, entered, "exact target read under ownership fence")
+	if cr.sessionStartMu.TryLock() {
+		cr.sessionStartMu.Unlock()
+		t.Fatal("exact target read did not retain session-start ownership fence")
+	}
+	stopDone := make(chan struct{})
+	go func() { cr.stopSessionStartController(); close(stopDone) }()
+	select {
+	case <-stopDone:
+		t.Fatal("ownership transition completed while exact read remained fenced")
+	default:
+	}
+	close(release)
+	awaitClose(t, sinkDone, "fenced exact evaluation")
+	awaitClose(t, stopDone, "ownership transition after exact evaluation")
+	if got := cr.sessionStartOwnershipState(); got != sessionStartOwnershipLegacy {
+		t.Fatalf("ownership = %v, want legacy", got)
+	}
+	if got := env.sp.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0", got)
+	}
+	if got := env.sessionInfo(target.ID).MetadataState; got != string(sessionpkg.StateCreating) {
+		t.Fatalf("persisted target state = %q, want creating", got)
+	}
 }
 
 func TestSessionWaitDependencyShadowInstallsAndReplacesObservedCensus(t *testing.T) {

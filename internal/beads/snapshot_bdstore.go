@@ -308,7 +308,14 @@ func (s *BdStore) applyForcedPass(ctx context.Context, forced []Snapshot, report
 // guarded-upsert option (ConflictSkip / AllowStaleIDs), refusing with a clear
 // message that names the required bd when it is absent.
 func (s *BdStore) HasWorkspacePrefixMintCapability() (bool, error) {
-	return s.hasWorkspacePrefixMintCapability()
+	return s.hasBDCapability(snapshotWorkspacePrefixMintCapability)
+}
+
+// HasWorkspaceBindingCapability reports whether bd understands the workspace
+// redirect directive that makes the city target authoritative while retaining
+// a rig's source prefix for minting.
+func (s *BdStore) HasWorkspaceBindingCapability() (bool, error) {
+	return s.hasBDCapability(snapshotWorkspaceBindingCapability)
 }
 
 // ConfigAddToSet appends value to the database config-table set at key via the
@@ -380,16 +387,16 @@ func (s *BdStore) runBoundedRead(ctx context.Context, args ...string) ([]byte, e
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		return s.runBDTransientRead(args...)
 	}
-	return execBDRead(ctx, s.dir, bdImportChildEnv(s.env), args...)
+	return execBDRead(ctx, s.dir, strings.TrimSpace(s.env["BD_BIN"]), bdImportChildEnv(s.env), args...)
 }
 
 // execBDRead runs a read-only `bd` command (no stdin) under ctx via
 // exec.CommandContext, so a ctx deadline actually kills the subprocess.
-func execBDRead(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
+func execBDRead(ctx context.Context, dir, bdBin string, env []string, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd := exec.CommandContext(ctx, bdExecutableFromOverride(bdBin), args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	var stdout, stderr bytes.Buffer
@@ -418,6 +425,10 @@ func execBDRead(ctx context.Context, dir string, env []string, args ...string) (
 // workspace-prefix-mint capability. The probe is fork-proof (a capabilities key,
 // never a version-number comparison) because this fleet pins forked bd builds.
 func (s *BdStore) hasWorkspacePrefixMintCapability() (bool, error) {
+	return s.hasBDCapability(snapshotWorkspacePrefixMintCapability)
+}
+
+func (s *BdStore) hasBDCapability(required string) (bool, error) {
 	out, err := s.runner(s.dir, "bd", "version", "--json")
 	if err != nil {
 		return false, fmt.Errorf("bd version: %w", err)
@@ -429,7 +440,7 @@ func (s *BdStore) hasWorkspacePrefixMintCapability() (bool, error) {
 		return false, fmt.Errorf("bd version: parsing capabilities: %w", err)
 	}
 	for _, capability := range payload.Capabilities {
-		if strings.TrimSpace(capability) == snapshotWorkspacePrefixMintCapability {
+		if strings.TrimSpace(capability) == required {
 			return true, nil
 		}
 	}
@@ -518,7 +529,7 @@ func (s *BdStore) runBDImport(ctx context.Context, stdin []byte, args ...string)
 	if s.importRunner != nil {
 		out, err = s.importRunner(s.dir, childEnv, stdin, args...)
 	} else {
-		out, err = execBDImport(ctx, s.dir, childEnv, stdin, args...)
+		out, err = execBDImport(ctx, s.dir, strings.TrimSpace(s.env["BD_BIN"]), childEnv, stdin, args...)
 	}
 	if err != nil {
 		return bdImportResult{}, fmt.Errorf("bd import: %w", err)
@@ -535,7 +546,8 @@ func (s *BdStore) runBDImport(ctx context.Context, stdin []byte, args ...string)
 // BD_JSON_ENVELOPE removed so the child always emits the bare --json shape the
 // parser expects.
 func bdImportChildEnv(overrides map[string]string) []string {
-	env := execEnvFor("bd", processEnvSnapshotExcludingNativeDoltOpen(), overrides)
+	baseEnv := envWithout(processEnvSnapshotExcludingNativeDoltOpen(), "BD_BIN")
+	env := execEnvFor("bd", baseEnv, overrides)
 	return envWithout(env, "BD_JSON_ENVELOPE")
 }
 
@@ -564,11 +576,11 @@ func unwrapBDJSONEnvelope(out []byte) []byte {
 
 // execBDImport runs `bd import` with JSONL on stdin via os/exec, using the
 // caller-computed child env and a bounded timeout bound to ctx.
-func execBDImport(ctx context.Context, dir string, env []string, stdin []byte, args ...string) ([]byte, error) {
+func execBDImport(ctx context.Context, dir, bdBin string, env []string, stdin []byte, args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd := exec.CommandContext(ctx, bdExecutableFromOverride(bdBin), args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin = bytes.NewReader(stdin)

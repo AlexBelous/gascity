@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 type topologyListErrorStore struct {
@@ -44,10 +45,25 @@ func TestBdTopologyShowScopedDefaults(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("show exit=%d stderr=%s", code, errOut)
 	}
-	for _, want := range []string{"infra:  bd", "scope:  scoped", "target: managed", "hq", "ga"} {
+	for _, want := range []string{"infra:  bd", "scope:  scoped", "hq", "ga"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("show output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestBdTopologyHelpAdvertisesOnlyLocalAxes(t *testing.T) {
+	out, errOut, code := runBdTopology(t, "unused", "--help")
+	if code != 0 || errOut != "" {
+		t.Fatalf("help exit=%d stderr=%q", code, errOut)
+	}
+	for _, want := range []string{"--infra local", "--scope scoped|unified", "bd-enterprise"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("help missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "--target") {
+		t.Fatalf("help advertises retired target axis:\n%s", out)
 	}
 }
 
@@ -61,7 +77,7 @@ func TestBdTopologyShowJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rep); err != nil {
 		t.Fatalf("decoding json %q: %v", out, err)
 	}
-	if !rep.OK || rep.Infra != "bd" || rep.Scope != "scoped" || rep.Target != "managed" {
+	if !rep.OK || rep.Infra != "bd" || rep.Scope != "scoped" {
 		t.Fatalf("unexpected report: %+v", rep)
 	}
 	if len(rep.Classes) != 5 {
@@ -131,6 +147,52 @@ func TestBdTopologySetInfraLocal(t *testing.T) {
 	}
 }
 
+func TestBdTopologyRejectsRetiredRemoteTargetSetter(t *testing.T) {
+	city := writeTopologyCity(t, t.TempDir(), "ga", "")
+	_, errOut, code := runBdTopology(t, city, "--target", "dolt://gateway.example:3306/shared")
+	if code == 0 {
+		t.Fatal("retired remote target setter unexpectedly succeeded")
+	}
+	if !strings.Contains(errOut, "no longer owns remote work migration") {
+		t.Fatalf("retired target error = %q", errOut)
+	}
+}
+
+func TestBdTopologyBootSummaryDoesNotAdvertiseRetiredRemoteMigration(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Beads.Work.Scope = config.BeadsWorkScopeUnified
+	cfg.Beads.Work.Target = "dolt://gateway.example:3306/shared"
+
+	if got := bdTopologyBootSummary(t.TempDir(), cfg); strings.Contains(got, "relocate the unified work DB") {
+		t.Fatalf("boot summary still assigns physical migration to gc: %q", got)
+	}
+}
+
+func TestBdTopologySetterNormalizesLegacyRemoteTarget(t *testing.T) {
+	city := writeTopologyCity(t, t.TempDir(), "ga", `
+[beads]
+event_hooks = false
+
+[beads.work]
+scope = "unified"
+target = "dolt://gateway.example:3306/shared"
+`)
+	_, errOut, code := runBdTopology(t, city, "--infra", "local", "--scope", "unified")
+	if code != 0 {
+		t.Fatalf("normalize exit=%d stderr=%s", code, errOut)
+	}
+	data, err := os.ReadFile(filepath.Join(city, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "target") || strings.Contains(string(data), "gateway.example") {
+		t.Fatalf("legacy target was retained:\n%s", data)
+	}
+	if !strings.Contains(string(data), "event_hooks = false") {
+		t.Fatalf("unrelated config was not preserved:\n%s", data)
+	}
+}
+
 // A deploy-lineage city may still carry the retired graph_store key. The
 // topology setter is the migration surface for that city shape, so its
 // structured rewrite must canonicalize the retired key instead of rejecting
@@ -171,16 +233,16 @@ func TestBdTopologyValidationTable(t *testing.T) {
 		wantSubstr string
 	}{
 		{
-			name:       "remote target requires unified",
+			name:       "remote target is retired",
 			prefix:     "ga",
 			args:       []string{"--target", "dolt://db:3306/org"},
-			wantSubstr: "requires beads.work.scope",
+			wantSubstr: "no longer owns remote work migration",
 		},
 		{
-			name:       "malformed remote target",
+			name:       "retired target remains rejected alongside scope",
 			prefix:     "ga",
 			args:       []string{"--scope", "unified", "--target", "dolt://db/org"},
-			wantSubstr: "invalid value",
+			wantSubstr: "no longer owns remote work migration",
 		},
 		{
 			name:       "unknown infra value",
@@ -493,52 +555,18 @@ func TestBdTopologyCountWorkBeadsUsesReadOnlyBD(t *testing.T) {
 	}
 }
 
-// TestBdTopologyDryRunRemotePlan pins the remote rung: endpoint, allowed_prefixes,
-// copy count, and credential note.
-func TestBdTopologyDryRunRemotePlan(t *testing.T) {
+// TestBdTopologyDryRunRejectsRetiredRemoteTarget ensures preview cannot revive
+// controller-owned remote migration.
+func TestBdTopologyDryRunRejectsRetiredRemoteTarget(t *testing.T) {
 	city := writeTopologyCity(t, t.TempDir(), "ga", "")
-
-	cityStore := newFakeWorkStore()
-	cityStore.seed(&fakeWorkRec{id: "ga-1", status: "open", issueType: "task"})
-	cityStore.seed(&fakeWorkRec{id: "ga-2", status: "open", issueType: "task"})
-	cityStore.seed(&fakeWorkRec{id: "ga-3", status: "closed", issueType: "task"})
-	origOpen := openWorkTopologyScopeStore
-	t.Cleanup(func() { openWorkTopologyScopeStore = origOpen })
-	openWorkTopologyScopeStore = func(string, string) (beads.Store, func(), error) {
-		return cityStore, func() {}, nil
-	}
-
-	out, errOut, code := runBdTopology(t, city,
+	_, errOut, code := runBdTopology(t, city,
 		"--scope", "unified", "--target", "dolt://org.db:3306/shared", "--dry-run", "--json")
-	if code != 0 {
-		t.Fatalf("remote dry-run exit=%d stderr=%s", code, errOut)
-	}
-	var plan bdTopologyPlan
-	if err := json.Unmarshal([]byte(out), &plan); err != nil {
-		t.Fatal(err)
-	}
-	if plan.RemoteRung.Status != "would-run" {
-		t.Fatalf("remote rung status = %q", plan.RemoteRung.Status)
-	}
-	if plan.RemoteRung.Endpoint != "dolt://org.db:3306/shared" {
-		t.Fatalf("endpoint = %q", plan.RemoteRung.Endpoint)
-	}
-	if !plan.RemoteRung.Countable || plan.RemoteRung.WorkBeadCopy != 3 {
-		t.Fatalf("copy count = %d countable=%v", plan.RemoteRung.WorkBeadCopy, plan.RemoteRung.Countable)
-	}
-	if plan.RemoteRung.CredentialNote == "" {
-		t.Fatalf("remote rung must carry a credential note")
-	}
-	if got := strings.Join(plan.RemoteRung.AllowedPrefixes, ","); got != "ga" {
-		t.Fatalf("allowed_prefixes = %q", got)
-	}
-	// Remote implies unified — the unify rung is present too.
-	if plan.UnifyRung.Status != "would-run" {
-		t.Fatalf("remote implies unify would-run, got %q", plan.UnifyRung.Status)
+	if code == 0 || !strings.Contains(errOut, "no longer owns remote work migration") {
+		t.Fatalf("retired remote dry-run exit=%d stderr=%s", code, errOut)
 	}
 }
 
-func TestBdTopologyDryRunFailsClosedWhenRemoteCensusFails(t *testing.T) {
+func TestBdTopologyDryRunRejectsRetiredRemoteTargetBeforeCensus(t *testing.T) {
 	city := writeTopologyCity(t, t.TempDir(), "ga", "")
 
 	origOpen := openWorkTopologyScopeStore
@@ -547,21 +575,10 @@ func TestBdTopologyDryRunFailsClosedWhenRemoteCensusFails(t *testing.T) {
 		return &topologyListErrorStore{Store: newFakeWorkStore()}, func() {}, nil
 	}
 
-	out, _, code := runBdTopology(t, city,
+	_, errOut, code := runBdTopology(t, city,
 		"--scope", "unified", "--target", "dolt://org.db:3306/shared", "--dry-run", "--json")
-	if code == 0 {
-		t.Fatalf("unreadable remote-copy source must fail the dry-run; output=%s", out)
-	}
-	var plan bdTopologyPlan
-	if err := json.Unmarshal([]byte(out), &plan); err != nil {
-		t.Fatalf("dry-run must preserve its JSON plan on failure: %v\noutput=%s", err, out)
-	}
-	if plan.OK || len(plan.Errors) != 1 {
-		t.Fatalf("plan = %+v, want one blocking error", plan)
-	}
-	if got := plan.Errors[0]; got.Code != "work_census_failed" || got.Rung != "remote" || got.Source != "hq" ||
-		!strings.Contains(got.Message, "schema unsupported") {
-		t.Fatalf("error = %+v, want the remote-copy source identity and cause", got)
+	if code == 0 || !strings.Contains(errOut, "no longer owns remote work migration") {
+		t.Fatalf("retired remote dry-run exit=%d stderr=%s", code, errOut)
 	}
 }
 

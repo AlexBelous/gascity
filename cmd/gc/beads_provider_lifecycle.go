@@ -211,8 +211,16 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 		clearCityDoltConfig(cityPath)
 	}
 	skipLocalDolt := false
+	if cityUsesBdStoreContract(cityPath) {
+		var err error
+		skipLocalDolt, err = scopeHasCompleteStorageBinding(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
+		if err != nil {
+			return err
+		}
+	}
 	keepAliveLocalDolt := false
 	switch {
+	case skipLocalDolt:
 	case isExternalDolt(cityPath):
 		// An externally-pinned dolt endpoint (city_canonical / explicit, e.g. a
 		// hosted beads-gateway) is not a gc-managed local lifecycle: connect to
@@ -459,9 +467,9 @@ func seedDeferredManagedBeads(cityPath, dir, prefix, doltDatabase string) {
 }
 
 func seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase string) error {
-	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
+	if usesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
-	} else if usesPostgres {
+	} else if usesNonDolt {
 		return nil
 	}
 	// Resolve topology once up front (F7/F12): a marker fault aborts before any
@@ -557,9 +565,9 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 	if !cityUsesBdStoreContract(cityPath) {
 		return nil
 	}
-	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
+	if usesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
-	} else if usesPostgres {
+	} else if usesNonDolt {
 		return nil
 	}
 	// Resolve the work topology ONCE up front via the error-returning reader
@@ -621,9 +629,9 @@ func workScopeResidueLabel(cityPath, dir string) string {
 // wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
 // is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
-	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
+	if usesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
-	} else if usesPostgres {
+	} else if usesNonDolt {
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
@@ -668,10 +676,15 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 }
 
 func scopeUsesPostgresBackendForInit(cityPath, dir string) (bool, error) {
+	path := scopeMetadataJSONPath(dir)
+	if completeBinding, err := scopeHasCompleteStorageBinding(fsys.OSFS{}, path); err != nil {
+		return false, err
+	} else if completeBinding {
+		return true, nil
+	}
 	if !cityUsesBdStoreContract(cityPath) {
 		return false, nil
 	}
-	path := scopeMetadataJSONPath(dir)
 	state, ok, err := contract.LoadMetadataState(fsys.OSFS{}, path)
 	if err != nil {
 		if allowLegacyDoltMetadataRepair(fsys.OSFS{}, path, err) {
@@ -687,8 +700,57 @@ func scopeUsesPostgresBackendForInit(cityPath, dir string) (bool, error) {
 			return false, nil
 		}
 	}
+	if !samePath(cityPath, dir) {
+		resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, dir, "")
+		if err != nil {
+			return false, err
+		}
+		if resolved.Kind == contract.ScopeConfigAuthoritative && resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity {
+			if usesNonDolt, err := scopeHasCompleteStorageBinding(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err != nil {
+				return false, err
+			} else if usesNonDolt {
+				return true, nil
+			}
+		}
+	}
 	_, usesPostgres, err := postgresMetadataForScope(cityPath, dir)
 	return usesPostgres, err
+}
+
+func scopeHasCompleteStorageBinding(fs fsys.FS, path string) (bool, error) {
+	data, err := fs.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read beads storage binding %s: %w", path, err)
+	}
+
+	var presence struct {
+		StorageEndpoint json.RawMessage `json:"storage_endpoint"`
+		StorageDatabase json.RawMessage `json:"storage_database"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return false, fmt.Errorf("parse beads storage binding %s: %w", path, err)
+	}
+	if len(presence.StorageEndpoint) == 0 && len(presence.StorageDatabase) == 0 {
+		return false, nil
+	}
+
+	var binding struct {
+		Backend         string `json:"backend"`
+		StorageEndpoint string `json:"storage_endpoint"`
+		StorageDatabase string `json:"storage_database"`
+	}
+	if err := json.Unmarshal(data, &binding); err != nil {
+		return false, fmt.Errorf("parse beads storage binding %s: %w", path, err)
+	}
+	if strings.TrimSpace(binding.Backend) != "" &&
+		strings.TrimSpace(binding.StorageEndpoint) != "" &&
+		strings.TrimSpace(binding.StorageDatabase) != "" {
+		return true, nil
+	}
+	return false, fmt.Errorf("partial beads storage binding %s: backend, storage_endpoint, and storage_database must all be non-empty", path)
 }
 
 func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
@@ -838,6 +900,13 @@ func ensureBeadsProvider(cityPath string) error {
 	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return nil
+	}
+	if cityUsesBdStoreContract(cityPath) {
+		if usesNonDolt, err := scopeHasCompleteStorageBinding(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err != nil {
+			return err
+		} else if usesNonDolt {
+			return nil
+		}
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
@@ -1241,6 +1310,13 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return nil
+	}
+	if cityUsesBdStoreContract(cityPath) {
+		if usesNonDolt, err := scopeHasCompleteStorageBinding(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err != nil {
+			return err
+		} else if usesNonDolt {
+			return nil
+		}
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
@@ -1773,9 +1849,9 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		return err
 	}
 	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
-		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath); err != nil {
+		if usesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, cityPath); err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
-		} else if !usesPostgres {
+		} else if !usesNonDolt {
 			doltDatabase := scopeDoltDatabaseForTopology(topo, cityPath, cityPath, config.EffectiveHQPrefix(cfg))
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
@@ -1798,9 +1874,9 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		if !rigUsesManagedBdStoreContract(cityPath, cfg.Rigs[i]) {
 			continue
 		}
-		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cfg.Rigs[i].Path); err != nil {
+		if usesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, cfg.Rigs[i].Path); err != nil {
 			return fmt.Errorf("classifying rig %q backend: %w", cfg.Rigs[i].Name, err)
-		} else if !usesPostgres {
+		} else if !usesNonDolt {
 			doltDatabase := scopeDoltDatabaseForTopology(topo, cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, doltDatabase); err != nil {
@@ -1836,13 +1912,13 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	}
 	resolveRigPaths(cityPath, rigs)
 	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
-	cityUsesPostgres := false
+	cityUsesNonDolt := false
 	if cityUsesBd {
-		usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
+		usesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
 		if err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
 		}
-		cityUsesPostgres = usesPostgres
+		cityUsesNonDolt = usesNonDolt
 	}
 	anyRigUsesBd := false
 	for _, rig := range rigs {
@@ -1865,21 +1941,19 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		return err
 	}
 	managedPort := ""
-	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityUsesPostgres {
+	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityUsesNonDolt {
 		managedPort = currentDoltPort(cityPath)
 	}
-	if cityUsesBd {
+	if cityUsesBd && !cityUsesNonDolt {
 		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
 			return err
 		}
-		if !cityUsesPostgres {
-			if managedPort != "" {
-				writeDoltPortFile(cityPath, managedPort, "city", warn)
-			} else {
-				removeDoltPortFile(cityPath)
-			}
+		if managedPort != "" {
+			writeDoltPortFile(cityPath, managedPort, "city", warn)
+		} else {
+			removeDoltPortFile(cityPath)
 		}
-	} else {
+	} else if !cityUsesBd {
 		removeDoltPortFile(cityPath)
 	}
 
@@ -1890,6 +1964,13 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		}
 		if !rigUsesManagedBdStoreContract(cityPath, rig) {
 			removeDoltPortFile(rig.Path)
+			continue
+		}
+		rigUsesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, rig.Path)
+		if err != nil {
+			return err
+		}
+		if rigUsesNonDolt {
 			continue
 		}
 		rigState, err := syncDesiredRigDoltConfigState(cityPath, rig, cityState)

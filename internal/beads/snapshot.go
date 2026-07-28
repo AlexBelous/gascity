@@ -50,6 +50,8 @@ var ErrExportOwnerExcludeConfigured = errors.New("bd export.exclude_owners confi
 // single probe gates both guarded-upsert options.
 const snapshotWorkspacePrefixMintCapability = "workspace-prefix-mint"
 
+const snapshotWorkspaceBindingCapability = "workspace-binding"
+
 // Snapshot is a raw-fidelity carrier for one exported bead — the bd-export
 // JSONL object held losslessly plus a decoded envelope of the fields Gas City
 // must read to route and verify the row.

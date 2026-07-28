@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -356,7 +357,10 @@ func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(rigDir): %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(worktreeDir, ".beads", "redirect"), []byte(filepath.Join(rigDir, ".beads")+"\n"), 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(city .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".beads", "redirect"), []byte(filepath.Join(cityDir, ".beads")+"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(redirect): %v", err)
 	}
 	setCwd(t, worktreeDir)
@@ -763,6 +767,46 @@ set -eu
 	}
 	if !samePath(got["GC_RIG_ROOT"], rigDir) {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", got["GC_RIG_ROOT"], rigDir)
+	}
+}
+
+func TestGcBdUsesWorkspacePinnedBdForCompleteNonDoltBinding(t *testing.T) {
+	cityPath := t.TempDir()
+	pinnedDir := t.TempDir()
+	ambientDir := t.TempDir()
+	capturePath := filepath.Join(t.TempDir(), "selected")
+	pinnedBd := filepath.Join(pinnedDir, "bd")
+	ambientBd := filepath.Join(ambientDir, "bd")
+	if err := os.WriteFile(pinnedBd, []byte(fmt.Sprintf("#!/bin/sh\nprintf pinned > %q\n", capturePath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ambientBd, []byte(fmt.Sprintf("#!/bin/sh\nprintf ambient > %q\n", capturePath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", pinnedDir+string(os.PathListSeparator)+"$PATH")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg","dolt_mode":"server","dolt_database":"legacy_hq"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"list"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd = %d, stderr=%q", got, stderr.String())
+	}
+	selected, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(selected); got != "pinned" {
+		t.Fatalf("selected bd = %q, want pinned", got)
 	}
 }
 

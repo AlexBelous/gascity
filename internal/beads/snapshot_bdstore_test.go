@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeBdRunner is a programmable CommandRunner for the bd-leg fast tests. It
@@ -450,6 +453,68 @@ func TestBdImportChildEnvStripsEnvelope(t *testing.T) {
 	}
 	if envHasKey(env, "BD_JSON_ENVELOPE") {
 		t.Fatalf("BD_JSON_ENVELOPE must be stripped: %v", env)
+	}
+}
+
+func TestBdStoreDirectExecPathsUseAbsoluteBdBin(t *testing.T) {
+	ambientDir := t.TempDir()
+	ambientBd := filepath.Join(ambientDir, "bd")
+	if err := os.WriteFile(ambientBd, []byte(`#!/bin/sh
+case "$1" in
+  list) printf '[]' ;;
+  import) printf '{"created":1,"ids":["ambient"]}' ;;
+  purge) printf '{"purged_count":1}' ;;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ambientOverride := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(ambientOverride, []byte("#!/bin/sh\nexit 9\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pinnedDir := t.TempDir()
+	pinnedBd := filepath.Join(pinnedDir, "bd")
+	if err := os.WriteFile(pinnedBd, []byte(`#!/bin/sh
+case "$1" in
+  list) printf '[]' ;;
+  import) printf '{"created":1,"ids":["pinned"]}' ;;
+  purge) printf '{"purged_count":2}' ;;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_BIN", ambientOverride)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	unscoped := NewBdStore(t.TempDir(), nil)
+	if err := unscoped.CredentialPreflight(ctx); err != nil {
+		t.Fatalf("ambient BD_BIN must be ignored in favor of logical bd: %v", err)
+	}
+
+	store := NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("runner must not be used by direct exec paths")
+	}, WithBdStoreEnv(map[string]string{"BD_BIN": pinnedBd}))
+
+	if err := store.CredentialPreflight(ctx); err != nil {
+		t.Fatalf("CredentialPreflight: %v", err)
+	}
+
+	imported, err := store.runBDImport(ctx, nil, "import", "-", "--json")
+	if err != nil {
+		t.Fatalf("runBDImport: %v", err)
+	}
+	if got := imported.IDs; !reflect.DeepEqual(got, []string{"pinned"}) {
+		t.Fatalf("import IDs = %v, want pinned bd", got)
+	}
+
+	purged, err := store.Purge(filepath.Join(store.Dir(), ".beads"), false)
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if purged.Purged != 2 {
+		t.Fatalf("purged = %d, want pinned bd result 2", purged.Purged)
 	}
 }
 

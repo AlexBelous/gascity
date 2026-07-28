@@ -55,7 +55,7 @@ func setExecProjectedBackendEnvEmpty(env map[string]string) {
 // set so it never blanks an ambient credential command for providers that skip
 // the copy.
 func execProjectedBackendCopyKeys() []string {
-	return append(execProjectedBackendEnvKeys(), "BEADS_DOLT_CREDENTIAL_COMMAND")
+	return append(execProjectedBackendEnvKeys(), "BEADS_DOLT_CREDENTIAL_COMMAND", "BD_BIN")
 }
 
 func copyExecProjectedBackendEnv(dst, src map[string]string) {

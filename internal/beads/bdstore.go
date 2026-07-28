@@ -93,7 +93,13 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 			defer slowTimer.Stop()
 		}
 
-		cmd := exec.CommandContext(ctx, name, args...)
+		executable := name
+		if name == "bd" {
+			if bdBin := strings.TrimSpace(env["BD_BIN"]); filepath.IsAbs(bdBin) {
+				executable = bdBin
+			}
+		}
+		cmd := exec.CommandContext(ctx, executable, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir
@@ -469,15 +475,16 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	}
 
 	dir := filepath.Dir(beadsDir)
-	env := envWithout(processEnvSnapshotExcludingNativeDoltOpen(), "BEADS_DIR")
-	env = append(env, "BEADS_DIR="+beadsDir)
+	baseEnv := envWithout(processEnvSnapshotExcludingNativeDoltOpen(), "BD_BIN")
+	env := execEnvFor("bd", envWithout(baseEnv, "BEADS_DIR"), s.env)
+	env = append(envWithout(env, "BEADS_DIR"), "BEADS_DIR="+beadsDir)
 
 	var out []byte
 	var err error
 	if s.purgeRunner != nil {
 		out, err = s.purgeRunner(dir, env, args...)
 	} else {
-		out, err = execPurge(dir, env, args)
+		out, err = execPurge(dir, strings.TrimSpace(s.env["BD_BIN"]), env, args)
 	}
 	if err != nil {
 		return PurgeResult{}, fmt.Errorf("bd purge: %w", err)
@@ -500,12 +507,12 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 }
 
 // execPurge runs bd purge via exec.CommandContext with a 60-second timeout.
-func execPurge(dir string, env, args []string) ([]byte, error) {
+func execPurge(dir, bdBin string, env, args []string) ([]byte, error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd := exec.CommandContext(ctx, bdExecutableFromOverride(bdBin), args...)
 	cmd.Dir = dir
 	cmd.Env = env
 
@@ -619,6 +626,14 @@ func mergeEnv(environ []string, overrides map[string]string) []string {
 		out = append(out, key+"="+overrides[key])
 	}
 	return out
+}
+
+func bdExecutableFromOverride(bdBin string) string {
+	bdBin = strings.TrimSpace(bdBin)
+	if filepath.IsAbs(bdBin) {
+		return bdBin
+	}
+	return "bd"
 }
 
 // StringMap is a map[string]string that tolerates non-string JSON values

@@ -127,6 +127,7 @@ type PreflightDetails struct {
 	Provider              string                 `json:"provider,omitempty"`
 	MetadataBackend       string                 `json:"metadata_backend,omitempty"`
 	BDContextBackend      string                 `json:"bd_context_backend,omitempty"`
+	BDContextLocation     string                 `json:"bd_context_location,omitempty"`
 	BDContextDoltMode     string                 `json:"bd_context_dolt_mode,omitempty"`
 	BDVersion             string                 `json:"bd_version,omitempty"`
 	BeadsLibraryVersion   string                 `json:"beads_library_version,omitempty"`

@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1409,10 +1408,20 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
 		OpenBdStore: func() (beads.Store, error) {
-			if _, err := exec.LookPath("bd"); err != nil {
+			var storeEnv map[string]string
+			var envErr error
+			if filepath.Clean(scopeRoot) == filepath.Clean(runtimeCityPath) {
+				storeEnv, envErr = bdRuntimeEnvWithError(runtimeCityPath)
+			} else {
+				storeEnv, envErr = bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, scopeRoot)
+			}
+			if envErr != nil {
+				return nil, envErr
+			}
+			if _, err := bdExecutableFromEnv([]string{"BD_BIN=" + storeEnv["BD_BIN"]}); err != nil {
 				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 			}
-			return openBdStoreAt(scopeRoot, runtimeCityPath)
+			return openBdStoreAt(scopeRoot, runtimeCityPath, storeEnv)
 		},
 		OpenExecStore: func() (beads.Store, error) {
 			return openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
@@ -1505,9 +1514,13 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 	return scopeRoot
 }
 
-func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
+func openBdStoreAt(storePath, cityPath string, scopedEnv ...map[string]string) (beads.Store, error) {
+	var opts []beads.BdStoreOption
+	if len(scopedEnv) > 0 {
+		opts = append(opts, beads.WithBdStoreEnv(scopedEnv[0]))
+	}
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
-		store := bdStoreForCity(storePath, cityPath)
+		store := bdStoreForCity(storePath, cityPath, opts...)
 		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
 			return optimized, nil
 		}
@@ -1517,7 +1530,7 @@ func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
 	if err != nil {
 		cfg = nil
 	}
-	store := bdStoreForRig(storePath, cityPath, cfg)
+	store := bdStoreForRigWithOptions(storePath, cityPath, cfg, opts)
 	if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
 		return optimized, nil
 	}

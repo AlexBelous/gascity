@@ -49,6 +49,149 @@ func setScopedBeadsProviderForTest(t *testing.T, scopeRoot, provider string) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", scopeRoot)
 }
 
+func TestScopeHasCompleteStorageBinding(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata string
+		want     bool
+		wantErr  bool
+	}{
+		{name: "missing metadata"},
+		{
+			name:     "legacy metadata has neither storage field",
+			metadata: `{"backend":"postgres","postgres_host":"db.example.test"}`,
+		},
+		{
+			name:     "complete opaque Dolt binding",
+			metadata: `{"backend":"dolt","storage_endpoint":"not-a-parsed-endpoint","storage_database":"work","unknown":{"preserve":true}}`,
+			want:     true,
+		},
+		{
+			name:     "one storage field is partial",
+			metadata: `{"backend":"dolt","storage_endpoint":"remote"}`,
+			wantErr:  true,
+		},
+		{
+			name:     "blank backend is partial",
+			metadata: `{"backend":" ","storage_endpoint":"remote","storage_database":"work"}`,
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scopeRoot := t.TempDir()
+			path := scopeMetadataJSONPath(scopeRoot)
+			if tt.metadata != "" {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(tt.metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := scopeHasCompleteStorageBinding(fsys.OSFS{}, path)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("scopeHasCompleteStorageBinding() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("scopeHasCompleteStorageBinding() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScopeUsesPostgresBackendForInitChecksCompleteBindingFirst(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	scopeRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(scopeRoot), []byte(`{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := scopeUsesPostgresBackendForInit(scopeRoot, scopeRoot)
+	if err != nil {
+		t.Fatalf("scopeUsesPostgresBackendForInit: %v", err)
+	}
+	if !got {
+		t.Fatal("scopeUsesPostgresBackendForInit = false, want true for complete storage binding")
+	}
+}
+
+// TestOpenStoreAfterEnterpriseBackendCutoverUsesBD verifies the restart path
+// after bd-enterprise has changed only the canonical city workspace metadata.
+// GC must ask bd for the effective backend and fall back to the workspace-bound
+// BdStore rather than attempting a native Dolt reopen against stale local
+// assumptions.
+func TestOpenStoreAfterEnterpriseBackendCutoverUsesBD(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"cutover\"\nprefix = \"gc\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(`{"backend":"postgres","database":"beads","postgres_host":"db.example","postgres_port":"5432","postgres_user":"gc","postgres_database":"cutover"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte("#!/bin/sh\nif [ \"$1\" = context ] && [ \"$2\" = --json ]; then\n  printf '{\"backend\":\"postgres\",\"schema_version\":1}\\n'\n  exit 0\nfi\necho unexpected bd command: \"$*\" >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := openStoreResultAtForCity(city, city)
+	if err != nil {
+		t.Fatalf("open store after cutover: %v", err)
+	}
+	raw, _, _ := unwrapBeadPolicyStore(result.Store)
+	if _, ok := raw.(*beads.BdStore); !ok {
+		t.Fatalf("cutover store = %T, want workspace-bound *beads.BdStore", raw)
+	}
+	if result.Diagnostic.Store != beads.BeadsStoreNameBdStore || result.Diagnostic.NativeStoreEligible {
+		t.Fatalf("cutover diagnostic = %+v, want bd fallback", result.Diagnostic)
+	}
+}
+
+// TestOpenStoreAfterRemoteDoltCutoverUsesBD proves that a remote Dolt target
+// is also backend-opaque to GC. A Dolt-shaped metadata file alone must not
+// authorize the native client; the effective bd context owns that decision.
+func TestOpenStoreAfterRemoteDoltCutoverUsesBD(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"cutover\"\nprefix = \"gc\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"cutover","project_id":"gc-cutover"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte("#!/bin/sh\nif [ \"$1\" = context ] && [ \"$2\" = --json ]; then\n  printf '{\"backend\":\"dolt\",\"location\":\"remote\",\"dolt_mode\":\"server\",\"schema_version\":1}\\n'\n  exit 0\nfi\necho unexpected bd command: \"$*\" >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := openStoreResultAtForCity(city, city)
+	if err != nil {
+		t.Fatalf("open remote-Dolt cutover store: %v", err)
+	}
+	raw, _, _ := unwrapBeadPolicyStore(result.Store)
+	if _, ok := raw.(*beads.BdStore); !ok {
+		t.Fatalf("remote-Dolt cutover store = %T, want workspace-bound *beads.BdStore", raw)
+	}
+	if result.Diagnostic.Store != beads.BeadsStoreNameBdStore || result.Diagnostic.NativeStoreEligible ||
+		!strings.Contains(result.Diagnostic.PreflightReason, `location="remote"`) {
+		t.Fatalf("remote-Dolt cutover diagnostic = %+v, want location-gated bd fallback", result.Diagnostic)
+	}
+}
+
 func mustProviderLifecycleProcessEnv(t *testing.T, cityPath, provider string) []string {
 	t.Helper()
 	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
@@ -10788,25 +10931,99 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"), contract.MetadataState{
-		Database:         "beads",
-		Backend:          "postgres",
-		PostgresHost:     "db.example.test",
-		PostgresPort:     "5432",
-		PostgresUser:     "bd",
-		PostgresDatabase: "beads_pg",
-	}); err != nil {
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	metadata := []byte(`{"database":"beads","backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432?sslmode=require","storage_database":"beads_pg","dolt_mode":"server","dolt_database":"legacy_hq","unknown":{"preserve":true}}`)
+	if err := os.WriteFile(metadataPath, metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := filepath.Join(cityPath, "rigs", "remote")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rigConfigPath := filepath.Join(rigPath, ".beads", "config.yaml")
+	rigConfig := []byte("issue_prefix: remote\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n")
+	if err := os.WriteFile(rigConfigPath, rigConfig, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:   "remote",
+			Path:   rigPath,
+			Prefix: "remote",
+		}},
+	}
+
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		t.Fatalf("managedDoltLifecycleOwned: %v", err)
+	}
+	if owned {
+		t.Fatal("managedDoltLifecycleOwned = true, want false")
+	}
+	if initScopeNeedsLocalDoltIdentity(cityPath, cityPath, cfg) {
+		t.Fatal("initScopeNeedsLocalDoltIdentity = true, want false")
+	}
+	if initScopeNeedsLocalDoltIdentity(cityPath, rigPath, cfg) {
+		t.Fatal("initScopeNeedsLocalDoltIdentity(inherited rig) = true, want false")
+	}
+	if !scopeBackendIsPostgres(cityPath, cityPath) {
+		t.Fatal("scopeBackendIsPostgres = false, want true")
+	}
+	if !scopeBackendIsPostgres(cityPath, rigPath) {
+		t.Fatal("scopeBackendIsPostgres(inherited rig) = false, want true")
+	}
+	if canonicalScopeDoltProjectionAuthoritative(cityPath) {
+		t.Fatal("canonicalScopeDoltProjectionAuthoritative = true, want false")
+	}
+	orderEnv := map[string]string{}
+	applyOrderExecCanonicalDoltEnv(cityPath, cityPath, orderEnv)
+	if _, ok := orderEnv["GC_DOLT_MANAGED_LOCAL"]; ok {
+		t.Fatal("order env selected managed Dolt for canonical non-Dolt binding")
+	}
+	if !doctorWorkspaceHasPostgresScope(cityPath, cfg) {
+		t.Fatal("doctorWorkspaceHasPostgresScope = false, want true")
+	}
+
+	runtimeStatePath := managedDoltStatePath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(runtimeStatePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtimeStatePath, []byte("preserve-runtime-state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearManagedDoltRuntimeStateUnlessPostgres(cityPath); err != nil {
+		t.Fatalf("clearManagedDoltRuntimeStateUnlessPostgres: %v", err)
+	}
+	if got, err := os.ReadFile(runtimeStatePath); err != nil || string(got) != "preserve-runtime-state" {
+		t.Fatalf("managed Dolt runtime state changed: got %q, err=%v", got, err)
+	}
+	if err := healthBeadsProviderContext(context.Background(), cityPath, false); err != nil {
+		t.Fatalf("healthBeadsProviderContext: %v", err)
+	}
+
 	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
 		t.Fatalf("startBeadsLifecycle() error = %v", err)
 	}
 	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
 		t.Fatalf("startBeadsLifecycle() should not invoke provider for postgres city, stat err = %v", err)
+	}
+	gotMetadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotMetadata, metadata) {
+		t.Fatalf("metadata changed:\n got %s\nwant %s", gotMetadata, metadata)
+	}
+	gotRigConfig, err := os.ReadFile(rigConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotRigConfig, rigConfig) {
+		t.Fatalf("inherited rig config changed:\n got %s\nwant %s", gotRigConfig, rigConfig)
 	}
 }
 

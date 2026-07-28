@@ -78,6 +78,87 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 }
 
+func TestBdContextCommandRunnerForCityUsesWorkspacePinnedBd(t *testing.T) {
+	writeBd := func(dir, label string) string {
+		t.Helper()
+		path := filepath.Join(dir, "bd")
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%s:%%s' \"${BD_BIN-}\"\n", label)
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	pinnedDir := t.TempDir()
+	ambientDir := t.TempDir()
+	pinnedBd := writeBd(pinnedDir, "pinned")
+	ambientBd := writeBd(ambientDir, "ambient")
+	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_BIN", ambientBd)
+
+	tests := []struct {
+		name     string
+		cityTOML string
+		want     string
+	}{
+		{
+			name:     "workspace path",
+			cityTOML: fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", pinnedDir+string(os.PathListSeparator)+"$PATH"),
+			want:     "pinned:" + pinnedBd,
+		},
+		{
+			name:     "legacy path",
+			cityTOML: "[workspace]\nname = \"demo\"\n",
+			want:     "ambient:",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(tt.cityTOML), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := bdContextCommandRunnerForCity(cityPath)(cityPath, "bd", "context", "--json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(out); got != tt.want {
+				t.Fatalf("context probe output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testing.T) {
+	cityPath := t.TempDir()
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\necho clean-runner-sentinel >&2\nexit 17\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", binDir+string(os.PathListSeparator)+"$PATH")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(`{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
+	if err == nil {
+		t.Fatal("runner error = nil, want fake bd failure")
+	}
+	if !strings.Contains(err.Error(), "clean-runner-sentinel") {
+		t.Fatalf("runner error = %q, want fake bd stderr", err)
+	}
+	if strings.Contains(err.Error(), "managed recovery") || strings.Contains(err.Error(), "postgres storage binding") {
+		t.Fatalf("runner error = %q, managed retry path must not run", err)
+	}
+}
+
 // ── Dolt config wiring tests (issue 011) ──────────────────────────────
 
 func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
@@ -4260,6 +4341,160 @@ dolt.auto-start: false
 	}
 }
 
+func TestRuntimeEnvDelegatesCompleteNonDoltStorageBindingToBd(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432?sslmode=require","storage_database":"beads_pg","dolt_mode":"server","dolt_database":"legacy_hq","unknown":"preserve-me"}`)
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	projectedKeys := append([]string{}, projectedDoltEnvKeys...)
+	projectedKeys = append(projectedKeys, projectedPostgresEnvKeys...)
+	projectedKeys = append(projectedKeys, projectedBeadsBackendEnvKeys...)
+	for _, key := range projectedKeys {
+		t.Setenv(key, "stale-projection")
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "custom-credentials")
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+	assertNoProjection := func(t *testing.T, env map[string]string) {
+		t.Helper()
+		for _, key := range projectedKeys {
+			if key == "BEADS_CREDENTIALS_FILE" {
+				continue
+			}
+			if got := env[key]; got != "" {
+				t.Errorf("env[%q] = %q, want absent for bd-owned storage binding", key, got)
+			}
+		}
+		if got := env["BEADS_CREDENTIALS_FILE"]; got != credentialsPath {
+			t.Errorf("BEADS_CREDENTIALS_FILE = %q, want %q", got, credentialsPath)
+		}
+	}
+
+	env, err := bdRuntimeEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithError: %v", err)
+	}
+	assertNoProjection(t, env)
+	if got := env["BD_EXPORT_AUTO"]; got != "false" {
+		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
+	}
+
+	processEnv, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("cityRuntimeProcessEnvWithError: %v", err)
+	}
+	assertNoProjection(t, listToMap(processEnv))
+
+	sessionEnv, err := sessionBackendEnvWithError(cityPath, "", nil)
+	if err != nil {
+		t.Fatalf("sessionBackendEnvWithError(city): %v", err)
+	}
+	assertNoProjection(t, sessionEnv)
+
+	rigPath := filepath.Join(cityPath, "rigs", "remote")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(`issue_prefix: remote
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rigEnv, err := sessionBackendEnvWithError(cityPath, rigPath, []config.Rig{{
+		Name:   "remote",
+		Path:   rigPath,
+		Prefix: "remote",
+	}})
+	if err != nil {
+		t.Fatalf("sessionBackendEnvWithError(inherited rig): %v", err)
+	}
+	assertNoProjection(t, rigEnv)
+}
+
+func TestCompleteNonDoltBindingProjectsWorkspacePinnedBdBin(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", binDir+string(os.PathListSeparator)+"$PATH")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg","dolt_mode":"server","dolt_database":"legacy_hq"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := bdRuntimeEnvWithError(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := env["BD_BIN"]; got != bdPath {
+		t.Fatalf("BD_BIN = %q, want workspace-pinned %q", got, bdPath)
+	}
+	processEnv, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := listToMap(processEnv)["BD_BIN"]; got != bdPath {
+		t.Fatalf("process BD_BIN = %q, want workspace-pinned %q", got, bdPath)
+	}
+
+	legacyPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(legacyPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyPath, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"legacy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyEnv := map[string]string{"BD_BIN": "/ambient/bd"}
+	used, err := applyCompleteNonDoltStorageBindingEnv(legacyEnv, legacyPath, legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used || legacyEnv["BD_BIN"] != "/ambient/bd" {
+		t.Fatalf("legacy Dolt binding changed BD_BIN: used=%v env=%v", used, legacyEnv)
+	}
+}
+
+func TestCompleteNonDoltBindingRejectsConfiguredPathWithoutBd(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	cityTOML := fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", t.TempDir())
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := bdRuntimeEnvWithError(cityPath); err == nil {
+		t.Fatal("bdRuntimeEnvWithError error = nil, want configured workspace PATH rejection")
+	}
+}
+
 func TestBdRuntimeEnvForRig_InheritsCityPostgresBackend(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
@@ -5109,12 +5344,17 @@ func TestPGTransportError_NoManagedRecovery(t *testing.T) {
 	})
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "devpw")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: pg
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
 dolt.auto-start: false
 `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432?sslmode=require","storage_database":"beads_pg","dolt_mode":"server","dolt_database":"legacy_hq"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -5140,8 +5380,8 @@ dolt.auto-start: false
 	if err == nil {
 		t.Fatal("runner err = nil, want wrapped transport error")
 	}
-	if !strings.Contains(err.Error(), "postgres at ") {
-		t.Errorf("err = %q, want substring %q", err.Error(), "postgres at ")
+	if !strings.Contains(err.Error(), "postgres storage binding") {
+		t.Errorf("err = %q, want canonical storage binding context", err.Error())
 	}
 	if !strings.Contains(err.Error(), "gc does not manage external PG endpoints (no managed recovery attempted)") {
 		t.Errorf("err = %q, want managed-recovery hint substring", err.Error())

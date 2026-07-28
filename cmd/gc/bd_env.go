@@ -45,6 +45,15 @@ func postgresCredentialResolvedKey(cityPath string, payload pgauth.PostgresCrede
 // Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
 // dolt port (which can change across city restarts).
 func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	completeBinding, err := scopeHasCompleteStorageBinding(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		return func(_, _ string, _ ...string) ([]byte, error) {
+			return nil, err
+		}
+	}
+	if completeBinding {
+		return bdContextCommandRunnerForCity(cityPath)
+	}
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
@@ -52,17 +61,41 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	})
 }
 
-func bdStoreForCity(dir, cityPath string) *beads.BdStore {
+// bdContextCommandRunnerForCity runs bd's config-only context probe without
+// projecting or recovering a presumed backend. The probe exists to discover
+// bd's authoritative workspace binding, so resolving GC's managed Dolt
+// endpoint first would be circular and could autostart a stale local server
+// after an enterprise cutover.
+func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		env := cityRuntimeEnvMapForCity(cityPath)
+		bdBin, err := workspacePinnedBdBinary(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		env["BD_BIN"] = bdBin
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		env["GC_RIG"] = ""
+		env["GC_RIG_ROOT"] = ""
+		env["BEADS_DOLT_AUTO_START"] = "0"
+		env["BD_EXPORT_AUTO"] = "false"
+		setExecProjectedBackendEnvEmpty(env)
+		return beadsExecCommandRunnerWithEnv(env)(dir, name, args...)
+	}
+}
+
+func bdStoreForCity(dir, cityPath string, extraOpts ...beads.BdStoreOption) *beads.BdStore {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		cfg = nil
 	}
 	reapStaleBdExportJSONL(dir)
+	opts := append(bdStoreOptionsForConfig(cfg), extraOpts...)
 	return beads.NewBdStoreWithPrefix(
 		dir,
 		bdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 
@@ -70,6 +103,10 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 // when available, falling back to city-level config. Use this when the rig
 // may have its own Dolt server (e.g., shared from another city).
 func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
+	return bdStoreForRigWithOptions(rigDir, cityPath, cfg, nil, knownPrefix...)
+}
+
+func bdStoreForRigWithOptions(rigDir, cityPath string, cfg *config.City, extraOpts []beads.BdStoreOption, knownPrefix ...string) *beads.BdStore {
 	prefix := issuePrefixForScope(rigDir, cityPath, cfg)
 	if prefix == "" {
 		for _, candidate := range knownPrefix {
@@ -80,11 +117,12 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
+	opts := append(bdStoreOptionsForConfig(cfg), extraOpts...)
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
 		bdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 
@@ -342,6 +380,27 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 	applyResolvedDoltAuthEnv(env, authScopeRoot, strings.TrimSpace(target.User))
 }
 
+func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
+	usesNonDolt, err := scopeHasCompleteStorageBinding(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !usesNonDolt {
+		return usesNonDolt, err
+	}
+	credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
+	if credentialsFile == "" {
+		credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
+	}
+	setExecProjectedBackendEnvEmpty(env)
+	if credentialsFile != "" {
+		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
+	}
+	bdBin, err := workspacePinnedBdBinary(cityPath)
+	if err != nil {
+		return true, err
+	}
+	env["BD_BIN"] = bdBin
+	return true, nil
+}
+
 // applyCanonicalScopeBackendEnv dispatches to the appropriate backend
 // helper based on the scope's MetadataState.Backend.
 //
@@ -357,6 +416,11 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	}
 	if resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false, nil
+	}
+	if usesNonDolt, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, scopeRoot); err != nil {
+		return true, err
+	} else if usesNonDolt {
+		return true, nil
 	}
 	meta, _, metaErr := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
 	if metaErr != nil {
@@ -409,6 +473,11 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 }
 
 func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, error) {
+	if usesNonDolt, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, cityPath); err != nil {
+		return true, err
+	} else if usesNonDolt {
+		return true, nil
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
 	if err != nil {
 		return false, err
@@ -640,7 +709,7 @@ func postgresMetadataForScope(cityPath, scopeRoot string) (contract.MetadataStat
 // Postgres backend. On any read error returns false for best-effort callers
 // that do not need to make recovery decisions.
 func scopeBackendIsPostgres(cityPath, scopeRoot string) bool {
-	_, ok, err := postgresMetadataForScope(cityPath, scopeRoot)
+	ok, err := scopeUsesPostgresBackendForInit(cityPath, scopeRoot)
 	if err != nil {
 		return false
 	}
@@ -1122,12 +1191,15 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		// error gets wrapped with an operator-facing hint and surfaced; gc
 		// does not manage external PG endpoints.
 		if err != nil {
-			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
+			if scopeBackendIsPostgres(cityPath, dir) {
+				if meta, ok, _ := postgresMetadataForScope(cityPath, dir); ok {
+					return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
+				}
+				return out, fmt.Errorf("postgres storage binding: gc does not manage external PG endpoints (no managed recovery attempted): %w", err)
+			}
+			_, _, classifyErr := postgresMetadataForScope(cityPath, dir)
 			if classifyErr != nil {
 				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
-			}
-			if ok {
-				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
 			}
 		}
 		if err == nil && scopeBackendIsPostgres(cityPath, dir) {

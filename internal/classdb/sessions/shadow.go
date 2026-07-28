@@ -335,16 +335,17 @@ func (s *Shadow) DepList(id, direction string) ([]beads.Dep, error) {
 }
 
 // ExportSessionClassBeads gathers every sessions-class bead from a bd
-// store: the session Type+Label union legs plus the wait-typed legs,
-// classify-filtered (a graph gate or a work chore never crosses). Shared
-// by the shadow seed, the shadow diff, and cmd/gc's migration/residue
-// sweep — one collector, one selection rule.
+// store: the session Type+Label union legs plus the durable-wait label leg,
+// classify-filtered (a graph gate or a work chore never crosses). The wait
+// label is shared by current gate-typed waits and historical wait-typed rows;
+// querying the retired "wait" type is not supported by current bd. Shared by
+// the shadow seed, the shadow diff, and cmd/gc's migration/residue sweep — one
+// collector, one selection rule.
 func ExportSessionClassBeads(primary beads.Store, includeClosed bool) (map[string]beads.Bead, error) {
 	legs := []beads.ListQuery{
 		{Type: session.BeadType, IncludeClosed: includeClosed},
 		{Label: session.LabelSession, IncludeClosed: includeClosed},
-		{Type: session.WaitBeadType, IncludeClosed: includeClosed},
-		{Type: session.LegacyWaitBeadType, IncludeClosed: includeClosed},
+		{Label: session.WaitBeadLabel, IncludeClosed: includeClosed},
 	}
 	rows := make(map[string]beads.Bead)
 	for _, leg := range legs {

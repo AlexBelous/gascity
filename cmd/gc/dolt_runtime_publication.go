@@ -71,11 +71,11 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 		if cityUsesDoltliteBeadsBackend(cityPath) {
 			return false, nil
 		}
-		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		usesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
 		if err != nil {
 			return false, err
 		}
-		if usesPostgres {
+		if usesNonDolt {
 			return false, nil
 		}
 		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
@@ -216,11 +216,11 @@ func clearManagedDoltRuntimeState(cityPath string) error {
 
 func clearManagedDoltRuntimeStateUnlessPostgres(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) {
-		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		usesNonDolt, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
 		if err != nil {
 			return err
 		}
-		if usesPostgres {
+		if usesNonDolt {
 			return nil
 		}
 	}

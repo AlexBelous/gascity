@@ -22,12 +22,13 @@ func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightCheck
 
 func preflightBDContextReader(cityPath string) func(scope string) (contract.PreflightBDContext, error) {
 	return func(scope string) (contract.PreflightBDContext, error) {
-		out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
+		out, err := bdContextCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
 		if err != nil {
 			return contract.PreflightBDContext{}, err
 		}
 		var raw struct {
 			Backend       string `json:"backend"`
+			Location      string `json:"location"`
 			DoltMode      string `json:"dolt_mode"`
 			BDVersion     string `json:"bd_version"`
 			SchemaVersion int    `json:"schema_version"`
@@ -37,6 +38,7 @@ func preflightBDContextReader(cityPath string) func(scope string) (contract.Pref
 		}
 		return contract.PreflightBDContext{
 			Backend:       raw.Backend,
+			Location:      raw.Location,
 			DoltMode:      raw.DoltMode,
 			BDVersion:     raw.BDVersion,
 			SchemaVersion: raw.SchemaVersion,

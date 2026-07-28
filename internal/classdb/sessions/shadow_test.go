@@ -1,6 +1,7 @@
 package sessionsdb
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -8,6 +9,17 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+type rejectingLegacyWaitTypeStore struct {
+	beads.Store
+}
+
+func (s rejectingLegacyWaitTypeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == session.LegacyWaitBeadType {
+		return nil, errors.New(`invalid issue type "wait"`)
+	}
+	return s.Store.List(query)
+}
 
 func newShadowPair(t *testing.T) (beads.Store, *Store) {
 	t.Helper()
@@ -21,6 +33,34 @@ func sessionBead(title string) beads.Bead {
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession, "agent:" + title},
 		Metadata: map[string]string{"state": "awake", "session_name": "gc-" + title},
+	}
+}
+
+func TestExportSessionClassBeadsPreservesLegacyWaitWhenTypeFilterIsRejected(t *testing.T) {
+	primary := beads.NewMemStore()
+	legacy, err := primary.Create(beads.Bead{
+		Title:  "legacy wait",
+		Type:   session.LegacyWaitBeadType,
+		Labels: []string{session.WaitBeadLabel, "session:gc-legacy"},
+		Metadata: map[string]string{
+			"session_id": "gc-legacy",
+			"state":      "pending",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := ExportSessionClassBeads(rejectingLegacyWaitTypeStore{Store: primary}, true)
+	if err != nil {
+		t.Fatalf("export session class beads: %v", err)
+	}
+	got, ok := rows[legacy.ID]
+	if !ok {
+		t.Fatalf("legacy wait %q missing from export", legacy.ID)
+	}
+	if got.Type != session.LegacyWaitBeadType {
+		t.Fatalf("legacy wait type = %q, want %q", got.Type, session.LegacyWaitBeadType)
 	}
 }
 

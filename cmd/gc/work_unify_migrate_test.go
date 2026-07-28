@@ -422,6 +422,53 @@ func TestEnsureWorkUnifiedDarkOnScopedCity(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkUnifiedCompleteStorageBindingIsDark(t *testing.T) {
+	city := t.TempDir()
+	metadataPath := scopeMetadataJSONPath(city)
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"backend":"postgres","storage_endpoint":"postgresql://remote.example","storage_database":"work","database":"dolt","dolt_database":"legacy","dolt_host":"127.0.0.1","unknown":{"keep":true}}`)
+	if err := os.WriteFile(metadataPath, metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origIdentity := workUnifyResolveIdentity
+	origOpen := openWorkUnifyScopeStore
+	t.Cleanup(func() {
+		workUnifyResolveIdentity = origIdentity
+		openWorkUnifyScopeStore = origOpen
+	})
+	identityCalled := false
+	openCalled := false
+	workUnifyResolveIdentity = func(string, string) (workUnifyScope, error) {
+		identityCalled = true
+		return workUnifyScope{}, fmt.Errorf("identity seam must remain dark")
+	}
+	openWorkUnifyScopeStore = func(string, string) (beads.Store, func(), error) {
+		openCalled = true
+		return nil, nil, fmt.Errorf("store seam must remain dark")
+	}
+
+	if err := ensureWorkUnified(city, unifiedCityConfig(), &strings.Builder{}); err != nil {
+		t.Fatalf("complete storage binding must be dark, got %v", err)
+	}
+	if identityCalled || openCalled {
+		t.Fatalf("migration seams called: identity=%v open=%v", identityCalled, openCalled)
+	}
+	after, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("metadata changed:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 // TestEnsureWorkUnifiedMarkerPresentClearsQuarantine pins F1/F3/F4: a
 // marker-present boot does not re-run the migration, but it DOES convergently
 // sweep any lingering gc.topology_migrating label off the city store (the
@@ -552,6 +599,11 @@ func TestEnsureWorkUnifiedHappyPath(t *testing.T) {
 	// must record the rig's residue source, and copied rows must be quarantine-
 	// cleared (label removed) after re-point.
 	city := t.TempDir()
+	// Unified workspace redirects target the city's real bd workspace. Model a
+	// booted city here so the happy path exercises that final binding step.
+	if err := os.Mkdir(filepath.Join(city, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeAllClassMigratedMarkers(t, city)
 	cityStore := newFakeWorkStore()
 	rigStore := newFakeWorkStore()
@@ -601,6 +653,91 @@ func TestEnsureWorkUnifiedHappyPath(t *testing.T) {
 	}
 	if m.Counts.Imported != 2 {
 		t.Fatalf("expected 2 imported recorded, got %d", m.Counts.Imported)
+	}
+}
+
+type leaseSnapshotRunner struct {
+	export       string
+	show         string
+	capabilities []string
+}
+
+func (r *leaseSnapshotRunner) run(_ string, name string, args ...string) ([]byte, error) {
+	if name != "bd" || len(args) == 0 {
+		return nil, fmt.Errorf("unexpected command %s %v", name, args)
+	}
+	switch args[0] {
+	case "version":
+		payload, err := json.Marshal(map[string]any{"version": "test", "capabilities": r.capabilities})
+		if err != nil {
+			return nil, err
+		}
+		return payload, nil
+	case "export":
+		return []byte(r.export), nil
+	case "show":
+		return []byte(r.show), nil
+	}
+	return nil, fmt.Errorf("unexpected bd command %v", args)
+}
+
+type leaseImportRecord struct{ stdin string }
+
+// The active unification leg is BdStore-to-BdStore raw JSONL. Lease columns
+// belong to the work bead row (not GC metadata), so this pins that copyRigWorkBeads
+// keeps them in the destination import payload. NativeDoltStore is deliberately
+// absent: ensureWorkUnified's BdStore provider gate is what prevents that
+// lossy, decoded path from being selected for this migration.
+func TestCopyRigWorkBeadsBdStorePreservesLeaseColumns(t *testing.T) {
+	leaseJSON := `{"_type":"issue","id":"al-lease","title":"claimed work","status":"in_progress","issue_type":"task","assignee":"worker-1","lease_expires_at":"2026-07-26T12:00:00Z","heartbeat_at":"2026-07-26T11:00:00Z","lease_granted_node":"node-a","created_at":"2026-07-26T10:00:00Z","updated_at":"2026-07-26T11:00:00Z"}`
+	sourceRunner := &leaseSnapshotRunner{export: leaseJSON + "\n"}
+	source := beads.NewBdStore("/rig", sourceRunner.run)
+
+	raw, err := source.ExportBeadSnapshots(context.Background(), beads.ExportOptions{IncludeEphemeral: true})
+	if err != nil || len(raw) != 1 {
+		t.Fatalf("source export = %v, %v", raw, err)
+	}
+	stamped, err := raw[0].StampMetadata(workTopologySourceMetadataKey, "city-source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamped, err = stamped.StampLabel(workTopologyMigratingLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	show, err := json.Marshal([]beads.Snapshot{stamped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destRunner := &leaseSnapshotRunner{
+		show:         string(show),
+		capabilities: []string{"workspace-prefix-mint", "workspace-binding"},
+	}
+	dest := beads.NewBdStore("/city", destRunner.run)
+	var imports []leaseImportRecord
+	dest.SetBDImportRunner(func(_ string, _ []string, stdin []byte, _ ...string) ([]byte, error) {
+		imports = append(imports, leaseImportRecord{stdin: string(stdin)})
+		return []byte(`{"created":1,"ids":["al-lease"]}`), nil
+	})
+
+	if _, err := copyRigWorkBeads(dest, source, "city-source", workUnifyScope{label: "alpha"}, io.Discard); err != nil {
+		t.Fatalf("copyRigWorkBeads: %v", err)
+	}
+	if len(imports) != 2 {
+		t.Fatalf("imports = %d, want guarded import plus stale-tie re-import", len(imports))
+	}
+	for _, imported := range imports {
+		for _, field := range []string{"lease_expires_at", "heartbeat_at", "lease_granted_node", "node-a"} {
+			if !strings.Contains(imported.stdin, field) {
+				t.Errorf("BdStore import payload dropped lease field %q:\n%s", field, imported.stdin)
+			}
+		}
+	}
+}
+
+func TestWorkUnifyProviderGateRejectsNativeDoltStore(t *testing.T) {
+	if err := workUnifyRequireBdProvider(&beads.NativeDoltStore{}); err == nil {
+		t.Fatal("NativeDoltStore passed the unification provider gate; raw BdStore snapshots are required for lease fidelity")
 	}
 }
 

@@ -44,6 +44,7 @@ const bdTopologyCommandName = "gc bd topology"
 type bdTopologyFlags struct {
 	json   bool
 	dryRun bool
+	help   bool
 	infra  string
 	scope  string
 	target string
@@ -66,15 +67,24 @@ func parseBdTopologyFlags(args []string) (bdTopologyFlags, error) {
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&f.json, "json", false, "emit the topology as a typed JSON document")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "validate the desired topology and print the boot migration plan without writing")
+	fs.BoolVarP(&f.help, "help", "h", false, "show topology help")
 	fs.StringVar(&f.infra, "infra", "", "set [beads] infra (local)")
 	fs.StringVar(&f.scope, "scope", "", "set [beads.work] scope (scoped|unified)")
-	fs.StringVar(&f.target, "target", "", "set [beads.work] target (managed|dolt://host:port/database)")
+	fs.StringVar(&f.target, "target", "", "retired compatibility flag")
+	// Keep parsing the retired flag only to give established operators an
+	// actionable migration error. It is deliberately absent from help: GC owns
+	// the local infra and scoped/unified work axes, while bd-enterprise owns a
+	// physical backend cutover.
+	_ = fs.MarkHidden("target")
 	if err := fs.Parse(args); err != nil {
 		return f, err
 	}
 	f.infraSet = fs.Changed("infra")
 	f.scopeSet = fs.Changed("scope")
 	f.targetSet = fs.Changed("target")
+	if f.targetSet {
+		return f, errors.New("--target is retired: gc no longer owns remote work migration; use bd-enterprise migrate storage for a physical backend cutover")
+	}
 	rest := fs.Args()
 	if len(rest) > 1 {
 		return f, fmt.Errorf("unexpected arguments after %q: %v", rest[0], rest[1:])
@@ -92,6 +102,10 @@ func doBdTopology(cityName string, args []string, stdout, stderr io.Writer) int 
 	f, err := parseBdTopologyFlags(args)
 	if err != nil {
 		return bdTopologyFail(f.json, stdout, stderr, "invalid_flags", err.Error())
+	}
+	if f.help {
+		_, _ = io.WriteString(stdout, bdTopologyUsage)
+		return 0
 	}
 	if f.positional != "" && f.positional != "show" {
 		return bdTopologyFail(f.json, stdout, stderr, "unknown_subcommand",
@@ -121,6 +135,19 @@ func doBdTopology(cityName string, args []string, stdout, stderr io.Writer) int 
 	}
 }
 
+const bdTopologyUsage = `Usage: gc bd topology [show] [flags]
+
+Configure the local Gas City topology. Physical backend migration is owned by
+bd-enterprise, not gc.
+
+Flags:
+  --infra local          set local SQLite infra stores
+  --scope scoped|unified keep rig work separate or unify it in the city workspace
+  --dry-run              validate and preview the next normal-start migration
+  --json                 emit JSON
+  -h, --help             show topology help
+`
+
 // bdTopologyFail emits a typed error (JSON or plain) and returns exit code 1.
 func bdTopologyFail(jsonOut bool, stdout, stderr io.Writer, code, msg string) int {
 	if jsonOut {
@@ -144,8 +171,11 @@ func bdTopologyDesired(cfg *config.City, f bdTopologyFlags) *config.City {
 	if f.scopeSet {
 		desired.Beads.Work.Scope = strings.TrimSpace(f.scope)
 	}
-	if f.targetSet {
-		desired.Beads.Work.Target = strings.TrimSpace(f.target)
+	// The former remote target is a retired compatibility input. Any supported
+	// topology edit converges an old city onto the local city workspace instead
+	// of perpetuating a third topology axis.
+	if f.infraSet || f.scopeSet {
+		desired.Beads.Work.Target = ""
 	}
 	return &desired
 }
@@ -174,13 +204,11 @@ type bdTopologyReport struct {
 	SchemaVersion string                 `json:"schema_version"`
 	OK            bool                   `json:"ok"`
 	City          string                 `json:"city"`
-	Infra         string                 `json:"infra"`  // effective: bd | local
-	Scope         string                 `json:"scope"`  // scoped | unified
-	Target        string                 `json:"target"` // managed | dolt://...
+	Infra         string                 `json:"infra"` // effective: bd | local
+	Scope         string                 `json:"scope"` // scoped | unified
 	InfraLocal    bool                   `json:"infra_local"`
 	Classes       []bdTopologyClassState `json:"classes"`
 	Unified       bdTopologyMarkerState  `json:"unified"`
-	Remote        bdTopologyRemoteState  `json:"remote"`
 	Prefixes      []bdTopologyPrefix     `json:"prefixes"`
 }
 
@@ -200,13 +228,6 @@ type bdTopologyMarkerState struct {
 	ResidueUndrained int  `json:"residue_undrained"`
 }
 
-type bdTopologyRemoteState struct {
-	MarkerPresent    bool   `json:"marker_present"`
-	Complete         bool   `json:"complete"`
-	Target           string `json:"target,omitempty"`
-	ResidueUndrained int    `json:"residue_undrained"`
-}
-
 type bdTopologyPrefix struct {
 	Scope  string `json:"scope"`
 	Prefix string `json:"prefix"`
@@ -222,7 +243,6 @@ func bdTopologyBuildReport(cityPath string, cfg *config.City) (bdTopologyReport,
 		City:          cityPath,
 		Infra:         effectiveInfraLabel(cfg.Beads),
 		Scope:         cfg.Beads.Work.EffectiveScope(),
-		Target:        cfg.Beads.Work.EffectiveTarget(),
 		InfraLocal:    cfg.Beads.EffectiveInfraLocal(),
 	}
 	for _, st := range classMigrationStates(cityPath, cfg) {
@@ -241,15 +261,6 @@ func bdTopologyBuildReport(cityPath string, cfg *config.City) (bdTopologyReport,
 		return bdTopologyReport{}, fmt.Errorf("reading work.unified marker: %w", err)
 	} else if ok {
 		rep.Unified = bdTopologyMarkerState{MarkerPresent: true, ResidueUndrained: m.undrainedResidueCount()}
-	}
-	if m, ok, err := readWorkTopologyMarker(workRemoteMarkerPath(cityPath)); err != nil {
-		return bdTopologyReport{}, fmt.Errorf("reading work.remote marker: %w", err)
-	} else if ok {
-		rs := bdTopologyRemoteState{MarkerPresent: true, Complete: m.isComplete(), ResidueUndrained: m.undrainedResidueCount()}
-		if m.Target != nil {
-			rs.Target = remoteMarkerTargetURL(m.Target)
-		}
-		rep.Remote = rs
 	}
 	rep.Prefixes = bdTopologyPrefixInventory(cityPath, cfg)
 	return rep, nil
@@ -271,7 +282,6 @@ func renderBdTopologyReport(stdout io.Writer, rep bdTopologyReport) {
 	fmt.Fprintf(stdout, "work-bead topology for %s\n", rep.City) //nolint:errcheck
 	fmt.Fprintf(stdout, "  infra:  %s\n", rep.Infra)             //nolint:errcheck
 	fmt.Fprintf(stdout, "  scope:  %s\n", rep.Scope)             //nolint:errcheck
-	fmt.Fprintf(stdout, "  target: %s\n", rep.Target)            //nolint:errcheck
 	fmt.Fprintln(stdout, "  infra classes:")                     //nolint:errcheck
 	for _, c := range rep.Classes {
 		fmt.Fprintf(stdout, "    %-9s backend=%-6s marker=%-7s routing=%s", c.Class, c.Backend, c.Marker, c.Routing) //nolint:errcheck
@@ -283,15 +293,6 @@ func renderBdTopologyReport(stdout io.Writer, rep bdTopologyReport) {
 	fmt.Fprintf(stdout, "  unified marker: %s", presentLabel(rep.Unified.MarkerPresent)) //nolint:errcheck
 	if rep.Unified.MarkerPresent {
 		fmt.Fprintf(stdout, " (residue undrained=%d)", rep.Unified.ResidueUndrained) //nolint:errcheck
-	}
-	fmt.Fprintln(stdout)                                                                //nolint:errcheck
-	fmt.Fprintf(stdout, "  remote marker:  %s", presentLabel(rep.Remote.MarkerPresent)) //nolint:errcheck
-	if rep.Remote.MarkerPresent {
-		phase := "complete"
-		if !rep.Remote.Complete {
-			phase = "started"
-		}
-		fmt.Fprintf(stdout, " (%s target=%s residue undrained=%d)", phase, rep.Remote.Target, rep.Remote.ResidueUndrained) //nolint:errcheck
 	}
 	fmt.Fprintln(stdout)                //nolint:errcheck
 	fmt.Fprintln(stdout, "  prefixes:") //nolint:errcheck
@@ -313,16 +314,14 @@ type bdTopologySetResult struct {
 }
 
 type bdTopologyAxes struct {
-	Infra  string `json:"infra"`
-	Scope  string `json:"scope"`
-	Target string `json:"target"`
+	Infra string `json:"infra"`
+	Scope string `json:"scope"`
 }
 
 func desiredAxes(desired *config.City) bdTopologyAxes {
 	return bdTopologyAxes{
-		Infra:  effectiveInfraLabel(desired.Beads),
-		Scope:  desired.Beads.Work.EffectiveScope(),
-		Target: desired.Beads.Work.EffectiveTarget(),
+		Infra: effectiveInfraLabel(desired.Beads),
+		Scope: desired.Beads.Work.EffectiveScope(),
 	}
 }
 
@@ -347,8 +346,8 @@ func bdTopologySet(cityPath string, cfg *config.City, f bdTopologyFlags, stdout,
 	if f.scopeSet {
 		rawCfg.Beads.Work.Scope = strings.TrimSpace(f.scope)
 	}
-	if f.targetSet {
-		rawCfg.Beads.Work.Target = strings.TrimSpace(f.target)
+	if f.infraSet || f.scopeSet {
+		rawCfg.Beads.Work.Target = ""
 	}
 
 	// Snapshot the exact bytes we are about to overwrite so a post-write reload /
@@ -397,7 +396,7 @@ func bdTopologySet(cityPath string, cfg *config.City, f bdTopologyFlags, stdout,
 	if f.json {
 		return writeCLIJSONLineOrExit(stdout, stderr, bdTopologyCommandName, res)
 	}
-	fmt.Fprintf(stdout, "topology updated: infra=%s scope=%s target=%s\n", res.Desired.Infra, res.Desired.Scope, res.Desired.Target) //nolint:errcheck
+	fmt.Fprintf(stdout, "topology updated: infra=%s scope=%s\n", res.Desired.Infra, res.Desired.Scope) //nolint:errcheck
 	if summary != "" {
 		fmt.Fprintf(stdout, "  next boot will: %s\n", summary) //nolint:errcheck
 	} else {
@@ -416,7 +415,6 @@ type bdTopologyPlan struct {
 	Desired       bdTopologyAxes        `json:"desired"`
 	InfraRung     bdTopologyInfraPlan   `json:"infra_rung"`
 	UnifyRung     bdTopologyUnifyPlan   `json:"unify_rung"`
-	RemoteRung    bdTopologyRemotePlan  `json:"remote_rung"`
 	Errors        []bdTopologyPlanError `json:"errors,omitempty"`
 }
 
@@ -462,16 +460,6 @@ type bdTopologyRigPlan struct {
 	WorkBeads int    `json:"work_beads"`
 	Countable bool   `json:"countable"`
 	Note      string `json:"note,omitempty"`
-}
-
-type bdTopologyRemotePlan struct {
-	Status          string   `json:"status"` // already-done | would-run | n/a
-	Endpoint        string   `json:"endpoint,omitempty"`
-	AllowedPrefixes []string `json:"allowed_prefixes,omitempty"`
-	WorkBeadCopy    int      `json:"work_bead_copy"`
-	Countable       bool     `json:"countable"`
-	CredentialNote  string   `json:"credential_note,omitempty"`
-	Note            string   `json:"note,omitempty"`
 }
 
 var (
@@ -542,7 +530,6 @@ func bdTopologyDryRun(cityPath string, cfg *config.City, f bdTopologyFlags, stdo
 		Desired:       desiredAxes(desired),
 		InfraRung:     bdTopologyPlanInfraRung(cityPath, desired),
 		UnifyRung:     bdTopologyPlanUnifyRung(cityPath, desired),
-		RemoteRung:    bdTopologyPlanRemoteRung(cityPath, desired),
 	}
 	plan.Errors = bdTopologyPlanErrors(plan)
 	plan.OK = len(plan.Errors) == 0
@@ -597,14 +584,6 @@ func bdTopologyPlanErrors(plan bdTopologyPlan) []bdTopologyPlanError {
 				Message: rig.Note,
 			})
 		}
-	}
-	if plan.RemoteRung.Status == "would-run" && !plan.RemoteRung.Countable {
-		problems = append(problems, bdTopologyPlanError{
-			Code:    "work_census_failed",
-			Rung:    "remote",
-			Source:  "hq",
-			Message: plan.RemoteRung.Note,
-		})
 	}
 	return problems
 }
@@ -753,31 +732,6 @@ func bdTopologyPlanUnifyRung(cityPath string, desired *config.City) bdTopologyUn
 	return plan
 }
 
-// bdTopologyPlanRemoteRung computes the remote rung READ-ONLY: the target
-// endpoint, the allowed_prefixes to register, the work-bead copy count (ClassWork
-// in the local unified city DB), and the credential/reachability note.
-func bdTopologyPlanRemoteRung(cityPath string, desired *config.City) bdTopologyRemotePlan {
-	plan := bdTopologyRemotePlan{Status: "n/a"}
-	if !desired.Beads.Work.IsRemote() {
-		return plan
-	}
-	plan.Endpoint = desired.Beads.Work.EffectiveTarget()
-	plan.AllowedPrefixes = cityScopePrefixes(desired)
-	plan.CredentialNote = "remote copy authenticates via the existing bd credential path (BEADS_DOLT_CREDENTIAL_COMMAND / GC_DOLT_PASSWORD); reachability is verified at boot before any copy"
-
-	if m, ok, err := readWorkTopologyMarker(workRemoteMarkerPath(cityPath)); err == nil && ok && m.isComplete() {
-		plan.Status = "already-done"
-		return plan
-	}
-	plan.Status = "would-run"
-	if n, ok, note := bdTopologyCountWorkBeads(cityPath, cityPath); ok {
-		plan.WorkBeadCopy, plan.Countable = n, true
-	} else {
-		plan.Note = note
-	}
-	return plan
-}
-
 // bdTopologyCountWorkBeads opens a scope's work store READ-ONLY and counts its
 // ClassWork beads (durable + ephemeral). Best-effort: an unopenable store or a
 // failed List returns ok=false with an explanatory note; the caller retains the
@@ -802,9 +756,9 @@ func bdTopologyCountWorkBeads(cityPath, scopeRoot string) (int, bool, string) {
 }
 
 func renderBdTopologyPlan(stdout io.Writer, plan bdTopologyPlan) {
-	fmt.Fprintf(stdout, "work-topology migration plan for %s\n", plan.City)                                                      //nolint:errcheck
-	fmt.Fprintf(stdout, "  desired: infra=%s scope=%s target=%s\n", plan.Desired.Infra, plan.Desired.Scope, plan.Desired.Target) //nolint:errcheck
-	fmt.Fprintf(stdout, "  infra rung [%s]:\n", plan.InfraRung.Status)                                                           //nolint:errcheck
+	fmt.Fprintf(stdout, "work-topology migration plan for %s\n", plan.City)                       //nolint:errcheck
+	fmt.Fprintf(stdout, "  desired: infra=%s scope=%s\n", plan.Desired.Infra, plan.Desired.Scope) //nolint:errcheck
+	fmt.Fprintf(stdout, "  infra rung [%s]:\n", plan.InfraRung.Status)                            //nolint:errcheck
 	for _, c := range plan.InfraRung.Classes {
 		fmt.Fprintf(stdout, "    %-9s %s\n", c.Class, c.Action) //nolint:errcheck
 	}
@@ -842,23 +796,6 @@ func renderBdTopologyPlan(stdout io.Writer, plan bdTopologyPlan) {
 	}
 	if plan.UnifyRung.Note != "" {
 		fmt.Fprintf(stdout, "    note: %s\n", plan.UnifyRung.Note) //nolint:errcheck
-	}
-	fmt.Fprintf(stdout, "  remote rung [%s]:\n", plan.RemoteRung.Status) //nolint:errcheck
-	if plan.RemoteRung.Endpoint != "" {
-		fmt.Fprintf(stdout, "    endpoint: %s\n", plan.RemoteRung.Endpoint) //nolint:errcheck
-	}
-	if len(plan.RemoteRung.AllowedPrefixes) > 0 {
-		fmt.Fprintf(stdout, "    allowed_prefixes to register: %s\n", strings.Join(plan.RemoteRung.AllowedPrefixes, ", ")) //nolint:errcheck
-	}
-	if plan.RemoteRung.Status == "would-run" {
-		if plan.RemoteRung.Countable {
-			fmt.Fprintf(stdout, "    work-bead copy count: %d\n", plan.RemoteRung.WorkBeadCopy) //nolint:errcheck
-		} else if plan.RemoteRung.Note != "" {
-			fmt.Fprintf(stdout, "    work-bead copy count: (%s)\n", plan.RemoteRung.Note) //nolint:errcheck
-		}
-	}
-	if plan.RemoteRung.CredentialNote != "" {
-		fmt.Fprintf(stdout, "    note: %s\n", plan.RemoteRung.CredentialNote) //nolint:errcheck
 	}
 }
 
@@ -915,25 +852,7 @@ func bdTopologyBootSummary(cityPath string, desired *config.City) string {
 			parts = append(parts, "unify rig work beads into the city database")
 		}
 	}
-	// Remote rung.
-	if desired.Beads.Work.IsRemote() {
-		done := false
-		if m, ok, err := readWorkTopologyMarker(workRemoteMarkerPath(cityPath)); err == nil && ok && m.isComplete() {
-			done = true
-		}
-		if !done {
-			parts = append(parts, fmt.Sprintf("relocate the unified work DB to %s", desired.Beads.Work.EffectiveTarget()))
-		}
-	}
 	return strings.Join(parts, "; ")
-}
-
-// remoteMarkerTargetURL renders a recorded remote marker target as a dolt:// URL.
-func remoteMarkerTargetURL(t *workTopologyTarget) string {
-	if t == nil {
-		return ""
-	}
-	return fmt.Sprintf("dolt://%s:%s/%s", t.Host, t.Port, t.Database)
 }
 
 // beadsIsNotFound reports whether err is beads.ErrNotFound.

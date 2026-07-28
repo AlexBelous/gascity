@@ -13,6 +13,7 @@ import (
 // PreflightBDContext is the bd-reported backend state for a beads scope.
 type PreflightBDContext struct {
 	Backend       string
+	Location      string
 	DoltMode      string
 	BDVersion     string
 	SchemaVersion int
@@ -61,25 +62,12 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		c.checkContractShape(metadata),
 	}
 	verdict := preflightVerdictForChecks(checks)
-	// A DEGRADED verdict caused solely by an unreachable bd context (e.g. a
-	// non-git city root where `bd context` cannot resolve a repo root) is
-	// upgraded to ELIGIBLE when gc has INDEPENDENTLY verified the dolt backend
-	// — the identity_match check connects to the dolt server and matches
-	// project_id. That direct verification is stronger evidence than bd
-	// context's cross-check, so an inability to also cross-verify via bd's
-	// cwd-sensitive context command must not force the per-call bd fallback.
-	eligibleViaIdentityFallback := false
-	if verdict == PreflightVerdictDegraded && bdCtxErr != nil && degradedOnlyByUnreachableBDContext(checks) {
-		verdict = PreflightVerdictEligible
-		eligibleViaIdentityFallback = true
-	}
 	result := PreflightResult{
-		Verdict:                           verdict,
-		Scope:                             scope,
-		Checks:                            checks,
-		RepairSteps:                       preflightRepairSteps(checks),
-		NativeStoreEligible:               verdict == PreflightVerdictEligible,
-		NativeEligibleViaIdentityFallback: eligibleViaIdentityFallback,
+		Verdict:             verdict,
+		Scope:               scope,
+		Checks:              checks,
+		RepairSteps:         preflightRepairSteps(checks),
+		NativeStoreEligible: verdict == PreflightVerdictEligible,
 	}
 	if verdict != PreflightVerdictEligible {
 		result.Fallback = PreflightFallbackBdStore
@@ -163,6 +151,7 @@ func (c PreflightChecker) readBDContext(scope string) (PreflightBDContext, error
 	}
 	ctx, err := c.BDContext(scope)
 	ctx.Backend = strings.TrimSpace(ctx.Backend)
+	ctx.Location = strings.TrimSpace(ctx.Location)
 	ctx.DoltMode = strings.TrimSpace(ctx.DoltMode)
 	ctx.BDVersion = strings.TrimSpace(ctx.BDVersion)
 	return ctx, err
@@ -191,6 +180,7 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	details := PreflightDetails{
 		MetadataBackend:   metadata.Backend,
 		BDContextBackend:  ctx.Backend,
+		BDContextLocation: ctx.Location,
 		BDContextDoltMode: ctx.DoltMode,
 	}
 	if err != nil {
@@ -201,6 +191,10 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	}
 	if metadata.Backend != "dolt" || ctx.Backend != "dolt" {
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "Dolt mode check is not required for non-dolt backend", details)
+	}
+	if ctx.Location != "local" {
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail,
+			fmt.Sprintf("bd context reports location=%q; native store requires a compatible local Dolt workspace — falling back to per-call bd", ctx.Location), details)
 	}
 	switch ctx.DoltMode {
 	case "server":
@@ -404,43 +398,6 @@ func preflightVerdictForChecks(checks []PreflightCheckResult) PreflightVerdict {
 		return PreflightVerdictDegraded
 	}
 	return PreflightVerdictEligible
-}
-
-// degradedOnlyByUnreachableBDContext reports whether a DEGRADED verdict is safe
-// to upgrade to ELIGIBLE. It is true only when the identity_match check PASSED
-// (gc independently connected to the dolt server and matched project_id) and
-// every non-passing check is a WARN from a bd-context-dependent check — i.e.
-// the sole cause of the degrade is that `bd context` could not run. Any FAIL,
-// or any WARN from a non-bd-context check, makes it false so the per-call bd
-// fallback is preserved.
-func degradedOnlyByUnreachableBDContext(checks []PreflightCheckResult) bool {
-	identityVerified := false
-	for _, check := range checks {
-		switch check.State {
-		case PreflightCheckFail:
-			return false
-		case PreflightCheckWarn:
-			if !isBDContextDependentCheck(check.ID) {
-				return false
-			}
-		}
-		if check.ID == PreflightCheckIdentityMatch && check.State == PreflightCheckPass {
-			identityVerified = true
-		}
-	}
-	return identityVerified
-}
-
-// isBDContextDependentCheck reports whether a check derives its verdict from
-// `bd context` output and therefore WARNs (rather than FAILs) when bd context
-// is unreachable.
-func isBDContextDependentCheck(id PreflightCheckID) bool {
-	switch id {
-	case PreflightCheckBDContextAgreement, PreflightCheckDoltModeSafe, PreflightCheckVersionCompat:
-		return true
-	default:
-		return false
-	}
 }
 
 func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {

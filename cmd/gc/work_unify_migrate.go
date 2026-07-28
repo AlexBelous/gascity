@@ -76,11 +76,16 @@ var workUnifyRequireBdProvider = func(cityStore beads.Store) error {
 	return fmt.Errorf("work unify blocked: scope=\"unified\" currently requires the bd work-store provider; keep scope=\"scoped\" or switch the work provider")
 }
 
-// workUnifyProbeCapability answers the bd prefix-override capability gate for the
-// city work store (the provider gate has already guaranteed a BdStore).
+// workUnifyProbeCapability answers the bd redirect and prefix-mint capability
+// gates for the city work store (the provider gate has already guaranteed a
+// BdStore).
 var workUnifyProbeCapability = func(cityStore beads.Store) (bool, error) {
 	if bd, ok := cityStore.(*beads.BdStore); ok {
-		return bd.HasWorkspacePrefixMintCapability()
+		mint, err := bd.HasWorkspacePrefixMintCapability()
+		if err != nil || !mint {
+			return mint, err
+		}
+		return bd.HasWorkspaceBindingCapability()
 	}
 	return false, fmt.Errorf("capability probe requires the bd provider")
 }
@@ -145,6 +150,16 @@ func ensureWorkUnified(cityPath string, cfg *config.City, stderr io.Writer) erro
 	if cfg == nil || !cfg.Beads.Work.IsUnified() {
 		return nil // dark: scoped/managed city
 	}
+	complete, err := scopeHasCompleteStorageBinding(
+		fsys.OSFS{},
+		scopeMetadataJSONPath(cityPath),
+	)
+	if err != nil {
+		return fmt.Errorf("work unify: checking city storage binding: %w", err)
+	}
+	if complete {
+		return nil
+	}
 	// A present marker means the canonicalizer (run in startBeadsLifecycle before
 	// this) has already re-pointed every scope and the residue-convergence pass
 	// drains any late rig — the per-rig one-shot migration has nothing to do. But
@@ -155,6 +170,9 @@ func ensureWorkUnified(cityPath string, cfg *config.City, stderr io.Writer) erro
 	if present, err := workMarkerPresent(workUnifiedMarkerPath(cityPath)); err != nil {
 		return err
 	} else if present {
+		if err := bindUnifiedWorkspaces(cityPath, cfg); err != nil {
+			return fmt.Errorf("work unify: binding unified workspaces: %w", err)
+		}
 		return sweepQuarantineOnMarkerPresentBoot(cityPath, stderr)
 	}
 
@@ -193,7 +211,7 @@ func ensureWorkUnified(cityPath string, cfg *config.City, stderr io.Writer) erro
 	if capable, err := workUnifyProbeCapability(cityStore); err != nil {
 		return fmt.Errorf("work unify: bd capability probe: %w", err)
 	} else if !capable {
-		return fmt.Errorf("work unify: the city bd binary lacks the %q capability required to mint per-rig prefixes into one database; install the forked bd that advertises it (bd version --json capabilities)", "workspace-prefix-mint")
+		return fmt.Errorf("work unify: the city bd binary lacks the %q and/or %q capabilities required to bind rig workspaces to the city database and mint per-rig prefixes; install the forked bd that advertises them (bd version --json capabilities)", "workspace-binding", "workspace-prefix-mint")
 	}
 	// Counter-mode refuse gate (F5/F10/F15): v1 has no counter-advance guard, so a
 	// counter-mode (sequential-id) work database is refused rather than risk a
@@ -262,6 +280,9 @@ func ensureWorkUnified(cityPath string, cfg *config.City, stderr io.Writer) erro
 	// Re-point (E.2): drive the now-marker-aware canonicalizer over all scopes.
 	if err := workUnifyRepointScopes(cityPath, cfg, stderr); err != nil {
 		return fmt.Errorf("work unify: re-pointing scopes: %w", err)
+	}
+	if err := bindUnifiedWorkspaces(cityPath, cfg); err != nil {
+		return fmt.Errorf("work unify: binding unified workspaces: %w", err)
 	}
 
 	// Straggler pass (E.4) + created_at conflict guard (E.5): converge copy-window

@@ -361,17 +361,8 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if err := ensureWorkUnified(p.CityPath, p.Cfg, p.Stderr); err != nil {
 		return bootBlockingRuntime(p, err)
 	}
-	// Work-remote migration (deliverable A): AFTER unify, relocate the unified city
-	// work DB to the configured remote org endpoint when the city is remote and the
-	// remote marker is absent. Same boot-blocking discipline as unify — a failed or
-	// aborted remote migration refuses the controller start.
-	if err := ensureWorkRemote(p.CityPath, p.Cfg, p.Stderr); err != nil {
-		return bootBlockingRuntime(p, err)
-	}
-	// The ctx-bound residue-convergence loop (re-armed by residue-source appends,
-	// retried on the order-rescan cadence) is started from cr.run so the runtime
-	// context stops it — see run(). It now drains both the unified and remote
-	// markers' sources and self-heals the org DB allowed_prefixes.
+	// Unified work remains in the city workspace. Remote storage migration is
+	// owned by bd-enterprise and is intentionally not started by the controller.
 
 	// Sessions shadow-write gate (P4): re-seed the class store from the bd
 	// truth so the soak's zero-discrepancy diff starts converged.

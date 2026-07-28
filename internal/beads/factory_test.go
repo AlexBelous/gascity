@@ -157,6 +157,36 @@ func TestOpenStoreAtForCityContextDriftFallsBackWithPreflightDiagnostic(t *testi
 	}
 }
 
+func TestOpenStoreAtForCityRemoteDoltFallsBackToBD(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	var bdOpened bool
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot: "/city",
+		Provider:  "bd",
+		PreflightChecker: factoryPreflightChecker("/city", factoryPreflightDoltMetadata(), contract.PreflightBDContext{
+			Backend: "dolt", Location: "remote", DoltMode: "server",
+		}),
+		OpenBdStore: func() (Store, error) {
+			bdOpened = true
+			return NewMemStore(), nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for remote Dolt scope")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if !bdOpened || result.Diagnostic.Store != storeNameBdStore || result.Diagnostic.NativeStoreEligible {
+		t.Fatalf("remote Dolt result = %+v bdOpened=%v, want BdStore fallback", result.Diagnostic, bdOpened)
+	}
+	if result.Diagnostic.PreflightGate != string(contract.PreflightCheckDoltModeSafe) ||
+		!strings.Contains(result.Diagnostic.PreflightReason, "location=\"remote\"") {
+		t.Fatalf("remote Dolt diagnostic = %+v", result.Diagnostic)
+	}
+}
+
 func TestOpenStoreAtForCityForceFallbackSkipsPreflightAndNativeOpen(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "1")
 
@@ -391,6 +421,9 @@ func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDCon
 	files.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(metadata)
 	if ctx.BDVersion == "" {
 		ctx.BDVersion = "1.0.4"
+	}
+	if ctx.Location == "" {
+		ctx.Location = "local"
 	}
 	if ctx.SchemaVersion == 0 {
 		ctx.SchemaVersion = 1

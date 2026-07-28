@@ -154,6 +154,48 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
 }
 
+func workspacePinnedBdBinary(cityPath string) (string, error) {
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	_, configured := cfg.Workspace.Env["PATH"]
+	if !configured {
+		return "", nil
+	}
+	pathValue := expandEnvMap(cfg.Workspace.Env)["PATH"]
+	for _, dir := range filepath.SplitList(pathValue) {
+		dir = strings.TrimSpace(dir)
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		candidate, err := exec.LookPath(filepath.Join(dir, "bd"))
+		if err == nil && filepath.IsAbs(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("workspace.env PATH is configured but contains no executable bd at an absolute path")
+}
+
+func bdExecutableFromEnv(environ []string) (string, error) {
+	bdBin := ""
+	for _, entry := range environ {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && key == "BD_BIN" {
+			bdBin = strings.TrimSpace(value)
+		}
+	}
+	if filepath.IsAbs(bdBin) {
+		return bdBin, nil
+	}
+	return exec.LookPath("bd")
+}
+
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
 	resolved, ok, err := canonicalScopeDoltTarget(cityPath, target.ScopeRoot)
 	if err != nil || !ok || !resolved.External {
@@ -351,7 +393,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
-	bdPath, err := exec.LookPath("bd")
+	env, err := bdCommandEnv(cityPath, cfg, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	bdPath, err := bdExecutableFromEnv(env)
 	if err != nil {
 		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
 		return 1
@@ -368,11 +415,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
-	env, err := bdCommandEnv(cityPath, cfg, target)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
 	traceStart := time.Now()

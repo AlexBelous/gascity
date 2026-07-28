@@ -83,15 +83,10 @@ func TestPreflightBlocksNativeOnContextDisagreement(t *testing.T) {
 }
 
 // An UNREACHABLE bd context (e.g. a non-git city root where `bd context` cannot
-// run) is not evidence of a backend disagreement — it only means the native
-// store's bd-context cross-checks cannot be verified. The bd-context-derived
-// checks report WARN, not FAIL. When gc has INDEPENDENTLY confirmed the dolt
-// backend by connecting to the server and matching project_id (identity_match
-// PASS), that direct verification is stronger evidence than bd context's
-// cross-check, so eligibility is upgraded to ELIGIBLE rather than falling back
-// to per-call bd. (A real disagreement, with a readable bd context, still
-// blocks — see TestPreflightBlocksNativeOnContextDisagreement.)
-func TestPreflightEligibleOnUnreachableBDContextWhenIdentityVerified(t *testing.T) {
+// run) leaves the effective backend location unknown. Even an independently
+// verified project_id is insufficient for native activation: only bd context
+// can attest that this workspace is local Dolt.
+func TestPreflightDegradesOnUnreachableBDContextWhenIdentityVerified(t *testing.T) {
 	scope := "/city"
 	fs := fsys.NewFake()
 	fs.Dirs[filepath.Join(scope, ".beads")] = true
@@ -118,18 +113,11 @@ func TestPreflightEligibleOnUnreachableBDContextWhenIdentityVerified(t *testing.
 		t.Fatalf("Check() error = %v", err)
 	}
 
-	// Unreachable bd context + independent identity proof => ELIGIBLE.
-	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
-	// The bd-context cross-checks still report WARN; they are informational —
-	// the verdict is upgraded on the strength of the independent identity match.
+	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
 	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
-	// The result flags that eligibility came via the identity-fallback path.
-	if !result.NativeEligibleViaIdentityFallback {
-		t.Errorf("NativeEligibleViaIdentityFallback = false, want true on the identity-verified upgrade")
-	}
 }
 
 // Without independent identity proof, an unreachable bd context must stay
@@ -168,10 +156,6 @@ func TestPreflightDegradesOnUnreachableBDContextWithoutIdentityProof(t *testing.
 	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckWarn)
-	// No upgrade happened, so the identity-fallback flag stays false.
-	if result.NativeEligibleViaIdentityFallback {
-		t.Errorf("NativeEligibleViaIdentityFallback = true, want false when the verdict stays DEGRADED")
-	}
 }
 
 func TestPreflightBlocksNativeOnIdentityMismatch(t *testing.T) {
@@ -388,6 +372,9 @@ func testPreflightChecker(metadata string, ctx PreflightBDContext, dbProjectID s
 	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(metadata)
 	if ctx.BDVersion == "" {
 		ctx.BDVersion = "1.0.4"
+	}
+	if ctx.Location == "" {
+		ctx.Location = "local"
 	}
 	if ctx.SchemaVersion == 0 {
 		ctx.SchemaVersion = 1

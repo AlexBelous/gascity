@@ -4008,6 +4008,36 @@ func TestExecCommandRunnerWithEnvOverridesInheritedValues(t *testing.T) {
 	}
 }
 
+func TestExecCommandRunnerWithEnvUsesAbsoluteBdBinOnlyForLogicalBd(t *testing.T) {
+	ambientDir := t.TempDir()
+	ambientBd := filepath.Join(ambientDir, "bd")
+	if err := os.WriteFile(ambientBd, []byte("#!/bin/sh\nprintf ambient\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pinnedDir := t.TempDir()
+	pinnedBd := filepath.Join(pinnedDir, "bd")
+	if err := os.WriteFile(pinnedBd, []byte("#!/bin/sh\nprintf pinned\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	out, err := beads.ExecCommandRunnerWithEnv(map[string]string{"BD_BIN": pinnedBd})(t.TempDir(), "bd", "version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(out); got != "pinned" {
+		t.Fatalf("absolute BD_BIN output = %q, want pinned", got)
+	}
+
+	out, err = beads.ExecCommandRunnerWithEnv(map[string]string{"BD_BIN": "relative/bd"})(t.TempDir(), "bd", "version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(out); got != "ambient" {
+		t.Fatalf("relative BD_BIN output = %q, want ambient logical bd", got)
+	}
+}
+
 func TestExecCommandRunnerWithEnvSurfacesBdJSONErrorFromStdout(t *testing.T) {
 	binDir := t.TempDir()
 	bdPath := filepath.Join(binDir, "bd")

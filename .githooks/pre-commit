@@ -73,5 +73,12 @@ if command -v npm >/dev/null 2>&1; then
     git add internal/api/dashboardspa/dist
   fi
 else
+  if [ -n "$staged_spec" ]; then
+    echo "error: internal/api/openapi.json is staged but npm is not on PATH — the generated TS API client" >&2
+    echo "cannot be regenerated, so this commit would ship a stale client with no enforcement until CI runs." >&2
+    echo "Install Node/npm, or regenerate manually:" >&2
+    echo "  cd internal/api/dashboardspa/web && npm ci && npm run generate:client" >&2
+    exit 1
+  fi
   echo "warning: npm not on PATH — skipped dashboard SPA typecheck + rebuild. CI will enforce this." >&2
 fi

@@ -401,6 +401,22 @@ func failedCreateIdentityReleased(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata["state"]) == string(StateFailedCreate)
 }
 
+// deadIdentityReleased reports whether an open session bead's identity no
+// longer reserves its alias because the session is finished-by-intent or its
+// runtime is gone: a drained session (drain_at stamped at drain) has completed
+// its pool turn, and a runtime-missing session (durable sleep_reason written by
+// the reconciler when the process vanished) is a husk awaiting cleanup. Both
+// otherwise squat their slot alias forever, wedging every subsequent pool
+// create for the same slot at start-pending (observed post-migration: pool
+// spawns starved for hours behind drained predecessors' aliases). Mirrors the
+// failed-create release semantics.
+func deadIdentityReleased(b beads.Bead) bool {
+	if strings.TrimSpace(b.Metadata["drain_at"]) != "" {
+		return true
+	}
+	return strings.TrimSpace(b.Metadata["sleep_reason"]) == LifecycleReasonRuntimeMissing
+}
+
 func continuityIneligibleConfiguredOwner(b beads.Bead, selfOwner string) bool {
 	if failedCreateIdentityReleased(b) {
 		return false
@@ -602,6 +618,9 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			continue
 		}
 		if failedCreateIdentityReleased(b) {
+			continue
+		}
+		if deadIdentityReleased(b) {
 			continue
 		}
 		if b.Status == "closed" {

@@ -55,6 +55,25 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 	}); err != nil {
 		t.Fatalf("seed live isolated tmux session: %v", err)
 	}
+	beforeStarts := len(provider.snapshotStartCalls())
+	if beforeStarts != 1 {
+		t.Fatalf("seed provider Start calls = %d, want exactly one", beforeStarts)
+	}
+	beforeServerPID := guard.ServerPID()
+	beforeSocket, err := os.Lstat(guard.SocketPath())
+	if err != nil {
+		t.Fatalf("stat isolated tmux socket before admission: %v", err)
+	}
+	beforeSessionIDs, err := runtimetmux.NewTmuxWithConfig(runtimetmux.Config{
+		SocketName: guard.SocketName(),
+	}).ListSessionIDs()
+	if err != nil {
+		t.Fatalf("list isolated tmux sessions before admission: %v", err)
+	}
+	if len(beforeSessionIDs) != 1 || strings.TrimSpace(beforeSessionIDs[sessionName]) == "" {
+		t.Fatalf("isolated tmux sessions before admission = %v, want exactly live target %q with a non-empty ID", beforeSessionIDs, sessionName)
+	}
+	t.Logf("LIVE_SOCKET_NOOP before starts=%d server_pid=%d socket=%s sessions=%v", beforeStarts, beforeServerPID, guard.SocketPath(), beforeSessionIDs)
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: guard.CityName()},
@@ -102,11 +121,6 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 	if beforeRow.Revision <= 0 {
 		t.Fatalf("live session row revision = %d, want positive", beforeRow.Revision)
 	}
-	beforeIdentity := exactSessionStartSocketTmuxIdentity(t, guard.SocketName(), sessionName)
-	beforeStarts := len(provider.snapshotStartCalls())
-	if beforeStarts != 1 {
-		t.Fatalf("seed provider Start calls = %d, want exactly one", beforeStarts)
-	}
 	if reply := cr.admitSessionStartSocketKey(bead.ID); reply != sessionStartSocketReplyOK {
 		t.Fatalf("exact session-start admission = %q, want %q", reply, sessionStartSocketReplyOK)
 	}
@@ -132,14 +146,31 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 	if afterRow.Revision != beforeRow.Revision || !reflect.DeepEqual(afterRow, beforeRow) {
 		t.Fatalf("durable row changed after no-op socket admission:\nbefore=%#v\nafter=%#v", beforeRow, afterRow)
 	}
-	if got := len(provider.snapshotStartCalls()); got != beforeStarts {
-		t.Fatalf("provider Start calls = %d, want unchanged %d", got, beforeStarts)
+	if got := len(provider.snapshotStartCalls()); got != 1 {
+		t.Fatalf("provider Start calls = %d, want absolute total 1", got)
 	}
-	afterIdentity := exactSessionStartSocketTmuxIdentity(t, guard.SocketName(), sessionName)
-	if afterIdentity != beforeIdentity || !provider.IsRunning(sessionName) || !guard.HasSession(sessionName) {
-		t.Fatalf("isolated tmux identity/live state = %q/%t/%t, want unchanged live identity %q",
-			afterIdentity, provider.IsRunning(sessionName), guard.HasSession(sessionName), beforeIdentity)
+	afterServerPID := guard.ServerPID()
+	if afterServerPID != beforeServerPID {
+		t.Fatalf("isolated tmux server PID after admission = %d, want unchanged %d", afterServerPID, beforeServerPID)
 	}
+	afterSocket, err := os.Lstat(guard.SocketPath())
+	if err != nil {
+		t.Fatalf("stat isolated tmux socket after admission: %v", err)
+	}
+	if !os.SameFile(beforeSocket, afterSocket) {
+		t.Fatalf("isolated tmux socket changed after no-op admission: before=%s after=%s", beforeSocket.Name(), afterSocket.Name())
+	}
+	afterSessionIDs, err := runtimetmux.NewTmuxWithConfig(runtimetmux.Config{
+		SocketName: guard.SocketName(),
+	}).ListSessionIDs()
+	if err != nil {
+		t.Fatalf("list isolated tmux sessions after admission: %v", err)
+	}
+	if !reflect.DeepEqual(afterSessionIDs, beforeSessionIDs) || !provider.IsRunning(sessionName) || !guard.HasSession(sessionName) {
+		t.Fatalf("isolated tmux sessions/live state = %v/%t/%t, want unchanged sessions %v and live target",
+			afterSessionIDs, provider.IsRunning(sessionName), guard.HasSession(sessionName), beforeSessionIDs)
+	}
+	t.Logf("LIVE_SOCKET_NOOP after starts=%d server_pid=%d socket_same=%t sessions=%v", len(provider.snapshotStartCalls()), afterServerPID, os.SameFile(beforeSocket, afterSocket), afterSessionIDs)
 
 	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
 	if err != nil {
@@ -162,21 +193,6 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 		witness.Fields["effect_applied"] != false {
 		t.Fatalf("socket status-shadow witness = %#v, want detached no-effect converged witness", witness)
 	}
-}
-
-func exactSessionStartSocketTmuxIdentity(t *testing.T, socketName, sessionName string) string {
-	t.Helper()
-	sessionIDs, err := runtimetmux.NewTmuxWithConfig(runtimetmux.Config{
-		SocketName: socketName,
-	}).ListSessionIDs()
-	if err != nil {
-		t.Fatalf("read isolated tmux identities: %v", err)
-	}
-	identity := strings.TrimSpace(sessionIDs[sessionName])
-	if identity == "" {
-		t.Fatalf("isolated tmux identity for %q is empty", sessionName)
-	}
-	return identity
 }
 
 // TestExactSessionStartNativeV59RealBDTmuxJourney proves exact socket admission

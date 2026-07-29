@@ -2190,18 +2190,23 @@ func commitStartResultTraced(
 	return true
 }
 
-// cwdCollisionTerminalErrorReason classifies the working-directory collision
-// guard's sentinel errors (internal/session.ErrWorkDirCollision,
-// ErrWorkDirLivenessUnavailable) as terminal provider-error reasons. Unlike
+// cwdCollisionErrorReason classifies the working-directory collision guard's
+// sentinel errors (internal/session.ErrWorkDirCollision,
+// ErrWorkDirLivenessUnavailable) into a short reason label. Unlike
 // runtime.ProviderTerminalErrorReason, which pattern-matches provider screen
 // text, these are typed Go sentinel errors wrapped with %w, so they are
 // classified with errors.Is against the wrapped result.err rather than a
-// string scan of its message. Both refusals share the same "retrying will not
-// help until something external changes" property as the other terminal
-// reasons: the directory is occupied by another live session, or liveness
-// could not even be verified, and no amount of immediate retrying resolves
-// either (ga-9x4z1g.1 FR4).
-func cwdCollisionTerminalErrorReason(err error) string {
+// string scan of its message.
+//
+// Despite the label vocabulary predating this comment (ga-9x4z1g.1 FR4), a
+// cwd collision is deliberately NOT treated as terminal: commitStartFailure
+// routes both reasons to a bounded-retry arm (recordCWDCollisionFailure), not
+// markProviderTerminalError's permanent wedge. The directory being occupied
+// by another live session, or liveness being momentarily unverifiable, can
+// each resolve on their own — the occupant exits, or the next scan succeeds
+// — so a collision refusal, even a genuine one, must not permanently wedge
+// the session the way an unrecoverable provider error does (ga-thkwp5 D).
+func cwdCollisionErrorReason(err error) string {
 	switch {
 	case errors.Is(err, sessionpkg.ErrWorkDirCollision):
 		return "work_dir_collision"
@@ -2213,19 +2218,59 @@ func cwdCollisionTerminalErrorReason(err error) string {
 }
 
 // commitStartFailure performs the failure-path side effects for a start that
-// returned an error: startup rate-limit quarantine, pending-create rollback, or
-// wake-failure accounting, plus the matching trace and log records. It is split
-// out of commitStartResultTraced to keep the success path legible; the caller
+// returned an error: startup rate-limit quarantine, pending-create rollback,
+// cwd-collision bounded-retry accounting, or generic wake-failure accounting,
+// plus the matching trace and log records. It is split out of
+// commitStartResultTraced to keep the success path legible; the caller
 // returns false after invoking it.
 func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, wave int, stderr io.Writer, trace *sessionReconcilerTraceCycle) {
 	info := result.prepared.candidate.info
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
-	reason := runtime.ProviderTerminalErrorReason(result.err.Error())
-	if reason == "" {
-		reason = cwdCollisionTerminalErrorReason(result.err)
+	if cwdReason := cwdCollisionErrorReason(result.err); cwdReason != "" {
+		// A collision refusal fires before the provider process ever starts
+		// (TestRuntimeStartCallSitesCheckCwdCollisionFirst), so — unlike the
+		// generic wake-failure arm below — there is never a stale conversation
+		// to discard, and this arm never falls through to it.
+		if result.rollbackPending {
+			// Mirrors the generic rollbackPending block further down: a rolled-back
+			// pending create is closed and recreated fresh on the next tick
+			// (rollbackPendingCreate → closeFailedCreateBeadInTx), so there is no
+			// bead left to carry a cwd_collision_attempts counter forward —
+			// recordCWDCollisionFailure would accrue onto a bead about to vanish.
+			if trace != nil {
+				trace.RecordOperation(TraceSiteLifecycleStartCWDCollisionRetry, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
+					"error":  formatLifecycleError(result.err),
+					"reason": cwdReason,
+				})
+			}
+			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
+			return
+		}
+		// Clear last_woke_at so wake-fairness ordering (wakeFairnessTime) treats
+		// this candidate as long-waiting rather than just-attempted, matching the
+		// generic wake-failure arm's same clear below — otherwise a just-failed
+		// last_woke_at would sort this session to the back of a budget-limited
+		// tick's wake queue and starve the bounded retry behind other candidates.
+		if err := sessFront.SetMarker(info.ID, "last_woke_at", ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+		}
+		// Terminal-to-this-arm failure path; discard the fold (see the terminal-
+		// provider-error note below for why). The persist lands via
+		// recordCWDCollisionFailure's ApplyPatchInfo/SetMarker writes.
+		_ = recordCWDCollisionFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+		if trace != nil {
+			trace.RecordOperation(TraceSiteLifecycleStartCWDCollisionRetry, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
+				"error":  formatLifecycleError(result.err),
+				"reason": cwdReason,
+			})
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
+		return
 	}
+	reason := runtime.ProviderTerminalErrorReason(result.err.Error())
 	if reason != "" {
 		// This runs on the async start goroutine, and this failure arm is terminal
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign

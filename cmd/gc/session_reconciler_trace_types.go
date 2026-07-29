@@ -130,6 +130,7 @@ const (
 	TraceSiteLifecycleStartTerminalProviderError TraceSiteCode = "reconciler.start.terminal_provider_error"
 	TraceSiteLifecycleStartRateLimitHold         TraceSiteCode = "reconciler.start.rate_limit_hold"
 	TraceSiteLifecycleShutdownPreserveSessions   TraceSiteCode = "lifecycle.shutdown.preserve_sessions"
+	TraceSiteLifecycleStartCWDCollisionRetry     TraceSiteCode = "reconciler.start.cwd_collision_retry"
 )
 
 type TraceReasonCode string

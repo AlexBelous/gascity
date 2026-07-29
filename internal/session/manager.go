@@ -452,10 +452,13 @@ type Info struct {
 	// missing/"0"/malformed all to 0); the mirror preserves that distinction for Step 6b.
 	WakeAttemptsMetadata string // wake_attempts (raw)
 	// CWDCollisionAttempts is the RAW cwd_collision_attempts metadata string,
-	// the WakeAttemptsMetadata-shaped counter for consecutive work_dir-collision
-	// start refusals (ga-thkwp5 D). Compile-time plumbing only: the scanner
-	// that scopes collisions to session-owned PIDs (B) and the retry routing
-	// that increments this counter (D) land in the GREEN step.
+	// the same accrual-counter shape as WakeAttemptsMetadata but tracking
+	// consecutive working-directory-collision start refusals independently
+	// from generic wake failures, so a collision (whose resolution depends on
+	// when the colliding session exits) does not exhaust the same threshold
+	// as a crash loop (ga-thkwp5 D). No int-parsed sibling: unlike
+	// WakeAttempts, nothing outside its own accrual function needs a parsed
+	// form (mirrors ChurnCount's raw-only precedent).
 	CWDCollisionAttempts string // cwd_collision_attempts (raw)
 	// ProviderKind is the RAW provider_kind metadata, verbatim — the provider
 	// FAMILY marker (claude/codex/gemini) stamped from ResolvedProvider, distinct
@@ -739,14 +742,20 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 // known runtime PID (catches sessions started by another Manager instance or
 // process entirely, attributed to the correct candidate — ga-9x4z1g.1 FR3),
 // or — only once every candidate has been checked and none could be
-// positively attributed — the scan confirming some live process occupies the
-// directory at all. That last, unattributed signal still refuses (fail
-// closed: never assume two live sessions can safely share a directory) but
-// is recorded without naming a specific candidate, since the scan alone
-// cannot say which bead (if any) it actually belongs to. When the scan
-// itself could not be completed, the guard fails closed before even
-// reaching candidates — refusing rather than risking two live sessions
-// sharing a directory (ga-ighomh.1).
+// positively attributed — the scan confirming some OTHER session-owned live
+// process (any live PID the scan attributes to a Gas City session via
+// GC_SESSION_ID, other than id itself) occupies the directory. That last,
+// unattributed signal still refuses (fail closed: never assume two live
+// sessions can safely share a directory) but is recorded without naming a
+// specific candidate, since the scan alone cannot say which bead (if any) it
+// actually belongs to. It is deliberately scoped to session-owned PIDs only:
+// a live process with no relationship to any Gas City session at all (the
+// supervisor, the controller, an operator's own shell) merely having its cwd
+// at the directory must never be enough to refuse a start (ga-thkwp5 B,
+// fixing the Failure 2 false positive). When the scan itself could not be
+// completed, the guard fails closed before even reaching candidates —
+// refusing rather than risking two live sessions sharing a directory
+// (ga-ighomh.1).
 func (m *Manager) checkNoCWDCollision(ctx context.Context, id string, b beads.Bead, workDir string) error {
 	_ = ctx
 	if strings.TrimSpace(workDir) == "" {
@@ -758,13 +767,6 @@ func (m *Manager) checkNoCWDCollision(ctx context.Context, id string, b beads.Be
 		return fmt.Errorf("%w: %s", ErrWorkDirLivenessUnavailable, workDir)
 	}
 	normalizedWorkDir := pathutil.NormalizePathForCompare(strings.TrimSpace(workDir))
-	scannerConfirmsLive := false
-	for _, cwd := range live.CWDs {
-		if cwd == normalizedWorkDir {
-			scannerConfirmsLive = true
-			break
-		}
-	}
 	candidates, err := m.sameWorkDirSessionBeads(b, "", workDir)
 	if err != nil {
 		return fmt.Errorf("checking working directory collisions: %w", err)
@@ -780,11 +782,46 @@ func (m *Manager) checkNoCWDCollision(ctx context.Context, id string, b beads.Be
 			return fmt.Errorf("%w: %s is occupied by session %s", ErrWorkDirCollision, workDir, other.ID)
 		}
 	}
-	if hasOtherCandidate && scannerConfirmsLive {
+	if hasOtherCandidate && m.anySessionOwnedPIDLiveAt(id, live, normalizedWorkDir) {
 		m.recordCWDRefusal(id, events.SessionStartRefusedReasonCollision, "")
 		return fmt.Errorf("%w: %s is occupied by an unattributed live process", ErrWorkDirCollision, workDir)
 	}
 	return nil
+}
+
+// anySessionOwnedPIDLiveAt reports whether any process the host-wide scan
+// attributes to some Gas City session (any live runtime with a non-empty
+// SessionID other than id) is live at normalizedWorkDir, cross-referenced by
+// PID rather than the raw directory-wide CWDs list. This is the unattributed
+// fallback signal in checkNoCWDCollision: it cannot name which specific
+// candidate bead is occupying the directory (candidateConfirmedLiveByPID
+// already covers per-candidate attribution), but it still distinguishes a
+// real, unidentified Gas City session occupant from a process with no
+// relationship to any session at all. Scoping the fallback to session-owned
+// PIDs — instead of any live cwd on the host — is the ga-thkwp5 B fix for the
+// Failure 2 false positive, where the supervisor/controller/an operator's own
+// shell merely having its cwd at a directory was enough to permanently wedge
+// an unrelated session start. A scan error is logged and, like
+// candidateConfirmedLiveByPID, treated as fail-open for this signal alone:
+// the caller still fails closed overall via its other signals.
+func (m *Manager) anySessionOwnedPIDLiveAt(id string, live pidutil.LiveState, normalizedWorkDir string) bool {
+	scanner, ok := m.sp.(runtime.ProcessTableScanner)
+	if !ok {
+		return false
+	}
+	found, err := scanner.FindRuntimesBySessionID("")
+	if err != nil {
+		log.Printf("session: scanning all session-owned runtimes for cwd collision fallback (failing closed): %v", err)
+	}
+	for _, rt := range found {
+		if rt.SessionID == "" || rt.SessionID == id || rt.PID == 0 {
+			continue
+		}
+		if cwd, ok := live.PIDCWDs[rt.PID]; ok && cwd == normalizedWorkDir {
+			return true
+		}
+	}
+	return false
 }
 
 // candidateConfirmedLiveByPID reports whether other's own known runtime PID

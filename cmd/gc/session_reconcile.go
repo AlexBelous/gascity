@@ -786,10 +786,12 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 // agentIdentity is the start-path-joinable agent label for
 // gc.agent.quarantines.total.
 //
-// callers use (recordWakeFailure, recordChurn); the real caller is
-// commitStartFailure's cwd-collision branch, landing at GREEN (ga-thkwp5 D).
+// siblings (recordWakeFailure, recordChurn) for consistency; its one real
+// caller (commitStartFailure's cwd-collision branch) discards the fold the
+// same way the terminal-provider-error arm discards markProviderTerminalError's,
+// so the result is unused at every call site by design, not by omission.
 //
-//nolint:unparam // Info return matches the write-returns-Info shape its
+//nolint:unparam // Info return matches the write-returns-Info shape of its
 func recordCWDCollisionFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	attempts, _ := strconv.Atoi(info.CWDCollisionAttempts)
 

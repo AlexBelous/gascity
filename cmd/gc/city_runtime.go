@@ -3288,9 +3288,9 @@ func ensureManagedDoltPublishedForRuntime(
 	portFn func(string) string,
 	placementFn func(string, string) error,
 ) error {
-	if !cityUsesBdStoreContract(cityPath) {
-		return nil
-	}
+	// Ownership is not equivalent to the city root's provider. A file-backed
+	// city may still own the canonical managed Dolt inherited by one or more
+	// bd-backed rigs, so let the topology-aware ownership check decide.
 	owned, err := ownedFn(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: managed dolt ownership preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr

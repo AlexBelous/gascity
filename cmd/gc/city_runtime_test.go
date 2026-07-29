@@ -951,6 +951,68 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickPlacesAdoptedIdentityOnce(t
 	}
 }
 
+func TestEnsureManagedDoltPublishedForRuntimePlacesInheritedRigUnderFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(
+		fsys.OSFS{},
+		filepath.Join(rigPath, ".beads", "metadata.json"),
+		contract.MetadataState{
+			Database:     "dolt",
+			Backend:      "dolt",
+			DoltMode:     "server",
+			DoltDatabase: "fe",
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	placementCalls := 0
+	err := ensureManagedDoltPublishedForRuntime(
+		cityPath,
+		io.Discard,
+		"gc start",
+		func(string) error {
+			t.Fatal("health called with a published managed-Dolt port")
+			return nil
+		},
+		managedDoltLifecycleOwned,
+		func(string) string { return "29620" },
+		func(_ string, port string) error {
+			placementCalls++
+			if port != "29620" {
+				t.Fatalf("placement port = %q, want 29620", port)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForRuntime: %v", err)
+	}
+	if placementCalls != 1 {
+		t.Fatalf("placementCalls = %d, want 1 for inherited managed-Dolt rig", placementCalls)
+	}
+}
+
 // TestCityRuntimeEnsureManagedDoltPublishedForTickPlacesRecoveredIdentity
 // verifies that recovery places the managed process before controller work
 // continues, and that a changed PID on the same port is revalidated.

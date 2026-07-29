@@ -75,6 +75,22 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		path = legacyPath
 	}
 	if path == "" {
+		for _, key := range []string{
+			beadmeta.WorkBranchMetadataKey,
+			beadmeta.WorktreeRepoMetadataKey,
+			beadmeta.WorktreeRootMetadataKey,
+			beadmeta.WorktreeBaseRefMetadataKey,
+			beadmeta.WorktreeBaseSHAMetadataKey,
+			beadmeta.WorktreeCreatorMetadataKey,
+			beadmeta.WorktreeOwnerMetadataKey,
+			beadmeta.WorktreeGenerationMetadataKey,
+			beadmeta.WorktreeLifecycleMetadataKey,
+		} {
+			if strings.TrimSpace(bead.Metadata[key]) != "" {
+				return nil, fmt.Errorf("work bead %s has managed worktree evidence %s=%q but no %s or %s",
+					bead.ID, key, bead.Metadata[key], beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey)
+			}
+		}
 		return nil, nil
 	}
 	values := []struct {
@@ -114,6 +130,14 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		Generation: strings.TrimSpace(bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]),
 		Lifecycle:  strings.TrimSpace(bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]),
 	}, nil
+}
+
+func classifyWorktreeRequest(bead beads.Bead, storeRef string) (*worktree.Spec, string, bool) {
+	spec, err := worktreeSpecForBead(bead, storeRef)
+	if err != nil {
+		return nil, err.Error(), false
+	}
+	return spec, "", spec == nil
 }
 
 // PoolDesiredState holds the desired state for a single agent template.
@@ -267,6 +291,8 @@ func computePoolDesiredStates(
 				if namedSessionBeadIDs[sessionBeadID] {
 					continue
 				}
+				workStoreRef := strings.TrimSpace(wb.Metadata[beadmeta.RootStoreRefMetadataKey])
+				worktreeSpec, worktreeError, unmanagedDirect := classifyWorktreeRequest(wb, workStoreRef)
 				resumeRequests = append(resumeRequests, SessionRequest{
 					Template:        template,
 					BeadPriority:    beadPriority(wb),
@@ -276,8 +302,11 @@ func computePoolDesiredStates(
 					WorkBeadTitle:   strings.TrimSpace(wb.Title),
 					WorkPack:        strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 					WorkWorkspace:   strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					WorkStoreRef:    workStoreRef,
+					WorktreeSpec:    worktreeSpec,
+					WorktreeError:   worktreeError,
 					BrainParentSID:  strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
-					UnmanagedDirect: true,
+					UnmanagedDirect: unmanagedDirect,
 				})
 				continue
 			}
@@ -303,6 +332,8 @@ func computePoolDesiredStates(
 				continue
 			}
 			wakeRequestedTemplates[template] = struct{}{}
+			workStoreRef := strings.TrimSpace(wb.Metadata[beadmeta.RootStoreRefMetadataKey])
+			worktreeSpec, worktreeError, unmanagedDirect := classifyWorktreeRequest(wb, workStoreRef)
 			resumeRequests = append(resumeRequests, SessionRequest{
 				Template:        template,
 				BeadPriority:    beadPriority(wb),
@@ -311,8 +342,11 @@ func computePoolDesiredStates(
 				WorkBeadTitle:   strings.TrimSpace(wb.Title),
 				WorkPack:        strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:   strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+				WorkStoreRef:    workStoreRef,
+				WorktreeSpec:    worktreeSpec,
+				WorktreeError:   worktreeError,
 				BrainParentSID:  strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
-				UnmanagedDirect: true,
+				UnmanagedDirect: unmanagedDirect,
 			})
 			if trace != nil {
 				trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
@@ -367,7 +401,7 @@ func computePoolDesiredStates(
 				})
 			}
 			for j := 0; j < inFlightCount; j++ {
-				req := inFlight[j]
+				req := classifyInFlightWorktreeRequest(inFlight[j], scaleCheckDemand[template])
 				allRequests = append(allRequests, req)
 				usage.accept(req, limits)
 			}
@@ -405,16 +439,17 @@ func computePoolDesiredStates(
 					}
 				}
 				req := SessionRequest{
-					Template:       template,
-					Tier:           "new",
-					WorkBeadID:     workBeadID,
-					WorkBeadTitle:  workBeadTitle,
-					WorkPack:       workPack,
-					WorkWorkspace:  workWorkspace,
-					WorkStoreRef:   workStoreRef,
-					BrainParentSID: workParentSID,
-					WorktreeSpec:   worktreeSpec,
-					WorktreeError:  worktreeError,
+					Template:        template,
+					Tier:            "new",
+					WorkBeadID:      workBeadID,
+					WorkBeadTitle:   workBeadTitle,
+					WorkPack:        workPack,
+					WorkWorkspace:   workWorkspace,
+					WorkStoreRef:    workStoreRef,
+					BrainParentSID:  workParentSID,
+					WorktreeSpec:    worktreeSpec,
+					WorktreeError:   worktreeError,
+					UnmanagedDirect: workBeadID != "" && worktreeSpec == nil && worktreeError == "",
 				}
 				allRequests = append(allRequests, req)
 				usage.accept(req, limits)
@@ -502,17 +537,43 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 				continue
 			}
 			requests[template] = append(requests[template], SessionRequest{
-				Template:        template,
-				Tier:            "new",
-				SessionBeadID:   sb.ID,
-				WorkBeadID:      strings.TrimSpace(sb.TriggerBeadID),
-				WorkStoreRef:    strings.TrimSpace(sb.TriggerBeadStoreRef),
-				BrainParentSID:  strings.TrimSpace(sb.BrainParentSID),
-				UnmanagedDirect: true,
+				Template:       template,
+				Tier:           "new",
+				SessionBeadID:  sb.ID,
+				WorkBeadID:     strings.TrimSpace(sb.TriggerBeadID),
+				WorkStoreRef:   strings.TrimSpace(sb.TriggerBeadStoreRef),
+				BrainParentSID: strings.TrimSpace(sb.BrainParentSID),
 			})
 		}
 	}
 	return requests
+}
+
+func classifyInFlightWorktreeRequest(request SessionRequest, demand scaleCheckDemand) SessionRequest {
+	workID := strings.TrimSpace(request.WorkBeadID)
+	if workID == "" {
+		return request
+	}
+	if demand.WorktreeErrors != nil {
+		if worktreeError := strings.TrimSpace(demand.WorktreeErrors[workID]); worktreeError != "" {
+			request.WorktreeError = worktreeError
+			return request
+		}
+	}
+	if demand.WorktreeSpecs != nil {
+		if spec := demand.WorktreeSpecs[workID]; spec != nil {
+			request.WorktreeSpec = spec
+			return request
+		}
+	}
+	for _, candidate := range demand.WorkBeadIDs {
+		if strings.TrimSpace(candidate) == workID {
+			request.UnmanagedDirect = true
+			return request
+		}
+	}
+	request.WorktreeError = "in-flight worktree ownership cannot be classified from current demand"
+	return request
 }
 
 // poolSessionConsumesNewDemandInfo reports whether a pool session already

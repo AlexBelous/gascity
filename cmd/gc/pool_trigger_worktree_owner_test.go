@@ -175,6 +175,30 @@ func TestBindPoolSessionTriggerBeadAllowsExplicitUnmanagedDirectFallback(t *test
 	}
 }
 
+func TestClassifyInFlightWorktreeRequestRequiresCurrentDemandEvidence(t *testing.T) {
+	request := SessionRequest{Tier: "new", WorkBeadID: "gc-test"}
+
+	unmanaged := classifyInFlightWorktreeRequest(request, scaleCheckDemand{
+		WorkBeadIDs: []string{"gc-test"},
+	})
+	if !unmanaged.UnmanagedDirect || unmanaged.WorktreeError != "" {
+		t.Fatalf("no-evidence current demand = %+v, want explicit unmanaged classification", unmanaged)
+	}
+
+	incomplete := classifyInFlightWorktreeRequest(request, scaleCheckDemand{
+		WorkBeadIDs:    []string{"gc-test"},
+		WorktreeErrors: map[string]string{"gc-test": "missing gc.worktree_owner"},
+	})
+	if incomplete.UnmanagedDirect || !strings.Contains(incomplete.WorktreeError, "gc.worktree_owner") {
+		t.Fatalf("incomplete managed demand = %+v, want fail-closed evidence error", incomplete)
+	}
+
+	unmatched := classifyInFlightWorktreeRequest(request, scaleCheckDemand{})
+	if unmatched.UnmanagedDirect || unmatched.WorktreeError == "" {
+		t.Fatalf("unmatched in-flight demand = %+v, want unclassified fail-closed error", unmatched)
+	}
+}
+
 func TestWorktreeSpecForBeadRequiresCompletePublishedEvidence(t *testing.T) {
 	metadata := map[string]string{
 		beadmeta.WorkDirMetadataKey:            "/worktrees/gc-test",
@@ -215,7 +239,12 @@ func TestWorktreeSpecForBeadRequiresCompletePublishedEvidence(t *testing.T) {
 	}
 
 	delete(metadata, beadmeta.WorkDirMetadataKey)
-	if spec, err := worktreeSpecForBead(bead, "rig:gascity"); err != nil || spec != nil {
-		t.Fatalf("bead without work_dir = spec %+v err %v, want no managed workspace", spec, err)
+	if _, err := worktreeSpecForBead(bead, "rig:gascity"); err == nil ||
+		!strings.Contains(err.Error(), "managed worktree evidence") {
+		t.Fatalf("bead with partial evidence and no work_dir error = %v, want fail closed", err)
+	}
+
+	if spec, err := worktreeSpecForBead(beads.Bead{ID: "gc-direct"}, "rig:gascity"); err != nil || spec != nil {
+		t.Fatalf("bead without any worktree evidence = spec %+v err %v, want explicit unmanaged boundary", spec, err)
 	}
 }

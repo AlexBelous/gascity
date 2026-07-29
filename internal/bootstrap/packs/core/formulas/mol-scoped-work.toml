@@ -102,7 +102,12 @@ if [ -z "${GC_BEAD_ID:-}" ]; then
   exit 1
 fi
 
-REPO_ROOT=$(git rev-parse --show-toplevel)
+GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir)
+if [ "$(basename "$GIT_COMMON_DIR")" != ".git" ]; then
+  echo "mol-scoped-work requires a non-bare repository with a stable common .git directory" >&2
+  exit 1
+fi
+REPO_ROOT=$(dirname "$GIT_COMMON_DIR")
 WORKTREE_ROOT="${REPO_ROOT}-worktrees"
 WORKTREE_PATH="$WORKTREE_ROOT/$WORK_BEAD_ID"
 WORK_BRANCH="work/$WORK_BEAD_ID"
@@ -270,17 +275,74 @@ description = """
 Remove the temporary worktree after the body reaches terminal state.
 
 ```bash
+set -euo pipefail
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
-if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
-  git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"
+if [ -z "${GC_BEAD_ID:-}" ]; then
+  echo "mol-scoped-work cleanup requires GC_BEAD_ID to resolve its source store" >&2
+  exit 1
 fi
-gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
+
+STEP_JSON=$(gc bd show "$GC_BEAD_ID" --json)
+STORE_REF=$(printf '%s' "$STEP_JSON" | jq -er '.[0].metadata["gc.root_store_ref"] | select(length > 0)')
+WORK_JSON=$(gc bd show "$WORK_BEAD_ID" --json)
+WORKTREE_PATH=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.work_dir"] | select(length > 0)')
+LEGACY_PATH=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata.work_dir | select(length > 0)')
+if [ "$WORKTREE_PATH" != "$LEGACY_PATH" ]; then
+  echo "mol-scoped-work cleanup refuses conflicting published worktree paths" >&2
+  exit 1
+fi
+REPO_ROOT=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.worktree_repo"] | select(length > 0)')
+WORKTREE_ROOT=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.worktree_root"] | select(length > 0)')
+WORK_BRANCH=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.work_branch"] | select(length > 0)')
+BASE_REF=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.worktree_base_ref"] | select(length > 0)')
+BASE_SHA=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.worktree_base_sha"] | select(length > 0)')
+CREATOR=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.worktree_creator"] | select(length > 0)')
+OWNER=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.worktree_owner"] | select(length > 0)')
+GENERATION=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.worktree_generation"] | select(length > 0)')
+LIFECYCLE=$(printf '%s' "$WORK_JSON" | jq -er '.[0].metadata["gc.worktree_lifecycle"] | select(length > 0)')
+
+cd "$REPO_ROOT"
+if CLEANUP_REPORT=$(gc worktree cleanup \
+  --repo "$REPO_ROOT" \
+  --root "$WORKTREE_ROOT" \
+  --path "$WORKTREE_PATH" \
+  --branch "$WORK_BRANCH" \
+  --base "$BASE_REF" \
+  --base-sha "$BASE_SHA" \
+  --bead "$WORK_BEAD_ID" \
+  --store-ref "$STORE_REF" \
+  --creator "$CREATOR" \
+  --owner "$OWNER" \
+  --generation "$GENERATION" \
+  --lifecycle "$LIFECYCLE" \
+  --json); then
+  CLEANUP_EXIT=0
+else
+  CLEANUP_EXIT=$?
+fi
+printf '%s\n' "$CLEANUP_REPORT"
+if [ "$CLEANUP_EXIT" -ne 0 ]; then
+  printf '%s' "$CLEANUP_REPORT" | jq -e '.cleanup_pending == true and (.error.code | length > 0)' >/dev/null
+  exit "$CLEANUP_EXIT"
+fi
+printf '%s' "$CLEANUP_REPORT" | jq -e '.removed == true or .already_absent == true' >/dev/null
+gc bd update "$WORK_BEAD_ID" \
+  --unset-metadata "gc.work_dir" \
+  --unset-metadata "work_dir" \
+  --unset-metadata "gc.work_branch" \
+  --unset-metadata "gc.worktree_repo" \
+  --unset-metadata "gc.worktree_root" \
+  --unset-metadata "gc.worktree_base_ref" \
+  --unset-metadata "gc.worktree_base_sha" \
+  --unset-metadata "gc.worktree_creator" \
+  --unset-metadata "gc.worktree_owner" \
+  --unset-metadata "gc.worktree_generation" \
+  --unset-metadata "gc.worktree_lifecycle"
 ```
 """
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }

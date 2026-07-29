@@ -1667,6 +1667,94 @@ func TestCityRuntimeSessionStartEventOverflowDoesNotBlockOnFullFallback(t *testi
 	}
 }
 
+type sessionStartBlockingListStore struct {
+	beads.Store
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *sessionStartBlockingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.Store.List(query)
+}
+
+func TestCityRuntimeSessionStartOverflowDoesNotDeadlockControllerStop(t *testing.T) {
+	baseStore := beads.NewMemStore()
+	store := &sessionStartBlockingListStore{
+		Store:   baseStore,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	sp := runtime.NewFake()
+	cs := coherentSessionStartControllerStateForTest(cfg, sp, store, rollout.Auto)
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var releaseFirstOnce sync.Once
+	releaseWorker := func() { releaseFirstOnce.Do(func() { close(releaseFirst) }) }
+	t.Cleanup(releaseWorker)
+
+	firstID := ""
+	original := newCitySessionStartController
+	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
+		opts.MaxDistinct = 1
+		opts.Reconcile = func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == firstID {
+				close(firstEntered)
+				<-releaseFirst
+			}
+			return nil
+		}
+		return original(opts)
+	}
+	t.Cleanup(func() { newCitySessionStartController = original })
+
+	cr := &CityRuntime{cfg: cfg, sp: sp, cs: cs, pokeCh: make(chan struct{}, 1), stdout: io.Discard, stderr: io.Discard}
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	first, err := baseStore.Create(beads.Bead{ID: "gcs-stop-overflow-first", Type: session.BeadType})
+	if err != nil {
+		t.Fatalf("create first session: %v", err)
+	}
+	second, err := baseStore.Create(beads.Bead{ID: "gcs-stop-overflow-second", Type: session.BeadType})
+	if err != nil {
+		t.Fatalf("create second session: %v", err)
+	}
+	firstID = first.ID
+	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, first))
+	awaitClose(t, firstEntered, "first event reconciliation")
+
+	eventDone := make(chan struct{})
+	go func() {
+		cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, second))
+		close(eventDone)
+	}()
+	awaitClose(t, store.entered, "overflow snapshot read")
+
+	stopDone := make(chan struct{})
+	go func() {
+		cr.stopSessionStartController()
+		close(stopDone)
+	}()
+	awaitCond(t, func() bool {
+		if cr.sessionStartMu.TryLock() {
+			cr.sessionStartMu.Unlock()
+			return false
+		}
+		return true
+	}, "controller stop ownership lock")
+
+	close(store.release)
+	awaitClose(t, eventDone, "overflow event during controller stop")
+	releaseWorker()
+	awaitClose(t, stopDone, "controller stop after overflow event")
+}
+
 func TestCityRuntimeSessionStartSeedOverflowDoesNotRequestLegacyFallback(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	cs := coherentSessionStartControllerStateForTest(cfg, runtime.NewFake(), beads.NewMemStore(), rollout.Auto)

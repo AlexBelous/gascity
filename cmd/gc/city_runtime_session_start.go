@@ -175,8 +175,15 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 		}
 		if outcome == sessionStartAdmissionOverflow {
 			fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start admission overflow for %s; authoritative audit requested\n", cr.sessionStartLogPrefix(), id) //nolint:errcheck // bounded queue overflow must be visible
+			// This callback is drained before its captured controller stops. Seed
+			// that controller directly so shutdown need not release its ownership
+			// fence while it waits for admitted callbacks.
+			if err := cr.seedSessionStartController(controller, cr.loadSessionBeadSnapshot()); err != nil {
+				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start authoritative audit: %v\n", cr.sessionStartLogPrefix(), err) //nolint:errcheck // audit failure remains level-triggered
+			}
+			// The eager seed consumes auditPending. Re-arm it so the next full
+			// reconciliation still verifies the authoritative snapshot.
 			controller.RequestAudit()
-			cr.seedActiveSessionStartController(cr.loadSessionBeadSnapshot())
 			cr.requestLegacySessionStartFallback()
 		}
 	}
@@ -218,13 +225,13 @@ func (cr *CityRuntime) admitConfirmedDrainAckStop(id string) {
 	outcome, err := controller.Admit(id, sessionStartAdmissionInProcess)
 	if err != nil {
 		fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting confirmed drain-ack stop for %s: %v\n", cr.sessionStartLogPrefix(), id, err) //nolint:errcheck // durable audit remains recovery path
-		controller.RequestAudit()
 		cr.seedActiveSessionStartController(cr.loadSessionBeadSnapshot())
+		controller.RequestAudit()
 		return
 	}
 	if outcome == sessionStartAdmissionOverflow {
-		controller.RequestAudit()
 		cr.seedActiveSessionStartController(cr.loadSessionBeadSnapshot())
+		controller.RequestAudit()
 	}
 }
 

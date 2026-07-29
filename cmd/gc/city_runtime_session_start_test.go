@@ -967,6 +967,214 @@ func TestCityRuntimeSessionStartEventRecordsConvergedStatusShadowWithoutEffects(
 	}
 }
 
+func TestCityRuntimeSessionStartSocketRecordsConvergedStatusShadowWithoutEffects(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(bead.ID, map[string]string{
+		"state":        string(session.StateAwake),
+		"wake_request": string(session.WakeCauseExplicit),
+	}); err != nil {
+		t.Fatalf("configure active wake: %v", err)
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("seed live runtime: %v", err)
+	}
+	before := exactStatusStoreState(t, env.store)
+	store := newExactStatusCountingStore(t, env.store)
+	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, store, rollout.Auto)
+	eventProv := cs.eventProv.(*events.Fake)
+	status := make(chan exactSessionLifecycleStatusResult, 1)
+	cityPath := t.TempDir()
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg:      env.cfg,
+		sp:       env.sp,
+		cs:       cs,
+		trace:    trace,
+		rec:      events.Discard,
+		stdout:   io.Discard,
+		stderr:   io.Discard,
+		sessionStartOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+			withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				status <- result
+			}),
+		},
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	beforeCalls := len(env.sp.SnapshotCalls())
+	if reply := cr.admitSessionStartSocketKey(bead.ID); reply != sessionStartSocketReplyOK {
+		t.Fatalf("socket admission reply = %q, want %q", reply, sessionStartSocketReplyOK)
+	}
+
+	var got exactSessionLifecycleStatusResult
+	select {
+	case got = <-status:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("socket-admitted converged status did not report")
+	}
+	if got.Admission.Source != sessionStartAdmissionSocket || got.AdmissionVersion == 0 || got.ControllerGeneration != 1 ||
+		!got.RuntimeLive || got.Disposition != exactSessionLifecycleStatusDispositionCandidate ||
+		got.Reason != exactSessionLifecycleStatusReasonCandidate || got.Plan == nil ||
+		got.Plan.Outcome != sessionLifecycleStatusNoop || got.Plan.Reason != sessionLifecycleStatusReasonConverged || got.EffectApplied {
+		t.Fatalf("status result = %#v, want socket-admitted converged no-op candidate", got)
+	}
+	if store.lists != 0 {
+		t.Fatalf("store List calls = %d, want 0", store.lists)
+	}
+	requireExactStatusStoreUnchanged(t, before, store)
+	readOnlyProviderCalls := map[string]bool{
+		"GetLastActivity": true,
+		"IsAttached":      true,
+		"IsRunning":       true,
+	}
+	for _, call := range env.sp.SnapshotCalls()[beforeCalls:] {
+		if !readOnlyProviderCalls[call.Method] {
+			t.Fatalf("provider call after socket admission = %#v, want only read-only observation", call)
+		}
+	}
+	recordedEvents, err := eventProv.List(events.Filter{})
+	if err != nil {
+		t.Fatalf("list recorded events: %v", err)
+	}
+	if len(recordedEvents) != 0 {
+		t.Fatalf("socket shadow recorded events = %#v, want none", recordedEvents)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read socket shadow trace: %v", err)
+	}
+	var witnesses []SessionReconcilerTraceRecord
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && record.SiteCode == TraceSiteLifecycleStatusShadow {
+			witnesses = append(witnesses, record)
+		}
+	}
+	if len(witnesses) != 1 {
+		t.Fatalf("socket status-shadow witnesses = %#v, want one", witnesses)
+	}
+	witness := witnesses[0]
+	if witness.OutcomeCode != TraceOutcomeNoChange || witness.Fields["session_id"] != bead.ID ||
+		witness.Fields["admission"] != string(sessionStartAdmissionSocket) ||
+		witness.Fields["admission_version"] != float64(got.AdmissionVersion) ||
+		witness.Fields["generation"] != float64(got.ControllerGeneration) ||
+		witness.Fields["status_outcome"] != "noop" ||
+		witness.Fields["status_reason"] != string(sessionLifecycleStatusReasonConverged) ||
+		witness.Fields["effect_applied"] != false {
+		t.Fatalf("socket status-shadow witness = %#v, want converged detached socket witness", witness)
+	}
+}
+
+func TestCityRuntimeSessionStartSocketMissingRuntimeStartsOnceWithoutFalseShadow(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto)
+	status := make(chan exactSessionLifecycleStatusResult, 1)
+	terminal := make(chan sessionStartReconcileResult, 1)
+	originalControllerConstructor := newCitySessionStartController
+	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
+		originalObserver := opts.Observer
+		opts.Observer = func(result sessionStartReconcileResult) {
+			if originalObserver != nil {
+				originalObserver(result)
+			}
+			terminal <- result
+		}
+		return originalControllerConstructor(opts)
+	}
+	t.Cleanup(func() { newCitySessionStartController = originalControllerConstructor })
+
+	cityPath := t.TempDir()
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg:      env.cfg,
+		sp:       env.sp,
+		cs:       cs,
+		trace:    trace,
+		rec:      events.Discard,
+		stdout:   io.Discard,
+		stderr:   io.Discard,
+		sessionStartOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+			withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				status <- result
+			}),
+		},
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	if reply := cr.admitSessionStartSocketKey(bead.ID); reply != sessionStartSocketReplyOK {
+		t.Fatalf("socket admission reply = %q, want %q", reply, sessionStartSocketReplyOK)
+	}
+
+	var terminalResult sessionStartReconcileResult
+	select {
+	case terminalResult = <-terminal:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("socket-admitted missing runtime did not reach a terminal result")
+	}
+	if terminalResult.Outcome != sessionStartReconcileSucceeded {
+		t.Fatalf("terminal result = %#v, want succeeded", terminalResult)
+	}
+	var exactStatus exactSessionLifecycleStatusResult
+	select {
+	case exactStatus = <-status:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("socket-admitted missing runtime did not report exact status")
+	}
+	if exactStatus.Admission.Source != sessionStartAdmissionSocket || exactStatus.RuntimeLive ||
+		exactStatus.Plan == nil || exactStatus.Plan.Outcome != sessionLifecycleStatusNoop ||
+		exactStatus.Plan.Reason != sessionLifecycleStatusReasonConverged {
+		t.Fatalf("missing-runtime exact status = %#v, want socket converged no-op before provider start", exactStatus)
+	}
+	if got := env.sp.CountCalls("Start", "worker"); got != 1 {
+		t.Fatalf("provider Start calls = %d, want exactly 1", got)
+	}
+	if got := env.sp.CountCalls("Stop", "worker"); got != 0 {
+		t.Fatalf("provider Stop calls = %d, want 0", got)
+	}
+	if got := env.sp.CountCalls("Nudge", "worker"); got != 0 {
+		t.Fatalf("provider Nudge calls = %d, want 0", got)
+	}
+	if got := env.sessionInfo(bead.ID).MetadataState; got != string(session.StateActive) {
+		t.Fatalf("durable session state = %q, want active", got)
+	}
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read missing-runtime socket trace: %v", err)
+	}
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && record.SiteCode == TraceSiteLifecycleStatusShadow {
+			t.Fatalf("missing-runtime socket start emitted false no-effect status witness: %#v", record)
+		}
+	}
+}
+
 func TestCityRuntimeSessionStartEventAppliesOneFencedStatusHeal(t *testing.T) {
 	env := newReconcilerTestEnv()
 	opened, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{

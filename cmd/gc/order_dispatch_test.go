@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -1704,6 +1705,104 @@ func TestOrderDispatchRespectsMaxDispatchesPerTick(t *testing.T) {
 	ad.drain(context.Background())
 	if got := countOrderTrackingRuns(t, store); got != 4 {
 		t.Fatalf("tracking runs after second tick = %d, want 4", got)
+	}
+}
+
+func TestOrderDispatchCadenceRepairsTwoMinuteFourLaunchStarvation(t *testing.T) {
+	// This is the smallest six-order slice from the ds-research city incident:
+	// it needs 7 launches/minute, while the old patrol-only scheduler could
+	// guarantee only 4 launches / 2 minutes = 2 launches/minute.
+	aa := []orders.Order{
+		{Name: "beads-health", Trigger: "cooldown", Interval: "30s"},
+		{Name: "gate-sweep", Trigger: "cooldown", Interval: "30s"},
+		{Name: "order-tracking-sweep", Trigger: "cooldown", Interval: "1m"},
+		{Name: "mayor-watchdog", Trigger: "cooldown", Interval: "1m"},
+		{Name: "cross-rig-handoff-patrol", Trigger: "cooldown", Interval: "2m"},
+		{Name: "terminal-escalation-patrol", Trigger: "cooldown", Interval: "2m"},
+	}
+
+	demand := cooldownLaunchDemandPerMinute(aa)
+	legacyCapacity := float64(defaultMaxOrderDispatchesPerTick) / (2 * time.Minute).Minutes()
+	if legacyCapacity >= demand {
+		t.Fatalf("legacy capacity = %.2f/min, demand = %.2f/min; test no longer reproduces starvation", legacyCapacity, demand)
+	}
+
+	cadence := computeOrderDispatchCadence(aa, 2*time.Minute)
+	gotCapacity := float64(cadence.maxDispatchesPerTick) / cadence.interval.Minutes()
+	if gotCapacity < demand*orderDispatchCapacityHeadroom {
+		t.Fatalf("planned capacity = %.2f/min, want >= %.2f/min (demand %.2f/min with headroom)", gotCapacity, demand*orderDispatchCapacityHeadroom, demand)
+	}
+	if cadence.interval > 30*time.Second {
+		t.Fatalf("cadence interval = %s, want <= shortest cooldown 30s", cadence.interval)
+	}
+	if cadence.maxDispatchesPerTick > maxOrderDispatchesPerTick {
+		t.Fatalf("per-tick budget = %d, exceeds hard cap %d", cadence.maxDispatchesPerTick, maxOrderDispatchesPerTick)
+	}
+}
+
+func TestOrderDispatchCadenceSatisfiesCurrentCityCooldownDemand(t *testing.T) {
+	// Exact enabled global-cooldown histogram from the ds-research incident:
+	// 63 orders requiring 11.065972 launches/minute in aggregate.
+	histogram := map[string]int{
+		"30s": 2,
+		"1m":  2,
+		"2m":  2,
+		"5m":  11,
+		"10m": 5,
+		"12m": 2,
+		"15m": 10,
+		"20m": 1,
+		"30m": 9,
+		"1h":  9,
+		"2h":  1,
+		"3h":  2,
+		"6h":  4,
+		"24h": 3,
+	}
+	var aa []orders.Order
+	for interval, count := range histogram {
+		for i := 0; i < count; i++ {
+			aa = append(aa, orders.Order{
+				Name:     fmt.Sprintf("cooldown-%s-%d", interval, i),
+				Trigger:  "cooldown",
+				Interval: interval,
+			})
+		}
+	}
+	if len(aa) != 63 {
+		t.Fatalf("fixture has %d orders, want 63", len(aa))
+	}
+
+	demand := cooldownLaunchDemandPerMinute(aa)
+	if math.Abs(demand-11.0659722222) > 0.000001 {
+		t.Fatalf("demand = %.10f/min, want 11.0659722222/min", demand)
+	}
+	cadence := computeOrderDispatchCadence(aa, 2*time.Minute)
+	capacity := float64(cadence.maxDispatchesPerTick) / cadence.interval.Minutes()
+	if capacity < demand*orderDispatchCapacityHeadroom {
+		t.Fatalf("capacity = %.6f/min, want >= %.6f/min", capacity, demand*orderDispatchCapacityHeadroom)
+	}
+	if cadence.maxDispatchesPerTick != defaultMaxOrderDispatchesPerTick {
+		t.Fatalf("per-tick budget = %d, want normal bounded budget %d", cadence.maxDispatchesPerTick, defaultMaxOrderDispatchesPerTick)
+	}
+}
+
+func TestOrderDispatchCadenceStaysBoundedWhenDemandExceedsHardCapacity(t *testing.T) {
+	aa := make([]orders.Order, 1000)
+	for i := range aa {
+		aa[i] = orders.Order{
+			Name:     fmt.Sprintf("high-rate-%d", i),
+			Trigger:  "cooldown",
+			Interval: "1s",
+		}
+	}
+
+	cadence := computeOrderDispatchCadence(aa, 2*time.Minute)
+	if cadence.interval != minOrderDispatchInterval {
+		t.Fatalf("cadence interval = %s, want hard floor %s", cadence.interval, minOrderDispatchInterval)
+	}
+	if cadence.maxDispatchesPerTick != maxOrderDispatchesPerTick {
+		t.Fatalf("per-tick budget = %d, want hard cap %d", cadence.maxDispatchesPerTick, maxOrderDispatchesPerTick)
 	}
 }
 

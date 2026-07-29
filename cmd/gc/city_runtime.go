@@ -728,6 +728,34 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	interval := cr.cfg.Daemon.PatrolIntervalDuration()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var orderTicker *time.Ticker
+	var orderTickerC <-chan time.Time
+	var orderTickerInterval time.Duration
+	defer func() {
+		if orderTicker != nil {
+			orderTicker.Stop()
+		}
+	}()
+	syncOrderTicker := func() {
+		desired := dedicatedOrderDispatchInterval(cr.od, interval)
+		if desired == orderTickerInterval {
+			return
+		}
+		orderTickerInterval = desired
+		if desired <= 0 {
+			if orderTicker != nil {
+				orderTicker.Stop()
+			}
+			orderTickerC = nil
+			return
+		}
+		if orderTicker == nil {
+			orderTicker = time.NewTicker(desired)
+		} else {
+			orderTicker.Reset(desired)
+		}
+		orderTickerC = orderTicker.C
+	}
 
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
 	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
@@ -777,6 +805,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	defer ctrlDB.cancelPending()
 
 	for {
+		// Reloads and periodic order rescans may replace the dispatcher with a
+		// different derived cadence. Apply it before the next select without
+		// increasing the full session-reconcile patrol frequency.
+		syncOrderTicker()
 		// Re-read on every iteration so a hot reload of city.toml takes
 		// effect on the next event without disturbing in-flight timers.
 		debounce := cr.cfg.Daemon.TickDebounceDuration()
@@ -787,6 +819,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			pokeDB.cancelPending()
 			ctrlDB.cancelPending()
 			runTick("patrol")
+		case <-orderTickerC:
+			cr.safeTick(func() {
+				cr.orderCadenceTick(ctx, cityRoot)
+			}, "order-cadence")
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
 			// session. Arm the debouncer; the deferred fire runs runTick("poke")
@@ -819,6 +855,37 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+type orderCadencedDispatcher interface {
+	orderDispatchCadence() orderDispatchCadence
+}
+
+func dedicatedOrderDispatchInterval(od orderDispatcher, patrolInterval time.Duration) time.Duration {
+	cadenced, ok := od.(orderCadencedDispatcher)
+	if !ok {
+		return 0
+	}
+	cadence := cadenced.orderDispatchCadence()
+	if cadence.interval <= 0 || cadence.interval >= patrolInterval {
+		return 0
+	}
+	return cadence.interval
+}
+
+// orderCadenceTick runs only the safety gates and order scheduler. Session
+// reconciliation remains on the normal patrol/poke paths, so increasing order
+// capacity does not multiply the expensive full-city work.
+func (cr *CityRuntime) orderCadenceTick(ctx context.Context, cityRoot string) {
+	if ctx.Err() != nil || cr.shouldSkipTickForFSPressure(nil, "order-cadence") {
+		return
+	}
+	prev := beads.SetReconcilerTickTrigger("order-cadence")
+	defer beads.RestoreReconcilerTickTrigger(prev)
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		return
+	}
+	cr.dispatchOrders(ctx, cityRoot)
 }
 
 // safeTick runs fn with panic recovery. A panic inside fn is logged to

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,8 @@ const (
 	// now), after which cachedLastRun remembers it across ticks and rebuilds.
 	orderTrackingHistoryIndexLimit   = 256
 	defaultMaxOrderDispatchesPerTick = 4
+	maxOrderDispatchesPerTick        = 16
+	minOrderDispatchInterval         = 15 * time.Second
 	orderTrackingSweepCloseBudget    = 4
 
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
@@ -98,6 +101,89 @@ const (
 	// closed order-tracking beads deleted per watchdog invocation.
 	orderTrackingRetentionWatchdogDeleteBudget = 100
 )
+
+const orderDispatchCapacityHeadroom = 1.25
+
+// orderDispatchCadence bounds the lightweight order-only scheduler loop. The
+// full reconciler keeps its operator-configured patrol interval; only order
+// trigger evaluation uses this faster cadence when configured cooldown demand
+// would otherwise exceed the patrol launch budget.
+type orderDispatchCadence struct {
+	interval             time.Duration
+	maxDispatchesPerTick int
+}
+
+// cooldownLaunchDemandPerMinute returns the configured steady-state cooldown
+// launch rate. Invalid intervals are ignored here because order validation
+// reports them separately and the dispatcher cannot schedule them.
+func cooldownLaunchDemandPerMinute(aa []orders.Order) float64 {
+	var demand float64
+	for _, a := range aa {
+		if a.Trigger != "cooldown" {
+			continue
+		}
+		interval, err := time.ParseDuration(a.Interval)
+		if err != nil || interval <= 0 {
+			continue
+		}
+		demand += float64(time.Minute) / float64(interval)
+	}
+	return demand
+}
+
+// computeOrderDispatchCadence derives enough cooldown capacity for the
+// configured order set with explicit headroom. It first shortens the
+// lightweight cadence while preserving the existing four-launch budget, then
+// raises that budget only when the 15-second scan floor requires it. Both axes
+// are hard-bounded to prevent scan or spawn storms.
+func computeOrderDispatchCadence(aa []orders.Order, patrolInterval time.Duration) orderDispatchCadence {
+	if patrolInterval <= 0 {
+		patrolInterval = 30 * time.Second
+	}
+
+	shortestCooldown := patrolInterval
+	for _, a := range aa {
+		if a.Trigger != "cooldown" {
+			continue
+		}
+		interval, err := time.ParseDuration(a.Interval)
+		if err == nil && interval > 0 && interval < shortestCooldown {
+			shortestCooldown = interval
+		}
+	}
+
+	cadence := orderDispatchCadence{
+		interval:             shortestCooldown,
+		maxDispatchesPerTick: defaultMaxOrderDispatchesPerTick,
+	}
+	demand := cooldownLaunchDemandPerMinute(aa)
+	if demand == 0 {
+		return cadence
+	}
+
+	// Preserve the normal four-launch budget by increasing only the
+	// lightweight scheduler frequency when that can satisfy demand.
+	maxIntervalMinutes := float64(defaultMaxOrderDispatchesPerTick) / (demand * orderDispatchCapacityHeadroom)
+	maxInterval := time.Duration(maxIntervalMinutes * float64(time.Minute))
+	if maxInterval > 0 && maxInterval < cadence.interval {
+		cadence.interval = maxInterval
+	}
+
+	// Never create an order-only scan loop faster than the hard floor. A
+	// faster operator patrol is already running and does not need this clamp.
+	if patrolInterval > minOrderDispatchInterval && cadence.interval < minOrderDispatchInterval {
+		cadence.interval = minOrderDispatchInterval
+	}
+
+	required := int(math.Ceil(demand * cadence.interval.Minutes() * orderDispatchCapacityHeadroom))
+	if required > cadence.maxDispatchesPerTick {
+		cadence.maxDispatchesPerTick = required
+	}
+	if cadence.maxDispatchesPerTick > maxOrderDispatchesPerTick {
+		cadence.maxDispatchesPerTick = maxOrderDispatchesPerTick
+	}
+	return cadence
+}
 
 // defaultOrderTrackingDeleteAfterClose is derived from the canonical config
 // constant so both load-time defaults and the runtime fallback stay in sync.
@@ -291,6 +377,7 @@ type memoryOrderDispatcher struct {
 	stderr               io.Writer
 	maxTimeout           time.Duration
 	maxDispatchesPerTick int
+	cadence              orderDispatchCadence
 	nextDispatchStart    int
 	cfg                  *config.City
 	cityName             string
@@ -426,6 +513,7 @@ func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.Ci
 	}
 
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	cadence := computeOrderDispatchCadence(aa, cfg.Daemon.PatrolIntervalDuration())
 	return &memoryOrderDispatcher{
 		aa: aa,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
@@ -436,13 +524,18 @@ func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.Ci
 		rec:                  rec,
 		stderr:               lockedStderr(stderr),
 		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
-		maxDispatchesPerTick: defaultMaxOrderDispatchesPerTick,
+		maxDispatchesPerTick: cadence.maxDispatchesPerTick,
+		cadence:              cadence,
 		cfg:                  cfg,
 		cityName:             loadedCityName(cfg, cityPath),
 		cityPath:             cityPath,
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
+}
+
+func (m *memoryOrderDispatcher) orderDispatchCadence() orderDispatchCadence {
+	return m.cadence
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {

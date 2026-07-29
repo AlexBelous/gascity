@@ -11,8 +11,10 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 const (
@@ -145,7 +147,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// Track severity contributions across error-level entries. Warnings should
 	// stay visible without converting an advisory error into a blocking gate.
 	var blockingErrors, advisoryErrors int
-	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
+	suspendedRigs := orderFiringCurrentSuspendedRigs(cityPath, c.cfg)
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -217,7 +219,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	scanCfg := orderFiringCurrentScanConfig(cfg)
+	scanCfg := orderFiringCurrentScanConfig(cityPath, cfg)
 	scanCfg = orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath, cfg, scanCfg)
 	allOrders, err := orderdiscovery.ScanAll(cityPath, scanCfg, orderFiringCurrentScanOptions(cityPath))
 	if err != nil {
@@ -236,11 +238,11 @@ func orderFiringCurrentScanOptions(cityPath string) orderdiscovery.ScanOptions {
 	}
 }
 
-func orderFiringCurrentScanConfig(cfg *config.City) *config.City {
+func orderFiringCurrentScanConfig(cityPath string, cfg *config.City) *config.City {
 	if cfg == nil {
 		return nil
 	}
-	suspended := orderFiringCurrentSuspendedRigs(cfg)
+	suspended := orderFiringCurrentSuspendedRigs(cityPath, cfg)
 	if len(suspended) == 0 {
 		return cfg
 	}
@@ -279,7 +281,7 @@ func orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath string, orig
 	if originalCfg == nil || scanCfg == nil || len(scanCfg.Orders.Overrides) == 0 {
 		return scanCfg
 	}
-	suspended := orderFiringCurrentSuspendedRigs(originalCfg)
+	suspended := orderFiringCurrentSuspendedRigs(cityPath, originalCfg)
 	if len(suspended) == 0 {
 		return scanCfg
 	}
@@ -325,13 +327,15 @@ func orderFiringCurrentScanWithoutOverrides(cityPath string, cfg *config.City) (
 	return orderdiscovery.ScanAll(cityPath, &clone, orderFiringCurrentScanOptions(cityPath))
 }
 
-func orderFiringCurrentSuspendedRigs(cfg *config.City) map[string]bool {
+func orderFiringCurrentSuspendedRigs(cityPath string, cfg *config.City) map[string]bool {
 	out := make(map[string]bool)
 	if cfg == nil {
 		return out
 	}
+	st, _ := suspensionstate.Load(fsys.OSFS{}, cityPath)
 	for _, rig := range cfg.Rigs {
-		if rig.Suspended && strings.TrimSpace(rig.Name) != "" {
+		if suspensionstate.EffectiveRigSuspended(st, rig.Name, rig.EffectiveSuspendedOnStart()) &&
+			strings.TrimSpace(rig.Name) != "" {
 			out[rig.Name] = true
 		}
 	}

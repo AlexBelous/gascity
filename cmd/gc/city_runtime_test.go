@@ -1592,11 +1592,80 @@ type recordingOrderDispatcher struct {
 	drainCtxErr error
 }
 
+type cadenceRecordingOrderDispatcher struct {
+	*recordingOrderDispatcher
+	cadence orderDispatchCadence
+}
+
+func (r *cadenceRecordingOrderDispatcher) orderDispatchCadence() orderDispatchCadence {
+	return r.cadence
+}
+
 func (r *recordingOrderDispatcher) dispatch(ctx context.Context, cityRoot string, now time.Time) {
 	r.calls.Add(1)
 	r.called.Store(true)
 	if r.onDispatch != nil {
 		r.onDispatch(ctx, cityRoot, now)
+	}
+}
+
+func TestCityRuntimeRunDispatchesOrdersOnDedicatedCadenceBeforePatrol(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	stubManagedDoltStoreOpeners(t)
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Daemon.PatrolInterval = "1h"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var reconciles atomic.Int32
+	sp := runtime.NewFake()
+	recording := &recordingOrderDispatcher{}
+	od := &cadenceRecordingOrderDispatcher{
+		recordingOrderDispatcher: recording,
+		cadence: orderDispatchCadence{
+			interval:             10 * time.Millisecond,
+			maxDispatchesPerTick: defaultMaxOrderDispatchesPerTick,
+		},
+	}
+	recording.onDispatch = func(context.Context, string, time.Time) {
+		if recording.calls.Load() >= 2 {
+			cancel()
+		}
+	}
+
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			reconciles.Add(1)
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cr.od = od
+	cs := newControllerState(context.Background(), cfg, cr.sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if got := recording.calls.Load(); got < 2 {
+		t.Fatalf("order dispatch calls = %d, want startup + dedicated cadence dispatch", got)
+	}
+	if got := reconciles.Load(); got != 1 {
+		t.Fatalf("full reconciles = %d, want only startup reconcile before one-hour patrol", got)
 	}
 }
 

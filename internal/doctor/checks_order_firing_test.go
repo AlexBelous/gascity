@@ -12,7 +12,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestOrderFiringCurrent_NeverFired_BeyondUptime(t *testing.T) {
@@ -234,6 +236,66 @@ func TestOrderFiringCurrent_SkipsSuspendedRigOrders(t *testing.T) {
 	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
 		t.Fatalf("details = %v, suspended rig order should be skipped", result.Details)
 	}
+}
+
+func TestOrderFiringCurrent_UsesEffectiveRigSuspension(t *testing.T) {
+	tests := []struct {
+		name             string
+		suspendedOnStart bool
+		runtimeOverride  *bool
+		wantSkipped      bool
+	}{
+		{name: "suspended on start", suspendedOnStart: true, wantSkipped: true},
+		{name: "runtime suspended", runtimeOverride: boolPointer(true), wantSkipped: true},
+		{name: "runtime resume overrides startup default", suspendedOnStart: true, runtimeOverride: boolPointer(false), wantSkipped: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+			cityPath, cfg := orderFiringTestCity(t)
+			rigPath := filepath.Join(cityPath, "rigs", "parked")
+			rigFormulas := filepath.Join(rigPath, "formulas")
+			rigOrders := filepath.Join(rigPath, "orders")
+			if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+				t.Fatalf("creating rig orders dir: %v", err)
+			}
+			cfg.Rigs = []config.Rig{{
+				Name:             "parked",
+				Path:             rigPath,
+				SuspendedOnStart: tt.suspendedOnStart,
+			}}
+			cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+			if tt.runtimeOverride != nil {
+				if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "parked", tt.runtimeOverride); err != nil {
+					t.Fatalf("write runtime suspension state: %v", err)
+				}
+			}
+			writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
+			)
+
+			result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+			if tt.wantSkipped {
+				if result.Status != StatusOK {
+					t.Fatalf("status = %v, want OK for effectively suspended rig; details = %v", result.Status, result.Details)
+				}
+				if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+					t.Fatalf("details = %v, effectively suspended rig order should be skipped", result.Details)
+				}
+				return
+			}
+			if result.Status != StatusError {
+				t.Fatalf("status = %v, want stale error for explicitly resumed rig; details = %v", result.Status, result.Details)
+			}
+		})
+	}
+}
+
+func boolPointer(v bool) *bool {
+	return &v
 }
 
 func TestOrderFiringCurrent_SkipsSuspendedRigOverrides(t *testing.T) {

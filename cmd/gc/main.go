@@ -1392,6 +1392,22 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 	if haveMode {
 		mode = modeOverride
 	}
+	openBd := func() (beads.Store, error) {
+		var storeEnv map[string]string
+		var envErr error
+		if filepath.Clean(scopeRoot) == filepath.Clean(runtimeCityPath) {
+			storeEnv, envErr = bdRuntimeEnvWithError(runtimeCityPath)
+		} else {
+			storeEnv, envErr = bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, scopeRoot)
+		}
+		if envErr != nil {
+			return nil, envErr
+		}
+		if _, err := bdExecutableFromEnv([]string{"BD_BIN=" + storeEnv["BD_BIN"]}); err != nil {
+			return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
+		}
+		return openBdStoreAt(scopeRoot, runtimeCityPath, storeEnv)
+	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:         scopeRoot,
 		CityPath:          runtimeCityPath,
@@ -1407,26 +1423,14 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 		OpenFileStore: func() (beads.Store, error) {
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
-		OpenBdStore: func() (beads.Store, error) {
-			var storeEnv map[string]string
-			var envErr error
-			if filepath.Clean(scopeRoot) == filepath.Clean(runtimeCityPath) {
-				storeEnv, envErr = bdRuntimeEnvWithError(runtimeCityPath)
-			} else {
-				storeEnv, envErr = bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, scopeRoot)
-			}
-			if envErr != nil {
-				return nil, envErr
-			}
-			if _, err := bdExecutableFromEnv([]string{"BD_BIN=" + storeEnv["BD_BIN"]}); err != nil {
-				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
-			}
-			return openBdStoreAt(scopeRoot, runtimeCityPath, storeEnv)
-		},
+		OpenBdStore:   openBd,
 		OpenExecStore: func() (beads.Store, error) {
 			return openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
 		},
 		OpenNativeStore: func() (beads.Store, error) {
+			if beads.NativePostgresReadActivated(scopeRoot) {
+				return openNativePostgresReadStore(context.Background(), scopeRoot, openBd)
+			}
 			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, nil, scopeRoot)
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)

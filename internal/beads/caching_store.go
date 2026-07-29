@@ -1230,6 +1230,17 @@ type cacheDependencySnapshotStore interface {
 	dependencySnapshotForCache(ids []string) (map[string][]Dep, bool, error)
 }
 
+// reconcileDepAuthoritativeStore is satisfied by backings whose List hydrates
+// each bead's complete dependencies, so during reconcile an empty fresh dep set
+// is an authoritative removal rather than a coverage hole. depsForReconcileLocked
+// keys the dep-removal-propagation carve-out on this capability instead of a
+// concrete *BdStore assertion, so the native postgres read wrapper (whose List
+// also hydrates complete deps) propagates an out-of-band `bd dep remove` instead
+// of resurrecting the removed edge every cycle.
+type reconcileDepAuthoritativeStore interface {
+	reconcileDepsAreAuthoritative() bool
+}
+
 type readyProjectionEnrichmentStore interface {
 	enrichReadyProjectionForCache([]Bead) ([]Bead, error)
 }

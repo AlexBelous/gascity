@@ -343,6 +343,8 @@ func conditionalStoreKind(store Store) string {
 		return "CachingStore"
 	case *NativeDoltStore:
 		return storeNameNativeDoltStore
+	case *NativePostgresReadStore:
+		return BeadsStoreNameNativePostgresStore
 	case nil:
 		return "<nil>"
 	default:

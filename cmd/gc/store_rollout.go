@@ -109,6 +109,11 @@ func conditionalWritesEventStoreKind(kind string) string {
 		return "bd"
 	case beads.BeadsStoreNameNativeDoltStore:
 		return "native"
+	case beads.BeadsStoreNameNativePostgresStore:
+		// The native postgres read store embeds *BdStore and its entire
+		// conditional-write surface IS bd's (writes always go through bd), so on
+		// the wire it is a bd store — mirroring the DoltliteReadStore mapping.
+		return "bd"
 	case beads.BeadsStoreNameFileStore:
 		return "file"
 	case "MemStore":

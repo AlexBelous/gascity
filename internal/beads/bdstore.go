@@ -431,6 +431,17 @@ func (s *BdStore) listIncludesCompleteDependencies() bool {
 	return false
 }
 
+// reconcileDepsAreAuthoritative reports whether an EMPTY fresh dependency set
+// from a reconcile List is an authoritative removal (propagate it) rather than
+// a missing-data artifact (resurrect the cached deps). bd list --json hydrates
+// each bead's complete deps, so for BdStore empty means removed. This is the
+// capability the caching-store reconcile carve-out keys on instead of a
+// concrete *BdStore type assertion, so any wrapper whose List also hydrates
+// complete deps (e.g. the native postgres read store) is treated the same.
+func (s *BdStore) reconcileDepsAreAuthoritative() bool {
+	return true
+}
+
 // Init initializes a beads database via bd init --server. This is an admin
 // operation on BdStore directly, not part of the Store interface (MemStore/
 // FileStore don't need it). If host is non-empty, --server-host (and

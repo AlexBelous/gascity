@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-727}"
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
+# 729: +2 over the prior 727 for the native postgres read path — github.com/jackc/pgx/v5
+# and github.com/jackc/puddle/v2 are net-new (pgpassfile was already present,
+# pgservicefile only version-swapped). Re-ratchet consciously if pgx's graph moves.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-729}"
+# 272MB: pgx adds ~1MB to the gc binary, leaving the prior 270MB cap at ~0.1%
+# headroom; re-set to a deliberate margin in the same change that added pgx.
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-272000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"

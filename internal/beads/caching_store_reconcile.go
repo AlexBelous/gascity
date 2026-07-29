@@ -711,7 +711,7 @@ func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap 
 		return cloneDeps(depMap[id])
 	}
 	freshDeps := depsFromBeadFields(freshBead)
-	if _, ok := c.backing.(*BdStore); ok {
+	if backing, ok := c.backing.(reconcileDepAuthoritativeStore); ok && backing.reconcileDepsAreAuthoritative() {
 		return freshDeps
 	}
 	if len(freshDeps) == 0 {

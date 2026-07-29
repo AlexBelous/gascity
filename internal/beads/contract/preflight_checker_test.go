@@ -365,6 +365,95 @@ func TestPreflightUnreadableScopeReturnsError(t *testing.T) {
 	assertPreflightReadOnly(t, fs)
 }
 
+func TestPreflightNativePostgresReadReducedEligible(t *testing.T) {
+	t.Setenv(NativePostgresReadEnv, "1")
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "postgres",
+		"storage_endpoint": "postgres://ro@db:5432",
+		"storage_database": "bd_prj_x",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "postgres"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	if len(result.Checks) != 2 {
+		t.Fatalf("reduced preflight should run only provider+metadata, got %d checks: %+v", len(result.Checks), result.Checks)
+	}
+	assertCheckState(t, result, PreflightCheckProviderContract, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckPass)
+	assertPreflightReadOnly(t, checker.FS.(*fsys.Fake))
+}
+
+func TestPreflightNativePostgresReadProviderFailFallsBack(t *testing.T) {
+	t.Setenv(NativePostgresReadEnv, "1")
+	scope := "/city"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(preflightMetadataJSON(`{
+		"backend": "postgres",
+		"storage_endpoint": "postgres://ro@db:5432",
+		"project_id": "gc-local"
+	}`))
+	checker := PreflightChecker{FS: fs, Provider: "exec:not-bd"}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckState(t, result, PreflightCheckProviderContract, PreflightCheckFail)
+	if result.Fallback != PreflightFallbackBdStore {
+		t.Errorf("Fallback = %v, want %v", result.Fallback, PreflightFallbackBdStore)
+	}
+}
+
+func TestPreflightNativePostgresReadFlagOffKeepsHistoricalFail(t *testing.T) {
+	t.Setenv(NativePostgresReadEnv, "")
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "postgres",
+		"storage_endpoint": "postgres://ro@db:5432",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "postgres"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckOrder(t, result) // full preflight ran
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
+}
+
+func TestPreflightNativePostgresReadSplitFieldsOnlyNotEligible(t *testing.T) {
+	// Flag on but only the legacy split fields (no storage_endpoint): the
+	// native postgres store cannot open this form, so eligibility, activation,
+	// and open agree it is NOT native-read eligible.
+	t.Setenv(NativePostgresReadEnv, "1")
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "postgres",
+		"postgres_host": "db.example.com",
+		"postgres_port": "5432",
+		"postgres_user": "operator",
+		"postgres_database": "gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "postgres"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if result.NativeStoreEligible {
+		t.Fatal("split-field-only postgres scope must not be native-read eligible")
+	}
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
+}
+
 func testPreflightChecker(metadata string, ctx PreflightBDContext, dbProjectID string) PreflightChecker {
 	scope := "/city"
 	fs := fsys.NewFake()
@@ -486,5 +575,22 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
 			}
 		})
+	}
+}
+
+// TestPreflightNativePostgresReadRequiresPostgresBackend pins the reduced
+// preflight to backend=postgres: inconsistent metadata (backend=dolt with a
+// leftover storage_endpoint) must take the FULL dolt preflight, never the
+// reduced form — otherwise a read-write dolt native open would run with the
+// dolt safety checks skipped.
+func TestPreflightNativePostgresReadRequiresPostgresBackend(t *testing.T) {
+	t.Setenv(NativePostgresReadEnv, "1")
+	m := preflightMetadata{Backend: "dolt", StorageEndpoint: "postgres://u@h/db"}
+	if m.hasPostgresNativeReadForm() {
+		t.Fatal("backend=dolt with storage_endpoint must NOT qualify for the reduced native-read preflight")
+	}
+	m.Backend = "postgres"
+	if !m.hasPostgresNativeReadForm() {
+		t.Fatal("backend=postgres with storage_endpoint must qualify")
 	}
 }

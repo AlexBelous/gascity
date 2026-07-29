@@ -165,10 +165,21 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	return opts.stampedResult(StoreOpenResult{
 		Store: native,
 		Diagnostic: BeadsDiagnostic{
-			Store:               storeNameNativeDoltStore,
+			Store:               nativeStoreDiagnosticName(native),
 			NativeStoreEligible: true,
 		},
 	}, nil)
+}
+
+// nativeStoreDiagnosticName returns the diagnostic store name for a
+// successfully opened native store, distinguishing the postgres read store from
+// the dolt native store so status snapshots, the dashboard, and gc doctor
+// report which native path is actually live on a scope.
+func nativeStoreDiagnosticName(store Store) string {
+	if _, ok := store.(*NativePostgresReadStore); ok {
+		return BeadsStoreNameNativePostgresStore
+	}
+	return storeNameNativeDoltStore
 }
 
 func (opts StoreOpenOptions) openBdFallback(provider string, diag BeadsDiagnostic) (StoreOpenResult, error) {

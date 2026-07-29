@@ -398,6 +398,9 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		s.SetEnv(env)
 		return s, nil
 	}
+	openBd := func() (beads.Store, error) {
+		return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix), nil
+	}
 	result, err := controllerStateOpenRigStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:                   scopeRoot,
 		CityPath:                    cs.cityPath,
@@ -412,11 +415,12 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			}
 			return store, nil
 		},
-		OpenBdStore: func() (beads.Store, error) {
-			return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix), nil
-		},
+		OpenBdStore: openBd,
 		OpenExecStore: openExecStore,
 		OpenNativeStore: func() (beads.Store, error) {
+			if beads.NativePostgresReadActivated(scopeRoot) {
+				return openNativePostgresReadStore(context.Background(), scopeRoot, openBd)
+			}
 			env, err := nativeDoltOpenEnvForScope(cs.cityPath, cfg, scopeRoot)
 			if err != nil {
 				return nil, fmt.Errorf("project native rig store env %s: %w", scopeRoot, err)

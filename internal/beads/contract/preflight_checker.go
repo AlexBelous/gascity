@@ -3,12 +3,27 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// NativePostgresReadEnv activates the in-process native Postgres READ path.
+// When unset the preflight keeps its historical "postgres → BdStore" verdict;
+// when "1"/"true" a postgres scope with a native read endpoint becomes
+// native-read eligible through the reduced preflight below.
+const NativePostgresReadEnv = "GC_NATIVE_POSTGRES_READ"
+
+// NativePostgresReadEnabled reports whether the native Postgres read path is
+// switched on via NativePostgresReadEnv. It is the single flag reader shared by
+// the preflight and the cmd/gc store-open wiring so the two never disagree.
+func NativePostgresReadEnabled() bool {
+	v := strings.TrimSpace(os.Getenv(NativePostgresReadEnv))
+	return v == "1" || strings.EqualFold(v, "true")
+}
 
 // PreflightBDContext is the bd-reported backend state for a beads scope.
 type PreflightBDContext struct {
@@ -50,6 +65,9 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	if err != nil {
 		return PreflightResult{}, err
 	}
+	if NativePostgresReadEnabled() && metadata.hasPostgresNativeReadForm() {
+		return c.nativePostgresReadResult(scope, metadata), nil
+	}
 	bdCtx, bdCtxErr := c.readBDContext(scope)
 
 	checks := []PreflightCheckResult{
@@ -74,6 +92,43 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		result.FallbackReason = preflightFallbackReason(checks)
 	}
 	return NewPreflightResult(result), nil
+}
+
+// nativePostgresReadResult is the reduced preflight for a postgres scope that
+// opted into the native READ path (NativePostgresReadEnv + a storage_endpoint).
+// The native postgres store is read-only and delegates every write — and any
+// read it cannot serve — to the per-call bd store, so the dolt-server safety
+// checks (bd-context agreement, dolt server mode, dolt identity probe, bd/dolt
+// version parity, dolt contract shape) do not apply and would otherwise block a
+// postgres endpoint whose bd context still reports the dolt-compat backend. Only
+// the provider contract and the metadata backend are gated here; either failing
+// drops the scope back to BdStore exactly as before.
+//
+// The two checks the dolt path's full preflight would run that DO still matter —
+// project-identity match and schema/version parity — are not skipped, only
+// MOVED: the native postgres store verifies them at open time against the live
+// database (beads.metadata._project_id and pg_schema_version plus a schema-shape
+// probe) and permanently disables itself, falling back to bd, on any mismatch or
+// absent sentinel. That open-time gate reads the actual postgres backend, unlike
+// the dolt-oriented preflight checks, which cannot.
+func (c PreflightChecker) nativePostgresReadResult(scope string, metadata preflightMetadata) PreflightResult {
+	checks := []PreflightCheckResult{
+		c.checkProvider(),
+		c.checkMetadataBackend(metadata),
+	}
+	verdict := preflightVerdictForChecks(checks)
+	result := PreflightResult{
+		Verdict:             verdict,
+		Scope:               scope,
+		Checks:              checks,
+		RepairSteps:         preflightRepairSteps(checks),
+		NativeStoreEligible: verdict == PreflightVerdictEligible,
+	}
+	if verdict != PreflightVerdictEligible {
+		result.Fallback = PreflightFallbackBdStore
+		result.FallbackReason = preflightFallbackReason(checks)
+	}
+	return NewPreflightResult(result)
 }
 
 func (c PreflightChecker) readMetadata(scope string) (preflightMetadata, error) {
@@ -134,6 +189,9 @@ func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) Prefl
 	case "dolt":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata backend is dolt", details)
 	case "postgres":
+		if NativePostgresReadEnabled() && metadata.hasPostgresNativeReadForm() {
+			return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata backend is postgres (storage_endpoint form, native read)", details)
+		}
 		if hasDSN && !hasSplit {
 			return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckWarn, "Metadata backend is postgres (postgres_dsn form)", details)
 		}
@@ -355,6 +413,8 @@ type preflightMetadata struct {
 	PostgresPort     string `json:"postgres_port"`
 	PostgresUser     string `json:"postgres_user"`
 	PostgresDatabase string `json:"postgres_database"`
+	StorageEndpoint  string `json:"storage_endpoint"`
+	StorageDatabase  string `json:"storage_database"`
 	ProjectID        string `json:"project_id"`
 }
 
@@ -368,8 +428,26 @@ func (m preflightMetadata) trimmed() preflightMetadata {
 	m.PostgresPort = strings.TrimSpace(m.PostgresPort)
 	m.PostgresUser = strings.TrimSpace(m.PostgresUser)
 	m.PostgresDatabase = strings.TrimSpace(m.PostgresDatabase)
+	m.StorageEndpoint = strings.TrimSpace(m.StorageEndpoint)
+	m.StorageDatabase = strings.TrimSpace(m.StorageDatabase)
 	m.ProjectID = strings.TrimSpace(m.ProjectID)
 	return m
+}
+
+// hasPostgresNativeReadForm reports whether the metadata carries a Postgres
+// endpoint the native read store can actually open: the storage_endpoint form
+// the bd-enterprise backend writes. It is the SINGLE predicate shared with
+// beads.NativePostgresReadActivated (the cmd/gc branch selector) and
+// resolveNativePostgresDSN (the opener), so eligibility, activation, and open
+// never disagree. The legacy split host/port/user/db fields are deliberately
+// NOT accepted here: the native postgres read store cannot open them, so a
+// split-only scope stays on the historical postgres→BdStore verdict instead of
+// being marked eligible for an open that would immediately fail. Backend must
+// also BE postgres: an inconsistent metadata (backend=dolt with a leftover
+// storage_endpoint) would otherwise take the reduced preflight and then open
+// the read-write dolt native store with every dolt safety check skipped.
+func (m preflightMetadata) hasPostgresNativeReadForm() bool {
+	return strings.TrimSpace(m.Backend) == "postgres" && m.StorageEndpoint != ""
 }
 
 func (m preflightMetadata) hasPostgresDSN() bool {

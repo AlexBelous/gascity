@@ -153,6 +153,27 @@ func startControllerSocket(
 	controlDispatcherCh chan struct{},
 	admitSessionStart sessionStartSocketAdmitter,
 ) (net.Listener, error) {
+	return startControllerSocketWithSessionReconcilerStatus(
+		cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh,
+		pokeCh, controlDispatcherCh, admitSessionStart, nil,
+	)
+}
+
+// startControllerSocketWithSessionReconcilerStatus starts a controller socket
+// that can serve a read-only live session-reconciler status snapshot.
+func startControllerSocketWithSessionReconcilerStatus(
+	cityPath string,
+	hostingMode controllerHostingMode,
+	cancelFn context.CancelFunc,
+	forceShutdown *atomic.Bool,
+	dirty *atomic.Bool,
+	reloadReqCh chan reloadRequest,
+	convergenceReqCh chan convergenceRequest,
+	pokeCh chan struct{},
+	controlDispatcherCh chan struct{},
+	admitSessionStart sessionStartSocketAdmitter,
+	sessionReconcilerStatus func() sessionReconcilerTraceStatus,
+) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
 	}
@@ -172,7 +193,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart)
+			go handleControllerConnWithSessionReconcilerStatus(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart, sessionReconcilerStatus)
 		}
 	}()
 	return lis, nil
@@ -196,6 +217,23 @@ func handleControllerConn(
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
 	admitSessionStart sessionStartSocketAdmitter,
+) {
+	handleControllerConnWithSessionReconcilerStatus(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart, nil)
+}
+
+func handleControllerConnWithSessionReconcilerStatus(
+	conn net.Conn,
+	cityPath string,
+	hostingMode controllerHostingMode,
+	cancelFn context.CancelFunc,
+	forceShutdown *atomic.Bool,
+	dirty *atomic.Bool,
+	reloadReqCh chan reloadRequest,
+	convergenceReqCh chan convergenceRequest,
+	pokeCh chan struct{},
+	controlDispatcherCh chan struct{},
+	admitSessionStart sessionStartSocketAdmitter,
+	sessionReconcilerStatus func() sessionReconcilerTraceStatus,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -264,7 +302,7 @@ func handleControllerConn(
 				}
 			}
 		case line == "trace-status":
-			handleTraceStatusSocketCmd(conn, cityPath)
+			handleTraceStatusSocketCmd(conn, cityPath, sessionReconcilerStatus)
 		}
 	}
 }
@@ -1334,7 +1372,24 @@ func runController(
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart)
+	lis, err := startControllerSocketWithSessionReconcilerStatus(
+		cityPath,
+		controllerHostingStandalone,
+		cancel,
+		forceShutdown,
+		configDirty,
+		reloadReqCh,
+		convergenceReqCh,
+		pokeCh,
+		controlDispatcherCh,
+		admitSessionStart,
+		func() sessionReconcilerTraceStatus {
+			if cr := sessionStartRuntime.Load(); cr != nil {
+				return cr.sessionReconcilerTraceStatus()
+			}
+			return unavailableSessionReconcilerTraceStatus()
+		},
+	)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

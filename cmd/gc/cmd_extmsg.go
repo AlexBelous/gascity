@@ -20,6 +20,14 @@ import (
 // envExternalOrigin is the env var the controller sets when nudging a session
 // for an externally-originated message. Its value is a JSON-encoded
 // externalOriginEnvelope carrying the ConversationRef the session should reply to.
+//
+// This is per-invocation session-context data, not a rollout/capability knob —
+// it carries no on/off or mode semantic and selects no code path, so it does
+// not belong in internal/rollout (rollout.Spec has no shape for it; see
+// rollout.Spec.SelectsBetween). Same pattern as GC_EXEC_INFO
+// (internal/clientauth) and GC_GRANT_INFO (internal/clientgrant): structured
+// per-call data handed to a fresh process via env because there is no other
+// side channel. Design ruling: ga-wsfbqe.
 const envExternalOrigin = "GC_EXTERNAL_ORIGIN"
 
 // externalOriginEnvelope mirrors extmsg.ExternalOriginEnvelope for JSON

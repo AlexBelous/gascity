@@ -411,7 +411,13 @@ func failedCreateIdentityReleased(b beads.Bead) bool {
 // spawns starved for hours behind drained predecessors' aliases). Mirrors the
 // failed-create release semantics.
 func deadIdentityReleased(b beads.Bead) bool {
-	if strings.TrimSpace(b.Metadata["drain_at"]) != "" {
+	// state=drained is the TERMINAL drained record. The drain_at stamp alone is
+	// NOT sufficient: a drain request that was canceled (assigned work) leaves
+	// drain_at on a live, working session — releasing its alias then makes the
+	// session unmatchable, so the reconciler re-judges it orphaned every tick
+	// and eventually kills it mid-turn (observed: the apply-fixes step's
+	// workers dying in a drain/cancel loop).
+	if strings.TrimSpace(b.Metadata["state"]) == string(StateDrained) {
 		return true
 	}
 	return strings.TrimSpace(b.Metadata["sleep_reason"]) == LifecycleReasonRuntimeMissing

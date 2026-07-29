@@ -15,6 +15,7 @@ import (
 const (
 	sessionStartControllerMaxDistinct = 4096
 	sessionStartControllerMaxRetries  = 5
+	sessionStartSeedPageSize          = 64
 )
 
 type sessionStartOwnership uint8
@@ -300,19 +301,28 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 		return err
 	}
 	now := time.Now().UTC()
-	for _, info := range snapshot.OpenInfos() {
-		if validateSessionStartAdmission(info.ID, sessionStartAdmissionAntiEntropy) != nil {
-			continue
+	cursor := 0
+	var page []sessionpkg.Info
+	return controller.StartAuthoritativeSeed(func(ctx context.Context) (string, bool) {
+		for {
+			if ctx.Err() != nil {
+				return "", false
+			}
+			if len(page) == 0 {
+				page, cursor = snapshot.openInfoPage(cursor, sessionStartSeedPageSize)
+				if len(page) == 0 {
+					return "", false
+				}
+			}
+			info := page[0]
+			page = page[1:]
+			if validateSessionStartAdmission(info.ID, sessionStartAdmissionAntiEntropy) != nil ||
+				!resolveExactSessionStartOrDrainAckStopOwnership(info, stateSnapshot.Config, now) {
+				continue
+			}
+			return info.ID, true
 		}
-		owned := resolveExactSessionStartOrDrainAckStopOwnership(info, stateSnapshot.Config, now)
-		if !owned {
-			continue
-		}
-		if _, err := controller.Admit(info.ID, sessionStartAdmissionAntiEntropy); err != nil {
-			return fmt.Errorf("admitting %q from authoritative snapshot: %w", info.ID, err)
-		}
-	}
-	return nil
+	})
 }
 
 func (cr *CityRuntime) seedActiveSessionStartController(snapshot *sessionBeadSnapshot) {

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1433,6 +1435,8 @@ func TestCityRuntimeSessionStartEventOverflowDoesNotBlockOnFullFallback(t *testi
 	pokeCh <- struct{}{}
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
+	var releaseFirstOnce sync.Once
+	release := func() { releaseFirstOnce.Do(func() { close(releaseFirst) }) }
 	firstID := ""
 	original := newCitySessionStartController
 	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
@@ -1449,7 +1453,7 @@ func TestCityRuntimeSessionStartEventOverflowDoesNotBlockOnFullFallback(t *testi
 	t.Cleanup(func() { newCitySessionStartController = original })
 	cr := &CityRuntime{cfg: env.cfg, sp: env.sp, cs: cs, pokeCh: pokeCh, stdout: io.Discard, stderr: io.Discard}
 	t.Cleanup(cr.stopSessionStartController)
-	t.Cleanup(func() { close(releaseFirst) })
+	t.Cleanup(release)
 	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
 		t.Fatalf("ensureSessionStartController: %v", err)
 	}
@@ -1503,6 +1507,92 @@ func TestCityRuntimeSessionStartSeedOverflowDoesNotRequestLegacyFallback(t *test
 	case <-pokeCh:
 		t.Fatal("seed-time overflow requested legacy fallback")
 	default:
+	}
+}
+
+func TestCityRuntimeSessionStartSeedLeavesHeadroomForExactWakeBeyondAdmissionLimit(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	cs := coherentSessionStartControllerStateForTest(cfg, runtime.NewFake(), beads.NewMemStore(), rollout.Auto)
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var releaseFirstOnce sync.Once
+	release := func() { releaseFirstOnce.Do(func() { close(releaseFirst) }) }
+	reconciled := make(chan string, sessionStartControllerMaxDistinct+2)
+	firstID := "gcs-seed-0000"
+	original := newCitySessionStartController
+	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
+		opts.Workers = 1
+		opts.Reconcile = func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == firstID {
+				close(firstEntered)
+				<-releaseFirst
+			}
+			reconciled <- admission.SessionID
+			return nil
+		}
+		return original(opts)
+	}
+	t.Cleanup(func() { newCitySessionStartController = original })
+	cr := &CityRuntime{cfg: cfg, sp: cs.sp, cs: cs, stdout: io.Discard, stderr: io.Discard}
+	t.Cleanup(cr.stopSessionStartController)
+	t.Cleanup(release)
+
+	infos := make([]session.Info, 0, sessionStartControllerMaxDistinct+1)
+	for i := 0; i <= sessionStartControllerMaxDistinct; i++ {
+		infos = append(infos, session.Info{
+			ID:          fmt.Sprintf("gcs-seed-%04d", i),
+			Type:        session.BeadType,
+			Template:    "worker",
+			WakeRequest: string(session.WakeCauseExplicit),
+		})
+	}
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(infos)); err != nil {
+		t.Fatalf("ensureSessionStartController: %v", err)
+	}
+	awaitClose(t, firstEntered, "first authoritative seed reconciliation")
+	controller := cr.sessionStartController
+	if got := controller.Pending(); got != 1 {
+		t.Fatalf("pending authoritative keys while first reconciliation is blocked = %d, want 1", got)
+	}
+	if outcome, err := controller.Admit("gcs-exact-wake", sessionStartAdmissionExplicitWake); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("admit exact wake = %q, %v, want accepted", outcome, err)
+	}
+	if got := controller.Pending(); got != 2 {
+		t.Fatalf("pending keys after exact wake = %d, want 2", got)
+	}
+
+	release()
+	first := receiveSessionStartID(t, reconciled)
+	if first != firstID {
+		t.Fatalf("first reconciliation = %q, want %q", first, firstID)
+	}
+	if second := receiveSessionStartID(t, reconciled); second != "gcs-exact-wake" {
+		t.Fatalf("second reconciliation = %q, want immediate exact wake", second)
+	}
+
+	seen := map[string]bool{firstID: true, "gcs-exact-wake": true}
+	for len(seen) < len(infos)+1 {
+		id := receiveSessionStartID(t, reconciled)
+		if seen[id] {
+			t.Fatalf("session %q reconciled more than once", id)
+		}
+		seen[id] = true
+	}
+	for _, info := range infos {
+		if !seen[info.ID] {
+			t.Fatalf("authoritative seed session %q was not reconciled", info.ID)
+		}
+	}
+}
+
+func receiveSessionStartID(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case id := <-ch:
+		return id
+	case <-time.After(hangBudget):
+		t.Fatal("timed out waiting for session-start reconciliation")
+		return ""
 	}
 }
 
@@ -1575,6 +1665,7 @@ func TestCityRuntimeSessionStartAntiEntropySeedsWithoutQueueAlarm(t *testing.T) 
 
 	cr.seedActiveSessionStartController(snapshot)
 
+	awaitCond(t, func() bool { return controller.Pending() == 1 }, "periodic authoritative seed admission")
 	if got := controller.Pending(); got != 1 {
 		t.Fatalf("pending keys = %d, want 1 from periodic authoritative seed without a queue alarm", got)
 	}

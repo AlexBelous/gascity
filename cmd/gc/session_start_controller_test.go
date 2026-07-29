@@ -295,6 +295,56 @@ func TestSessionStartControllerStopClosesAdmissionAndJoinsWorkers(t *testing.T) 
 	awaitClose(t, stopped, "controller stop")
 }
 
+func TestSessionStartControllerStopJoinsAuthoritativeSeedBeforeQueueDrain(t *testing.T) {
+	firstStarted := make(chan struct{})
+	reconciled := make(chan string, 2)
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 2,
+		MaxRetries:  1,
+		Reconcile: func(ctx context.Context, admission sessionStartAdmission) error {
+			reconciled <- admission.SessionID
+			if admission.SessionID == "gcs-seed-stop-first" {
+				close(firstStarted)
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return nil
+		},
+	})
+	first := true
+	producerBlocked := make(chan struct{})
+	if err := controller.StartAuthoritativeSeed(func(ctx context.Context) (string, bool) {
+		if first {
+			first = false
+			return "gcs-seed-stop-first", true
+		}
+		close(producerBlocked)
+		<-ctx.Done()
+		return "", false
+	}); err != nil {
+		t.Fatalf("StartAuthoritativeSeed: %v", err)
+	}
+	awaitClose(t, firstStarted, "first authoritative seed reconciliation")
+	awaitClose(t, producerBlocked, "authoritative seed producer waiting for cancellation")
+
+	stopped := make(chan struct{})
+	go func() {
+		controller.Stop()
+		close(stopped)
+	}()
+	awaitClose(t, controller.ctx.Done(), "controller cancellation")
+	awaitClose(t, stopped, "controller stop")
+	if got := <-reconciled; got != "gcs-seed-stop-first" {
+		t.Fatalf("reconciliation before stop = %q, want first seed", got)
+	}
+	select {
+	case got := <-reconciled:
+		t.Fatalf("Stop admitted a seed after cancellation: %q", got)
+	default:
+	}
+}
+
 func mustStartSessionStartController(t *testing.T, opts sessionStartControllerOptions) *sessionStartController {
 	t.Helper()
 	controller, err := newSessionStartController(opts)

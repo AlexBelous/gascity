@@ -307,6 +307,29 @@ func (s *sessionBeadSnapshot) OpenInfos() []sessionpkg.Info {
 	return result
 }
 
+// openInfoPage returns a detached, bounded page from the snapshot's canonical
+// open-session order. It keeps large authoritative scans out of the snapshot
+// lock and avoids copying the entire fleet for one consumer.
+func (s *sessionBeadSnapshot) openInfoPage(offset, limit int) ([]sessionpkg.Info, int) {
+	if s == nil || limit <= 0 {
+		return nil, offset
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(s.openInfos) {
+		return nil, len(s.openInfos)
+	}
+	end := min(offset+limit, len(s.openInfos))
+	page := make([]sessionpkg.Info, end-offset)
+	for i := range page {
+		page[i] = cloneSessionInfo(s.openInfos[offset+i])
+	}
+	return page, end
+}
+
 // WriteBackReconcileInfos folds the reconciler's post-tick Info snapshot back onto
 // the carrier's open rows, so post-tick consumers observe the tick's in-memory
 // heals / dedup-retires / closes. Before W-tick the reconciler mutated the raw

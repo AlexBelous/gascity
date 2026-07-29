@@ -72,17 +72,20 @@ type sessionStartControllerOptions struct {
 // reconciliation. The durable store remains authoritative: admissions are only
 // hints naming which exact key to reread.
 type sessionStartController struct {
-	queue        workqueue.TypedRateLimitingInterface[string]
-	workers      int
-	maxDistinct  int
-	maxRetries   int
-	reconcile    func(context.Context, sessionStartAdmission) error
-	observer     func(sessionStartReconcileResult)
-	now          func() time.Time
-	stderr       io.Writer
-	admissions   map[string]sessionStartAdmission
-	nextVersion  uint64
-	auditPending bool
+	queue           workqueue.TypedRateLimitingInterface[string]
+	workers         int
+	maxDistinct     int
+	maxRetries      int
+	reconcile       func(context.Context, sessionStartAdmission) error
+	observer        func(sessionStartReconcileResult)
+	now             func() time.Time
+	stderr          io.Writer
+	admissions      map[string]sessionStartAdmission
+	nextVersion     uint64
+	auditPending    bool
+	seedOutstanding map[string]struct{}
+	seedActive      bool
+	seedCapacity    chan struct{}
 
 	mu        sync.Mutex
 	started   bool
@@ -91,6 +94,7 @@ type sessionStartController struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	workerWG  sync.WaitGroup
+	seedWG    sync.WaitGroup
 	stopOnce  sync.Once
 	stderrMu  sync.Mutex
 }
@@ -119,15 +123,17 @@ func newSessionStartController(opts sessionStartControllerOptions) (*sessionStar
 		stderr = io.Discard
 	}
 	return &sessionStartController{
-		queue:       workqueue.NewTypedRateLimitingQueue(rateLimiter),
-		workers:     opts.Workers,
-		maxDistinct: opts.MaxDistinct,
-		maxRetries:  opts.MaxRetries,
-		reconcile:   opts.Reconcile,
-		observer:    opts.Observer,
-		now:         now,
-		stderr:      stderr,
-		admissions:  make(map[string]sessionStartAdmission, opts.MaxDistinct),
+		queue:           workqueue.NewTypedRateLimitingQueue(rateLimiter),
+		workers:         opts.Workers,
+		maxDistinct:     opts.MaxDistinct,
+		maxRetries:      opts.MaxRetries,
+		reconcile:       opts.Reconcile,
+		observer:        opts.Observer,
+		now:             now,
+		stderr:          stderr,
+		admissions:      make(map[string]sessionStartAdmission, opts.MaxDistinct),
+		seedOutstanding: make(map[string]struct{}),
+		seedCapacity:    make(chan struct{}, 1),
 	}, nil
 }
 
@@ -165,14 +171,30 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 		return "", err
 	}
 
+	return c.admit(id, source, false)
+}
+
+func (c *sessionStartController) admitAuthoritative(id string) (sessionStartAdmissionOutcome, error) {
+	return c.admit(id, sessionStartAdmissionAntiEntropy, true)
+}
+
+func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool) (sessionStartAdmissionOutcome, error) {
+	if err := validateSessionStartAdmission(id, source); err != nil {
+		return "", err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.accepting || c.stopped {
 		return "", fmt.Errorf("admitting session start %q: controller is stopped", id)
 	}
 	previous, existed := c.admissions[id]
+	if authoritative && !existed && len(c.seedOutstanding) >= c.authoritativeCapacity() {
+		return sessionStartAdmissionOverflow, nil
+	}
 	if !existed && len(c.admissions) >= c.maxDistinct {
-		c.auditPending = true
+		if !authoritative {
+			c.auditPending = true
+		}
 		return sessionStartAdmissionOverflow, nil
 	}
 	c.nextVersion++
@@ -186,17 +208,106 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 		source = previous.Source
 		admittedAt = previous.AdmittedAt
 	}
-	c.admissions[id] = sessionStartAdmission{
+	admission := sessionStartAdmission{
 		SessionID:  id,
 		Source:     source,
 		Version:    c.nextVersion,
 		AdmittedAt: admittedAt,
+	}
+	c.admissions[id] = admission
+	if authoritative && !existed && admission.Source == sessionStartAdmissionAntiEntropy {
+		c.seedOutstanding[id] = struct{}{}
 	}
 	c.queue.Add(id)
 	if existed {
 		return sessionStartAdmissionCoalesced, nil
 	}
 	return sessionStartAdmissionAccepted, nil
+}
+
+// StartAuthoritativeSeed starts at most one bounded producer. next returns the
+// next owned, canonical key and false after the captured authoritative snapshot
+// is exhausted. It is called without the controller lock.
+func (c *sessionStartController) StartAuthoritativeSeed(next func(context.Context) (string, bool)) error {
+	if c == nil {
+		return fmt.Errorf("starting authoritative session-start seed: controller is nil")
+	}
+	if next == nil {
+		return fmt.Errorf("starting authoritative session-start seed: next is nil")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.accepting || c.stopped {
+		return fmt.Errorf("starting authoritative session-start seed: controller is stopped")
+	}
+	if c.seedActive {
+		c.auditPending = true
+		return nil
+	}
+	c.auditPending = false
+	c.seedActive = true
+	c.seedWG.Add(1)
+	go c.runAuthoritativeSeed(next)
+	return nil
+}
+
+func (c *sessionStartController) runAuthoritativeSeed(next func(context.Context) (string, bool)) {
+	defer c.seedWG.Done()
+	defer func() {
+		c.mu.Lock()
+		c.seedActive = false
+		c.mu.Unlock()
+	}()
+
+	pendingID := ""
+	for {
+		if err := c.ctx.Err(); err != nil {
+			return
+		}
+		if pendingID == "" {
+			var ok bool
+			pendingID, ok = next(c.ctx)
+			if !ok {
+				return
+			}
+		}
+		outcome, err := c.admitAuthoritative(pendingID)
+		if err != nil {
+			return
+		}
+		switch outcome {
+		case sessionStartAdmissionAccepted, sessionStartAdmissionCoalesced:
+			pendingID = ""
+		case sessionStartAdmissionOverflow:
+			if !c.waitForSeedCapacity() {
+				return
+			}
+		}
+	}
+}
+
+func (c *sessionStartController) authoritativeCapacity() int {
+	capacity := min(c.workers, c.maxDistinct-1)
+	if capacity < 1 {
+		return 1
+	}
+	return capacity
+}
+
+func (c *sessionStartController) waitForSeedCapacity() bool {
+	select {
+	case <-c.ctx.Done():
+		return false
+	case <-c.seedCapacity:
+		return true
+	}
+}
+
+func (c *sessionStartController) signalSeedCapacityLocked() {
+	select {
+	case c.seedCapacity <- struct{}{}:
+	default:
+	}
 }
 
 func validateSessionStartAdmission(id string, source sessionStartAdmissionSource) error {
@@ -278,6 +389,7 @@ func (c *sessionStartController) Stop() {
 		if cancel != nil {
 			cancel()
 		}
+		c.seedWG.Wait()
 		if started {
 			c.queue.ShutDownWithDrain()
 			c.workerWG.Wait()
@@ -287,6 +399,7 @@ func (c *sessionStartController) Stop() {
 
 		c.mu.Lock()
 		clear(c.admissions)
+		clear(c.seedOutstanding)
 		c.mu.Unlock()
 	})
 }
@@ -366,6 +479,7 @@ func (c *sessionStartController) reconcileKey(key string) {
 	c.mu.Lock()
 	if current, exists := c.admissions[key]; exists && current.Version == admission.Version {
 		delete(c.admissions, key)
+		c.releaseAuthoritativeSlotLocked(key)
 		c.auditPending = true
 	}
 	c.mu.Unlock()
@@ -392,7 +506,13 @@ func (c *sessionStartController) deleteAdmissionIfVersion(key string, version ui
 	defer c.mu.Unlock()
 	if current, ok := c.admissions[key]; ok && current.Version == version {
 		delete(c.admissions, key)
+		c.releaseAuthoritativeSlotLocked(key)
 	}
+}
+
+func (c *sessionStartController) releaseAuthoritativeSlotLocked(key string) {
+	delete(c.seedOutstanding, key)
+	c.signalSeedCapacityLocked()
 }
 
 func (c *sessionStartController) callReconcile(admission sessionStartAdmission) (err error) {

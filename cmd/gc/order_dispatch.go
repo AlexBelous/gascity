@@ -158,6 +158,9 @@ func computeOrderDispatchCadence(aa []orders.Order, patrolInterval time.Duration
 	}
 	demand := cooldownLaunchDemandPerMinute(aa)
 	if demand == 0 {
+		// Patrol ticks already evaluate cron/condition/event orders. Without a
+		// cooldown service rate there is no reason to create a second ticker.
+		cadence.interval = 0
 		return cadence
 	}
 

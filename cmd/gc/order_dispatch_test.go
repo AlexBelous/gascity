@@ -1825,6 +1825,25 @@ func TestOrderDispatchCadenceNeverCreatesSubFloorDedicatedLoop(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchCadenceDisablesDedicatedLoopWithoutCooldownDemand(t *testing.T) {
+	aa := []orders.Order{{
+		Name:    "conditional-only",
+		Trigger: "condition",
+		Check:   "true",
+	}}
+
+	cadence := computeOrderDispatchCadence(aa, 5*time.Second)
+	if cadence.interval != 0 {
+		t.Fatalf("cadence interval = %s, want disabled without cooldown demand", cadence.interval)
+	}
+	if got := dedicatedOrderDispatchInterval(&cadenceRecordingOrderDispatcher{
+		recordingOrderDispatcher: &recordingOrderDispatcher{},
+		cadence:                  cadence,
+	}, 2*time.Minute); got != 0 {
+		t.Fatalf("dedicated interval = %s, want disabled after stale-patrol comparison", got)
+	}
+}
+
 func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	store := beads.NewMemStore()
 	var aa []orders.Order

@@ -1013,6 +1013,46 @@ prefix = "fe"
 	}
 }
 
+func TestEnsureManagedDoltPublishedForRuntimeSkipsOwnershipForPlainFileCityWithBrokenPack(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("not valid toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureManagedDoltPublishedForRuntime(
+		cityPath,
+		io.Discard,
+		"gc start",
+		func(string) error {
+			t.Fatal("health called for plain file city")
+			return nil
+		},
+		managedDoltLifecycleOwned,
+		func(string) string {
+			t.Fatal("port called for plain file city")
+			return ""
+		},
+		func(string, string) error {
+			t.Fatal("placement called for plain file city")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForRuntime: %v", err)
+	}
+}
+
 // TestCityRuntimeEnsureManagedDoltPublishedForTickPlacesRecoveredIdentity
 // verifies that recovery places the managed process before controller work
 // continues, and that a changed PID on the same port is revalidated.
@@ -7281,17 +7321,52 @@ func TestOrderTrackingRetentionWatchdog_LogsPrunedCount(t *testing.T) {
 	}
 }
 
-func TestOrderTrackingRetentionWatchdog_NilCfgSkipsWithoutPanic(_ *testing.T) {
+func TestOrderTrackingRetentionWatchdog_NilCfgSkipsWithoutStoreDiscovery(t *testing.T) {
 	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	cwd := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWD); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	oldOpenSweepStore := newCityRuntimeOpenSweepStore
+	openCalls := 0
+	newCityRuntimeOpenSweepStore = func(_, _ string) (beads.Store, error) {
+		openCalls++
+		return nil, errors.New("nil-config watchdog must not discover stores")
+	}
+	t.Cleanup(func() {
+		newCityRuntimeOpenSweepStore = oldOpenSweepStore
+	})
+
 	cr := &CityRuntime{
 		cityName:  "test-city",
-		cfg:       nil, // nil cfg: watchdog must not panic
+		cfg:       nil,
 		stdout:    io.Discard,
 		stderr:    io.Discard,
 		logPrefix: "gc test",
 	}
-	// Must not panic.
 	cr.runOrderTrackingRetentionWatchdog(now)
+
+	if openCalls != 0 {
+		t.Fatalf("store discovery calls = %d, want 0", openCalls)
+	}
+	if !cr.orderTrackingRetentionWatchdogLast.IsZero() {
+		t.Fatalf("watchdog timestamp = %v, want zero for skipped nil config", cr.orderTrackingRetentionWatchdogLast)
+	}
+	for _, path := range []string{filepath.Join(cwd, ".gc"), filepath.Join(cwd, ".beads")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("nil-config watchdog created cwd artifact %q: stat err=%v", path, err)
+		}
+	}
 }
 
 func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {

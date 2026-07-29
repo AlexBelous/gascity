@@ -1609,6 +1609,9 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
 // orderTrackingRetentionWatchdogDeleteBudget beads per invocation.
 func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
+	if cr == nil || cr.cfg == nil {
+		return
+	}
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
 		return
@@ -3290,7 +3293,19 @@ func ensureManagedDoltPublishedForRuntime(
 ) error {
 	// Ownership is not equivalent to the city root's provider. A file-backed
 	// city may still own the canonical managed Dolt inherited by one or more
-	// bd-backed rigs, so let the topology-aware ownership check decide.
+	// bd-backed rigs. Use the same cheap topology evidence as lifecycle
+	// resolution before the full ownership check so ordinary file cities do
+	// not load pack imports on every controller tick.
+	if beadsProvider(cityPath) == "file" {
+		hasEvidence, err := fileCityHasManagedDoltLifecycleEvidence(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: managed dolt topology preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return fmt.Errorf("managed dolt topology preflight: %w", err)
+		}
+		if !hasEvidence {
+			return nil
+		}
+	}
 	owned, err := ownedFn(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: managed dolt ownership preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr

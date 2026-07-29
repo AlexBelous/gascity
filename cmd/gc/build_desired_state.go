@@ -775,6 +775,42 @@ func buildDesiredStateWithSessionBeads(
 				}
 			}
 		}
+		// A deterministic control-dispatcher runs `gc convoy control --serve
+		// --follow` (config.ControlDispatcherStartCommand): a resident serve loop
+		// that blocks on city events rather than exiting per bead. It ships
+		// max_active_sessions=1 with no min floor, so once its control queue
+		// empties no demand source keeps the singleton desired — the overlay would
+		// then drop the live session and the reconciler would orphan-drain the
+		// healthy serve loop, respawning a replacement on the next control bead
+		// (per-rig drain/respawn treadmill, gc-0ychy). Floor demand to 1 for any
+		// template that already has a RUNNING singleton dispatcher session so the
+		// pool pass reuses that live canonical bead instead of dropping it. This is
+		// retention only: gated on a running (active/awake) state, so a
+		// creating/draining/asleep/stopped dispatcher keeps its existing
+		// scale-to-zero and pending-create-rollback behavior, and a duplicate is
+		// still collapsed to one by the canonical-pool guard and the
+		// max_active_sessions cap in the pool pass below.
+		openSessionInfos := sessionBeads.OpenInfos()
+		for i := range cfg.Agents {
+			dispAgent := &cfg.Agents[i]
+			if !config.IsDeterministicControlDispatcher(dispAgent) || !dispAgent.UsesCanonicalSingletonPoolIdentity() {
+				continue
+			}
+			template := dispAgent.QualifiedName()
+			if scaleCheckCounts[template] >= 1 {
+				continue
+			}
+			for _, info := range openSessionInfos {
+				if isPoolManagedSessionInfo(info) && isRunningPoolSessionInfo(info) &&
+					agentTemplateIdentitiesEquivalent(cfg, info.Template, template) {
+					if scaleCheckCounts == nil {
+						scaleCheckCounts = make(map[string]int)
+					}
+					scaleCheckCounts[template] = 1
+					break
+				}
+			}
+		}
 		readyUnassignedRoutedWorkBeads, readyUnassignedRoutedWorkStoreRefs = selectReadyUnassignedRoutedWork(
 			unassignedRoutedBeads,
 			unassignedRoutedStoreRefs,

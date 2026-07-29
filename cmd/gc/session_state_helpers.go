@@ -46,6 +46,24 @@ func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
 	return true
 }
 
+// isRunningPoolSessionInfo reports whether a pool session bead is in a genuinely
+// running state — its runtime is up and serving — as opposed to a transitional
+// (creating/start-pending/draining), idle (asleep/stopped), or problem
+// (suspended/quarantined) state. It is stricter than poolSessionIsLiveInfo,
+// which only excludes asleep/drained: callers that must not perturb the
+// scale-to-zero or pending-create-rollback behavior of a not-yet/no-longer
+// running session use this predicate instead. "awake" normalizes to "active"
+// (see normalizeInfoState); both are matched for robustness against an
+// un-normalized snapshot.
+func isRunningPoolSessionInfo(i sessionpkg.Info) bool {
+	switch strings.TrimSpace(i.MetadataState) {
+	case string(sessionpkg.StateActive), string(sessionpkg.StateAwake):
+		return true
+	default:
+		return false
+	}
+}
+
 // isPoolSessionSlotFreeable reports whether a session's bead is in a terminal
 // state where the pool slot it occupies can be freed — either explicitly
 // drained, or asleep from a normal idle transition. Sessions parked via

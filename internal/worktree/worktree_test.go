@@ -1,48 +1,45 @@
 package worktree
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // runGit runs a git command in dir and fails the test on error. Strips
 // repository-locating git env vars so host hooks cannot interfere.
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	for _, e := range os.Environ() {
-		k, _, _ := strings.Cut(e, "=")
-		switch k {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR":
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
-	}
-	return strings.TrimSpace(string(out))
+	return testutil.RunGit(t, dir, args...)
 }
 
 // initTestRepo creates a git repo with one commit and returns its path and
 // the name of its initial branch.
 func initTestRepo(t *testing.T) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
-	runGit(t, dir, "init")
-	runGit(t, dir, "config", "user.email", "test@test.com")
-	runGit(t, dir, "config", "user.name", "Test")
-	runGit(t, dir, "commit", "--allow-empty", "-m", "init")
-	branch := runGit(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
-	return dir, branch
+	return testutil.InitGitRepo(t)
+}
+
+func managedSpec(repo, root, path, branch, base string) Spec {
+	return Spec{
+		RepoDir:    repo,
+		Root:       root,
+		Path:       path,
+		Branch:     branch,
+		Base:       base,
+		BeadID:     "gc-test",
+		StoreRef:   "gascity",
+		Creator:    "test",
+		Owner:      "test-owner",
+		Generation: "1",
+		Lifecycle:  LifecycleActive,
+	}
 }
 
 // snapshotDir returns the sorted entries of a directory, or nil when it does
@@ -351,7 +348,9 @@ func TestRollbackRemovesCreatedState(t *testing.T) {
 	if err := g.WorktreeAddNewBranch(wt, "doomed", base); err != nil {
 		t.Fatalf("WorktreeAddNewBranch: %v", err)
 	}
-	rollbackCreated(g, wt, "doomed", true)
+	if err := rollbackCreated(g, wt, "doomed", true); err != nil {
+		t.Fatalf("rollbackCreated: %v", err)
+	}
 	if _, statErr := os.Stat(wt); statErr == nil {
 		t.Error("rollback left the worktree path in place")
 	}
@@ -368,11 +367,215 @@ func TestRollbackKeepsPreexistingBranch(t *testing.T) {
 	if err := g.WorktreeAddExistingBranch(wt, "keep"); err != nil {
 		t.Fatalf("WorktreeAddExistingBranch: %v", err)
 	}
-	rollbackCreated(g, wt, "keep", false)
+	if err := rollbackCreated(g, wt, "keep", false); err != nil {
+		t.Fatalf("rollbackCreated: %v", err)
+	}
 	if _, statErr := os.Stat(wt); statErr == nil {
 		t.Error("rollback left the worktree path in place")
 	}
 	if out := runGit(t, repo, "branch", "--list", "keep"); out == "" {
 		t.Error("rollback deleted a pre-existing branch")
+	}
+}
+
+func TestRollbackPreservesDirtyAttemptState(t *testing.T) {
+	repo, base := initTestRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.New(repo)
+	if err := g.WorktreeAddNewBranch(wt, "dirty", base); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+	marker := filepath.Join(wt, "uncommitted.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := rollbackCreated(g, wt, "dirty", true); err == nil {
+		t.Fatal("rollbackCreated removed a dirty worktree")
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {
+		t.Fatalf("dirty WIP changed: data=%q err=%v", got, err)
+	}
+	if out := runGit(t, repo, "branch", "--list", "dirty"); out == "" {
+		t.Fatal("rollback deleted the branch of a retained dirty worktree")
+	}
+}
+
+func TestEnsureManagedWorktreePersistsAndVerifiesProvenance(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+
+	rep, err := Ensure(spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if rep.Provenance == nil {
+		t.Fatal("Ensure report has nil provenance")
+	}
+	if rep.Provenance.BeadID != spec.BeadID ||
+		rep.Provenance.StoreRef != spec.StoreRef ||
+		rep.Provenance.Path != wt ||
+		rep.Provenance.Branch != spec.Branch ||
+		rep.Provenance.BaseRef != base ||
+		rep.Provenance.BaseSHA == "" ||
+		rep.Provenance.RepoIdentity == "" ||
+		rep.Provenance.Creator != spec.Creator ||
+		rep.Provenance.Owner != spec.Owner ||
+		rep.Provenance.Generation != spec.Generation ||
+		rep.Provenance.Lifecycle != LifecycleActive ||
+		rep.Provenance.CreatedAt.IsZero() ||
+		rep.Provenance.AttemptID == "" {
+		t.Fatalf("provenance = %+v, want complete durable identity", rep.Provenance)
+	}
+
+	manifest, err := provenanceFilePath(wt)
+	if err != nil {
+		t.Fatalf("provenanceFilePath: %v", err)
+	}
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", manifest, err)
+	}
+	var stored Provenance
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("Unmarshal provenance: %v", err)
+	}
+	if stored != *rep.Provenance {
+		t.Fatalf("stored provenance = %+v, report = %+v", stored, *rep.Provenance)
+	}
+
+	verifySpec := spec
+	verifySpec.BaseSHA = rep.Provenance.BaseSHA
+	verified, err := Verify(verifySpec)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if verified.Provenance == nil || verified.Provenance.AttemptID != rep.Provenance.AttemptID {
+		t.Fatalf("verified provenance = %+v, want attempt %q", verified.Provenance, rep.Provenance.AttemptID)
+	}
+}
+
+func TestVerifyManagedWorktreeRejectsConflictingProvenanceAndPreservesWIP(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+	rep, err := Ensure(spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	marker := filepath.Join(wt, "uncommitted.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Spec)
+		want   string
+	}{
+		{"bead", func(s *Spec) { s.BeadID = "gc-other" }, "bead"},
+		{"store", func(s *Spec) { s.StoreRef = "other" }, "store"},
+		{"owner", func(s *Spec) { s.Owner = "other" }, "owner"},
+		{"generation", func(s *Spec) { s.Generation = "2" }, "generation"},
+		{"base sha", func(s *Spec) { s.BaseSHA = strings.Repeat("a", 40) }, "base SHA"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conflict := spec
+			conflict.BaseSHA = rep.Provenance.BaseSHA
+			tt.mutate(&conflict)
+			if _, err := Verify(conflict); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Verify conflict error = %v, want actionable %q mismatch", err, tt.want)
+			}
+			if _, err := Ensure(conflict); err == nil {
+				t.Fatal("Ensure accepted conflicting existing provenance")
+			}
+			if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {
+				t.Fatalf("existing WIP changed: data=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestEnsureManagedWorktreeRefusesNonCanonicalOrNestedPath(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+
+	t.Run("not direct child of configured root", func(t *testing.T) {
+		spec := managedSpec(repo, root, filepath.Join(root, "outer", "inner"), "work/nested", base)
+		if _, err := Ensure(spec); err == nil || !strings.Contains(err.Error(), "direct child") {
+			t.Fatalf("Ensure nested path error = %v, want configured-root refusal", err)
+		}
+	})
+
+	t.Run("inside registered worktree", func(t *testing.T) {
+		outer := filepath.Join(root, "outer")
+		runGit(t, repo, "worktree", "add", "-b", "outer", outer, base)
+		spec := managedSpec(repo, outer, filepath.Join(outer, "inner"), "work/inner", base)
+		if _, err := Ensure(spec); err == nil || !strings.Contains(err.Error(), "registered worktree") {
+			t.Fatalf("Ensure nested registered-worktree error = %v, want refusal", err)
+		}
+	})
+}
+
+func TestRollbackAttemptRemovesOnlyAttemptCreatedState(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+	rep, err := Ensure(spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := RollbackAttempt(spec, rep); err != nil {
+		t.Fatalf("RollbackAttempt: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("worktree still exists after rollback: %v", err)
+	}
+	if out := runGit(t, repo, "branch", "--list", spec.Branch); out != "" {
+		t.Fatalf("attempt-created branch still exists: %q", out)
+	}
+
+	preexisting := filepath.Join(root, "preexisting")
+	runGit(t, repo, "branch", "keep", base)
+	preSpec := managedSpec(repo, root, preexisting, "keep", base)
+	preRep, err := Ensure(preSpec)
+	if err != nil {
+		t.Fatalf("Ensure pre-existing branch: %v", err)
+	}
+	if preRep.BranchCreated {
+		t.Fatal("pre-existing branch reported as created")
+	}
+	if err := RollbackAttempt(preSpec, Report{
+		Path: preRep.Path, Branch: preRep.Branch, Provenance: preRep.Provenance,
+	}); err == nil {
+		t.Fatal("RollbackAttempt accepted a report without Created=true")
+	}
+	if _, err := os.Stat(preexisting); err != nil {
+		t.Fatalf("RollbackAttempt touched pre-existing state: %v", err)
+	}
+}
+
+func TestManagedDryRunDoesNotPublishProvenance(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+	spec.DryRun = true
+	before := snapshotDir(t, root)
+
+	rep, err := Ensure(spec)
+	if err != nil {
+		t.Fatalf("Ensure dry-run: %v", err)
+	}
+	if rep.Provenance == nil || rep.Provenance.CreatedAt.IsZero() == false || rep.Provenance.AttemptID != "" {
+		t.Fatalf("dry-run provenance = %+v, want planned identity without creation facts", rep.Provenance)
+	}
+	if after := snapshotDir(t, root); strings.Join(after, "\x00") != strings.Join(before, "\x00") {
+		t.Fatalf("dry-run mutated root: before=%v after=%v", before, after)
 	}
 }

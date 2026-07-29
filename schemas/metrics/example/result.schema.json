@@ -205,7 +205,10 @@
               "login",
               "logout",
               "whoami",
-              "runtime-heartbeat"
+              "runtime-heartbeat",
+              "worktree",
+              "worktree-ensure",
+              "worktree-verify"
             ]
           },
           "event_id": {

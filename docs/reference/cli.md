@@ -4720,11 +4720,13 @@ gc whoami [flags]
 Ensure or verify agent workspace worktrees.
 
 gc worktree is the single transactional owner for workspace provisioning.
-Postconditions: the path is the root of a worktree of the given repository,
-with the given branch checked out on an attached HEAD (never detached).
-A new branch is created from --base, resolved verbatim against the local
-repository. Failed creation rolls back everything it created; --dry-run
-plans without mutating anything.
+Postconditions: the path is a direct child of the configured per-rig root and
+the root of a worktree of the given repository, with the bead's uniquely named
+branch checked out on an attached HEAD (never detached). Durable provenance is
+stored in the worktree's private git directory and returned as JSON so callers
+can atomically publish the same evidence on the bead. A new branch is created
+from --base, resolved verbatim against the local repository. Failed creation
+rolls back everything it created; --dry-run plans without mutating anything.
 
 ```
 gc worktree
@@ -4745,12 +4747,20 @@ gc worktree ensure [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--base` | string |  | base ref for creating a new branch (resolved verbatim locally) |
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
 | `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
 | `-n`, `--dry-run` | bool |  | plan without mutating anything |
+| `--generation` | string |  | provisioning generation fence (required) |
 | `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
 | `--path` | string |  | worktree path (required) |
 | `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
 
 ## gc worktree verify
 
@@ -4762,7 +4772,16 @@ gc worktree verify [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
 | `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
 | `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
 | `--path` | string |  | worktree path (required) |
 | `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |

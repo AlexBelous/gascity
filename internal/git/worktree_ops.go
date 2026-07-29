@@ -128,6 +128,21 @@ func (g *Git) CommonDir() (string, error) {
 	return filepath.Clean(common), nil
 }
 
+// GitDir returns the worktree-specific git directory as an absolute path.
+// Unlike CommonDir, this identifies one registered worktree and is therefore
+// suitable for per-worktree owner metadata.
+func (g *Git) GitDir() (string, error) {
+	out, err := g.run("rev-parse", "--git-dir")
+	if err != nil {
+		return "", fmt.Errorf("resolving git dir: %w", err)
+	}
+	dir := strings.TrimSpace(out)
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(g.workDir, dir)
+	}
+	return filepath.Clean(dir), nil
+}
+
 // TopLevel returns the absolute path of the working-tree root containing
 // the scoped directory.
 func (g *Git) TopLevel() (string, error) {

@@ -158,6 +158,37 @@ func TestCommonDir(t *testing.T) {
 	}
 }
 
+func TestGitDirIsWorktreeSpecific(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	base, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := g.WorktreeAddNewBranch(wtPath, "gitdir-check", base); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+
+	mainGitDir, err := g.GitDir()
+	if err != nil {
+		t.Fatalf("GitDir main: %v", err)
+	}
+	wtGitDir, err := New(wtPath).GitDir()
+	if err != nil {
+		t.Fatalf("GitDir worktree: %v", err)
+	}
+	if !filepath.IsAbs(mainGitDir) || !filepath.IsAbs(wtGitDir) {
+		t.Fatalf("GitDir paths must be absolute: main=%q worktree=%q", mainGitDir, wtGitDir)
+	}
+	if mainGitDir == wtGitDir {
+		t.Fatalf("GitDir returned shared directory %q for both worktrees", mainGitDir)
+	}
+	if _, err := os.Stat(wtGitDir); err != nil {
+		t.Fatalf("worktree GitDir %q is not readable: %v", wtGitDir, err)
+	}
+}
+
 func TestHeadSymbolicRef(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

@@ -4,48 +4,44 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 func worktreeTestRepo(t *testing.T) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
-	run := func(args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		for _, e := range os.Environ() {
-			k, _, _ := strings.Cut(e, "=")
-			switch k {
-			case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR":
-				continue
-			}
-			cmd.Env = append(cmd.Env, e)
-		}
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
-		}
-		return strings.TrimSpace(string(out))
+	return testutil.InitGitRepo(t)
+}
+
+func managedWorktreeCmdOpts(repo, root, path, base string) worktreeCmdOpts {
+	return worktreeCmdOpts{
+		Repo:       repo,
+		Root:       root,
+		Path:       path,
+		Branch:     "work/gc-test",
+		Base:       base,
+		BeadID:     "gc-test",
+		StoreRef:   "gascity",
+		Creator:    "test",
+		Owner:      "gc-sling",
+		Generation: "1",
+		Lifecycle:  worktree.LifecycleActive,
 	}
-	run("init")
-	run("config", "user.email", "test@test.com")
-	run("config", "user.name", "Test")
-	run("commit", "--allow-empty", "-m", "init")
-	return dir, run("rev-parse", "--abbrev-ref", "HEAD")
 }
 
 func TestCmdWorktreeEnsureCreatesAndVerifies(t *testing.T) {
 	repo, base := worktreeTestRepo(t)
-	wt := filepath.Join(t.TempDir(), "wt")
+	root := t.TempDir()
+	wt := filepath.Join(root, "wt")
 	var stdout, stderr bytes.Buffer
 
-	code := runWorktreeEnsure(worktreeCmdOpts{
-		Repo: repo, Path: wt, Branch: "feat", Base: base, JSON: true,
-	}, &stdout, &stderr)
+	opts := managedWorktreeCmdOpts(repo, root, wt, base)
+	opts.JSON = true
+	code := runWorktreeEnsure(opts, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("ensure exit = %d, stderr: %s", code, stderr.String())
 	}
@@ -54,18 +50,25 @@ func TestCmdWorktreeEnsureCreatesAndVerifies(t *testing.T) {
 		Branch        string `json:"branch"`
 		Created       bool   `json:"created"`
 		BranchCreated bool   `json:"branch_created"`
+		Provenance    *struct {
+			BaseSHA   string `json:"base_sha"`
+			AttemptID string `json:"attempt_id"`
+		} `json:"provenance"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &rep); err != nil {
 		t.Fatalf("unmarshal ensure output %q: %v", stdout.String(), err)
 	}
-	if !rep.Created || !rep.BranchCreated || rep.Branch != "feat" {
-		t.Errorf("report = %+v, want created new-branch feat", rep)
+	if !rep.Created || !rep.BranchCreated || rep.Branch != "work/gc-test" ||
+		rep.Provenance == nil || rep.Provenance.BaseSHA == "" || rep.Provenance.AttemptID == "" {
+		t.Errorf("report = %+v, want created managed worktree with publishable provenance", rep)
 	}
 
 	// verify must pass on the ensured worktree.
 	stdout.Reset()
 	stderr.Reset()
-	code = runWorktreeVerify(worktreeCmdOpts{Repo: repo, Path: wt, Branch: "feat", JSON: true}, &stdout, &stderr)
+	verifyOpts := opts
+	verifyOpts.BaseSHA = rep.Provenance.BaseSHA
+	code = runWorktreeVerify(verifyOpts, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("verify exit = %d, stderr: %s", code, stderr.String())
 	}
@@ -73,10 +76,10 @@ func TestCmdWorktreeEnsureCreatesAndVerifies(t *testing.T) {
 
 func TestCmdWorktreeVerifyFailsOnMissing(t *testing.T) {
 	repo, _ := worktreeTestRepo(t)
+	root := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	code := runWorktreeVerify(worktreeCmdOpts{
-		Repo: repo, Path: filepath.Join(t.TempDir(), "nope"), Branch: "feat",
-	}, &stdout, &stderr)
+	opts := managedWorktreeCmdOpts(repo, root, filepath.Join(root, "nope"), "main")
+	code := runWorktreeVerify(opts, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("verify on missing worktree returned 0, want nonzero")
 	}
@@ -87,11 +90,13 @@ func TestCmdWorktreeVerifyFailsOnMissing(t *testing.T) {
 
 func TestCmdWorktreeEnsureDryRunIsPure(t *testing.T) {
 	repo, base := worktreeTestRepo(t)
-	wt := filepath.Join(t.TempDir(), "wt")
+	root := t.TempDir()
+	wt := filepath.Join(root, "wt")
 	var stdout, stderr bytes.Buffer
-	code := runWorktreeEnsure(worktreeCmdOpts{
-		Repo: repo, Path: wt, Branch: "feat", Base: base, DryRun: true, JSON: true,
-	}, &stdout, &stderr)
+	opts := managedWorktreeCmdOpts(repo, root, wt, base)
+	opts.DryRun = true
+	opts.JSON = true
+	code := runWorktreeEnsure(opts, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("dry-run ensure exit = %d, stderr: %s", code, stderr.String())
 	}
@@ -106,6 +111,24 @@ func TestCmdWorktreeEnsureDryRunIsPure(t *testing.T) {
 	}
 	if len(rep.Planned) == 0 {
 		t.Error("dry-run output has no planned actions")
+	}
+}
+
+func TestCmdWorktreeManagedFlagsReachSpec(t *testing.T) {
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "gc-test")
+	opts := managedWorktreeCmdOpts(repo, root, path, base)
+	opts.BaseSHA = strings.Repeat("a", 40)
+
+	spec, err := opts.spec()
+	if err != nil {
+		t.Fatalf("spec: %v", err)
+	}
+	if spec.Root != root || spec.BeadID != opts.BeadID || spec.StoreRef != opts.StoreRef ||
+		spec.BaseSHA != opts.BaseSHA || spec.Creator != opts.Creator || spec.Owner != opts.Owner ||
+		spec.Generation != opts.Generation || spec.Lifecycle != opts.Lifecycle {
+		t.Fatalf("spec = %+v, want all managed ownership fields from CLI", spec)
 	}
 }
 

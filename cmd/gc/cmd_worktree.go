@@ -12,12 +12,20 @@ import (
 
 // worktreeCmdOpts carries the flag values for gc worktree subcommands.
 type worktreeCmdOpts struct {
-	Repo   string
-	Path   string
-	Branch string
-	Base   string
-	DryRun bool
-	JSON   bool
+	Repo       string
+	Root       string
+	Path       string
+	Branch     string
+	Base       string
+	BaseSHA    string
+	BeadID     string
+	StoreRef   string
+	Creator    string
+	Owner      string
+	Generation string
+	Lifecycle  string
+	DryRun     bool
+	JSON       bool
 }
 
 // newWorktreeCmd returns the gc worktree command group. It is the CLI face
@@ -31,11 +39,13 @@ func newWorktreeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Ensure or verify agent workspace worktrees.
 
 gc worktree is the single transactional owner for workspace provisioning.
-Postconditions: the path is the root of a worktree of the given repository,
-with the given branch checked out on an attached HEAD (never detached).
-A new branch is created from --base, resolved verbatim against the local
-repository. Failed creation rolls back everything it created; --dry-run
-plans without mutating anything.`,
+Postconditions: the path is a direct child of the configured per-rig root and
+the root of a worktree of the given repository, with the bead's uniquely named
+branch checked out on an attached HEAD (never detached). Durable provenance is
+stored in the worktree's private git directory and returned as JSON so callers
+can atomically publish the same evidence on the bead. A new branch is created
+from --base, resolved verbatim against the local repository. Failed creation
+rolls back everything it created; --dry-run plans without mutating anything.`,
 	}
 	cmd.AddCommand(newWorktreeEnsureCmd(stdout, stderr))
 	cmd.AddCommand(newWorktreeVerifyCmd(stdout, stderr))
@@ -44,12 +54,23 @@ plans without mutating anything.`,
 
 func worktreeFlagSet(cmd *cobra.Command, opts *worktreeCmdOpts) {
 	cmd.Flags().StringVar(&opts.Repo, "repo", "", "repository directory the worktree belongs to (required)")
+	cmd.Flags().StringVar(&opts.Root, "root", "", "configured per-rig worktree root; path must be its direct child (required)")
 	cmd.Flags().StringVar(&opts.Path, "path", "", "worktree path (required)")
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "branch that must be checked out (required)")
+	cmd.Flags().StringVar(&opts.Base, "base", "", "exact base ref used for this worktree (required)")
+	cmd.Flags().StringVar(&opts.BaseSHA, "base-sha", "", "recorded base SHA to verify when reusing a worktree")
+	cmd.Flags().StringVar(&opts.BeadID, "bead", "", "work bead bound to this worktree (required)")
+	cmd.Flags().StringVar(&opts.StoreRef, "store-ref", "", "work bead store reference (required)")
+	cmd.Flags().StringVar(&opts.Creator, "creator", "", "mechanism creating the worktree (required)")
+	cmd.Flags().StringVar(&opts.Owner, "owner", "", "single selected provisioning owner (required)")
+	cmd.Flags().StringVar(&opts.Generation, "generation", "", "provisioning generation fence (required)")
+	cmd.Flags().StringVar(&opts.Lifecycle, "lifecycle", worktree.LifecycleActive, "worktree lifecycle state")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "emit the report as JSON")
-	_ = cmd.MarkFlagRequired("repo")   //nolint:errcheck // flag exists
-	_ = cmd.MarkFlagRequired("path")   //nolint:errcheck // flag exists
-	_ = cmd.MarkFlagRequired("branch") //nolint:errcheck // flag exists
+	for _, name := range []string{
+		"repo", "root", "path", "branch", "base", "bead", "store-ref", "creator", "owner", "generation",
+	} {
+		_ = cmd.MarkFlagRequired(name) //nolint:errcheck // flags exist
+	}
 }
 
 func newWorktreeEnsureCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -66,7 +87,6 @@ func newWorktreeEnsureCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 	worktreeFlagSet(cmd, &opts)
-	cmd.Flags().StringVar(&opts.Base, "base", "", "base ref for creating a new branch (resolved verbatim locally)")
 	cmd.Flags().BoolVarP(&opts.DryRun, "dry-run", "n", false, "plan without mutating anything")
 	return cmd
 }
@@ -97,12 +117,24 @@ func (o worktreeCmdOpts) spec() (worktree.Spec, error) {
 	if err != nil {
 		return worktree.Spec{}, fmt.Errorf("resolving --path %q: %w", o.Path, err)
 	}
+	root, err := filepath.Abs(o.Root)
+	if err != nil {
+		return worktree.Spec{}, fmt.Errorf("resolving --root %q: %w", o.Root, err)
+	}
 	return worktree.Spec{
-		RepoDir: repo,
-		Path:    path,
-		Branch:  o.Branch,
-		Base:    o.Base,
-		DryRun:  o.DryRun,
+		RepoDir:    repo,
+		Root:       root,
+		Path:       path,
+		Branch:     o.Branch,
+		Base:       o.Base,
+		BaseSHA:    o.BaseSHA,
+		BeadID:     o.BeadID,
+		StoreRef:   o.StoreRef,
+		Creator:    o.Creator,
+		Owner:      o.Owner,
+		Generation: o.Generation,
+		Lifecycle:  o.Lifecycle,
+		DryRun:     o.DryRun,
 	}, nil
 }
 

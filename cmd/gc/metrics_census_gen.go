@@ -194,6 +194,9 @@ const (
 	productMetricsGeneratedCommandID193 productMetricsCommandID = 193
 	productMetricsGeneratedCommandID194 productMetricsCommandID = 194
 	productMetricsGeneratedCommandID195 productMetricsCommandID = 195
+	productMetricsGeneratedCommandID196 productMetricsCommandID = 196
+	productMetricsGeneratedCommandID197 productMetricsCommandID = 197
+	productMetricsGeneratedCommandID198 productMetricsCommandID = 198
 )
 
 var generatedProductMetricsGlobalConditionalModes = []productMetricsConditionalMode{productMetricsConditionalGenericMachineOutput, productMetricsConditionalManagedContext, productMetricsConditionalProviderHook}
@@ -484,6 +487,9 @@ var generatedProductMetricsCommandCensus = []productMetricsCommandCensusEntry{
 	{Path: "gc workflow delete-source", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: true, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "convoy-delete-source", Mode: productMetricsModeWorkflowCompat, Notice: productMetricsNoticeIneligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerImmediate, ID: productMetricsGeneratedCommandID38},
 	{Path: "gc workflow poke", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: true, EffectiveHidden: true, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "excluded", Mode: productMetricsModeHiddenPrivate, Notice: productMetricsNoticeIneligible, Recording: productMetricsRecordingExcluded, Owner: productMetricsOwnerExcluded, Exclusion: productMetricsExclusionHiddenPrivate},
 	{Path: "gc workflow reopen-source", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: true, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "convoy-reopen-source", Mode: productMetricsModeWorkflowCompat, Notice: productMetricsNoticeIneligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerImmediate, ID: productMetricsGeneratedCommandID41},
+	{Path: "gc worktree", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: false, DisableFlagParsing: false, Shape: productMetricsShapeStructural, Classification: "worktree", Mode: productMetricsModeStandard, Notice: productMetricsNoticeEligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerStructural, ID: productMetricsGeneratedCommandID196},
+	{Path: "gc worktree ensure", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: false, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "worktree-ensure", Mode: productMetricsModeStandard, Notice: productMetricsNoticeEligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerImmediate, ID: productMetricsGeneratedCommandID197},
+	{Path: "gc worktree verify", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: false, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "worktree-verify", Mode: productMetricsModeStandard, Notice: productMetricsNoticeEligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerImmediate, ID: productMetricsGeneratedCommandID198},
 }
 
 var generatedProductMetricsSyntheticCensus = []productMetricsSyntheticCensusEntry{

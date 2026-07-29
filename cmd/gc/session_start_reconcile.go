@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -47,8 +48,12 @@ type exactSessionStartParams struct {
 	ObserveLoadedSession exactLoadedSessionObserver
 	StartOptions         []startExecutionOption
 	AsyncStopTracker     *asyncStartTracker
-	AsyncStopCompletion  func()
+	AsyncStopCompletion  func(bool)
 	AsyncStopQueued      func()
+	RolloutMode          rollout.Mode
+	RigStores            map[string]beads.Store
+	DrainOps             drainOps
+	DrainTracker         *drainTracker
 }
 
 // planExactSessionWaitDependencyStartShadow reads one dependency-ready session
@@ -491,14 +496,45 @@ func reconcileExactSessionStartWithOwner(
 		return exactSessionStartUnowned, nil
 	}
 	if isDrainAckStopPendingInfo(info) {
-		if strings.TrimSpace(info.SessionNameMetadata) == "" || strings.TrimSpace(info.InstanceToken) == "" || params.AsyncStopTracker == nil {
+		if _, ok := params.Provider.(runtime.FreshLivenessObserver); !ok {
+			switch params.RolloutMode {
+			case rollout.Auto:
+				return exactSessionStartLegacyOwner, nil
+			case rollout.Require:
+				return exactSessionStartKeyedOwner, nil
+			}
+		}
+		name := strings.TrimSpace(info.SessionNameMetadata)
+		token := strings.TrimSpace(info.InstanceToken)
+		if name == "" || token == "" {
 			return exactSessionStartKeyedOwner, nil
 		}
-		liveToken, tokenErr := params.Provider.GetMeta(info.SessionNameMetadata, "GC_INSTANCE_TOKEN")
+		processNames := drainAckStopPendingProcessNames(params.Config, info)
+		liveness := runtime.ObserveFreshLiveness(params.Provider, runtime.LivenessTarget{
+			SessionID: info.ID, SessionName: name, ProcessNames: processNames,
+		})
+		if !liveness.Running && !liveness.Alive {
+			if !liveness.Complete {
+				return exactSessionStartKeyedOwner, nil
+			}
+			result := finalizeDrainAckStoppedSession(
+				params.CityPath, params.Config, params.Store, params.RigStores, info,
+				normalizedSessionTemplateInfo(info, params.Config), isPoolManagedSessionInfo(info),
+				params.DrainOps, params.DrainTracker, clk, recorder, stderr,
+			)
+			if result.batch == nil && !result.closed && result.folded == nil && result.witnessInfo == nil {
+				return exactSessionStartKeyedOwner, fmt.Errorf("reconciling exact drain-ack stop %q: durable finalization made no progress", info.ID)
+			}
+			return exactSessionStartKeyedOwner, nil
+		}
+		if params.AsyncStopTracker == nil {
+			return exactSessionStartKeyedOwner, nil
+		}
+		liveToken, tokenErr := params.Provider.GetMeta(name, "GC_INSTANCE_TOKEN")
 		if tokenErr != nil {
 			return exactSessionStartKeyedOwner, fmt.Errorf("reconciling exact drain-ack stop %q: reading runtime instance token: %w", info.ID, tokenErr)
 		}
-		if strings.TrimSpace(liveToken) != strings.TrimSpace(info.InstanceToken) {
+		if strings.TrimSpace(liveToken) != token {
 			return exactSessionStartKeyedOwner, nil
 		}
 		if queueExactDrainAckAsyncStop(
@@ -507,12 +543,16 @@ func reconcileExactSessionStartWithOwner(
 			params.Provider,
 			params.Config,
 			info.ID,
-			info.SessionNameMetadata,
-			info.InstanceToken,
-			drainAckStopPendingProcessNames(params.Config, info),
+			name,
+			token,
+			processNames,
 			params.AsyncStopTracker,
 			stderr,
-			params.AsyncStopCompletion,
+			func(confirmed bool) {
+				if params.AsyncStopCompletion != nil {
+					params.AsyncStopCompletion(confirmed)
+				}
+			},
 		) && params.AsyncStopQueued != nil {
 			params.AsyncStopQueued()
 		}

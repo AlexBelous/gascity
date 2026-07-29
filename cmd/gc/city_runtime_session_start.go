@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -113,23 +114,33 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			}
 			statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(snapshot.Store)
 			owner, reconcileErr := reconcileExactSessionStartWithOwner(reconcileCtx, admission, exactSessionStartParams{
-				Generation:          snapshot.Generation,
-				CityPath:            snapshot.CityPath,
-				CityName:            snapshot.CityName,
-				Config:              snapshot.Config,
-				Provider:            snapshot.Provider,
-				Store:               snapshot.Store,
-				StatusWriter:        statusWriter,
-				StatusWriterError:   statusWriterErr,
-				Recorder:            snapshot.Recorder,
-				Stdout:              cr.sessionStartStdout(),
-				Stderr:              cr.sessionStartStderr(),
-				StartOptions:        startOptions,
-				AsyncStopTracker:    &cr.asyncStops,
-				AsyncStopCompletion: release,
+				Generation:        snapshot.Generation,
+				CityPath:          snapshot.CityPath,
+				CityName:          snapshot.CityName,
+				Config:            snapshot.Config,
+				Provider:          snapshot.Provider,
+				Store:             snapshot.Store,
+				StatusWriter:      statusWriter,
+				StatusWriterError: statusWriterErr,
+				Recorder:          snapshot.Recorder,
+				Stdout:            cr.sessionStartStdout(),
+				Stderr:            cr.sessionStartStderr(),
+				StartOptions:      startOptions,
+				AsyncStopTracker:  &cr.asyncStops,
+				AsyncStopCompletion: func(confirmed bool) {
+					release()
+					if !confirmed {
+						return
+					}
+					cr.admitConfirmedDrainAckStop(admission.SessionID)
+				},
 				AsyncStopQueued: func() {
 					leaseTransferred = true
 				},
+				RolloutMode:  mode,
+				RigStores:    cr.rigBeadStores(),
+				DrainOps:     cr.dops,
+				DrainTracker: cr.sessionDrains,
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				cr.requestLegacySessionStartFallback()
@@ -164,6 +175,8 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 		}
 		if outcome == sessionStartAdmissionOverflow {
 			fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start admission overflow for %s; authoritative audit requested\n", cr.sessionStartLogPrefix(), id) //nolint:errcheck // bounded queue overflow must be visible
+			controller.RequestAudit()
+			cr.seedActiveSessionStartController(cr.loadSessionBeadSnapshot())
 			cr.requestLegacySessionStartFallback()
 		}
 	}
@@ -185,6 +198,34 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 	cr.sessionStartController = controller
 	cr.sessionStartOwnership = sessionStartOwnershipKeyed
 	return nil
+}
+
+// admitConfirmedDrainAckStop sends confirmed-stop recovery through the current
+// keyed owner. The durable stop marker, not the completed controller instance,
+// is the recovery record across a provider reload.
+func (cr *CityRuntime) admitConfirmedDrainAckStop(id string) {
+	if cr == nil {
+		return
+	}
+	cr.sessionStartMu.Lock()
+	controller := cr.sessionStartController
+	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	cr.sessionStartMu.Unlock()
+	if !owned || controller == nil {
+		cr.requestLegacySessionStartFallback()
+		return
+	}
+	outcome, err := controller.Admit(id, sessionStartAdmissionInProcess)
+	if err != nil {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting confirmed drain-ack stop for %s: %v\n", cr.sessionStartLogPrefix(), id, err) //nolint:errcheck // durable audit remains recovery path
+		controller.RequestAudit()
+		cr.seedActiveSessionStartController(cr.loadSessionBeadSnapshot())
+		return
+	}
+	if outcome == sessionStartAdmissionOverflow {
+		controller.RequestAudit()
+		cr.seedActiveSessionStartController(cr.loadSessionBeadSnapshot())
+	}
 }
 
 func withAdditionalExactSessionLifecycleStatusObserver(observer exactSessionLifecycleStatusObserver) startExecutionOption {
@@ -464,7 +505,8 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 
 // sessionStartLegacyExclusionPredicate is the single ownership predicate used
 // by legacy start and drain-ack stop entry points while keyed reconciliation is
-// active. Legacy still finalizes a confirmed-dead drain-ack session.
+// active. Keyed reconciliation owns drain-ack finalization when the provider
+// can produce a fresh observation; Auto otherwise leaves it to legacy.
 func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.Info) bool {
 	if cr == nil {
 		return nil
@@ -498,6 +540,11 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 			lifecycle := sessionpkg.ProjectLifecycle(input)
 			return !info.Closed && (!lifecycle.Terminal || isDrainAckStopPendingInfo(info)) &&
 				(isDrainAckStopPendingInfo(info) || lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) || lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit))
+		}
+		if isDrainAckStopPendingInfo(info) && mode == rollout.Auto {
+			if _, ok := snapshot.Provider.(runtime.FreshLivenessObserver); !ok {
+				return false
+			}
 		}
 		return resolveExactSessionStartOrDrainAckStopOwnership(info, snapshot.Config, time.Now().UTC())
 	}

@@ -288,11 +288,11 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 	_ = queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, tracker, stderr, false, nil)
 }
 
-func queueExactDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer, onComplete func()) bool {
+func queueExactDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer, onComplete func(bool)) bool {
 	return queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, tracker, stderr, true, onComplete)
 }
 
-func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer, strictTokenFence bool, onComplete func()) bool {
+func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer, strictTokenFence bool, onComplete func(bool)) bool {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return false
@@ -313,14 +313,27 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 	// confines each goroutine to the seam that was live when its stop was queued.
 	poke := drainAckAsyncStopPokeController
 	go func() {
+		confirmed := false
+		defer done()
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n%s", name, r, debug.Stack()) //nolint:errcheck
 			}
-			if onComplete != nil {
-				onComplete()
+			// Re-admission must not coalesce behind this completed stop, but the
+			// wait-group entry remains live until its callback has returned.
+			if tracker != nil {
+				tracker.drainAckStopKeys.Delete(key)
 			}
-			done()
+			if onComplete != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s completion callback panicked: %v\n%s", name, r, debug.Stack()) //nolint:errcheck
+						}
+					}()
+					onComplete(confirmed)
+				}()
+			}
 		}()
 		// Token fence (mirrors verifiedStop): this kill targets the session by
 		// NAME and may fire long after it was queued. If the name was reused by
@@ -351,20 +364,12 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 		// (the reassigned next step stays runtime-missing). The expected token is
 		// threaded through so each re-kill stays fenced against a re-woken
 		// same-name replacement. Mirrors #4089's confirm-dead contract.
-		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, strictTokenFence)
-		// The runtime session is now confirmed dead (or the confirm-dead
-		// deadline passed and we proceed best-effort), but its pool session
-		// bead stays open (occupying the pool slot) until
-		// finalizeDrainAckStopPendingSessions closes it on a subsequent tick.
-		// Poke the controller so finalize + pool respawn runs on the next
-		// event-driven tick instead of waiting up to a full patrol interval
-		// (ga-ryhnhd). Mirrors the drain-ack CLI poke.
-		// Poke is best-effort: a failure is not logged because the goroutine may
-		// outlive its reconcile invocation and write to stderr concurrently with
-		// the caller's subsequent writes on the same writer (data race on
-		// non-goroutine-safe buffers). The controller reconciles on the next
-		// patrol tick regardless.
-		_ = poke(cityPath)
+		confirmed = confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, strictTokenFence)
+		// Legacy drain-ack uses its existing best-effort poke. Exact drain-ack
+		// re-admits the durable marker through the keyed owner instead.
+		if !strictTokenFence {
+			_ = poke(cityPath)
+		}
 	}()
 	return true
 }
@@ -691,12 +696,12 @@ func reconcileDrainAckStopPending(
 	if info.ID == "" || !isDrainAckStopPendingInfo(info) {
 		return false, drainAckFinalizeResult{}
 	}
+	if legacyExcluded != nil && legacyExcluded(info) {
+		return true, drainAckFinalizeResult{}
+	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, tp.Hints.ProcessNames)
 	if err != nil || obs.Running || obs.Alive {
-		if legacyExcluded != nil && legacyExcluded(info) {
-			return true, drainAckFinalizeResult{}
-		}
 		// Async-stop: queueDrainAckAsyncStop takes the session ID and mutates only
 		// the async tracker, so the snapshot stays coherent — a zero result (applyTo
 		// no-op) matches the unmutated session. The token fence reads the typed
@@ -761,6 +766,9 @@ func finalizeDrainAckStopPendingSessions(
 		if !isDrainAckStopPendingInfo(info) {
 			continue
 		}
+		if excluded != nil && excluded(info) {
+			continue
+		}
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		// Resolve the configured agent process-name hints for this persisted
 		// stop-pending session, exactly as the reset-driven path threads
@@ -772,9 +780,6 @@ func finalizeDrainAckStopPendingSessions(
 		processNames := drainAckStopPendingProcessNames(cfg, info)
 		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
 		if err != nil || obs.Running || obs.Alive {
-			if excluded != nil && excluded(info) {
-				continue
-			}
 			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
 			continue
 		}

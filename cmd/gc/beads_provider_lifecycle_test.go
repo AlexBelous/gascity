@@ -1191,6 +1191,12 @@ prefix = "fe"
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, []config.Rig{{
+		Name: "frontend",
+		Path: rigPath,
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	return cityPath
 }
 
@@ -1198,6 +1204,24 @@ func TestBeadsLifecycleProviderUsesManagedBdForInheritedRigUnderFileCity(t *test
 	t.Setenv("GC_BEADS", "")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	cityPath := writeInheritedBdRigUnderFileCity(t)
+
+	got, err := beadsLifecycleProvider(cityPath)
+	if err != nil {
+		t.Fatalf("beadsLifecycleProvider: %v", err)
+	}
+	want := "exec:" + gcBeadsBdScriptPath(cityPath)
+	if got != want {
+		t.Fatalf("beadsLifecycleProvider = %q, want %q", got, want)
+	}
+}
+
+func TestBeadsLifecycleProviderUsesManagedBdForLegacyInheritedRigUnderFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := writeInheritedBdRigUnderFileCity(t)
+	if err := os.Remove(config.SiteBindingPath(cityPath)); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := beadsLifecycleProvider(cityPath)
 	if err != nil {
@@ -1220,6 +1244,32 @@ name = "demo"
 [beads]
 provider = "file"
 `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := beadsLifecycleProvider(cityPath)
+	if err != nil {
+		t.Fatalf("beadsLifecycleProvider: %v", err)
+	}
+	if got != "file" {
+		t.Fatalf("beadsLifecycleProvider = %q, want file", got)
+	}
+}
+
+func TestBeadsLifecycleProviderDoesNotLoadUnrelatedInvalidPackForPlainFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("not valid toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

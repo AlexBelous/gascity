@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -733,6 +734,13 @@ func beadsLifecycleProvider(cityPath string) (string, error) {
 	if provider != "file" {
 		return provider, nil
 	}
+	hasEvidence, err := fileCityHasManagedDoltLifecycleEvidence(cityPath)
+	if err != nil {
+		return "", err
+	}
+	if !hasEvidence {
+		return provider, nil
+	}
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
 		return "", err
@@ -741,6 +749,60 @@ func beadsLifecycleProvider(cityPath string) (string, error) {
 		return provider, nil
 	}
 	return "exec:" + gcBeadsBdScriptPath(cityPath), nil
+}
+
+// fileCityHasManagedDoltLifecycleEvidence cheaply identifies file-backed city
+// roots that may still own managed Dolt for an inherited bd-backed rig. It
+// deliberately avoids config.LoadWithIncludes: lifecycle resolution is used by
+// commands such as rig add, and an unrelated pack import error must not make a
+// plain file-backed city depend on the managed-Dolt path.
+func fileCityHasManagedDoltLifecycleEvidence(cityPath string) (bool, error) {
+	if scopeUsesBdStoreContract(cityPath) {
+		return true, nil
+	}
+
+	site, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return false, fmt.Errorf("load site binding for managed dolt lifecycle evidence: %w", err)
+	}
+	for _, rig := range site.Rigs {
+		if fileCityRigPathUsesBdStore(cityPath, rig.Path) {
+			return true, nil
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read city config for managed dolt lifecycle evidence: %w", err)
+	}
+	var legacy struct {
+		Rigs []struct {
+			Path string `toml:"path"`
+		} `toml:"rigs"`
+	}
+	if _, err := toml.Decode(string(data), &legacy); err != nil {
+		return false, fmt.Errorf("parse city config for managed dolt lifecycle evidence: %w", err)
+	}
+	for _, rig := range legacy.Rigs {
+		if fileCityRigPathUsesBdStore(cityPath, rig.Path) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func fileCityRigPathUsesBdStore(cityPath, rigPath string) bool {
+	rigPath = strings.TrimSpace(rigPath)
+	if rigPath == "" {
+		return false
+	}
+	if !filepath.IsAbs(rigPath) {
+		rigPath = filepath.Join(cityPath, rigPath)
+	}
+	return scopeUsesBdStoreContract(rigPath)
 }
 
 // ensureBeadsProvider starts the bead store's backing service if needed.

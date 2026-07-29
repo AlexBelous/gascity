@@ -499,6 +499,44 @@ func TestCreateSessionRefusesWhenLivenessScanUnavailable(t *testing.T) {
 	}
 }
 
+// TestCreateSessionRefusesWhenSessionBeadListIsPartial pins the ga-c5yi8m
+// finding: a beads.PartialResultError from the session-bead list must not be
+// silently scanned as "no other candidates" and allowed through. The prior
+// implementation tolerated the partial error and iterated whatever rows came
+// back; when the partial read drops every same-workdir row (including a live
+// occupant's own bead), hasOtherCandidate stays false and
+// checkNoCWDCollision's `hasOtherCandidate && ...` short-circuits, so the
+// independent anySessionOwnedPIDLiveAt fallback is never even consulted --
+// silently allowing a start on an otherwise-uncontested-looking directory
+// with zero refusal event. A degraded bead read must fail closed the same
+// way an unavailable liveness scan already does (PartialResultError's own
+// doc comment: callers needing a complete picture must treat it as a hard
+// failure), not silently degrade to best-effort.
+func TestCreateSessionRefusesWhenSessionBeadListIsPartial(t *testing.T) {
+	// rows: nil models the worst case from ga-c5yi8m -- the partial read
+	// drops every same-workdir row, including what would be the live
+	// occupant's own bead, so the old code's hasOtherCandidate loop never
+	// finds anything to iterate.
+	store := partialWaitListStore{Store: beads.NewMemStore()}
+	sp := runtime.NewFake()
+	rec := &recordingRecorder{}
+	mgr := NewManagerWithOptions(store, sp, WithLivenessScanner(fixedLiveness(true)), WithEventRecorder(rec))
+
+	dir := t.TempDir() // uncontested-looking: the scan reports nothing live here
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "solo", Command: "claude", WorkDir: dir, Provider: "claude"})
+	if err == nil {
+		t.Fatal("CreateSession succeeded despite a partial session-bead list, want fail-closed refusal")
+	}
+	if !errors.Is(err, ErrWorkDirLivenessUnavailable) {
+		t.Fatalf("error = %v, want wrapping ErrWorkDirLivenessUnavailable", err)
+	}
+
+	payload := refusedCwdPayload(t, rec)
+	if payload.Reason != events.SessionStartRefusedReasonLivenessUnavailable {
+		t.Fatalf("payload.Reason = %q, want %q", payload.Reason, events.SessionStartRefusedReasonLivenessUnavailable)
+	}
+}
+
 // TestRuntimeStartCallSitesCheckCwdCollisionFirst mirrors
 // TestRuntimeStartCallSitesCleanOrphansFirst: every m.sp.Start(ctx,
 // sessName, cfg) call site in manager.go/chat.go must be preceded by a

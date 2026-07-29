@@ -30,7 +30,6 @@ func TestMeasureReconcilerPerfComparePairsStartAndStopProductionPaths(t *testing
 	}
 
 	if !strings.Contains(report.Provenance.Store, "MemStore") ||
-		!strings.Contains(report.Provenance.Store, "nudgequeue state file") ||
 		!strings.Contains(report.Provenance.Runtime, "synthetic") ||
 		!strings.Contains(report.Provenance.Workload, "workload=reconciler-synthetic-v2") ||
 		!strings.Contains(report.Provenance.Workload, "latency=action-needed-to-provider-entry") ||
@@ -41,14 +40,15 @@ func TestMeasureReconcilerPerfComparePairsStartAndStopProductionPaths(t *testing
 		!strings.Contains(report.Provenance.Workload, "contention") {
 		t.Fatalf("provenance = %+v, want explicit synthetic provenance", report.Provenance)
 	}
-	if report.Coverage.MeasuredActions != 3 || len(report.Coverage.MissingActions) != 0 {
-		t.Fatalf("coverage = %+v, want all reconciler actions measured", report.Coverage)
+	if report.Coverage.MeasuredActions != 2 ||
+		strings.Join(report.Coverage.MissingActions, ",") != "nudge" {
+		t.Fatalf("coverage = %+v, want start and stop measured", report.Coverage)
 	}
 	if report.Warmup.PairsPerAction != 1 || !report.Warmup.Excluded {
 		t.Fatalf("warmup policy = %+v, want one excluded pair", report.Warmup)
 	}
-	if len(report.Actions) != 3 {
-		t.Fatalf("actions = %d, want 3", len(report.Actions))
+	if len(report.Actions) != 2 {
+		t.Fatalf("actions = %d, want 2", len(report.Actions))
 	}
 	start := report.Actions[0]
 	if start.Action != reconcilerPerfActionStart ||
@@ -67,25 +67,6 @@ func TestMeasureReconcilerPerfComparePairsStartAndStopProductionPaths(t *testing
 			arm.ThroughputPerSecond <= 0 ||
 			arm.Latency == nil {
 			t.Errorf("%s summary = %+v, want three successful measured starts", name, arm)
-		}
-	}
-	nudge := report.Actions[2]
-	if nudge.Action != reconcilerPerfActionNudge ||
-		nudge.PairCount != 3 ||
-		nudge.MismatchCount != 0 {
-		t.Fatalf("nudge comparison = %+v", nudge)
-	}
-	for name, arm := range map[string]reconcilerPerfArmSummary{
-		"legacy": nudge.Legacy,
-		"keyed":  nudge.Keyed,
-	} {
-		if arm.AttemptedCount != 3 ||
-			arm.SampleCount != 3 ||
-			arm.ErrorCount != 0 ||
-			arm.MeasurementWindowNS <= 0 ||
-			arm.ThroughputPerSecond <= 0 ||
-			arm.Latency == nil {
-			t.Errorf("%s nudge summary = %+v, want three successful measured nudges", name, arm)
 		}
 	}
 	stop := report.Actions[1]
@@ -506,10 +487,9 @@ func TestRunPerfReconcilerCompareEmitsVersionedJSON(t *testing.T) {
 	if report.SchemaVersion != reconcilerPerfSchemaV1 ||
 		!report.OK ||
 		report.Provenance.Workload != "workload=reconciler-synthetic-v2; latency=action-needed-to-provider-entry; fresh-isolated-single-session-alternating-sequential-pairs; excludes=tmux,Dolt,wake-socket/IPC,contention" ||
-		len(report.Actions) != 3 ||
+		len(report.Actions) != 2 ||
 		report.Actions[0].PairCount != 2 ||
-		report.Actions[1].PairCount != 2 ||
-		report.Actions[2].PairCount != 2 {
+		report.Actions[1].PairCount != 2 {
 		t.Fatalf("JSON report = %+v", report)
 	}
 }

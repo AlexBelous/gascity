@@ -124,7 +124,7 @@ func measureReconcilerPerfCompare(
 	if strings.TrimSpace(cityPath) == "" {
 		return reconcilerPerfReport{}, fmt.Errorf("workspace path is empty")
 	}
-	provenance.Store = "synthetic:beads.MemStore+nudgequeue state file"
+	provenance.Store = "synthetic:beads.MemStore"
 	provenance.StoreSchema = "none"
 	provenance.Runtime = "synthetic:runtime.Fake"
 	provenance.Workload = "workload=reconciler-synthetic-v2; latency=action-needed-to-provider-entry; fresh-isolated-single-session-alternating-sequential-pairs; excludes=tmux,Dolt,wake-socket/IPC,contention"
@@ -152,18 +152,6 @@ func measureReconcilerPerfCompare(
 	if err != nil {
 		return reconcilerPerfReport{}, fmt.Errorf("measuring stop cohort: %w", err)
 	}
-	nudge, err := measureReconcilerPerfCohort(ctx, iterations, warmup, cityPath, reconcilerPerfActionNudge,
-		func(ctx context.Context, cityPath, pairID string) (reconcilerPerfArmSample, int64, error) {
-			measurement, err := measureLegacyReconcilerPerfNudge(ctx, cityPath, pairID)
-			return measurement.sample, measurement.windowNS, err
-		},
-		func(ctx context.Context, cityPath, pairID string) (reconcilerPerfArmSample, int64, error) {
-			measurement, err := measureKeyedReconcilerPerfNudge(ctx, cityPath, pairID)
-			return measurement.sample, measurement.windowNS, err
-		})
-	if err != nil {
-		return reconcilerPerfReport{}, fmt.Errorf("measuring nudge cohort: %w", err)
-	}
 	return buildReconcilerPerfReport(reconcilerPerfReportInput{
 		Provenance: provenance,
 		Warmup: reconcilerPerfWarmupPolicy{
@@ -171,7 +159,7 @@ func measureReconcilerPerfCompare(
 			Excluded:       true,
 			ExecutionOrder: "alternating_first_arm_legacy_first",
 		},
-		Cohorts: []reconcilerPerfActionCohort{start, stop, nudge},
+		Cohorts: []reconcilerPerfActionCohort{start, stop},
 	})
 }
 

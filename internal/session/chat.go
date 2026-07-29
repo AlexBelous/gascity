@@ -1051,16 +1051,29 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 // known. For a live target, closed historical sessions are excluded; for a
 // closed target they are kept so historical same-workdir ambiguity is preserved.
 // A beads.PartialResultError from the list is tolerated and scanned with
-// whatever rows came back: this feeds checkNoCWDCollision, whose real safety
-// gate is the independent process-liveness scan, so one corrupt bead elsewhere
-// in the store must not block every session start fleet-wide.
+// whatever rows came back, trading completeness for availability: this feeds
+// TranscriptPath, a best-effort lookup where one corrupt bead elsewhere in the
+// store must not block transcript resolution fleet-wide. checkNoCWDCollision
+// has different requirements (a degraded read must not be mistaken for a
+// complete one) and uses sameWorkDirSessionBeadsChecked instead.
 func (m *Manager) sameWorkDirSessionBeads(b beads.Bead, provider, workDir string) ([]beads.Bead, error) {
+	same, _, err := m.sameWorkDirSessionBeadsChecked(b, provider, workDir)
+	return same, err
+}
+
+// sameWorkDirSessionBeadsChecked is sameWorkDirSessionBeads plus a partial
+// flag reporting whether the underlying list was a beads.PartialResultError,
+// so a fail-closed caller can tell "no other candidates" apart from "we don't
+// actually know" instead of silently treating a degraded read as a complete
+// one (ga-c5yi8m).
+func (m *Manager) sameWorkDirSessionBeadsChecked(b beads.Bead, provider, workDir string) ([]beads.Bead, bool, error) {
 	all, err := m.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		IncludeClosed: b.Status == "closed",
 	})
-	if err != nil && !beads.IsPartialResult(err) {
-		return nil, fmt.Errorf("listing sessions: %w", err)
+	partial := err != nil && beads.IsPartialResult(err)
+	if err != nil && !partial {
+		return nil, false, fmt.Errorf("listing sessions: %w", err)
 	}
 	var same []beads.Bead
 	for _, other := range all {
@@ -1081,7 +1094,7 @@ func (m *Manager) sameWorkDirSessionBeads(b beads.Bead, provider, workDir string
 			same = append(same, other)
 		}
 	}
-	return same, nil
+	return same, partial, nil
 }
 
 // KeyedTranscriptPath returns the transcript path only when it resolves to a

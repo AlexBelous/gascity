@@ -767,9 +767,17 @@ func (m *Manager) checkNoCWDCollision(ctx context.Context, id string, b beads.Be
 		return fmt.Errorf("%w: %s", ErrWorkDirLivenessUnavailable, workDir)
 	}
 	normalizedWorkDir := pathutil.NormalizePathForCompare(strings.TrimSpace(workDir))
-	candidates, err := m.sameWorkDirSessionBeads(b, "", workDir)
+	candidates, partial, err := m.sameWorkDirSessionBeadsChecked(b, "", workDir)
 	if err != nil {
 		return fmt.Errorf("checking working directory collisions: %w", err)
+	}
+	if partial {
+		// A degraded bead read cannot be told apart from "no other
+		// candidates" -- treat it the same as an unavailable liveness scan
+		// rather than risk silently missing the live occupant's own bead
+		// (ga-c5yi8m).
+		m.recordCWDRefusal(id, events.SessionStartRefusedReasonLivenessUnavailable, "")
+		return fmt.Errorf("%w: %s", ErrWorkDirLivenessUnavailable, workDir)
 	}
 	hasOtherCandidate := false
 	for _, other := range candidates {

@@ -3992,6 +3992,270 @@ func TestRealizePoolDesiredSessionsResumePreservesLegacyBoundSessionName(t *test
 	}
 }
 
+// TestRealizePoolDesiredSessionsRereadsResumeSessionBeforeReuse pins the
+// snapshot-to-realization race that released active maintenance work. The
+// controller may compute a resume request from an open session and then observe
+// that same durable session close before desired-state realization. Reusing the
+// stale projection would start the closed identity; orphan release would then
+// correctly clear its work assignment. Realization must re-read the durable
+// row and create a fresh session instead.
+func TestRealizePoolDesiredSessionsRereadsResumeSessionBeforeReuse(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"agent_name":           "worker-1",
+			"session_name":         "worker-stale",
+			"state":                "awake",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+
+	// Capture the controller's tick snapshot while the session is open, then
+	// close the durable row before desired-state realization.
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.addInfo(sessiontest.SeedBead(t, stale))
+	if err := store.Close(stale.ID); err != nil {
+		t.Fatalf("close stale session after snapshot: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{{
+			Template:      "worker",
+			Tier:          "resume",
+			SessionBeadID: stale.ID,
+		}},
+	}, desired, &stderr)
+
+	if _, ok := desired["worker-stale"]; ok {
+		t.Fatalf("desired state restarted closed session %s; stderr=%q", stale.ID, stderr.String())
+	}
+	if got := len(desired); got != 1 {
+		t.Fatalf("desired sessions = %d, want one fresh replacement; keys=%v stderr=%q",
+			got, mapKeys(desired), stderr.String())
+	}
+	stored, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("get stale session: %v", err)
+	}
+	if stored.Status != "closed" {
+		t.Fatalf("stale session status = %q, want closed", stored.Status)
+	}
+}
+
+func TestSelectOrCreatePoolSessionBead_RereadsAndReusesOpenPreferred(t *testing.T) {
+	store := beads.NewMemStore()
+	open, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"agent_name":           "worker-2",
+			"session_name":         "worker-live",
+			"state":                "creating",
+			"pool_slot":            "2",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotInfo := sessiontest.SeedBead(t, open)
+	if err := store.SetMetadata(open.ID, "state", "awake"); err != nil {
+		t.Fatalf("advance current session state after snapshot: %v", err)
+	}
+	cfgAgent := config.Agent{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)}
+	bp := &agentBuildParams{
+		beadStore:    store,
+		sessionBeads: newSessionBeadSnapshot([]beads.Bead{open}),
+		agents:       []config.Agent{cfgAgent},
+		assignedWorkBeads: []beads.Bead{{
+			ID:       "work-1",
+			Status:   "in_progress",
+			Assignee: open.ID,
+		}},
+	}
+
+	result, slot, err := selectOrCreatePoolSessionBead(
+		bp, &cfgAgent, "worker", &snapshotInfo, map[string]bool{}, map[int]bool{},
+	)
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+	if result.ID != open.ID {
+		t.Fatalf("selected session = %q, want live preferred %q", result.ID, open.ID)
+	}
+	if result.MetadataState != "awake" {
+		t.Fatalf("selected state = %q, want current durable state awake", result.MetadataState)
+	}
+	if slot != 2 {
+		t.Fatalf("preferred reuse slot = %d, want 2", slot)
+	}
+}
+
+// TestMaintenanceReviewToAuthorKeepsLiveSessionClaim exercises the natural
+// two-half maintenance handoff through desired-state realization and orphan
+// release. Review completion must not force a new session identity when the
+// same durable pool session remains open and takes the authoring work.
+func TestMaintenanceReviewToAuthorKeepsLiveSessionClaim(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	worker, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"agent_name":           "worker-1",
+			"session_name":         "worker-live",
+			"state":                "awake",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := store.Create(beads.Bead{
+		Title: "maintenance review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	author, err := store.Create(beads.Bead{
+		Title: "maintenance author",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	workerID := worker.ID
+	if err := store.Update(review.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &workerID}); err != nil {
+		t.Fatalf("claim review: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+	realizeStage := func(work beads.Bead) {
+		t.Helper()
+		currentWorker, getErr := store.Get(worker.ID)
+		if getErr != nil {
+			t.Fatalf("get worker: %v", getErr)
+		}
+		snapshot := newSessionBeadSnapshot([]beads.Bead{currentWorker})
+		var stderr bytes.Buffer
+		bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+		bp.sessionBeads = snapshot
+		bp.assignedWorkBeads = []beads.Bead{work}
+		desired := map[string]TemplateParams{}
+		realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+			Template: "worker",
+			Requests: []SessionRequest{{
+				Template:      "worker",
+				Tier:          "resume",
+				SessionBeadID: worker.ID,
+				WorkBeadID:    work.ID,
+			}},
+		}, desired, &stderr)
+		if _, ok := desired["worker-live"]; !ok {
+			t.Fatalf("stage %s did not reuse live session; keys=%v stderr=%q",
+				work.Title, mapKeys(desired), stderr.String())
+		}
+	}
+
+	review, err = store.Get(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realizeStage(review)
+
+	// Claim the next half before closing the completed half, matching the
+	// maintenance queue handoff with no unowned gap.
+	if err := store.Update(author.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &workerID}); err != nil {
+		t.Fatalf("claim author: %v", err)
+	}
+	if err := store.Close(review.ID); err != nil {
+		t.Fatalf("close review: %v", err)
+	}
+	author, err = store.Get(author.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realizeStage(author)
+
+	currentWorker, err := sessionFrontDoor(store).Get(worker.ID)
+	if err != nil {
+		t.Fatalf("get current worker: %v", err)
+	}
+	released := releaseOrphanedPoolAssignments(
+		store,
+		cfg,
+		cityPath,
+		[]sessionpkg.Info{currentWorker},
+		[]beads.Bead{author},
+		[]beads.Store{store},
+		[]string{"city"},
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("orphan release cleared live author claim: %+v", released)
+	}
+	gotAuthor, err := store.Get(author.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuthor.Status != "in_progress" || gotAuthor.Assignee != worker.ID {
+		t.Fatalf("author claim = status %q assignee %q, want in_progress/%s",
+			gotAuthor.Status, gotAuthor.Assignee, worker.ID)
+	}
+	gotWorker, err := sessionFrontDoor(store).Get(worker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotWorker.Closed {
+		t.Fatal("review-to-author handoff closed the live worker session")
+	}
+}
+
 func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) {
 	maxWakes := 2
 	store := beads.NewMemStore()
@@ -9820,7 +10084,7 @@ func TestSelectOrCreatePoolSessionBead_UsesFreshCreateTimeNotBeaconTime(t *testi
 	}
 }
 
-func TestSelectOrCreatePoolSessionBead_ReusesPreferredDrained(t *testing.T) {
+func TestSelectOrCreatePoolSessionBead_ReplacesPreferredDrained(t *testing.T) {
 	store := beads.NewMemStore()
 	drained, err := store.Create(beads.Bead{
 		Title:  "claude",
@@ -9852,11 +10116,11 @@ func TestSelectOrCreatePoolSessionBead_ReusesPreferredDrained(t *testing.T) {
 	if err != nil {
 		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
 	}
-	if result.ID != drained.ID {
-		t.Fatal("resume tier should reuse preferred drained session bead")
+	if result.ID == drained.ID {
+		t.Fatal("resume tier reused preferred drained session bead")
 	}
-	if slot != 4 {
-		t.Fatalf("preferred reuse slot = %d, want 4", slot)
+	if slot != 1 {
+		t.Fatalf("fresh replacement slot = %d, want 1", slot)
 	}
 }
 
@@ -12530,11 +12794,15 @@ func TestBuildDesiredState_ProviderRedBlocksNewPoolSessionCreate(t *testing.T) {
 		cfg := makeCfg()
 		active := makeSessionBead("session-worker-1", "worker-1", "active", "1")
 		store := beads.NewMemStore()
+		storedActive, err := store.Create(active)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var stderr strings.Builder
 		result := buildDesiredStateWithSessionBeads(
 			"test-city", cityPath, time.Now().UTC(),
 			cfg, runtime.NewFake(), store, nil,
-			newSessionBeadSnapshot([]beads.Bead{active}),
+			newSessionBeadSnapshot([]beads.Bead{storedActive}),
 			nil, &stderr,
 		)
 		if _, ok := result.State["worker-1"]; !ok {

@@ -156,6 +156,33 @@ func reusablePoolSessionInfos(bp *agentBuildParams, cfgAgent *config.Agent, temp
 	return candidates
 }
 
+// currentPoolSessionInfoForReuse re-reads a snapshot candidate at the final
+// reuse boundary. Pool desired state is computed from a tick snapshot, but a
+// session can close or enter a terminal lifecycle state before realization.
+// Reusing that stale identity makes the controller restart a closed session;
+// the orphan-release pass then correctly releases work assigned to it. A
+// missing or terminal current row is therefore not reusable. Other read errors
+// fail closed so an uncertain store cannot create a duplicate worker.
+func currentPoolSessionInfoForReuse(bp *agentBuildParams, candidate session.Info) (session.Info, bool, error) {
+	if bp == nil || bp.beadStore == nil {
+		if candidate.Closed || isDrainedSessionInfo(candidate) || isFailedCreateSessionInfo(candidate) {
+			return session.Info{}, false, nil
+		}
+		return candidate, true, nil
+	}
+	current, err := sessionFrontDoor(bp.beadStore).Get(candidate.ID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return session.Info{}, false, nil
+		}
+		return session.Info{}, false, fmt.Errorf("re-reading pool session %s before reuse: %w", candidate.ID, err)
+	}
+	if current.Closed || isDrainedSessionInfo(current) || isFailedCreateSessionInfo(current) {
+		return session.Info{}, false, nil
+	}
+	return current, true, nil
+}
+
 // findReusableCanonicalNonExpandingPoolSessionInfo is the session.Info sibling of
 // findReusableCanonicalNonExpandingPoolSessionBead.
 func findReusableCanonicalNonExpandingPoolSessionInfo(

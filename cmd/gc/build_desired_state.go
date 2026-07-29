@@ -3627,7 +3627,21 @@ func selectOrPlanPoolSessionBead(
 		return session.Info{}, 0, nil, fmt.Errorf("pool template %q has no configured agent", template)
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
-	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
+	if preferred != nil && (preferred.ID == "" || used[preferred.ID]) {
+		preferred = nil
+	}
+	if preferred != nil {
+		current, reusable, err := currentPoolSessionInfoForReuse(bp, *preferred)
+		if err != nil {
+			return session.Info{}, 0, nil, err
+		}
+		if !reusable {
+			preferred = nil
+		} else {
+			preferred = &current
+		}
+	}
+	if preferred != nil {
 		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, *preferred, usedSlots)
 		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 			return session.Info{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
@@ -3639,21 +3653,36 @@ func selectOrPlanPoolSessionBead(
 		return info, slot, nil, err
 	}
 	if canonical, ok := findReusableCanonicalNonExpandingPoolSessionInfo(bp, cfgAgent, template, used); ok {
-		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, canonical, usedSlots)
-		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
-		return info, slot, nil, err
+		current, currentReusable, err := currentPoolSessionInfoForReuse(bp, canonical)
+		if err != nil {
+			return session.Info{}, 0, nil, err
+		}
+		if currentReusable &&
+			reusablePoolSessionInfo(bp, cfgAgent, template, current, used) &&
+			infoIdentifiesAsCanonical(current, cfgAgent.QualifiedName()) {
+			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, current, usedSlots)
+			info, normalizeErr := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, current)
+			return info, slot, nil, normalizeErr
+		}
 	}
 	// Reuse an existing active/creating session bead. Skip drained, closed,
 	// and asleep — asleep ephemerals are not restarted; a fresh session is
 	// created instead. The reconciler closes orphaned asleep beads.
 	for _, candidate := range reusablePoolSessionInfos(bp, cfgAgent, template, used) {
-		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
-			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
+		current, currentReusable, err := currentPoolSessionInfoForReuse(bp, candidate)
+		if err != nil {
+			return session.Info{}, 0, nil, err
+		}
+		if !currentReusable || !reusablePoolSessionInfo(bp, cfgAgent, template, current, used) {
+			continue
+		}
+		if desiredName := strings.TrimSpace(current.SessionNameMetadata); desiredName != "" {
+			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, current, usedSlots)
 			if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 				continue
 			}
-			info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, candidate)
-			return info, slot, nil, err
+			info, normalizeErr := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, current)
+			return info, slot, nil, normalizeErr
 		}
 	}
 	slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, session.Info{}, usedSlots)

@@ -69,6 +69,14 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 		if err != nil || pid <= 1 {
 			continue
 		}
+		owned, err := processOwnedByUID(root, pid, os.Geteuid())
+		if err != nil {
+			scanErr = errors.Join(scanErr, fmt.Errorf("reading owner for pid %d: %w", pid, err))
+			continue
+		}
+		if !owned {
+			continue
+		}
 		env, err := parseEnvironFile(filepath.Join(root, entry.Name(), "environ"))
 		if err != nil {
 			scanErr = errors.Join(scanErr, fmt.Errorf("reading environ for pid %d: %w", pid, err))
@@ -116,6 +124,31 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 	return out, scanErr
 }
 
+func processOwnedByUID(root string, pid, uid int) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "status"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Uid:") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "Uid:"))
+		if len(fields) == 0 {
+			break
+		}
+		observed, err := strconv.Atoi(fields[0])
+		if err != nil {
+			break
+		}
+		return observed == uid, nil
+	}
+	return false, fmt.Errorf("missing valid Uid field")
+}
+
 func mergeCurrentEnv(env map[string]string) map[string]string {
 	if env == nil {
 		env = make(map[string]string)
@@ -133,7 +166,7 @@ func mergeCurrentEnv(env map[string]string) map[string]string {
 func parseEnvironFile(path string) (map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || os.IsPermission(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -187,7 +220,7 @@ func isInfrastructureParent(root string, pid int) bool {
 func readParentPID(path string) (int, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || os.IsPermission(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return 0, false, nil
 		}
 		return 0, false, err

@@ -1737,7 +1737,7 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 
 	var stderr synchronizedBuffer
-	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr)
+	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "", "worker", "original-token", []string{"claude"}, &stderr)
 	if !dead {
 		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
 	}
@@ -1751,6 +1751,62 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "instance token mismatch") {
 		t.Fatalf("stderr = %q, want token mismatch diagnostic", got)
+	}
+}
+
+type freshLivenessProvider struct {
+	*runtime.Fake
+	fresh runtime.Liveness
+}
+
+func (p *freshLivenessProvider) ObserveFreshLiveness(runtime.LivenessTarget) runtime.Liveness {
+	return p.fresh
+}
+
+func TestConfirmDrainAckRuntimeDeadStrictRequiresCompleteAbsence(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 20 * time.Millisecond
+	drainAckStopConfirmDeadPoll = time.Millisecond
+	defer func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	}()
+
+	store := beads.NewMemStore()
+	sp := &freshLivenessProvider{Fake: runtime.NewFake()}
+
+	if confirmDrainAckRuntimeDead("", store, runtime.NewFake(), &config.City{}, "sid-1", "worker", "", nil, io.Discard, true) {
+		t.Fatal("strict confirm-dead accepted absence from an unsupported provider")
+	}
+
+	sp.fresh = runtime.Liveness{}
+	if confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "", nil, io.Discard, true) {
+		t.Fatal("strict confirm-dead accepted incomplete absence")
+	}
+
+	sp.fresh = runtime.Liveness{Complete: true}
+	if !confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "", nil, io.Discard, true) {
+		t.Fatal("strict confirm-dead rejected complete absence")
+	}
+}
+
+func TestConfirmDrainAckRuntimeDeadStrictTokenFenceRetainsLiveEvidence(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &freshLivenessProvider{Fake: runtime.NewFake(), fresh: runtime.Liveness{Running: true, Alive: true, Complete: true}}
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "replacement"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	if confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "original", nil, io.Discard, true) {
+		t.Fatal("strict confirm-dead treated token-fenced live evidence as dead")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "worker" {
+			t.Fatal("strict confirm-dead killed a token-fenced replacement")
+		}
 	}
 }
 

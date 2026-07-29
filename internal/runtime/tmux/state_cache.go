@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -73,6 +74,11 @@ type runtimeStateSnapshot struct {
 	ProcessesAvailable bool
 }
 
+type exactProcessScan struct {
+	runtimes []runtime.LiveRuntime
+	complete bool
+}
+
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
 // status check or reconciler pass. Concurrent callers are coalesced via
 // singleflight so at most one tmux/process snapshot refresh runs at a time.
@@ -87,16 +93,108 @@ type StateCache struct {
 	staleTTL   time.Duration
 	sf         singleflight.Group
 	fetcher    StateFetcher
+	scanMu     sync.RWMutex
+	// scanBySessionID is an instance-owned seam so fresh liveness tests can
+	// model exact and partial process-table scans without mutable global state.
+	scanBySessionID func(string) exactProcessScan
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
 // staleTTL defaults to 30s.
 func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
-	return &StateCache{
-		fetcher:  fetcher,
-		ttl:      ttl,
-		staleTTL: defaultStaleTTL,
+	var scanBySessionID func(string) exactProcessScan
+	if goruntime.GOOS == "linux" || goruntime.GOOS == "darwin" {
+		scanBySessionID = func(id string) exactProcessScan {
+			runtimes, err := proctable.ScanBySessionID(id)
+			return exactProcessScan{runtimes: runtimes, complete: err == nil}
+		}
 	}
+	return &StateCache{
+		fetcher:         fetcher,
+		ttl:             ttl,
+		staleTTL:        defaultStaleTTL,
+		scanBySessionID: scanBySessionID,
+	}
+}
+
+// freshState forces one post-invalidation cache generation and reports whether
+// that exact generation published a usable, non-stale snapshot.
+func (c *StateCache) freshState() (runtimeStateSnapshot, bool) {
+	c.Invalidate()
+	c.mu.RLock()
+	generation := c.generation
+	c.mu.RUnlock()
+
+	if c.refresh(generation) {
+		return c.snapshot(), false
+	}
+
+	c.mu.RLock()
+	state := c.state
+	complete := c.generation == generation && !c.dirty && c.lastError == nil &&
+		state.Sessions != nil && !c.fetchedAt.IsZero() && time.Since(c.fetchedAt) <= c.staleTTL
+	c.mu.RUnlock()
+	return state, complete
+}
+
+func (c *StateCache) snapshot() runtimeStateSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.state
+}
+
+func (c *StateCache) setScanBySessionID(scan func(string) exactProcessScan) {
+	c.scanMu.Lock()
+	c.scanBySessionID = scan
+	c.scanMu.Unlock()
+}
+
+func (c *StateCache) scanSessionID(id string) (exactProcessScan, bool) {
+	c.scanMu.RLock()
+	scan := c.scanBySessionID
+	c.scanMu.RUnlock()
+	if scan == nil {
+		return exactProcessScan{}, false
+	}
+	return scan(id), true
+}
+
+// ObserveFreshLiveness forces a new tmux snapshot and combines it with an
+// exact GC_SESSION_ID process-table scan. Absence is complete only when both
+// sources were fully observed in that post-invalidation generation.
+func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	name := strings.TrimSpace(target.SessionName)
+	if name == "" || p.cache == nil {
+		return runtime.Liveness{}
+	}
+
+	state, cacheComplete := p.cache.freshState()
+	session, panePresent := state.Sessions[name]
+	panePresent = panePresent && session.Running
+	processNames := nonEmptyProcessNames(target.ProcessNames)
+	processAlive := len(processNames) > 0 && state.processAlive(name, processNames)
+
+	var (
+		exactProcessAlive bool
+		scanComplete      bool
+	)
+	if sessionID := strings.TrimSpace(target.SessionID); sessionID != "" {
+		result, scanned := p.cache.scanSessionID(sessionID)
+		scanComplete = scanned && result.complete
+		for _, live := range result.runtimes {
+			if live.SessionID == sessionID {
+				exactProcessAlive = true
+				break
+			}
+		}
+	}
+
+	positive := panePresent || processAlive || exactProcessAlive
+	complete := cacheComplete && scanComplete
+	if len(processNames) > 0 && panePresent && !state.ProcessesAvailable {
+		complete = false
+	}
+	return runtime.Liveness{Running: positive, Alive: positive, Complete: complete}
 }
 
 // IsRunning reports whether the named session exists in the cached set.
@@ -255,6 +353,11 @@ type tmuxFetcher struct {
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
 	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
 	if err != nil {
+		if errors.Is(err, ErrNoCurrentTarget) {
+			return runtimeStateSnapshot{
+				Sessions: make(map[string]sessionRuntimeState),
+			}, nil
+		}
 		if isNoServerError(err) {
 			// An unreachable tmux server is an observation FAILURE, not the
 			// fact "no sessions exist". Returning an empty *success* here let

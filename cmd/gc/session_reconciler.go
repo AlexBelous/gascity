@@ -351,7 +351,7 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 		// (the reassigned next step stays runtime-missing). The expected token is
 		// threaded through so each re-kill stays fenced against a re-woken
 		// same-name replacement. Mirrors #4089's confirm-dead contract.
-		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, strictTokenFence)
+		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, strictTokenFence)
 		// The runtime session is now confirmed dead (or the confirm-dead
 		// deadline passed and we proceed best-effort), but its pool session
 		// bead stays open (occupying the pool slot) until
@@ -380,13 +380,24 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 // when a definite token mismatch shows the name now belongs to a replacement —
 // and false if it outlived the deadline (caller proceeds best-effort). Mirrors
 // #4089's confirm-dead contract.
-func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer, strictTokenFence ...bool) bool {
+func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, stderr io.Writer, strictTokenFence ...bool) bool {
 	strict := len(strictTokenFence) > 0 && strictTokenFence[0]
 	deadline := time.Now().Add(drainAckStopConfirmDeadTimeout)
 	for {
-		running, alive := observeRuntimeProviderLiveness(sp, name, processNames)
-		if !running && !alive {
-			return true
+		if strict {
+			liveness := runtime.ObserveFreshLiveness(sp, runtime.LivenessTarget{
+				SessionID:    sessionID,
+				SessionName:  name,
+				ProcessNames: processNames,
+			})
+			if !liveness.Running && !liveness.Alive {
+				return liveness.Complete
+			}
+		} else {
+			running, alive := observeRuntimeProviderLiveness(sp, name, processNames)
+			if !running && !alive {
+				return true
+			}
 		}
 		if !time.Now().Before(deadline) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: runtime still alive after confirm-dead deadline; slot may stay occupied\n", name) //nolint:errcheck

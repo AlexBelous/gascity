@@ -23,7 +23,7 @@ import (
 // See gastownhall/gascity#2148 for the named-session lookup-error visibility
 // regression this field exists to surface.
 type sessionBeadSnapshot struct {
-	// mu guards openInfos/openCircuits + the four lookup maps. addInfo() (called
+	// mu guards openInfos/openCircuits + the lookup maps. addInfo() (called
 	// from the pool create/reuse path) can fire from multiple goroutines when
 	// realizePoolDesiredSessions parallelizes pool session bead creates across
 	// distinct aliases — see gastownhall/gascity#2319. All read methods take RLock;
@@ -39,11 +39,19 @@ type sessionBeadSnapshot struct {
 	// Phase 0.5 without a per-id store Get. An Info-fed snapshot (FromInfos) has no
 	// backing circuit metadata, so its entries are the zero CircuitState.
 	openCircuits              []sessionpkg.CircuitState
+	infoByID                  map[string]sessionpkg.Info
 	beadIDByAgentName         map[string]string
 	beadIDByTemplateHint      map[string]string
 	sessionNameByAgentName    map[string]string
 	sessionNameByTemplateHint map[string]string
-	loadErr                   error
+	// generation advances with every complete index publication. addInfo builds
+	// its O(fleet) replacement outside mu, then only publishes it when this
+	// generation still matches the captured snapshot.
+	generation uint64
+	// beforeAddInfoRebuild is a per-snapshot deterministic test hook. It is nil
+	// in production and runs after addInfo has released mu for its rebuild.
+	beforeAddInfoRebuild func()
+	loadErr              error
 	// fingerprint is the config-change cache key (sessionBeadSnapshotFingerprint):
 	// a hash of every open bead's ID + Status + Assignee + ALL metadata keys. It is
 	// computed at the store edge from the raw beads — session.Info deliberately drops
@@ -144,6 +152,7 @@ func newSessionBeadSnapshotFromReconcileRows(rows []sessionpkg.ReconcileSession)
 // filtered in lockstep with the closed-drop; a nil circuits yields the zero
 // CircuitState for every open row (an Info-fed snapshot has no circuit metadata).
 func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuits []sessionpkg.CircuitState) *sessionBeadSnapshot {
+	infoByID := make(map[string]sessionpkg.Info)
 	beadIDByAgentName := make(map[string]string)
 	beadIDByTemplateHint := make(map[string]string)
 	sessionNameByAgentName := make(map[string]string)
@@ -161,6 +170,11 @@ func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuit
 			openCircuits = append(openCircuits, circuits[i])
 		} else {
 			openCircuits = append(openCircuits, sessionpkg.CircuitState{})
+		}
+		// FindInfoByID historically returned the first matching open row. Keep
+		// that behavior if a damaged feed contains duplicate IDs.
+		if _, exists := infoByID[in.ID]; !exists {
+			infoByID[in.ID] = cloneSessionInfo(in)
 		}
 
 		sn := in.SessionNameMetadata
@@ -207,11 +221,19 @@ func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuit
 	return &sessionBeadSnapshot{
 		openInfos:                 openInfos,
 		openCircuits:              openCircuits,
+		infoByID:                  infoByID,
 		beadIDByAgentName:         beadIDByAgentName,
 		beadIDByTemplateHint:      beadIDByTemplateHint,
 		sessionNameByAgentName:    sessionNameByAgentName,
 		sessionNameByTemplateHint: sessionNameByTemplateHint,
 	}
+}
+
+func cloneSessionInfo(info sessionpkg.Info) sessionpkg.Info {
+	clone := info
+	clone.Labels = append([]string(nil), info.Labels...)
+	clone.AliasHistory = append([]string(nil), info.AliasHistory...)
+	return clone
 }
 
 // addInfo appends a freshly created/reopened session's projected Info to the
@@ -226,27 +248,50 @@ func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuit
 // reconcile tick (which re-loads the snapshot from the store after buildDesiredState) —
 // so they observe the new session directly. The sync path re-lists raw beads from the
 // store every cycle, so a just-created session_name is durably visible there too
-// (CreateSessionInfo persists the bead before projecting it). Under Lock; safe for the
-// parallel pool-create fan-out (gastownhall/gascity#2319).
+// (CreateSessionInfo persists the bead before projecting it). The O(fleet) rebuild
+// runs outside the lock; generation-checked publication remains safe for the parallel
+// pool-create fan-out (gastownhall/gascity#2319).
 func (s *sessionBeadSnapshot) addInfo(info sessionpkg.Info) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	infos := make([]sessionpkg.Info, 0, len(s.openInfos)+1)
-	infos = append(infos, s.openInfos...)
-	infos = append(infos, info)
-	circuits := make([]sessionpkg.CircuitState, 0, len(s.openCircuits)+1)
-	circuits = append(circuits, s.openCircuits...)
-	circuits = append(circuits, sessionpkg.CircuitState{})
-	rebuilt := newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+	for {
+		s.mu.RLock()
+		generation := s.generation
+		infos := append([]sessionpkg.Info(nil), s.openInfos...)
+		circuits := append([]sessionpkg.CircuitState(nil), s.openCircuits...)
+		hook := s.beforeAddInfoRebuild
+		s.mu.RUnlock()
+
+		infos = append(infos, info)
+		circuits = append(circuits, sessionpkg.CircuitState{})
+		if hook != nil {
+			hook()
+		}
+		rebuilt := newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+
+		s.mu.Lock()
+		if s.generation == generation {
+			s.publishRebuiltLocked(rebuilt)
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+	}
+}
+
+// publishRebuiltLocked replaces every snapshot index together. Callers must hold
+// s.mu.Lock; readers therefore see either the old complete index set or the new
+// complete index set, never a mixture.
+func (s *sessionBeadSnapshot) publishRebuiltLocked(rebuilt *sessionBeadSnapshot) {
 	s.openInfos = rebuilt.openInfos
 	s.openCircuits = rebuilt.openCircuits
+	s.infoByID = rebuilt.infoByID
 	s.beadIDByAgentName = rebuilt.beadIDByAgentName
 	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
 	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
 	s.sessionNameByTemplateHint = rebuilt.sessionNameByTemplateHint
+	s.generation++
 }
 
 // OpenInfos is a copy of the session.Info projection of every open session, in the
@@ -277,10 +322,17 @@ func (s *sessionBeadSnapshot) WriteBackReconcileInfos(infoByID map[string]sessio
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	changed := false
 	for i := range s.openInfos {
-		if post, ok := infoByID[s.openInfos[i].ID]; ok {
+		id := s.openInfos[i].ID
+		if post, ok := infoByID[id]; ok {
 			s.openInfos[i] = post
+			s.infoByID[id] = cloneSessionInfo(post)
+			changed = true
 		}
+	}
+	if changed {
+		s.generation++
 	}
 }
 
@@ -321,6 +373,8 @@ func (s *sessionBeadSnapshot) ApplyOpenInfoPatch(id string, patch sessionpkg.Met
 	for i := range s.openInfos {
 		if s.openInfos[i].ID == id {
 			s.openInfos[i] = s.openInfos[i].ApplyPatch(patch)
+			s.infoByID[id] = cloneSessionInfo(s.openInfos[i])
+			s.generation++
 			return
 		}
 	}
@@ -365,15 +419,11 @@ func (s *sessionBeadSnapshot) FindInfoByID(id string) (sessionpkg.Info, bool) {
 	return s.findInfoByIDLocked(id)
 }
 
-// findInfoByIDLocked is the inner lookup over openInfos; callers must hold at least
-// s.mu.RLock.
+// findInfoByIDLocked is the inner exact lookup over the infoByID index;
+// callers must hold at least s.mu.RLock.
 func (s *sessionBeadSnapshot) findInfoByIDLocked(id string) (sessionpkg.Info, bool) {
-	for _, info := range s.openInfos {
-		if info.ID == id {
-			return info, true
-		}
-	}
-	return sessionpkg.Info{}, false
+	info, ok := s.infoByID[id]
+	return cloneSessionInfo(info), ok
 }
 
 // FindInfoByNamedIdentity returns the session.Info of the open session whose

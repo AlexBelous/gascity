@@ -141,6 +141,15 @@ func (cr *CityRuntime) resetFSPressureEpisode() {
 	cr.fsPressureEpisodeLogged = false
 }
 
+// shouldSkipOrderCadenceForFSPressure applies the same high-pressure signal to
+// lightweight order-only ticks without consuming the full reconciler's
+// bounded-skip counter. The patrol path remains solely responsible for forcing
+// a complete reconciliation after maxConsecutiveFSPressureSkips.
+func shouldSkipOrderCadenceForFSPressure(stderr io.Writer) bool {
+	status, ok := currentFSPressureStatus(stderr)
+	return ok && status.High
+}
+
 // shouldSkipTickForFSPressure gates only the patrol/poke tick path after
 // config reload and before managed-Dolt preflight, order dispatch, session
 // sync, demand build, and reconciliation. Pressure-skipped ticks still drain

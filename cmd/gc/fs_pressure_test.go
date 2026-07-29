@@ -378,6 +378,35 @@ func TestCityRuntimeTickSkipsDueOrderDispatchUnderFSPressure(t *testing.T) {
 	}
 }
 
+func TestOrderCadencePressureGateDoesNotConsumePatrolSkipBudget(t *testing.T) {
+	withFakePressureFile(t, []byte(samplePressureHigh), nil)
+	t.Setenv(fsPressureThresholdEnv, "")
+
+	od := &recordingOrderDispatcher{}
+	cr := &CityRuntime{
+		od:                         od,
+		stderr:                     io.Discard,
+		fsPressureConsecutiveSkips: 3,
+		fsPressureEpisodeLogged:    true,
+		managedDoltOwned: func(string) (bool, error) {
+			t.Fatal("managed Dolt preflight should not run while order cadence is pressure-gated")
+			return false, nil
+		},
+	}
+
+	cr.orderCadenceTick(context.Background(), t.TempDir())
+
+	if got := od.calls.Load(); got != 0 {
+		t.Fatalf("order dispatch calls = %d, want 0 under high FS pressure", got)
+	}
+	if got := cr.fsPressureConsecutiveSkips; got != 3 {
+		t.Fatalf("patrol pressure skip budget = %d, want unchanged 3", got)
+	}
+	if !cr.fsPressureEpisodeLogged {
+		t.Fatal("patrol pressure episode state was reset by order-only cadence gate")
+	}
+}
+
 func TestCityRuntimeTickForcesRunAfterMaxConsecutiveFSPressureSkips(t *testing.T) {
 	pressure := []byte(samplePressureHigh)
 	withFakePressureReader(t, func(string) ([]byte, error) {

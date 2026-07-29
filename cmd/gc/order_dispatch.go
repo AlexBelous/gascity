@@ -169,9 +169,10 @@ func computeOrderDispatchCadence(aa []orders.Order, patrolInterval time.Duration
 		cadence.interval = maxInterval
 	}
 
-	// Never create an order-only scan loop faster than the hard floor. A
-	// faster operator patrol is already running and does not need this clamp.
-	if patrolInterval > minOrderDispatchInterval && cadence.interval < minOrderDispatchInterval {
+	// Never create an order-only scan loop faster than the hard floor. When
+	// the operator patrol is already faster, returning the floor disables the
+	// dedicated ticker while the patrol continues to supply the cadence.
+	if cadence.interval < minOrderDispatchInterval {
 		cadence.interval = minOrderDispatchInterval
 	}
 

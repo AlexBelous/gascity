@@ -1806,6 +1806,25 @@ func TestOrderDispatchCadenceStaysBoundedWhenDemandExceedsHardCapacity(t *testin
 	}
 }
 
+func TestOrderDispatchCadenceNeverCreatesSubFloorDedicatedLoop(t *testing.T) {
+	aa := []orders.Order{{
+		Name:     "one-second-order",
+		Trigger:  "cooldown",
+		Interval: "1s",
+	}}
+
+	cadence := computeOrderDispatchCadence(aa, 10*time.Second)
+	if cadence.interval != minOrderDispatchInterval {
+		t.Fatalf("cadence interval = %s, want hard floor %s", cadence.interval, minOrderDispatchInterval)
+	}
+	if got := dedicatedOrderDispatchInterval(&cadenceRecordingOrderDispatcher{
+		recordingOrderDispatcher: &recordingOrderDispatcher{},
+		cadence:                  cadence,
+	}, 10*time.Second); got != 0 {
+		t.Fatalf("dedicated interval = %s, want disabled when patrol is already faster than floor", got)
+	}
+}
+
 func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	store := beads.NewMemStore()
 	var aa []orders.Order

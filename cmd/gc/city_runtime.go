@@ -877,7 +877,7 @@ func dedicatedOrderDispatchInterval(od orderDispatcher, patrolInterval time.Dura
 // reconciliation remains on the normal patrol/poke paths, so increasing order
 // capacity does not multiply the expensive full-city work.
 func (cr *CityRuntime) orderCadenceTick(ctx context.Context, cityRoot string) {
-	if ctx.Err() != nil || cr.shouldSkipTickForFSPressure(nil, "order-cadence") {
+	if ctx.Err() != nil || shouldSkipOrderCadenceForFSPressure(cr.stderr) {
 		return
 	}
 	prev := beads.SetReconcilerTickTrigger("order-cadence")

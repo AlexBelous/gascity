@@ -75,6 +75,7 @@ type CityRuntime struct {
 	ct                      crashTracker
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
+	adt                     assignedWorkDeferTracker
 	wg                      wispGC
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
@@ -237,6 +238,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
+	adt := buildAssignedWorkDeferTracker(p.Cfg, p.CityName, p.SP)
 
 	wg := newWispGCForConfig(p.Cfg)
 
@@ -334,6 +336,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		ct:                      ct,
 		it:                      it,
 		mat:                     mat,
+		adt:                     adt,
 		wg:                      wg,
 		od:                      od,
 		orderSet:                orderSnapshot.Orders,
@@ -2039,6 +2042,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
+	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
 
 	cr.wg = newWispGCForConfig(nextCfg)
 
@@ -2394,6 +2398,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAsyncStartTracker(&cr.asyncStarts),
 		withAsyncDrainAckStopTracker(&cr.asyncStops),
 		withMaxSessionAgeTracker(cr.mat),
+		withAssignedWorkDeferTracker(cr.adt),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 	}
 	if bootReconcile {

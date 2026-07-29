@@ -914,6 +914,61 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 }
 
+func TestDefaultScaleCheckDemandRejectsUnpublishedOwnerWorktree(t *testing.T) {
+	const template = "gascity/workflows.codex-min"
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:  "owner-created before metadata publication",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	repo, base := worktreeTestRepo(t)
+	root := repo + "-worktrees"
+	path := filepath.Join(root, work.ID)
+	if _, err := worktree.Ensure(worktree.Spec{
+		RepoDir:    repo,
+		Root:       root,
+		Path:       path,
+		Branch:     "work/" + work.ID,
+		Base:       base,
+		BeadID:     work.ID,
+		StoreRef:   "rig:gascity",
+		Creator:    "formula:test",
+		Owner:      "formula:test",
+		Generation: "formula:test:" + work.ID,
+		Lifecycle:  worktree.LifecycleActive,
+	}); err != nil {
+		t.Fatalf("Ensure owner worktree: %v", err)
+	}
+
+	_, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    store,
+		repoDir:  repo,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	worktreeErr := demand[template].WorktreeErrors[work.ID]
+	if !strings.Contains(worktreeErr, "owner evidence") || !strings.Contains(worktreeErr, path) {
+		t.Fatalf("WorktreeErrors[%s] = %q, want unpublished owner evidence at %s", work.ID, worktreeErr, path)
+	}
+	classified := classifyInFlightWorktreeRequest(
+		SessionRequest{Tier: "new", WorkBeadID: work.ID},
+		demand[template],
+	)
+	if classified.UnmanagedDirect || !strings.Contains(classified.WorktreeError, "owner evidence") {
+		t.Fatalf("in-flight request = %+v, want fail-closed owner evidence", classified)
+	}
+}
+
 // TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget
 // reproduces a writer that stamps gc.routed_to with an instance-suffixed pool
 // identity directly (e.g. `bd update --set-metadata gc.routed_to=hello-world/polecat-1`),
@@ -4331,12 +4386,13 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
 		Template: "worker",
 		Requests: []SessionRequest{{
-			Template:      "worker",
-			Tier:          "new",
-			WorkBeadID:    "gp-59q",
-			WorkBeadTitle: "Fix pack route templates!",
-			WorkPack:      "packer",
-			WorkStoreRef:  "rig:gascity-packs",
+			Template:        "worker",
+			Tier:            "new",
+			WorkBeadID:      "gp-59q",
+			WorkBeadTitle:   "Fix pack route templates!",
+			WorkPack:        "packer",
+			WorkStoreRef:    "rig:gascity-packs",
+			UnmanagedDirect: true,
 		}},
 	}, desired, &stderr)
 
@@ -4519,13 +4575,14 @@ func TestRealizePoolDesiredSessionsHonorsExplicitPackWorkspace(t *testing.T) {
 	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
 		Template: "worker",
 		Requests: []SessionRequest{{
-			Template:      "worker",
-			Tier:          "new",
-			WorkBeadID:    "gp-59q",
-			WorkBeadTitle: "Fix pack route templates!",
-			WorkPack:      "packer",
-			WorkWorkspace: workspace,
-			WorkStoreRef:  "rig:gascity-packs",
+			Template:        "worker",
+			Tier:            "new",
+			WorkBeadID:      "gp-59q",
+			WorkBeadTitle:   "Fix pack route templates!",
+			WorkPack:        "packer",
+			WorkWorkspace:   workspace,
+			WorkStoreRef:    "rig:gascity-packs",
+			UnmanagedDirect: true,
 		}},
 	}, map[string]TemplateParams{}, &stderr)
 
@@ -4593,14 +4650,15 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
 		Template: "worker",
 		Requests: []SessionRequest{{
-			Template:      "worker",
-			Tier:          "resume",
-			SessionBeadID: reusable.ID,
-			WorkBeadID:    "gp-new",
-			WorkBeadTitle: "Route smoke",
-			WorkPack:      "packer",
-			WorkWorkspace: workspace,
-			WorkStoreRef:  "rig:gascity-packs",
+			Template:        "worker",
+			Tier:            "resume",
+			SessionBeadID:   reusable.ID,
+			WorkBeadID:      "gp-new",
+			WorkBeadTitle:   "Route smoke",
+			WorkPack:        "packer",
+			WorkWorkspace:   workspace,
+			WorkStoreRef:    "rig:gascity-packs",
+			UnmanagedDirect: true,
 		}},
 	}, map[string]TemplateParams{}, &stderr)
 

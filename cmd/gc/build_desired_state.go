@@ -138,6 +138,7 @@ type defaultScaleCheckTarget struct {
 	template string
 	storeKey string
 	store    beads.Store
+	repoDir  string
 	err      error
 }
 
@@ -518,7 +519,7 @@ func buildDesiredStateWithSessionBeads(
 				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
+					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city", repoDir: ownTarget.repoDir}
 					if namedSessionMode != "always" {
 						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
 					}
@@ -528,7 +529,12 @@ func buildDesiredStateWithSessionBeads(
 			}
 			if store != nil && isCold && !storeScopedControlDispatcher {
 				for _, source := range activeStores {
-					defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTarget{
+						template: template,
+						store:    source.store,
+						storeKey: source.ref,
+						repoDir:  poolDir,
+					})
 				}
 			}
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
@@ -598,7 +604,12 @@ func buildDesiredStateWithSessionBeads(
 			// claim a route from the city store. Keep their cold-wake probe on the
 			// owning store instead of applying generic cross-store pool delivery.
 			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
+				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{
+					template: template,
+					store:    store,
+					storeKey: "city",
+					repoDir:  ownTarget.repoDir,
+				})
 			}
 			continue
 		}
@@ -611,7 +622,12 @@ func buildDesiredStateWithSessionBeads(
 		// it itself, or the pool will churn at the warm/cold boundary.
 		if store != nil && isCold && !storeScopedControlDispatcher {
 			for _, source := range activeStores {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{
+					template: template,
+					store:    source.store,
+					storeKey: source.ref,
+					repoDir:  poolDir,
+				})
 			}
 			coldWakeTemplates[template] = true
 		}
@@ -1421,12 +1437,14 @@ func defaultScaleCheckTargetForAgent(
 		template: agentCfg.QualifiedName(),
 		storeKey: "city",
 		store:    cityStore,
+		repoDir:  cityPath,
 	}
 	rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs)
 	if rigName == "" {
 		return target
 	}
 	target.storeKey = "rig:" + rigName
+	target.repoDir = resolveAgentDirPath(cityPath, rigRootForName(rigName, cfg.Rigs))
 	if rigStores != nil {
 		if rigStore := rigStores[rigName]; rigStore != nil {
 			target.store = rigStore
@@ -1462,6 +1480,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		store     beads.Store
 		storeKey  string
 		templates map[string]struct{}
+		repoDirs  map[string]string
 	}
 	groups := make(map[string]*scaleStoreGroup)
 	var errs []error
@@ -1489,10 +1508,18 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		}
 		group := groups[key]
 		if group == nil {
-			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
+			group = &scaleStoreGroup{
+				store:     target.store,
+				storeKey:  key,
+				templates: make(map[string]struct{}),
+				repoDirs:  make(map[string]string),
+			}
 			groups[key] = group
 		}
 		group.templates[template] = struct{}{}
+		if repoDir := strings.TrimSpace(target.repoDir); repoDir != "" {
+			group.repoDirs[template] = repoDir
+		}
 	}
 
 	// countedBeads dedups counted bead IDs per template ACROSS store groups.
@@ -1571,6 +1598,11 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
 				}
 				entry.WorktreeSpecs[b.ID] = spec
+			} else if evidenceErr := unpublishedWorktreeOwnerEvidence(group.repoDirs[template], b.ID); evidenceErr != "" {
+				if entry.WorktreeErrors == nil {
+					entry.WorktreeErrors = make(map[string]string)
+				}
+				entry.WorktreeErrors[b.ID] = evidenceErr
 			}
 			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
 				if entry.ParentSIDs == nil {
@@ -1582,6 +1614,28 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		}
 	}
 	return counts, demand, partialTemplates, errs
+}
+
+func unpublishedWorktreeOwnerEvidence(repoDir, workBeadID string) string {
+	repoDir = strings.TrimSpace(repoDir)
+	workBeadID = strings.TrimSpace(workBeadID)
+	if repoDir == "" || workBeadID == "" {
+		return ""
+	}
+	path := filepath.Join(repoDir+"-worktrees", workBeadID)
+	provenance, err := worktree.InspectManagedEvidence(path)
+	if err != nil {
+		return fmt.Sprintf("worktree owner evidence at %q cannot be verified: %v", path, err)
+	}
+	if provenance == nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"worktree owner evidence at %q exists for bead %q in store %q but work bead metadata is unpublished",
+		path,
+		provenance.BeadID,
+		provenance.StoreRef,
+	)
 }
 
 func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scaleCheckDemand {

@@ -154,6 +154,28 @@ type CleanupReport struct {
 	Error          *CleanupError `json:"error,omitempty"`
 }
 
+// InspectManagedEvidence returns the durable owner provenance at path without
+// requiring the caller to already possess the published bead metadata needed
+// to build a complete Spec. A missing path has no evidence and returns
+// (nil, nil). An existing path whose provenance cannot be read is reported as
+// an error so callers can fail closed across interrupted publication.
+func InspectManagedEvidence(path string) (*Provenance, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("managed worktree evidence path must not be empty")
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("inspecting managed worktree evidence at %q: %w", path, err)
+	}
+	provenance, err := readProvenance(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading managed worktree evidence at %q: %w", path, err)
+	}
+	return &provenance, nil
+}
+
 func (s Spec) validate() error {
 	if s.RepoDir == "" {
 		return errors.New("worktree spec: repo dir must not be empty")

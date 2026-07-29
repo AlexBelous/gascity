@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -144,16 +146,26 @@ func TestCreateSessionRefusesLiveWorkDirCollision(t *testing.T) {
 	}
 }
 
-// TestCreateSessionRefusesWhenScannerReportsKnownSessionDirLive proves the
-// guard also honors the /proc-derived liveness signal for a known session's
-// recorded directory, not just the runtime provider's own IsRunning
-// bookkeeping — the bead-only session below is never started via the fake
-// provider, so only the injected scanner can be the source of the refusal.
-func TestCreateSessionRefusesWhenScannerReportsKnownSessionDirLive(t *testing.T) {
+// TestCreateSessionRefusesWhenSessionOwnedPIDLiveAtKnownDir proves the guard
+// still refuses via its unattributed fallback signal when a session-owned
+// process (one the process-table scan attributes to some session ID) is
+// confirmed live at a known session's recorded directory, even though that
+// live PID belongs to a session OTHER than the only bead on record there —
+// so no single candidate can be individually attributed, yet the collision
+// is still real and must still be refused (ga-thkwp5 B: narrowing the
+// fallback to session-owned PIDs must not stop it from firing when one
+// genuinely is live there).
+func TestCreateSessionRefusesWhenSessionOwnedPIDLiveAtKnownDir(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
+	rec := &recordingRecorder{}
 	dir := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithLivenessScanner(fixedLiveness(true, dir)))
+	normalizedDir := pathutil.NormalizePathForCompare(dir)
+	const elsewherePID = 5151
+	sp.OrphanedRuntimes = map[string]runtime.LiveRuntime{
+		"elsewhere-session": {SessionID: "elsewhere-session", PID: elsewherePID},
+	}
+	mgr := NewManagerWithOptions(store, sp, WithLivenessScanner(fixedLivenessWithPIDs(true, map[int]string{elsewherePID: normalizedDir}, dir)), WithEventRecorder(rec))
 
 	known, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "known", Command: "claude", WorkDir: dir, Provider: "claude"})
 	if err != nil {
@@ -165,10 +177,15 @@ func TestCreateSessionRefusesWhenScannerReportsKnownSessionDirLive(t *testing.T)
 
 	_, err = mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "challenger", Command: "claude", WorkDir: dir, Provider: "claude"})
 	if err == nil {
-		t.Fatal("CreateSession at a dir the scanner reports live for a known session succeeded, want refusal")
+		t.Fatal("CreateSession at a dir with a session-owned live PID succeeded, want refusal")
 	}
 	if !errors.Is(err, ErrWorkDirCollision) {
 		t.Fatalf("error = %v, want wrapping ErrWorkDirCollision", err)
+	}
+
+	payload := refusedCwdPayload(t, rec)
+	if payload.CollidingSessionID != "" {
+		t.Fatalf("payload.CollidingSessionID = %q, want empty: the live PID belongs to session %q, not the known bead %q on record at this dir", payload.CollidingSessionID, "elsewhere-session", known.ID)
 	}
 }
 
@@ -227,37 +244,77 @@ func TestCandidateConfirmedLiveByPID_NoRuntimeFound(t *testing.T) {
 	}
 }
 
-// TestCreateSessionRefusesWithoutFalseAttributionWhenUnattributable proves
-// the FR3 "honesty" property: when the scanner confirms some live process
-// occupies a directory but the sole candidate session bead cannot be
-// positively attributed to it (not IsRunning, no matching live PID), the
-// guard still refuses fail-closed but must not name that candidate as the
-// occupant — the prior implementation blamed whichever bead was the only (or
-// first-iterated) candidate on the scanner signal alone, without evidence it
-// was actually the live one (ga-9x4z1g.1 FR3).
-func TestCreateSessionRefusesWithoutFalseAttributionWhenUnattributable(t *testing.T) {
+// TestCreateSessionAllowsWorkDirWhenLiveProcessIsUnattributedSquatter proves
+// the FR4/Failure-2 regression: a live process with no relationship to any
+// Gas City session (no GC_SESSION_ID; e.g. the supervisor, the controller,
+// or an operator's own shell) merely having its cwd at a directory, plus an
+// unrelated never-started session bead recording that same directory, must
+// NOT be enough to refuse a start. The prior implementation blamed any live
+// /proc cwd match regardless of whether it belonged to a session at all,
+// producing this false positive (ga-thkwp5 Failure 2, PR #4735). Uses the
+// REAL pidutil.LiveCWDs scanner and a real subprocess rather than stubs,
+// since the bug is specifically about production /proc data shaped this way
+// (adapted from the ga-naxg9e investigation artifact that first reproduced
+// it).
+func TestCreateSessionAllowsWorkDirWhenLiveProcessIsUnattributedSquatter(t *testing.T) {
+	dir := t.TempDir()
+
+	// A real live process whose cwd is dir, with no relationship to any
+	// session (no GC_SESSION_ID). Stands in for the supervisor/controller/
+	// operator shell that always occupies a city root in production.
+	squatter := exec.Command("sleep", "60")
+	squatter.Dir = dir
+	if err := squatter.Start(); err != nil {
+		t.Fatalf("starting squatter process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = squatter.Process.Kill()
+		_, _ = squatter.Process.Wait()
+	})
+
+	// Confirm the production scanner really sees it, so a pass below proves
+	// the guard's logic rather than /proc being unavailable on this host.
+	deadline := time.Now().Add(5 * time.Second)
+	sawSquatter := false
+	for time.Now().Before(deadline) {
+		live := pidutil.LiveCWDs()
+		if !live.Scanned {
+			t.Skip("no /proc on this host; guard cannot be exercised")
+		}
+		if cwd, ok := live.PIDCWDs[squatter.Process.Pid]; ok && cwd != "" {
+			sawSquatter = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !sawSquatter {
+		t.Fatalf("production scanner never observed squatter pid %d at %s", squatter.Process.Pid, dir)
+	}
+
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	rec := &recordingRecorder{}
-	dir := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithLivenessScanner(fixedLiveness(true, dir)), WithEventRecorder(rec))
+	mgr := NewManagerWithOptions(store, sp, WithLivenessScanner(pidutil.LiveCWDs))
 
-	known, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "known", Command: "claude", WorkDir: dir, Provider: "claude"})
+	// A never-started session bead recording the same work_dir. In
+	// production this is any prior session for the same agent that has not
+	// been closed.
+	known, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly: true, Template: "helper", Title: "known",
+		Command: "claude", WorkDir: dir, Provider: "claude",
+	})
 	if err != nil {
-		t.Fatalf("create bead-only known session: %v", err)
+		t.Fatalf("creating bead-only known session: %v", err)
+	}
+	if sp.IsRunning(known.SessionName) {
+		t.Fatal("precondition violated: bead-only session must not be running")
 	}
 
-	_, err = mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "challenger", Command: "claude", WorkDir: dir, Provider: "claude"})
-	if err == nil {
-		t.Fatal("CreateSession at a dir the scanner reports live succeeded, want refusal")
-	}
-	if !errors.Is(err, ErrWorkDirCollision) {
-		t.Fatalf("error = %v, want wrapping ErrWorkDirCollision", err)
-	}
-
-	payload := refusedCwdPayload(t, rec)
-	if payload.CollidingSessionID != "" {
-		t.Fatalf("payload.CollidingSessionID = %q, want empty: %s has no evidence (not IsRunning, no matching live PID) of being the live occupant", payload.CollidingSessionID, known.ID)
+	_, err = mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Title: "challenger",
+		Command: "claude", WorkDir: dir, Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession refused at %s: no live session shares this directory — squatter pid %d has no GC_SESSION_ID and %s was never started, so neither is a live session occupant: %v", dir, squatter.Process.Pid, known.ID, err)
 	}
 }
 

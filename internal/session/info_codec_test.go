@@ -145,6 +145,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		SessionIDFlag:                  b.Metadata["session_id_flag"],
 		TemplateOverrides:              b.Metadata["template_overrides"],
 		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
+		CWDCollisionAttempts:           b.Metadata["cwd_collision_attempts"],
 		ProviderKind:                   b.Metadata["provider_kind"],
 		BuiltinAncestor:                b.Metadata["builtin_ancestor"],
 

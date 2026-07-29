@@ -1499,6 +1499,78 @@ func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *
 	}
 }
 
+func TestRecordCWDCollisionFailure_Quarantine(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"cwd_collision_attempts": "4", // one below threshold
+	})
+
+	recordCWDCollisionFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if session.Metadata["cwd_collision_attempts"] != "5" {
+		t.Errorf("cwd_collision_attempts = %q, want 5", session.Metadata["cwd_collision_attempts"])
+	}
+	if session.Metadata["quarantined_until"] == "" {
+		t.Error("expected quarantine to be set at max attempts")
+	}
+	if session.Metadata["sleep_reason"] != "cwd-collision" {
+		t.Errorf("sleep_reason = %q, want cwd-collision", session.Metadata["sleep_reason"])
+	}
+}
+
+func TestRecordCWDCollisionFailure_BelowThreshold(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"cwd_collision_attempts": "1",
+	})
+
+	recordCWDCollisionFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if session.Metadata["cwd_collision_attempts"] != "2" {
+		t.Errorf("cwd_collision_attempts = %q, want 2", session.Metadata["cwd_collision_attempts"])
+	}
+	if session.Metadata["quarantined_until"] != "" {
+		t.Error("should not quarantine below threshold")
+	}
+}
+
+// TestRecordCWDCollisionFailure_DoesNotResetConversation locks in the
+// ga-thkwp5 D distinction from recordWakeFailure/recordChurn:
+// checkNoCWDCollision always runs before the provider process starts
+// (TestRuntimeStartCallSitesCheckCwdCollisionFirst), so a collision refusal
+// never leaves a stale conversation binding to discard, and resuming the same
+// conversation once the directory frees up is correct. A future edit that
+// copies the wake-failure reset pattern onto this function would silently
+// discard live conversation state on every transient collision.
+func TestRecordCWDCollisionFailure_DoesNotResetConversation(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+
+	session := makeBead("b1", map[string]string{
+		"session_key":         "old-key",
+		"started_config_hash": "abc123",
+	})
+
+	recordCWDCollisionFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if session.Metadata["session_key"] != "old-key" {
+		t.Errorf("session_key = %q, want unchanged old-key", session.Metadata["session_key"])
+	}
+	if session.Metadata["started_config_hash"] != "abc123" {
+		t.Errorf("started_config_hash = %q, want unchanged abc123", session.Metadata["started_config_hash"])
+	}
+}
+
 func TestClearWakeFailures(t *testing.T) {
 	store := newTestStore()
 

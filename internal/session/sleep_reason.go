@@ -35,6 +35,7 @@ const (
 	SleepReasonContextChurn          SleepReason = "context-churn"
 	SleepReasonMaxSessionAge         SleepReason = "max-session-age"
 	SleepReasonAssignedWorkExhausted SleepReason = "assigned-work-exhausted"
+	SleepReasonCWDCollision          SleepReason = "cwd-collision"
 )
 
 // IsDeliberateSleepReason reports whether a sleep_reason records an

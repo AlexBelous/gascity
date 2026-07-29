@@ -5520,17 +5520,18 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 	}
 }
 
-// TestCommitStartResult_WorkDirCollisionMarksTerminalNotRetryable proves a
-// checkNoCWDCollision refusal is treated as a terminal, non-retryable provider
-// error rather than falling into the generic wake-failure retry path. Before
-// this fix the reconciler treated ErrWorkDirCollision like any other transient
-// start error: it cleared last_woke_at and called recordWakeFailure, which
-// re-attempts the start on the very next tick — and since the working
-// directory is still occupied, the next attempt fails the same way, forever.
-// That retry storm is exactly what a genuinely occupied directory must not
-// trigger: the operator (or another live session) owns that directory until
-// something changes, and no amount of retrying fixes it (ga-9x4z1g.1 FR4).
-func TestCommitStartResult_WorkDirCollisionMarksTerminalNotRetryable(t *testing.T) {
+// TestCommitStartResult_WorkDirCollisionRetriesWithBoundedAccrual proves a
+// checkNoCWDCollision refusal is routed to the bounded cwd-collision retry
+// arm rather than markProviderTerminalError's permanent wedge. An earlier
+// design (ga-9x4z1g.1 FR4) treated this as terminal on the theory that no
+// amount of retrying fixes an occupied directory; ga-thkwp5 D overturned
+// that: the directory can free up as soon as the occupying session exits, so
+// a collision refusal — even a genuine one — must not permanently wedge the
+// session. The retry is bounded by its own cwd_collision_attempts counter,
+// independent of the generic wake_attempts counter, so a collision (whose
+// resolution depends on another session's lifecycle) does not exhaust the
+// same threshold as a crash loop.
+func TestCommitStartResult_WorkDirCollisionRetriesWithBoundedAccrual(t *testing.T) {
 	store := newTestStore()
 	session := makeBead("b1", map[string]string{
 		"template":     "worker",
@@ -5555,29 +5556,28 @@ func TestCommitStartResult_WorkDirCollisionMarksTerminalNotRetryable(t *testing.
 		t.Fatal("commitStartResult returned true for a work-dir collision")
 	}
 	got := store.metadata[session.ID]
-	if got[sessionHealthStateMetadataKey] != "unhealthy" {
-		t.Fatalf("session health = %q, want unhealthy", got[sessionHealthStateMetadataKey])
+	if got[sessionHealthStateMetadataKey] != "" {
+		t.Fatalf("session health = %q, want unset: a collision refusal must not mark terminal-provider-error health", got[sessionHealthStateMetadataKey])
 	}
-	if got[sessionHealthReasonMetadataKey] != "work_dir_collision" {
-		t.Fatalf("health reason = %q, want work_dir_collision", got[sessionHealthReasonMetadataKey])
+	if got["cwd_collision_attempts"] != "1" {
+		t.Fatalf("cwd_collision_attempts = %q, want 1", got["cwd_collision_attempts"])
 	}
-	if got[sessionDrainableMetadataKey] != boolMetadata(true) {
-		t.Fatalf("drainable = %q, want true", got[sessionDrainableMetadataKey])
+	if got["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared so wake-fairness ordering retries this candidate promptly instead of starving it", got["last_woke_at"])
 	}
 	if got["wake_attempts"] != "" {
-		t.Fatalf("wake_attempts = %q, want unset: a work-dir collision must not feed the retry-accounting path", got["wake_attempts"])
+		t.Fatalf("wake_attempts = %q, want unset: a work-dir collision must feed its own counter, not the generic wake-failure path", got["wake_attempts"])
 	}
 }
 
-// TestCommitStartResult_WorkDirLivenessUnavailableMarksTerminalNotRetryable
-// mirrors TestCommitStartResult_WorkDirCollisionMarksTerminalNotRetryable for
+// TestCommitStartResult_WorkDirLivenessUnavailableRetriesWithBoundedAccrual
+// mirrors TestCommitStartResult_WorkDirCollisionRetriesWithBoundedAccrual for
 // the sibling refusal reason: the guard could not even complete its liveness
 // scan, so it fails closed rather than risk starting a second session atop a
-// directory it could not verify was empty. That refusal carries the same
-// "retrying will not help until something external changes" property as an
-// attributed collision, so it gets the same terminal treatment (ga-9x4z1g.1
-// FR4).
-func TestCommitStartResult_WorkDirLivenessUnavailableMarksTerminalNotRetryable(t *testing.T) {
+// directory it could not verify was empty. That refusal gets the same
+// bounded-retry treatment as an attributed collision — the scan can succeed
+// on a later tick — rather than a permanent wedge (ga-thkwp5 D).
+func TestCommitStartResult_WorkDirLivenessUnavailableRetriesWithBoundedAccrual(t *testing.T) {
 	store := newTestStore()
 	session := makeBead("b1", map[string]string{
 		"template":     "worker",
@@ -5602,17 +5602,77 @@ func TestCommitStartResult_WorkDirLivenessUnavailableMarksTerminalNotRetryable(t
 		t.Fatal("commitStartResult returned true for an unavailable liveness scan")
 	}
 	got := store.metadata[session.ID]
-	if got[sessionHealthStateMetadataKey] != "unhealthy" {
-		t.Fatalf("session health = %q, want unhealthy", got[sessionHealthStateMetadataKey])
+	if got[sessionHealthStateMetadataKey] != "" {
+		t.Fatalf("session health = %q, want unset: a collision refusal must not mark terminal-provider-error health", got[sessionHealthStateMetadataKey])
 	}
-	if got[sessionHealthReasonMetadataKey] != "work_dir_liveness_unavailable" {
-		t.Fatalf("health reason = %q, want work_dir_liveness_unavailable", got[sessionHealthReasonMetadataKey])
+	if got["cwd_collision_attempts"] != "1" {
+		t.Fatalf("cwd_collision_attempts = %q, want 1", got["cwd_collision_attempts"])
 	}
-	if got[sessionDrainableMetadataKey] != boolMetadata(true) {
-		t.Fatalf("drainable = %q, want true", got[sessionDrainableMetadataKey])
+	if got["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want cleared so wake-fairness ordering retries this candidate promptly instead of starving it", got["last_woke_at"])
 	}
 	if got["wake_attempts"] != "" {
-		t.Fatalf("wake_attempts = %q, want unset: an unavailable liveness scan must not feed the retry-accounting path", got["wake_attempts"])
+		t.Fatalf("wake_attempts = %q, want unset: an unavailable liveness scan must feed its own counter, not the generic wake-failure path", got["wake_attempts"])
+	}
+}
+
+// TestCommitStartResult_WorkDirCollisionRollbackPendingSkipsAccrual proves the
+// bounded cwd-collision retry arm defers to rollback when the failed start
+// was a pending create: rollbackPendingCreate closes the bead outright
+// (closeFailedCreateBeadInTx), so it is discarded and recreated fresh on the
+// next tick — mirroring the generic rollbackPending arm's existing rationale
+// for skipping recordWakeFailure, there is no bead left to carry a
+// cwd_collision_attempts counter forward (ga-thkwp5 D).
+func TestCommitStartResult_WorkDirCollisionRollbackPendingSkipsAccrual(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "2",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				info: sessiontest.SeedBead(t, session),
+				tp: TemplateParams{
+					Command:      "worker",
+					SessionName:  "worker",
+					TemplateName: "worker",
+				},
+			},
+		},
+		err:             fmt.Errorf("%w: /rig/work is occupied by session other-session", sessionpkg.ErrWorkDirCollision),
+		outcome:         "provider_error",
+		started:         clk.Now(),
+		finished:        clk.Now(),
+		rollbackPending: true,
+	}
+
+	if commitStartResult(result, sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("rollback-pending cwd-collision error should not count as committed")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so pending-create can be retried by a replacement bead", updated.Status)
+	}
+	if got := updated.Metadata["cwd_collision_attempts"]; got != "" {
+		t.Fatalf("cwd_collision_attempts = %q, want unset: a rolled-back pending create is discarded, not accrued", got)
 	}
 }
 

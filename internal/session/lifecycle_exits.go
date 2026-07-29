@@ -162,6 +162,17 @@ func ChurnAccrualPatch(priorCycles, maxCycles int, until time.Time) ExitAccrual 
 	return exitAccrual("churn_count", priorCycles+1, maxCycles, string(SleepReasonContextChurn), until)
 }
 
+// CWDCollisionAccrualPatch builds the write for one more working-directory
+// collision start refusal on top of priorAttempts. Reaching maxAttempts
+// quarantines the session until the given time with sleep reason
+// "cwd-collision". Unlike WakeFailureAccrualPatch and ChurnAccrualPatch, the
+// caller does not pair this with a conversation reset: checkNoCWDCollision
+// always runs before the provider process starts, so a collision refusal
+// never leaves a stale conversation binding to discard (ga-thkwp5 D).
+func CWDCollisionAccrualPatch(priorAttempts, maxAttempts int, until time.Time) ExitAccrual {
+	return exitAccrual("cwd_collision_attempts", priorAttempts+1, maxAttempts, string(SleepReasonCWDCollision), until)
+}
+
 func exitAccrual(counterKey string, next, threshold int, sleepReason string, until time.Time) ExitAccrual {
 	count := strconv.Itoa(next)
 	if next >= threshold {

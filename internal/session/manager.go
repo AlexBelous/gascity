@@ -451,6 +451,12 @@ type Info struct {
 	// the raw string (!= "" && != "0"), which the int form cannot reproduce (it collapses
 	// missing/"0"/malformed all to 0); the mirror preserves that distinction for Step 6b.
 	WakeAttemptsMetadata string // wake_attempts (raw)
+	// CWDCollisionAttempts is the RAW cwd_collision_attempts metadata string,
+	// the WakeAttemptsMetadata-shaped counter for consecutive work_dir-collision
+	// start refusals (ga-thkwp5 D). Compile-time plumbing only: the scanner
+	// that scopes collisions to session-owned PIDs (B) and the retry routing
+	// that increments this counter (D) land in the GREEN step.
+	CWDCollisionAttempts string // cwd_collision_attempts (raw)
 	// ProviderKind is the RAW provider_kind metadata, verbatim — the provider
 	// FAMILY marker (claude/codex/gemini) stamped from ResolvedProvider, distinct
 	// from Provider (the concrete provider name). The session-logs / mcp-integration

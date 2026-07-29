@@ -41,7 +41,8 @@ func canonicalTempDir(t *testing.T) string {
 // e2eAgent describes an agent for E2E tests with full config control.
 type e2eAgent struct {
 	Name              string
-	Dir               string // working directory (supports {{.Agent}} templates)
+	Dir               string // identity prefix / default dir (NOT templated; literal, shared across pool instances)
+	WorkDir           string // working directory override; templated per-instance ({{.Agent}}, {{.AgentBase}}, etc.)
 	StartCommand      string // overrides workspace default
 	IdleTimeout       string // overrides default singleton keep-alive window
 	OverlayDir        string // relative to cityDir
@@ -230,6 +231,9 @@ func writeE2EAgentSections(b *strings.Builder, agents []e2eAgent) {
 		}
 		if a.Dir != "" {
 			fmt.Fprintf(b, "dir = %s\n", quote(a.Dir))
+		}
+		if a.WorkDir != "" {
+			fmt.Fprintf(b, "work_dir = %s\n", quote(a.WorkDir))
 		}
 		if a.OverlayDir != "" {
 			fmt.Fprintf(b, "overlay_dir = %s\n", quote(a.OverlayDir))

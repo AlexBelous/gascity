@@ -287,6 +287,10 @@ const (
 	// quarantine.
 	defaultMaxWakeAttempts = 5
 
+	// defaultMaxCWDCollisionAttempts is how many consecutive working-directory
+	// collision start refusals before quarantine (ga-thkwp5 D).
+	defaultMaxCWDCollisionAttempts = 5
+
 	// rateLimitPeekLines is the amount of pane scrollback inspected before a
 	// rapid dead process is classified as a crash. Known provider rate-limit
 	// screens are short, so 120 lines favors robust detection over shaving a

@@ -217,6 +217,11 @@ var infoKeyCodec = []infoKeySpec{
 		}
 	}},
 
+	// cwd_collision_attempts: raw mirror only, no parsed-int twin — every
+	// reader of this counter (recordCWDCollisionFailure) parses the raw
+	// string itself, mirroring wake_attempts' WakeAttemptsMetadata half.
+	{"cwd_collision_attempts", func(i *Info, v string) { i.CWDCollisionAttempts = v }},
+
 	// last_nudge_delivered_at: RFC3339 time. Reset-to-zero first (clears a
 	// carried-forward value in the patch direction; a no-op on a fresh Info).
 	{MetadataLastNudgeDeliveredAt, func(i *Info, v string) {

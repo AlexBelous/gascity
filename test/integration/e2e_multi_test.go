@@ -57,6 +57,12 @@ func TestE2E_MultiAgent_PoolAndFixed(t *testing.T) {
 				StartCommand: e2eReportScript(),
 				Env:          map[string]string{"CUSTOM_TYPE": "pooled"},
 				Pool:         &e2ePool{Min: 2, Max: 2, Check: "echo 2"},
+				// Pool instances run concurrently, so each needs its own
+				// working directory (ga-thkwp5 Failure 1) — without a
+				// per-instance work_dir, pooled-1 and pooled-2 both resolve
+				// to the same literal dir and the cwd-collision guard
+				// correctly refuses the second instance.
+				WorkDir: ".gc/agents/{{.AgentBase}}",
 			},
 		},
 	}

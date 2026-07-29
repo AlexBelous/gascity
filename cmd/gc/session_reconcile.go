@@ -771,6 +771,42 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 	return info.ApplyPatch(map[string]string{"churn_count": next})
 }
 
+// recordCWDCollisionFailure increments cwd_collision_attempts and quarantines
+// if threshold exceeded. It returns the snapshot Info advanced by every write
+// it made (write-returns-Info, same convention as recordWakeFailure and
+// recordChurn).
+//
+// Unlike recordWakeFailure and recordChurn, this does not pair the accrual
+// with a ConversationResetPatch: checkNoCWDCollision runs before the provider
+// process starts, so a collision refusal never leaves a stale conversation
+// binding to discard (ga-thkwp5 D). A future edit must not copy the
+// wake-failure/churn reset pattern onto this function without re-confirming
+// that invariant.
+//
+// agentIdentity is the start-path-joinable agent label for
+// gc.agent.quarantines.total.
+//
+// callers use (recordWakeFailure, recordChurn); the real caller is
+// commitStartFailure's cwd-collision branch, landing at GREEN (ga-thkwp5 D).
+//
+//nolint:unparam // Info return matches the write-returns-Info shape its
+func recordCWDCollisionFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
+	attempts, _ := strconv.Atoi(info.CWDCollisionAttempts)
+
+	accrual := sessionpkg.CWDCollisionAccrualPatch(attempts, defaultMaxCWDCollisionAttempts, clk.Now().Add(defaultQuarantineDuration))
+	if accrual.Quarantined {
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
+			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
+			info = next
+		}
+		return info
+	}
+
+	next := accrual.Patch["cwd_collision_attempts"]
+	_ = sessFront.SetMarker(info.ID, "cwd_collision_attempts", next)
+	return info.ApplyPatch(map[string]string{"cwd_collision_attempts": next})
+}
+
 // clearChurn resets the churn counter for a productive session. It returns the
 // snapshot Info with the {"churn_count":"0"} clear folded in (write-returns-Info),
 // or the input Info unchanged when churn_count is already absent or zero (no-op).

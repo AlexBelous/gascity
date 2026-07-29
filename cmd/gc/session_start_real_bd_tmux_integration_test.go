@@ -3,10 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,7 +18,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	runtimetmux "github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -24,14 +26,14 @@ import (
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
-type exactSessionStartDurableSample struct {
-	SessionID            string `json:"session_id"`
-	SchemaStatus         string `json:"schema_status"`
-	AdmissionToStartNS   int64  `json:"admission_to_start_ns"`
-	ProviderCallNS       int64  `json:"provider_call_ns"`
-	AdmissionToPersistNS int64  `json:"admission_to_persist_ns"`
-	ProviderStartEffects int    `json:"provider_start_effects"`
-	PersistedState       string `json:"persisted_state"`
+type exactSessionStartStopDurableSample struct {
+	Version                        string `json:"version"`
+	SessionID                      string `json:"session_id"`
+	SchemaStatus                   string `json:"schema_status"`
+	StartAdmissionToFinalizationNS int64  `json:"start_admission_to_finalization_ns"`
+	StopAdmissionToFinalizationNS  int64  `json:"stop_admission_to_finalization_ns"`
+	StartPersistedState            string `json:"start_persisted_state"`
+	StopPersistedState             string `json:"stop_persisted_state"`
 }
 
 func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testing.T) {
@@ -196,10 +198,10 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 }
 
 // TestExactSessionStartNativeV59RealBDTmuxJourney proves exact socket admission
-// against both an already-live no-op and a v59 durable pending-create start.
+// against both an already-live no-op and a v59 durable start-to-stop lifecycle.
 func TestExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	t.Run("live_socket_noop", testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow)
-	t.Run("native_v59_start", testExactSessionStartNativeV59RealBDTmuxJourney)
+	t.Run("native_v59_start_stop", testExactSessionStartNativeV59RealBDTmuxJourney)
 }
 
 func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
@@ -219,213 +221,385 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("install bd PATH shim: %v", err)
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BEADS_DOLT_AUTO_START", "1")
 	if tracePath := strings.TrimSpace(os.Getenv("GC_TEST_BD_TRACE_JSON")); tracePath != "" {
 		t.Setenv("GC_BD_TRACE_JSON", tracePath)
 	}
-	t.Logf("BD_BINARY %s", bdPath)
+
 	guard := tmuxtest.NewGuard(t)
 	cityPath := t.TempDir()
-	schemaStatus := initializeExactStartBDStore(t, cityPath)
+	cleanupManagedDoltTestCity(t, cityPath)
+	configPath := filepath.Join(t.TempDir(), "city.toml")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: guard.CityName()},
+		Beads: config.BeadsConfig{
+			Provider:          "bd",
+			ConditionalWrites: "auto",
+		},
+		Daemon: config.DaemonConfig{
+			SessionReconciler: "auto",
+			PatrolInterval:    "1m",
+			TickDebounce:      "30s",
+		},
+		Session: config.SessionConfig{
+			Socket:         guard.SocketName(),
+			SetupTimeout:   "3s",
+			StartupTimeout: "10s",
+		},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "sleep 600",
+			Env:          map[string]string{"GC_PROVIDER": "codex"},
+		}},
+	}
+	configData, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal exact start-stop city config: %v", err)
+	}
+	if err := os.WriteFile(configPath, configData, 0o644); err != nil {
+		t.Fatalf("write exact start-stop city config: %v", err)
+	}
+
+	gcBinary := currentGCBinaryForTests(t)
+	runtimeDir := t.TempDir()
+	gcHome := t.TempDir()
+	commandEnv := append([]string(nil), os.Environ()...)
+	commandEnv = replaceEnvEntry(commandEnv, "PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	commandEnv = replaceEnvEntry(commandEnv, "GC_HOME", gcHome)
+	commandEnv = replaceEnvEntry(commandEnv, "XDG_RUNTIME_DIR", runtimeDir)
+	commandEnv = replaceEnvEntry(commandEnv, "GC_SESSION", "tmux")
+	commandEnv = replaceEnvEntry(commandEnv, "GC_BEADS", "bd")
+	commandEnv = replaceEnvEntry(commandEnv, "GC_BEADS_SCOPE_ROOT", cityPath)
+	commandEnv = replaceEnvEntry(commandEnv, "GC_DOLT", "")
+	commandEnv = replaceEnvEntry(commandEnv, "BEADS_DIR", filepath.Join(cityPath, ".beads"))
+	commandEnv = replaceEnvEntry(commandEnv, "BEADS_DOLT_AUTO_START", "1")
+	commandEnv = replaceEnvEntry(commandEnv, "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS", "1")
+
+	runGC := func(timeout time.Duration, args ...string) string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), timeout)
+		defer cancel()
+		cmd := newExactStartStopGCCommand(ctx, commandEnv, gcBinary, args...)
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			t.Fatalf("gc %s: %v\n%s", strings.Join(args, " "), runErr, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	runGC(30*time.Second,
+		"init",
+		"--skip-provider-readiness",
+		"--no-start",
+		"--name", guard.CityName(),
+		"--file", configPath,
+		cityPath,
+	)
+	loaded, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("load initialized exact start-stop city config: %v", err)
+	}
+	if loaded.Session.Socket != guard.SocketName() {
+		t.Fatalf("initialized session socket = %q, want %q", loaded.Session.Socket, guard.SocketName())
+	}
+
+	schemaStatus := exactStartBDCommand(t, cityPath, "migrate", "schema", "--json")
+	if strings.TrimSpace(schemaStatus) == "" {
+		schemaStatus = exactStartBDCommand(t, cityPath, "migrate", "schema")
+	}
 	if !strings.Contains(schemaStatus, "v59") {
 		t.Fatalf("bd schema status = %q, want v59", schemaStatus)
 	}
 
-	sessionConfig := config.SessionConfig{
-		Socket:             guard.SocketName(),
-		SetupTimeout:       "3s",
-		NudgeReadyTimeout:  "2s",
-		NudgeRetryInterval: "50ms",
-		NudgeLockTimeout:   "2s",
-		StartupTimeout:     "10s",
-	}
-	baseProvider, err := newSessionProviderForCityByName(
-		nil,
-		"",
-		sessionConfig,
-		guard.CityName(),
+	controllerCtx, cancelController := context.WithCancel(t.Context())
+	var controllerStdout, controllerStderr synchronizedBuffer
+	controllerCmd := newExactStartStopGCCommand(
+		controllerCtx,
+		commandEnv,
+		gcBinary,
+		"start",
+		"--foreground",
+		"--no-strict",
 		cityPath,
 	)
-	if err != nil {
-		t.Fatalf("construct isolated tmux provider: %v", err)
+	controllerCmd.Stdout = &controllerStdout
+	controllerCmd.Stderr = &controllerStderr
+	if err := controllerCmd.Start(); err != nil {
+		t.Fatalf("start production controller: %v", err)
 	}
-	provider := &sessionLifecycleShadowJourneyProvider{Provider: baseProvider}
-	sessionName := guard.SessionName("worker")
+	controllerDone := make(chan error, 1)
+	go func() {
+		controllerDone <- controllerCmd.Wait()
+	}()
 	t.Cleanup(func() {
-		if provider.IsRunning(sessionName) {
-			if err := provider.Stop(sessionName); err != nil {
-				t.Errorf("cleanup isolated tmux session: %v", err)
-			}
+		stopOutput, stopErr := runExactStartStopGC(commandEnv, 30*time.Second, gcBinary, "stop", "--force", cityPath)
+		if stopErr != nil {
+			t.Errorf("stop production controller: %v\n%s", stopErr, stopOutput)
 		}
-	})
-
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: guard.CityName()},
-		Agents: []config.Agent{{
-			Name:         "worker",
-			StartCommand: "sleep 600",
-			// Avoid unrelated tmux process-family discovery so this sample
-			// measures keyed admission rather than host-wide ps/pgrep latency.
-			Env: map[string]string{"GC_PROVIDER": "codex"},
-		}},
-		Session: sessionConfig,
-	}
-	backingStore := beads.NewBdStoreWithPrefix(cityPath, beads.ExecCommandRunner(), "gct")
-	nativeStore, err := beads.OpenNativeDoltStoreAt(t.Context(), cityPath, nil)
-	if err != nil {
-		t.Fatalf("open production native session store over v59 data: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := nativeStore.CloseStore(); err != nil {
-			t.Errorf("close production native session store: %v", err)
-		}
-	})
-	store := beads.NewCachingStore(nativeStore, nil)
-	if err := store.PrimeActive(); err != nil {
-		t.Fatalf("prime production-shaped session cache: %v", err)
-	}
-	cs := coherentSessionStartControllerStateForTest(cfg, provider, store, rollout.Auto)
-	cs.cityName = guard.CityName()
-	cs.cityPath = cityPath
-	cr := &CityRuntime{
-		cityPath: cityPath,
-		cityName: guard.CityName(),
-		cfg:      cfg,
-		sp:       provider,
-		cs:       cs,
-		rec:      events.Discard,
-		stdout:   io.Discard,
-		stderr:   io.Discard,
-		sessionStartOptions: []startExecutionOption{
-			withStartStabilityWaiter(immediateStartStabilityWaiter),
-			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
-		},
-	}
-	t.Cleanup(cr.stopSessionStartController)
-	terminalResults := make(chan sessionStartReconcileResult, 8)
-	originalControllerConstructor := newCitySessionStartController
-	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
-		originalObserver := opts.Observer
-		opts.Observer = func(result sessionStartReconcileResult) {
-			if originalObserver != nil {
-				originalObserver(result)
-			}
-			terminalResults <- result
-		}
-		return originalControllerConstructor(opts)
-	}
-	t.Cleanup(func() { newCitySessionStartController = originalControllerConstructor })
-	if err := cr.ensureSessionStartController(t.Context(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
-		t.Fatalf("start keyed session controller: %v", err)
-	}
-
-	now := time.Now().UTC()
-	info, err := sessionFrontDoor(backingStore).CreateSessionInfo(sessionpkg.CreateSpec{
-		Title:     "worker",
-		AgentName: "worker",
-		Metadata: map[string]string{
-			"session_name":              sessionName,
-			"agent_name":                "worker",
-			"template":                  "worker",
-			"generation":                "1",
-			"instance_token":            "integration-token",
-			"live_hash":                 runtime.LiveFingerprint(runtime.Config{Command: "sleep 600"}),
-			"state":                     string(sessionpkg.StateCreating),
-			"pending_create_claim":      "true",
-			"pending_create_started_at": now.Format(time.RFC3339Nano),
-		},
-	})
-	if err != nil {
-		t.Fatalf("create durable session: %v", err)
-	}
-
-	admittedAt := time.Now().UTC()
-	if reply := cr.admitSessionStartSocketKey(info.ID); reply != sessionStartSocketReplyOK {
-		t.Fatalf("exact session-start admission = %q, want %q", reply, sessionStartSocketReplyOK)
-	}
-
-	waitCtx, cancelWait := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancelWait()
-	for {
+		cancelController()
 		select {
-		case result := <-terminalResults:
-			switch result.Outcome {
-			case sessionStartReconcileRetrying, sessionStartReconcileSuperseded:
-				continue
-			case sessionStartReconcileSucceeded:
-				goto reconciled
-			default:
-				t.Fatalf("exact start terminal result = %+v, want succeeded", result)
-			}
-		case <-waitCtx.Done():
-			t.Fatalf("exact start did not reach a terminal result: %v", waitCtx.Err())
+		case <-controllerDone:
+		case <-time.After(testutil.ExecRaceTimeout):
+			t.Errorf("production controller did not exit; stdout=%q stderr=%q", controllerStdout.String(), controllerStderr.String())
 		}
+	})
+	waitForControllerAvailable(t, cityPath)
+
+	var (
+		traceOutput string
+		traceStatus traceStatusResultJSON
+	)
+	if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
+		out, runErr := runExactStartStopGC(
+			commandEnv,
+			10*time.Second,
+			gcBinary,
+			"--city", cityPath,
+			"trace", "status", "--json",
+		)
+		traceOutput = out
+		if runErr != nil {
+			return false, runErr
+		}
+		var status traceStatusResultJSON
+		if decodeErr := json.Unmarshal([]byte(exactStartStopJSONPayload(out)), &status); decodeErr != nil {
+			return false, decodeErr
+		}
+		traceStatus = status
+		return status.SessionReconciler.Available &&
+			status.SessionReconciler.ConfiguredMode == "auto" &&
+			status.SessionReconciler.EffectiveOwner == "keyed", nil
+	}); err != nil {
+		t.Fatalf("production session reconciler did not become auto/keyed: %v; status=%+v output=%q controller stdout=%q stderr=%q",
+			err, traceStatus.SessionReconciler, traceOutput, controllerStdout.String(), controllerStderr.String())
 	}
 
-reconciled:
-	persisted, err := sessionFrontDoor(backingStore).Get(info.ID)
+	startAdmittedAt := time.Now().UTC()
+	createdOutput := runGC(30*time.Second,
+		"--city", cityPath,
+		"session", "new", "worker",
+		"--no-attach",
+		"--json",
+	)
+	var created sessionNewJSON
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(createdOutput)), &created); err != nil {
+		t.Fatalf("decode exact session creation: %v\n%s", err, createdOutput)
+	}
+	if created.SessionID == "" || created.SessionName == "" || !created.DeferredStart {
+		t.Fatalf("exact session creation = %+v, want deferred ID and tmux name", created)
+	}
+
+	backingStore := beads.NewBdStoreWithPrefix(cityPath, beads.ExecCommandRunner(), "gct")
+	var (
+		started          sessionpkg.Info
+		lastStartInfo    sessionpkg.Info
+		startFinalizedAt time.Time
+	)
+	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
+		info, getErr := sessionFrontDoor(backingStore).Get(created.SessionID)
+		if getErr != nil {
+			return false, getErr
+		}
+		lastStartInfo = info
+		view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
+		if view.BaseState != sessionpkg.BaseStateActive || info.PendingCreateClaim {
+			return false, nil
+		}
+		started = info
+		startFinalizedAt = time.Now().UTC()
+		return true, nil
+	}); err != nil {
+		t.Fatalf("exact start did not converge: %v; current=%+v controller stdout=%q stderr=%q",
+			err, lastStartInfo, controllerStdout.String(), controllerStderr.String())
+	}
+	tmuxClient := runtimetmux.NewTmuxWithConfig(runtimetmux.Config{SocketName: guard.SocketName()})
+	liveToken, err := tmuxClient.GetEnvironment(created.SessionName, "GC_INSTANCE_TOKEN")
 	if err != nil {
-		t.Fatalf("read exact-start result: %v", err)
+		t.Fatalf("read live isolated tmux instance token: %v; controller stdout=%q stderr=%q",
+			err, controllerStdout.String(), controllerStderr.String())
 	}
-	if persisted.MetadataState != string(sessionpkg.StateActive) {
-		t.Fatalf("persisted state = %q, want active", persisted.MetadataState)
+	if strings.TrimSpace(liveToken) == "" || liveToken != started.InstanceToken {
+		t.Fatalf("live/durable instance tokens = %q/%q, want the same non-empty token", liveToken, started.InstanceToken)
 	}
-	persistedAt := time.Now().UTC()
-
-	startCalls := provider.snapshotStartCalls()
-	if len(startCalls) != 1 {
-		t.Fatalf("provider Start calls = %d, want exactly 1: %#v", len(startCalls), startCalls)
+	sessionIDs, err := tmuxClient.ListSessionIDs()
+	if err != nil {
+		t.Fatalf("read exact-start tmux identity: %v", err)
 	}
-	startCall := startCalls[0]
-	if startCall.Name != sessionName || startCall.Err != nil {
-		t.Fatalf("provider Start = %#v, want successful %q start", startCall, sessionName)
-	}
-	if !provider.IsRunning(sessionName) || !guard.HasSession(sessionName) {
-		t.Fatalf("exact start returned without live isolated tmux session %q", sessionName)
-	}
-	if persisted.PendingCreateClaim {
-		t.Fatal("pending_create_claim remained set after exact start")
+	startedTmuxID := strings.TrimSpace(sessionIDs[created.SessionName])
+	if startedTmuxID == "" {
+		t.Fatalf("exact-start tmux identity for %q is empty: %v", created.SessionName, sessionIDs)
 	}
 
-	sample := exactSessionStartDurableSample{
-		SessionID:            info.ID,
-		SchemaStatus:         schemaStatus,
-		AdmissionToStartNS:   startCall.EnteredAt.Sub(admittedAt).Nanoseconds(),
-		ProviderCallNS:       startCall.CompletedAt.Sub(startCall.EnteredAt).Nanoseconds(),
-		AdmissionToPersistNS: persistedAt.Sub(admittedAt).Nanoseconds(),
-		ProviderStartEffects: len(startCalls),
-		PersistedState:       persisted.MetadataState,
+	stopPending, err := sessionFrontDoor(backingStore).ApplyPatchInfo(
+		started,
+		sessionpkg.DrainAckStopPendingPatch(time.Now().UTC()),
+	)
+	if err != nil {
+		t.Fatalf("persist drain-ack stop-pending through session front door: %v", err)
+	}
+	if !isDrainAckStopPendingInfo(stopPending) {
+		t.Fatalf("stop-pending projection = %#v, want durable drain-ack marker", stopPending)
+	}
+
+	stopAdmittedAt := time.Now().UTC()
+	eventOutput := runGC(10*time.Second,
+		"--city", cityPath,
+		"event", "emit", "bead.updated",
+		"--subject", created.SessionID,
+		"--bead-payload", created.SessionID,
+		"--actor", "bd-hook",
+		"--json",
+	)
+	var emitted struct {
+		HasPayload bool `json:"has_payload"`
+		Submitted  bool `json:"submitted"`
+	}
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(eventOutput)), &emitted); err != nil {
+		t.Fatalf("decode typed stop event: %v\n%s", err, eventOutput)
+	}
+	if !emitted.HasPayload || !emitted.Submitted {
+		t.Fatalf("typed stop event = %+v, want submitted bead payload; output=%q", emitted, eventOutput)
+	}
+
+	var (
+		stopped         sessionpkg.Info
+		stopFinalizedAt time.Time
+	)
+	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		info, getErr := sessionFrontDoor(backingStore).Get(created.SessionID)
+		if getErr != nil {
+			return false, getErr
+		}
+		if info.MetadataState != string(sessionpkg.StateDrained) || isDrainAckStopPendingInfo(info) {
+			return false, nil
+		}
+		stopped = info
+		stopFinalizedAt = time.Now().UTC()
+		return true, nil
+	}); err != nil {
+		current, currentErr := sessionFrontDoor(backingStore).Get(created.SessionID)
+		currentIDs, idsErr := tmuxClient.ListSessionIDs()
+		t.Fatalf("exact stop did not converge: %v; current=%+v current_err=%v tmux_ids=%v tmux_err=%v controller stdout=%q stderr=%q",
+			err, current, currentErr, currentIDs, idsErr, controllerStdout.String(), controllerStderr.String())
+	}
+	if !stopFinalizedAt.After(stopAdmittedAt) {
+		t.Fatalf("exact-stop finalized at %s before admission at %s", stopFinalizedAt, stopAdmittedAt)
+	}
+	if stopped.Closed {
+		t.Fatal("exact stop closed the durable session bead; want open drained bead")
+	}
+	stoppedBead, err := backingStore.Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("read exact-stop bead from real bd: %v", err)
+	}
+	if stoppedBead.Status != "open" {
+		t.Fatalf("exact-stop bead status = %q, want open", stoppedBead.Status)
+	}
+	afterIDs, listErr := tmuxClient.ListSessionIDs()
+	if listErr != nil && !strings.Contains(strings.ToLower(listErr.Error()), "no server running") {
+		t.Fatalf("list isolated tmux sessions after exact stop: %v", listErr)
+	}
+	if afterID := strings.TrimSpace(afterIDs[created.SessionName]); afterID != "" {
+		t.Fatalf("exact stop left or replaced tmux target %q: before=%q after=%q all=%v",
+			created.SessionName, startedTmuxID, afterID, afterIDs)
+	}
+	startSuccessLog := fmt.Sprintf(
+		"session lifecycle: op=start wave=0 session=%s template=worker outcome=success",
+		created.SessionName,
+	)
+	if count := strings.Count(controllerStderr.String(), startSuccessLog); count != 1 {
+		t.Fatalf("successful provider starts = %d, want exactly 1; controller stderr=%q", count, controllerStderr.String())
+	}
+
+	sample := exactSessionStartStopDurableSample{
+		Version:                        "exact-session-start-stop-v1",
+		SessionID:                      created.SessionID,
+		SchemaStatus:                   schemaStatus,
+		StartAdmissionToFinalizationNS: startFinalizedAt.Sub(startAdmittedAt).Nanoseconds(),
+		StopAdmissionToFinalizationNS:  stopFinalizedAt.Sub(stopAdmittedAt).Nanoseconds(),
+		StartPersistedState:            started.MetadataState,
+		StopPersistedState:             stopped.MetadataState,
 	}
 	wire, err := json.Marshal(sample)
 	if err != nil {
-		t.Fatalf("marshal exact-start sample: %v", err)
+		t.Fatalf("marshal exact start-stop sample: %v", err)
 	}
-	t.Logf("EXACT_START_DURABLE_SAMPLE %s", wire)
+	t.Logf("EXACT_START_STOP_DURABLE_SAMPLE %s", wire)
 }
 
-func initializeExactStartBDStore(t *testing.T, cityPath string) string {
-	t.Helper()
-	run := func(args ...string) string {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-		defer cancel()
-		runner := beads.ExecCommandRunnerWithEnvContext(ctx, map[string]string{
-			"BEADS_DIR": filepath.Join(cityPath, ".beads"),
-		})
-		out, err := runner(cityPath, "bd", args...)
-		if err != nil {
-			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+func replaceEnvEntry(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			continue
 		}
-		return strings.TrimSpace(string(out))
+		out = append(out, entry)
 	}
+	return append(out, prefix+value)
+}
 
-	run("init", "--non-interactive", "--skip-hooks", "--skip-agents", "--prefix", "gct")
-	run("config", "set", "types.custom", "molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step")
-	status := run("migrate", "schema", "--json")
-	if status == "" {
-		status = run("migrate", "schema")
+func newExactStartStopGCCommand(ctx context.Context, env []string, binary string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Env = env
+	return cmd
+}
+
+func runExactStartStopGC(env []string, timeout time.Duration, binary string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := newExactStartStopGCCommand(ctx, env, binary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return strings.TrimSpace(stdout.String() + stderr.String()), err
+}
+
+func waitExactStartStopState(ctx context.Context, timeout time.Duration, condition func() (bool, error)) error {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		ok, err := condition()
+		if err != nil {
+			lastErr = err
+		} else if ok {
+			return nil
+		}
+		select {
+		case <-deadline.Done():
+			return fmt.Errorf("%w (last observation error: %v)", deadline.Err(), lastErr)
+		case <-ticker.C:
+		}
 	}
-	if status == "" {
-		status = "schema status unavailable"
+}
+
+func exactStartBDCommand(t *testing.T, cityPath string, args ...string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	runner := beads.ExecCommandRunnerWithEnvContext(ctx, map[string]string{
+		"BEADS_DIR": filepath.Join(cityPath, ".beads"),
+	})
+	out, err := runner(cityPath, "bd", args...)
+	if err != nil {
+		t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	return status
+	return strings.TrimSpace(string(out))
+}
+
+func exactStartStopJSONPayload(raw string) string {
+	data := []byte(raw)
+	for i, b := range data {
+		if b != '{' && b != '[' {
+			continue
+		}
+		candidate := bytes.TrimSpace(data[i:])
+		if json.Valid(candidate) {
+			return string(candidate)
+		}
+	}
+	return raw
 }

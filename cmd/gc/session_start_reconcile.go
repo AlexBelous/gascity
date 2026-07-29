@@ -510,8 +510,12 @@ func reconcileExactSessionStartWithOwner(
 			return exactSessionStartKeyedOwner, nil
 		}
 		processNames := drainAckStopPendingProcessNames(params.Config, info)
+		incarnationStartedAt := drainAckIncarnationStartedAt(info)
 		liveness := runtime.ObserveFreshLiveness(params.Provider, runtime.LivenessTarget{
-			SessionID: info.ID, SessionName: name, ProcessNames: processNames,
+			SessionID:            info.ID,
+			SessionName:          name,
+			ProcessNames:         processNames,
+			IncarnationStartedAt: incarnationStartedAt,
 		})
 		if !liveness.Running && !liveness.Alive {
 			if !liveness.Complete {
@@ -546,6 +550,7 @@ func reconcileExactSessionStartWithOwner(
 			name,
 			token,
 			processNames,
+			incarnationStartedAt,
 			params.AsyncStopTracker,
 			stderr,
 			func(confirmed bool) {
@@ -713,6 +718,13 @@ func reconcileExactSessionStartWithOwner(
 		return owner, fmt.Errorf("reconciling exact session start %q: start result did not commit", info.ID)
 	}
 	return owner, nil
+}
+
+func drainAckIncarnationStartedAt(info sessionpkg.Info) time.Time {
+	if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok {
+		return wokeAt
+	}
+	return time.Time{}
 }
 
 // resolveExactSessionStartOwnership projects the durable start family once and

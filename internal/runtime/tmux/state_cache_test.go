@@ -343,7 +343,7 @@ func TestProviderInvalidateLivenessForcesFreshSnapshot(t *testing.T) {
 }
 
 func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T) {
-	completedScan := func(string) exactProcessScan {
+	completedScan := func(string, time.Time) exactProcessScan {
 		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
 	}
 	liveSession := runtimeStateSnapshot{
@@ -430,9 +430,13 @@ func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T)
 
 	t.Run("exact session scan is positive and partial scans remain incomplete", func(t *testing.T) {
 		cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}}, time.Hour)
-		cache.setScanBySessionID(func(id string) exactProcessScan {
+		incarnationStartedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+		cache.setScanBySessionID(func(id string, gotStartedAt time.Time) exactProcessScan {
 			if id != "sid-1" {
 				t.Fatalf("scan session ID = %q, want sid-1", id)
+			}
+			if !gotStartedAt.Equal(incarnationStartedAt) {
+				t.Fatalf("scan incarnation boundary = %v, want %v", gotStartedAt, incarnationStartedAt)
 			}
 			return exactProcessScan{
 				runtimes: []gcruntime.LiveRuntime{{SessionID: id, PID: 42}},
@@ -440,12 +444,16 @@ func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T)
 			}
 		})
 		provider := &Provider{cache: cache}
-		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{
+			SessionID:            "sid-1",
+			SessionName:          "agent-1",
+			IncarnationStartedAt: incarnationStartedAt,
+		})
 		if !got.Running || !got.Alive || !got.Complete {
 			t.Fatalf("exact-ID process observation = %#v, want complete live", got)
 		}
 
-		cache.setScanBySessionID(func(string) exactProcessScan {
+		cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
 			return exactProcessScan{}
 		})
 		got = provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
@@ -461,7 +469,7 @@ func TestProviderObserveFreshLivenessLastSessionUsesDrainedServerAbsence(t *test
 		errs: []error{nil, ErrNoCurrentTarget},
 	}
 	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: exec}}, time.Hour)
-	cache.setScanBySessionID(func(string) exactProcessScan {
+	cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
 		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
 	})
 	provider := &Provider{cache: cache}

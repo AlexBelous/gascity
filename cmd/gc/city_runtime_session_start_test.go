@@ -223,16 +223,19 @@ func TestReconcileExactSessionStartAuthoritativeDrainAckDeathFinalizes(t *testin
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
+	incarnationStartedAt := bead.CreatedAt.Add(time.Minute).UTC().Truncate(time.Second)
 	env.setSessionMetadata(&bead, map[string]string{
 		"state":          string(session.StateDraining),
 		"state_reason":   session.DrainAckStopPendingReason,
 		"instance_token": "drain-token",
+		"last_woke_at":   incarnationStartedAt.Format(time.RFC3339),
 	})
 	params := exactSessionStartTestParams(t, env)
-	params.Provider = &freshLivenessProvider{
+	provider := &freshLivenessProvider{
 		Fake:  env.sp,
 		fresh: runtime.Liveness{Complete: true},
 	}
+	params.Provider = provider
 	params.RolloutMode = rollout.Auto
 
 	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
@@ -244,6 +247,25 @@ func TestReconcileExactSessionStartAuthoritativeDrainAckDeathFinalizes(t *testin
 	}
 	if isDrainAckStopPendingInfo(env.sessionInfo(bead.ID)) {
 		t.Fatal("authoritative dead observation did not finalize the durable stop marker")
+	}
+	if got := provider.lastTarget().IncarnationStartedAt; !got.Equal(incarnationStartedAt) {
+		t.Fatalf("fresh-dead incarnation boundary = %v, want %v", got, incarnationStartedAt)
+	}
+}
+
+func TestDrainAckIncarnationStartedAtDoesNotUseAdoptedBeadCreation(t *testing.T) {
+	createdAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	if got := drainAckIncarnationStartedAt(session.Info{CreatedAt: createdAt}); !got.IsZero() {
+		t.Fatalf("adopted bead creation time = %v, want no trusted runtime boundary", got)
+	}
+
+	wokeAt := createdAt.Add(time.Minute)
+	got := drainAckIncarnationStartedAt(session.Info{
+		CreatedAt:  createdAt,
+		LastWokeAt: wokeAt.Format(time.RFC3339),
+	})
+	if !got.Equal(wokeAt) {
+		t.Fatalf("pre-wake boundary = %v, want %v", got, wokeAt)
 	}
 }
 
@@ -259,7 +281,7 @@ func TestQueueExactDrainAckAsyncStopCompletionPanicDoesNotLeakTracker(t *testing
 		t.Fatalf("set runtime token: %v", err)
 	}
 	tracker := &asyncStartTracker{}
-	if !queueExactDrainAckAsyncStop("", beads.NewMemStore(), provider, &config.City{}, "gcs-stop", "worker", "drain-token", nil, tracker, io.Discard, func(bool) {
+	if !queueExactDrainAckAsyncStop("", beads.NewMemStore(), provider, &config.City{}, "gcs-stop", "worker", "drain-token", nil, time.Time{}, tracker, io.Discard, func(bool) {
 		panic("completion callback failure")
 	}) {
 		t.Fatal("queue exact drain-ack stop = false, want true")

@@ -1737,7 +1737,7 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 
 	var stderr synchronizedBuffer
-	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "", "worker", "original-token", []string{"claude"}, &stderr)
+	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "", "worker", "original-token", []string{"claude"}, &stderr, time.Time{}, false)
 	if !dead {
 		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
 	}
@@ -1756,11 +1756,29 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 
 type freshLivenessProvider struct {
 	*runtime.Fake
-	fresh runtime.Liveness
+	mu       sync.Mutex
+	fresh    runtime.Liveness
+	sequence []runtime.Liveness
+	targets  []runtime.LivenessTarget
 }
 
-func (p *freshLivenessProvider) ObserveFreshLiveness(runtime.LivenessTarget) runtime.Liveness {
+func (p *freshLivenessProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.targets = append(p.targets, target)
+	if index := len(p.targets) - 1; index < len(p.sequence) {
+		return p.sequence[index]
+	}
 	return p.fresh
+}
+
+func (p *freshLivenessProvider) lastTarget() runtime.LivenessTarget {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.targets) == 0 {
+		return runtime.LivenessTarget{}
+	}
+	return p.targets[len(p.targets)-1]
 }
 
 func TestConfirmDrainAckRuntimeDeadStrictRequiresCompleteAbsence(t *testing.T) {
@@ -1775,18 +1793,54 @@ func TestConfirmDrainAckRuntimeDeadStrictRequiresCompleteAbsence(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &freshLivenessProvider{Fake: runtime.NewFake()}
 
-	if confirmDrainAckRuntimeDead("", store, runtime.NewFake(), &config.City{}, "sid-1", "worker", "", nil, io.Discard, true) {
+	if confirmDrainAckRuntimeDead("", store, runtime.NewFake(), &config.City{}, "sid-1", "worker", "", nil, io.Discard, time.Time{}, true) {
 		t.Fatal("strict confirm-dead accepted absence from an unsupported provider")
 	}
 
 	sp.fresh = runtime.Liveness{}
-	if confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "", nil, io.Discard, true) {
+	if confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "", nil, io.Discard, time.Time{}, true) {
 		t.Fatal("strict confirm-dead accepted incomplete absence")
 	}
 
 	sp.fresh = runtime.Liveness{Complete: true}
-	if !confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "", nil, io.Discard, true) {
+	incarnationStartedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	if !confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "", nil, io.Discard, incarnationStartedAt, true) {
 		t.Fatal("strict confirm-dead rejected complete absence")
+	}
+	if got := sp.lastTarget().IncarnationStartedAt; !got.Equal(incarnationStartedAt) {
+		t.Fatalf("strict confirm-dead incarnation boundary = %v, want %v", got, incarnationStartedAt)
+	}
+}
+
+func TestConfirmDrainAckRuntimeDeadStrictWaitsForCompleteAbsence(t *testing.T) {
+	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+	drainAckStopConfirmDeadTimeout = 100 * time.Millisecond
+	drainAckStopConfirmDeadPoll = time.Millisecond
+	defer func() {
+		drainAckStopConfirmDeadTimeout = oldTimeout
+		drainAckStopConfirmDeadPoll = oldPoll
+	}()
+
+	sp := &freshLivenessProvider{
+		Fake: runtime.NewFake(),
+		sequence: []runtime.Liveness{
+			{},
+			{Complete: true},
+		},
+	}
+	if !confirmDrainAckRuntimeDead(
+		"", beads.NewMemStore(), sp, &config.City{},
+		"sid-1", "worker", "original-token", nil, io.Discard, time.Time{}, true,
+	) {
+		t.Fatal("strict confirm-dead rejected complete absence after a transient incomplete observation")
+	}
+	if len(sp.targets) < 2 {
+		t.Fatalf("fresh liveness observations = %d, want at least 2", len(sp.targets))
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" {
+			t.Fatal("strict confirm-dead re-killed a provider-absent target while waiting for complete evidence")
+		}
 	}
 }
 
@@ -1800,7 +1854,7 @@ func TestConfirmDrainAckRuntimeDeadStrictTokenFenceRetainsLiveEvidence(t *testin
 		t.Fatalf("SetMeta: %v", err)
 	}
 
-	if confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "original", nil, io.Discard, true) {
+	if confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "sid-1", "worker", "original", nil, io.Discard, time.Time{}, true) {
 		t.Fatal("strict confirm-dead treated token-fenced live evidence as dead")
 	}
 	for _, call := range sp.Calls {

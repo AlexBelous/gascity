@@ -366,13 +366,16 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 		graceTimeout = 0
 	}
 
-	code := doStopWithoutSuccess(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
+	code := doStopWithoutSuccessMessage(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
 
 	// Clean up orphan sessions (sessions with the city prefix that are
 	// not in the current config).
-	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
-
-	teardownServerForStop(sp, stderr)
+	if stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr) {
+		code = 1
+	}
+	if code == 0 {
+		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
+	}
 
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
@@ -381,16 +384,6 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	}
 
 	return code
-}
-
-func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
-	lifecycle, ok := sp.(runtime.ServerLifecycleProvider)
-	if !ok {
-		return
-	}
-	if err := lifecycle.TeardownServer(); err != nil {
-		fmt.Fprintf(stderr, "gc stop: teardown server: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
 }
 
 func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) {
@@ -508,12 +501,12 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // isolation, all sessions on the socket belong to this city.
 func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
-) {
+) bool {
 	running, err := sp.ListRunning("")
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
+		return true
 	}
 	if partialList {
 		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -526,6 +519,7 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 		orphans = append(orphans, name)
 	}
 	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr)
+	return partialList
 }
 
 // tryStopController connects to the controller socket and sends "stop".
@@ -602,30 +596,33 @@ func controllerStopTimeoutError(identity controllerIdentityReply, waitingForLock
 // doStop is the pure logic for "gc stop". Filters to running sessions and
 // performs graceful shutdown (interrupt → wait → kill). Accepts session names,
 // provider, timeout, and recorder for testability.
-func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration, //nolint:unparam // compatibility wrapper preserves the production-shaped store seam for direct tests
+//
+//nolint:unparam // compatibility wrapper preserves the established test seam; production passes its store to the no-message core.
+func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
-	code := doStopWithoutSuccess(sessionNames, sp, cfg, store, timeout, rec, stdout, stderr)
+	code := doStopWithoutSuccessMessage(sessionNames, sp, cfg, store, timeout, rec, stdout, stderr)
 	if code == 0 {
 		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 	}
 	return code
 }
 
-func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
+func doStopWithoutSuccessMessage(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
 	visible := map[string]bool{}
-	partialObservation := false
+	inventoryFailed := false
 	if sp != nil {
 		names, err := sp.ListRunning("")
 		partialList := runtime.IsPartialListError(err)
 		if err != nil && !partialList {
+			inventoryFailed = true
 			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 			names = nil
 		}
 		if partialList {
-			partialObservation = true
+			inventoryFailed = true
 			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		for _, name := range names {
@@ -649,7 +646,7 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 		}
 	}
 	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
-	if partialObservation {
+	if inventoryFailed {
 		return 1
 	}
 	return 0

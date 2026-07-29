@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,25 +9,37 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // lifecycleOrderProvider wraps runtime.Fake and additionally implements
-// runtime.ServerLifecycleProvider. It records the order of ListRunning and
-// TeardownServer calls so ordering tests can verify the stop-path sequence.
+// runtime.ServerLifecycleProvider. It records a teardown attempt so the
+// managed-stop test can reject server destruction.
 type lifecycleOrderProvider struct {
 	*runtime.Fake
-	mu          sync.Mutex
-	events      []string
-	teardownErr error
+	mu         sync.Mutex
+	events     []string
+	listCalls  int
+	listErrors []error
 }
 
 func (p *lifecycleOrderProvider) ListRunning(prefix string) ([]string, error) {
 	p.mu.Lock()
 	p.events = append(p.events, "ListRunning")
+	call := p.listCalls
+	p.listCalls++
+	var err error
+	if call < len(p.listErrors) {
+		err = p.listErrors[call]
+	}
 	p.mu.Unlock()
-	return p.Fake.ListRunning(prefix)
+	names, listErr := p.Fake.ListRunning(prefix)
+	if listErr != nil {
+		return names, listErr
+	}
+	return names, err
 }
 
 func (p *lifecycleOrderProvider) ConfigureServer() error {
@@ -37,7 +50,7 @@ func (p *lifecycleOrderProvider) TeardownServer() error {
 	p.mu.Lock()
 	p.events = append(p.events, "TeardownServer")
 	p.mu.Unlock()
-	return p.teardownErr
+	return nil
 }
 
 // Compile-time assertions: lifecycleOrderProvider satisfies both interfaces.
@@ -46,13 +59,9 @@ var (
 	_ runtime.ServerLifecycleProvider = (*lifecycleOrderProvider)(nil)
 )
 
-// TestCmdStopBodyTeardownRunsAfterStopOrphansBeforeBeadsShutdown is a
-// coordination test that verifies the stop-path ordering contract in
-// cmdStopBody: TeardownServer is called after stopOrphans has run its
-// ListRunning sweep AND before the bead-provider shutdown.
-//
-// Expected sequence: doStop -> stopOrphans (ListRunning) -> TeardownServer -> shutdownBeadsProvider
-func TestCmdStopBodyTeardownRunsAfterStopOrphansBeforeBeadsShutdown(t *testing.T) {
+// TestCmdStopBodyPreservesDrainedServerInventory proves a managed stop drains
+// sessions without tearing down a provider-owned server inventory.
+func TestCmdStopBodyPreservesDrainedServerInventory(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -61,24 +70,17 @@ func TestCmdStopBodyTeardownRunsAfterStopOrphansBeforeBeadsShutdown(t *testing.T
 		Workspace: config.Workspace{Name: "lifecycle-order-city"},
 		Beads:     config.BeadsConfig{Provider: "file"},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		Agents:    []config.Agent{{Name: "worker"}},
 	}
 	writeStopLifecycleCityConfig(t, cityDir, cfg)
 
 	sp := &lifecycleOrderProvider{Fake: runtime.NewFake()}
+	sessionName := agent.SessionNameFor(cfg.Workspace.Name, cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("start managed session: %v", err)
+	}
 
-	var orderMu sync.Mutex
-	var shutdownCalled bool
-	var eventsAtShutdown []string
 	overrideShutdownBeadsProviderForStop(t, func(string) error {
-		sp.mu.Lock()
-		snapshot := make([]string, len(sp.events))
-		copy(snapshot, sp.events)
-		sp.mu.Unlock()
-
-		orderMu.Lock()
-		shutdownCalled = true
-		eventsAtShutdown = snapshot
-		orderMu.Unlock()
 		return nil
 	})
 
@@ -91,64 +93,70 @@ func TestCmdStopBodyTeardownRunsAfterStopOrphansBeforeBeadsShutdown(t *testing.T
 	if code != 0 {
 		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
+	if sp.IsRunning(sessionName) {
+		t.Fatalf("managed session %q remains running after stop", sessionName)
+	}
 
 	sp.mu.Lock()
 	allProviderEvents := make([]string, len(sp.events))
 	copy(allProviderEvents, sp.events)
 	sp.mu.Unlock()
 
-	orderMu.Lock()
-	called := shutdownCalled
-	snapshot := eventsAtShutdown
-	orderMu.Unlock()
-
-	// TeardownServer must be present.
-	teardownIdx := -1
-	for i, e := range allProviderEvents {
-		if e == "TeardownServer" {
-			teardownIdx = i
-			break
+	for _, event := range allProviderEvents {
+		if event == "TeardownServer" {
+			t.Fatalf("managed stop tore down the drained server inventory: %v", allProviderEvents)
 		}
-	}
-	if teardownIdx < 0 {
-		t.Fatalf("TeardownServer was never called; provider events = %v", allProviderEvents)
-	}
-
-	// TeardownServer must precede the bead-provider shutdown.
-	if called {
-		found := false
-		for _, e := range snapshot {
-			if e == "TeardownServer" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("TeardownServer must occur before bead-provider shutdown; events at shutdown = %v, all provider events = %v",
-				snapshot, allProviderEvents)
-		}
-	}
-
-	// TeardownServer must follow at least one ListRunning (the orphan sweep).
-	listRunningBeforeTeardown := false
-	for _, e := range allProviderEvents[:teardownIdx] {
-		if e == "ListRunning" {
-			listRunningBeforeTeardown = true
-			break
-		}
-	}
-	if !listRunningBeforeTeardown {
-		t.Fatalf("TeardownServer called before any ListRunning (orphan sweep must precede teardown); events = %v", allProviderEvents)
 	}
 }
 
-// TestCmdStopBodySkipsTeardownForNonLifecycleProvider verifies that cmdStopBody
-// completes successfully when the session provider does not implement
-// runtime.ServerLifecycleProvider. The type assertion must yield ok=false and
-// skip teardown silently: no panic, no error in stderr.
-//
-// This is the normal case for non-tmux providers (subprocess, exec, K8s, Fake).
-func TestCmdStopBodySkipsTeardownForNonLifecycleProvider(t *testing.T) {
+func TestCmdStopBodyFailsClosedWhenRuntimeInventoryFails(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		listErrors []error
+	}{
+		{name: "partial orphan inventory", listErrors: []error{nil, &runtime.PartialListError{Err: errors.New("partial runtime inventory unavailable")}}},
+		{name: "hard orphan inventory error", listErrors: []error{nil, errors.New("runtime inventory unavailable")}},
+		{name: "hard initial inventory error", listErrors: []error{errors.New("runtime inventory unavailable")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "orphan-inventory-city"},
+				Beads:     config.BeadsConfig{Provider: "file"},
+				Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+			}
+			writeStopLifecycleCityConfig(t, cityDir, cfg)
+
+			provider := &lifecycleOrderProvider{
+				Fake:       runtime.NewFake(),
+				listErrors: test.listErrors,
+			}
+			overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+			oldFactory := sessionProviderForStopCity
+			t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+			sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+				return provider, nil
+			}
+
+			var stdout, stderr lockedBuffer
+			code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("cmdStopBody() = %d, want fail-closed 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "City stopped.") {
+				t.Fatalf("stdout reported terminal success after failed orphan inventory: %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "runtime inventory unavailable") {
+				t.Fatalf("stderr = %q, want runtime inventory failure detail", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCmdStopBodyStopsWithNonServerProvider(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -159,15 +167,6 @@ func TestCmdStopBodySkipsTeardownForNonLifecycleProvider(t *testing.T) {
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
 	}
 	writeStopLifecycleCityConfig(t, cityDir, cfg)
-
-	// Verify that runtime.Fake does NOT implement ServerLifecycleProvider.
-	// This guards against a future change that accidentally adds the interface
-	// to Fake (which would defeat the skip path and change non-tmux behavior).
-	var baseProvider runtime.Provider = runtime.NewFake()
-	if _, ok := baseProvider.(runtime.ServerLifecycleProvider); ok {
-		t.Fatal("runtime.Fake must not implement runtime.ServerLifecycleProvider; " +
-			"non-lifecycle providers must skip teardown via ok=false type assertion")
-	}
 
 	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
 
@@ -180,53 +179,11 @@ func TestCmdStopBodySkipsTeardownForNonLifecycleProvider(t *testing.T) {
 	var stdout, stderr lockedBuffer
 	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdStopBody() = %d, want 0 for non-lifecycle provider; stdout=%q stderr=%q",
+		t.Fatalf("cmdStopBody() = %d, want 0 for non-server provider; stdout=%q stderr=%q",
 			code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "City stopped.") {
 		t.Fatalf("stdout = %q, want City stopped.", stdout.String())
-	}
-	if strings.Contains(stderr.String(), "teardown server") {
-		t.Fatalf("stderr = %q, unexpected teardown error for non-lifecycle provider", stderr.String())
-	}
-}
-
-// TestCmdStopBodyReportsTeardownErrorWithoutFailing verifies that tmux server
-// teardown is best-effort: a provider error is visible to the operator but does
-// not change the stop exit code.
-func TestCmdStopBodyReportsTeardownErrorWithoutFailing(t *testing.T) {
-	cityDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "lifecycle-error-city"},
-		Beads:     config.BeadsConfig{Provider: "file"},
-		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
-	}
-	writeStopLifecycleCityConfig(t, cityDir, cfg)
-
-	sp := &lifecycleOrderProvider{
-		Fake:        runtime.NewFake(),
-		teardownErr: errors.New("provider-stop-failed"),
-	}
-
-	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
-
-	oldFactory := sessionProviderForStopCity
-	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
-	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
-
-	var stdout, stderr lockedBuffer
-	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Fatalf("stdout = %q, want City stopped.", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "gc stop: teardown server: provider-stop-failed") {
-		t.Fatalf("stderr = %q, want teardown server warning", stderr.String())
 	}
 }
 

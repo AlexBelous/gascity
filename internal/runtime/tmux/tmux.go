@@ -736,7 +736,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 	if err != nil {
 		// Session might not exist or server may have already gone away.
 		killErr := t.KillSession(name)
-		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
+		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoCurrentTarget) {
 			return nil
 		}
 		return killErr
@@ -781,10 +781,10 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 	}
 
 	// Kill the tmux session - this will terminate the excluded process too.
-	// Ignore missing/dead-server errors - if we killed all non-excluded
-	// processes, tmux may have already destroyed the session automatically.
+	// A missing session on a responsive server is idempotent success. A missing
+	// server is an uncertain inventory observation and must reach the caller.
 	err = t.KillSession(name)
-	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) {
 		return nil
 	}
 	return err

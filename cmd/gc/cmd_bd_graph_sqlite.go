@@ -371,6 +371,32 @@ func bdWriteMentionsGraphOnlyInValues(bdArgs []string, prefix string) bool {
 	case "release-if-current":
 		id, _, ok, err := parseBdReleaseIfCurrentArgs(bdArgs)
 		return err == nil && ok && !isGraphID(id)
+	case "list":
+		// A list passes through only when every graph mention sits in a
+		// --metadata-field/--label VALUE (e.g. workflow_id=gcg-…, the
+		// pr-merge-queue leftover-member probe): bd answers from the
+		// work/rig store it can read, and graph-resident rows are simply
+		// not there — the same store-scoped semantics as any other list.
+		// Filters that NAME a graph bead (--parent gcg-…, positional ids)
+		// are graph-targeted reads and keep the loud refusal: a silent
+		// empty answer there is the graph-blind lie that caused the
+		// destructive-restart incident.
+		valueFlag := map[string]bool{"--metadata-field": true, "--label": true}
+		args := bdArgs[1:]
+		for i := 0; i < len(args); i++ {
+			a := args[i]
+			if valueFlag[a] {
+				i++ // the value may mention graph ids freely
+				continue
+			}
+			if eq := strings.IndexByte(a, '='); eq > 0 && strings.HasPrefix(a, "--") && valueFlag[a[:eq]] {
+				continue
+			}
+			if isGraphID(a) {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

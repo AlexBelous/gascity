@@ -78,6 +78,26 @@ type DesiredStateResult struct {
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
 	NamedSessionDemand map[string]bool
+	// NamedSessionRoutedDemand records, per named-session identity, whether
+	// there is routed-but-unassigned demand on the identity's backing template
+	// (ScaleCheckCounts[backingTemplate] > 0), computed BEFORE canonical-alias
+	// pool suppression runs. Unlike NamedSessionDemand this is not
+	// assignee-direct and must never be merged into poolDesired — it exists
+	// solely to give ComputeAwakeSet a wake-only signal for an asleep named
+	// holder whose alias correctly suppresses the redundant pool standby
+	// (ga-jl73y2): routed-but-unclaimed demand that should wake the holder,
+	// without affecting pool sizing.
+	//
+	// It IS sleep-suppressing while the routed demand remains live. The
+	// resulting "routed-demand" wake reason is exempt from ComputeAwakeSet's
+	// idle-sleep pass and overrides non-interactive sleep suppression in
+	// wakeDemandOverridesSleepSuppression — otherwise a long-lived holder
+	// carrying a non-zero idle reference is re-slept on the same tick and the
+	// wake is silently undone. Suppression ends when demand clears: the holder
+	// then drains via the non-exempt "on-demand:running" reason. Scoped to
+	// canonical singleton backing pools, so only the one session that can
+	// serve the demand is kept awake.
+	NamedSessionRoutedDemand map[string]bool
 	// ReadyAssigned is the set of AssignedWorkBeads that carry real wake-demand
 	// readiness, keyed by store ref + bead ID: in-progress work, assigned
 	// molecule roots, and store-Ready()/deps-gated open work. Beads admitted
@@ -873,6 +893,24 @@ func buildDesiredStateWithSessionBeads(
 	if len(assignedWorkBeads) > 0 {
 		fmt.Fprintf(stderr, "namedWorkReady: %d assigned beads, %d named specs, ready=%v\n", len(assignedWorkBeads), len(namedSpecs), namedWorkReady) //nolint:errcheck
 	}
+	// NamedSessionRoutedDemand: routed (unassigned) scale-check demand on the
+	// backing template, independent of direct assignee demand above. See the
+	// field doc on DesiredStateResult.NamedSessionRoutedDemand.
+	// Canonical singleton backing pools only. This signal exists solely to
+	// compensate for alias suppression, and alias suppression applies exactly to
+	// canonical singleton identities (see canonicalSingletonAliasHeldTemplates).
+	// A multi-instance backing pool can serve routed demand with an ordinary
+	// standby, so waking the named holder there would wake it AND mint the
+	// standby — the overprovisioning this signal is meant to prevent.
+	namedRoutedDemand := make(map[string]bool, len(namedSpecs))
+	for identity, spec := range namedSpecs {
+		if !spec.Agent.UsesCanonicalSingletonPoolIdentity() {
+			continue
+		}
+		if scaleCheckCounts[namedSessionBackingTemplate(spec)] > 0 {
+			namedRoutedDemand[identity] = true
+		}
+	}
 	for identity, spec := range namedSpecs {
 		canonicalInfo, hasCanonical := findCanonicalNamedSessionInfo(bp.sessionBeads, spec)
 		if !hasCanonical {
@@ -937,6 +975,7 @@ func buildDesiredStateWithSessionBeads(
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
 		ReadyAssigned:                      readyAssigned,
 		NamedSessionDemand:                 namedWorkReady,
+		NamedSessionRoutedDemand:           namedRoutedDemand,
 		StoreQueryPartial:                  storePartial,
 		BeaconTime:                         beaconTime,
 	}
@@ -2765,11 +2804,6 @@ func realizePoolDesiredSessions(
 		// directly (W-pool), so the former raw pool-loop projection is gone; the
 		// bind fold and every downstream identity read flow through Info.
 		sbInfo := item.sessionInfo
-		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sbInfo, item.request); err != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
-		} else {
-			sbInfo = bound
-		}
 		slot := item.slot
 		manualSession := isManualSessionInfoForAgent(sbInfo, cfgAgent)
 		var (
@@ -2782,6 +2816,18 @@ func realizePoolDesiredSessions(
 			resolveAgent = sessionBeadConfigAgent(cfgAgent, qualifiedInstance)
 		} else {
 			resolveAgent, qualifiedInstance, poolSlot = poolDesiredRequestIdentity(cfgAgent, slot)
+		}
+		// Bind using this item's own per-slot qualifiedInstance, not the base
+		// qualifiedName resolved once above the Phase A/B/C pipeline: the work
+		// dir template expands per-request identity (e.g. {{.AgentBase}}), and
+		// qualifiedName is loop-invariant across every item in this pipeline.
+		// cfgAgent (not resolveAgent) matches the Phase A create-time call
+		// (poolTriggerMetadata via selectOrPlanPoolSessionBead), which also
+		// resolves the work dir off the base agent plus the per-slot name.
+		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedInstance, sbInfo, item.request); err != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+		} else {
+			sbInfo = bound
 		}
 		fpExtra := buildFingerprintExtra(resolveAgent)
 		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedInstance, fpExtra, sbInfo)

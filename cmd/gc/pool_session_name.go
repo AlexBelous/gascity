@@ -15,6 +15,8 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+
+	sessionsdb "github.com/gastownhall/gascity/internal/classdb/sessions"
 )
 
 // sessionBeadAssigneeIdentities returns every identifier under which a work
@@ -181,6 +183,16 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 			if liveOpenSessionAssignmentExists(store, assignee) {
+				continue
+			}
+			// Split-topology last defense: on a sessions-routed city the
+			// session beads live in the sessions class store, NOT the work
+			// store queried above — without this leg, a fresh session that
+			// claimed within its first tick (its bead not yet in this tick's
+			// snapshot) looks orphaned and its in-flight step is released
+			// mid-turn (observed repeatedly on the apply-fixes/verdict step).
+			if sessClass, routed, rerr := sessionsdb.RoutedStoreFor(cityPath, cfg); rerr == nil && routed &&
+				liveOpenSessionAssignmentExists(sessClass, assignee) {
 				continue
 			}
 		}

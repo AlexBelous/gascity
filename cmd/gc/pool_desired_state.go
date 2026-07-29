@@ -132,12 +132,18 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 	}, nil
 }
 
-func classifyWorktreeRequest(bead beads.Bead, storeRef string) (*worktree.Spec, string, bool) {
+func classifyWorktreeRequest(bead beads.Bead, storeRef, repoDir string) (*worktree.Spec, string, bool) {
 	spec, err := worktreeSpecForBead(bead, storeRef)
 	if err != nil {
 		return nil, err.Error(), false
 	}
-	return spec, "", spec == nil
+	if spec != nil {
+		return spec, "", false
+	}
+	if evidenceErr := unpublishedWorktreeOwnerEvidence(repoDir, bead.ID); evidenceErr != "" {
+		return nil, evidenceErr, false
+	}
+	return nil, "", true
 }
 
 // PoolDesiredState holds the desired state for a single agent template.
@@ -292,7 +298,11 @@ func computePoolDesiredStates(
 					continue
 				}
 				workStoreRef := strings.TrimSpace(wb.Metadata[beadmeta.RootStoreRefMetadataKey])
-				worktreeSpec, worktreeError, unmanagedDirect := classifyWorktreeRequest(wb, workStoreRef)
+				worktreeSpec, worktreeError, unmanagedDirect := classifyWorktreeRequest(
+					wb,
+					workStoreRef,
+					scaleCheckDemand[template].RepoDir,
+				)
 				resumeRequests = append(resumeRequests, SessionRequest{
 					Template:        template,
 					BeadPriority:    beadPriority(wb),
@@ -333,7 +343,11 @@ func computePoolDesiredStates(
 			}
 			wakeRequestedTemplates[template] = struct{}{}
 			workStoreRef := strings.TrimSpace(wb.Metadata[beadmeta.RootStoreRefMetadataKey])
-			worktreeSpec, worktreeError, unmanagedDirect := classifyWorktreeRequest(wb, workStoreRef)
+			worktreeSpec, worktreeError, unmanagedDirect := classifyWorktreeRequest(
+				wb,
+				workStoreRef,
+				scaleCheckDemand[template].RepoDir,
+			)
 			resumeRequests = append(resumeRequests, SessionRequest{
 				Template:        template,
 				BeadPriority:    beadPriority(wb),

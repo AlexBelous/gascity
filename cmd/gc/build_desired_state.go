@@ -144,6 +144,7 @@ type defaultScaleCheckTarget struct {
 
 type scaleCheckDemand struct {
 	Count          int
+	RepoDir        string
 	WorkBeadIDs    []string
 	Titles         map[string]string
 	Packs          map[string]string
@@ -796,6 +797,19 @@ func buildDesiredStateWithSessionBeads(
 		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, namedScaleCheckPartialTemplates)
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
+		}
+		if scaleCheckDemandByTemplate == nil {
+			scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
+		}
+		for i := range cfg.Agents {
+			agent := &cfg.Agents[i]
+			if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+				continue
+			}
+			template := agent.QualifiedName()
+			entry := scaleCheckDemandByTemplate[template]
+			entry.RepoDir = agentCommandDir(cityPath, agent, cfg.Rigs)
+			scaleCheckDemandByTemplate[template] = entry
 		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
@@ -1566,6 +1580,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			counts[template]++
 			entry := demand[template]
 			entry.Count++
+			entry.RepoDir = group.repoDirs[template]
 			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
 			if entry.Titles == nil {
 				entry.Titles = make(map[string]string)
@@ -1639,6 +1654,9 @@ func unpublishedWorktreeOwnerEvidence(repoDir, workBeadID string) string {
 }
 
 func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scaleCheckDemand {
+	if existing.RepoDir == "" {
+		existing.RepoDir = incoming.RepoDir
+	}
 	if count <= 0 || len(incoming.WorkBeadIDs) == 0 {
 		return existing
 	}

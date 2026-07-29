@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
@@ -197,6 +198,84 @@ func TestClassifyInFlightWorktreeRequestRequiresCurrentDemandEvidence(t *testing
 	if unmatched.UnmanagedDirect || unmatched.WorktreeError == "" {
 		t.Fatalf("unmatched in-flight demand = %+v, want unclassified fail-closed error", unmatched)
 	}
+}
+
+func TestAssignedResumeAndWakeRejectUnpublishedOwnerWorktree(t *testing.T) {
+	const (
+		template = "worker"
+		workID   = "gc-test"
+		storeRef = "rig:gascity"
+	)
+	repo, base := testutil.InitGitRepoWithoutCWD(t)
+	root := repo + "-worktrees"
+	path := filepath.Join(root, workID)
+	if _, err := worktree.Ensure(worktree.Spec{
+		RepoDir:    repo,
+		Root:       root,
+		Path:       path,
+		Branch:     "work/" + workID,
+		Base:       base,
+		BeadID:     workID,
+		StoreRef:   storeRef,
+		Creator:    "formula:test",
+		Owner:      "formula:test",
+		Generation: "formula:test:" + workID,
+		Lifecycle:  worktree.LifecycleActive,
+	}); err != nil {
+		t.Fatalf("Ensure owner worktree: %v", err)
+	}
+
+	cfg := &config.City{Agents: []config.Agent{poolAgent(template, "", intPtr(1), 0)}}
+	demand := map[string]scaleCheckDemand{template: {RepoDir: repo}}
+	work := workBead(workID, template, "", "in_progress", 1)
+	work.Metadata[beadmeta.RootStoreRefMetadataKey] = storeRef
+
+	t.Run("resume", func(t *testing.T) {
+		work := work
+		work.Assignee = "session-1"
+		session := beads.Bead{
+			ID:     "session-1",
+			Status: "open",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "template:" + template},
+			Metadata: map[string]string{
+				"template":             template,
+				"session_name":         "worker-1",
+				"state":                string(sessionpkg.StateAwake),
+				poolManagedMetadataKey: boolMetadata(true),
+			},
+		}
+		result := computePoolDesiredStates(
+			cfg,
+			[]beads.Bead{work},
+			sessionInfosFromBeads([]beads.Bead{session}),
+			nil,
+			demand,
+			nil,
+		)
+		request := singlePoolRequest(t, result)
+		if request.UnmanagedDirect || !strings.Contains(request.WorktreeError, "owner evidence") {
+			t.Fatalf("resume request = %+v, want fail-closed unpublished owner evidence", request)
+		}
+	})
+
+	t.Run("wake-known-identity", func(t *testing.T) {
+		work := work
+		work.Assignee = template
+		result := computePoolDesiredStates(cfg, []beads.Bead{work}, nil, nil, demand, nil)
+		request := singlePoolRequest(t, result)
+		if request.UnmanagedDirect || !strings.Contains(request.WorktreeError, "owner evidence") {
+			t.Fatalf("wake request = %+v, want fail-closed unpublished owner evidence", request)
+		}
+	})
+}
+
+func singlePoolRequest(t *testing.T, states []PoolDesiredState) SessionRequest {
+	t.Helper()
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("pool desired states = %+v, want exactly one request", states)
+	}
+	return states[0].Requests[0]
 }
 
 func TestWorktreeSpecForBeadRequiresCompletePublishedEvidence(t *testing.T) {

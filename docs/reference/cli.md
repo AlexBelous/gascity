@@ -4734,8 +4734,40 @@ gc worktree
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc worktree cleanup](#gc-worktree-cleanup) | Remove an owned worktree after all safety gates pass |
 | [gc worktree ensure](#gc-worktree-ensure) | Ensure the worktree exists and satisfies all postconditions |
 | [gc worktree verify](#gc-worktree-verify) | Verify the worktree satisfies all postconditions without mutating |
+
+## gc worktree cleanup
+
+Remove an owned worktree after all safety gates pass.
+
+Cleanup verifies the canonical repository, path, branch, and durable ownership
+provenance before acting. It refuses dirty worktrees, commits not reachable
+from a remote-tracking ref, and commits not merged into --base. There is no
+force mode and no recursive-filesystem fallback. An already-absent,
+unregistered path is an idempotent success. With --json, safety refusals return
+a structured cleanup_pending result for formula automation.
+
+```
+gc worktree cleanup [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
 
 ## gc worktree ensure
 

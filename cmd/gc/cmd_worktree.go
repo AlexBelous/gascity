@@ -49,6 +49,7 @@ rolls back everything it created; --dry-run plans without mutating anything.`,
 	}
 	cmd.AddCommand(newWorktreeEnsureCmd(stdout, stderr))
 	cmd.AddCommand(newWorktreeVerifyCmd(stdout, stderr))
+	cmd.AddCommand(newWorktreeCleanupCmd(stdout, stderr))
 	return cmd
 }
 
@@ -108,6 +109,31 @@ func newWorktreeVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+func newWorktreeCleanupCmd(stdout, stderr io.Writer) *cobra.Command {
+	var opts worktreeCmdOpts
+	cmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Remove an owned worktree after all safety gates pass",
+		Long: `Remove an owned worktree after all safety gates pass.
+
+Cleanup verifies the canonical repository, path, branch, and durable ownership
+provenance before acting. It refuses dirty worktrees, commits not reachable
+from a remote-tracking ref, and commits not merged into --base. There is no
+force mode and no recursive-filesystem fallback. An already-absent,
+unregistered path is an idempotent success. With --json, safety refusals return
+a structured cleanup_pending result for formula automation.`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if runWorktreeCleanup(opts, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	worktreeFlagSet(cmd, &opts)
+	return cmd
+}
+
 func (o worktreeCmdOpts) spec() (worktree.Spec, error) {
 	repo, err := filepath.Abs(o.Repo)
 	if err != nil {
@@ -149,7 +175,7 @@ func runWorktreeEnsure(opts worktreeCmdOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc worktree ensure: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	return writeWorktreeReport(rep, opts, stdout, stderr)
+	return writeWorktreeReport("ensure", rep, opts, stdout, stderr)
 }
 
 func runWorktreeVerify(opts worktreeCmdOpts, stdout, stderr io.Writer) int {
@@ -163,12 +189,50 @@ func runWorktreeVerify(opts worktreeCmdOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc worktree verify: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	return writeWorktreeReport(rep, opts, stdout, stderr)
+	return writeWorktreeReport("verify", rep, opts, stdout, stderr)
 }
 
-func writeWorktreeReport(rep worktree.Report, opts worktreeCmdOpts, stdout, stderr io.Writer) int {
+func runWorktreeCleanup(opts worktreeCmdOpts, stdout, stderr io.Writer) int {
+	spec, err := opts.spec()
+	if err != nil {
+		report := worktree.CleanupReport{
+			Path:           opts.Path,
+			Branch:         opts.Branch,
+			CleanupPending: true,
+			Error: &worktree.CleanupError{
+				Code:     worktree.CleanupErrorInvalidSpec,
+				Message:  err.Error(),
+				ExitCode: 1,
+			},
+		}
+		return writeWorktreeCleanupReport(report, opts, stdout, stderr)
+	}
+	report, cleanupErr := worktree.Cleanup(spec)
+	code := writeWorktreeCleanupReport(report, opts, stdout, stderr)
+	if cleanupErr != nil {
+		return 1
+	}
+	return code
+}
+
+type worktreeJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Command       string `json:"command"`
+	Action        string `json:"action"`
+	worktree.Report
+}
+
+func writeWorktreeReport(action string, rep worktree.Report, opts worktreeCmdOpts, stdout, stderr io.Writer) int {
 	if opts.JSON {
-		if err := json.NewEncoder(stdout).Encode(rep); err != nil {
+		result := worktreeJSONResult{
+			SchemaVersion: "1",
+			OK:            true,
+			Command:       "worktree " + action,
+			Action:        action,
+			Report:        rep,
+		}
+		if err := json.NewEncoder(stdout).Encode(result); err != nil {
 			fmt.Fprintf(stderr, "gc worktree: encoding report: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -184,6 +248,48 @@ func writeWorktreeReport(rep worktree.Report, opts worktreeCmdOpts, stdout, stde
 		fmt.Fprintf(stdout, "created worktree %s on branch %s at %s\n", rep.Path, rep.Branch, rep.Head) //nolint:errcheck
 	default:
 		fmt.Fprintf(stdout, "worktree %s on branch %s at %s\n", rep.Path, rep.Branch, rep.Head) //nolint:errcheck
+	}
+	return 0
+}
+
+type worktreeCleanupJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Command       string `json:"command"`
+	Action        string `json:"action"`
+	worktree.CleanupReport
+}
+
+func writeWorktreeCleanupReport(rep worktree.CleanupReport, opts worktreeCmdOpts, stdout, stderr io.Writer) int {
+	if opts.JSON {
+		result := worktreeCleanupJSONResult{
+			SchemaVersion: "1",
+			OK:            rep.Error == nil,
+			Command:       "worktree cleanup",
+			Action:        "cleanup",
+			CleanupReport: rep,
+		}
+		if err := json.NewEncoder(stdout).Encode(result); err != nil {
+			fmt.Fprintf(stderr, "gc worktree cleanup: encoding report: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if rep.Error != nil {
+			fmt.Fprintf(stderr, "gc worktree cleanup: %s\n", rep.Error.Message) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+	if rep.Error != nil {
+		fmt.Fprintf(stderr, "gc worktree cleanup: %s\n", rep.Error.Message) //nolint:errcheck
+		return 1
+	}
+	switch {
+	case rep.AlreadyAbsent:
+		fmt.Fprintf(stdout, "worktree %s is already absent\n", rep.Path) //nolint:errcheck
+	case rep.Removed:
+		fmt.Fprintf(stdout, "removed worktree %s on branch %s\n", rep.Path, rep.Branch) //nolint:errcheck
+	default:
+		fmt.Fprintf(stdout, "worktree %s required no cleanup\n", rep.Path) //nolint:errcheck
 	}
 	return 0
 }

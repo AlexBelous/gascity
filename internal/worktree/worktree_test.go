@@ -42,6 +42,11 @@ func managedSpec(repo, root, path, branch, base string) Spec {
 	}
 }
 
+func publishRemoteRef(t *testing.T, repo, branch, commit string) {
+	t.Helper()
+	runGit(t, repo, "update-ref", "refs/remotes/origin/"+branch, commit)
+}
+
 // snapshotDir returns the sorted entries of a directory, or nil when it does
 // not exist. Used to assert dry-run filesystem purity.
 func snapshotDir(t *testing.T, dir string) []string {
@@ -560,6 +565,52 @@ func TestRollbackAttemptRemovesOnlyAttemptCreatedState(t *testing.T) {
 	}
 }
 
+func TestRollbackAttemptRefusesWrongAttemptAndDirtyState(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+	rep, err := Ensure(spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	wrongAttempt := rep
+	wrongProvenance := *rep.Provenance
+	wrongProvenance.AttemptID = "other-attempt"
+	wrongAttempt.Provenance = &wrongProvenance
+	if err := RollbackAttempt(spec, wrongAttempt); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("RollbackAttempt wrong attempt error = %v, want fenced refusal", err)
+	}
+	if _, statErr := os.Stat(wt); statErr != nil {
+		t.Fatalf("wrong-attempt rollback removed worktree: %v", statErr)
+	}
+
+	marker := filepath.Join(wt, "keep.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := RollbackAttempt(spec, rep); err == nil || !strings.Contains(err.Error(), "contains changes") {
+		t.Fatalf("RollbackAttempt dirty error = %v, want WIP refusal", err)
+	}
+	if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "keep" {
+		t.Fatalf("rollback changed dirty WIP: data=%q err=%v", got, readErr)
+	}
+}
+
+func TestRollbackResultReportsCompleteAndIncompleteRollback(t *testing.T) {
+	cause := errors.New("create failed")
+	if got := rollbackResult(cause, nil).Error(); !strings.Contains(got, "rolled back") {
+		t.Fatalf("rollbackResult complete = %q, want rolled-back evidence", got)
+	}
+	if got := rollbackResult(cause, errors.New("remove failed")).Error(); !strings.Contains(got, "rollback incomplete") {
+		t.Fatalf("rollbackResult incomplete = %q, want incomplete evidence", got)
+	}
+	if provenanceAttempt(nil) != "" {
+		t.Fatal("provenanceAttempt(nil) returned non-empty value")
+	}
+}
+
 func TestManagedDryRunDoesNotPublishProvenance(t *testing.T) {
 	repo, base := initTestRepo(t)
 	root := t.TempDir()
@@ -578,4 +629,198 @@ func TestManagedDryRunDoesNotPublishProvenance(t *testing.T) {
 	if after := snapshotDir(t, root); strings.Join(after, "\x00") != strings.Join(before, "\x00") {
 		t.Fatalf("dry-run mutated root: before=%v after=%v", before, after)
 	}
+}
+
+func TestCleanupRemovesOnlyVerifiedMergedPushedWorktreeAndIsIdempotent(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+	rep, err := Ensure(spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	publishRemoteRef(t, repo, base, rep.Head)
+
+	cleaned, err := Cleanup(spec)
+	if err != nil {
+		t.Fatalf("Cleanup: %v (report: %+v)", err, cleaned)
+	}
+	if !cleaned.Removed || cleaned.AlreadyAbsent || cleaned.CleanupPending || cleaned.Error != nil {
+		t.Fatalf("Cleanup report = %+v, want removed cleanly", cleaned)
+	}
+	if cleaned.Provenance == nil || cleaned.Provenance.AttemptID != rep.Provenance.AttemptID {
+		t.Fatalf("Cleanup provenance = %+v, want verified attempt %q", cleaned.Provenance, rep.Provenance.AttemptID)
+	}
+	if _, statErr := os.Stat(wt); !os.IsNotExist(statErr) {
+		t.Fatalf("worktree path remains after Cleanup: %v", statErr)
+	}
+
+	again, err := Cleanup(spec)
+	if err != nil {
+		t.Fatalf("second Cleanup: %v (report: %+v)", err, again)
+	}
+	if again.Removed || !again.AlreadyAbsent || again.CleanupPending || again.Error != nil {
+		t.Fatalf("second Cleanup report = %+v, want idempotent already_absent", again)
+	}
+}
+
+func TestCleanupRefusesDirtyWorktreeWithoutRemovingWIP(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+	rep, err := Ensure(spec)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	publishRemoteRef(t, repo, base, rep.Head)
+	marker := filepath.Join(wt, "uncommitted.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	report, err := Cleanup(spec)
+	if err == nil {
+		t.Fatal("Cleanup dirty worktree succeeded, want refusal")
+	}
+	if !report.CleanupPending || report.Error == nil || report.Error.Code != CleanupErrorDirty {
+		t.Fatalf("Cleanup report = %+v, want structured dirty cleanup_pending refusal", report)
+	}
+	if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "keep" {
+		t.Fatalf("dirty WIP changed: data=%q err=%v", got, readErr)
+	}
+}
+
+func TestCleanupRefusesUnpushedCommits(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+	if _, err := Ensure(spec); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	publishRemoteRef(t, repo, base, runGit(t, repo, "rev-parse", base))
+	runGit(t, wt, "commit", "--allow-empty", "-m", "local-only")
+
+	report, err := Cleanup(spec)
+	if err == nil {
+		t.Fatal("Cleanup unpushed worktree succeeded, want refusal")
+	}
+	if !report.CleanupPending || report.Error == nil || report.Error.Code != CleanupErrorUnpushed {
+		t.Fatalf("Cleanup report = %+v, want structured unpushed cleanup_pending refusal", report)
+	}
+	if _, statErr := os.Stat(wt); statErr != nil {
+		t.Fatalf("Cleanup removed unpushed worktree: %v", statErr)
+	}
+}
+
+func TestCleanupRefusesPushedButUnmergedCommits(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	spec := managedSpec(repo, root, wt, "work/gc-test", base)
+	if _, err := Ensure(spec); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	runGit(t, wt, "commit", "--allow-empty", "-m", "pushed-not-merged")
+	tip := runGit(t, wt, "rev-parse", "HEAD")
+	publishRemoteRef(t, repo, spec.Branch, tip)
+
+	report, err := Cleanup(spec)
+	if err == nil {
+		t.Fatal("Cleanup unmerged worktree succeeded, want refusal")
+	}
+	if !report.CleanupPending || report.Error == nil || report.Error.Code != CleanupErrorUnmerged {
+		t.Fatalf("Cleanup report = %+v, want structured unmerged cleanup_pending refusal", report)
+	}
+	if _, statErr := os.Stat(wt); statErr != nil {
+		t.Fatalf("Cleanup removed unmerged worktree: %v", statErr)
+	}
+}
+
+func TestCleanupRefusesAmbiguousOrMismatchedOwnership(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+
+	t.Run("existing path is not a registered worktree", func(t *testing.T) {
+		path := filepath.Join(root, "plain")
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		spec := managedSpec(repo, root, path, "work/plain", base)
+		report, err := Cleanup(spec)
+		if err == nil {
+			t.Fatal("Cleanup ambiguous plain path succeeded, want refusal")
+		}
+		if !report.CleanupPending || report.Error == nil || report.Error.Code != CleanupErrorAmbiguous {
+			t.Fatalf("Cleanup report = %+v, want structured ambiguous-path refusal", report)
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("Cleanup removed ambiguous path: %v", statErr)
+		}
+	})
+
+	t.Run("provenance owner does not match", func(t *testing.T) {
+		path := filepath.Join(root, "owned")
+		spec := managedSpec(repo, root, path, "work/owned", base)
+		if _, err := Ensure(spec); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		conflict := spec
+		conflict.Owner = "other-owner"
+		report, err := Cleanup(conflict)
+		if err == nil {
+			t.Fatal("Cleanup mismatched provenance succeeded, want refusal")
+		}
+		if !report.CleanupPending || report.Error == nil || report.Error.Code != CleanupErrorOwnership {
+			t.Fatalf("Cleanup report = %+v, want structured ownership refusal", report)
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("Cleanup removed mismatched worktree: %v", statErr)
+		}
+	})
+}
+
+func TestCleanupRequiresManagedSpecAndRefusesMissingRegisteredPath(t *testing.T) {
+	repo, base := initTestRepo(t)
+
+	t.Run("unmanaged spec", func(t *testing.T) {
+		report, err := Cleanup(Spec{
+			RepoDir: repo,
+			Path:    filepath.Join(t.TempDir(), "missing"),
+			Branch:  "work/unmanaged",
+			Base:    base,
+		})
+		if err == nil {
+			t.Fatal("Cleanup unmanaged spec succeeded, want refusal")
+		}
+		if !report.CleanupPending || report.Error == nil || report.Error.Code != CleanupErrorInvalidSpec {
+			t.Fatalf("Cleanup report = %+v, want invalid_spec", report)
+		}
+	})
+
+	t.Run("registered path disappeared", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "owned")
+		spec := managedSpec(repo, root, path, "work/disappeared", base)
+		if _, err := Ensure(spec); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		moved := filepath.Join(root, "moved-aside")
+		if err := os.Rename(path, moved); err != nil {
+			t.Fatalf("Rename worktree aside: %v", err)
+		}
+
+		report, err := Cleanup(spec)
+		if err == nil {
+			t.Fatal("Cleanup missing registered path succeeded, want refusal")
+		}
+		if !report.CleanupPending || report.Error == nil || report.Error.Code != CleanupErrorAmbiguous {
+			t.Fatalf("Cleanup report = %+v, want ambiguous stale-registration refusal", report)
+		}
+		if _, statErr := os.Stat(moved); statErr != nil {
+			t.Fatalf("Cleanup touched moved worktree contents: %v", statErr)
+		}
+	})
 }

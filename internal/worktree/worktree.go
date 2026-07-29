@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -40,6 +41,23 @@ const (
 
 	// LifecycleActive is the initial lifecycle state of a usable workspace.
 	LifecycleActive = "active"
+
+	// CleanupErrorInvalidSpec reports incomplete or invalid ownership input.
+	CleanupErrorInvalidSpec = "invalid_spec"
+	// CleanupErrorAmbiguous reports a path whose registered identity cannot be proven.
+	CleanupErrorAmbiguous = "ambiguous_path"
+	// CleanupErrorOwnership reports durable provenance that does not match the caller.
+	CleanupErrorOwnership = "ownership_mismatch"
+	// CleanupErrorDirty reports staged, unstaged, or untracked work.
+	CleanupErrorDirty = "dirty_worktree"
+	// CleanupErrorUnpushed reports commits absent from every remote-tracking ref.
+	CleanupErrorUnpushed = "unpushed_commits"
+	// CleanupErrorUnmerged reports a HEAD not contained in the requested base.
+	CleanupErrorUnmerged = "unmerged_commits"
+	// CleanupErrorRemove reports a safe git worktree remove failure.
+	CleanupErrorRemove = "remove_failed"
+	// CleanupErrorPrune reports incomplete post-removal registration pruning.
+	CleanupErrorPrune = "prune_failed"
 )
 
 // Spec describes the desired workspace worktree.
@@ -112,6 +130,28 @@ type Report struct {
 	// Provenance is the verified durable identity, or the planned identity in
 	// dry-run output (without CreatedAt or AttemptID).
 	Provenance *Provenance `json:"provenance,omitempty"`
+}
+
+// CleanupError is the stable machine-readable reason a managed worktree could
+// not be removed safely. Cleanup never offers a force mode: callers must
+// resolve the reported state rather than bypassing the ownership gates.
+type CleanupError struct {
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	ExitCode int    `json:"exit_code"`
+}
+
+// CleanupReport describes the result of owner-mediated worktree removal.
+// CleanupPending is true whenever operator or caller action is still required.
+type CleanupReport struct {
+	Path           string        `json:"path"`
+	Branch         string        `json:"branch"`
+	Head           string        `json:"head,omitempty"`
+	Removed        bool          `json:"removed"`
+	AlreadyAbsent  bool          `json:"already_absent"`
+	CleanupPending bool          `json:"cleanup_pending"`
+	Provenance     *Provenance   `json:"provenance,omitempty"`
+	Error          *CleanupError `json:"error,omitempty"`
 }
 
 func (s Spec) validate() error {
@@ -298,6 +338,133 @@ func Ensure(spec Spec) (Report, error) {
 	created.Created = true
 	created.BranchCreated = !branchExists
 	return created, nil
+}
+
+// Cleanup removes a managed worktree only after proving that the exact
+// canonical path is registered to the requested repository and that its
+// durable provenance matches the caller's complete ownership spec. It then
+// fails closed for dirty, unpushed, or unmerged work. Removal is never forced
+// and never falls back to recursive filesystem deletion.
+//
+// A path that is absent and has no matching worktree registration is an
+// idempotent success. A missing path with a stale registration is ambiguous:
+// Cleanup cannot read and verify its worktree-private provenance, so it leaves
+// the registration untouched and reports cleanup_pending.
+func Cleanup(spec Spec) (CleanupReport, error) {
+	report := CleanupReport{Path: spec.Path, Branch: spec.Branch}
+	if !spec.managed() {
+		return cleanupFailure(report, CleanupErrorInvalidSpec, "cleanup requires a complete managed worktree spec")
+	}
+	if err := spec.validate(); err != nil {
+		return cleanupFailure(report, CleanupErrorInvalidSpec, err.Error())
+	}
+
+	repoGit := git.New(spec.RepoDir)
+	registered, err := matchingRegisteredWorktrees(repoGit, spec.Path)
+	if err != nil {
+		return cleanupFailure(report, CleanupErrorAmbiguous, fmt.Sprintf("listing registered worktrees: %v", err))
+	}
+	_, statErr := os.Stat(spec.Path)
+	if os.IsNotExist(statErr) {
+		if len(registered) == 0 {
+			report.AlreadyAbsent = true
+			return report, nil
+		}
+		return cleanupFailure(report, CleanupErrorAmbiguous,
+			fmt.Sprintf("path %q is missing but remains registered; provenance cannot be verified", spec.Path))
+	}
+	if statErr != nil {
+		return cleanupFailure(report, CleanupErrorAmbiguous,
+			fmt.Sprintf("inspecting path %q: %v", spec.Path, statErr))
+	}
+	if len(registered) != 1 {
+		return cleanupFailure(report, CleanupErrorAmbiguous,
+			fmt.Sprintf("path %q has %d canonical worktree registrations, want exactly 1", spec.Path, len(registered)))
+	}
+
+	verified, err := Verify(spec)
+	if err != nil {
+		return cleanupFailure(report, CleanupErrorOwnership, err.Error())
+	}
+	report.Head = verified.Head
+	report.Provenance = verified.Provenance
+
+	worktreeGit := git.New(spec.Path)
+	status, err := worktreeGit.StatusPorcelain()
+	if err != nil {
+		return cleanupFailure(report, CleanupErrorDirty, fmt.Sprintf("checking worktree status: %v", err))
+	}
+	if strings.TrimSpace(status) != "" {
+		return cleanupFailure(report, CleanupErrorDirty, "worktree contains staged, unstaged, or untracked changes")
+	}
+	hasUnpushed, err := worktreeGit.HasUnpushedCommitsResult()
+	if err != nil {
+		return cleanupFailure(report, CleanupErrorUnpushed, err.Error())
+	}
+	if hasUnpushed {
+		return cleanupFailure(report, CleanupErrorUnpushed, "worktree HEAD contains commits not reachable from any remote-tracking ref")
+	}
+	baseSHA, err := repoGit.RevParseVerifyCommit(spec.Base)
+	if err != nil {
+		return cleanupFailure(report, CleanupErrorUnmerged, fmt.Sprintf("resolving merge target %q: %v", spec.Base, err))
+	}
+	merged, err := isAncestor(spec.Path, "HEAD", baseSHA)
+	if err != nil {
+		return cleanupFailure(report, CleanupErrorUnmerged, fmt.Sprintf("checking merge state against %q: %v", spec.Base, err))
+	}
+	if !merged {
+		return cleanupFailure(report, CleanupErrorUnmerged,
+			fmt.Sprintf("worktree HEAD is not merged into local base %q at %s", spec.Base, baseSHA))
+	}
+
+	if err := repoGit.WorktreeRemove(spec.Path, false); err != nil {
+		return cleanupFailure(report, CleanupErrorRemove, err.Error())
+	}
+	report.Removed = true
+	if err := repoGit.WorktreePrune(); err != nil {
+		return cleanupFailure(report, CleanupErrorPrune, err.Error())
+	}
+	return report, nil
+}
+
+func cleanupFailure(report CleanupReport, code, message string) (CleanupReport, error) {
+	report.CleanupPending = true
+	report.Error = &CleanupError{Code: code, Message: message, ExitCode: 1}
+	return report, errors.New(message)
+}
+
+func matchingRegisteredWorktrees(repoGit *git.Git, path string) ([]git.Worktree, error) {
+	entries, err := repoGit.WorktreeList()
+	if err != nil {
+		return nil, err
+	}
+	candidate, err := canonicalPathAllowMissing(path)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]git.Worktree, 0, 1)
+	for _, entry := range entries {
+		registered, pathErr := canonicalPathAllowMissing(entry.Path)
+		if pathErr == nil && pathutil.SamePath(candidate, registered) {
+			matches = append(matches, entry)
+		}
+	}
+	return matches, nil
+}
+
+func isAncestor(workDir, ancestor, descendant string) (bool, error) {
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = workDir
+	cmd.Env = git.SanitizedEnv()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor: %s: %w", strings.TrimSpace(string(output)), err)
 }
 
 func resolveCreationState(spec Spec) (*git.Git, bool, string, error) {

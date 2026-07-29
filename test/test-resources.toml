@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 542
-baseline_files = 163
+baseline_calls = 543
+baseline_files = 164
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 421
-baseline_files = 156
+baseline_calls = 422
+baseline_files = 157
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 403
-baseline_files = 112
+baseline_calls = 404
+baseline_files = 113
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -294,6 +294,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner"
 resource_owner = "the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store"
 migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/session"
+package_name = "session"
+owner = "TestCreateSessionAllowsWorkDirWhenLiveProcessIsUnattributedSquatter"
+resources = ["subprocess", "fixed_sleep"]
+owner_bead = "ga-esrrot"
+invariant = "cwd-collision session-owned-PID scoping regression (ga-thkwp5 Failure 2) is a checked Medium owner"
+resource_owner = "the one real sleep(1) subprocess and its time.Sleep poll are confined to TestCreateSessionAllowsWorkDirWhenLiveProcessIsUnattributedSquatter, which proves liveness scoping against genuine /proc data instead of a fake scanner"
+migration_target = "ga-thkwp5"
 expires = "2026-10-01"
 
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It

@@ -1163,6 +1163,130 @@ func TestManagedDoltLifecycleOwnedReportsInvalidCityConfigForFileCity(t *testing
 	}
 }
 
+func writeInheritedBdRigUnderFileCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigPath, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "fe",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return cityPath
+}
+
+func TestBeadsLifecycleProviderUsesManagedBdForInheritedRigUnderFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := writeInheritedBdRigUnderFileCity(t)
+
+	got, err := beadsLifecycleProvider(cityPath)
+	if err != nil {
+		t.Fatalf("beadsLifecycleProvider: %v", err)
+	}
+	want := "exec:" + gcBeadsBdScriptPath(cityPath)
+	if got != want {
+		t.Fatalf("beadsLifecycleProvider = %q, want %q", got, want)
+	}
+}
+
+func TestBeadsLifecycleProviderKeepsPlainFileCityFileBacked(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := beadsLifecycleProvider(cityPath)
+	if err != nil {
+		t.Fatalf("beadsLifecycleProvider: %v", err)
+	}
+	if got != "file" {
+		t.Fatalf("beadsLifecycleProvider = %q, want file", got)
+	}
+}
+
+func TestHealthBeadsProviderRecoversInheritedRigUnderFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := writeInheritedBdRigUnderFileCity(t)
+
+	listener := listenOnRandomPort(t)
+	defer func() { _ = listener.Close() }()
+	port := listener.Addr().(*net.TCPAddr).Port
+	providerState := providerManagedDoltStatePath(cityPath)
+	opsFile := filepath.Join(t.TempDir(), "provider-ops.log")
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$1" >> %q
+case "$1" in
+  health)
+    exit 1
+    ;;
+  recover)
+    mkdir -p "$(dirname %q)"
+    cat > %q <<'JSON'
+{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-07-29T00:00:00Z"}
+JSON
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, opsFile, providerState, providerState, os.Getpid(), port, filepath.Join(cityPath, ".beads", "dolt"))
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := healthBeadsProviderContext(context.Background(), cityPath, false); err != nil {
+		t.Fatalf("healthBeadsProviderContext: %v", err)
+	}
+	ops, err := os.ReadFile(opsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(ops)), "health\nrecover"; got != want {
+		t.Fatalf("provider operations = %q, want %q", got, want)
+	}
+	published, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read published state: %v", err)
+	}
+	if published.Port != port || published.PID != os.Getpid() {
+		t.Fatalf("published state = %+v, want pid=%d port=%d", published, os.Getpid(), port)
+	}
+}
+
 // TestEnsureBeadsProvider_bd_skip verifies bd provider is no-op when GC_DOLT=skip.
 func TestEnsureBeadsProvider_bd_skip(t *testing.T) {
 	dir := t.TempDir()

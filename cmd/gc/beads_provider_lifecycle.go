@@ -722,18 +722,42 @@ func resolveRigPaths(cityPath string, rigs []config.Rig) {
 // for new call sites. These remain exported for tests that need to verify
 // individual operations.
 
+// beadsLifecycleProvider resolves the provider responsible for the city's
+// backing-service lifecycle. The city root may use the file provider while
+// one or more bd-backed rigs inherit a city-owned managed Dolt. In that
+// topology the root remains file-backed for work operations, but the city
+// still owns the managed bd provider's start, health, recovery, and stop
+// lifecycle.
+func beadsLifecycleProvider(cityPath string) (string, error) {
+	provider := beadsProvider(cityPath)
+	if provider != "file" {
+		return provider, nil
+	}
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return "", err
+	}
+	if !owned {
+		return provider, nil
+	}
+	return "exec:" + gcBeadsBdScriptPath(cityPath), nil
+}
+
 // ensureBeadsProvider starts the bead store's backing service if needed.
 // For exec providers, fires "start". For file providers, always available.
 // Acquires a per-city semaphore to prevent concurrent start operations
 // from causing spawn storms.
 func ensureBeadsProvider(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
-		return nil
-	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return nil
 	}
-	provider := beadsProvider(cityPath)
+	provider, err := beadsLifecycleProvider(cityPath)
+	if err != nil {
+		return fmt.Errorf("resolve beads lifecycle provider: %w", err)
+	}
+	if providerUsesBdStoreContract(provider) && gcDoltSkip() {
+		return nil
+	}
 	if strings.HasPrefix(provider, "exec:") {
 		release, err := acquireProviderSemaphoreForOp(cityPath, "start")
 		if err != nil {
@@ -777,13 +801,16 @@ func ensureBeadsProvider(cityPath string) error {
 // Called by gc stop after agents have been terminated.
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
-		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
-	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
 	}
-	provider := beadsProvider(cityPath)
+	provider, err := beadsLifecycleProvider(cityPath)
+	if err != nil {
+		return fmt.Errorf("resolve beads lifecycle provider: %w", err)
+	}
+	if providerUsesBdStoreContract(provider) && gcDoltSkip() {
+		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+	}
 	if strings.HasPrefix(provider, "exec:") {
 		if providerUsesBdStoreContract(provider) {
 			owned, err := managedDoltLifecycleOwned(cityPath)
@@ -1107,13 +1134,16 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
-		return nil
-	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return nil
 	}
-	provider := beadsProvider(cityPath)
+	provider, err := beadsLifecycleProvider(cityPath)
+	if err != nil {
+		return fmt.Errorf("resolve beads lifecycle provider: %w", err)
+	}
+	if providerUsesBdStoreContract(provider) && gcDoltSkip() {
+		return nil
+	}
 	if strings.HasPrefix(provider, "exec:") {
 		release, err := acquireProviderSemaphoreForOpContext(ctx, cityPath, "health")
 		if err != nil {

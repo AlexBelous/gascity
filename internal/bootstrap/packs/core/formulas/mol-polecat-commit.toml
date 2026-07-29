@@ -1,9 +1,9 @@
 description = """
 Polecat direct-commit variant — commits directly to base_branch.
 
-Extends mol-polecat-base with a simplified workspace setup (worktree on
-base_branch, no feature branch) and direct commit+push instead of refinery
-submission. Designed for small installations where merge review is
+Extends mol-polecat-base with a simplified workspace setup (a unique local
+work branch based on base_branch) and direct push to base_branch instead of
+refinery submission. Designed for small installations where merge review is
 unnecessary.
 
 ## Polecat Contract (Direct-Commit Model)
@@ -13,7 +13,8 @@ unnecessary.
 3. Commit to base_branch, push, close bead, exit
 4. You are GONE — no refinery step needed
 
-**No feature branch.** Work is committed directly to base_branch.
+**No review branch.** Work uses a unique local branch for worktree ownership,
+then pushes its HEAD directly to base_branch.
 Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 
 ## Failure Modes
@@ -33,17 +34,17 @@ formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "workspace-setup"
-title = "Set up worktree on base branch"
+title = "Set up owned worktree from base branch"
 needs = ["load-context"]
 description = """
-Create an isolated worktree checked out at base_branch HEAD.
-No feature branch — you will commit directly.
+Create an isolated worktree on a unique local branch based at base_branch HEAD.
+The commit step pushes that local branch directly to base_branch.
 
 **Config: base_branch = {{base_branch}}**
 **Config: setup_command = {{setup_command}}**
 
-**1. Fetch latest and derive your work bead:**
 ```bash
+set -euo pipefail
 git fetch --prune origin
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
@@ -51,46 +52,93 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-polecat-commit requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-```
+if [ -z "${GC_BEAD_ID:-}" ]; then
+  echo "mol-polecat-commit requires GC_BEAD_ID to resolve its source store" >&2
+  exit 1
+fi
 
-**2. Ensure worktree exists.**
+REPO_ROOT=$(git rev-parse --show-toplevel)
+WORKTREE_ROOT="${REPO_ROOT}-worktrees"
+WORKTREE_PATH="$WORKTREE_ROOT/$WORK_BEAD_ID"
+WORK_BRANCH="work/$WORK_BEAD_ID"
+BASE_REF="origin/{{base_branch}}"
+CREATOR="formula:mol-polecat-commit"
+OWNER="formula:mol-polecat-commit"
+GENERATION="formula:mol-polecat-commit:$WORK_BEAD_ID"
+LIFECYCLE="active"
 
-Check if `metadata.work_dir` already records your worktree path:
-```bash
-WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
-```
+STEP_JSON=$(gc bd show "$GC_BEAD_ID" --json)
+STORE_REF=$(printf '%s' "$STEP_JSON" | jq -er '.[0].metadata["gc.root_store_ref"] | select(length > 0)')
+WORK_JSON=$(gc bd show "$WORK_BEAD_ID" --json)
+PUBLISHED_CANONICAL=$(printf '%s' "$WORK_JSON" | jq -r '.[0].metadata["gc.work_dir"] // empty')
+PUBLISHED_LEGACY=$(printf '%s' "$WORK_JSON" | jq -r '.[0].metadata.work_dir // empty')
+if [ -n "$PUBLISHED_CANONICAL" ] && [ -n "$PUBLISHED_LEGACY" ] && [ "$PUBLISHED_CANONICAL" != "$PUBLISHED_LEGACY" ]; then
+  echo "mol-polecat-commit found conflicting published worktree paths" >&2
+  exit 1
+fi
+PUBLISHED_PATH="${PUBLISHED_CANONICAL:-$PUBLISHED_LEGACY}"
+if [ -n "$PUBLISHED_PATH" ] && [ "$PUBLISHED_PATH" != "$WORKTREE_PATH" ]; then
+  echo "mol-polecat-commit refuses published worktree path outside its deterministic owner path" >&2
+  exit 1
+fi
 
-**If worktree path exists in metadata** — reuse it:
-```bash
-cd "$WORKTREE"              # Enter existing worktree
-git pull --rebase origin {{base_branch}}  # Catch up to latest
-```
-If the directory is missing, fall through to create a new one.
+ENSURE_ARGS=(
+  --repo "$REPO_ROOT"
+  --root "$WORKTREE_ROOT"
+  --path "$WORKTREE_PATH"
+  --branch "$WORK_BRANCH"
+  --base "$BASE_REF"
+  --bead "$WORK_BEAD_ID"
+  --store-ref "$STORE_REF"
+  --creator "$CREATOR"
+  --owner "$OWNER"
+  --generation "$GENERATION"
+  --lifecycle "$LIFECYCLE"
+  --json
+)
+PUBLISHED_BASE_SHA=$(printf '%s' "$WORK_JSON" | jq -r '.[0].metadata["gc.worktree_base_sha"] // empty')
+if [ -n "$PUBLISHED_BASE_SHA" ]; then
+  ENSURE_ARGS+=(--base-sha "$PUBLISHED_BASE_SHA")
+fi
+REPORT=$(gc worktree ensure "${ENSURE_ARGS[@]}")
+printf '%s' "$REPORT" | jq -e \
+  --arg path "$WORKTREE_PATH" \
+  --arg branch "$WORK_BRANCH" \
+  --arg bead "$WORK_BEAD_ID" \
+  --arg store "$STORE_REF" \
+  --arg base "$BASE_REF" \
+  --arg creator "$CREATOR" \
+  --arg owner "$OWNER" \
+  --arg generation "$GENERATION" \
+  --arg lifecycle "$LIFECYCLE" \
+  '.path == $path and .branch == $branch and
+   .provenance.bead_id == $bead and .provenance.store_ref == $store and
+   .provenance.base_ref == $base and (.provenance.base_sha | length > 0) and
+   .provenance.creator == $creator and .provenance.owner == $owner and
+   .provenance.generation == $generation and .provenance.lifecycle == $lifecycle' \
+  >/dev/null
+BASE_SHA=$(printf '%s' "$REPORT" | jq -er '.provenance.base_sha | select(length > 0)')
+gc bd update "$WORK_BEAD_ID" \
+  --set-metadata "gc.work_dir=$WORKTREE_PATH" \
+  --set-metadata "work_dir=$WORKTREE_PATH" \
+  --set-metadata "gc.work_branch=$WORK_BRANCH" \
+  --set-metadata "gc.worktree_repo=$REPO_ROOT" \
+  --set-metadata "gc.worktree_root=$WORKTREE_ROOT" \
+  --set-metadata "gc.worktree_base_ref=$BASE_REF" \
+  --set-metadata "gc.worktree_base_sha=$BASE_SHA" \
+  --set-metadata "gc.worktree_creator=$CREATOR" \
+  --set-metadata "gc.worktree_owner=$OWNER" \
+  --set-metadata "gc.worktree_generation=$GENERATION" \
+  --set-metadata "gc.worktree_lifecycle=$LIFECYCLE"
 
-**If no worktree** — create one:
-```bash
-WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
-git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
 cd "$WORKTREE_PATH"
-```
-Record immediately so restarts and witness recovery can find it:
-```bash
-gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
-```
-
-**3. Ensure clean working state:**
-```bash
-git status                  # Should be clean
-```
-
-**4. Run project setup (if configured):**
-```bash
+git status
 {{setup_command}}
 ```
 Empty setup_command → skip.
 
-**Exit criteria:** In your worktree, at base_branch HEAD, deps installed,
-worktree recorded on the bead."""
+**Exit criteria:** In the verified owned worktree on its unique local branch,
+deps installed and complete provenance recorded atomically on the bead."""
 
 [[steps]]
 id = "commit-and-push"

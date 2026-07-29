@@ -388,7 +388,7 @@ func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testi
 // a request carrying a brain parent sid yields session-bead metadata with the
 // gc.brain_parent_sid key, the value the launch path forks off of.
 func TestPoolTriggerMetadata_StampsParentSID(t *testing.T) {
-	req := SessionRequest{WorkBeadID: "wb-1", BrainParentSID: "brain-abc"}
+	req := SessionRequest{WorkBeadID: "wb-1", BrainParentSID: "brain-abc", UnmanagedDirect: true}
 	md, err := poolTriggerMetadata(nil, nil, "city/claude", req)
 	if err != nil {
 		t.Fatalf("poolTriggerMetadata: %v", err)
@@ -398,7 +398,7 @@ func TestPoolTriggerMetadata_StampsParentSID(t *testing.T) {
 	}
 
 	// No parent sid means no key — the fresh path is byte-for-byte unchanged.
-	plain, err := poolTriggerMetadata(nil, nil, "city/claude", SessionRequest{WorkBeadID: "wb-1"})
+	plain, err := poolTriggerMetadata(nil, nil, "city/claude", SessionRequest{WorkBeadID: "wb-1", UnmanagedDirect: true})
 	if err != nil {
 		t.Fatalf("poolTriggerMetadata plain: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B", UnmanagedDirect: true})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
@@ -443,7 +443,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-B", BrainParentSID: "brain-B", UnmanagedDirect: true})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}
@@ -457,7 +457,7 @@ func TestBindPoolSessionTriggerBead_ClearsParentOnReassign(t *testing.T) {
 			beadmeta.TriggerBeadIDMetadataKey:  "wb-A",
 			beadmeta.BrainParentSIDMetadataKey: "brain-A",
 		}}
-		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A"})
+		boundInfo, err := bindPoolSessionTriggerBead(nil, nil, "city/claude", seedSessionInfo(session), SessionRequest{WorkBeadID: "wb-A", BrainParentSID: "brain-A", UnmanagedDirect: true})
 		if err != nil {
 			t.Fatalf("bind: %v", err)
 		}

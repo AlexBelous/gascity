@@ -11,11 +11,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 func TestBindPoolSessionTriggerBeadVerifiesManagedWorktreeBeforePublishing(t *testing.T) {
-	repo, base := worktreeTestRepo(t)
+	repo, base := testutil.InitGitRepoWithoutCWD(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "gc-test")
 	spec := worktree.Spec{
@@ -66,7 +67,7 @@ func TestBindPoolSessionTriggerBeadVerifiesManagedWorktreeBeforePublishing(t *te
 }
 
 func TestBindPoolSessionTriggerBeadRejectsCompetingOwnerBeforeMetadata(t *testing.T) {
-	repo, base := worktreeTestRepo(t)
+	repo, base := testutil.InitGitRepoWithoutCWD(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "gc-test")
 	spec := worktree.Spec{
@@ -106,6 +107,71 @@ func TestBindPoolSessionTriggerBeadRejectsCompetingOwnerBeforeMetadata(t *testin
 		persisted.Metadata[beadmeta.LegacyWorkDirMetadataKey] != "" ||
 		persisted.Metadata[beadmeta.TriggerBeadIDMetadataKey] != "" {
 		t.Fatalf("failed verification published partial metadata: %+v", persisted.Metadata)
+	}
+}
+
+func TestBindPoolSessionTriggerBeadRejectsManagedDemandWithoutWorktreeEvidence(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{ID: "session-1", Type: "session"})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	info, err := sessionFrontDoor(store).Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("Get session info: %v", err)
+	}
+	root := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{{
+			Name: "worker", WorkDir: filepath.Join(root, "slot"),
+		}},
+	}
+	bp := newAgentBuildParams("city", root, cfg, runtime.NewFake(), time.Now().UTC(), store, &bytes.Buffer{})
+
+	if _, err := bindPoolSessionTriggerBead(bp, &cfg.Agents[0], "worker", info, SessionRequest{
+		Tier: "new", WorkBeadID: "gc-test", WorkStoreRef: "rig:gascity",
+	}); err == nil {
+		t.Fatal("bind accepted managed demand without verified worktree evidence")
+	}
+	persisted, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("Get persisted session: %v", err)
+	}
+	if persisted.Metadata[beadmeta.WorkDirMetadataKey] != "" ||
+		persisted.Metadata[beadmeta.LegacyWorkDirMetadataKey] != "" ||
+		persisted.Metadata[beadmeta.TriggerBeadIDMetadataKey] != "" {
+		t.Fatalf("failed verification published partial metadata: %+v", persisted.Metadata)
+	}
+}
+
+func TestBindPoolSessionTriggerBeadAllowsExplicitUnmanagedDirectFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{ID: "session-1", Type: "session"})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	info, err := sessionFrontDoor(store).Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("Get session info: %v", err)
+	}
+	root := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{{
+			Name: "worker", WorkDir: filepath.Join(root, "slot"),
+		}},
+	}
+	bp := newAgentBuildParams("city", root, cfg, runtime.NewFake(), time.Now().UTC(), store, &bytes.Buffer{})
+
+	bound, err := bindPoolSessionTriggerBead(bp, &cfg.Agents[0], "worker", info, SessionRequest{
+		Tier: "resume", WorkBeadID: "gc-test", UnmanagedDirect: true,
+	})
+	if err != nil {
+		t.Fatalf("bind explicit unmanaged direct session: %v", err)
+	}
+	if bound.WorkDirCanonical == "" || bound.WorkDirCanonical != bound.WorkDir {
+		t.Fatalf("bound work dirs = canonical %q legacy %q, want matching configured fallback", bound.WorkDirCanonical, bound.WorkDir)
 	}
 }
 

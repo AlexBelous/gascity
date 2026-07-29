@@ -68,9 +68,10 @@ func TestBindPoolSessionTriggerBeadUsesExplicitWorkspace(t *testing.T) {
 		t.Fatalf("get session info: %v", err)
 	}
 	bound, err := bindPoolSessionTriggerBead(bp, &cfg.Agents[0], "worker", info, SessionRequest{
-		Tier:          "new",
-		WorkBeadID:    workBead,
-		WorkWorkspace: workspace,
+		Tier:            "new",
+		WorkBeadID:      workBead,
+		WorkWorkspace:   workspace,
+		UnmanagedDirect: true,
 	})
 	if err != nil {
 		t.Fatalf("first bind: %v", err)
@@ -81,9 +82,10 @@ func TestBindPoolSessionTriggerBeadUsesExplicitWorkspace(t *testing.T) {
 	}
 
 	reBound, err := bindPoolSessionTriggerBead(bp, &cfg.Agents[0], "worker", bound, SessionRequest{
-		Tier:          "wake-known-identity",
-		WorkBeadID:    workBead,
-		WorkWorkspace: workspace,
+		Tier:            "wake-known-identity",
+		WorkBeadID:      workBead,
+		WorkWorkspace:   workspace,
+		UnmanagedDirect: true,
 	})
 	if err != nil {
 		t.Fatalf("re-bind: %v", err)

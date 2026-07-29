@@ -35,6 +35,11 @@ type SessionRequest struct {
 	// while building demand. The realization path fails closed before creating
 	// or updating a session bead.
 	WorktreeError string
+	// UnmanagedDirect is the explicit compatibility boundary for a session
+	// that already owns work outside the managed worktree provisioner. Only
+	// these direct continuations may derive a legacy configured work directory
+	// without WorktreeSpec; new routed pool demand must fail closed.
+	UnmanagedDirect bool
 	// BrainParentSID is gc.brain_parent_sid from the driving work bead, when
 	// set: the parent session to fork this launch off of (warm-arm fork-launch).
 	BrainParentSID string
@@ -263,15 +268,16 @@ func computePoolDesiredStates(
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
-					Template:       template,
-					BeadPriority:   beadPriority(wb),
-					Tier:           "resume",
-					SessionBeadID:  sessionBeadID,
-					WorkBeadID:     wb.ID,
-					WorkBeadTitle:  strings.TrimSpace(wb.Title),
-					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
-					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
-					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Template:        template,
+					BeadPriority:    beadPriority(wb),
+					Tier:            "resume",
+					SessionBeadID:   sessionBeadID,
+					WorkBeadID:      wb.ID,
+					WorkBeadTitle:   strings.TrimSpace(wb.Title),
+					WorkPack:        strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+					WorkWorkspace:   strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					BrainParentSID:  strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					UnmanagedDirect: true,
 				})
 				continue
 			}
@@ -298,14 +304,15 @@ func computePoolDesiredStates(
 			}
 			wakeRequestedTemplates[template] = struct{}{}
 			resumeRequests = append(resumeRequests, SessionRequest{
-				Template:       template,
-				BeadPriority:   beadPriority(wb),
-				Tier:           "wake-known-identity",
-				WorkBeadID:     wb.ID,
-				WorkBeadTitle:  strings.TrimSpace(wb.Title),
-				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
-				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
-				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+				Template:        template,
+				BeadPriority:    beadPriority(wb),
+				Tier:            "wake-known-identity",
+				WorkBeadID:      wb.ID,
+				WorkBeadTitle:   strings.TrimSpace(wb.Title),
+				WorkPack:        strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+				WorkWorkspace:   strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+				BrainParentSID:  strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+				UnmanagedDirect: true,
 			})
 			if trace != nil {
 				trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
@@ -495,12 +502,13 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 				continue
 			}
 			requests[template] = append(requests[template], SessionRequest{
-				Template:       template,
-				Tier:           "new",
-				SessionBeadID:  sb.ID,
-				WorkBeadID:     strings.TrimSpace(sb.TriggerBeadID),
-				WorkStoreRef:   strings.TrimSpace(sb.TriggerBeadStoreRef),
-				BrainParentSID: strings.TrimSpace(sb.BrainParentSID),
+				Template:        template,
+				Tier:            "new",
+				SessionBeadID:   sb.ID,
+				WorkBeadID:      strings.TrimSpace(sb.TriggerBeadID),
+				WorkStoreRef:    strings.TrimSpace(sb.TriggerBeadStoreRef),
+				BrainParentSID:  strings.TrimSpace(sb.BrainParentSID),
+				UnmanagedDirect: true,
 			})
 		}
 	}

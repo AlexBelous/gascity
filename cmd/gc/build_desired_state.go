@@ -3016,6 +3016,9 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		return "", fmt.Errorf("pool trigger worktree evidence invalid: %s", request.WorktreeError)
 	}
 	if request.WorktreeSpec == nil {
+		if strings.TrimSpace(request.WorkBeadID) != "" && !request.UnmanagedDirect {
+			return "", fmt.Errorf("pool trigger worktree evidence missing for managed work bead %q", request.WorkBeadID)
+		}
 		return poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request), nil
 	}
 	spec := *request.WorktreeSpec

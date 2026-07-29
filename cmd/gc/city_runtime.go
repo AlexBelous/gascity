@@ -380,6 +380,14 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		stderr:            p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
+	if cr.lifecycleShadowWorker == nil {
+		worker, err := newSessionLifecycleShadowWorker(1, cr.recordSessionLifecycleStartShadowEvaluation, shadowWorkerStderr(cr.stderr))
+		if err != nil {
+			fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle shadow worker disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow startup must not affect legacy reconciliation
+		} else {
+			cr.lifecycleShadowWorker = worker
+		}
+	}
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
@@ -414,16 +422,101 @@ func (cr *CityRuntime) stopSessionLifecycleShadowWorker() {
 	cr.lifecycleShadowWorker.Stop()
 }
 
-func (cr *CityRuntime) sessionLifecycleShadowStartOption() startExecutionOption {
-	if cr == nil || !cr.lifecycleShadowWorker.acceptingObservations() {
+func shadowWorkerStderr(stderr io.Writer) io.Writer {
+	if stderr == nil {
+		return io.Discard
+	}
+	return stderr
+}
+
+func (cr *CityRuntime) recordSessionLifecycleStartShadowEvaluation(evaluation sessionLifecycleStartShadowEvaluation) {
+	if cr == nil || cr.trace == nil || evaluation.Observation.Input.ObservedAt.IsZero() ||
+		evaluation.CompletedAt.IsZero() ||
+		evaluation.CompletedAt.Before(evaluation.Observation.Input.ObservedAt) {
+		return
+	}
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+	cycle := cr.trace.BeginCycle(TraceTickTriggerControl, "lifecycle.start_selection.shadow", evaluation.CompletedAt, cfg)
+	if cycle == nil {
+		return
+	}
+	outcome := TraceOutcomeUnknown
+	switch evaluation.Comparison.Outcome {
+	case sessionLifecycleStartSelectionComparisonMatched:
+		outcome = TraceOutcomeNoChange
+	case sessionLifecycleStartSelectionComparisonMismatched:
+		outcome = TraceOutcomeFailed
+	case sessionLifecycleStartSelectionComparisonIncomparable:
+		outcome = TraceOutcomeSkipped
+	}
+	cycle.recordAdmittedDetailOperation(
+		TraceSiteLifecycleStartSelectionShadow,
+		TraceReasonRetained,
+		outcome,
+		"lifecycle.start_selection.shadow",
+		evaluation.Observation.Admission.Template,
+		evaluation.Observation.Input.Info.ID,
+		evaluation.Observation.Input.Info.SessionNameMetadata,
+		evaluation.Observation.Admission.Source,
+		evaluation.CompletedAt.Sub(evaluation.Observation.Input.ObservedAt),
+		map[string]any{
+			"session_id":               evaluation.Observation.Input.Info.ID,
+			"admitted_template":        evaluation.Observation.Admission.Template,
+			"admitted_source":          string(evaluation.Observation.Admission.Source),
+			"admitted_expires_at":      evaluation.Observation.Admission.ExpiresAt,
+			"candidate_outcome":        sessionLifecycleStartSelectionOutcomeTraceValue(evaluation.Comparison.Plan.Outcome),
+			"candidate_reason":         string(evaluation.Comparison.Plan.Reason),
+			"legacy_selected":          evaluation.Comparison.LegacySelected,
+			"comparison_outcome":       string(evaluation.Comparison.Outcome),
+			"comparison_reason":        string(evaluation.Comparison.Reason),
+			"queue_latency_ns":         evaluation.QueueLatency.Nanoseconds(),
+			"planning_latency_ns":      evaluation.PlanningLatency.Nanoseconds(),
+			"observed_to_completed_ns": evaluation.CompletedAt.Sub(evaluation.Observation.Input.ObservedAt).Nanoseconds(),
+			"effect_applied":           false,
+		},
+	)
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle start-selection shadow trace: %v\n", cr.logPrefix, err) //nolint:errcheck // tracing must not affect reconciliation
+	}
+}
+
+func sessionLifecycleStartSelectionOutcomeTraceValue(outcome sessionLifecycleStartSelectionOutcome) string {
+	switch outcome {
+	case sessionLifecycleStartSelectionPrepare:
+		return "prepare"
+	case sessionLifecycleStartSelectionNoop:
+		return "noop"
+	case sessionLifecycleStartSelectionPark:
+		return "park"
+	default:
+		return "unknown"
+	}
+}
+
+func (cr *CityRuntime) sessionLifecycleShadowStartOption(cycle *SessionReconcilerTraceCycle) startExecutionOption {
+	if cr == nil || !cr.lifecycleShadowWorker.acceptingObservations() ||
+		cr.sessionStartOwnershipState() != sessionStartOwnershipLegacy ||
+		cycle == nil || !cycle.hasStartSelectionShadowAdmission() {
 		return nil
 	}
-	worker := cr.lifecycleShadowWorker
-	return withSessionLifecycleStartSelectionShadowObserver(func(observation sessionLifecycleStartShadowObservation) {
-		if err := worker.EnqueueStart(observation); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: lifecycle shadow observation dropped: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow admission must not affect legacy reconciliation
+	admission := func(template string) (sessionLifecycleStartShadowAdmission, bool) {
+		token, ok := cycle.startSelectionShadowAdmission(template)
+		if !ok || (!token.ExpiresAt.IsZero() && token.ExpiresAt.Before(time.Now().UTC())) {
+			return sessionLifecycleStartShadowAdmission{}, false
 		}
-	})
+		return token, true
+	}
+	worker := cr.lifecycleShadowWorker
+	return func(opts *startExecutionOptions) {
+		withSessionLifecycleStartSelectionShadowObserver(func(observation sessionLifecycleStartShadowObservation) {
+			if err := worker.EnqueueStart(observation); err != nil {
+				fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle shadow observation dropped: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow admission must not affect legacy reconciliation
+			}
+		})(opts)
+		withSessionLifecycleStartSelectionShadowAdmission(admission)(opts)
+	}
 }
 
 // run executes the reconciliation loop until ctx is canceled. This is
@@ -2522,7 +2615,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAssignedWorkDeferTracker(cr.adt),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 	}
-	if shadowOption := cr.sessionLifecycleShadowStartOption(); shadowOption != nil {
+	if shadowOption := cr.sessionLifecycleShadowStartOption(trace); shadowOption != nil {
 		reconcileStartOptions = append(reconcileStartOptions, shadowOption)
 	}
 	if keyedOption := cr.sessionStartLegacyExclusionOption(); keyedOption != nil {

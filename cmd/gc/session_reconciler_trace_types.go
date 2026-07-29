@@ -109,6 +109,7 @@ const (
 	TraceSiteLifecycleStartFailed           TraceSiteCode = "reconciler.start.failed"
 	TraceSiteLifecycleStartRun              TraceSiteCode = "reconciler.start.execute"
 	TraceSiteLifecycleStatusShadow          TraceSiteCode = "lifecycle.status.shadow"
+	TraceSiteLifecycleStartSelectionShadow  TraceSiteCode = "lifecycle.start_selection.shadow"
 	TraceSiteWaitDependencyShadow           TraceSiteCode = "lifecycle.wait_dependency.shadow"
 	TraceSiteLifecycleStartPrepare          TraceSiteCode = "lifecycle.start.prepare"
 	TraceSiteLifecycleStartExecute          TraceSiteCode = "lifecycle.start.execute"

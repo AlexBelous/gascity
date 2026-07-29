@@ -93,6 +93,40 @@ func (c *SessionReconcilerTraceCycle) RecordControllerOperation(site TraceSiteCo
 	c.addRecord(rec)
 }
 
+func (c *SessionReconcilerTraceCycle) recordAdmittedDetailOperation(
+	site TraceSiteCode,
+	reason TraceReasonCode,
+	outcome TraceOutcomeCode,
+	opName string,
+	template string,
+	sessionBeadID string,
+	sessionName string,
+	source TraceSource,
+	duration time.Duration,
+	fields map[string]any,
+) {
+	if c == nil {
+		return
+	}
+	rec := newTraceRecord(TraceRecordOperation).withCycle(c, time.Now().UTC())
+	rec.SiteCode = site
+	rec.ReasonCode = reason
+	rec.OutcomeCode = outcome
+	rec.Template = normalizedTraceTemplate(template)
+	rec.SessionBeadID = sessionBeadID
+	rec.SessionName = sessionName
+	rec.OperationID = newTraceID(opName)
+	rec.TraceMode = TraceModeDetail
+	rec.TraceSource = source
+	rec.DurationMS = duration.Milliseconds()
+	rec.ensureFields()
+	rec.Fields["operation_name"] = opName
+	for k, v := range fields {
+		rec.Fields[k] = v
+	}
+	c.addRecord(rec)
+}
+
 func (c *SessionReconcilerTraceCycle) end(completion TraceCompletionStatus, data traceRecordPayload) {
 	if c == nil {
 		return

@@ -105,9 +105,10 @@ func (w *sessionLifecycleShadowWorker) EnqueueStart(observation sessionLifecycle
 		return fmt.Errorf("enqueueing lifecycle shadow observation for %s: worker is stopped", id)
 	}
 	w.projection[id] = sessionLifecycleShadowProjectionEntry{
-		observation: newSessionLifecycleStartShadowObservation(
+		observation: newAdmittedSessionLifecycleStartShadowObservation(
 			observation.Input,
 			observation.LegacySelected,
+			observation.Admission,
 		),
 		enqueuedAt: w.now(),
 	}
@@ -168,7 +169,7 @@ func (w *sessionLifecycleShadowWorker) evaluate(key string) {
 			fmt.Fprintf(w.stderr, "lifecycle shadow evaluation panicked for %s: %v\n%s\n", key, recovered, debug.Stack()) //nolint:errcheck // shadow diagnostics must not affect legacy reconciliation
 		}
 	}()
-	entry, ok := w.readProjection(key)
+	entry, ok := w.consumeProjection(key)
 	if !ok {
 		return
 	}
@@ -180,9 +181,10 @@ func (w *sessionLifecycleShadowWorker) evaluate(key string) {
 	)
 	completedAt := w.now()
 	w.observer(sessionLifecycleStartShadowEvaluation{
-		Observation: newSessionLifecycleStartShadowObservation(
+		Observation: newAdmittedSessionLifecycleStartShadowObservation(
 			entry.observation.Input,
 			entry.observation.LegacySelected,
+			entry.observation.Admission,
 		),
 		Comparison:      comparison,
 		EnqueuedAt:      entry.enqueuedAt,
@@ -193,16 +195,18 @@ func (w *sessionLifecycleShadowWorker) evaluate(key string) {
 	})
 }
 
-func (w *sessionLifecycleShadowWorker) readProjection(key string) (sessionLifecycleShadowProjectionEntry, bool) {
+func (w *sessionLifecycleShadowWorker) consumeProjection(key string) (sessionLifecycleShadowProjectionEntry, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	entry, ok := w.projection[key]
 	if !ok {
 		return sessionLifecycleShadowProjectionEntry{}, false
 	}
-	entry.observation = newSessionLifecycleStartShadowObservation(
+	delete(w.projection, key)
+	entry.observation = newAdmittedSessionLifecycleStartShadowObservation(
 		entry.observation.Input,
 		entry.observation.LegacySelected,
+		entry.observation.Admission,
 	)
 	return entry, true
 }

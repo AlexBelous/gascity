@@ -3496,11 +3496,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	var startSelectionInputs []sessionLifecycleStartShadowInput
 	var startSelectionInputByID map[string]int
 	observeStartSelection := reconcileOpts.startSelectionObserver != nil ||
-		reconcileOpts.startSelectionShadowObserver != nil
-	if observeStartSelection {
-		startSelectionInputs = make([]sessionLifecycleStartShadowInput, 0, len(wakeTargets))
-		startSelectionInputByID = make(map[string]int, len(wakeTargets))
-	}
+		(reconcileOpts.startSelectionShadowObserver != nil &&
+			reconcileOpts.startSelectionShadowAdmission != nil)
 	for _, target := range wakeTargets {
 		if ctx != nil && ctx.Err() != nil {
 			return 0
@@ -3546,7 +3543,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			lifecycleTimerBlockerInfo(info, clk.Now()) == "user_hold" {
 			shouldWake = true
 		}
-		if observeStartSelection {
+		shadowAdmitted := false
+		var shadowAdmission sessionLifecycleStartShadowAdmission
+		if reconcileOpts.startSelectionShadowObserver != nil &&
+			reconcileOpts.startSelectionShadowAdmission != nil {
+			shadowAdmission, shadowAdmitted = reconcileOpts.startSelectionShadowAdmission(target.tp.TemplateName)
+		}
+		if observeStartSelection && (reconcileOpts.startSelectionObserver != nil || shadowAdmitted) {
+			if startSelectionInputByID == nil {
+				startSelectionInputByID = make(map[string]int)
+			}
 			startSelectionInputByID[info.ID] = len(startSelectionInputs)
 			startSelectionInputs = append(startSelectionInputs, sessionLifecycleStartShadowInput{
 				Info:                 info,
@@ -3557,6 +3563,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				RuntimeAlive:         target.alive,
 				ObservedAt:           clk.Now().UTC(),
 				StartupTimeout:       startupTimeout,
+				ShadowAdmitted:       shadowAdmitted,
+				ShadowAdmission:      shadowAdmission,
 			})
 		}
 
@@ -3861,7 +3869,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 	}
-	if observeStartSelection {
+	if len(startSelectionInputs) > 0 {
 		selectedByID := make(map[string]bool, len(startCandidates))
 		for _, candidate := range startCandidates {
 			selectedByID[candidate.info.ID] = true
@@ -3872,9 +3880,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				plan := planSessionLifecycleStartSelection(input)
 				reconcileOpts.startSelectionObserver(compareSessionLifecycleStartSelection(plan, legacySelected))
 			}
-			if reconcileOpts.startSelectionShadowObserver != nil {
+			if reconcileOpts.startSelectionShadowObserver != nil && input.ShadowAdmitted {
 				reconcileOpts.startSelectionShadowObserver(
-					newSessionLifecycleStartShadowObservation(input, legacySelected),
+					newAdmittedSessionLifecycleStartShadowObservation(input, legacySelected, input.ShadowAdmission),
 				)
 			}
 		}

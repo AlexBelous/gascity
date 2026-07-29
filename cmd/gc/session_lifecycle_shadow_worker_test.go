@@ -184,6 +184,49 @@ func TestSessionLifecycleShadowWorkerReplaysLatestObservationWithoutConcurrentSa
 	}
 }
 
+func TestSessionLifecycleShadowWorkerConsumesProjectionAndReplaysPostConsumeObservation(t *testing.T) {
+	evaluations := make(chan sessionLifecycleStartShadowEvaluation, 2)
+	firstObserved := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	worker := mustStartSessionLifecycleShadowWorker(t, 1, func(evaluation sessionLifecycleStartShadowEvaluation) {
+		evaluations <- evaluation
+		if evaluation.Observation.Input.Info.Title == "first" {
+			close(firstObserved)
+			<-releaseFirst
+		}
+	})
+
+	if err := worker.EnqueueStart(testSessionLifecycleStartShadowObservation("session-a", "first")); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	waitForSignal(t, firstObserved, "first observation")
+	worker.mu.Lock()
+	_, ok := worker.projection["session-a"]
+	worker.mu.Unlock()
+	if ok {
+		t.Fatal("projection remained after evaluation began")
+	}
+	if err := worker.EnqueueStart(testSessionLifecycleStartShadowObservation("session-a", "replay")); err != nil {
+		t.Fatalf("enqueue replay: %v", err)
+	}
+	close(releaseFirst)
+
+	first := receiveShadowEvaluation(t, evaluations)
+	if first.Observation.Input.Info.Title != "first" {
+		t.Fatalf("first title = %q, want first", first.Observation.Input.Info.Title)
+	}
+	replay := receiveShadowEvaluation(t, evaluations)
+	if replay.Observation.Input.Info.Title != "replay" {
+		t.Fatalf("replay title = %q, want replay", replay.Observation.Input.Info.Title)
+	}
+	worker.mu.Lock()
+	_, ok = worker.projection["session-a"]
+	worker.mu.Unlock()
+	if ok {
+		t.Fatal("projection remained after replay evaluation")
+	}
+}
+
 func TestSessionLifecycleShadowWorkerProcessesDifferentKeysConcurrently(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
@@ -268,7 +311,7 @@ func TestSessionLifecycleShadowWorkerStopRejectsAdmissionAndJoinsWorkers(t *test
 }
 
 func TestCityRuntimeLifecycleShadowWorkerIsOptInAndLegacyKeepsEffectOwnership(t *testing.T) {
-	if option := (&CityRuntime{}).sessionLifecycleShadowStartOption(); option != nil {
+	if option := (&CityRuntime{}).sessionLifecycleShadowStartOption(nil); option != nil {
 		t.Fatal("default CityRuntime shadow option is enabled")
 	}
 
@@ -285,13 +328,20 @@ func TestCityRuntimeLifecycleShadowWorkerIsOptInAndLegacyKeepsEffectOwnership(t 
 	}
 	cr.startSessionLifecycleShadowWorker()
 	t.Cleanup(cr.stopSessionLifecycleShadowWorker)
+	cycle := &SessionReconcilerTraceCycle{directDetailArms: map[string]sessionLifecycleStartShadowAdmission{
+		"worker": {
+			Template:  "worker",
+			Source:    TraceSourceManual,
+			ExpiresAt: time.Now().UTC().Add(time.Minute),
+		},
+	}}
 
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	sessionBead := env.createSessionBead("worker", "worker")
 	env.markSessionCreating(&sessionBead)
-	env.startOptions = append(env.startOptions, cr.sessionLifecycleShadowStartOption())
+	env.startOptions = append(env.startOptions, cr.sessionLifecycleShadowStartOption(cycle))
 
 	if woken := env.reconcile([]beads.Bead{sessionBead}); woken != 1 {
 		t.Fatalf("legacy woken count = %d, want 1", woken)
@@ -309,6 +359,111 @@ func TestCityRuntimeLifecycleShadowWorkerIsOptInAndLegacyKeepsEffectOwnership(t 
 	cr.stopSessionLifecycleShadowWorker()
 	if err := worker.EnqueueStart(testSessionLifecycleStartShadowObservation("session-after-runtime-stop", "stopped")); err == nil {
 		t.Fatal("CityRuntime stop left shadow worker admission open")
+	}
+}
+
+func TestRecordSessionLifecycleStartShadowEvaluationPersistsNoEffectEvidence(t *testing.T) {
+	cityPath := t.TempDir()
+	trace := newSessionReconcilerTraceManager(cityPath, "shadow-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "shadow-city",
+		cfg:      &config.City{},
+		trace:    trace,
+		stderr:   io.Discard,
+	}
+	observedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	expiresAt := observedAt.Add(2 * time.Millisecond)
+	cr.recordSessionLifecycleStartShadowEvaluation(sessionLifecycleStartShadowEvaluation{
+		Observation: newAdmittedSessionLifecycleStartShadowObservation(
+			sessionLifecycleStartShadowInput{
+				Info:       session.Info{ID: "gcs-shadow"},
+				ObservedAt: observedAt,
+			},
+			true,
+			sessionLifecycleStartShadowAdmission{
+				Template:  "worker",
+				Source:    TraceSourceManual,
+				ExpiresAt: expiresAt,
+			},
+		),
+		Comparison: sessionLifecycleStartSelectionComparison{
+			Plan: sessionLifecycleStartSelectionPlan{
+				SessionID: "gcs-shadow",
+				Outcome:   sessionLifecycleStartSelectionPrepare,
+				Reason:    sessionLifecycleStartSelectionReasonReady,
+			},
+			LegacySelected: true,
+			Outcome:        sessionLifecycleStartSelectionComparisonMatched,
+			Reason:         sessionLifecycleStartSelectionComparisonReasonEquivalent,
+		},
+		EnqueuedAt:      observedAt.Add(time.Millisecond),
+		StartedAt:       observedAt.Add(2 * time.Millisecond),
+		CompletedAt:     observedAt.Add(3 * time.Millisecond),
+		QueueLatency:    time.Millisecond,
+		PlanningLatency: time.Millisecond,
+	})
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+		SiteCode:    TraceSiteLifecycleStartSelectionShadow,
+		Template:    "worker",
+		TraceMode:   TraceModeDetail,
+		TraceSource: TraceSourceManual,
+	})
+	if err != nil {
+		t.Fatalf("read start-selection shadow trace: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("start-selection shadow records = %#v, want one", records)
+	}
+	record := records[0]
+	if record.RecordType != TraceRecordOperation ||
+		record.Template != "worker" ||
+		record.SessionBeadID != "gcs-shadow" ||
+		record.TraceMode != TraceModeDetail ||
+		record.TraceSource != TraceSourceManual ||
+		record.OutcomeCode != TraceOutcomeNoChange ||
+		record.Fields["session_id"] != "gcs-shadow" ||
+		record.Fields["admitted_template"] != "worker" ||
+		record.Fields["admitted_source"] != string(TraceSourceManual) ||
+		record.Fields["candidate_outcome"] != "prepare" ||
+		record.Fields["candidate_reason"] != string(sessionLifecycleStartSelectionReasonReady) ||
+		record.Fields["legacy_selected"] != true ||
+		record.Fields["comparison_outcome"] != string(sessionLifecycleStartSelectionComparisonMatched) ||
+		record.Fields["comparison_reason"] != string(sessionLifecycleStartSelectionComparisonReasonEquivalent) ||
+		record.Fields["effect_applied"] != false {
+		t.Fatalf("start-selection shadow record = %#v, want matched no-effect evidence", record)
+	}
+}
+
+func TestCityRuntimeLifecycleShadowStartOptionRequiresDirectCycleArm(t *testing.T) {
+	worker := mustStartSessionLifecycleShadowWorker(t, 1, func(sessionLifecycleStartShadowEvaluation) {})
+	cr := &CityRuntime{lifecycleShadowWorker: worker, stderr: io.Discard}
+
+	if option := cr.sessionLifecycleShadowStartOption(&SessionReconcilerTraceCycle{}); option != nil {
+		t.Fatal("unarmed trace cycle published a shadow option")
+	}
+	expiresAt := time.Date(2030, 7, 29, 12, 0, 0, 0, time.UTC)
+	cycle := &SessionReconcilerTraceCycle{directDetailArms: map[string]sessionLifecycleStartShadowAdmission{
+		"worker": {Template: "worker", Source: TraceSourceManual, ExpiresAt: expiresAt},
+	}}
+	option := cr.sessionLifecycleShadowStartOption(cycle)
+	if option == nil {
+		t.Fatal("direct detail arm did not publish a shadow option")
+	}
+	var options startExecutionOptions
+	option(&options)
+	if options.startSelectionShadowAdmission == nil {
+		t.Fatal("shadow option did not install admission predicate")
+	}
+	admission, ok := options.startSelectionShadowAdmission("worker")
+	if !ok || admission.Template != "worker" || admission.Source != TraceSourceManual || !admission.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("admission = %+v, %t; want direct arm token", admission, ok)
+	}
+	cr.sessionStartOwnership = sessionStartOwnershipKeyed
+	if option := cr.sessionLifecycleShadowStartOption(cycle); option != nil {
+		t.Fatal("keyed ownership published a shadow option")
 	}
 }
 

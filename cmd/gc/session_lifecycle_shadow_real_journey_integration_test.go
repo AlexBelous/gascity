@@ -130,7 +130,15 @@ func TestSessionLifecycleStartShadowRealTmuxJourney(t *testing.T) {
 	}
 	cityRuntime.startSessionLifecycleShadowWorker()
 	t.Cleanup(cityRuntime.stopSessionLifecycleShadowWorker)
-	shadowOption := cityRuntime.sessionLifecycleShadowStartOption()
+	shadowOption := cityRuntime.sessionLifecycleShadowStartOption(&SessionReconcilerTraceCycle{
+		directDetailArms: map[string]sessionLifecycleStartShadowAdmission{
+			"worker": {
+				Template:  "worker",
+				Source:    TraceSourceManual,
+				ExpiresAt: time.Now().UTC().Add(time.Minute),
+			},
+		},
+	})
 	if shadowOption == nil {
 		t.Fatal("started CityRuntime did not publish a shadow start option")
 	}

@@ -307,6 +307,7 @@ type startExecutionOptions struct {
 	exactStatusObserver            exactSessionLifecycleStatusObserver
 	startSelectionObserver         sessionLifecycleStartSelectionComparisonObserver
 	startSelectionShadowObserver   func(sessionLifecycleStartShadowObservation)
+	startSelectionShadowAdmission  func(string) (sessionLifecycleStartShadowAdmission, bool)
 	legacyStartExcluded            func(sessionpkg.Info) bool
 	legacyStatusHealExcluded       func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
@@ -414,6 +415,14 @@ func withSessionLifecycleStartSelectionShadowObserver(
 ) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.startSelectionShadowObserver = observer
+	}
+}
+
+func withSessionLifecycleStartSelectionShadowAdmission(
+	admission func(string) (sessionLifecycleStartShadowAdmission, bool),
+) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.startSelectionShadowAdmission = admission
 	}
 }
 

@@ -19,6 +19,16 @@ type sessionLifecycleStartShadowInput struct {
 	StartupTimeout       time.Duration
 	CircuitOpen          bool
 	ProviderUnavailable  bool
+	ShadowAdmitted       bool
+	ShadowAdmission      sessionLifecycleStartShadowAdmission
+}
+
+// sessionLifecycleStartShadowAdmission is the immutable trace-arm token that
+// admitted an observation during the synchronous legacy reconcile cycle.
+type sessionLifecycleStartShadowAdmission struct {
+	Template  string
+	Source    TraceSource
+	ExpiresAt time.Time
 }
 
 // sessionLifecycleStartShadowObservation is the immutable handoff from the
@@ -28,6 +38,17 @@ type sessionLifecycleStartShadowInput struct {
 type sessionLifecycleStartShadowObservation struct {
 	Input          sessionLifecycleStartShadowInput
 	LegacySelected bool
+	Admission      sessionLifecycleStartShadowAdmission
+}
+
+func newAdmittedSessionLifecycleStartShadowObservation(
+	input sessionLifecycleStartShadowInput,
+	legacySelected bool,
+	admission sessionLifecycleStartShadowAdmission,
+) sessionLifecycleStartShadowObservation {
+	observation := newSessionLifecycleStartShadowObservation(input, legacySelected)
+	observation.Admission = admission
+	return observation
 }
 
 func newSessionLifecycleStartShadowObservation(

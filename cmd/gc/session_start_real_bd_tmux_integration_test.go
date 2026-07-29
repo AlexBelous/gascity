@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	runtimetmux "github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -330,16 +331,22 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	go func() {
 		controllerDone <- controllerCmd.Wait()
 	}()
+	controllerStopped := false
+	controllerWaited := false
 	t.Cleanup(func() {
-		stopOutput, stopErr := runExactStartStopGC(commandEnv, 30*time.Second, gcBinary, "stop", "--force", cityPath)
-		if stopErr != nil {
-			t.Errorf("stop production controller: %v\n%s", stopErr, stopOutput)
+		if !controllerStopped {
+			stopOutput, stopErr := runExactStartStopGC(commandEnv, 30*time.Second, gcBinary, "stop", "--force", cityPath)
+			if stopErr != nil {
+				t.Errorf("stop production controller: %v\n%s", stopErr, stopOutput)
+			}
 		}
 		cancelController()
-		select {
-		case <-controllerDone:
-		case <-time.After(testutil.ExecRaceTimeout):
-			t.Errorf("production controller did not exit; stdout=%q stderr=%q", controllerStdout.String(), controllerStderr.String())
+		if !controllerWaited {
+			select {
+			case <-controllerDone:
+			case <-time.After(testutil.ExecRaceTimeout):
+				t.Errorf("production controller did not exit; stdout=%q stderr=%q", controllerStdout.String(), controllerStderr.String())
+			}
 		}
 	})
 	waitForControllerAvailable(t, cityPath)
@@ -524,6 +531,200 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("marshal exact start-stop sample: %v", err)
 	}
 	t.Logf("EXACT_START_STOP_DURABLE_SAMPLE %s", wire)
+
+	stopOutput, stopErr := runExactStartStopGC(commandEnv, 30*time.Second, gcBinary, "stop", "--force", cityPath)
+	if stopErr != nil {
+		t.Fatalf("stop keyed production controller: %v\n%s", stopErr, stopOutput)
+	}
+	controllerStopped = true
+	cancelController()
+	select {
+	case controllerErr := <-controllerDone:
+		controllerWaited = true
+		if controllerErr != nil && !strings.Contains(strings.ToLower(controllerErr.Error()), "signal: killed") {
+			t.Fatalf("keyed production controller exit: %v", controllerErr)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatalf("keyed production controller did not exit; stdout=%q stderr=%q",
+			controllerStdout.String(), controllerStderr.String())
+	}
+
+	cityConfigPath := filepath.Join(cityPath, "city.toml")
+	legacyConfig, err := os.ReadFile(cityConfigPath)
+	if err != nil {
+		t.Fatalf("read initialized config for legacy shadow: %v", err)
+	}
+	const (
+		autoSessionReconciler   = `session_reconciler = "auto"`
+		legacySessionReconciler = `session_reconciler = "off"`
+	)
+	if count := bytes.Count(legacyConfig, []byte(autoSessionReconciler)); count != 1 {
+		t.Fatalf("initialized session_reconciler auto settings = %d, want exactly one", count)
+	}
+	legacyConfig = bytes.Replace(legacyConfig, []byte(autoSessionReconciler), []byte(legacySessionReconciler), 1)
+	if err := fsys.WriteFileAtomic(
+		fsys.OSFS{},
+		cityConfigPath,
+		legacyConfig,
+		0o644,
+	); err != nil {
+		t.Fatalf("write legacy shadow config: %v", err)
+	}
+
+	legacyControllerCtx, cancelLegacyController := context.WithCancel(t.Context())
+	var legacyControllerStdout, legacyControllerStderr synchronizedBuffer
+	legacyControllerCmd := newExactStartStopGCCommand(
+		legacyControllerCtx,
+		commandEnv,
+		gcBinary,
+		"start",
+		"--foreground",
+		"--no-strict",
+		cityPath,
+	)
+	legacyControllerCmd.Stdout = &legacyControllerStdout
+	legacyControllerCmd.Stderr = &legacyControllerStderr
+	if err := legacyControllerCmd.Start(); err != nil {
+		t.Fatalf("start legacy shadow controller: %v", err)
+	}
+	legacyControllerDone := make(chan error, 1)
+	go func() {
+		legacyControllerDone <- legacyControllerCmd.Wait()
+	}()
+	t.Cleanup(func() {
+		stopOutput, stopErr := runExactStartStopGC(commandEnv, 30*time.Second, gcBinary, "stop", "--force", cityPath)
+		if stopErr != nil {
+			t.Errorf("stop legacy shadow controller: %v\n%s", stopErr, stopOutput)
+		}
+		cancelLegacyController()
+		select {
+		case <-legacyControllerDone:
+		case <-time.After(testutil.ExecRaceTimeout):
+			t.Errorf("legacy shadow controller did not exit; stdout=%q stderr=%q",
+				legacyControllerStdout.String(), legacyControllerStderr.String())
+		}
+	})
+	waitForControllerAvailable(t, cityPath)
+
+	if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
+		out, runErr := runExactStartStopGC(
+			commandEnv,
+			10*time.Second,
+			gcBinary,
+			"--city", cityPath,
+			"trace", "status", "--json",
+		)
+		traceOutput = out
+		if runErr != nil {
+			return false, runErr
+		}
+		var status traceStatusResultJSON
+		if decodeErr := json.Unmarshal([]byte(exactStartStopJSONPayload(out)), &status); decodeErr != nil {
+			return false, decodeErr
+		}
+		traceStatus = status
+		return status.SessionReconciler.Available &&
+			status.SessionReconciler.ConfiguredMode == "off" &&
+			status.SessionReconciler.EffectiveOwner == "legacy", nil
+	}); err != nil {
+		t.Fatalf("production session reconciler did not become off/legacy: %v; status=%+v output=%q controller stdout=%q stderr=%q",
+			err, traceStatus.SessionReconciler, traceOutput, legacyControllerStdout.String(), legacyControllerStderr.String())
+	}
+	runGC(10*time.Second,
+		"--city", cityPath,
+		"trace", "start",
+		"--template", "worker",
+		"--for", "2m",
+		"--level", string(TraceModeDetail),
+	)
+
+	shadowCreatedOutput := runGC(30*time.Second,
+		"--city", cityPath,
+		"session", "new", "worker",
+		"--no-attach",
+		"--json",
+	)
+	var shadowCreated sessionNewJSON
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(shadowCreatedOutput)), &shadowCreated); err != nil {
+		t.Fatalf("decode legacy shadow session creation: %v\n%s", err, shadowCreatedOutput)
+	}
+	if shadowCreated.SessionID == "" || shadowCreated.SessionName == "" || !shadowCreated.DeferredStart {
+		t.Fatalf("legacy shadow session creation = %+v, want deferred ID and tmux name", shadowCreated)
+	}
+
+	var shadowStarted sessionpkg.Info
+	if err := waitExactStartStopState(t.Context(), 45*time.Second, func() (bool, error) {
+		info, getErr := sessionFrontDoor(backingStore).Get(shadowCreated.SessionID)
+		if getErr != nil {
+			return false, getErr
+		}
+		view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
+		if view.BaseState != sessionpkg.BaseStateActive || info.PendingCreateClaim {
+			return false, nil
+		}
+		shadowStarted = info
+		return true, nil
+	}); err != nil {
+		t.Fatalf("legacy shadow start did not converge: %v; current=%+v controller stdout=%q stderr=%q",
+			err, shadowStarted, legacyControllerStdout.String(), legacyControllerStderr.String())
+	}
+	shadowToken, err := tmuxClient.GetEnvironment(shadowCreated.SessionName, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		t.Fatalf("read legacy shadow tmux instance token: %v; controller stdout=%q stderr=%q",
+			err, legacyControllerStdout.String(), legacyControllerStderr.String())
+	}
+	if strings.TrimSpace(shadowToken) == "" || shadowToken != shadowStarted.InstanceToken {
+		t.Fatalf("legacy shadow live/durable instance tokens = %q/%q, want the same non-empty token",
+			shadowToken, shadowStarted.InstanceToken)
+	}
+
+	var shadowWitness SessionReconcilerTraceRecord
+	if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
+		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+			SiteCode:    TraceSiteLifecycleStartSelectionShadow,
+			Template:    "worker",
+			TraceMode:   TraceModeDetail,
+			TraceSource: TraceSourceManual,
+		})
+		if readErr != nil {
+			return false, readErr
+		}
+		matches := 0
+		for _, record := range records {
+			if record.Fields["session_id"] != shadowCreated.SessionID {
+				continue
+			}
+			matches++
+			shadowWitness = record
+		}
+		if matches > 1 {
+			return false, fmt.Errorf("legacy shadow witnesses = %d, want exactly one", matches)
+		}
+		return matches == 1, nil
+	}); err != nil {
+		t.Fatalf("legacy START-shadow witness did not converge: %v; controller stdout=%q stderr=%q",
+			err, legacyControllerStdout.String(), legacyControllerStderr.String())
+	}
+	if shadowWitness.RecordType != TraceRecordOperation ||
+		shadowWitness.OutcomeCode != TraceOutcomeNoChange ||
+		shadowWitness.Fields["admitted_template"] != "worker" ||
+		shadowWitness.Fields["admitted_source"] != string(TraceSourceManual) ||
+		shadowWitness.Fields["candidate_outcome"] != "prepare" ||
+		shadowWitness.Fields["candidate_reason"] != string(sessionLifecycleStartSelectionReasonReady) ||
+		shadowWitness.Fields["legacy_selected"] != true ||
+		shadowWitness.Fields["comparison_outcome"] != string(sessionLifecycleStartSelectionComparisonMatched) ||
+		shadowWitness.Fields["comparison_reason"] != string(sessionLifecycleStartSelectionComparisonReasonEquivalent) ||
+		shadowWitness.Fields["effect_applied"] != false {
+		t.Fatalf("legacy START-shadow witness = %#v, want matched legacy-owned no-effect evidence", shadowWitness)
+	}
+	shadowStartSuccessLog := fmt.Sprintf(
+		"session lifecycle: op=start wave=0 session=%s template=worker outcome=success",
+		shadowCreated.SessionName,
+	)
+	if count := strings.Count(legacyControllerStderr.String(), shadowStartSuccessLog); count != 1 {
+		t.Fatalf("legacy shadow provider starts = %d, want exactly 1; controller stderr=%q",
+			count, legacyControllerStderr.String())
+	}
 }
 
 func replaceEnvEntry(env []string, key, value string) []string {

@@ -148,9 +148,6 @@ func TestUnsupportedOpsFailLoud(t *testing.T) {
 	if _, err := st.ListByAssignee("a", "open", 0); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("ListByAssignee: %v", err)
 	}
-	if err := st.Tx("msg", func(beads.Tx) error { return nil }); !errors.Is(err, ErrUnsupported) {
-		t.Errorf("Tx: %v", err)
-	}
 	if err := st.DepAdd("a", "b", "blocks"); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("DepAdd: %v", err)
 	}

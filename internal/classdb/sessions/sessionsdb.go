@@ -335,31 +335,37 @@ func (s *Store) Create(b beads.Bead) (beads.Bead, error) {
 	if err != nil {
 		return beads.Bead{}, err
 	}
-	table := tableFor(b.Type)
-	hotCols, hotPh := hotColumnList(table)
 	err = s.db.Write(context.Background(), func(tx *sql.Tx) error {
-		if b.ID == "" {
-			var next int64
-			if err := tx.QueryRow(`UPDATE id_seq SET next = next + 1 WHERE k = 1 RETURNING next`).Scan(&next); err != nil {
-				return fmt.Errorf("minting session id: %w", err)
-			}
-			b.ID = fmt.Sprintf("%s-%d", idPrefix, next)
-		}
-		args := []any{
-			b.ID, b.Title, b.Type, b.Status, b.Assignee, b.Description,
-			b.CreatedAt.UnixNano(), b.UpdatedAt.UnixNano(), labelsJSON, metaJSON,
-		}
-		args = append(args, hotValues(table, b.Metadata)...)
-		_, err := tx.Exec(`INSERT INTO `+table+` (`+rowColumns+hotCols+`) VALUES (?,?,?,?,?,?,?,?,?,?`+hotPh+`)`, args...)
-		if err != nil {
-			return fmt.Errorf("creating %s row %s: %w", table, b.ID, err)
-		}
-		return nil
+		return createRowInTx(tx, &b, labelsJSON, metaJSON)
 	})
 	if err != nil {
 		return beads.Bead{}, err
 	}
 	return b, nil
+}
+
+// createRowInTx mints an id when absent and inserts the encoded row, against
+// a caller-supplied transaction. Shared by Create and the Store.Tx surface.
+func createRowInTx(tx *sql.Tx, b *beads.Bead, labelsJSON, metaJSON string) error {
+	table := tableFor(b.Type)
+	hotCols, hotPh := hotColumnList(table)
+	if b.ID == "" {
+		var next int64
+		if err := tx.QueryRow(`UPDATE id_seq SET next = next + 1 WHERE k = 1 RETURNING next`).Scan(&next); err != nil {
+			return fmt.Errorf("minting session id: %w", err)
+		}
+		b.ID = fmt.Sprintf("%s-%d", idPrefix, next)
+	}
+	args := []any{
+		b.ID, b.Title, b.Type, b.Status, b.Assignee, b.Description,
+		b.CreatedAt.UnixNano(), b.UpdatedAt.UnixNano(), labelsJSON, metaJSON,
+	}
+	args = append(args, hotValues(table, b.Metadata)...)
+	_, err := tx.Exec(`INSERT INTO `+table+` (`+rowColumns+hotCols+`) VALUES (?,?,?,?,?,?,?,?,?,?`+hotPh+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("creating %s row %s: %w", table, b.ID, err)
+	}
+	return nil
 }
 
 // ImportBead inserts a bead VERBATIM — id, type (empty allowed), status,
@@ -495,21 +501,28 @@ func writeRow(tx *sql.Tx, table string, b beads.Bead) error {
 // back in the same transaction. fn returning false skips the write (no-op).
 func (s *Store) mutate(id string, fn func(b *beads.Bead) (bool, error)) error {
 	return s.db.Write(context.Background(), func(tx *sql.Tx) error {
-		r, table, err := getRowTx(tx, id)
-		if err != nil {
-			return err
-		}
-		b, err := r.bead()
-		if err != nil {
-			return err
-		}
-		write, err := fn(&b)
-		if err != nil || !write {
-			return err
-		}
-		b.UpdatedAt = time.Now()
-		return writeRow(tx, table, b)
+		return mutateInTx(tx, id, fn)
 	})
+}
+
+// mutateInTx is mutate's body against a caller-supplied transaction, shared
+// by the per-op path and the Store.Tx surface so both read-modify-write
+// through the SAME tx (a Tx step must see the tx's own earlier writes).
+func mutateInTx(tx *sql.Tx, id string, fn func(b *beads.Bead) (bool, error)) error {
+	r, table, err := getRowTx(tx, id)
+	if err != nil {
+		return err
+	}
+	b, err := r.bead()
+	if err != nil {
+		return err
+	}
+	write, err := fn(&b)
+	if err != nil || !write {
+		return err
+	}
+	b.UpdatedAt = time.Now()
+	return writeRow(tx, table, b)
 }
 
 // Update modifies fields of an existing bead, mirroring the in-memory
@@ -526,6 +539,14 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 		return fmt.Errorf("%w: Update with ParentID", ErrUnsupported)
 	}
 	return s.db.Write(context.Background(), func(tx *sql.Tx) error {
+		return updateRowInTx(tx, id, opts)
+	})
+}
+
+// updateRowInTx is Update's body against a caller-supplied transaction,
+// shared with the Store.Tx surface.
+func updateRowInTx(tx *sql.Tx, id string, opts beads.UpdateOpts) error {
+	{
 		r, table, err := getRowTx(tx, id)
 		if err != nil {
 			return fmt.Errorf("updating bead %q: %w", id, beads.ErrNotFound)
@@ -599,7 +620,7 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 			return nil
 		}
 		return writeRow(tx, table, b)
-	})
+	}
 }
 
 // Close sets a bead's status to "closed". Closing an already-closed bead
@@ -898,10 +919,87 @@ func (s *Store) ListByAssignee(string, string, int) ([]beads.Bead, error) {
 	return nil, fmt.Errorf("%w: ListByAssignee", ErrUnsupported)
 }
 
-// Tx is unused on sessions-class paths; batch writes use CloseAll and
-// SetMetadataBatch, which are natively transactional here.
-func (s *Store) Tx(string, func(tx beads.Tx) error) error {
-	return fmt.Errorf("%w: Tx", ErrUnsupported)
+// Tx runs fn against a transactional view of the audited write surface
+// (Create, Update, SetMetadataBatch, Close), committing only when fn
+// returns nil — a real SQLite transaction, so multi-step lifecycle writes
+// (the reconciler's pending-create rollback: metadata clears + failed-create
+// close in one atomic unit) either fully apply or fully roll back. Every
+// step reads through the SAME tx via the shared *InTx helpers, so later
+// steps see earlier steps' writes. commitMsg is accepted for interface
+// parity and unused (SQLite has no commit messages).
+func (s *Store) Tx(_ string, fn func(tx beads.Tx) error) error {
+	if fn == nil {
+		return fmt.Errorf("sessions class store: nil Tx callback")
+	}
+	return s.db.Write(context.Background(), func(tx *sql.Tx) error {
+		return fn(&storeTx{tx: tx})
+	})
+}
+
+// storeTx adapts one *sql.Tx to the beads.Tx write surface using the same
+// tx-scoped helpers the per-op paths use.
+type storeTx struct {
+	tx *sql.Tx
+}
+
+func (t *storeTx) Create(b beads.Bead) (beads.Bead, error) {
+	if err := rejectUnsupportedFields(b); err != nil {
+		return beads.Bead{}, err
+	}
+	if b.Type == "" {
+		b.Type = "task"
+	}
+	b.Status = "open"
+	now := time.Now()
+	b.CreatedAt = time.Unix(0, now.UnixNano())
+	b.UpdatedAt = b.CreatedAt
+	labelsJSON, err := encodeLabels(b.Labels)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	metaJSON, err := encodeMeta(b.Metadata)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if err := createRowInTx(t.tx, &b, labelsJSON, metaJSON); err != nil {
+		return beads.Bead{}, err
+	}
+	return b, nil
+}
+
+func (t *storeTx) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Priority != nil {
+		return fmt.Errorf("%w: Update with Priority", ErrUnsupported)
+	}
+	if opts.ParentID != nil {
+		return fmt.Errorf("%w: Update with ParentID", ErrUnsupported)
+	}
+	return updateRowInTx(t.tx, id, opts)
+}
+
+func (t *storeTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
+	return mutateInTx(t.tx, id, func(b *beads.Bead) (bool, error) {
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, len(kvs))
+		}
+		for k, v := range kvs {
+			b.Metadata[k] = v
+		}
+		return true, nil
+	})
+}
+
+func (t *storeTx) Close(id string) error {
+	return mutateInTx(t.tx, id, func(b *beads.Bead) (bool, error) {
+		if b.Status == "closed" {
+			return false, nil
+		}
+		b.Status = "closed"
+		return true, nil
+	})
 }
 
 // DepAdd is a graph concern; waits carry dep_ids as metadata by design.

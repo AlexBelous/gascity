@@ -616,6 +616,7 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
 	visible := map[string]bool{}
+	partialObservation := false
 	if sp != nil {
 		names, err := sp.ListRunning("")
 		partialList := runtime.IsPartialListError(err)
@@ -624,6 +625,7 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 			names = nil
 		}
 		if partialList {
+			partialObservation = true
 			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		for _, name := range names {
@@ -647,5 +649,8 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 		}
 	}
 	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
+	if partialObservation {
+		return 1
+	}
 	return 0
 }

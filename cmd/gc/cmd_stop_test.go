@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -43,6 +44,97 @@ func (p *recordingStopProvider) Stop(name string) error {
 func (p *recordingStopProvider) Interrupt(name string) error {
 	p.interrupts <- name
 	return p.Fake.Interrupt(name)
+}
+
+func TestDoStopPartialRuntimeObservationFailsClosedAfterBestEffortCleanup(t *testing.T) {
+	const sessionName = "partial-stop-session"
+	tests := []struct {
+		name      string
+		running   bool
+		wantStops int
+	}{
+		{name: "no positively observed names"},
+		{name: "positive names remain cleanup candidates", running: true, wantStops: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			healthy := runtime.NewFake()
+			if test.running {
+				if err := healthy.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			provider := sessionhybrid.New(healthy, runtime.NewFailFake(), func(string) bool { return false })
+
+			var stdout, stderr bytes.Buffer
+			code := doStop([]string{sessionName}, provider, nil, nil, 0, events.Discard, &stdout, &stderr)
+
+			if code != 1 {
+				t.Fatalf("doStop = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "City stopped.") {
+				t.Fatalf("stdout reported terminal success after partial observation: %q", stdout.String())
+			}
+			if got := healthy.CountCalls("Stop", sessionName); got != test.wantStops {
+				t.Fatalf("best-effort Stop calls = %d, want %d", got, test.wantStops)
+			}
+		})
+	}
+}
+
+// TestStopCommandFailsClosedAfterPartialRuntimeObservation is the command,
+// PackV2 config, provider-factory, and production hybrid composition proof.
+func TestStopCommandFailsClosedAfterPartialRuntimeObservation(t *testing.T) {
+	resetFlags(t)
+	const (
+		cityName    = "partial-stop-city"
+		sessionName = "partial-stop-session"
+	)
+	cityDir := setupCity(t, cityName)
+	cfg := &config.City{
+		Beads:  config.BeadsConfig{Provider: "file"},
+		Daemon: config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	data, err := cfg.MarshalForWrite()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogFile(t, cityDir, filepath.Join("agents", sessionName, "agent.toml"), "scope = \"city\"\n")
+
+	healthy := runtime.NewFake()
+	if err := healthy.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	provider := sessionhybrid.New(healthy, runtime.NewFailFake(), func(string) bool { return false })
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return provider, nil
+	}
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	cmd := newStopCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{cityDir})
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	err = cmd.Execute()
+
+	if !errors.Is(err, errExit) {
+		t.Fatalf("stop command error = %v, want errExit; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout reported terminal success after partial observation: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "listing sessions partially failed") {
+		t.Fatalf("stderr = %q, want partial-observation detail", stderr.String())
+	}
+	if healthy.IsRunning(sessionName) {
+		t.Fatalf("positively observed session %q is still running", sessionName)
+	}
 }
 
 func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {

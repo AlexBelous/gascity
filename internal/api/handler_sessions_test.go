@@ -353,11 +353,16 @@ func TestHandleSessionListPreservesPartialRows(t *testing.T) {
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	info := createTestSession(t, store, fs.sp, "Session survivor")
-	survivor, err := store.Get(info.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", info.ID, err)
-	}
+	// Seeded directly on the store rather than via createTestSession: this
+	// store always reports a partial result for session-bead list queries
+	// (see partialPrimeSessionStore below), which trips the cwd-collision
+	// check's fail-closed path (ga-c5yi8m) if creation goes through
+	// session.Manager. The subject under test is GET /sessions' partial-row
+	// handling, not session-creation collision behavior.
+	survivor := createTestSessionBead(t, store, map[string]string{
+		"session_name": "session-survivor",
+		"state":        "active",
+	}, "Session survivor")
 	store.partialRows = []beads.Bead{survivor}
 
 	w := httptest.NewRecorder()
@@ -382,8 +387,8 @@ func TestHandleSessionListPreservesPartialRows(t *testing.T) {
 	if len(body.PartialErrors) == 0 {
 		t.Fatal("partial_errors empty")
 	}
-	if body.Total != 1 || len(body.Items) != 1 || body.Items[0].ID != info.ID {
-		t.Fatalf("body = %+v, want surviving session %s", body, info.ID)
+	if body.Total != 1 || len(body.Items) != 1 || body.Items[0].ID != survivor.ID {
+		t.Fatalf("body = %+v, want surviving session %s", body, survivor.ID)
 	}
 }
 

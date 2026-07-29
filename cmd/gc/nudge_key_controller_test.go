@@ -40,7 +40,7 @@ func TestDiscoverDueExactNudgeSessionIDs_StableDeduplicatesDueItems(t *testing.T
 	}
 }
 
-func TestReconcileExactQueuedNudge_DeliversAndAcknowledgesOnlyExactSession(t *testing.T) {
+func TestReconcileExactQueuedNudge_ParksWhileAttachedThenDeliversWhenDetached(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
@@ -64,29 +64,58 @@ func TestReconcileExactQueuedNudge_DeliversAndAcknowledgesOnlyExactSession(t *te
 	if err := reconcileExactQueuedNudge(context.Background(), info.ID, exactQueuedNudgeParams{CityPath: dir, Config: &config.City{}, Provider: fake, SessionStore: store.Store, NudgeStore: store.Store}); err != nil {
 		t.Fatalf("reconcileExactQueuedNudge: %v", err)
 	}
-	if got := fake.CountCalls("Nudge", info.SessionName); got != 1 {
-		t.Fatalf("Nudge calls = %d, want 1", got)
+	if got := fake.CountCalls("Nudge", info.SessionName); got != 0 {
+		t.Fatalf("Nudge calls while attached = %d, want 0", got)
 	}
 	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
 	if err != nil {
 		t.Fatalf("listQueuedNudges: %v", err)
 	}
-	if len(pending)+len(inFlight)+len(dead) != 0 {
-		t.Fatalf("queue not acknowledged: pending=%d in_flight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("attached queue outcome pending/inflight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
 	}
 	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(item.ID)
 	if err != nil {
 		t.Fatalf("FindIncludingTerminal: %v", err)
 	}
-	if !ok || shadow.Open || shadow.State != "injected" || shadow.CommitBoundary != "provider-nudge-return" {
-		t.Fatalf("terminal shadow = %+v, want closed injected provider-nudge-return", shadow)
+	if !ok || !shadow.Open {
+		t.Fatalf("attached shadow = %+v, want open nonterminal command", shadow)
 	}
 	refetched, err := store.Get(info.ID)
 	if err != nil {
 		t.Fatalf("refetch session: %v", err)
 	}
+	if refetched.Metadata[session.MetadataLastNudgeDeliveredAt] != "" {
+		t.Fatalf("session has %s while attached", session.MetadataLastNudgeDeliveredAt)
+	}
+
+	fake.SetAttached(info.SessionName, false)
+	if err := reconcileExactQueuedNudge(context.Background(), info.ID, exactQueuedNudgeParams{CityPath: dir, Config: &config.City{}, Provider: fake, SessionStore: store.Store, NudgeStore: store.Store}); err != nil {
+		t.Fatalf("reconcileExactQueuedNudge after detach: %v", err)
+	}
+	if got := fake.CountCalls("Nudge", info.SessionName); got != 1 {
+		t.Fatalf("Nudge calls after detach = %d, want 1", got)
+	}
+	pending, inFlight, dead, err = listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges after detach: %v", err)
+	}
+	if len(pending)+len(inFlight)+len(dead) != 0 {
+		t.Fatalf("queue not acknowledged after detach: pending=%d in_flight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	}
+	shadow, ok, err = nudgeFrontDoor(store).FindIncludingTerminal(item.ID)
+	if err != nil {
+		t.Fatalf("FindIncludingTerminal after detach: %v", err)
+	}
+	if !ok || shadow.Open || shadow.State != "injected" || shadow.CommitBoundary != "provider-nudge-return" {
+		t.Fatalf("terminal shadow = %+v, want closed injected provider-nudge-return", shadow)
+	}
+	refetched, err = store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("refetch session after detach: %v", err)
+	}
 	if refetched.Metadata[session.MetadataLastNudgeDeliveredAt] == "" {
-		t.Fatalf("session missing %s after exact delivery", session.MetadataLastNudgeDeliveredAt)
+		t.Fatalf("session missing %s after detached exact delivery", session.MetadataLastNudgeDeliveredAt)
 	}
 }
 

@@ -165,6 +165,9 @@ func reconcileExactQueuedNudge(ctx context.Context, sessionID string, params exa
 	if !obs.Running {
 		return nil
 	}
+	if obs.Attached {
+		return nil
+	}
 	_, err = tryDeliverQueuedNudgesByPollerMatching(target, params.NudgeStore, params.SessionStore, params.Provider, defaultNudgePollQuiescence, obs, func(item queuedNudge) bool {
 		return item.SessionID == sessionID
 	})

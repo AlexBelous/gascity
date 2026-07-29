@@ -5348,7 +5348,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 	var waitCalls []waitCall
 	stopErr := fmt.Errorf("stop after sequence")
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+	workflowServeWaitForWake = func(_ workflowWakeRelevance, _ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
 		waitCalls = append(waitCalls, waitCall{idleSweeps: idleSweeps, sleepDur: sleepDur})
 		switch len(waitCalls) {
 		case 1, 2, 3, 5:
@@ -5437,7 +5437,7 @@ func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *te
 
 	watcherErr := errors.New("event stream closed")
 	waitCalls := 0
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+	workflowServeWaitForWake = func(_ workflowWakeRelevance, _ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
 		waitCalls++
 		if waitCalls == 1 {
 			// A relevant event was observed, then a fatal watcher error arrived
@@ -5508,7 +5508,7 @@ func TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout(t *testing.T) {
 	})
 
 	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+	workflowServeWaitForWake = func(_ workflowWakeRelevance, _ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
 		return false, nil
 	}
 
@@ -5550,7 +5550,7 @@ func TestRunWorkflowServeFollowSurvivesDoltCircuitBreakerOutage(t *testing.T) {
 	})
 
 	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+	workflowServeWaitForWake = func(_ workflowWakeRelevance, _ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
 		return false, nil
 	}
 
@@ -5601,6 +5601,130 @@ func TestWorkflowEventRelevantRejectsNonBeadEvents(t *testing.T) {
 		if workflowEventRelevant(evt) {
 			t.Fatalf("workflowEventRelevant(%q) = true, want false", evt.Type)
 		}
+	}
+}
+
+// TestControlDispatcherWakeRelevanceScopesToOwnBeads is the gc-ii38p
+// regression. Before the fix, workflowEventRelevant accepted every bead
+// lifecycle event with no agent/store/route context, so a single unrelated
+// city-mail bead lifecycle event woke every control dispatcher in the city at
+// once (the observed gascity / gascity-packs / gascity-dashboard / codeprobe /
+// city fanout). This asserts that after the fix an unrelated event wakes NO
+// dispatcher, while a bead assigned or routed to a specific dispatcher wakes
+// only that one — with the conservative wake-all fallback preserved where the
+// dispatcher's identity or the event's bead cannot be resolved.
+func TestControlDispatcherWakeRelevanceScopesToOwnBeads(t *testing.T) {
+	// Clear inherited session identity so the assignee candidate set is
+	// exactly the query-baked target/control-session, not this test runner's
+	// own GC_* session (which would otherwise match test beads by accident).
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+
+	const (
+		routeA   = "test-rig-a/control-dispatcher"
+		routeB   = "test-rig-b/control-dispatcher"
+		sessionA = "test-rig-a--control-dispatcher"
+	)
+	agentA := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "test-rig-a"}
+	agentB := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "test-rig-b"}
+	relevantA := newWorkflowWakeRelevance(
+		workflowServeControlReadyQueryForBeads(agentA, config.BeadsConfig{}, sessionA), nil)
+	relevantB := newWorkflowWakeRelevance(
+		workflowServeControlReadyQueryForBeads(agentB, config.BeadsConfig{}, "test-rig-b--control-dispatcher"), nil)
+
+	beadEvent := func(evtType string, b beads.Bead) events.Event {
+		payload, err := json.Marshal(b)
+		if err != nil {
+			t.Fatalf("marshal bead %q: %v", b.ID, err)
+		}
+		return events.Event{Type: evtType, Subject: b.ID, Payload: payload}
+	}
+
+	// An unrelated ephemeral city-mail bead: assigned to nobody, routed to
+	// nobody. This is the event that used to wake every dispatcher.
+	cityMail := beadEvent(events.BeadCreated, beads.Bead{
+		ID:       "gc-citymail-1",
+		Type:     "message",
+		Metadata: beads.StringMap{"gc.ephemeral": "true"},
+	})
+	if relevantA(cityMail) {
+		t.Fatal("unrelated city-mail bead woke dispatcher A (gc-ii38p fanout regression)")
+	}
+	if relevantB(cityMail) {
+		t.Fatal("unrelated city-mail bead woke dispatcher B (gc-ii38p fanout regression)")
+	}
+
+	// A bead routed to A wakes A promptly and only A.
+	routedToA := beadEvent(events.BeadCreated, beads.Bead{
+		ID:       "gc-work-a",
+		Type:     "task",
+		Metadata: beads.StringMap{beadmeta.RoutedToMetadataKey: routeA},
+	})
+	if !relevantA(routedToA) {
+		t.Fatal("bead routed to A did not wake dispatcher A")
+	}
+	if relevantB(routedToA) {
+		t.Fatal("bead routed to A wrongly woke dispatcher B")
+	}
+
+	// A bead carrying A's run-target (workflow step route), unassigned, wakes A.
+	runTargetA := beadEvent(events.BeadUpdated, beads.Bead{
+		ID:       "gc-step-a",
+		Type:     "task",
+		Metadata: beads.StringMap{beadmeta.RunTargetMetadataKey: routeA},
+	})
+	if !relevantA(runTargetA) {
+		t.Fatal("bead with A's run-target did not wake dispatcher A")
+	}
+	if relevantB(runTargetA) {
+		t.Fatal("bead with A's run-target wrongly woke dispatcher B")
+	}
+
+	// A bead assigned to A's control session wakes A and only A.
+	assignedToA := beadEvent(events.BeadClosed, beads.Bead{
+		ID:       "gc-asg-a",
+		Type:     "task",
+		Assignee: sessionA,
+	})
+	if !relevantA(assignedToA) {
+		t.Fatal("bead assigned to A did not wake dispatcher A")
+	}
+	if relevantB(assignedToA) {
+		t.Fatal("bead assigned to A wrongly woke dispatcher B")
+	}
+
+	// An epic routed to A is excluded (mirrors the ready query's
+	// --exclude-type=epic), so it does not wake A.
+	epicRoutedToA := beadEvent(events.BeadUpdated, beads.Bead{
+		ID:       "gc-epic-a",
+		Type:     "epic",
+		Metadata: beads.StringMap{beadmeta.RoutedToMetadataKey: routeA},
+	})
+	if relevantA(epicRoutedToA) {
+		t.Fatal("epic routed to A woke dispatcher A despite --exclude-type=epic")
+	}
+
+	// Conservative fallback 1: a bead event with no decodable snapshot cannot
+	// be ruled out, so it still wakes rather than stranding routed work.
+	if !relevantA(events.Event{Type: events.BeadCreated}) {
+		t.Fatal("bead event with empty payload should conservatively wake")
+	}
+
+	// A non-bead event never wakes, payload or not.
+	if relevantA(events.Event{Type: events.SessionUpdated}) {
+		t.Fatal("non-bead event should never wake a dispatcher")
+	}
+
+	// Conservative fallback 2: a serve loop whose work query is not a
+	// control-ready query has no mechanically-resolvable identity, so it
+	// preserves the pre-gc-ii38p type-only gate (wake on any bead event).
+	plain := newWorkflowWakeRelevance("bd list --status open --json", nil)
+	if !plain(cityMail) {
+		t.Fatal("non-control-dispatcher serve loop should fall back to waking on any bead event")
+	}
+	if plain(events.Event{Type: events.SessionUpdated}) {
+		t.Fatal("non-control-dispatcher fallback should still reject non-bead events")
 	}
 }
 
@@ -6663,7 +6787,7 @@ func TestWaitForRelevantWorkflowWakeTraceIncludesBackoffState(t *testing.T) {
 
 	eventCh := make(chan workflowWatchResult) // never receives
 
-	eventWake, err := waitForRelevantWorkflowWakeWithTrace(eventCh, 5*time.Millisecond, 3)
+	eventWake, err := waitForRelevantWorkflowWakeWithTrace(workflowEventRelevant, eventCh, 5*time.Millisecond, 3)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}

@@ -521,6 +521,11 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	eventCh := make(chan workflowWatchResult, 1)
 	go pumpWorkflowEvents(done, watcher, eventCh)
 
+	// Resolve this serve loop's wake-relevance once from its own identity so an
+	// unrelated city bead lifecycle event does not wake every dispatcher in the
+	// city (gc-ii38p). Non-control-dispatcher loops fall back to the type gate.
+	relevant := newWorkflowWakeRelevance(workQuery, workEnv)
+
 	idleSweeps := 0
 	var pendingWakeErr error
 	for {
@@ -560,7 +565,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 			drainResult.processedAny,
 			drainResult.pendingAny,
 		)
-		eventWake, err := workflowServeWaitForWake(eventCh, sleepDur, idleSweeps)
+		eventWake, err := workflowServeWaitForWake(relevant, eventCh, sleepDur, idleSweeps)
 		if err != nil {
 			if !eventWake {
 				// Fatal stream error with no relevant event observed: nothing to
@@ -607,10 +612,10 @@ func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh ch
 // path (so the caller can reset any idle-backoff counter), false when the
 // timer fires.
 func waitForRelevantWorkflowWake(eventCh <-chan workflowWatchResult, sleepDur time.Duration) (bool, error) {
-	return waitForRelevantWorkflowWakeWithTrace(eventCh, sleepDur, -1)
+	return waitForRelevantWorkflowWakeWithTrace(workflowEventRelevant, eventCh, sleepDur, -1)
 }
 
-func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+func waitForRelevantWorkflowWakeWithTrace(relevant workflowWakeRelevance, eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
 	timer := time.NewTimer(sleepDur)
 	defer timer.Stop()
 
@@ -620,7 +625,7 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 			if res.err != nil {
 				return false, res.err
 			}
-			if workflowEventRelevant(res.evt) {
+			if relevant(res.evt) {
 				if idleSweeps >= 0 {
 					workflowTracef("serve wake-event type=%s subject=%s idle_sweeps=%d sleep=%s", res.evt.Type, res.evt.Subject, idleSweeps, sleepDur)
 				} else {
@@ -686,6 +691,12 @@ func coalesceWorkflowWakeBurst(eventCh <-chan workflowWatchResult) (int, error) 
 	}
 }
 
+// workflowEventRelevant is the type-only wake gate: it accepts every bead
+// lifecycle event and rejects everything else. It is the conservative fallback
+// used wherever a serve loop's own identity cannot be resolved mechanically
+// (see newWorkflowWakeRelevance) — waking on any bead event is the pre-gc-ii38p
+// behavior and never strands work, at the cost of the cross-dispatcher fanout
+// that gc-ii38p narrows for control dispatchers specifically.
 func workflowEventRelevant(evt events.Event) bool {
 	switch evt.Type {
 	case events.BeadCreated, events.BeadClosed, events.BeadUpdated:
@@ -693,6 +704,81 @@ func workflowEventRelevant(evt events.Event) bool {
 	default:
 		return false
 	}
+}
+
+// workflowWakeRelevance decides whether a city event observed on the shared
+// event stream should wake this serve loop's drain. It is resolved once per
+// serve loop from the dispatcher's own identity so an unrelated city bead
+// lifecycle event (city mail, another rig's session or retention bead) does not
+// fan every dispatcher's expensive re-scan out across the whole city (gc-ii38p:
+// one ephemeral city-mail bead was observed waking gascity, gascity-packs,
+// gascity-dashboard, codeprobe, and the city dispatcher at once).
+type workflowWakeRelevance func(events.Event) bool
+
+// newWorkflowWakeRelevance builds the wake-relevance predicate for a serve loop
+// from its work query and runtime env.
+//
+// For a control-dispatcher ready query the dispatcher's assignee candidates and
+// routes are recovered mechanically (parseControlReadyQuery — the very same
+// identity the ready scan itself is built from), and only a bead lifecycle
+// event whose bead is assigned or routed to THIS dispatcher wakes it. City vs
+// rig/store identity therefore falls straight out of the routing metadata the
+// event already carries, with no separate heuristic.
+//
+// For any other work-query shape the dispatcher's identity cannot be resolved
+// mechanically, so the predicate conservatively falls back to the type-only
+// gate (wake on every bead lifecycle event) — exactly the pre-gc-ii38p
+// behavior, preserved wherever evidence is absent. A control-ready event whose
+// payload carries no decodable bead snapshot is treated the same way: waking is
+// cheap relative to stranding routed work until the next fallback sweep.
+func newWorkflowWakeRelevance(workQuery string, env map[string]string) workflowWakeRelevance {
+	parsed, ok := parseControlReadyQuery(workQuery)
+	if !ok {
+		return workflowEventRelevant
+	}
+	envList := mergeRuntimeEnv(os.Environ(), env)
+	candidates := controlReadyCandidates(parsed, envList)
+	routes := controlReadyRoutes(parsed)
+	return func(evt events.Event) bool {
+		if !workflowEventRelevant(evt) {
+			return false
+		}
+		bead, ok := beads.DecodeBeadEventPayload(evt.Payload)
+		if !ok {
+			// No decodable bead snapshot on the event: we cannot rule the bead
+			// out, so wake conservatively rather than risk stranding work
+			// routed to us until the next exponential-backoff sweep.
+			return true
+		}
+		return controlDispatcherCaresAboutBead(bead, candidates, routes)
+	}
+}
+
+// controlDispatcherCaresAboutBead reports whether a bead named by a lifecycle
+// event belongs to a control dispatcher with the given assignee candidates and
+// routes. It mirrors the two match paths the ready query itself uses (see
+// evaluateControlReady): a bead assigned to one of the dispatcher's identities,
+// or an unassigned bead whose run-target or routed-to metadata names one of the
+// dispatcher's routes. Epic beads are excluded to match the query's
+// --exclude-type=epic.
+func controlDispatcherCaresAboutBead(bead beads.Bead, candidates, routes []string) bool {
+	if bead.Type == controlReadyExcludeType {
+		return false
+	}
+	for _, cand := range candidates {
+		if bead.Assignee == cand {
+			return true
+		}
+	}
+	if bead.Assignee == "" {
+		for _, route := range routes {
+			if bead.Metadata[beadmeta.RunTargetMetadataKey] == route ||
+				bead.Metadata[beadmeta.RoutedToMetadataKey] == route {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func workflowServeQuery(workQuery string) string {

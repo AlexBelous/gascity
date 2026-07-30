@@ -1067,6 +1067,76 @@ coherence, and end-to-end provider wiring. Do not put low-level edge cases
 here. Corrupt files, exact parser failures, request validation branches, and
 single handler error cases belong in unit tests next to the implementation.
 
+#### Opt-in supervisor preserve-adoption latency baseline
+
+`TestSupervisorPreserveAdoptionLatencyExactBinary` is a local measurement
+journey, deliberately excluded from the integration shards. It builds and uses
+the test suite's exact `gc` binary, a real bd/Dolt-backed city, and a named,
+test-owned tmux socket. The isolated launcher returns the PID of its direct
+supervisor child only after `supervisor status --json` reports `running:true`
+and that exact PID through the isolated control socket. A zero or different
+fallback PID keeps waiting, while early child exit reports the child log. The
+journey verifies the returned PID is alive and sends SIGTERM only to it, never
+to an API or service-manager fallback PID. It then measures
+successor readiness after the supervisor API reports the city running, exactly
+one durable worker session is still `state:"active"` and `running:true`, its
+stable lifecycle fields are unchanged, and the named tmux socket, session,
+window, pane, and pane PID identity all match the pre-signal witness. Closed,
+suspended, and non-running projections are not readiness witnesses. The
+measured isolated environment is pinned to `GC_SESSION=tmux`;
+caller-selected `hybrid`, `subprocess`, or other runtime routing cannot enter
+the baseline.
+
+It is opt-in because the default run has one excluded warmup plus 30 sequential
+preserve/restart attempts and may take **up to 35 minutes**. Run it only on a
+host where `tmux`, `bd`, and `dolt` are available (or provide the normal
+`GC_INTEGRATION_REAL_BD` and `GC_INTEGRATION_DOLT_BINARY` overrides).
+`GC_INTEGRATION_GC_BINARY` must be unset: the integration harness wraps that
+override in a shim, so the benchmark rejects it rather than misreporting the
+shim hash as the gc payload hash.
+
+```bash
+mkdir -p /tmp/gc-adoption-latency
+GC_RUN_ADOPTION_PERF=1 \
+GC_ADOPTION_PERF_REPORT=/tmp/gc-adoption-latency/report.json \
+go test -tags=integration ./test/integration/ \
+  -run '^TestSupervisorPreserveAdoptionLatencyExactBinary$' -count=1 -timeout=35m
+```
+
+For a one-sample smoke of the same real boundaries, add
+`GC_ADOPTION_PERF_SAMPLES=1`. The report is atomically written even when setup,
+warmup, or an attempt fails. It records separate provenance for the invoked gc
+binary, invoked bd filebdshim (`bdBinary`), real bd payload (`realBDBinary`),
+invoked Dolt wrapper, real Dolt payload, and tmux: each has a path, SHA-256, and
+version. It also records the gc commit, host OS and architecture, and preserved
+runtime identity. The selected runtime provider must be `tmux`, and the
+reported `cpu_count` is the positive value from `runtime.NumCPU`; both are
+required for `ok:true` and keep comparisons on the documented like-for-like
+runtime and CPU profile.
+Every requested index is retained: cycles skipped after budget exhaustion or
+an unsafe identity failure are explicitly `not_attempted`. It reports
+successful-only p50/p95/p99/max plus exactly the six readiness phases.
+`starting_bead_store` has a fixed one-second censor threshold and records
+observed and censored counts; its percentiles are explicitly observed-only
+(and null when nothing was observed). Internally the journey gives setup and
+samples a 32-minute work context. Initial readiness has a 60-second child
+context and reports its last observed error. Shared lifecycle helpers do not
+all accept the per-cycle context, so an in-flight cycle can overrun it by at
+most 80 seconds: 60 seconds for the PID-exit wait, 10 seconds for successor
+startup, and 10 seconds for command and `WaitDelay` caps. The 35-minute Go
+timeout therefore leaves 100 seconds for cleanup and atomic report publication.
+The per-cycle 60-second context bounds context-aware commands and readiness, but
+is not a hard wall-clock bound around those shared helpers. The warmup is
+excluded from both the sample list and percentiles; a setup failure records it
+as `not_attempted`.
+
+This is a baseline, not an SLO or a legacy-versus-new performance comparison.
+It excludes warmup time, pre-existing supervisor/city setup, default-tmux
+behavior, cross-host contention, and provider execution time. Non-ready
+attempts are retained for diagnosis but excluded from the successful latency
+percentiles; do not interpret a percentile with failures as a reliability
+claim.
+
 #### Dashboard serve-level projection tests (`test/dashport`)
 
 `test/dashport` is the Go serve-level (Layer A) e2e for the dashboard. It stands

@@ -781,41 +781,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 	}
 
 	if pid != "" {
-		// Get the process group ID
-		pgid := getProcessGroupID(pid)
-
-		// 1. Get all descendant PIDs recursively (catches processes that called setsid())
-		descendants := getAllDescendants(pid)
-
-		// Build known PID set for group membership verification
-		knownPIDs := make(map[string]bool, len(descendants)+1)
-		knownPIDs[pid] = true
-		for _, dpid := range descendants {
-			knownPIDs[dpid] = true
-		}
-
-		// 2. Get verified process group members (only reparented-to-init processes).
-		// Instead of adding ALL group members — which could include unrelated
-		// processes sharing the same PGID — we only add those that were reparented
-		// to init (PPID == 1), indicating they were likely children in our tree.
-		var reparented []string
-		if pgid != "" && pgid != "0" && pgid != "1" {
-			reparented = collectReparentedGroupMembers(pgid, knownPIDs)
-		}
-
-		// Partition the discovered process set into the descendant/group PIDs to
-		// terminate and whether the pane leader should be killed, honoring the
-		// exclusion set. This decision is pure so it can be unit-tested without
-		// real processes (see computeExcludingKillSet).
-		killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
-
-		terminateProcesses(killList)
-
-		// Kill the pane process itself (may have called setsid() and detached),
-		// only if it is not excluded.
-		if killPaneLeader {
-			terminateProcesses([]string{pid})
-		}
+		terminatePaneProcessTreeExcluding(pid, exclude)
 	}
 
 	// Kill the tmux session - this will terminate the excluded process too.
@@ -826,6 +792,55 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		return nil
 	}
 	return err
+}
+
+// KillSessionWithCertifiedPaneProcessesExcluding terminates the process trees
+// of the already-certified pane IDs, then kills the already-certified session
+// ID. It never accepts a session name, preventing a post-certification name
+// lookup from targeting a replacement session.
+func (t *Tmux) KillSessionWithCertifiedPaneProcessesExcluding(sessionID string, paneIDs, excludePIDs []string) error {
+	exclude := make(map[string]bool, len(excludePIDs))
+	for _, pid := range excludePIDs {
+		exclude[pid] = true
+	}
+
+	panePIDs := make([]string, 0, len(paneIDs))
+	for _, paneID := range paneIDs {
+		pid, err := t.GetPanePID(paneID)
+		if err != nil {
+			return fmt.Errorf("reading certified pane %q for session %q: %w", paneID, sessionID, err)
+		}
+		panePIDs = append(panePIDs, pid)
+	}
+	for _, pid := range panePIDs {
+		terminatePaneProcessTreeExcluding(pid, exclude)
+	}
+
+	err := t.KillSession(sessionID)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) {
+		return nil
+	}
+	return err
+}
+
+func terminatePaneProcessTreeExcluding(pid string, exclude map[string]bool) {
+	pgid := getProcessGroupID(pid)
+	descendants := getAllDescendants(pid)
+	knownPIDs := make(map[string]bool, len(descendants)+1)
+	knownPIDs[pid] = true
+	for _, descendantPID := range descendants {
+		knownPIDs[descendantPID] = true
+	}
+
+	var reparented []string
+	if pgid != "" && pgid != "0" && pgid != "1" {
+		reparented = collectReparentedGroupMembers(pgid, knownPIDs)
+	}
+	killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
+	terminateProcesses(killList)
+	if killPaneLeader {
+		terminateProcesses([]string{pid})
+	}
 }
 
 // computeExcludingKillSet partitions a discovered process set into the

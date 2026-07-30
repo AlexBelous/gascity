@@ -2,6 +2,7 @@
 package pathutil
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,27 +20,10 @@ func NormalizePathForCompare(path string) string {
 	path = filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
-	} else if resolved, ok := normalizeMissingPath(path); ok {
+	} else if resolved, resolveErr := ResolveNearestExistingAncestor(path); resolveErr == nil {
 		path = resolved
 	}
 	return canonicalizePlatformPathAlias(path)
-}
-
-func normalizeMissingPath(path string) (string, bool) {
-	var missing []string
-	for current := path; ; current = filepath.Dir(current) {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			for i := len(missing) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, missing[i])
-			}
-			return resolved, true
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", false
-		}
-		missing = append(missing, filepath.Base(current))
-	}
 }
 
 // ResolveNearestExistingAncestor canonicalizes path by resolving symlinks on
@@ -56,11 +40,24 @@ func normalizeMissingPath(path string) (string, bool) {
 // It returns an error only when resolution fails for a reason other than an
 // ancestor simply not existing yet — e.g. a permission error or a symlink
 // loop — since walking further up the tree cannot recover from those.
-//
-// TODO(ga-iawy13.1): stub for RED — not yet implemented, not yet called by
-// any production path.
-func ResolveNearestExistingAncestor(_ string) (string, error) {
-	return "", nil
+func ResolveNearestExistingAncestor(path string) (string, error) {
+	cur := filepath.Clean(path)
+	tail := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(resolved, tail), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Clean(path), nil
+		}
+		tail = filepath.Join(filepath.Base(cur), tail)
+		cur = parent
+	}
 }
 
 func canonicalizePlatformPathAlias(path string) string {

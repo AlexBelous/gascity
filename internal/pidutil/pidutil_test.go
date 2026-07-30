@@ -1,6 +1,7 @@
 package pidutil
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,6 +240,36 @@ func TestChildPIDsReturnsErrorWhenPSHangs(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("ChildPIDs took %s, want bounded timeout", elapsed)
+	}
+}
+
+// TestChildPIDsExcludesItsOwnEnumerationHelper is a regression test: ps is
+// itself alive, and a child of the caller, at the instant it captures the
+// process table, so an unfiltered ChildPIDs(os.Getpid()) always reports at
+// least one phantom "child" — the transient ps invocation itself — even
+// when no real child exists. This is exactly the self-monitoring pattern
+// this package's callers use for leak checks (ChildPIDs(os.Getpid())), and
+// it produced a false-positive "leaked child" on every run of
+// internal/workspacesvc's TestMain regardless of any real leak (ga-gxmz9n).
+//
+// The fake ps here reports a single row for itself ($$, the real parent),
+// mirroring the one spurious row a genuine ps produces in the self-check
+// case; ChildPIDs must recognize that row as its own helper and exclude it.
+func TestChildPIDsExcludesItsOwnEnumerationHelper(t *testing.T) {
+	binDir := t.TempDir()
+	psPath := filepath.Join(binDir, "ps")
+	script := fmt.Sprintf("#!/bin/sh\necho \"$$ %d\"\n", os.Getpid())
+	if err := os.WriteFile(psPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(ps): %v", err)
+	}
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+
+	pids, err := ChildPIDs(os.Getpid())
+	if err != nil {
+		t.Fatalf("ChildPIDs(%d): %v", os.Getpid(), err)
+	}
+	if len(pids) != 0 {
+		t.Fatalf("ChildPIDs(%d) = %v, want empty — the only ps row was the enumeration helper's own (self, parent) pair and must be excluded, not reported as a leaked child", os.Getpid(), pids)
 	}
 }
 

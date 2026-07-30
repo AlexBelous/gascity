@@ -82,12 +82,21 @@ type DesiredStateResult struct {
 	// there is routed-but-unassigned demand on the identity's backing template
 	// (ScaleCheckCounts[backingTemplate] > 0), computed BEFORE canonical-alias
 	// pool suppression runs. Unlike NamedSessionDemand this is not
-	// assignee-direct and must never be merged into poolDesired or treated as
-	// sleep-suppressing — it exists solely to give ComputeAwakeSet a wake-only
-	// signal for an asleep named holder whose alias correctly suppresses the
-	// redundant pool standby (ga-jl73y2): routed-but-unclaimed demand that
-	// should wake the holder once, without affecting pool sizing or later
-	// idle-sleep decisions.
+	// assignee-direct and must never be merged into poolDesired — it exists
+	// solely to give ComputeAwakeSet a wake-only signal for an asleep named
+	// holder whose alias correctly suppresses the redundant pool standby
+	// (ga-jl73y2): routed-but-unclaimed demand that should wake the holder,
+	// without affecting pool sizing.
+	//
+	// It IS sleep-suppressing while the routed demand remains live. The
+	// resulting "routed-demand" wake reason is exempt from ComputeAwakeSet's
+	// idle-sleep pass and overrides non-interactive sleep suppression in
+	// wakeDemandOverridesSleepSuppression — otherwise a long-lived holder
+	// carrying a non-zero idle reference is re-slept on the same tick and the
+	// wake is silently undone. Suppression ends when demand clears: the holder
+	// then drains via the non-exempt "on-demand:running" reason. Scoped to
+	// canonical singleton backing pools, so only the one session that can
+	// serve the demand is kept awake.
 	NamedSessionRoutedDemand map[string]bool
 	// ReadyAssigned is the set of AssignedWorkBeads that carry real wake-demand
 	// readiness, keyed by store ref + bead ID: in-progress work, assigned
@@ -516,7 +525,31 @@ func buildDesiredStateWithSessionBeads(
 			}
 			if store != nil && isCold && !storeScopedControlDispatcher {
 				for _, source := range activeStores {
-					defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+					target := defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref}
+					// Mirror the generic-pool cold-wake probe below (vp-s37 /
+					// #3078): a custom scale_check that is cold and asleep
+					// cannot see routed demand, so probe every active store
+					// and feed defaultScaleTargets too, not just
+					// defaultNamedScaleTargets (which only preserves
+					// partial-query retention for defaultNamedSessionDemand
+					// and never itself produces demand — see its doc
+					// comment). Gate on mode != "always": an always-on named
+					// session is already unconditionally desired by the
+					// named pass, so adding pool demand for the same
+					// template would spawn a redundant {name}-N phantom
+					// alongside it, mirroring the identical guard on the
+					// !hasCustomScaleCheck branch above.
+					if namedSessionMode != "always" {
+						defaultScaleTargets = append(defaultScaleTargets, target)
+					}
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, target)
+				}
+				if namedSessionMode != "always" {
+					// Clamp to 1 in the merge below (coldWakeTemplates), same
+					// as the generic-pool branch: this probe only wakes the
+					// pool from zero and must never override the custom
+					// check's own authoritative warm count.
+					coldWakeTemplates[template] = true
 				}
 			}
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})

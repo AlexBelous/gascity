@@ -710,6 +710,9 @@ type AgentOverride struct {
 	// MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.
 	// Duration string (e.g., "15m"). Empty disables jitter.
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
+	// field for semantics).
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -3255,6 +3258,19 @@ type Agent struct {
 	// disables jitter (every session restarts at exactly MaxSessionAge).
 	// Ignored when MaxSessionAge is unset.
 	MaxSessionAgeJitter string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the
+	// idle-timeout ladder may defer on the same assigned-work bead
+	// (DecideIdleTimeout's AssignedWorkHas rung) before the reconciler
+	// overrides the defer and forces a stop via DecideAssignedWorkExhausted.
+	// Nil means use the built-in default. Without this backstop a session
+	// anchored to a bead that never clears assigned-work (e.g. a bead stuck
+	// open due to an upstream status-mapping bug) would defer indefinitely,
+	// reproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at
+	// the single-tick level. The counter resets whenever the anchor bead
+	// changes or the session is not idle-kill-eligible; see
+	// sessionHasAwakeAssignedWorkForReachableStore's caller in
+	// session_reconciler.go.
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
@@ -3448,6 +3464,7 @@ func (a Agent) Clone() Agent {
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -4100,6 +4117,13 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		reservedSessionNames[sessionName] = identity
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
+			if agent.EffectiveWakeMode() == "fresh" {
+				warnings = append(warnings, fmt.Sprintf(
+					"named_session %q: mode %q with wake_mode %q on template %q %s; use only for a deliberate restart-per-cycle actor",
+					s.QualifiedName(), s.ModeOrDefault(), agent.EffectiveWakeMode(), agent.QualifiedName(),
+					alwaysFreshWakeModeMarker,
+				))
+			}
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
 				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
@@ -4116,6 +4140,20 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		}
 	}
 	return warnings, nil
+}
+
+// alwaysFreshWakeModeMarker is a stable substring on the warning emitted when a
+// mode="always" named session backs a wake_mode="fresh" template. CLI warning
+// classification keys off this marker, so keep it in sync with
+// IsAlwaysFreshWakeModeWarning.
+const alwaysFreshWakeModeMarker = "starts a fresh provider session after every drain"
+
+// IsAlwaysFreshWakeModeWarning reports whether a load warning is the non-fatal
+// always+fresh advisory. CLI warning filters use this to print the notice and
+// keep it non-fatal in strict mode. Keep in sync with
+// alwaysFreshWakeModeMarker.
+func IsAlwaysFreshWakeModeWarning(warning string) bool {
+	return strings.Contains(warning, alwaysFreshWakeModeMarker)
 }
 
 // disabledNamedSessionMarker is a stable suffix on the warning emitted when a

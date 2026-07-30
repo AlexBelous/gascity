@@ -46,14 +46,21 @@ func (w *recordingWriteCloser) written() string {
 func TestNudgeNowHiddenAttachedRecordsPoke(t *testing.T) {
 	genuine := time.Date(2026, 6, 4, 1, 0, 0, 0, time.UTC) // last real agent turn
 
-	// rawSessionActivity reads list-windows #{window_activity}; return the
+	// NudgeNow fences input before and after rendering the message, then
+	// rawSessionActivity reads list-windows #{window_activity}. Return a
+	// detached, non-copy-mode exact pane row for each fence followed by the
 	// genuine turn's unix seconds so pokePrior snapshots it as the poke's prior.
-	fe := &fakeExecutor{out: strconv.FormatInt(genuine.Unix(), 10)}
+	const sess = "hidden-attach-nudge"
+	paneCensus := "$1\t" + sess + "\t@1\t%1\t0\t0\t0"
+	fe := &fakeExecutor{outs: []string{
+		paneCensus,
+		paneCensus,
+		strconv.FormatInt(genuine.Unix(), 10),
+	}}
 	tm := NewTmux()
 	tm.exec = fe
 	tm.cfg.DebounceMs = 0 // no wall-clock debounce in a unit test
 
-	const sess = "hidden-attach-nudge"
 	sink := &recordingWriteCloser{}
 	tm.hiddenAttachMu.Lock()
 	tm.hiddenAttachClients = map[string]*hiddenAttachClient{

@@ -18,7 +18,7 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 	snapshot := filepath.Join(dir, "child.env")
 	spy := filepath.Join(dir, "gc-child-spy")
 	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$GC_DISABLE_USAGE_METRICS\" \"$BD_DISABLE_METRICS\" \"$OTEL_SERVICE_NAME\" > \"$GC_TEST_PRODUCT_METRICS_CHILD_ENV_SPY\"\n"
+		"printf '%s\\n' \"$GC_DISABLE_USAGE_METRICS\" \"$BD_DISABLE_METRICS\" \"$OTEL_SERVICE_NAME\" > \"$GC_TEST_PRODUCT_METRICS_CHILD_ENV_SPY.tmp\" && mv \"$GC_TEST_PRODUCT_METRICS_CHILD_ENV_SPY.tmp\" \"$GC_TEST_PRODUCT_METRICS_CHILD_ENV_SPY\"\n"
 	if err := os.WriteFile(spy, []byte(script), 0o700); err != nil {
 		t.Fatalf("write child spy: %v", err)
 	}
@@ -51,17 +51,19 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 // lines or deadline passes. A snapshot writer may create the file before
 // its content is fully written (e.g. shell redirect truncation); a read
 // landing in that window must not be mistaken for a finished write.
-func waitForCompleteSnapshot(path string, _ int, deadline time.Time) ([]byte, error) {
+func waitForCompleteSnapshot(path string, wantLines int, deadline time.Time) ([]byte, error) {
 	for {
 		data, err := os.ReadFile(path)
 		if err == nil {
-			return data, nil
-		}
-		if !os.IsNotExist(err) {
+			lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+			if len(lines) == wantLines {
+				return data, nil
+			}
+		} else if !os.IsNotExist(err) {
 			return nil, err
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("child environment snapshot was not written within deadline")
+			return nil, fmt.Errorf("child environment snapshot did not contain %d complete lines within deadline", wantLines)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

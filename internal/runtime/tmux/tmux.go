@@ -255,6 +255,10 @@ type Tmux struct {
 	// observer; tests inject a deterministic observation without opening a
 	// socket.
 	serverSocketObserver func(context.Context, string) error
+
+	// namedSocketLstat observes a named socket before an attach. Nil selects
+	// the production filesystem observation.
+	namedSocketLstat func(context.Context, string) (namedSocketObservation, error)
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -421,35 +425,6 @@ func (t *Tmux) probeServerAlive() error {
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
 	// fork into a parallel server.
-	return fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
-}
-
-// probeServerAliveForAttach checks that a named tmux server answers immediately
-// before attach. Both this probe and the final attach use tmux -N, so neither
-// command can start or rebind a server when the socket disappears. This does
-// not authenticate continuity against an external process replacing a live
-// socket between commands.
-func (t *Tmux) probeServerAliveForAttach() error {
-	if t.cfg.SocketName == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
-	defer cancel()
-	_, err := t.runCtx(ctx, "-N", "has-session", "-t", "="+probeSessionName)
-	if err == nil || errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) {
-		return nil
-	}
-	if errors.Is(err, ErrNoServer) {
-		observer := t.serverSocketObserver
-		if observer == nil {
-			observer = observeNamedSocket
-		}
-		path := namedSocketPath(t.cfg.SocketName)
-		if observationErr := observer(ctx, path); observationErr != nil {
-			return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
-		}
-		return fmt.Errorf("%w: protocol=no-server path=%s observation=socket absent or stale", ErrServerDegraded, path)
-	}
 	return fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
 }
 
@@ -1455,11 +1430,12 @@ func (t *Tmux) requiresHiddenAttachedInterrupt(target string) bool {
 }
 
 func (t *Tmux) ensureHiddenAttachedClient(target string) error {
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return err
+	}
 	if t.isSessionAttachedForAttach(target) {
 		return nil
-	}
-	if err := t.probeServerAliveForAttach(); err != nil {
-		return err
 	}
 
 	t.hiddenAttachMu.Lock()
@@ -1469,7 +1445,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), hiddenAttachMaxLifetime)
-	cmdArgs := t.hiddenAttachCommandArgs(target)
+	cmdArgs := t.hiddenAttachCommandArgsForWitness(target, witness)
 	cmd := exec.CommandContext(ctx, "script", hiddenAttachScriptArgs(goruntime.GOOS, cmdArgs)...)
 	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
 	cmd.Stdout = io.Discard
@@ -1477,6 +1453,12 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		cancel()
+		t.hiddenAttachMu.Unlock()
+		return err
+	}
+	if err := t.verifyAttachSocketWitness(witness); err != nil {
+		_ = stdin.Close()
 		cancel()
 		t.hiddenAttachMu.Unlock()
 		return err
@@ -1525,9 +1507,11 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 	return nil
 }
 
-func (t *Tmux) hiddenAttachCommandArgs(target string) []string {
+func (t *Tmux) hiddenAttachCommandArgsForWitness(target string, witness namedSocketWitness) []string {
 	args := []string{"-u"}
-	if t.cfg.SocketName != "" {
+	if witness.canonicalPath != "" {
+		args = append(args, "-N", "-S", witness.canonicalPath)
+	} else if t.cfg.SocketName != "" {
 		args = append(args, "-N", "-L", t.cfg.SocketName)
 	}
 	return append(args, "attach-session", "-t", target)
@@ -2785,10 +2769,14 @@ func (t *Tmux) CapturePaneLines(session string, lines int) ([]string, error) {
 // AttachSession attaches to an existing session.
 // Note: This replaces the current process with tmux attach.
 func (t *Tmux) AttachSession(session string) error {
-	if err := t.probeServerAliveForAttach(); err != nil {
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
 		return err
 	}
-	_, err := t.runForAttach("attach-session", "-t", session)
+	if err := t.verifyAttachSocketWitness(witness); err != nil {
+		return err
+	}
+	_, err = t.runForAttachWitness(witness, "attach-session", "-t", session)
 	return err
 }
 

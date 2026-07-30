@@ -549,6 +549,19 @@ func (p *reconcilerPerfStopProvider) Stop(name string) error {
 	return call.err
 }
 
+// StopUnattendedSession implements the exact token-fenced stop used by the
+// keyed reconciler benchmark path.
+func (p *reconcilerPerfStopProvider) StopUnattendedSession(name, expectedToken string) error {
+	actualToken, err := p.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return err
+	}
+	if actualToken != expectedToken {
+		return fmt.Errorf("instance token mismatch")
+	}
+	return p.Stop(name)
+}
+
 func (p *reconcilerPerfStopProvider) snapshotCalls() []reconcilerPerfStopCall {
 	p.mu.Lock()
 	defer p.mu.Unlock()

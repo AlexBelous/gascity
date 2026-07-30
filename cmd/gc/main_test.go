@@ -5853,17 +5853,18 @@ func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
 }
 
 func TestDoStopStopError(t *testing.T) {
-	sp := runtime.NewFailFake() // Stop will fail
+	sp := runtime.NewFailFake()
 
 	var stdout, stderr bytes.Buffer
 	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doStop = %d, want 0 (errors are non-fatal); stderr: %s", code, stderr.String())
+	if code != 1 {
+		t.Fatalf("doStop = %d, want 1 after runtime inventory failure; stderr: %s", code, stderr.String())
 	}
-	// FailFake makes IsRunning return false, so no stop attempt.
-	// Should still print "City stopped."
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Errorf("stdout missing 'City stopped.': %q", stdout.String())
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: session unavailable") {
+		t.Errorf("stderr missing inventory failure diagnostic: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Errorf("stdout reported false success after inventory failure: %q", stdout.String())
 	}
 }
 

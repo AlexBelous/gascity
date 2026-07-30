@@ -2473,8 +2473,16 @@ prefix = "fe"
 	if err != nil {
 		t.Fatalf("read SQL log: %v", err)
 	}
-	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'"
-	if strings.TrimSpace(string(query)) != wantQuery {
-		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
+	const (
+		queryPrefix = "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = "
+		querySuffix = " WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'"
+	)
+	gotQuery := strings.TrimSpace(string(query))
+	if !strings.HasPrefix(gotQuery, queryPrefix) || !strings.HasSuffix(gotQuery, querySuffix) {
+		t.Fatalf("SQL query = %q, want exact release-if-current query with fresh revision", gotQuery)
+	}
+	revision, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(gotQuery, queryPrefix), querySuffix), 10, 64)
+	if err != nil || revision <= 0 {
+		t.Fatalf("SQL revision = %q, want fresh positive int64 (err=%v)", strings.TrimSuffix(strings.TrimPrefix(gotQuery, queryPrefix), querySuffix), err)
 	}
 }

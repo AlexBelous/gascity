@@ -72,7 +72,7 @@ type exactSessionLifecycleStatusInput struct {
 	Observation          worker.LiveObservation
 	ObservedAt           time.Time
 	StartupTimeout       time.Duration
-	PrerequisitesReady   bool
+	HealInputsRowBacked  bool
 	UnavailableReason    exactSessionLifecycleStatusReason
 	Error                string
 }
@@ -119,7 +119,7 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		return result
 	}
 	if input.Context != exactSessionLifecycleStatusContextDesired || input.UnavailableReason != "" ||
-		!input.PrerequisitesReady || input.ObservedAt.IsZero() || input.Error != "" {
+		input.ObservedAt.IsZero() || input.Error != "" {
 		return result
 	}
 	result.RuntimeLive = runtimeObservationLive(input.Observation)
@@ -132,7 +132,7 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		StartupTimeout:    input.StartupTimeout,
 		RollbackAvailable: true,
 	})
-	if plan.Outcome == sessionLifecycleStatusHeal && input.LoadedRevision <= 0 {
+	if plan.Outcome == sessionLifecycleStatusHeal && (!input.HealInputsRowBacked || input.LoadedRevision <= 0) {
 		result.Reason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
 		return result
 	}

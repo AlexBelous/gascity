@@ -612,11 +612,11 @@ func reconcileExactSessionStartWithOwner(
 	}
 	statusObservedAt := clk.Now().UTC()
 	retainStatusFromInitialRead(exactSessionLifecycleStatusInput{
-		Context:            exactSessionLifecycleStatusContextDesired,
-		Observation:        observation,
-		ObservedAt:         statusObservedAt,
-		StartupTimeout:     params.Config.Session.StartupTimeoutDuration(),
-		PrerequisitesReady: true,
+		Context:             exactSessionLifecycleStatusContextDesired,
+		Observation:         observation,
+		ObservedAt:          statusObservedAt,
+		StartupTimeout:      params.Config.Session.StartupTimeoutDuration(),
+		HealInputsRowBacked: exactSessionStatusHealInputsAreRowBacked(info, params.Config),
 	})
 	if (params.StatusWriter != nil || params.StatusWriterError != nil) &&
 		statusResult != nil && statusResult.RuntimeLive && statusResult.Plan != nil && statusResult.Plan.Outcome == sessionLifecycleStatusHeal {
@@ -730,6 +730,21 @@ func resolveExactSessionStartOwnership(
 ) bool {
 	_, _, owner := classifyExactSessionStartOwnership(info, cfg, now)
 	return owner == exactSessionStartKeyedOwner
+}
+
+// exactSessionStatusHealInputsAreRowBacked reports whether the status-heal
+// candidate's identity comes from revision-guarded row content. Labels persist
+// separately in bd, while common_name and aliases require fallback resolution,
+// so only an agent_name that resolves in the current config or a valid stored
+// template can authorize a whole-row conditional update.
+func exactSessionStatusHealInputsAreRowBacked(info sessionpkg.Info, cfg *config.City) bool {
+	if info.Type != sessionpkg.BeadType {
+		return false
+	}
+	if resolvedTemplateForIdentity(info.AgentName, cfg) != "" {
+		return true
+	}
+	return findAgentByTemplate(cfg, info.Template) != nil
 }
 
 func resolveExactSessionStartOrDrainAckStopOwnership(

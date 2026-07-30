@@ -35,9 +35,9 @@ func TestEvaluateExactSessionLifecycleStatus(t *testing.T) {
 			MetadataState: string(session.StateAwake),
 			SessionKey:    "resume-key",
 		},
-		Observation:        worker.LiveObservation{},
-		ObservedAt:         now,
-		PrerequisitesReady: true,
+		Observation:         worker.LiveObservation{},
+		ObservedAt:          now,
+		HealInputsRowBacked: true,
 	}
 
 	tests := []struct {
@@ -160,6 +160,314 @@ func TestReconcileExactSessionStartInProcessInvalidatesCachedLiveness(t *testing
 	}
 }
 
+func TestReconcileExactSessionStartDoesNotHealFromLabelDerivedInputs(t *testing.T) {
+	tests := []struct {
+		name          string
+		configure     func(t *testing.T, env *reconcilerTestEnv, bead *beads.Bead)
+		removeLabels  []string
+		state         session.State
+		wantWrites    int
+		wantPlan      sessionLifecycleStatusOutcome
+		wantReason    exactSessionLifecycleStatusReason
+		wantType      string
+		wantTemplate  string
+		wantAgentName string
+	}{
+		{
+			name: "repairable session classification write-producing heal parks",
+			configure: func(t *testing.T, env *reconcilerTestEnv, bead *beads.Bead) {
+				t.Helper()
+				empty := ""
+				if err := env.store.Update(bead.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+					t.Fatalf("make repairable session: %v", err)
+				}
+			},
+			removeLabels:  []string{session.LabelSession},
+			state:         session.StateAsleep,
+			wantReason:    exactSessionLifecycleStatusReasonPrerequisiteUnavailable,
+			wantType:      "",
+			wantTemplate:  "worker",
+			wantAgentName: "worker",
+		},
+		{
+			name: "repairable session classification converged no-op remains candidate",
+			configure: func(t *testing.T, env *reconcilerTestEnv, bead *beads.Bead) {
+				t.Helper()
+				empty := ""
+				if err := env.store.Update(bead.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+					t.Fatalf("make repairable session: %v", err)
+				}
+			},
+			removeLabels:  []string{session.LabelSession},
+			state:         session.StateAwake,
+			wantPlan:      sessionLifecycleStatusNoop,
+			wantReason:    exactSessionLifecycleStatusReasonCandidate,
+			wantType:      "",
+			wantTemplate:  "worker",
+			wantAgentName: "worker",
+		},
+		{
+			name: "agent identity write-producing heal parks",
+			configure: func(t *testing.T, env *reconcilerTestEnv, bead *beads.Bead) {
+				t.Helper()
+				empty := ""
+				if err := env.store.Update(bead.ID, beads.UpdateOpts{Metadata: map[string]string{"template": empty, "agent_name": empty}}); err != nil {
+					t.Fatalf("remove row-backed identity: %v", err)
+				}
+				if err := env.store.Update(bead.ID, beads.UpdateOpts{Labels: []string{"agent:worker"}}); err != nil {
+					t.Fatalf("add label identity: %v", err)
+				}
+			},
+			removeLabels: []string{"agent:worker"},
+			state:        session.StateAsleep,
+			wantReason:   exactSessionLifecycleStatusReasonPrerequisiteUnavailable,
+			wantType:     session.BeadType,
+		},
+		{
+			name: "agent identity converged no-op remains candidate",
+			configure: func(t *testing.T, env *reconcilerTestEnv, bead *beads.Bead) {
+				t.Helper()
+				empty := ""
+				if err := env.store.Update(bead.ID, beads.UpdateOpts{Metadata: map[string]string{"template": empty, "agent_name": empty}}); err != nil {
+					t.Fatalf("remove row-backed identity: %v", err)
+				}
+				if err := env.store.Update(bead.ID, beads.UpdateOpts{Labels: []string{"agent:worker"}}); err != nil {
+					t.Fatalf("add label identity: %v", err)
+				}
+			},
+			removeLabels: []string{"agent:worker"},
+			state:        session.StateAwake,
+			wantPlan:     sessionLifecycleStatusNoop,
+			wantReason:   exactSessionLifecycleStatusReasonCandidate,
+			wantType:     session.BeadType,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+			bead := env.createSessionBead("worker", "worker")
+			tt.configure(t, env, &bead)
+			env.setSessionMetadata(&bead, map[string]string{
+				"wake_request": string(session.WakeCauseExplicit),
+				"state":        string(tt.state),
+				"session_key":  "resume",
+			})
+
+			counting := newExactStatusCountingStore(t, env.store)
+			var reports []exactSessionLifecycleStatusResult
+			params := exactSessionStartTestParams(t, env)
+			params.Generation, params.Store, params.StatusWriter = 1, counting, counting
+			params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
+				if err := env.store.Update(bead.ID, beads.UpdateOpts{RemoveLabels: tt.removeLabels}); err != nil {
+					t.Fatalf("remove label after authoritative read: %v", err)
+				}
+				return worker.LiveObservation{Running: true, Alive: true}, nil
+			}
+			params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				reports = append(reports, result)
+			}))
+
+			owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+				SessionID: bead.ID, Source: sessionStartAdmissionExplicitWake, Version: 1,
+			}, params)
+			if err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("owner/error = %d/%v, want keyed/nil", owner, err)
+			}
+			if counting.extraWrites != tt.wantWrites {
+				t.Fatalf("status-heal writes = %d, want %d", counting.extraWrites, tt.wantWrites)
+			}
+			if len(reports) != 1 || reports[0].EffectApplied || reports[0].Reason != tt.wantReason {
+				t.Fatalf("status reports = %#v, want one non-effect result with reason %q", reports, tt.wantReason)
+			}
+			if tt.wantPlan == sessionLifecycleStatusUnknown {
+				if reports[0].Plan != nil {
+					t.Fatalf("status plan = %#v, want nil parked result", reports[0].Plan)
+				}
+			} else if reports[0].Plan == nil || reports[0].Plan.Outcome != tt.wantPlan {
+				t.Fatalf("status plan = %#v, want outcome %v", reports[0].Plan, tt.wantPlan)
+			}
+			got, err := env.store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("read label-mutated session: %v", err)
+			}
+			if got.Type != tt.wantType || got.Metadata["template"] != tt.wantTemplate || got.Metadata["agent_name"] != tt.wantAgentName || got.Metadata["state"] != string(tt.state) {
+				t.Fatalf("label-mutated session = %#v, want type/template/agent/state %q/%q/%q/%q", got, tt.wantType, tt.wantTemplate, tt.wantAgentName, tt.state)
+			}
+		})
+	}
+}
+
+func TestReconcileExactSessionStartCommonNameFallbackNeverAuthorizesHeal(t *testing.T) {
+	tests := []struct {
+		name       string
+		agentName  string
+		alias      string
+		state      session.State
+		wantPlan   sessionLifecycleStatusOutcome
+		wantReason exactSessionLifecycleStatusReason
+	}{
+		{
+			name:       "write-producing heal parks",
+			state:      session.StateAsleep,
+			wantReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable,
+		},
+		{
+			name:       "converged no-op remains candidate",
+			state:      session.StateAwake,
+			wantPlan:   sessionLifecycleStatusNoop,
+			wantReason: exactSessionLifecycleStatusReasonCandidate,
+		},
+		{
+			name:       "invalid agent_name with valid alias/common_name write-producing heal parks",
+			agentName:  "retired",
+			alias:      "worker",
+			state:      session.StateAsleep,
+			wantReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable,
+		},
+		{
+			name:       "invalid agent_name with valid alias/common_name converged no-op remains candidate",
+			agentName:  "retired",
+			alias:      "worker",
+			state:      session.StateAwake,
+			wantPlan:   sessionLifecycleStatusNoop,
+			wantReason: exactSessionLifecycleStatusReasonCandidate,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+			bead := env.createSessionBead("worker", "worker")
+			if err := env.store.Update(bead.ID, beads.UpdateOpts{Metadata: map[string]string{
+				"template":    "",
+				"agent_name":  tt.agentName,
+				"alias":       tt.alias,
+				"common_name": "worker",
+			}}); err != nil {
+				t.Fatalf("configure common-name identity: %v", err)
+			}
+			env.setSessionMetadata(&bead, map[string]string{
+				"wake_request": string(session.WakeCauseExplicit),
+				"state":        string(tt.state),
+				"session_key":  "resume",
+			})
+
+			counting := newExactStatusCountingStore(t, env.store)
+			labelAdded := false
+			counting.rewriteGet = func(_ int, _ string, got beads.Bead, err error) (beads.Bead, error) {
+				if labelAdded && err == nil {
+					got.Labels = append(got.Labels, "agent:other")
+				}
+				return got, err
+			}
+			before, err := counting.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("read common-name session: %v", err)
+			}
+			var reports []exactSessionLifecycleStatusResult
+			params := exactSessionStartTestParams(t, env)
+			params.Generation, params.Store, params.StatusWriter = 1, counting, counting
+			params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
+				labelAdded = true
+				return worker.LiveObservation{Running: true, Alive: true}, nil
+			}
+			params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				reports = append(reports, result)
+			}))
+
+			owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+				SessionID: bead.ID, Source: sessionStartAdmissionExplicitWake, Version: 1,
+			}, params)
+			if err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("owner/error = %d/%v, want keyed/nil", owner, err)
+			}
+			if counting.extraWrites != 0 {
+				t.Fatalf("status-heal writes = %d, want 0", counting.extraWrites)
+			}
+			if len(reports) != 1 || reports[0].EffectApplied || reports[0].Reason != tt.wantReason {
+				t.Fatalf("status reports = %#v, want one non-effect result with reason %q", reports, tt.wantReason)
+			}
+			if tt.wantPlan == sessionLifecycleStatusUnknown {
+				if reports[0].Plan != nil {
+					t.Fatalf("status plan = %#v, want nil parked result", reports[0].Plan)
+				}
+			} else if reports[0].Plan == nil || reports[0].Plan.Outcome != tt.wantPlan {
+				t.Fatalf("status plan = %#v, want outcome %v", reports[0].Plan, tt.wantPlan)
+			}
+			after, err := counting.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("read common-name session after label addition: %v", err)
+			}
+			if after.Revision != before.Revision || !slices.Contains(after.Labels, "agent:other") {
+				t.Fatalf("label injection = revision %d -> %d labels %v, want stable revision with agent:other", before.Revision, after.Revision, after.Labels)
+			}
+			if after.Metadata["state"] != string(tt.state) {
+				t.Fatalf("common-name session state = %q, want unchanged %q", after.Metadata["state"], tt.state)
+			}
+			if after.Metadata["agent_name"] != tt.agentName || after.Metadata["alias"] != tt.alias {
+				t.Fatalf("stored identity = agent_name %q alias %q, want %q/%q", after.Metadata["agent_name"], after.Metadata["alias"], tt.agentName, tt.alias)
+			}
+		})
+	}
+}
+
+func TestReconcileExactSessionStartExpandedAgentNameAuthorizesHeal(t *testing.T) {
+	maxSessions := 3
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{
+		Name:              "worker",
+		StartCommand:      "true",
+		MaxActiveSessions: &maxSessions,
+	}}}
+	bead := env.createSessionBead("worker-1", "")
+	env.setSessionMetadata(&bead, map[string]string{
+		"wake_request": string(session.WakeCauseExplicit),
+		"state":        string(session.StateAsleep),
+		"session_key":  "resume",
+	})
+
+	counting := newExactStatusCountingStore(t, env.store)
+	before, err := counting.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read expanded-identity session: %v", err)
+	}
+	var reports []exactSessionLifecycleStatusResult
+	params := exactSessionStartTestParams(t, env)
+	params.Generation, params.Store, params.StatusWriter = 1, counting, counting
+	params.ObserveLoadedSession = func(context.Context, string, beads.Store, runtime.Provider, *config.City, session.Info, []string) (worker.LiveObservation, error) {
+		return worker.LiveObservation{Running: true, Alive: true}, nil
+	}
+	params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+		reports = append(reports, result)
+	}))
+
+	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+		SessionID: bead.ID, Source: sessionStartAdmissionExplicitWake, Version: 1,
+	}, params)
+	if err != nil || owner != exactSessionStartKeyedOwner {
+		t.Fatalf("owner/error = %d/%v, want keyed/nil", owner, err)
+	}
+	if counting.extraWrites != 1 {
+		t.Fatalf("status-heal writes = %d, want 1", counting.extraWrites)
+	}
+	if len(reports) != 1 || !reports[0].EffectApplied || reports[0].Reason != exactSessionLifecycleStatusReasonCandidate || reports[0].Plan == nil || reports[0].Plan.Outcome != sessionLifecycleStatusHeal {
+		t.Fatalf("status reports = %#v, want one applied heal candidate", reports)
+	}
+	after, err := counting.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read healed expanded-identity session: %v", err)
+	}
+	if after.Revision == before.Revision || after.Metadata["state"] != string(session.StateAwake) {
+		t.Fatalf("healed session = revision %d -> %d state %q, want fresh revision and awake", before.Revision, after.Revision, after.Metadata["state"])
+	}
+	if after.Metadata["agent_name"] != "worker-1" || after.Metadata["template"] != "" {
+		t.Fatalf("stored identity = agent_name %q template %q, want worker-1/empty", after.Metadata["agent_name"], after.Metadata["template"])
+	}
+}
+
 type exactStartCachedLivenessProvider struct {
 	*runtime.Fake
 	invalidations []string
@@ -190,8 +498,8 @@ func TestEvaluateExactSessionLifecycleStatusRequiresRevisionOnlyForHeal(t *testi
 			MetadataState: string(session.StateAwake),
 			SessionKey:    "resume-key",
 		},
-		ObservedAt:         now,
-		PrerequisitesReady: true,
+		ObservedAt:          now,
+		HealInputsRowBacked: true,
 	}
 
 	if got := evaluateExactSessionLifecycleStatus(heal); got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Reason != exactSessionLifecycleStatusReasonCandidate || got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusHeal || got.LoadedRevision != 17 {
@@ -219,7 +527,7 @@ func TestEvaluateExactSessionLifecycleStatusRequiresRevisionOnlyForHeal(t *testi
 	closed.Context = exactSessionLifecycleStatusContextUnavailable
 	closed.Info.Closed = true
 	closed.ObservedAt = time.Time{}
-	closed.PrerequisitesReady = false
+	closed.HealInputsRowBacked = false
 	if got := evaluateExactSessionLifecycleStatus(closed); got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusNoop || got.Plan.Reason != sessionLifecycleStatusReasonTerminal {
 		t.Fatalf("zero-revision closed status = %#v, want candidate terminal no-op", got)
 	}
@@ -261,7 +569,7 @@ func TestEvaluateExactSessionLifecycleStatusClosedAndUnavailable(t *testing.T) {
 	unavailable := base
 	unavailable.Observation = worker.LiveObservation{Running: true, Alive: true}
 	unavailable.ObservedAt = time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
-	unavailable.PrerequisitesReady = true
+	unavailable.HealInputsRowBacked = true
 	unavailable.UnavailableReason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
 	if got := evaluateExactSessionLifecycleStatus(unavailable); got.Context != exactSessionLifecycleStatusContextUnavailable || got.Disposition != exactSessionLifecycleStatusDispositionPark || got.Reason != exactSessionLifecycleStatusReasonPrerequisiteUnavailable || got.Plan != nil {
 		t.Fatalf("unavailable result = %#v, want prerequisite-unavailable park", got)

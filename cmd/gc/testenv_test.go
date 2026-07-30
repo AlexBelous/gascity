@@ -343,13 +343,27 @@ func writeTestDoltIdentity(homeDir string) error {
 	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), data, 0o644)
 }
 
+// doltIdentityHomeDir returns a fresh directory for dolt/git identity files,
+// created outside every t.TempDir() tree rather than nested inside one.
+// t.TempDir()'s cleanup is a single-pass, non-retrying RemoveAll on its
+// shared parent (see ga-7dgcg6); a dolt/bd child process still writing
+// under DOLT_ROOT_PATH when that RemoveAll fires turns an otherwise-passing
+// test into an ENOTEMPTY failure. Cleanup here is best-effort so a lingering
+// writer fails only this directory's own removal, not the whole test tree.
+func doltIdentityHomeDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(os.TempDir(), "gc-dolt-identity-")
+	if err != nil {
+		t.Fatalf("MkdirTemp(dolt identity home): %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func configureTestDoltIdentityEnv(t *testing.T) {
 	t.Helper()
 
-	homeDir := filepath.Join(t.TempDir(), "home")
-	if err := os.MkdirAll(homeDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(test home): %v", err)
-	}
+	homeDir := doltIdentityHomeDir(t)
 	if err := writeTestGitIdentity(homeDir); err != nil {
 		t.Fatalf("write test git identity: %v", err)
 	}

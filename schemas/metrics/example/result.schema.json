@@ -206,7 +206,8 @@
               "logout",
               "whoami",
               "runtime-heartbeat",
-              "pack-registry-requests"
+              "pack-registry-requests",
+              "github-runs-evaluate"
             ]
           },
           "event_id": {

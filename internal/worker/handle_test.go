@@ -19,6 +19,21 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
+type unattendedStopTestCall struct {
+	name  string
+	token string
+}
+
+type unattendedStopTestProvider struct {
+	*runtime.Fake
+	calls []unattendedStopTestCall
+}
+
+func (p *unattendedStopTestProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopTestCall{name: name, token: expectedToken})
+	return p.Stop(name)
+}
+
 func TestSessionHandleStartStopState(t *testing.T) {
 	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
@@ -422,6 +437,49 @@ func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
 	}
 	if bead.Metadata["state"] != string(sessionpkg.StateActive) {
 		t.Fatalf("bead state = %q, want %q after Kill", bead.Metadata["state"], sessionpkg.StateActive)
+	}
+}
+
+func TestSessionHandleStopUnattendedUsesBoundWorkerBoundary(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := &unattendedStopTestProvider{Fake: runtime.NewFake()}
+	manager := sessionpkg.NewManagerWithOptions(store, provider)
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager: manager,
+		Session: SessionSpec{
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "claude",
+			WorkDir:  t.TempDir(),
+			Provider: "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+
+	if err := handle.StopUnattended(context.Background(), "exact-token"); err != nil {
+		t.Fatalf("StopUnattended: %v", err)
+	}
+	if got, want := provider.calls, []unattendedStopTestCall{{name: info.SessionName, token: "exact-token"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("bound unattended stops = %#v, want %#v", got, want)
+	}
+	if got := provider.CountCalls("Stop", info.SessionName); got != 1 {
+		t.Fatalf("runtime Stop calls = %d, want exactly one bound stop", got)
+	}
+	bead, err := store.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", handle.sessionID, err)
+	}
+	if got, want := bead.Metadata["state"], string(sessionpkg.StateActive); got != want {
+		t.Fatalf("bead state = %q, want %q after bound stop", got, want)
 	}
 }
 

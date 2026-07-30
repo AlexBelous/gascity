@@ -42,6 +42,13 @@ type LifecycleHandle interface {
 	StateHandle
 }
 
+// UnattendedStopHandle exposes the optional bound stop operation used only
+// when a caller must preserve a runtime provider's exact-incarnation proof.
+// Ordinary lifecycle operations remain on [LifecycleHandle].
+type UnattendedStopHandle interface {
+	StopUnattended(context.Context, string) error
+}
+
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
 	Message(context.Context, MessageRequest) (MessageResult, error)

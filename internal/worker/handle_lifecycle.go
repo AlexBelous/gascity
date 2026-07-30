@@ -138,6 +138,20 @@ func (h *SessionHandle) Kill(ctx context.Context) (err error) {
 	return err
 }
 
+// StopUnattended stops the exact runtime incarnation only when its provider
+// can bind unattended certification and destruction in one operation.
+func (h *SessionHandle) StopUnattended(ctx context.Context, expectedToken string) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationKill)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	err = h.manager.StopUnattendedSession(id, expectedToken)
+	return err
+}
+
 // Close permanently ends the worker session.
 func (h *SessionHandle) Close(ctx context.Context) (err error) {
 	_, err = h.CloseDetailed(ctx)

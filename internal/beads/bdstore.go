@@ -3,10 +3,13 @@ package beads
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1186,15 +1189,31 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
 // (see cmd/gc releasePoolAssignmentIfCurrent), so no caller changes are needed.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
-	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+	revision, err := newRevisionToken()
+	if err != nil {
+		return false, fmt.Errorf("bd release-if-current: minting revision: %w", err)
+	}
+	legacyQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
-	out, err := s.runBDTransientWriteOutput("sql", "--json", query)
-	if err != nil {
+	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = " +
+		strconv.FormatInt(revision, 10) +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
+	args := s.bdTransientWriteArgs([]string{"sql", "--json", query})
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil && !isBdTransientWriteError(err) {
 		if isBdSQLUnsupportedInEmbeddedMode(err) {
-			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee)
+			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee, revision)
 		}
+		if isMissingRevisionColumn(err) {
+			args = s.bdTransientWriteArgs([]string{"sql", "--json", legacyQuery})
+			out, err = s.runner(s.dir, "bd", args...)
+		}
+	}
+	if err != nil {
 		return false, fmt.Errorf("bd release-if-current: %w", err)
 	}
 	var result struct {
@@ -1206,7 +1225,7 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	return result.RowsAffected > 0, nil
 }
 
-func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string) (bool, error) {
+func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string, revision int64) (bool, error) {
 	doltDir, ok, err := s.embeddedDoltDir()
 	if err != nil {
 		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", err)
@@ -1214,20 +1233,60 @@ func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string
 	if !ok {
 		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", ErrConditionalReleaseUnsupported)
 	}
-	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+	legacyQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'in_progress'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
+		"; SELECT ROW_COUNT() AS rows_affected"
+	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = " +
+		strconv.FormatInt(revision, 10) +
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
 		"; SELECT ROW_COUNT() AS rows_affected"
 	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
 	if err != nil {
-		return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+		if isBdTransientWriteError(err) || !isMissingRevisionColumn(err) {
+			return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+		}
+		out, err = s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", legacyQuery)
+		if err != nil {
+			return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
+		}
 	}
 	rowsAffected, err := parseDoltRowsAffected(out)
 	if err != nil {
 		return false, fmt.Errorf("bd release-if-current embedded fallback: parsing SQL result: %w", err)
 	}
 	return rowsAffected > 0, nil
+}
+
+func newRevisionToken() (int64, error) {
+	for {
+		var data [8]byte
+		if _, err := rand.Read(data[:]); err != nil {
+			return 0, err
+		}
+		revision := int64(binary.BigEndian.Uint64(data[:]) & math.MaxInt64)
+		if revision != 0 {
+			return revision, nil
+		}
+	}
+}
+
+func isMissingRevisionColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unknown column 'revision'") ||
+		strings.Contains(message, "unknown column `revision`") ||
+		strings.Contains(message, `unknown column "revision"`) ||
+		strings.Contains(message, "no such column: revision") ||
+		strings.Contains(message, `column "revision" not found`) ||
+		strings.Contains(message, "column 'revision' not found") ||
+		strings.Contains(message, "column `revision` not found") ||
+		strings.Contains(message, "column not found: revision")
 }
 
 func (s *BdStore) embeddedDoltDir() (string, bool, error) {

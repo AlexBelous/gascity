@@ -86,7 +86,7 @@ tick_debounce = "1s"
 		initial.HeadSeq,
 		15*time.Second,
 		"start-selection",
-		sessionReconcilerColdDisableShadowRecords,
+		sessionReconcilerColdDisableFirstShadowRecord,
 	); err != nil {
 		t.Fatalf("initial START-shadow comparison did not converge: %v", err)
 	}
@@ -99,7 +99,7 @@ tick_debounce = "1s"
 	if len(disarmed.ActiveArms) != 0 {
 		t.Fatalf("trace arms after disarm = %+v, want none", disarmed.ActiveArms)
 	}
-	sessionReconcilerColdDisableInstallOffConfig(t, cityDir)
+	sessionReconcilerColdDisableInstallOffConfig(t, cityDir, env, before.SessionName)
 
 	oldPID := sessionReconcilerColdDisableSupervisorPID(t, env)
 	if err := syscall.Kill(oldPID, syscall.SIGTERM); err != nil {
@@ -170,7 +170,15 @@ func sessionReconcilerColdDisableShadowRecords(trace sessionWaitDependencyShadow
 	return matches
 }
 
-func sessionReconcilerColdDisableInstallOffConfig(t *testing.T, cityDir string) {
+func sessionReconcilerColdDisableFirstShadowRecord(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, afterSeq uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
+	matches := sessionReconcilerColdDisableShadowRecords(trace, sessionID, afterSeq)
+	if len(matches) == 0 {
+		return nil
+	}
+	return matches[:1]
+}
+
+func sessionReconcilerColdDisableInstallOffConfig(t *testing.T, cityDir string, env []string, sessionName string) {
 	t.Helper()
 	configPath := filepath.Join(cityDir, "city.toml")
 	info, err := os.Lstat(configPath)
@@ -184,10 +192,41 @@ func sessionReconcilerColdDisableInstallOffConfig(t *testing.T, cityDir string) 
 	if err != nil {
 		t.Fatalf("read city config: %v", err)
 	}
+	beforePID := sessionReconcilerColdDisableSupervisorPID(t, env)
+	beforeIdentity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, sessionName)
+	beforeStatus := sessionReconcilerColdDisableReadStatus(t, cityDir).SessionReconciler
 	if matches := sessionReconcilerColdDisableAssignment.FindAll(current, -1); len(matches) != 1 {
 		t.Fatalf("session_reconciler assignments = %d, want exactly 1", len(matches))
 	}
 	candidate := filepath.Join(cityDir, ".city.toml.cold-disable")
+	malformed := []byte("session_reconciler = [\n")
+	if err := fsys.WriteFileAtomic(fsys.OSFS{}, candidate, malformed, info.Mode().Perm()); err != nil {
+		t.Fatalf("write malformed same-directory cold-disable candidate: %v", err)
+	}
+	if out, err := gc(cityDir, "config", "show", "--validate", "--root-file", candidate); err == nil {
+		t.Fatalf("validate malformed cold-disable candidate succeeded:\n%s", out)
+	} else if !strings.Contains(out, candidate) {
+		t.Fatalf("malformed candidate diagnostic = %q, want candidate path %q", out, candidate)
+	}
+	if got, err := os.ReadFile(configPath); err != nil {
+		t.Fatalf("read live city config after malformed candidate: %v", err)
+	} else if !bytes.Equal(got, current) {
+		t.Fatalf("live city config changed after malformed candidate: got %q want %q", got, current)
+	}
+	if got, err := os.ReadFile(candidate); err != nil {
+		t.Fatalf("read malformed candidate after validation: %v", err)
+	} else if !bytes.Equal(got, malformed) {
+		t.Fatalf("malformed candidate changed during validation: got %q want %q", got, malformed)
+	}
+	if got := sessionReconcilerColdDisableSupervisorPID(t, env); got != beforePID {
+		t.Fatalf("supervisor PID changed after malformed candidate: before=%d after=%d", beforePID, got)
+	}
+	if got := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, sessionName); got != beforeIdentity {
+		t.Fatalf("tmux identity changed after malformed candidate: before=%q after=%q", beforeIdentity, got)
+	}
+	if got := sessionReconcilerColdDisableReadStatus(t, cityDir).SessionReconciler; got != beforeStatus {
+		t.Fatalf("reconciler status changed after malformed candidate: before=%+v after=%+v", beforeStatus, got)
+	}
 	off := sessionReconcilerColdDisableAssignment.ReplaceAll(current, []byte(`${1}"off"${2}`))
 	if err := fsys.WriteFileAtomic(fsys.OSFS{}, candidate, off, info.Mode().Perm()); err != nil {
 		t.Fatalf("write same-directory cold-disable candidate: %v", err)
@@ -196,7 +235,7 @@ func sessionReconcilerColdDisableInstallOffConfig(t *testing.T, cityDir string) 
 	if err != nil || !candidateInfo.Mode().IsRegular() || candidateInfo.Mode()&os.ModeSymlink != 0 {
 		t.Fatalf("cold-disable candidate is not a regular file: info=%v err=%v", candidateInfo, err)
 	}
-	if out, err := gc(cityDir, "config", "show", "--validate", "--file", candidate); err != nil {
+	if out, err := gc(cityDir, "config", "show", "--validate", "--root-file", candidate); err != nil {
 		t.Fatalf("validate cold-disable candidate: %v\n%s", err, out)
 	}
 	if err := os.Rename(candidate, configPath); err != nil {

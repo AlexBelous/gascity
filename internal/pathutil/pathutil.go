@@ -42,6 +42,27 @@ func normalizeMissingPath(path string) (string, bool) {
 	}
 }
 
+// ResolveNearestExistingAncestor canonicalizes path by resolving symlinks on
+// its nearest existing ancestor and rejoining the remaining, not-yet-existing
+// tail segments onto that resolved ancestor. A plain filepath.EvalSymlinks
+// fails outright on any path with a missing leaf, so this is what lets a
+// not-yet-created path — a rig or git-clone destination, for example — be
+// compared or contained correctly even when it's reached through a
+// symlinked ancestor.
+//
+// path is expected to already be absolute; it is only filepath.Clean'd here,
+// not resolved against the working directory.
+//
+// It returns an error only when resolution fails for a reason other than an
+// ancestor simply not existing yet — e.g. a permission error or a symlink
+// loop — since walking further up the tree cannot recover from those.
+//
+// TODO(ga-iawy13.1): stub for RED — not yet implemented, not yet called by
+// any production path.
+func ResolveNearestExistingAncestor(_ string) (string, error) {
+	return "", nil
+}
+
 func canonicalizePlatformPathAlias(path string) string {
 	path = filepath.Clean(path)
 	// On macOS, /tmp and /var commonly appear to callers without /private

@@ -155,7 +155,7 @@ func newReconcilerPerfNudgeFixture(workspacePath, arm, pairID string) (*reconcil
 	if err := provider.Start(context.Background(), info.SessionName, gcruntime.Config{Command: "true", WorkDir: cityPath}); err != nil {
 		return nil, fmt.Errorf("starting nudge session: %w", err)
 	}
-	provider.SetAttached(info.SessionName, true)
+	provider.SetAttached(info.SessionName, false)
 	provider.SetActivity(info.SessionName, reconcilerPerfNudgeFixtureActivity)
 	item := newQueuedNudgeWithOptions(reconcilerPerfStartTemplate, "reconciler performance nudge", "session", reconcilerPerfNudgeFixtureTime, queuedNudgeOptions{SessionID: info.ID})
 	item.ID = "reconciler-perf-nudge-" + pairID

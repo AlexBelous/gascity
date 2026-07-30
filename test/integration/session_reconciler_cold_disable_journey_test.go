@@ -7,10 +7,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -110,11 +114,118 @@ tick_debounce = "1s"
 		t.Fatalf("tmux identity changed during preserve shutdown: before=%q after=%q", beforeIdentity, got)
 	}
 
-	startIsolatedSupervisor(t, env, gcHome)
+	offConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read installed off config: %v", err)
+	}
+	candidate := filepath.Join(cityDir, ".city.toml.cold-disable")
+	releasePort := sessionReconcilerColdDisableHoldSupervisorPort(t, gcHome)
+	if out, err := runGCWithEnv(env, "", "supervisor", "start"); err == nil {
+		t.Fatalf("supervisor start with foreign listener succeeded:\n%s", out)
+	} else if !strings.Contains(out, filepath.Join(gcHome, "supervisor.log")) {
+		t.Fatalf("failed supervisor start did not point to its log:\n%s", out)
+	}
+	if got, err := os.ReadFile(configPath); err != nil {
+		t.Fatalf("read off config after failed successor: %v", err)
+	} else if !bytes.Equal(got, offConfig) {
+		t.Fatalf("live off config changed after failed successor: got %q want %q", got, offConfig)
+	}
+	if out, err := gc(cityDir, "config", "show", "--validate", "--root-file", configPath); err != nil {
+		t.Fatalf("validate preserved off config after failed successor: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cold-disable candidate after failed successor: err=%v, want absent", err)
+	}
+	sessionReconcilerColdDisableWaitPIDGone(t, oldPID)
+	if got := controllerAlive(cityDir); got != 0 {
+		t.Fatalf("controller control socket PID after failed successor = %d, want none", got)
+	}
+	if got := sessionReconcilerColdDisableSupervisorControlSocketPID(t, gcHome); got != 0 {
+		t.Fatalf("supervisor control socket PID after failed successor = %d, want none", got)
+	}
+	sessionReconcilerColdDisableAssertOfflineStatus(t, cityDir)
+	if got := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, before.SessionName); got != beforeIdentity {
+		t.Fatalf("tmux identity changed after failed successor: before=%q after=%q", beforeIdentity, got)
+	}
+
+	releasePort()
+	if out, err := runGCWithEnv(env, "", "supervisor", "start"); err != nil {
+		t.Fatalf("retry supervisor start after port release: %v\n%s", err, out)
+	}
 	waitForControllerReady(t, cityDir, 15*time.Second)
 	sessionReconcilerColdDisableReadStatus(t, cityDir)
 	if got := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, before.SessionName); got != beforeIdentity {
 		t.Fatalf("tmux identity changed across cold disable: before=%q after=%q", beforeIdentity, got)
+	}
+}
+
+func sessionReconcilerColdDisableHoldSupervisorPort(t *testing.T, gcHome string) func() {
+	t.Helper()
+	addr := net.JoinHostPort("127.0.0.1", readSupervisorPortFromConfig(t, gcHome))
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("listen on configured supervisor port %s: %v", addr, err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "foreign listener", http.StatusServiceUnavailable)
+	})}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			if err := server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				t.Errorf("close foreign supervisor-port listener: %v", err)
+			}
+			select {
+			case err := <-done:
+				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+					t.Errorf("serve foreign supervisor-port listener: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Errorf("foreign supervisor-port listener did not stop")
+			}
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func sessionReconcilerColdDisableSupervisorControlSocketPID(t *testing.T, gcHome string) int {
+	t.Helper()
+	conn, err := net.DialTimeout("unix", filepath.Join(gcHome, "supervisor.sock"), 500*time.Millisecond)
+	if err != nil {
+		return 0
+	}
+	defer conn.Close() //nolint:errcheck // best-effort test probe cleanup
+	if _, err := conn.Write([]byte("ping\n")); err != nil {
+		return 0
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return 0
+	}
+	var pid int
+	if _, err := fmt.Fscan(conn, &pid); err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+func sessionReconcilerColdDisableAssertOfflineStatus(t *testing.T, cityDir string) {
+	t.Helper()
+	out, err := gc(cityDir, "trace", "status", "--json")
+	if err != nil {
+		t.Fatalf("read offline trace status: %v\n%s", err, out)
+	}
+	var status sessionReconcilerColdDisableStatus
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &status); err != nil {
+		t.Fatalf("decode offline trace status: %v\n%s", err, out)
+	}
+	got := status.SessionReconciler
+	if status.ControllerRunning || got.Available || got.EffectiveOwner != "unavailable" ||
+		got.PendingKeys != 0 || got.AuditPending || len(status.ActiveArms) != 0 {
+		t.Fatalf("offline trace status = %+v, want controller stopped, unavailable reconciler, and no arms", status)
 	}
 }
 

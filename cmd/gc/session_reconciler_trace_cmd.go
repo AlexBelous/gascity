@@ -135,6 +135,23 @@ func (cr *CityRuntime) sessionReconcilerTraceStatus() sessionReconcilerTraceStat
 	}
 	cr.sessionStartMu.Unlock()
 
+	sessionStartEventAdmission := false
+	sessionWaitShadowProducerAdmission := false
+	if cr.cs != nil {
+		cr.cs.mu.RLock()
+		sessionStartEventAdmission = cr.cs.sessionStartEventAdmission != nil
+		sessionWaitShadowProducerAdmission = cr.cs.sessionWaitShadowProducerAdmission != nil
+		cr.cs.mu.RUnlock()
+	}
+
+	cr.nudgeKeyMu.Lock()
+	nudgeKeyController := cr.nudgeKeyController != nil
+	cr.nudgeKeyMu.Unlock()
+
+	cr.sessionWaitDependencyMu.RLock()
+	waitDependencyProducer := cr.waitDependencyProducer != nil
+	cr.sessionWaitDependencyMu.RUnlock()
+
 	if mode == rollout.ModeUnset {
 		if cr.cs != nil {
 			mode = cr.cs.RolloutFlags().SessionReconciler()
@@ -150,7 +167,14 @@ func (cr *CityRuntime) sessionReconcilerTraceStatus() sessionReconcilerTraceStat
 	configuredMode, modeOK := sessionReconcilerTraceConfiguredMode(mode)
 	effectiveOwner, ownerOK := sessionReconcilerTraceEffectiveOwner(owner)
 	controllerTupleOK := (owner == sessionStartOwnershipKeyed) == (controller != nil)
-	if !modeOK || !ownerOK || !controllerTupleOK {
+	offLegacyOwnersAbsent := mode != rollout.Off ||
+		owner != sessionStartOwnershipLegacy ||
+		(controller == nil &&
+			!sessionStartEventAdmission &&
+			!nudgeKeyController &&
+			!waitDependencyProducer &&
+			!sessionWaitShadowProducerAdmission)
+	if !modeOK || !ownerOK || !controllerTupleOK || !offLegacyOwnersAbsent {
 		return unavailableSessionReconcilerTraceStatus()
 	}
 

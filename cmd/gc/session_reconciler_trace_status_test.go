@@ -110,6 +110,86 @@ func TestSessionReconcilerTraceStatusFallbacksAndProjectionMatch(t *testing.T) {
 	}
 }
 
+func TestSessionReconcilerTraceStatusOffLegacyRequiresNoKeyedEffectOwners(t *testing.T) {
+	available := sessionReconcilerTraceStatus{
+		SchemaVersion:  "1",
+		Available:      true,
+		ConfiguredMode: "off",
+		EffectiveOwner: "legacy",
+	}
+	for _, tc := range []struct {
+		name    string
+		install func(*CityRuntime)
+		want    sessionReconcilerTraceStatus
+	}{
+		{
+			name: "clean off",
+			want: available,
+		},
+		{
+			name: "stale session start controller",
+			install: func(cr *CityRuntime) {
+				cr.sessionStartController = &sessionStartController{}
+			},
+			want: unavailableSessionReconcilerTraceStatus(),
+		},
+		{
+			name: "stale session start event admission",
+			install: func(cr *CityRuntime) {
+				cr.cs = &controllerState{sessionStartEventAdmission: func(string) {}}
+			},
+			want: unavailableSessionReconcilerTraceStatus(),
+		},
+		{
+			name: "stale nudge key controller",
+			install: func(cr *CityRuntime) {
+				cr.nudgeKeyController = &nudgeKeyController{}
+			},
+			want: unavailableSessionReconcilerTraceStatus(),
+		},
+		{
+			name: "stale wait dependency producer",
+			install: func(cr *CityRuntime) {
+				cr.waitDependencyProducer = &sessionWaitDependencyProducer{}
+			},
+			want: unavailableSessionReconcilerTraceStatus(),
+		},
+		{
+			name: "stale wait dependency producer admission",
+			install: func(cr *CityRuntime) {
+				cr.cs = &controllerState{
+					sessionWaitShadowProducerAdmission: func(sessionWaitDependencyProducerRequest) {},
+				}
+			},
+			want: unavailableSessionReconcilerTraceStatus(),
+		},
+		{
+			name: "generic wait shadow admission is read only",
+			install: func(cr *CityRuntime) {
+				cr.cs = &controllerState{
+					sessionWaitShadowAdmission: func() sessionWaitShadowRefreshResult {
+						return sessionWaitShadowConverged
+					},
+				}
+			},
+			want: available,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := &CityRuntime{
+				sessionStartMode:      rollout.Off,
+				sessionStartOwnership: sessionStartOwnershipLegacy,
+			}
+			if tc.install != nil {
+				tc.install(cr)
+			}
+			if got := cr.sessionReconcilerTraceStatus(); got != tc.want {
+				t.Fatalf("sessionReconcilerTraceStatus() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSessionReconcilerTraceStatusSocketProjection(t *testing.T) {
 	cityDir := t.TempDir()
 	cr := &CityRuntime{sessionStartMode: rollout.Off, sessionStartOwnership: sessionStartOwnershipLegacy}

@@ -43,6 +43,11 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrInputFenced reports that a runtime could not safely inject input because
+// its terminal state is ambiguous or reserved for user interaction. Callers
+// should leave the input pending and retry once the fence clears.
+var ErrInputFenced = errors.New("runtime input is fenced")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".

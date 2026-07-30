@@ -12,6 +12,31 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+type inputFencedNudgeProvider struct {
+	*runtime.Fake
+	fenced bool
+}
+
+func (p *inputFencedNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	if err := p.Fake.Nudge(name, content); err != nil {
+		return err
+	}
+	if p.fenced {
+		return runtime.ErrInputFenced
+	}
+	return nil
+}
+
+func (p *inputFencedNudgeProvider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	if err := p.Fake.NudgeNow(name, content); err != nil {
+		return err
+	}
+	if p.fenced {
+		return runtime.ErrInputFenced
+	}
+	return nil
+}
+
 func TestDiscoverDueExactNudgeSessionIDs_StableDeduplicatesDueItems(t *testing.T) {
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	state := nudgequeue.State{
@@ -37,6 +62,78 @@ func TestDiscoverDueExactNudgeSessionIDs_StableDeduplicatesDueItems(t *testing.T
 		if got[i] != want[i] {
 			t.Fatalf("discoverDueExactNudgeSessionIDs() = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestReconcileExactQueuedNudge_InputFenceParksWithoutRetryThenDeliversOnce(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := &inputFencedNudgeProvider{Fake: runtime.NewFake(), fenced: true}
+	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	item := newQueuedNudgeWithOptions("worker", "copy-mode fenced", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: info.ID})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	if err := reconcileExactQueuedNudge(context.Background(), info.ID, exactQueuedNudgeParams{CityPath: dir, Config: &config.City{}, Provider: fake, SessionStore: store.Store, NudgeStore: store.Store}); err != nil {
+		t.Fatalf("reconcileExactQueuedNudge while input fenced: %v", err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState while input fenced: %v", err)
+	}
+	if len(state.Pending) != 1 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("input-fenced queue outcome pending/inflight/dead = %d/%d/%d, want 1/0/0", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	if got := state.Pending[0]; got.Attempts != 0 || !got.LastAttemptAt.IsZero() || got.LastError != "" || !got.ClaimedAt.IsZero() || !got.LeaseUntil.IsZero() {
+		t.Fatalf("input-fenced item = %+v, want released without attempt, backoff, or error", got)
+	}
+	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(item.ID)
+	if err != nil {
+		t.Fatalf("FindIncludingTerminal while input fenced: %v", err)
+	}
+	if !ok || !shadow.Open {
+		t.Fatalf("input-fenced shadow = %+v, want open command", shadow)
+	}
+	refetched, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("refetch session while input fenced: %v", err)
+	}
+	if refetched.Metadata[session.MetadataLastNudgeDeliveredAt] != "" {
+		t.Fatalf("session has %s while input fenced", session.MetadataLastNudgeDeliveredAt)
+	}
+
+	fake.fenced = false
+	if err := reconcileExactQueuedNudge(context.Background(), info.ID, exactQueuedNudgeParams{CityPath: dir, Config: &config.City{}, Provider: fake, SessionStore: store.Store, NudgeStore: store.Store}); err != nil {
+		t.Fatalf("reconcileExactQueuedNudge after input fence clears: %v", err)
+	}
+	if got := fake.CountCalls("Nudge", info.SessionName); got != 2 {
+		t.Fatalf("Nudge calls after fence clears = %d, want 2 including the fenced attempt", got)
+	}
+	state, err = nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState after input fence clears: %v", err)
+	}
+	if len(state.Pending)+len(state.InFlight)+len(state.Dead) != 0 {
+		t.Fatalf("queue not acknowledged after input fence clears: pending=%d in_flight=%d dead=%d", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	refetched, err = store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("refetch session after input fence clears: %v", err)
+	}
+	if refetched.Metadata[session.MetadataLastNudgeDeliveredAt] == "" {
+		t.Fatalf("session missing %s after delivery", session.MetadataLastNudgeDeliveredAt)
 	}
 }
 

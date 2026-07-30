@@ -1397,7 +1397,7 @@ func tryDeliverQueuedNudgesByPollerMatching(target nudgeTarget, store, sessStore
 	})
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
-		if errors.Is(err, runtime.ErrSessionNotFound) {
+		if errors.Is(err, runtime.ErrSessionNotFound) || errors.Is(err, runtime.ErrInputFenced) {
 			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
 				return false, errors.Join(bookkeepErr, recErr)
 			}

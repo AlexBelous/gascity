@@ -535,6 +535,12 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	if err := p.nudgeInputFence(name); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return nil
+		}
+		return err
+	}
 	// Wait for the agent to be idle before sending, unless disabled.
 	// This prevents interrupting active tool calls — the prompt is visible
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
@@ -544,6 +550,12 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
 		if err := p.tm.WaitForIdle(context.Background(), name, idleTimeout); err != nil {
+			if fenceErr := p.nudgeInputFence(name); fenceErr != nil {
+				if errors.Is(fenceErr, ErrSessionNotFound) || errors.Is(fenceErr, ErrNoServer) {
+					return nil
+				}
+				return fenceErr
+			}
 			// Not idle within the window. A mid-session Codex/GPT model-switch
 			// modal ("approaching rate limits — switch model?") blocks input and
 			// would otherwise hang the session; dismiss it (keep current model,
@@ -557,6 +569,12 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	if err := p.nudgeInputFence(name); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return nil
+		}
+		return err
+	}
 	var parts []string
 	for _, b := range content {
 		switch b.Type {
@@ -580,6 +598,12 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	message := strings.Join(parts, "\n")
 	if message == "" {
 		return nil
+	}
+	if err := p.nudgeInputFence(name); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return nil
+		}
+		return err
 	}
 
 	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
@@ -678,14 +702,35 @@ func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
 }
 
 func (p *Provider) unattendedSessionCensus(name string) (unattendedSessionCensus, error) {
-	out, err := p.tm.run("list-panes", "-s", "-t", "="+name, "-F", unattendedSessionCensusFormat)
-	if err != nil {
-		return unattendedSessionCensus{}, fmt.Errorf("stopping unattended tmux session %q: listing exact panes: %w", name, err)
-	}
-	return parseUnattendedSessionCensus(name, out)
+	return p.exactSessionPaneCensus(name, "stopping unattended tmux session")
 }
 
-func parseUnattendedSessionCensus(name, output string) (unattendedSessionCensus, error) {
+// nudgeInputFence proves that every pane in the exact named session is outside
+// copy mode before any input-affecting nudge path runs. An incomplete census is
+// unsafe for input too, so it is intentionally reported as a retryable fence.
+func (p *Provider) nudgeInputFence(name string) error {
+	census, err := p.exactSessionPaneCensus(name, "nudging tmux session")
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", runtime.ErrInputFenced, err)
+	}
+	if census.copyModePanes != 0 {
+		return fmt.Errorf("%w: tmux session %q has %d copy-mode panes", runtime.ErrInputFenced, name, census.copyModePanes)
+	}
+	return nil
+}
+
+func (p *Provider) exactSessionPaneCensus(name, operation string) (unattendedSessionCensus, error) {
+	out, err := p.tm.run("list-panes", "-s", "-t", "="+name, "-F", unattendedSessionCensusFormat)
+	if err != nil {
+		return unattendedSessionCensus{}, fmt.Errorf("%s %q: listing exact panes: %w", operation, name, err)
+	}
+	return parseExactSessionPaneCensus(name, operation, out)
+}
+
+func parseExactSessionPaneCensus(name, operation, output string) (unattendedSessionCensus, error) {
 	census := unattendedSessionCensus{
 		linkedWindows:  make(map[string]struct{}),
 		paneIdentities: make(map[string]struct{}),
@@ -693,27 +738,27 @@ func parseUnattendedSessionCensus(name, output string) (unattendedSessionCensus,
 	seenPanes := make(map[string]struct{})
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) == 1 && strings.TrimSpace(lines[0]) == "" {
-		return census, fmt.Errorf("stopping unattended tmux session %q: empty pane census", name)
+		return census, fmt.Errorf("%s %q: empty pane census", operation, name)
 	}
 	for index, line := range lines {
 		fields := strings.Split(line, "\t")
 		if len(fields) != 7 {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed pane census row %d", name, index+1)
+			return census, fmt.Errorf("%s %q: malformed pane census row %d", operation, name, index+1)
 		}
 		sessionID, sessionName, windowID, paneID := fields[0], fields[1], fields[2], fields[3]
 		if !wellFormedTmuxID(sessionID, '$') || !wellFormedTmuxID(windowID, '@') || !wellFormedTmuxID(paneID, '%') {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed identity in pane census row %d", name, index+1)
+			return census, fmt.Errorf("%s %q: malformed identity in pane census row %d", operation, name, index+1)
 		}
 		if sessionName != name {
-			return census, fmt.Errorf("stopping unattended tmux session %q: census row %d names session %q", name, index+1, sessionName)
+			return census, fmt.Errorf("%s %q: census row %d names session %q", operation, name, index+1, sessionName)
 		}
 		if census.sessionID == "" {
 			census.sessionID = sessionID
 		} else if census.sessionID != sessionID {
-			return census, fmt.Errorf("stopping unattended tmux session %q: mixed session identities in pane census", name)
+			return census, fmt.Errorf("%s %q: mixed session identities in pane census", operation, name)
 		}
 		if _, duplicate := seenPanes[paneID]; duplicate {
-			return census, fmt.Errorf("stopping unattended tmux session %q: duplicate pane %q in census", name, paneID)
+			return census, fmt.Errorf("%s %q: duplicate pane %q in census", operation, name, paneID)
 		}
 		seenPanes[paneID] = struct{}{}
 		census.paneIdentities[windowID+"\t"+paneID] = struct{}{}
@@ -721,23 +766,23 @@ func parseUnattendedSessionCensus(name, output string) (unattendedSessionCensus,
 
 		attached, err := parseNonnegativeTmuxCount(fields[4])
 		if err != nil {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed attachment count in pane census row %d", name, index+1)
+			return census, fmt.Errorf("%s %q: malformed attachment count in pane census row %d", operation, name, index+1)
 		}
 		if index == 0 {
 			census.attachedClients = attached
 		} else if census.attachedClients != attached {
-			return census, fmt.Errorf("stopping unattended tmux session %q: inconsistent attachment counts in pane census", name)
+			return census, fmt.Errorf("%s %q: inconsistent attachment counts in pane census", operation, name)
 		}
 		inMode, err := parseNonnegativeTmuxCount(fields[5])
 		if err != nil {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed copy-mode count in pane census row %d", name, index+1)
+			return census, fmt.Errorf("%s %q: malformed copy-mode count in pane census row %d", operation, name, index+1)
 		}
 		if inMode > 0 {
 			census.copyModePanes++
 		}
 		linked, err := parseNonnegativeTmuxCount(fields[6])
 		if err != nil {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed linked-window count in pane census row %d", name, index+1)
+			return census, fmt.Errorf("%s %q: malformed linked-window count in pane census row %d", operation, name, index+1)
 		}
 		if linked > 0 {
 			census.linkedWindows[windowID] = struct{}{}

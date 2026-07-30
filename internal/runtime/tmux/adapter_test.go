@@ -220,6 +220,9 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	if _, err := p.tm.run("copy-mode", "-t", secondPane); err != nil {
 		t.Fatalf("enter copy mode on second-window pane: %v", err)
 	}
+	if _, err := p.tm.run("select-window", "-t", "="+name+":^"); err != nil {
+		t.Fatalf("reselect input window after copy-mode setup: %v", err)
+	}
 	if err := p.StopUnattendedSession(name, token); err == nil || !strings.Contains(err.Error(), "copy-mode panes") {
 		t.Fatalf("second-window copy-mode stop = %v, want copy-mode park", err)
 	}
@@ -269,6 +272,105 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("named tmux socket still exists after exact cleanup: %v", err)
 	}
+	defaultAfter, defaultAfterErr := os.Lstat(defaultPath)
+	switch {
+	case errors.Is(defaultBeforeErr, os.ErrNotExist):
+		if !errors.Is(defaultAfterErr, os.ErrNotExist) {
+			t.Fatalf("default tmux socket was created: %v", defaultAfterErr)
+		}
+	case defaultBeforeErr != nil:
+		t.Fatalf("inspect default tmux socket before proof: %v", defaultBeforeErr)
+	case defaultAfterErr != nil:
+		t.Fatalf("default tmux socket changed during proof: %v", defaultAfterErr)
+	case !os.SameFile(defaultBefore, defaultAfter):
+		t.Fatal("default tmux socket identity changed during named-socket proof")
+	}
+}
+
+func TestProviderNudgeFencesCopyModeAcrossNamedSessionPanes(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-nudge-copy-fence-%d-%d", os.Getpid(), time.Now().UnixNano())
+	cfg.NudgeIdleTimeout = 0
+	p := NewProviderWithConfig(cfg)
+	name := "nudge-copy-fence"
+	socketPath := namedSocketPath(cfg.SocketName)
+	defaultPath := namedSocketPath("default")
+	defaultBefore, defaultBeforeErr := os.Lstat(defaultPath)
+	t.Cleanup(func() {
+		if err := p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("tear down exact named tmux server: %v", err)
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove exact named tmux socket: %v", err)
+		}
+	})
+
+	marker := filepath.Join(t.TempDir(), "nudge-marker")
+	message := fmt.Sprintf("copy-fence-marker-%d", time.Now().UnixNano())
+	signal := fmt.Sprintf("gc-nudge-copy-fence-%d", time.Now().UnixNano())
+	command := "while IFS= read -r line; do printf '%s\\n' \"$line\" >> " + shellquote.Quote(marker) + "; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(signal) + "; done"
+	if err := p.Start(context.Background(), name, runtime.Config{Command: command, ProviderName: "codex"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	secondPane, err := p.tm.run("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "="+name, "sleep 300")
+	if err != nil {
+		t.Fatalf("create second-window pane: %v", err)
+	}
+	if !wellFormedTmuxID(secondPane, '%') {
+		t.Fatalf("second-window pane ID = %q, want %%<digits>", secondPane)
+	}
+	if _, err := p.tm.run("select-window", "-t", "="+name+":^"); err != nil {
+		t.Fatalf("select input window: %v", err)
+	}
+	if _, err := p.tm.run("copy-mode", "-t", secondPane); err != nil {
+		t.Fatalf("enter copy mode on second-window pane: %v", err)
+	}
+
+	if err := p.Nudge(name, runtime.TextContent(message)); !errors.Is(err, runtime.ErrInputFenced) {
+		t.Fatalf("Nudge during copy mode = %v, want ErrInputFenced", err)
+	}
+	if err := p.NudgeNow(name, runtime.TextContent(message)); !errors.Is(err, runtime.ErrInputFenced) {
+		t.Fatalf("NudgeNow during copy mode = %v, want ErrInputFenced", err)
+	}
+	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read nudge marker while copy mode is active: %v", err)
+	} else if len(data) != 0 {
+		t.Fatalf("nudge marker = %q while copy mode is active, want no delivery", data)
+	}
+	mode, err := p.tm.run("display-message", "-t", secondPane, "-p", "#{pane_in_mode}")
+	if err != nil {
+		t.Fatalf("read copy mode after fenced nudge: %v", err)
+	}
+	if strings.TrimSpace(mode) != "1" {
+		t.Fatalf("copy mode after fenced nudge = %q, want 1", mode)
+	}
+
+	if _, err := p.tm.run("send-keys", "-t", secondPane, "-X", "cancel"); err != nil {
+		t.Fatalf("cancel copy mode on exact second pane: %v", err)
+	}
+	if _, err := p.tm.run("select-window", "-t", "="+name+":^"); err != nil {
+		t.Fatalf("reselect input window after copy-mode cancel: %v", err)
+	}
+	if err := p.NudgeNow(name, runtime.TextContent(message)); err != nil {
+		t.Fatalf("NudgeNow after copy mode cancels: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	defer cancel()
+	if _, err := p.tm.runCtx(ctx, "wait-for", signal); err != nil {
+		t.Fatalf("wait for flushed nudge marker: %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read flushed nudge marker: %v", err)
+	}
+	if got := strings.Split(strings.TrimSpace(string(data)), "\n"); len(got) != 1 || got[0] != message {
+		t.Fatalf("nudge marker = %q, want one %q", data, message)
+	}
+
 	defaultAfter, defaultAfterErr := os.Lstat(defaultPath)
 	switch {
 	case errors.Is(defaultBeforeErr, os.ErrNotExist):

@@ -398,6 +398,53 @@ func TestReconcilerPerfStopLatencyEndsAtProviderEntry(t *testing.T) {
 	}
 }
 
+func TestReconcilerPerfStopProviderSuppliesCompleteFreshDeath(t *testing.T) {
+	fixture, err := newReconcilerPerfStopFixture(t.TempDir(), "fresh-death")
+	if err != nil {
+		t.Fatalf("new stop fixture: %v", err)
+	}
+	target := gcruntime.LivenessTarget{
+		SessionID:            fixture.info.ID,
+		SessionName:          fixture.sessionName,
+		ProcessNames:         drainAckStopPendingProcessNames(fixture.cfg, fixture.info),
+		IncarnationStartedAt: drainAckIncarnationStartedAt(fixture.info),
+	}
+
+	before := gcruntime.ObserveFreshLiveness(fixture.provider, target)
+	if !before.Running || !before.Alive || !before.Complete {
+		t.Errorf("fresh liveness before stop = %+v, want live complete observation", before)
+	}
+	if err := fixture.provider.StopUnattendedSession(fixture.sessionName, fixture.info.InstanceToken); err != nil {
+		t.Fatalf("stop fixture runtime: %v", err)
+	}
+	after := gcruntime.ObserveFreshLiveness(fixture.provider, target)
+	if after.Running || after.Alive || !after.Complete {
+		t.Errorf("fresh liveness after stop = %+v, want absent complete observation", after)
+	}
+
+	oldTimeout := drainAckStopConfirmDeadTimeout
+	drainAckStopConfirmDeadTimeout = 0
+	defer func() { drainAckStopConfirmDeadTimeout = oldTimeout }()
+	if !confirmDrainAckRuntimeDead(
+		fixture.cityPath,
+		fixture.store,
+		fixture.provider,
+		fixture.cfg,
+		target.SessionID,
+		target.SessionName,
+		fixture.info.InstanceToken,
+		target.ProcessNames,
+		io.Discard,
+		target.IncarnationStartedAt,
+		true,
+	) {
+		t.Error("strict confirm-dead rejected complete fresh absence")
+	}
+	if got := fixture.provider.CountCalls("Stop", fixture.sessionName); got != 1 {
+		t.Fatalf("provider Stop calls = %d, want exactly 1", got)
+	}
+}
+
 func TestReconcilerPerfStopMismatchAndFailureAreNotSuccess(t *testing.T) {
 	tests := []struct {
 		name   string

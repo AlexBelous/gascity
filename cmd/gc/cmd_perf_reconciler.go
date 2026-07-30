@@ -574,6 +574,12 @@ func (p *reconcilerPerfStopProvider) StopUnattendedSession(name, expectedToken s
 	return p.Stop(name)
 }
 
+func (p *reconcilerPerfStopProvider) ObserveFreshLiveness(target gcruntime.LivenessTarget) gcruntime.Liveness {
+	liveness := gcruntime.ObserveLiveness(p.Fake, target.SessionName, target.ProcessNames)
+	liveness.Complete = true
+	return liveness
+}
+
 func (p *reconcilerPerfStopProvider) snapshotCalls() []reconcilerPerfStopCall {
 	p.mu.Lock()
 	defer p.mu.Unlock()

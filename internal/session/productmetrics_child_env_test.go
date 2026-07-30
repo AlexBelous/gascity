@@ -47,12 +47,16 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 	}
 }
 
+// waitForCompleteSnapshotRead is overridden in tests to simulate a writer
+// still mid-write without depending on real filesystem timing.
+var waitForCompleteSnapshotRead = os.ReadFile
+
 // waitForCompleteSnapshot requires the full line count, not just existence,
 // because a writer may create the file before it finishes writing (e.g.
 // shell redirect truncation) -- a short read is not done.
 func waitForCompleteSnapshot(path string, wantLines int, deadline time.Time) ([]byte, error) {
 	for {
-		data, err := os.ReadFile(path)
+		data, err := waitForCompleteSnapshotRead(path)
 		if err == nil {
 			lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 			if len(lines) == wantLines {
@@ -68,36 +72,31 @@ func waitForCompleteSnapshot(path string, wantLines int, deadline time.Time) ([]
 	}
 }
 
-// TestWaitForCompleteSnapshotIgnoresPartialRead deterministically reproduces
-// the truncation race from the bug report instead of relying on real
-// scheduling timing.
+// TestWaitForCompleteSnapshotIgnoresPartialRead reproduces the truncation
+// race from the bug report by injecting reads instead of racing real
+// goroutines against filesystem timing.
 func TestWaitForCompleteSnapshotIgnoresPartialRead(t *testing.T) {
-	dir := t.TempDir()
-	snapshot := filepath.Join(dir, "child.env")
-
-	if err := os.WriteFile(snapshot, []byte("only-one-line\n"), 0o600); err != nil {
-		t.Fatalf("write partial snapshot: %v", err)
-	}
-
+	partial := []byte("only-one-line\n")
 	full := []byte("1\nkeep-beads-setting\nkeep-otel-setting\n")
-	errCh := make(chan error, 1)
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		tmp := snapshot + ".tmp"
-		if err := os.WriteFile(tmp, full, 0o600); err != nil {
-			errCh <- err
-			return
+
+	var calls int
+	previous := waitForCompleteSnapshotRead
+	waitForCompleteSnapshotRead = func(string) ([]byte, error) {
+		calls++
+		if calls < 3 {
+			return partial, nil
 		}
-		errCh <- os.Rename(tmp, snapshot)
-	}()
+		return full, nil
+	}
+	t.Cleanup(func() { waitForCompleteSnapshotRead = previous })
 
 	deadline := time.Now().Add(testutil.ExecRaceTimeout)
-	data, err := waitForCompleteSnapshot(snapshot, 3, deadline)
+	data, err := waitForCompleteSnapshot("child.env", 3, deadline)
 	if err != nil {
 		t.Fatalf("waitForCompleteSnapshot: %v", err)
 	}
-	if err := <-errCh; err != nil {
-		t.Fatalf("complete snapshot in background: %v", err)
+	if calls != 3 {
+		t.Fatalf("waitForCompleteSnapshot read %d time(s), want 3 (must retry past partial reads)", calls)
 	}
 
 	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")

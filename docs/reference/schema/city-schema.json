@@ -1291,6 +1291,15 @@
           "description": "SessionReconciler selects keyed exact-start ownership and, when the current\nstore has a conditional writer, eligible desired-session status healing.\n\"off\" (the default) keeps both on the legacy fleet-wide reconciler. \"auto\"\ndegrades either family to legacy when its requirements are unavailable.\nOrphan and unsupported rows remain legacy-owned. \"require\" refuses startup\nonly when exact-start requirements are unavailable; a conditional-write\nrefusal instead parks heal candidates without disabling converged exact\nstarts. The value is boot-latched; changing it requires a controller restart.",
           "default": "off"
         },
+        "nudge_shadow": {
+          "type": "string",
+          "enum": [
+            "off",
+            "required"
+          ],
+          "description": "NudgeShadow selects whether the nudge-shadow path is required. Nil means\nomitted and resolves to the built-in \"off\" default; a non-nil value is an\nexplicit operator selection. The value is boot-latched; changing it\nrequires a controller restart.",
+          "default": "off"
+        },
         "patrol_interval": {
           "type": "string",
           "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",

@@ -1953,6 +1953,114 @@ func TestCityRuntimeSessionStartAntiEntropySeedsWithoutQueueAlarm(t *testing.T) 
 	}
 }
 
+func TestCityRuntimeSessionStartRestartUsesFreshSnapshotAfterPartialSeed(t *testing.T) {
+	const oldFleetSize = sessionStartSeedPageSize + 1
+	maxWakes := 1
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	oldIDs := make([]string, 0, oldFleetSize)
+	for i := range oldFleetSize {
+		name := fmt.Sprintf("old-%03d", i)
+		bead := env.createSessionBead(name, "worker")
+		if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+			t.Fatalf("request old wake %d: %v", i, err)
+		}
+		oldIDs = append(oldIDs, bead.ID)
+	}
+
+	cityPath := t.TempDir()
+	cs := coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto)
+	cs.cityPath = cityPath
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 env.cfg,
+		sp:                  env.sp,
+		cs:                  cs,
+		rec:                 events.Discard,
+		sessionStartOptions: env.startOptions,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	t.Cleanup(cr.stopSessionStartController)
+
+	oldAdmission := make(chan string, 1)
+	oldReconcileStarted := make(chan struct{})
+	var factoryCalls atomic.Int32
+	previousFactory := newCitySessionStartController
+	newCitySessionStartController = func(opts sessionStartControllerOptions) (*sessionStartController, error) {
+		if factoryCalls.Add(1) == 1 {
+			opts.Reconcile = func(ctx context.Context, admission sessionStartAdmission) error {
+				oldAdmission <- admission.SessionID
+				close(oldReconcileStarted)
+				<-ctx.Done()
+				return ctx.Err()
+			}
+		}
+		return previousFactory(opts)
+	}
+	t.Cleanup(func() { newCitySessionStartController = previousFactory })
+
+	oldSnapshot := cr.loadSessionBeadSnapshot()
+	if got := len(oldSnapshot.OpenInfos()); got != oldFleetSize {
+		t.Fatalf("old authoritative snapshot rows = %d, want %d", got, oldFleetSize)
+	}
+	if err := cr.ensureSessionStartController(context.Background(), oldSnapshot); err != nil {
+		t.Fatalf("start old keyed child: %v", err)
+	}
+	oldController := cr.sessionStartController
+	awaitClose(t, oldReconcileStarted, "old partial-snapshot reconciliation")
+	if got := <-oldAdmission; got != oldIDs[0] {
+		t.Fatalf("old partial snapshot reconciled %q, want first row %q", got, oldIDs[0])
+	}
+
+	cr.stopSessionStartController()
+	if got := oldController.Pending(); got != 0 {
+		t.Fatalf("stopped old controller pending admissions = %d, want 0", got)
+	}
+
+	if closed, err := env.store.CloseAll(oldIDs, nil); err != nil || closed != len(oldIDs) {
+		t.Fatalf("close old durable rows = %d, %v; want %d", closed, err, len(oldIDs))
+	}
+	if err := env.store.Reopen(oldIDs[0]); err != nil {
+		t.Fatalf("restore first durable row: %v", err)
+	}
+	current := env.createSessionBead("current-after-restore", "worker")
+	if err := env.store.SetMetadataBatch(current.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request current wake: %v", err)
+	}
+
+	if err := cr.restartSessionStartController(context.Background()); err != nil {
+		t.Fatalf("restart keyed child from durable authority: %v", err)
+	}
+	currentController := cr.sessionStartController
+	if currentController == nil || currentController == oldController {
+		t.Fatal("restart did not install a fresh keyed child")
+	}
+	awaitSessionStartSeedInactive(t, currentController, "fresh authoritative snapshot")
+	awaitCond(t, func() bool { return currentController.Pending() == 0 }, "fresh snapshot reconciliations")
+
+	if got := factoryCalls.Load(); got != 2 {
+		t.Fatalf("keyed controller constructions = %d, want old and fresh", got)
+	}
+	if got := env.sp.CountCalls("Start", "old-000"); got != 1 {
+		t.Fatalf("restored row start calls = %d, want 1 from fresh snapshot", got)
+	}
+	if got := env.sp.CountCalls("Start", "current-after-restore"); got != 1 {
+		t.Fatalf("current row start calls = %d, want 1 from fresh snapshot", got)
+	}
+	for i := 1; i < oldFleetSize; i++ {
+		name := fmt.Sprintf("old-%03d", i)
+		if got := env.sp.CountCalls("Start", name); got != 0 {
+			t.Fatalf("closed old row %q start calls = %d, want 0", name, got)
+		}
+	}
+}
+
 func TestCityRuntimeSessionStartConfigMutationKeepsOneOwner(t *testing.T) {
 	stubSessionStartCityStoreOpen(t)
 	tests := []struct {
@@ -2520,5 +2628,116 @@ func coherentSessionStartControllerStateForTest(
 		rolloutFlags:                rollout.ForTest(rollout.WithSessionReconciler(mode)),
 		sessionStartGeneration:      1,
 		sessionStartStoreGeneration: 1,
+	}
+}
+
+type indexedExactSessionStartBenchmarkStore struct {
+	beads.Store
+	byID map[string]beads.Bead
+}
+
+func (s *indexedExactSessionStartBenchmarkStore) Get(id string) (beads.Bead, error) {
+	bead, ok := s.byID[id]
+	if !ok {
+		return beads.Bead{}, fmt.Errorf("getting benchmark bead %q: %w", id, beads.ErrNotFound)
+	}
+	return bead, nil
+}
+
+// exactSessionStartBenchmarkProbeStore counts the one setup reconciliation
+// that proves the benchmark enters the exact-key path. Timed iterations use
+// the indexed store directly.
+type exactSessionStartBenchmarkProbeStore struct {
+	beads.Store
+	gets int
+}
+
+func (s *exactSessionStartBenchmarkProbeStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.Store.Get(id)
+}
+
+func BenchmarkExactSessionStartPerKeyFleetSize(b *testing.B) {
+	for _, fleetSize := range []int{1, 1000, 10000} {
+		b.Run(fmt.Sprint(fleetSize), func(b *testing.B) {
+			b.StopTimer()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+			}
+			rows := make([]beads.Bead, fleetSize)
+			byID := make(map[string]beads.Bead, fleetSize)
+			for i := range fleetSize {
+				name := fmt.Sprintf("worker-%05d", i)
+				row := beads.Bead{
+					ID:       fmt.Sprintf("gcs-benchmark-%05d", i),
+					Title:    name,
+					Type:     session.BeadType,
+					Status:   "open",
+					Labels:   []string{session.LabelSession},
+					Revision: 1,
+					Metadata: map[string]string{
+						"session_name":         name,
+						"agent_name":           name,
+						"template":             "worker",
+						"session_origin":       "manual",
+						"state":                string(session.StateCreating),
+						"pending_create_claim": "true",
+						"generation":           "1",
+						"instance_token":       "benchmark-token",
+					},
+				}
+				rows[i] = row
+				byID[row.ID] = row
+			}
+			target := rows[len(rows)-1]
+			store := &indexedExactSessionStartBenchmarkStore{
+				Store: beads.NewMemStoreFrom(fleetSize, rows, nil),
+				byID:  byID,
+			}
+			provider := runtime.NewFake()
+			if err := provider.Start(context.Background(), target.Metadata["session_name"], runtime.Config{Command: "true"}); err != nil {
+				b.Fatalf("start converged target: %v", err)
+			}
+			params := exactSessionStartParams{
+				CityPath: b.TempDir(),
+				CityName: "test-city",
+				Config:   cfg,
+				Provider: provider,
+				Store:    store,
+				Recorder: events.Discard,
+				Stdout:   io.Discard,
+				Stderr:   io.Discard,
+			}
+			admission := sessionStartAdmission{
+				SessionID: target.ID,
+				Source:    sessionStartAdmissionAntiEntropy,
+			}
+			probeStore := &exactSessionStartBenchmarkProbeStore{Store: store}
+			params.Store = probeStore
+			owner, err := reconcileExactSessionStartWithOwner(context.Background(), admission, params)
+			if err != nil {
+				b.Fatalf("pre-benchmark exact reconciliation: %v", err)
+			}
+			if owner != exactSessionStartKeyedOwner {
+				b.Fatalf("pre-benchmark owner = %v, want keyed", owner)
+			}
+			if got := probeStore.gets; got != 1 {
+				b.Fatalf("pre-benchmark indexed Get calls = %d, want 1", got)
+			}
+			if got := provider.CountCalls("IsRunning", target.Metadata["session_name"]); got == 0 {
+				b.Fatal("pre-benchmark exact reconciliation did not observe the target runtime")
+			}
+			params.Store = store
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.StartTimer()
+			for i := 0; i < b.N; i++ {
+				if err := reconcileExactSessionStart(context.Background(), admission, params); err != nil {
+					b.Fatalf("reconcile converged exact key: %v", err)
+				}
+			}
+		})
 	}
 }

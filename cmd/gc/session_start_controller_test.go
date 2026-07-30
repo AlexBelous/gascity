@@ -687,16 +687,63 @@ func TestSessionStartControllerCompleteAuthoritativeCensusKeepsNewerExactAdmissi
 }
 
 func TestSessionStartControllerIncompleteAuthoritativeCensusesDoNotCullQueuedAdmission(t *testing.T) {
-	t.Run("producer error", func(t *testing.T) {
-		controller := newSessionStartControllerWithQueuedAuthoritativeAdmission(context.Background(), t)
+	t.Run("producer error after partial page", func(t *testing.T) {
+		releaseBlockers := make(chan struct{})
+		var blockersStarted atomic.Int32
+		controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+			Workers:     2,
+			MaxDistinct: 4,
+			MaxRetries:  1,
+			Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+				if strings.HasPrefix(admission.SessionID, "gcs-blocker-") {
+					blockersStarted.Add(1)
+					<-releaseBlockers
+				}
+				return nil
+			},
+		})
+		t.Cleanup(func() { close(releaseBlockers) })
+		for i := range 2 {
+			if _, err := controller.Admit(fmt.Sprintf("gcs-blocker-%d", i), sessionStartAdmissionExplicitWake); err != nil {
+				t.Fatalf("admit blocker %d: %v", i, err)
+			}
+		}
+		awaitCond(t, func() bool { return blockersStarted.Load() == 2 }, "both workers blocked")
+
+		first := true
 		if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+			if first {
+				first = false
+				return sessionStartAuthoritativeSeedResult{SessionID: "gcs-old"}
+			}
+			return sessionStartAuthoritativeSeedResult{Complete: true}
+		}); err != nil {
+			t.Fatalf("start initial authoritative census: %v", err)
+		}
+		awaitSessionStartSeedInactive(t, controller, "initial complete authoritative census")
+		oldBefore, ok := controller.readAdmission("gcs-old")
+		if !ok {
+			t.Fatal("old anti-entropy admission missing before failed census")
+		}
+
+		var producerCalls atomic.Int32
+		if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+			if producerCalls.Add(1) == 1 {
+				return sessionStartAuthoritativeSeedResult{SessionID: "gcs-seen"}
+			}
 			return sessionStartAuthoritativeSeedResult{Err: errors.New("pagination failed")}
 		}); err != nil {
 			t.Fatalf("start failed census: %v", err)
 		}
 		awaitSessionStartSeedInactive(t, controller, "failed authoritative census")
-		if _, ok := controller.readAdmission("gcs-old"); !ok {
-			t.Fatal("failed census culled queued old admission")
+		if got := producerCalls.Load(); got != 2 {
+			t.Fatalf("failed census producer calls = %d, want yielded key then error", got)
+		}
+		if _, ok := controller.readAdmission("gcs-seen"); !ok {
+			t.Fatal("failed census did not admit its yielded key")
+		}
+		if oldAfter, ok := controller.readAdmission("gcs-old"); !ok || oldAfter.Culled || oldAfter.Version != oldBefore.Version {
+			t.Fatalf("unseen queued admission after failed census = (%+v, %t), want unchanged %+v", oldAfter, ok, oldBefore)
 		}
 		if !controller.TakeAuditRequest() {
 			t.Fatal("failed census did not request a follow-up audit")

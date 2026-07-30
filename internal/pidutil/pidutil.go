@@ -190,6 +190,13 @@ func NormalizeArgv(argv []string) []string {
 	return out
 }
 
+// ChildPIDs is a stub pending the GREEN step of ga-gxmz9n: it does not yet
+// enumerate anything, which is what makes the RED tests for it fail on
+// assertions rather than on a missing symbol.
+func ChildPIDs(_ int) ([]int, error) {
+	return nil, nil
+}
+
 func psReportsZombie(pid int) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), psZombieTimeout)
 	defer cancel()

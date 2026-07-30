@@ -46,12 +46,13 @@ type sessionWaitDependencyShadowJourneyTraceShow struct {
 }
 
 type sessionWaitDependencyShadowJourneyTraceRecord struct {
-	Seq         uint64 `json:"seq"`
-	RecordID    string `json:"record_id"`
-	RecordType  string `json:"record_type"`
-	SiteCode    string `json:"site_code"`
-	OutcomeCode string `json:"outcome_code"`
-	Fields      struct {
+	Seq                  uint64 `json:"seq"`
+	RecordID             string `json:"record_id"`
+	ControllerInstanceID string `json:"controller_instance_id"`
+	RecordType           string `json:"record_type"`
+	SiteCode             string `json:"site_code"`
+	OutcomeCode          string `json:"outcome_code"`
+	Fields               struct {
 		Cause         string `json:"cause"`
 		WaitOutcome   string `json:"wait_outcome"`
 		StartOutcome  string `json:"start_outcome"`

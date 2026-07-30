@@ -45,7 +45,7 @@ func TestSessionReconcilerColdDisableExactBinaryJourney(t *testing.T) {
 		t.Skip("cold-disable journey requires an isolated named tmux server")
 	}
 
-	cityDir := setupReconcilerCityWithDaemon(t, `session_reconciler = "off"
+	cityDir := setupReconcilerCityWithDaemon(t, `session_reconciler = "auto"
 
 [[agent]]
 name = "worker"
@@ -75,7 +75,7 @@ tick_debounce = "1s"
 	startIsolatedSupervisor(t, env, gcHome)
 	waitForControllerReady(t, cityDir, 15*time.Second)
 
-	initial := sessionReconcilerColdDisableReadStatus(t, cityDir)
+	initial := sessionReconcilerColdDisableWaitForMode(t, cityDir, "auto", "keyed")
 	if out, err := gc(cityDir, "trace", "start", "--template", "worker", "--for", "2m", "--level", "detail"); err != nil {
 		t.Fatalf("arm worker trace: %v\n%s", err, out)
 	}
@@ -83,33 +83,41 @@ tick_debounce = "1s"
 	before := sessionReconcilerColdDisableNewSession(t, cityDir, "before-cutoff")
 	waitForAgentRunning(t, cityDir, "before-cutoff", 45*time.Second)
 	beforeIdentity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, before.SessionName)
-	if _, _, err := sessionLifecycleStatusShadowJourneyWaitForWitness(
+	sessionReconcilerColdDisableEmitSessionUpdate(t, cityDir, before.SessionID)
+	beforeTrace, _, err := sessionLifecycleStatusShadowJourneyWaitForWitness(
 		t.Context(),
 		cityDir,
 		before.SessionID,
 		initial.HeadSeq,
 		15*time.Second,
-		"start-selection",
-		sessionReconcilerColdDisableFirstShadowRecord,
-	); err != nil {
-		t.Fatalf("initial START-shadow comparison did not converge: %v", err)
+		"enabled lifecycle-status",
+		sessionLifecycleStatusShadowJourneyStatusWitnesses,
+	)
+	if err != nil {
+		t.Fatalf("initial enabled lifecycle-status comparison did not converge: %v", err)
 	}
-	sessionReconcilerColdDisableReadStatus(t, cityDir)
+	beforeShadows := sessionLifecycleStatusShadowJourneyStatusWitnesses(beforeTrace, before.SessionID, initial.HeadSeq)
+	if len(beforeShadows) != 1 || !sessionReconcilerColdDisableIsEnabledWitness(beforeShadows[0]) || beforeShadows[0].ControllerInstanceID == "" {
+		t.Fatalf("initial enabled lifecycle-status records = %+v, want exactly one converged no-effect record with controller generation", beforeShadows)
+	}
+	retiredGeneration := beforeShadows[0].ControllerInstanceID
+	sessionReconcilerColdDisableWaitForMode(t, cityDir, "auto", "keyed")
 
 	if out, err := gc(cityDir, "trace", "stop", "--template", "worker"); err != nil {
 		t.Fatalf("disarm worker trace: %v\n%s", err, out)
 	}
-	disarmed := sessionReconcilerColdDisableReadStatus(t, cityDir)
+	disarmed := sessionReconcilerColdDisableWaitForMode(t, cityDir, "auto", "keyed")
 	if len(disarmed.ActiveArms) != 0 {
 		t.Fatalf("trace arms after disarm = %+v, want none", disarmed.ActiveArms)
 	}
-	sessionReconcilerColdDisableInstallOffConfig(t, cityDir, env, before.SessionName)
+	sessionReconcilerColdDisableInstallModeConfig(t, cityDir, env, before.SessionName, "auto", "keyed", "off")
 
 	oldPID := sessionReconcilerColdDisableSupervisorPID(t, env)
 	if err := syscall.Kill(oldPID, syscall.SIGTERM); err != nil {
 		t.Fatalf("SIGTERM test-owned supervisor %d: %v", oldPID, err)
 	}
 	sessionReconcilerColdDisableWaitPIDGone(t, oldPID)
+	retiredShadowCount := sessionReconcilerColdDisableShadowCount(t, cityDir, retiredGeneration)
 	if got := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, before.SessionName); got != beforeIdentity {
 		t.Fatalf("tmux identity changed during preserve shutdown: before=%q after=%q", beforeIdentity, got)
 	}
@@ -156,6 +164,82 @@ tick_debounce = "1s"
 	sessionReconcilerColdDisableReadStatus(t, cityDir)
 	if got := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, before.SessionName); got != beforeIdentity {
 		t.Fatalf("tmux identity changed across cold disable: before=%q after=%q", beforeIdentity, got)
+	}
+	offGeneration := sessionReconcilerColdDisableProveOffSuccessor(t, cityDir, retiredGeneration, retiredShadowCount)
+
+	// Re-enabling must start a fresh controller generation; never let an old
+	// shadow observer resume after the cold-disable boundary.
+	sessionReconcilerColdDisableReenableAndProveFreshGeneration(t, cityDir, env, gcHome, before, retiredGeneration, offGeneration, retiredShadowCount)
+}
+
+func sessionReconcilerColdDisableProveOffSuccessor(t *testing.T, cityDir, retiredGeneration string, retiredShadowCount int) string {
+	t.Helper()
+	if out, err := gc(cityDir, "trace", "start", "--template", "worker", "--for", "2m", "--level", "detail"); err != nil {
+		t.Fatalf("arm worker trace under off successor: %v\n%s", err, out)
+	}
+	status := sessionReconcilerColdDisableReadStatus(t, cityDir)
+	duringOff := sessionReconcilerColdDisableNewSession(t, cityDir, "during-off")
+	waitForAgentRunning(t, cityDir, "during-off", 45*time.Second)
+	if bead := sessionLifecycleStatusShadowJourneyReadBead(t, cityDir, duringOff.SessionID); bead.Metadata["state"] != "active" && bead.Metadata["state"] != "awake" {
+		t.Fatalf("during-off durable session state = %q, want active/awake", bead.Metadata["state"])
+	}
+	if identity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, duringOff.SessionName); identity == "" {
+		t.Fatal("during-off runtime identity is empty")
+	}
+	trace, _, err := sessionLifecycleStatusShadowJourneyWaitForWitness(t.Context(), cityDir, duringOff.SessionID, status.HeadSeq, 15*time.Second, "off-successor start-selection", sessionReconcilerColdDisableFirstShadowRecord)
+	if err != nil {
+		t.Fatalf("off-successor START-shadow comparison did not converge: %v", err)
+	}
+	shadows := sessionReconcilerColdDisableShadowRecords(trace, duringOff.SessionID, status.HeadSeq)
+	if len(shadows) == 0 || shadows[0].ControllerInstanceID == "" || shadows[0].ControllerInstanceID == retiredGeneration {
+		t.Fatalf("off-successor START-shadow records = %+v, want a successor generation distinct from %q", shadows, retiredGeneration)
+	}
+	offGeneration := shadows[0].ControllerInstanceID
+	for _, shadow := range shadows[1:] {
+		if shadow.ControllerInstanceID != offGeneration {
+			t.Fatalf("off-successor START-shadow generations = %+v, want only %q", shadows, offGeneration)
+		}
+	}
+	if got := sessionReconcilerColdDisableShadowCount(t, cityDir, retiredGeneration); got != retiredShadowCount {
+		t.Fatalf("retired controller generation %q advanced shadow metrics after off-successor stimulus: before=%d after=%d", retiredGeneration, retiredShadowCount, got)
+	}
+	if out, err := gc(cityDir, "trace", "stop", "--template", "worker"); err != nil {
+		t.Fatalf("disarm worker trace under off successor: %v\n%s", err, out)
+	}
+	if disarmed := sessionReconcilerColdDisableReadStatus(t, cityDir); len(disarmed.ActiveArms) != 0 {
+		t.Fatalf("trace arms after off-successor disarm = %+v, want none", disarmed.ActiveArms)
+	}
+	return offGeneration
+}
+
+func sessionReconcilerColdDisableReenableAndProveFreshGeneration(t *testing.T, cityDir string, env []string, gcHome string, before sessionLifecycleStatusShadowJourneyNew, retiredGeneration, offGeneration string, retiredShadowCount int) {
+	t.Helper()
+	sessionReconcilerColdDisableInstallModeConfig(t, cityDir, env, before.SessionName, "off", "legacy", "auto")
+	oldPID := sessionReconcilerColdDisableSupervisorPID(t, env)
+	if err := syscall.Kill(oldPID, syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM test-owned off supervisor %d for re-enable: %v", oldPID, err)
+	}
+	sessionReconcilerColdDisableWaitPIDGone(t, oldPID)
+	startIsolatedSupervisor(t, env, gcHome)
+	sessionReconcilerColdDisableWaitForMode(t, cityDir, "auto", "keyed")
+
+	if out, err := gc(cityDir, "trace", "start", "--template", "worker", "--for", "2m", "--level", "detail"); err != nil {
+		t.Fatalf("arm worker trace after re-enable: %v\n%s", err, out)
+	}
+	status := sessionReconcilerColdDisableWaitForMode(t, cityDir, "auto", "keyed")
+	after := sessionReconcilerColdDisableNewSession(t, cityDir, "after-reenable")
+	waitForAgentRunning(t, cityDir, "after-reenable", 45*time.Second)
+	sessionReconcilerColdDisableEmitSessionUpdate(t, cityDir, after.SessionID)
+	trace, _, err := sessionLifecycleStatusShadowJourneyWaitForWitness(t.Context(), cityDir, after.SessionID, status.HeadSeq, 15*time.Second, "re-enabled lifecycle-status", sessionLifecycleStatusShadowJourneyStatusWitnesses)
+	if err != nil {
+		t.Fatalf("re-enabled lifecycle-status comparison did not converge: %v", err)
+	}
+	shadows := sessionLifecycleStatusShadowJourneyStatusWitnesses(trace, after.SessionID, status.HeadSeq)
+	if len(shadows) != 1 || !sessionReconcilerColdDisableIsEnabledWitness(shadows[0]) || shadows[0].ControllerInstanceID == "" || shadows[0].ControllerInstanceID == retiredGeneration || shadows[0].ControllerInstanceID == offGeneration {
+		t.Fatalf("re-enabled lifecycle-status records = %+v, want one converged no-effect fresh generation distinct from retired %q and off %q", shadows, retiredGeneration, offGeneration)
+	}
+	if got := sessionReconcilerColdDisableShadowCount(t, cityDir, retiredGeneration); got != retiredShadowCount {
+		t.Fatalf("retired controller generation %q advanced shadow metrics after re-enable: before=%d after=%d", retiredGeneration, retiredShadowCount, got)
 	}
 }
 
@@ -230,6 +314,10 @@ func sessionReconcilerColdDisableAssertOfflineStatus(t *testing.T, cityDir strin
 }
 
 func sessionReconcilerColdDisableReadStatus(t *testing.T, cityDir string) sessionReconcilerColdDisableStatus {
+	return sessionReconcilerColdDisableWaitForMode(t, cityDir, "off", "legacy")
+}
+
+func sessionReconcilerColdDisableWaitForMode(t *testing.T, cityDir, mode, owner string) sessionReconcilerColdDisableStatus {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), sessionReconcilerColdDisableTimeout)
 	defer cancel()
@@ -243,13 +331,13 @@ func sessionReconcilerColdDisableReadStatus(t *testing.T, cityDir string) sessio
 		}
 		got := status.SessionReconciler
 		if err == nil && status.ControllerRunning && got.SchemaVersion == "1" && got.Available &&
-			got.ConfiguredMode == "off" && got.EffectiveOwner == "legacy" &&
+			got.ConfiguredMode == mode && got.EffectiveOwner == owner &&
 			got.PendingKeys == 0 && !got.AuditPending {
 			return status
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("waiting for exact available off/legacy tuple with no keyed owner: %v; status=%+v error=%v", ctx.Err(), status, err)
+			t.Fatalf("waiting for exact available %s/%s tuple with no keyed owner: %v; status=%+v error=%v", mode, owner, ctx.Err(), status, err)
 		case <-ticker.C:
 		}
 	}
@@ -271,6 +359,30 @@ func sessionReconcilerColdDisableNewSession(t *testing.T, cityDir, alias string)
 	return created
 }
 
+func sessionReconcilerColdDisableEmitSessionUpdate(t *testing.T, cityDir, sessionID string) {
+	t.Helper()
+	out, err := runCommand(cityDir, replaceEnv(commandEnvForDir(cityDir, false), "GC_BEADS", "file"), integrationBDCommandTimeout,
+		bdBinary, "update", sessionID, "--set-metadata", "state=awake", "--set-metadata", "wake_request=explicit")
+	if err != nil {
+		t.Fatalf("stage exact-start ownership for %s: %v\n%s", sessionID, err, out)
+	}
+	out, err = gc(cityDir, "event", "emit", "bead.updated",
+		"--subject", sessionID,
+		"--bead-payload", sessionID,
+		"--actor", "bd-hook",
+		"--json")
+	if err != nil {
+		t.Fatalf("emit typed session update for %s: %v\n%s", sessionID, err, out)
+	}
+	var emitted sessionWaitDependencyShadowJourneyEventEmit
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &emitted); err != nil {
+		t.Fatalf("decode typed session update for %s: %v\n%s", sessionID, err, out)
+	}
+	if !emitted.HasPayload || !emitted.Submitted {
+		t.Fatalf("typed session update for %s = %+v, want submitted payload", sessionID, emitted)
+	}
+}
+
 func sessionReconcilerColdDisableShadowRecords(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, afterSeq uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
 	var matches []sessionWaitDependencyShadowJourneyTraceRecord
 	for _, record := range trace.Records {
@@ -289,8 +401,35 @@ func sessionReconcilerColdDisableFirstShadowRecord(trace sessionWaitDependencySh
 	return matches[:1]
 }
 
-func sessionReconcilerColdDisableInstallOffConfig(t *testing.T, cityDir string, env []string, sessionName string) {
+func sessionReconcilerColdDisableIsEnabledWitness(record sessionWaitDependencyShadowJourneyTraceRecord) bool {
+	return record.SiteCode == "lifecycle.status.shadow" &&
+		record.RecordType == "operation" &&
+		(record.Fields.Admission == "in_process" || record.Fields.Admission == "socket") &&
+		record.Fields.StatusOutcome == "noop" &&
+		record.Fields.StatusReason == "converged" &&
+		record.Fields.EffectApplied != nil && !*record.Fields.EffectApplied
+}
+
+func sessionReconcilerColdDisableShadowCount(t *testing.T, cityDir, controllerGeneration string) int {
 	t.Helper()
+	trace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+	if err != nil {
+		t.Fatalf("read shadow metrics: %v", err)
+	}
+	count := 0
+	for _, record := range trace.Records {
+		if strings.Contains(record.SiteCode, ".shadow") && record.ControllerInstanceID == controllerGeneration {
+			count++
+		}
+	}
+	return count
+}
+
+func sessionReconcilerColdDisableInstallModeConfig(t *testing.T, cityDir string, env []string, sessionName, fromMode, fromOwner, mode string) {
+	t.Helper()
+	if mode != "off" && mode != "auto" {
+		t.Fatalf("unsupported session reconciler mode %q", mode)
+	}
 	configPath := filepath.Join(cityDir, "city.toml")
 	info, err := os.Lstat(configPath)
 	if err != nil {
@@ -305,7 +444,7 @@ func sessionReconcilerColdDisableInstallOffConfig(t *testing.T, cityDir string, 
 	}
 	beforePID := sessionReconcilerColdDisableSupervisorPID(t, env)
 	beforeIdentity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, sessionName)
-	beforeStatus := sessionReconcilerColdDisableReadStatus(t, cityDir).SessionReconciler
+	beforeStatus := sessionReconcilerColdDisableWaitForMode(t, cityDir, fromMode, fromOwner).SessionReconciler
 	if matches := sessionReconcilerColdDisableAssignment.FindAll(current, -1); len(matches) != 1 {
 		t.Fatalf("session_reconciler assignments = %d, want exactly 1", len(matches))
 	}
@@ -335,22 +474,22 @@ func sessionReconcilerColdDisableInstallOffConfig(t *testing.T, cityDir string, 
 	if got := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, sessionName); got != beforeIdentity {
 		t.Fatalf("tmux identity changed after malformed candidate: before=%q after=%q", beforeIdentity, got)
 	}
-	if got := sessionReconcilerColdDisableReadStatus(t, cityDir).SessionReconciler; got != beforeStatus {
+	if got := sessionReconcilerColdDisableWaitForMode(t, cityDir, fromMode, fromOwner).SessionReconciler; got != beforeStatus {
 		t.Fatalf("reconciler status changed after malformed candidate: before=%+v after=%+v", beforeStatus, got)
 	}
-	off := sessionReconcilerColdDisableAssignment.ReplaceAll(current, []byte(`${1}"off"${2}`))
-	if err := fsys.WriteFileAtomic(fsys.OSFS{}, candidate, off, info.Mode().Perm()); err != nil {
-		t.Fatalf("write same-directory cold-disable candidate: %v", err)
+	next := sessionReconcilerColdDisableAssignment.ReplaceAll(current, []byte(fmt.Sprintf(`${1}"%s"${2}`, mode)))
+	if err := fsys.WriteFileAtomic(fsys.OSFS{}, candidate, next, info.Mode().Perm()); err != nil {
+		t.Fatalf("write same-directory %s candidate: %v", mode, err)
 	}
 	candidateInfo, err := os.Lstat(candidate)
 	if err != nil || !candidateInfo.Mode().IsRegular() || candidateInfo.Mode()&os.ModeSymlink != 0 {
-		t.Fatalf("cold-disable candidate is not a regular file: info=%v err=%v", candidateInfo, err)
+		t.Fatalf("%s candidate is not a regular file: info=%v err=%v", mode, candidateInfo, err)
 	}
 	if out, err := gc(cityDir, "config", "show", "--validate", "--root-file", candidate); err != nil {
-		t.Fatalf("validate cold-disable candidate: %v\n%s", err, out)
+		t.Fatalf("validate %s candidate: %v\n%s", mode, err, out)
 	}
 	if err := os.Rename(candidate, configPath); err != nil {
-		t.Fatalf("atomically install cold-disable candidate: %v", err)
+		t.Fatalf("atomically install %s candidate: %v", mode, err)
 	}
 }
 

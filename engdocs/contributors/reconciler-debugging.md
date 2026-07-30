@@ -56,6 +56,60 @@ When you are done:
 gc trace stop --template repo/polecat
 ```
 
+## Cold-disable and re-enable the keyed reconciler
+
+`session_reconciler` is boot-latched: validate and atomically replace the city
+root, then restart the supervisor. There is no `gc config set` command for this
+field. Run the following from the city root to cold-disable it. The candidate is
+in the same directory as `city.toml`, so the final rename is atomic.
+
+> **Warning:** `gc supervisor stop --wait` is the portable supported path, but
+> it is machine-wide and destructive to live runtime state: it stops every
+> managed city and its live sessions. Durable work survives and can converge
+> again after restart, but tmux identities are not preserved. There is no
+> universal CLI command for a preserve-in-place supervisor restart today.
+
+```bash
+set -eu
+candidate=.city.toml.reconciler-next
+trap 'rm -f "$candidate"' EXIT
+awk '
+  /^[[:space:]]*session_reconciler[[:space:]]*=/ {
+    if (++n != 1) exit 42
+    sub(/"[^"]*"/, "\"off\"")
+  }
+  { print }
+  END { if (n != 1) exit 42 }
+' city.toml > "$candidate"
+gc config show --validate --root-file "$candidate"
+mv -f "$candidate" city.toml
+gc supervisor stop --wait
+gc supervisor start
+gc trace status
+```
+
+The final status must report `configured mode: off` and `effective owner:
+legacy`. Keep any incident trace separately; after the old supervisor exits its
+`controller_instance_id` must not appear on new shadow records.
+
+The exact-binary cold-disable acceptance journey also covers service-managed
+preserve semantics: its test-owned supervisor opts into preserve-on-SIGTERM and
+proves tmux identity continuity. That is a separate service configuration, not
+a property of the portable copy/paste procedure above.
+
+To re-enable the rollout path, repeat the same sequence with `"auto"` in place
+of `"off"`. `gc trace status` must then report `configured mode: auto` and,
+when the keyed capability is available, `effective owner: keyed`. Start a fresh,
+bounded trace arm before the reproduction:
+
+```bash
+gc trace start --template repo/polecat --for 20m --level detail
+gc trace show --template repo/polecat --since 20m --json > /tmp/reconciler-after-reenable.json
+```
+
+New records must carry a different `controller_instance_id`; do not treat old
+records in the append-only trace store as activity by the new controller.
+
 ## What To Send An Agent
 
 Point the next agent at these artifacts:

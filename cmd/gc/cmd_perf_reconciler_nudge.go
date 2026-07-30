@@ -175,17 +175,6 @@ func newReconcilerPerfNudgeFixture(workspacePath, arm, pairID string) (*reconcil
 	}, nil
 }
 
-func measureLegacyReconcilerPerfNudge(ctx context.Context, workspacePath, pairID string) (reconcilerPerfNudgeMeasurement, error) {
-	if err := ctx.Err(); err != nil {
-		return reconcilerPerfNudgeMeasurement{}, err
-	}
-	fixture, err := newReconcilerPerfNudgeFixture(workspacePath, "legacy", pairID)
-	if err != nil {
-		return reconcilerPerfNudgeMeasurement{}, err
-	}
-	return measureLegacyReconcilerPerfNudgeFixture(ctx, fixture)
-}
-
 func measureLegacyReconcilerPerfNudgeFixture(ctx context.Context, fixture *reconcilerPerfNudgeFixture) (reconcilerPerfNudgeMeasurement, error) {
 	if err := ctx.Err(); err != nil {
 		return reconcilerPerfNudgeMeasurement{}, err
@@ -202,17 +191,6 @@ func measureLegacyReconcilerPerfNudgeFixture(ctx context.Context, fixture *recon
 		err = fmt.Errorf("legacy nudge deliveries = %d, want 1", delivered)
 	}
 	return fixture.finish(neededAt, now(), err), nil
-}
-
-func measureKeyedReconcilerPerfNudge(ctx context.Context, workspacePath, pairID string) (reconcilerPerfNudgeMeasurement, error) {
-	if err := ctx.Err(); err != nil {
-		return reconcilerPerfNudgeMeasurement{}, err
-	}
-	fixture, err := newReconcilerPerfNudgeFixture(workspacePath, "keyed", pairID)
-	if err != nil {
-		return reconcilerPerfNudgeMeasurement{}, err
-	}
-	return measureKeyedReconcilerPerfNudgeFixture(ctx, fixture)
 }
 
 func measureKeyedReconcilerPerfNudgeFixture(ctx context.Context, fixture *reconcilerPerfNudgeFixture) (reconcilerPerfNudgeMeasurement, error) {

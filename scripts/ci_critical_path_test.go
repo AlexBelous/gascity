@@ -629,9 +629,12 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 		}
 	}
 
-	var filterStep, decideStep ciCriticalPathStep
-	var hasFilter, hasDecide bool
+	var filterStep, decideStep, checkoutStep ciCriticalPathStep
+	var hasFilter, hasDecide, hasCheckout bool
 	for _, step := range gate.Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") {
+			checkoutStep, hasCheckout = step, true
+		}
 		switch step.ID {
 		case "filter":
 			filterStep, hasFilter = step, true
@@ -639,11 +642,34 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 			decideStep, hasDecide = step, true
 		}
 	}
+	if !hasCheckout {
+		t.Fatal("gate job has no checkout step")
+	}
+	wantCheckoutWith := map[string]string{
+		"repository":          "${{ inputs.head_repo || github.repository }}",
+		"ref":                 "${{ inputs.head_sha || github.sha }}",
+		"persist-credentials": "false",
+	}
+	for name, want := range wantCheckoutWith {
+		if got := checkoutStep.With[name]; got != want {
+			t.Errorf("gate checkout with.%s = %q, want %q (every other mac-regression job pins the same head ref/repo and disables credential persistence; the gate job must not be the odd one out)", name, got, want)
+		}
+	}
 	if !hasFilter {
 		t.Fatal("gate job has no paths-filter step (id: filter)")
 	}
 	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
 		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
+	}
+	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**"}
+	filterValue := filterStep.With["filters"]
+	for _, entry := range wantFilterEntries {
+		if !strings.Contains(filterValue, "'"+entry+"'") {
+			t.Errorf("gate filter mac_sensitive list missing %q; want exactly %v", entry, wantFilterEntries)
+		}
+	}
+	if gotEntries := regexp.MustCompile(`(?m)^\s*-\s*'[^']*'\s*$`).FindAllString(filterValue, -1); len(gotEntries) != len(wantFilterEntries) {
+		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
 	}
 	if !hasDecide {
 		t.Fatal("gate job has no routing-decision step (id: gate)")
@@ -683,6 +709,24 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 		if !strings.Contains(decideStep.Run, marker) {
 			t.Errorf("gate decision step run script missing %q", marker)
 		}
+	}
+
+	// An unrecognized (or default) $SUITE_INPUT on a manual dispatch must
+	// still run the smoke tier, not silently run nothing — run_smoke must
+	// be set unconditionally before the case statement, not only inside
+	// specific case branches, so the catch-all `*)` arm inherits it too.
+	const dispatchMarker = `"$EVENT_NAME" == "workflow_dispatch" ]]; then`
+	dispatchIdx := strings.Index(decideStep.Run, dispatchMarker)
+	if dispatchIdx < 0 {
+		t.Fatal("gate decision step run script missing workflow_dispatch branch")
+	}
+	afterDispatch := decideStep.Run[dispatchIdx+len(dispatchMarker):]
+	caseIdx := strings.Index(afterDispatch, `case "$SUITE_INPUT" in`)
+	if caseIdx < 0 {
+		t.Fatal("gate decision step run script missing case statement in workflow_dispatch branch")
+	}
+	if preCase := afterDispatch[:caseIdx]; !strings.Contains(preCase, "run_smoke=true") {
+		t.Errorf("gate decision step workflow_dispatch branch does not set run_smoke=true before the case statement (preamble %q) — an unrecognized suite input must still default to the smoke tier", preCase)
 	}
 }
 

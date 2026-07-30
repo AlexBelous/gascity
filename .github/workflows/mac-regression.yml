@@ -124,20 +124,19 @@ jobs:
       reason: ${{ steps.gate.outputs.reason }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         continue-on-error: true
         with:
           filters: |
             mac_sensitive:
-              - '.github/workflows/mac-regression.yml'
-              - '.github/workflows/scripts/runner_policy.py'
-              - '.github/actions/setup-gascity-macos/**'
-              - 'Makefile'
-              - 'go.mod'
-              - 'go.sum'
               - 'cmd/gc/**'
-              - 'internal/**'
+              - 'internal/pathutil/**'
+              - 'internal/fsys/**'
       - name: Decide which tiers should run
         id: gate
         env:
@@ -157,21 +156,18 @@ jobs:
             run_smoke=true; run_full=true; run_review_formulas=true
             reason="nightly schedule"
           elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            run_smoke=true
             case "$SUITE_INPUT" in
-              smoke)
-                run_smoke=true
-                reason="manual dispatch (suite=smoke)"
-                ;;
               full)
-                run_smoke=true; run_full=true; run_review_formulas=true
+                run_full=true; run_review_formulas=true
                 reason="manual dispatch (suite=full)"
                 ;;
               needs-mac)
-                run_smoke=true; run_full=true
+                run_full=true
                 reason="manual dispatch (suite=needs-mac)"
                 ;;
               *)
-                reason="manual dispatch (suite=$SUITE_INPUT, unrecognized)"
+                reason="manual dispatch (suite=smoke)"
                 ;;
             esac
           elif [[ "$EVENT_NAME" == "pull_request" ]]; then

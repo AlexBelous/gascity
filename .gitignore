@@ -76,3 +76,6 @@ __pycache__/
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Cairn search index — disposable materialized view over markdown frontmatter
+index/

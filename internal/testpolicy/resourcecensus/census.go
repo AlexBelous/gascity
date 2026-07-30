@@ -229,8 +229,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   317,
-			BaselineFiles:   66,
+			BaselineCalls:   318,
+			BaselineFiles:   67,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
 			OwnerBead:       "ga-80po0c.2.2",
@@ -328,6 +328,17 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "internal/api tracked-source error URN guard is a checked Medium owner",
 			ResourceOwner:   "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt",
 			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "internal/telemetry",
+			PackageName:     "telemetry",
+			Owner:           "TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver",
+			Resources:       []Resource{ResourceHTTPTestServer},
+			OwnerBead:       "ga-f7v2ft.44.1",
+			Invariant:       "isolated OTLP receiver acknowledgment is a checked Medium owner",
+			ResourceOwner:   "the one HTTP test server is confined to TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver and closed by the test",
+			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
 		{

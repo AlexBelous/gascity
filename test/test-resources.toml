@@ -116,8 +116,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
-baseline_files = 66
+baseline_calls = 318
+baseline_files = 67
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-80po0c.2.2"
@@ -217,6 +217,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "internal/api tracked-source error URN guard is a checked Medium owner"
 resource_owner = "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt"
 migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/telemetry"
+package_name = "telemetry"
+owner = "TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver"
+resources = ["http_test_server"]
+owner_bead = "ga-f7v2ft.44.1"
+invariant = "isolated OTLP receiver acknowledgment is a checked Medium owner"
+resource_owner = "the one HTTP test server is confined to TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver and closed by the test"
+migration_target = "P0.4c"
 expires = "2026-10-01"
 
 [[medium]]

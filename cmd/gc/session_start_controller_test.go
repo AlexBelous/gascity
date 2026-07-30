@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -314,14 +316,14 @@ func TestSessionStartControllerStopJoinsAuthoritativeSeedBeforeQueueDrain(t *tes
 	})
 	first := true
 	producerBlocked := make(chan struct{})
-	if err := controller.StartAuthoritativeSeed(func(ctx context.Context) (string, bool) {
+	if err := controller.StartAuthoritativeSeed(func(ctx context.Context) sessionStartAuthoritativeSeedResult {
 		if first {
 			first = false
-			return "gcs-seed-stop-first", true
+			return sessionStartAuthoritativeSeedResult{SessionID: "gcs-seed-stop-first"}
 		}
 		close(producerBlocked)
 		<-ctx.Done()
-		return "", false
+		return sessionStartAuthoritativeSeedResult{Err: ctx.Err()}
 	}); err != nil {
 		t.Fatalf("StartAuthoritativeSeed: %v", err)
 	}
@@ -343,6 +345,523 @@ func TestSessionStartControllerStopJoinsAuthoritativeSeedBeforeQueueDrain(t *tes
 		t.Fatalf("Stop admitted a seed after cancellation: %q", got)
 	default:
 	}
+}
+
+func TestSessionStartControllerCompleteAuthoritativeCensusDoesNotCullInFlightAdmission(t *testing.T) {
+	oldStarted := make(chan struct{})
+	releaseOld := make(chan struct{})
+	var releaseOldOnce sync.Once
+	release := func() { releaseOldOnce.Do(func() { close(releaseOld) }) }
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 2,
+		MaxRetries:  1,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == "gcs-old" {
+				close(oldStarted)
+				<-releaseOld
+			}
+			return nil
+		},
+	})
+	t.Cleanup(release)
+
+	first := true
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		if first {
+			first = false
+			return sessionStartAuthoritativeSeedResult{SessionID: "gcs-old"}
+		}
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start first census: %v", err)
+	}
+	awaitClose(t, oldStarted, "old authoritative reconciliation")
+	awaitCond(t, func() bool {
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		return !controller.seedActive
+	}, "first complete authoritative census")
+	if got := controller.Pending(); got != 1 {
+		t.Fatalf("pending after first census = %d, want 1 in-flight old admission", got)
+	}
+
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start second census: %v", err)
+	}
+	awaitCond(t, func() bool {
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		return !controller.seedActive
+	}, "second complete authoritative census")
+	if got := controller.Pending(); got != 1 {
+		t.Fatalf("pending after absent key in complete later census = %d, want 1 while effect is in flight", got)
+	}
+	release()
+	awaitCond(t, func() bool { return controller.Pending() == 0 }, "in-flight admission completion")
+}
+
+func TestSessionStartControllerCompleteAuthoritativeCensusCullsQueuedAdmission(t *testing.T) {
+	controller := newSessionStartControllerWithQueuedAuthoritativeAdmission(context.Background(), t)
+	if _, ok := controller.readAdmission("gcs-old"); !ok {
+		t.Fatal("old anti-entropy admission missing before later census")
+	}
+
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start empty later census: %v", err)
+	}
+	awaitSessionStartSeedInactive(t, controller, "later complete authoritative census")
+	if admission, ok := controller.readAdmission("gcs-old"); !ok || !admission.Culled {
+		t.Fatalf("absent queued admission = (%+v, %t), want retained cull marker", admission, ok)
+	}
+}
+
+func TestSessionStartControllerCensusCullRetainsQueuedSlotUntilDequeue(t *testing.T) {
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBlocker) }) }
+	culledReconciled := make(chan struct{}, 1)
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 2,
+		MaxRetries:  1,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			switch admission.SessionID {
+			case "gcs-blocker":
+				close(blockerStarted)
+				<-releaseBlocker
+			case "gcs-old":
+				culledReconciled <- struct{}{}
+			}
+			return nil
+		},
+	})
+	t.Cleanup(release)
+
+	if _, err := controller.Admit("gcs-blocker", sessionStartAdmissionExplicitWake); err != nil {
+		t.Fatalf("admit blocker: %v", err)
+	}
+	awaitClose(t, blockerStarted, "blocker reconciliation")
+	first := true
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		if first {
+			first = false
+			return sessionStartAuthoritativeSeedResult{SessionID: "gcs-old"}
+		}
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start initial census: %v", err)
+	}
+	awaitSessionStartSeedInactive(t, controller, "initial complete census")
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start empty census: %v", err)
+	}
+	awaitSessionStartSeedInactive(t, controller, "empty complete census")
+
+	if got := controller.Pending(); got != 2 {
+		t.Fatalf("retained state after cull = %d, want blocker plus queued tombstone", got)
+	}
+	if got := controller.queue.Len(); got != 1 {
+		t.Fatalf("queue length after cull = %d, want one retained queued key", got)
+	}
+
+	release()
+	awaitCond(t, func() bool { return controller.Pending() == 0 && controller.queue.Len() == 0 }, "culled key dequeue")
+	select {
+	case <-culledReconciled:
+		t.Fatal("culled queued key reached reconcile callback")
+	default:
+	}
+}
+
+func TestSessionStartControllerCensusCullBetweenReadAndMarkSkipsEffect(t *testing.T) {
+	markEntered := make(chan struct{})
+	releaseMark := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseMark) }) }
+	reconciled := make(chan struct{}, 1)
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 2,
+		MaxRetries:  1,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			reconciled <- struct{}{}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new session-start controller: %v", err)
+	}
+	controller.beforeMarkInFlightForTest = func() {
+		close(markEntered)
+		<-releaseMark
+	}
+	if err := controller.Start(context.Background()); err != nil {
+		t.Fatalf("start session-start controller: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+	t.Cleanup(release)
+
+	first := true
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		if first {
+			first = false
+			return sessionStartAuthoritativeSeedResult{SessionID: "gcs-raced-cull"}
+		}
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start initial census: %v", err)
+	}
+	awaitClose(t, markEntered, "worker read before in-flight mark")
+	awaitSessionStartSeedInactive(t, controller, "initial complete census")
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start empty census: %v", err)
+	}
+	awaitSessionStartSeedInactive(t, controller, "empty complete census")
+	if admission, ok := controller.readAdmission("gcs-raced-cull"); !ok || !admission.Culled {
+		t.Fatalf("admission before mark release = (%+v, %t), want retained cull marker", admission, ok)
+	}
+
+	release()
+	awaitCond(t, func() bool { return controller.Pending() == 0 }, "raced cull dequeue")
+	select {
+	case <-reconciled:
+		t.Fatal("cull between worker read and in-flight mark reached reconcile callback")
+	default:
+	}
+}
+
+func TestSessionStartControllerBlockedWorkersKeepDistinctCensusQueueBounded(t *testing.T) {
+	const (
+		retainedLimit = 16
+		attempts      = 128
+	)
+	releaseWorkers := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWorkers) }) }
+	var blockersStarted atomic.Int32
+	var unexpectedEffects atomic.Int32
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     retainedLimit,
+		MaxDistinct: retainedLimit * 2,
+		MaxRetries:  1,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			if strings.HasPrefix(admission.SessionID, "gcs-blocker-") {
+				blockersStarted.Add(1)
+				<-releaseWorkers
+				return nil
+			}
+			unexpectedEffects.Add(1)
+			return nil
+		},
+	})
+	t.Cleanup(release)
+
+	for i := range retainedLimit {
+		if _, err := controller.Admit(fmt.Sprintf("gcs-blocker-%02d", i), sessionStartAdmissionExplicitWake); err != nil {
+			t.Fatalf("admit blocker %d: %v", i, err)
+		}
+	}
+	awaitCond(t, func() bool { return blockersStarted.Load() == retainedLimit }, "all workers blocked")
+
+	accepted := 0
+	overflowed := 0
+	for i := range attempts {
+		presentGeneration := advanceSessionStartSeedGenerationForTest(controller)
+		outcome, _, err := controller.admitAuthoritative(
+			fmt.Sprintf("gcs-census-%03d", i),
+			presentGeneration,
+		)
+		if err != nil {
+			t.Fatalf("admit census key %d: %v", i, err)
+		}
+		switch outcome {
+		case sessionStartAdmissionAccepted:
+			accepted++
+			controller.publishCompleteAuthoritativeCensus(presentGeneration)
+			emptyGeneration := advanceSessionStartSeedGenerationForTest(controller)
+			controller.publishCompleteAuthoritativeCensus(emptyGeneration)
+		case sessionStartAdmissionOverflow:
+			overflowed++
+		default:
+			t.Fatalf("admit census key %d outcome = %q, want accepted or overflow", i, outcome)
+		}
+	}
+
+	if accepted != retainedLimit || overflowed != attempts-retainedLimit {
+		t.Fatalf("census outcomes = accepted %d overflow %d, want %d and %d", accepted, overflowed, retainedLimit, attempts-retainedLimit)
+	}
+	if got := controller.queue.Len(); got != retainedLimit {
+		t.Fatalf("queued census keys = %d, want bounded %d", got, retainedLimit)
+	}
+	if got := controller.Pending(); got != retainedLimit*2 {
+		t.Fatalf("retained controller keys = %d, want bounded %d", got, retainedLimit*2)
+	}
+	controller.mu.Lock()
+	retainedSeeds := len(controller.seedOutstanding)
+	controller.mu.Unlock()
+	if retainedSeeds != retainedLimit {
+		t.Fatalf("retained authoritative slots = %d, want %d", retainedSeeds, retainedLimit)
+	}
+	if got := unexpectedEffects.Load(); got != 0 {
+		t.Fatalf("census effects while workers blocked = %d, want 0", got)
+	}
+}
+
+func advanceSessionStartSeedGenerationForTest(controller *sessionStartController) uint64 {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.seedGeneration++
+	return controller.seedGeneration
+}
+
+func TestSessionStartControllerCompleteAuthoritativeCensusKeepsNewerExactAdmission(t *testing.T) {
+	oldStarted := make(chan struct{})
+	releaseOld := make(chan struct{})
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 2,
+		MaxRetries:  1,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == "gcs-old" {
+				close(oldStarted)
+				<-releaseOld
+			}
+			return nil
+		},
+	})
+	t.Cleanup(func() { close(releaseOld) })
+
+	first := true
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		if first {
+			first = false
+			return sessionStartAuthoritativeSeedResult{SessionID: "gcs-old"}
+		}
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start first census: %v", err)
+	}
+	awaitClose(t, oldStarted, "old authoritative reconciliation")
+	awaitCond(t, func() bool {
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		return !controller.seedActive
+	}, "first complete authoritative census")
+	beforeExact, ok := controller.readAdmission("gcs-old")
+	if !ok {
+		t.Fatal("old admission missing before newer exact admission")
+	}
+
+	secondEntered := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		close(secondEntered)
+		<-releaseSecond
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start second census: %v", err)
+	}
+	awaitClose(t, secondEntered, "second census before completion")
+	if outcome, err := controller.Admit("gcs-old", sessionStartAdmissionExplicitWake); err != nil || outcome != sessionStartAdmissionCoalesced {
+		t.Fatalf("admit newer exact key = %q, %v, want coalesced", outcome, err)
+	}
+	close(releaseSecond)
+	awaitCond(t, func() bool {
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		return !controller.seedActive
+	}, "second complete authoritative census")
+	if admission, ok := controller.readAdmission("gcs-old"); !ok || admission.Source != sessionStartAdmissionExplicitWake || admission.Version <= beforeExact.Version {
+		t.Fatalf("newer exact admission = (%+v, %t), want retained", admission, ok)
+	}
+}
+
+func TestSessionStartControllerIncompleteAuthoritativeCensusesDoNotCullQueuedAdmission(t *testing.T) {
+	t.Run("producer error", func(t *testing.T) {
+		controller := newSessionStartControllerWithQueuedAuthoritativeAdmission(context.Background(), t)
+		if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+			return sessionStartAuthoritativeSeedResult{Err: errors.New("pagination failed")}
+		}); err != nil {
+			t.Fatalf("start failed census: %v", err)
+		}
+		awaitSessionStartSeedInactive(t, controller, "failed authoritative census")
+		if _, ok := controller.readAdmission("gcs-old"); !ok {
+			t.Fatal("failed census culled queued old admission")
+		}
+		if !controller.TakeAuditRequest() {
+			t.Fatal("failed census did not request a follow-up audit")
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		parent, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		controller := newSessionStartControllerWithQueuedAuthoritativeAdmission(parent, t)
+		if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+			cancel()
+			return sessionStartAuthoritativeSeedResult{Complete: true}
+		}); err != nil {
+			t.Fatalf("start canceled census: %v", err)
+		}
+		awaitSessionStartSeedInactive(t, controller, "canceled authoritative census")
+		if _, ok := controller.readAdmission("gcs-old"); !ok {
+			t.Fatal("canceled census culled queued old admission")
+		}
+	})
+
+	t.Run("supersession", func(t *testing.T) {
+		controller := newSessionStartControllerWithQueuedAuthoritativeAdmission(context.Background(), t)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+			close(entered)
+			<-release
+			return sessionStartAuthoritativeSeedResult{Complete: true}
+		}); err != nil {
+			t.Fatalf("start superseded census: %v", err)
+		}
+		awaitClose(t, entered, "superseded authoritative census")
+		if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+			return sessionStartAuthoritativeSeedResult{Complete: true}
+		}); err != nil {
+			t.Fatalf("supersede authoritative census: %v", err)
+		}
+		close(release)
+		awaitSessionStartSeedInactive(t, controller, "superseded authoritative census exit")
+		if _, ok := controller.readAdmission("gcs-old"); !ok {
+			t.Fatal("superseded census culled queued old admission")
+		}
+		if !controller.TakeAuditRequest() {
+			t.Fatal("superseded census did not retain a follow-up audit")
+		}
+	})
+}
+
+func TestSessionStartControllerSupersessionFencesAdmissionAfterProducerReturns(t *testing.T) {
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	var releaseBlockerOnce sync.Once
+	release := func() { releaseBlockerOnce.Do(func() { close(releaseBlocker) }) }
+	staleReconciled := make(chan struct{}, 1)
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 3,
+		MaxRetries:  1,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			switch admission.SessionID {
+			case "gcs-blocker":
+				close(blockerStarted)
+				<-releaseBlocker
+			case "gcs-stale":
+				staleReconciled <- struct{}{}
+			}
+			return nil
+		},
+	})
+	t.Cleanup(release)
+
+	if _, err := controller.Admit("gcs-blocker", sessionStartAdmissionExplicitWake); err != nil {
+		t.Fatalf("admit blocker: %v", err)
+	}
+	awaitClose(t, blockerStarted, "blocker reconciliation")
+
+	nextEntered := make(chan struct{})
+	releaseNext := make(chan struct{})
+	var releaseNextOnce sync.Once
+	releaseProducer := func() { releaseNextOnce.Do(func() { close(releaseNext) }) }
+	t.Cleanup(releaseProducer)
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		close(nextEntered)
+		<-releaseNext
+		return sessionStartAuthoritativeSeedResult{SessionID: "gcs-stale"}
+	}); err != nil {
+		t.Fatalf("start stale producer: %v", err)
+	}
+	awaitClose(t, nextEntered, "stale producer callback")
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("supersede stale producer: %v", err)
+	}
+	releaseProducer()
+	awaitSessionStartSeedInactive(t, controller, "superseded producer exit")
+
+	if admission, ok := controller.readAdmission("gcs-stale"); ok {
+		t.Errorf("superseded producer admitted stale key: %+v", admission)
+	}
+	if got := controller.queue.Len(); got != 0 {
+		t.Errorf("queue length after superseded producer = %d, want 0", got)
+	}
+
+	release()
+	controller.Stop()
+	select {
+	case <-staleReconciled:
+		t.Fatal("superseded producer reached reconcile callback")
+	default:
+	}
+}
+
+func newSessionStartControllerWithQueuedAuthoritativeAdmission(ctx context.Context, t *testing.T) *sessionStartController {
+	t.Helper()
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 2,
+		MaxRetries:  1,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == "gcs-blocker" {
+				close(blockerStarted)
+				<-releaseBlocker
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new session-start controller: %v", err)
+	}
+	if err := controller.Start(ctx); err != nil {
+		t.Fatalf("start session-start controller: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+	t.Cleanup(func() { close(releaseBlocker) })
+
+	if _, err := controller.Admit("gcs-blocker", sessionStartAdmissionExplicitWake); err != nil {
+		t.Fatalf("admit blocker: %v", err)
+	}
+	awaitClose(t, blockerStarted, "blocker reconciliation")
+	first := true
+	if err := controller.StartAuthoritativeSeed(func(context.Context) sessionStartAuthoritativeSeedResult {
+		if first {
+			first = false
+			return sessionStartAuthoritativeSeedResult{SessionID: "gcs-old"}
+		}
+		return sessionStartAuthoritativeSeedResult{Complete: true}
+	}); err != nil {
+		t.Fatalf("start initial authoritative census: %v", err)
+	}
+	awaitSessionStartSeedInactive(t, controller, "initial complete authoritative census")
+	return controller
+}
+
+func awaitSessionStartSeedInactive(t *testing.T, controller *sessionStartController, what string) {
+	t.Helper()
+	awaitCond(t, func() bool {
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		return !controller.seedActive
+	}, what)
 }
 
 func mustStartSessionStartController(t *testing.T, opts sessionStartControllerOptions) *sessionStartController {

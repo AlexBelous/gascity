@@ -351,15 +351,15 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 	now := time.Now().UTC()
 	cursor := 0
 	var page []sessionpkg.Info
-	return controller.StartAuthoritativeSeed(func(ctx context.Context) (string, bool) {
+	return controller.StartAuthoritativeSeed(func(ctx context.Context) sessionStartAuthoritativeSeedResult {
 		for {
 			if ctx.Err() != nil {
-				return "", false
+				return sessionStartAuthoritativeSeedResult{Err: ctx.Err()}
 			}
 			if len(page) == 0 {
 				page, cursor = snapshot.openInfoPage(cursor, sessionStartSeedPageSize)
 				if len(page) == 0 {
-					return "", false
+					return sessionStartAuthoritativeSeedResult{Complete: true}
 				}
 			}
 			info := page[0]
@@ -368,7 +368,7 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 				!resolveExactSessionStartOrDrainAckStopOwnership(info, stateSnapshot.Config, now) {
 				continue
 			}
-			return info.ID, true
+			return sessionStartAuthoritativeSeedResult{SessionID: info.ID}
 		}
 	})
 }

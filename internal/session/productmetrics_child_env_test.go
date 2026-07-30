@@ -47,10 +47,9 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 	}
 }
 
-// waitForCompleteSnapshot polls path until it can read wantLines complete
-// lines or deadline passes. A snapshot writer may create the file before
-// its content is fully written (e.g. shell redirect truncation); a read
-// landing in that window must not be mistaken for a finished write.
+// waitForCompleteSnapshot requires the full line count, not just existence,
+// because a writer may create the file before it finishes writing (e.g.
+// shell redirect truncation) -- a short read is not done.
 func waitForCompleteSnapshot(path string, wantLines int, deadline time.Time) ([]byte, error) {
 	for {
 		data, err := os.ReadFile(path)
@@ -69,17 +68,13 @@ func waitForCompleteSnapshot(path string, wantLines int, deadline time.Time) ([]
 	}
 }
 
-// TestWaitForCompleteSnapshotIgnoresPartialRead reproduces the race from
-// the bug report deterministically: a reader can observe a snapshot file
-// after it has been created but before its writer finished populating it.
-// waitForCompleteSnapshot must keep polling past a short/partial read
-// instead of returning it as if the write were complete.
+// TestWaitForCompleteSnapshotIgnoresPartialRead deterministically reproduces
+// the truncation race from the bug report instead of relying on real
+// scheduling timing.
 func TestWaitForCompleteSnapshotIgnoresPartialRead(t *testing.T) {
 	dir := t.TempDir()
 	snapshot := filepath.Join(dir, "child.env")
 
-	// Simulate the exact race window from the bug report: the file exists
-	// with partial content before the writer finishes populating it.
 	if err := os.WriteFile(snapshot, []byte("only-one-line\n"), 0o600); err != nil {
 		t.Fatalf("write partial snapshot: %v", err)
 	}

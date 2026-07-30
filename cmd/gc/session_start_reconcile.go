@@ -534,13 +534,6 @@ func reconcileExactSessionStartWithOwner(
 		if params.AsyncStopTracker == nil {
 			return exactSessionStartKeyedOwner, nil
 		}
-		liveToken, tokenErr := params.Provider.GetMeta(name, "GC_INSTANCE_TOKEN")
-		if tokenErr != nil {
-			return exactSessionStartKeyedOwner, fmt.Errorf("reconciling exact drain-ack stop %q: reading runtime instance token: %w", info.ID, tokenErr)
-		}
-		if strings.TrimSpace(liveToken) != token {
-			return exactSessionStartKeyedOwner, nil
-		}
 		if queueExactDrainAckAsyncStop(
 			params.CityPath,
 			params.Store,

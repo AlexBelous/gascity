@@ -335,24 +335,22 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 				}()
 			}
 		}()
-		// Token fence (mirrors verifiedStop): this kill targets the session by
-		// NAME and may fire long after it was queued. If the name was reused by
-		// a re-woken replacement in the meantime, its GC_INSTANCE_TOKEN differs
-		// from the one we intended to stop; killing it would take out a live,
-		// working session. Skip on a definite mismatch. An empty expected or
-		// live token means "cannot verify" and falls through to the kill,
-		// matching verifiedStop's conservative posture.
-		if expectedToken != "" {
+		// Legacy drain-ack still targets a session by name, so retain its token
+		// fence. Strict keyed drain-ack delegates the token and destructive action
+		// together to the bound unattended-stop capability below.
+		if !strictTokenFence && expectedToken != "" {
 			actualToken, tokenErr := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-			if strictTokenFence && (tokenErr != nil || strings.TrimSpace(actualToken) == "" || strings.TrimSpace(actualToken) != expectedToken) {
-				return
-			}
-			if !strictTokenFence && actualToken != "" && actualToken != expectedToken {
+			if tokenErr == nil && actualToken != "" && actualToken != expectedToken {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
 				return
 			}
 		}
-		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+		if strictTokenFence {
+			if err := workerStopUnattendedSessionByIDWithConfig(cityPath, store, sp, cfg, sessionID, expectedToken); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s parked before kill: %v\n", name, err) //nolint:errcheck
+				return
+			}
+		} else if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck
 			return
 		}
@@ -416,26 +414,22 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: runtime still alive after confirm-dead deadline; slot may stay occupied\n", name) //nolint:errcheck
 			return false
 		}
-		// Token fence before every re-kill (mirrors the first-kill fence above
-		// and verifiedStop): the re-kill targets the session by NAME, and a
-		// survivor that finally exits can be replaced by a freshly re-woken
-		// same-name session carrying a different GC_INSTANCE_TOKEN before this
-		// loop next observes it. A definite live-token mismatch means our
-		// intended target is already gone and the name now belongs to a live
-		// replacement — treat the original as confirmed dead and stop rather than
-		// killing the replacement. An empty expected or live token means "cannot
-		// verify" and falls through to the re-kill, matching verifiedStop.
-		if expectedToken != "" {
+		// Legacy re-kills still target by name. Strict re-kills use one bound
+		// unattended-stop operation so a replacement cannot slip between a
+		// separate proof and an ordinary name-based kill.
+		if !strictTokenFence && expectedToken != "" {
 			actualToken, tokenErr := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-			if strictTokenFence && (tokenErr != nil || strings.TrimSpace(actualToken) == "" || strings.TrimSpace(actualToken) != expectedToken) {
-				return false
-			}
-			if !strictTokenFence && actualToken != "" && actualToken != expectedToken {
+			if tokenErr == nil && actualToken != "" && actualToken != expectedToken {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s confirm-dead skipped re-kill: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
 				return true
 			}
 		}
-		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+		if strictTokenFence {
+			if err := workerStopUnattendedSessionByIDWithConfig(cityPath, store, sp, cfg, sessionID, expectedToken); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s parked before re-kill: %v\n", name, err) //nolint:errcheck
+				return false
+			}
+		} else if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s re-kill: %v\n", name, err) //nolint:errcheck
 		}
 		time.Sleep(drainAckStopConfirmDeadPoll)

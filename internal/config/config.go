@@ -2464,10 +2464,10 @@ type DaemonConfig struct {
 	// refusal instead parks heal candidates without disabling converged exact
 	// starts. The value is boot-latched; changing it requires a controller restart.
 	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
-	// NudgeShadow selects whether the nudge-shadow path is required. Nil means
-	// omitted and resolves to the built-in "off" default; a non-nil value is an
-	// explicit operator selection. The value is boot-latched; changing it
-	// requires a controller restart.
+	// NudgeShadow selects whether the queued exact due-target selection shadow
+	// is required. Nil means omitted and resolves to the built-in "off" default;
+	// a non-nil value is an explicit operator selection. The value is
+	// boot-latched; changing it requires a controller restart.
 	NudgeShadow *string `toml:"nudge_shadow,omitempty" jsonschema:"default=off,enum=off,enum=required"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`

@@ -1339,12 +1339,25 @@ func runController(
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
+	cityName := loadedCityName(cfg, cityPath)
 	lock, err := acquireControllerLock(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck // best-effort cleanup
+
+	nudgeShadowSelection, nudgeShadowTrace, err := prepareNudgeShadowRuntime(cityPath, cityName, cfg, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: nudge shadow preflight: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	nudgeShadowTraceTransferred := false
+	defer func() {
+		if nudgeShadowTrace != nil && !nudgeShadowTraceTransferred {
+			_ = nudgeShadowTrace.Close()
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1415,7 +1428,6 @@ func runController(
 	}
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
-	cityName := loadedCityName(cfg, cityPath)
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
@@ -1441,9 +1453,12 @@ func runController(
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
 		ControlDispatcherCh:     controlDispatcherCh,
+		NudgeShadowSelection:    nudgeShadowSelection,
+		Trace:                   nudgeShadowTrace,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
+	nudgeShadowTraceTransferred = true
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for

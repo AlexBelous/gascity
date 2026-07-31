@@ -35,7 +35,8 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	for _, key := range []string{
 		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
 		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
-		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
 	} {
 		t.Setenv(key, "")
 	}
@@ -88,12 +89,38 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	for _, key := range []string{
 		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
 		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
-		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
 	} {
 		t.Setenv(key, "")
 	}
 
+	// Scrubbing env vars alone is not enough: bd's config precedence falls
+	// through to $HOME/.beads/config.yaml as a last resort, so on a fleet
+	// agent HOME with dolt.shared-server: true set there, bd still routes
+	// to the shared server regardless of the vars above. Pin a test-owned
+	// HOME so that fallback file doesn't exist. See ga-zxpfic and
+	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	dir := t.TempDir()
+	t.Cleanup(func() {
+		// This test's embedded dolt store can still have a background
+		// writer holding files open a few dozen ms after the bd subprocess
+		// exits, racing t.TempDir()'s single-shot RemoveAll cleanup with an
+		// intermittent "directory not empty" error. Retry briefly; fall
+		// through to let TempDir's own best-effort cleanup have the last
+		// word either way. See
+		// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which
+		// hits the same race for the same reason.
+		for i := 0; i < 10; i++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
 
 	runBD := func(args ...string) string {
 		t.Helper()

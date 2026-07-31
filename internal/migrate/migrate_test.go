@@ -792,6 +792,35 @@ upstream = "bedrock"
 	}
 }
 
+// TestMigrateWritesAgentTomlForResidentOnlyAgent guards isZeroAgentConfig for the
+// residency field (gc-0ychy): an agent whose only non-default field is
+// resident=true must still get its per-agent agent.toml written. If
+// isZeroAgentConfig omits cfg.Resident it judges the agent "zero", skips the
+// write, and the residency opt-in — which floors the agent to a warm serve loop —
+// is silently lost in migration.
+func TestMigrateWritesAgentTomlForResidentOnlyAgent(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "watcher"
+resident = true
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	agentToml := readFile(t, filepath.Join(cityDir, "agents", "watcher", "agent.toml"))
+	if !strings.Contains(agentToml, "resident = true") {
+		t.Fatalf("watcher agent.toml missing resident opt-in:\n%s", agentToml)
+	}
+}
+
 func TestMigrateCreatesFreshBindingWhenExistingImportHasNonDefaultSemantics(t *testing.T) {
 	t.Parallel()
 
@@ -1131,6 +1160,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		OptionDefaults:         map[string]string{"effort": "max"},
 		MaxActiveSessions:      intPtr(5),
 		MinActiveSessions:      intPtr(1),
+		Resident:               &trueVal,
 		ScaleCheck:             "echo 3",
 		DrainTimeout:           "10m",
 		OnBoot:                 "echo boot",

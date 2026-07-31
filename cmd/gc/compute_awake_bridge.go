@@ -55,6 +55,7 @@ func buildAwakeInputFromReconciler(
 			Suspended:         isAgentEffectivelySuspendedWith(cfg, cityPath, a, suspState),
 			SleepAfterIdle:    parseSleepDuration(a.SleepAfterIdle),
 			MinActiveSessions: a.EffectiveMinActiveSessions(),
+			Resident:          a.IsResident(),
 		}
 		if len(a.DependsOn) > 0 {
 			agent.DependsOn = a.DependsOn

@@ -787,6 +787,9 @@ type AgentOverride struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// Resident overrides whether the agent is a persistent serve loop floored to
+	// min_active_sessions>=1 by ApplyResidentAgentFloor.
+	Resident *bool `toml:"resident,omitempty"`
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
@@ -3211,6 +3214,13 @@ type Agent struct {
 	// mode="always"; both produce sessions, and gc doctor reports accidental
 	// combinations.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// Resident marks an agent as a persistent serve loop that must never scale
+	// to zero while it is enabled: a resident agent is floored to
+	// min_active_sessions>=1 by ApplyResidentAgentFloor (gated on max!=0 and an
+	// unset min) so a quiet tick does not drain it and respawn a colliding
+	// replacement. This is a role-neutral capability any pack agent may declare;
+	// the SDK's own deterministic control-dispatcher opts in via its agent.toml.
+	Resident *bool `toml:"resident,omitempty"`
 	// ScaleCheck is a shell command template whose output reports new
 	// unassigned session demand. In bead-backed reconciliation this is
 	// additive: assigned work is resumed separately, and ScaleCheck reports
@@ -3497,6 +3507,7 @@ func (a Agent) Clone() Agent {
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
+	out.Resident = copyBoolPtr(a.Resident)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
 	out.Attach = copyBoolPtr(a.Attach)
@@ -3783,6 +3794,73 @@ func ApplyAgentDefaults(cfg *City) {
 			if cfg.Agents[i].Upstream == "" {
 				cfg.Agents[i].Upstream = upstream
 			}
+		}
+	}
+}
+
+// ApplyResidentAgentFloor floors every resident agent (Agent.resident=true) to
+// min_active_sessions=1 so its persistent serve loop keeps pool demand >= 1 and
+// is not classed no-wake-reason and drained on a quiet tick — which otherwise
+// respawns a replacement whose canonical alias collides with the still-draining
+// prior generation (gc-0ychy).
+//
+// Residency is a ROLE-NEUTRAL, config-declared capability: any pack agent may
+// set resident=true and receive the floor. The SDK's own deterministic control-
+// dispatcher opts in through its shipped agent.toml. This function keys ONLY on
+// the resident flag — never on an agent name, command, or role — so pack-defined
+// resident agents opt in on equal footing.
+//
+// The floor is GATED, never unconditional. It is skipped when:
+//
+//   - the agent is disabled via max_active_sessions=0 — the disable override
+//     wins, and the floor must never synthesize min > max (a load/validate
+//     failure); and
+//   - min_active_sessions is already set — an explicit operator override wins.
+//
+// The v2-control-lane gate (daemon.formula_v2) is NOT applied here; it is a
+// control-lane concern handled by ClearDisabledControlLaneResidency before this
+// runs, keeping this mechanism reusable by any pack.
+//
+// Call after pack expansion and rig-override application (so EffectiveMax
+// reflects a rig disable) and before ValidateAgents.
+func ApplyResidentAgentFloor(cfg *City) {
+	if cfg == nil {
+		return
+	}
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if !a.IsResident() {
+			continue
+		}
+		if a.MinActiveSessions != nil {
+			continue
+		}
+		if m := a.EffectiveMaxActiveSessions(); m != nil && *m == 0 {
+			continue
+		}
+		floor := 1
+		a.MinActiveSessions = &floor
+	}
+}
+
+// ClearDisabledControlLaneResidency turns off the deterministic control-
+// dispatcher's declared residency when the v2 control lane is disabled
+// (daemon.formula_v2 off): with no v2 lane there must be no resident dispatcher,
+// so the lane scales to zero as before. This governs the SDK's OWN control-lane
+// lifecycle — the same category as ApplyAgentDefaults and ControlDispatcherForScope,
+// which are also control-dispatcher-aware — and is deliberately kept separate
+// from ApplyResidentAgentFloor so that residency stays a role-neutral capability
+// any pack agent can use. It never touches a non-dispatcher resident agent.
+//
+// Call after pack expansion and rig-override application, before
+// ApplyResidentAgentFloor.
+func ClearDisabledControlLaneResidency(cfg *City) {
+	if cfg == nil || cfg.Daemon.FormulaV2Enabled() {
+		return
+	}
+	for i := range cfg.Agents {
+		if IsDeterministicControlDispatcher(&cfg.Agents[i]) {
+			cfg.Agents[i].Resident = nil
 		}
 	}
 }

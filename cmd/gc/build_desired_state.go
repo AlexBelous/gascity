@@ -4042,6 +4042,39 @@ func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
 		containsString(i.Labels, "agent:"+canonical)
 }
 
+// infoIdentifiesAsCanonicalOwner reports whether a session bead belongs to the
+// canonical singleton for cfgAgent, whether it carries the exact canonical
+// identity OR a phantom numbered pool identity ("{canonical}-N") left by a prior
+// collision generation. It mirrors normalizeNonExpandingPoolSessionInfo's
+// ownership recognition (nonExpandingPoolIdentitySlot), so canonical-singleton
+// residency reuses the SAME phantom-identity bead in place — the collapse
+// normalizes its identity to canonical — instead of failing to recognize it and
+// minting a colliding replacement that orphan-drains the running session
+// (gc-0ychy: the live dispatchers were drained because their phantom-identity
+// beads went unrecognized here). The phantom check is scoped to cfgAgent, so a
+// numbered identity of a different rig's dispatcher never matches.
+func infoIdentifiesAsCanonicalOwner(i session.Info, cfgAgent *config.Agent, canonical string) bool {
+	if infoIdentifiesAsCanonical(i, canonical) {
+		return true
+	}
+	if cfgAgent == nil {
+		return false
+	}
+	for _, identity := range []string{i.AgentName, i.Alias, i.Title} {
+		if nonExpandingPoolIdentitySlot(cfgAgent, strings.TrimSpace(identity)) > 0 {
+			return true
+		}
+	}
+	for _, label := range i.Labels {
+		label = strings.TrimSpace(label)
+		if strings.HasPrefix(label, "agent:") &&
+			nonExpandingPoolIdentitySlot(cfgAgent, strings.TrimPrefix(label, "agent:")) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func createPoolSessionBeadWithGuardedAlias(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,

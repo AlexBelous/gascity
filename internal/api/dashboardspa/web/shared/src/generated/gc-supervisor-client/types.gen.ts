@@ -95,6 +95,7 @@ export type AgentPatch = {
     PreStartAppend: Array<string> | null;
     PromptTemplate: string | null;
     Provider: string | null;
+    Resident: boolean | null;
     ResumeCommand: string | null;
     ScaleCheck: string | null;
     Scope: string | null;

@@ -3,3 +3,8 @@ start_command = "sh -c 'export GC_WORKFLOW_TRACE=\"${GC_WORKFLOW_TRACE:-${GC_CON
 prompt_mode = "none"
 process_names = ["gc"]
 max_active_sessions = 1
+# Resident serve loop: floored to min_active_sessions>=1 by
+# ApplyResidentAgentFloor so a quiet tick does not drain it and respawn a
+# colliding replacement (gc-0ychy). Role-neutral config opt-in; the floor is
+# cleared when the v2 control lane is disabled (daemon.formula_v2=false).
+resident = true

@@ -44,6 +44,12 @@ type AwakeAgent struct {
 	Suspended         bool
 	SleepAfterIdle    time.Duration // 0 = disabled
 	MinActiveSessions int           // effective min_active_sessions; 0 = no always-warm guarantee
+	// Resident marks a persistent serve loop (Agent.resident). A resident,
+	// min-floored agent whose only occupant is asleep with sleep_reason=no-wake-
+	// reason (a completed demandless drain) is revived by the min-active pass,
+	// matching canonicalSingletonResidency's reuse allowlist so the retained bead
+	// is actually woken instead of stranded holding the canonical alias.
+	Resident bool
 }
 
 // AwakeNamedSession represents a [[named_session]] config entry.
@@ -334,16 +340,18 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		assignedAnchor[bead.SessionName] = anchorBead
 	}
 
-	// Min-active-sessions wake: keep min_active_sessions pool sessions warm
-	// across a city-stop. A pool agent whose only instance is asleep with
-	// sleep_reason=city-stop is neither counted toward the min nor woken by
-	// the demand-driven passes above, so without this pass a
-	// min_active_sessions=1 agent stays cold indefinitely after gc stop &&
-	// gc start until work is explicitly slung to it. We revive the existing
-	// asleep city-stop bead rather than relying on a fresh spawn (no
-	// orphaned-bead churn), mirroring the named-always same-tick wake (#2367)
-	// on the pool min path. Scoped to sleep_reason=city-stop so idle_timeout
-	// and wake_mode semantics are unchanged. See #2739.
+	// Min-active-sessions wake: keep min_active_sessions pool sessions warm.
+	// A pool agent whose only instance is asleep with a revivable reason is
+	// neither counted toward the min nor woken by the demand-driven passes
+	// above, so without this pass a min_active_sessions=1 agent stays cold
+	// indefinitely until work is explicitly slung to it. We revive the existing
+	// asleep bead rather than relying on a fresh spawn (no orphaned-bead churn),
+	// mirroring the named-always same-tick wake (#2367) on the pool min path.
+	// Revivable reasons are city-stop (any min-floored agent, after gc stop &&
+	// gc start) and, for a RESIDENT agent, no-wake-reason (a completed demandless
+	// drain of a resident serve loop that canonicalSingletonResidency reuses in
+	// place — gc-0ychy); idle_timeout / deliberate-park / wake_mode semantics are
+	// unchanged. See #2739 and residentRevivablePoolBeads.
 	for _, agent := range input.Agents {
 		if agent.Suspended || agent.MinActiveSessions <= 0 {
 			continue
@@ -353,7 +361,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if covered >= agent.MinActiveSessions {
 			continue
 		}
-		for _, bead := range cityStopPoolBeads(input.SessionBeads, template) {
+		for _, bead := range residentRevivablePoolBeads(input.SessionBeads, template, agent.Resident) {
 			if covered >= agent.MinActiveSessions {
 				break
 			}
@@ -643,15 +651,33 @@ func countMinActiveCovered(beads []AwakeSessionBead, desired map[string]string, 
 	return n
 }
 
-// cityStopPoolBeads returns the asleep, city-stop pool beads for template in
-// deterministic order (by bead ID). These are the revival candidates for the
-// min_active_sessions wake — restricting to sleep_reason=city-stop keeps
-// idle_timeout / wake_mode semantics untouched.
-func cityStopPoolBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
+// residentRevivablePoolBeads returns the asleep pool beads for template that the
+// min_active_sessions pass may revive, in deterministic order (by bead ID):
+//
+//   - sleep_reason=city-stop for any min-floored agent — the city was stopped and
+//     the lane returns on gc start; and
+//   - sleep_reason=no-wake-reason for a RESIDENT agent — a completed demandless
+//     drain of a resident serve loop. canonicalSingletonResidency reuses that
+//     same bead in place (never mints a replacement), so the awake decision must
+//     wake it or it strands asleep holding the canonical alias (gc-0ychy).
+//
+// Restricting no-wake-reason to resident agents keeps idle_timeout, deliberate-
+// park, and wake_mode semantics untouched and mirrors the pool retention
+// allowlist. Every other sleep_reason (idle, idle-timeout, provider-terminal-
+// error, quarantine, ...) is never revived here.
+func residentRevivablePoolBeads(beads []AwakeSessionBead, template string, resident bool) []AwakeSessionBead {
 	var out []AwakeSessionBead
 	for _, b := range beads {
-		if isMinActivePoolBead(b, template) && b.State == "asleep" && b.SleepReason == string(sessionpkg.SleepReasonCityStop) {
+		if !isMinActivePoolBead(b, template) || b.State != "asleep" {
+			continue
+		}
+		switch b.SleepReason {
+		case string(sessionpkg.SleepReasonCityStop):
 			out = append(out, b)
+		case string(sessionpkg.SleepReasonNoWakeReason):
+			if resident {
+				out = append(out, b)
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

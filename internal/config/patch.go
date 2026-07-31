@@ -151,6 +151,9 @@ type AgentPatch struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// Resident overrides whether the agent is a persistent serve loop floored to
+	// min_active_sessions>=1 by ApplyResidentAgentFloor.
+	Resident *bool `toml:"resident,omitempty"`
 	// ScaleCheck overrides the command template whose output reports new
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
@@ -596,6 +599,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.MinActiveSessions != nil {
 		a.MinActiveSessions = p.MinActiveSessions
+	}
+	if p.Resident != nil {
+		a.Resident = p.Resident
 	}
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck

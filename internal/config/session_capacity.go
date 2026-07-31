@@ -32,6 +32,14 @@ func (a *Agent) EffectiveMinActiveSessions() int {
 	return 0
 }
 
+// IsResident reports whether the agent declares itself a persistent serve loop
+// that must be kept alive (min_active_sessions>=1) while enabled. It is a role-
+// neutral capability: any pack agent may set resident=true; the SDK's own
+// deterministic control-dispatcher opts in through its shipped agent.toml.
+func (a *Agent) IsResident() bool {
+	return a != nil && a.Resident != nil && *a.Resident
+}
+
 // SupportsGenericEphemeralSessions reports whether the template may satisfy
 // generic controller demand with ephemeral sessions.
 func (a *Agent) SupportsGenericEphemeralSessions() bool {

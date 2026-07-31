@@ -378,6 +378,12 @@
               "null"
             ]
           },
+          "Resident": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "ResumeCommand": {
             "type": [
               "string",
@@ -555,6 +561,7 @@
           "InjectFragmentsAppend",
           "MaxActiveSessions",
           "MinActiveSessions",
+          "Resident",
           "ScaleCheck",
           "OptionDefaults"
         ],

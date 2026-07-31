@@ -995,6 +995,7 @@ type AgentPatch struct {
 	PreStartAppend          *[]string         `json:"PreStartAppend"`
 	PromptTemplate          *string           `json:"PromptTemplate"`
 	Provider                *string           `json:"Provider"`
+	Resident                *bool             `json:"Resident"`
 	ResumeCommand           *string           `json:"ResumeCommand"`
 	ScaleCheck              *string           `json:"ScaleCheck"`
 	Scope                   *string           `json:"Scope"`

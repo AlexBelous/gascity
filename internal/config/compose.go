@@ -672,6 +672,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// controller sees one concrete identity per rig.
 	ExpandGenericRigNamedSessions(root)
 
+	// The deterministic control-dispatcher declares residency in its agent.toml.
+	// When the v2 control lane is disabled (daemon.formula_v2 off) there must be
+	// no resident dispatcher, so clear its residency before the role-neutral
+	// floor runs. This is a control-lane concern, kept out of the floor itself.
+	ClearDisabledControlLaneResidency(root)
+	// Floor every resident agent to min_active_sessions=1 (gc-0ychy). Runs after
+	// pack expansion and rig overrides so a max_active_sessions=0 disable is
+	// honored. Role-neutral: keys only on the resident flag, so any pack agent
+	// can opt in.
+	ApplyResidentAgentFloor(root)
+
 	// Validate named session declarations after pack expansion and site
 	// binding resolution so stamped identities and deterministic runtime
 	// names reflect the effective workspace identity.

@@ -245,6 +245,15 @@ func computePoolDesiredStates(
 	}
 
 	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionInfos)
+	// Canonical-singleton residency (gc-0ychy): keep exactly one resident occupant
+	// for a min-floored canonical singleton without minting a colliding
+	// replacement. retentionResume names the owner to reuse/WAKE in place (added as
+	// a resume request below); minFillSpawnSuppressed marks templates whose only
+	// owner is draining or drained-but-not-closed (holds the alias, not reusable)
+	// so the floor's min-fill spawn waits rather than mints. Scale-check demand is
+	// never suppressed — queued control work still schedules a runtime-missing
+	// restart.
+	retentionResume, minFillSpawnSuppressed := canonicalSingletonResidency(cfg, sessionInfos)
 
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
@@ -371,6 +380,34 @@ func computePoolDesiredStates(
 		}
 	}
 
+	// Residency reuse/wake: for each min-floored canonical singleton with a live
+	// owner (active/awake/asleep/in-flight), resume the SAME bead so the floor is
+	// satisfied in place — no colliding fresh generation (gc-0ychy). Iterate
+	// cfg.Agents for determinism; isDuplicateSessionRequest drops this when the
+	// owner already has a work-driven resume. The retained resume carries the full
+	// routing context (occupant trigger metadata, else routed scale demand) so
+	// reusing the occupant does not consume the singleton cap ahead of routed
+	// demand and silently drop it, nor clear an in-flight bead's trigger metadata.
+	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
+	for _, sb := range sessionInfos {
+		sessionInfoByID[sb.ID] = sb
+	}
+	for i := range cfg.Agents {
+		template := cfg.Agents[i].QualifiedName()
+		beadID, ok := retentionResume[template]
+		if !ok {
+			continue
+		}
+		delete(retentionResume, template) // one resume per template
+		req := SessionRequest{
+			Template:      template,
+			Tier:          "resume",
+			SessionBeadID: beadID,
+		}
+		applyResidencyResumeContext(&req, sessionInfoByID[beadID], scaleCheckDemand[template])
+		resumeRequests = append(resumeRequests, req)
+	}
+
 	limits := newNestedCapLimits(cfg)
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
@@ -471,7 +508,144 @@ func computePoolDesiredStates(
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, minFillSpawnSuppressed, trace)
+}
+
+// canonicalSingletonResidency computes how to keep exactly one resident occupant
+// for each min-floored canonical-singleton pool agent (e.g. the deterministic
+// control-dispatcher, floored by config.ApplyResidentAgentFloor via its
+// resident=true opt-in) WITHOUT minting a colliding replacement (gc-0ychy). It
+// returns:
+//
+//   - retentionResume[template] = bead ID of the owner to REUSE/WAKE in place (the
+//     oldest active/awake/asleep owner). A resume request for it satisfies the min
+//     floor via the SAME bead and canonical alias — no new generation. This also
+//     wakes an asleep bead left by a completed drain, which would otherwise be
+//     stranded.
+//   - minFillSuppressed[template] set when the only owner is draining or
+//     drained-but-not-closed: it still holds the alias/identity but cannot be
+//     reused, so the floor's min-fill spawn must WAIT (not mint) until it closes.
+//
+// Identity ownership: an occupant OWNS the canonical identity until the bead is
+// CLOSED (skipped here) or its create failed. A failed-create bead has released
+// the identity (failedCreateIdentityReleased, internal/session/names.go), so it is
+// ignored — a fresh spawn is allowed. A state=drained bead still owns the alias
+// until close, so it suppresses (never "clean respawn while drained").
+//
+// Complements canonicalSingletonAliasHeldTemplates, which handles the
+// non-pool-managed (named-singleton) alias holders it deliberately excludes.
+func canonicalSingletonResidency(cfg *config.City, sessionInfos []sessionpkg.Info) (retentionResume map[string]string, minFillSuppressed map[string]struct{}) {
+	retentionResume = make(map[string]string)
+	minFillSuppressed = make(map[string]struct{})
+	if cfg == nil {
+		return retentionResume, minFillSuppressed
+	}
+	sorted := append([]sessionpkg.Info(nil), sessionInfos...)
+	sortSessionInfosByCreatedAtThenID(sorted)
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.UsesCanonicalSingletonPoolIdentity() || agent.EffectiveMinActiveSessions() < 1 {
+			continue
+		}
+		canonical := agent.QualifiedName()
+		var reuseWakeOwner string
+		var hasHeldOwner bool
+		for _, sb := range sorted {
+			if sb.Closed || !isPoolManagedSessionInfo(sb) || !infoIdentifiesAsCanonicalOwner(sb, agent, canonical) {
+				continue
+			}
+			if isFailedCreateSessionInfo(sb) {
+				continue // identity released -> allow a fresh spawn
+			}
+			if isDrainedSessionInfo(sb) {
+				hasHeldOwner = true // still owns the alias until the bead closes
+				continue
+			}
+			switch strings.TrimSpace(sb.MetadataState) {
+			case "active", "awake", string(sessionpkg.StateCreating), string(sessionpkg.StateStartPending):
+				// A live owner, or one still being created (creating/start-pending):
+				// preserve it in place. Keeping the in-flight create desired via a
+				// resume request stops the reconciler from rolling it back on cold
+				// startup, and never mints a colliding fresh generation.
+				if reuseWakeOwner == "" {
+					reuseWakeOwner = sb.ID
+				}
+			case "asleep":
+				// A sleeper's fate depends on WHY it slept, and residency reuse is
+				// an ALLOWLIST — never a default. Only two sleeps are retained
+				// resident lanes to reuse/WAKE in place:
+				//   - city-stop: the city was stopped; the lane returns on resume;
+				//   - no-wake-reason: a completed no-wake-reason drain of a
+				//     resident serve loop (the gc-0ychy case), scoped to
+				//     resident agents so a role-neutral pack resident opts in too.
+				// Every other sleep (idle, idle-timeout, config-drift, user-hold,
+				// wait-hold, rate-limit, provider-terminal-error, quarantine, ...) is
+				// a deliberate or terminal park: do NOT mint a colliding replacement.
+				// Hold the mint; the reconciler frees the slot and (once the bead
+				// closes / releases the alias) a clean replacement spawns, or a
+				// deliberately parked session stays parked. ComputeAwakeSet's own
+				// wake paths (wait-ready, min-active city-stop revive) are unaffected.
+				reason := strings.TrimSpace(sb.SleepReason)
+				retainSleeper := reason == string(sessionpkg.SleepReasonCityStop) ||
+					(reason == string(sessionpkg.SleepReasonNoWakeReason) && agent.IsResident())
+				if retainSleeper {
+					if reuseWakeOwner == "" {
+						reuseWakeOwner = sb.ID
+					}
+				} else {
+					hasHeldOwner = true
+				}
+			default:
+				hasHeldOwner = true // draining, creating, stopped, ... — holds the alias, not reusable
+			}
+		}
+		switch {
+		case reuseWakeOwner != "":
+			retentionResume[canonical] = reuseWakeOwner
+		case hasHeldOwner:
+			minFillSuppressed[canonical] = struct{}{}
+		}
+	}
+	return retentionResume, minFillSuppressed
+}
+
+// applyResidencyResumeContext fills the routing context of a residency-retention
+// resume so reusing a resident singleton in place preserves the work binding
+// instead of dropping it (gc-0ychy). Reusing the occupant consumes the
+// singleton's single cap slot ahead of routed scale demand, so a context-free
+// resume would starve that demand and silently drop its WorkBeadID / pack /
+// workspace / store / fork-parent; and for an in-flight (creating/start-pending)
+// occupant it would clear the bead's own trigger metadata on bind. Precedence:
+// the occupant's own trigger metadata (never cleared), else the first routed work
+// in the template's scale demand; title/pack/workspace/store/parent are enriched
+// from the demand keyed on the resolved work bead id (reads of a nil demand map
+// return the zero value, so no routed demand simply leaves the context empty).
+func applyResidencyResumeContext(req *SessionRequest, info sessionpkg.Info, demand scaleCheckDemand) {
+	req.WorkStoreRef = strings.TrimSpace(info.TriggerBeadStoreRef)
+	req.BrainParentSID = strings.TrimSpace(info.BrainParentSID)
+	workBeadID := strings.TrimSpace(info.TriggerBeadID)
+	if workBeadID == "" && len(demand.WorkBeadIDs) > 0 {
+		workBeadID = strings.TrimSpace(demand.WorkBeadIDs[0])
+	}
+	if workBeadID == "" {
+		return
+	}
+	req.WorkBeadID = workBeadID
+	if title := strings.TrimSpace(demand.Titles[workBeadID]); title != "" {
+		req.WorkBeadTitle = title
+	}
+	if pack := strings.TrimSpace(demand.Packs[workBeadID]); pack != "" {
+		req.WorkPack = pack
+	}
+	if ws := strings.TrimSpace(demand.Workspaces[workBeadID]); ws != "" {
+		req.WorkWorkspace = ws
+	}
+	if sr := strings.TrimSpace(demand.StoreRefs[workBeadID]); sr != "" {
+		req.WorkStoreRef = sr
+	}
+	if parent := strings.TrimSpace(demand.ParentSIDs[workBeadID]); parent != "" {
+		req.BrainParentSID = parent
+	}
 }
 
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {
@@ -606,7 +780,7 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
 // Accepts requests in priority order, rejecting any that would exceed a cap.
-func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
+func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates, minFillSpawnSuppressed map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
 	// Sort by priority DESC, resume tier first within same priority.
 	sort.SliceStable(requests, func(i, j int) bool {
 		if requests[i].BeadPriority != requests[j].BeadPriority {
@@ -656,6 +830,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		template := agent.QualifiedName()
 		minSess := agent.EffectiveMinActiveSessions()
 		if _, ok := aliasHeldTemplates[template]; ok {
+			continue
+		}
+		if _, ok := minFillSpawnSuppressed[template]; ok {
 			continue
 		}
 		for usage.agentCount[template] < minSess {

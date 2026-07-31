@@ -153,6 +153,62 @@ func TestCmdlineReturnsOwnArgv(t *testing.T) {
 	}
 }
 
+// TestEnvironReturnsOwnEnv is a RED test for ga-18nugn round 2: Environ must
+// read a PID's real environment from /proc, not the caller's own os.Environ.
+// It sets a distinctive value on the current process's own env and reads it
+// back via Environ(os.Getpid()) -- proving the /proc/<pid>/environ read path
+// works before scan_linux.go is wired to call it for a foreign target pid.
+func TestEnvironReturnsOwnEnv(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("environ detection uses /proc on linux")
+	}
+	t.Setenv("PIDUTIL_ENVIRON_TEST_MARKER", "gctest-marker-value")
+
+	env, err := Environ(os.Getpid())
+	if err != nil {
+		t.Fatalf("Environ(%d): %v", os.Getpid(), err)
+	}
+	got, ok := EnvValue(env, "PIDUTIL_ENVIRON_TEST_MARKER")
+	if !ok || got != "gctest-marker-value" {
+		t.Fatalf("EnvValue(Environ(%d), marker) = (%q, %v), want (\"gctest-marker-value\", true)", os.Getpid(), got, ok)
+	}
+}
+
+func TestEnvironRejectsUnreadablePID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("environ detection uses /proc on linux")
+	}
+	// PID 1 exists on every Linux host but this test process never has
+	// permission to read another user's environ -- the TOCTOU/permission
+	// error path Cmdline callers already rely on (see listServersUnder).
+	if _, err := Environ(1); err == nil {
+		t.Skip("test process can read PID 1's environ (running as root); cannot exercise the error path")
+	}
+}
+
+func TestEnvValue(t *testing.T) {
+	env := []string{"PATH=/usr/bin", "TMUX_TMPDIR=/custom/tmp", "EMPTY="}
+	cases := []struct {
+		name      string
+		key       string
+		wantValue string
+		wantOK    bool
+	}{
+		{name: "present", key: "TMUX_TMPDIR", wantValue: "/custom/tmp", wantOK: true},
+		{name: "present with empty value", key: "EMPTY", wantValue: "", wantOK: true},
+		{name: "absent", key: "TMUX_TMPDIR_TYPO", wantValue: "", wantOK: false},
+		{name: "shorter key is not a false-positive prefix match", key: "TMUX_TMP", wantValue: "", wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotValue, gotOK := EnvValue(env, tc.key)
+			if gotValue != tc.wantValue || gotOK != tc.wantOK {
+				t.Fatalf("EnvValue(env, %q) = (%q, %v), want (%q, %v)", tc.key, gotValue, gotOK, tc.wantValue, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestNormalizeArgv(t *testing.T) {
 	got := NormalizeArgv([]string{"cut", "", "-d", " ", "\t ", "-f", "1"})
 	want := []string{"cut", "-d", "-f", "1"}

@@ -177,6 +177,26 @@ func Cmdline(pid int) ([]string, error) {
 	return NormalizeArgv(strings.Split(trimmed, "\x00")), nil
 }
 
+// Environ returns a PID's environment variables from /proc, each entry in
+// "KEY=VALUE" form. It returns an error on hosts without /proc environ
+// support or when the process record is unreadable -- the same skip-on-error
+// TOCTOU convention as Cmdline: a process that exits between snapshot and
+// read, or one whose environ this process lacks permission to read, is
+// treated as "record unavailable," not guessed at.
+func Environ(pid int) ([]string, error) {
+	_ = pid
+	return nil, nil // RED stub for ga-18nugn round 2 — implemented in GREEN
+}
+
+// EnvValue looks up key in env, a slice of "KEY=VALUE" strings such as
+// Environ returns. It reports the value and whether key was present at all,
+// so callers can distinguish an explicitly empty value ("KEY=") from key
+// being unset entirely.
+func EnvValue(env []string, key string) (string, bool) {
+	_, _ = env, key
+	return "", false // RED stub for ga-18nugn round 2 — implemented in GREEN
+}
+
 // NormalizeArgv returns argv with empty and whitespace-only arguments
 // dropped — the rule Cmdline applies to /proc command lines. Callers
 // comparing a configured argv against Cmdline output must pass the

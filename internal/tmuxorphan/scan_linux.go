@@ -54,7 +54,16 @@ func listServersUnder(root string) ([]ServerProcess, error) {
 		if err != nil {
 			continue
 		}
-		servers = append(servers, ServerProcess{PID: pid, SocketPath: namedSocketPathFromArgv(argv)})
+		// Same TOCTOU/permission convention as Cmdline above: an Environ
+		// read failure inside namedSocketPathFromArgv skips this PID
+		// rather than falling back to a default that could misclassify a
+		// live, differently-configured server as orphaned (ga-18nugn
+		// review Finding 1).
+		socketPath, err := namedSocketPathFromArgv(pid, argv)
+		if err != nil {
+			continue
+		}
+		servers = append(servers, ServerProcess{PID: pid, SocketPath: socketPath})
 	}
 	return servers, nil
 }
@@ -69,35 +78,58 @@ func isTmuxServerComm(root string, pid int) bool {
 
 // namedSocketPathFromArgv extracts the socket path implied by a tmux
 // server's own launch argv: a literal path after -S, or a socket name
-// after -L resolved via namedSocketPath. Returns "" when neither flag is
-// present -- the default-socket case that must never become a reap
-// candidate (AGENTS.md: "treat personal tmux servers as out of bounds").
+// after -L resolved via namedSocketPath against pid's own environment.
+// Returns "" when neither flag is present -- the default-socket case that
+// must never become a reap candidate (AGENTS.md: "treat personal tmux
+// servers as out of bounds"). Returns a non-nil error only when a -L
+// socket name was found but pid's environment could not be read; callers
+// must skip the PID on that error rather than treat "" as "no named
+// socket" (see namedSocketPath).
 //
 // This codebase's own tmux launcher (internal/runtime/tmux) always passes
 // -L/-S as separate argv elements via exec.Command, never the attached
 // getopt short-flag form (-Lname); every real server this reaper will ever
 // encounter in the fleet was spawned that way, so only the separated form
 // is handled.
-func namedSocketPathFromArgv(argv []string) string {
+func namedSocketPathFromArgv(pid int, argv []string) (string, error) {
 	for i := 0; i+1 < len(argv); i++ {
 		switch argv[i] {
 		case "-S":
-			return argv[i+1]
+			return argv[i+1], nil
 		case "-L":
-			return namedSocketPath(argv[i+1])
+			return namedSocketPath(pid, argv[i+1])
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // namedSocketPath resolves the on-disk path tmux uses for a named -L
-// socket. Mirrors internal/runtime/tmux's unexported namedSocketPath
-// (server_socket_probe.go): tmux honors TMUX_TMPDIR here, with TMPDIR
-// deliberately not a fallback, matching tmux's own convention.
-func namedSocketPath(socketName string) string {
-	tmpDir := os.Getenv("TMUX_TMPDIR")
-	if tmpDir == "" {
+// socket, honoring TMUX_TMPDIR from the TARGET server process's own
+// environment -- never the reaper's own -- with TMPDIR deliberately not a
+// fallback, matching tmux's own convention. (Mirrors the resolution logic
+// in internal/runtime/tmux's unexported namedSocketPath in
+// server_socket_probe.go, which resolves the caller's own prospective
+// socket and so correctly uses the caller's own environment; that is a
+// different problem from identifying an arbitrary already-running target's
+// socket, which is what this function does.)
+//
+// It returns an error when pid's environment cannot be read (TOCTOU race,
+// or a permission denial on a foreign-UID process). That error must never
+// be papered over with the /tmp default: a permission error masquerading
+// as "TMUX_TMPDIR unset" would compute the wrong path for a live server
+// with a real custom TMUX_TMPDIR, making it look orphaned and reapable --
+// exactly the misclassification this function exists to prevent (ga-18nugn
+// review Finding 1). The /tmp fallback below fires only once the
+// environment was actually read and TMUX_TMPDIR was confirmed absent or
+// empty within it.
+func namedSocketPath(pid int, socketName string) (string, error) {
+	env, err := pidutil.Environ(pid)
+	if err != nil {
+		return "", err
+	}
+	tmpDir, ok := pidutil.EnvValue(env, "TMUX_TMPDIR")
+	if !ok || tmpDir == "" {
 		tmpDir = "/tmp"
 	}
-	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName), nil
 }

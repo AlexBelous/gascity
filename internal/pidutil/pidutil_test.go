@@ -155,22 +155,54 @@ func TestCmdlineReturnsOwnArgv(t *testing.T) {
 
 // TestEnvironReturnsOwnEnv is a RED test for ga-18nugn round 2: Environ must
 // read a PID's real environment from /proc, not the caller's own os.Environ.
-// It sets a distinctive value on the current process's own env and reads it
-// back via Environ(os.Getpid()) -- proving the /proc/<pid>/environ read path
-// works before scan_linux.go is wired to call it for a foreign target pid.
+//
+// /proc/<pid>/environ reflects a process's environment as of its own
+// execve, not subsequent in-process mutation: a process that calls
+// os.Setenv (which is what t.Setenv does, restoring the prior value on
+// cleanup) on itself and then reads its own /proc/self/environ does not
+// observe the change (confirmed empirically -- this is standard Linux
+// /proc behavior, not a Go quirk). So this spawns a real child process with
+// a marker baked into its exec-time environment -- the same technique
+// internal/tmuxorphan's scan_linux_test.go fixture uses for TMUX_TMPDIR --
+// and reads the child's environment from the outside via Environ(pid),
+// proving the /proc/<pid>/environ read path works before scan_linux.go is
+// wired to call it for a foreign target pid.
 func TestEnvironReturnsOwnEnv(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("environ detection uses /proc on linux")
 	}
-	t.Setenv("PIDUTIL_ENVIRON_TEST_MARKER", "gctest-marker-value")
 
-	env, err := Environ(os.Getpid())
-	if err != nil {
-		t.Fatalf("Environ(%d): %v", os.Getpid(), err)
+	// "kill -STOP $$" stops the shell in place -- no fork, no exec -- so
+	// there's no forked grandchild to leak and the process stays alive
+	// (and its /proc entry readable) until the deferred SIGKILL below.
+	cmd := exec.Command("sh", "-c", "kill -STOP $$")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "PIDUTIL_ENVIRON_TEST_MARKER=gctest-marker-value"}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting child: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	pid := cmd.Process.Pid
+
+	deadline := time.Now().Add(2 * time.Second)
+	var env []string
+	for {
+		var err error
+		env, err = Environ(pid)
+		if err == nil && len(env) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Environ(%d) never returned a populated environment (last err: %v)", pid, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	got, ok := EnvValue(env, "PIDUTIL_ENVIRON_TEST_MARKER")
 	if !ok || got != "gctest-marker-value" {
-		t.Fatalf("EnvValue(Environ(%d), marker) = (%q, %v), want (\"gctest-marker-value\", true)", os.Getpid(), got, ok)
+		t.Fatalf("EnvValue(Environ(%d), marker) = (%q, %v), want (\"gctest-marker-value\", true)", pid, got, ok)
 	}
 }
 

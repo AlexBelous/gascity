@@ -184,8 +184,19 @@ func Cmdline(pid int) ([]string, error) {
 // read, or one whose environ this process lacks permission to read, is
 // treated as "record unavailable," not guessed at.
 func Environ(pid int) ([]string, error) {
-	_ = pid
-	return nil, nil // RED stub for ga-18nugn round 2 — implemented in GREEN
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimRight(string(data), "\x00")
+	if trimmed == "" {
+		return nil, nil
+	}
+	// Unlike Cmdline, this is deliberately NOT passed through NormalizeArgv:
+	// an environment value can legitimately be empty or whitespace-only
+	// (e.g. "FOO="), and dropping such entries would silently turn "FOO is
+	// set to empty" into "FOO is unset" for EnvValue callers.
+	return strings.Split(trimmed, "\x00"), nil
 }
 
 // EnvValue looks up key in env, a slice of "KEY=VALUE" strings such as
@@ -193,8 +204,13 @@ func Environ(pid int) ([]string, error) {
 // so callers can distinguish an explicitly empty value ("KEY=") from key
 // being unset entirely.
 func EnvValue(env []string, key string) (string, bool) {
-	_, _ = env, key
-	return "", false // RED stub for ga-18nugn round 2 — implemented in GREEN
+	prefix := key + "="
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, prefix); ok {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 // NormalizeArgv returns argv with empty and whitespace-only arguments

@@ -68,6 +68,9 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 	registerCityCommandEnv(cityDir, env)
 	waitForExpectedTmuxSessions(t, cityDir, gasTownExpectedSessions(agents))
 
+	// Captured from the cityDir string, not read off disk, so it stays
+	// correct even if cleanup runs after cityDir has already been removed.
+	socketName := filepath.Base(cityDir)
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
 		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
@@ -81,6 +84,13 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
 			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
 		}
+		// Guaranteed fallback independent of the above (ga-026hrg): `gc
+		// stop`/`gc supervisor stop` both re-resolve city state from
+		// cityDir, so when cityDir is unresolvable by cleanup time (already
+		// removed, or any other reason path resolution fails) they return
+		// before ever tearing down the tmux server, leaking it. Target only
+		// this test's own known socket, per AGENTS.md tmux safety.
+		_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
 	})
 
 	time.Sleep(200 * time.Millisecond)

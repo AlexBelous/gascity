@@ -327,6 +327,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
 	// Advisory + read-only (/proc/stat); no config needed.
 	register(newForkRateCheck())
+	// Orphaned tmux server watch (ga-026hrg): advisory + read-only by default
+	// (/proc); opt-in --fix terminates confirmed orphans. No config needed.
+	register(newTmuxOrphanCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
 		register(doctorchecks.NewPostgresAuthCheck(cityPath, cfg))
 	}

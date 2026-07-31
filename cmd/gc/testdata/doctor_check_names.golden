@@ -68,6 +68,7 @@ order-tracking-retention
 session-model
 dolt-server
 fork-rate
+tmux-orphan
 dolt-noms-size
 dolt-journal-size
 dolt-config

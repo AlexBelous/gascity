@@ -9233,11 +9233,14 @@ func TestReconcileSessionBeads_IdleTimeoutFeedsDemandMismatchTracker(t *testing.
 }
 
 // TestReconcileSessionBeads_IdleTimeoutDemandMismatchSeesOpenWork guards the
-// distinction the idle-timeout ladder needs but does not make on its own:
-// unlike the max-age ladder, DecideIdleTimeout does not defer on assigned
-// work, so a session can be idle-killed while still holding an open
-// assigned-work bead. The demand-mismatch tracker relies on hasOpenWork to
-// tell that case apart from a genuine no-claim cycle.
+// distinction the idle-timeout ladder needs but does not fully collapse:
+// DecideIdleTimeout defers when a session holds *awake* assigned work
+// (in-progress, or open and ready), but open work that is blocked on an
+// unmet dependency is not awake, so the ladder still reaches
+// TimerActionStop and the session is idle-killed while that blocked bead
+// is still assigned to it. The demand-mismatch tracker relies on
+// hasOpenWork -- backed by the status-only Open query, not the Awake one --
+// to tell that case apart from a genuine no-claim cycle.
 func TestReconcileSessionBeads_IdleTimeoutDemandMismatchSeesOpenWork(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -9252,13 +9255,25 @@ func TestReconcileSessionBeads_IdleTimeoutDemandMismatchSeesOpenWork(t *testing.
 		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
 	}
 
-	if _, err := env.store.Create(beads.Bead{
+	blocker, err := env.store.Create(beads.Bead{
+		Title:  "blocking dependency",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	work, err := env.store.Create(beads.Bead{
 		Title:    "implement phase work",
 		Type:     "task",
-		Status:   "in_progress",
+		Status:   "open",
 		Assignee: session.ID,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create(assigned bead): %v", err)
+	}
+	if err := env.store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
 	}
 
 	it := newFakeIdleTracker()
@@ -9275,7 +9290,7 @@ func TestReconcileSessionBeads_IdleTimeoutDemandMismatchSeesOpenWork(t *testing.
 		t.Fatalf("demandMismatchCalls = %d, want 1: %+v", len(it.demandMismatchCalls), it.demandMismatchCalls)
 	}
 	if !it.demandMismatchCalls[0].hasOpenWork {
-		t.Error("hasOpenWork = false, want true: killed session still held an open assigned-work bead")
+		t.Error("hasOpenWork = false, want true: killed session still held an open (but blocked, non-awake) assigned-work bead")
 	}
 }
 

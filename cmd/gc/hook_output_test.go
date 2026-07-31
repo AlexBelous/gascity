@@ -121,6 +121,52 @@ func TestWriteProviderHookContextCodexDefaultsSessionStartFromEnv(t *testing.T) 
 	}
 }
 
+// codexPreCompactCommandOutputWire mirrors Codex 0.146's
+// PreCompactCommandOutputWire: the only universal output fields it accepts, with
+// serde `deny_unknown_fields`. Decoding gc's PreCompact hook output into this
+// struct with DisallowUnknownFields reproduces Codex's rejection of any extra
+// top-level key (notably hookSpecificOutput/additionalContext).
+type codexPreCompactCommandOutputWire struct {
+	Continue       *bool   `json:"continue"`
+	StopReason     *string `json:"stopReason"`
+	SuppressOutput *bool   `json:"suppressOutput"`
+	SystemMessage  *string `json:"systemMessage"`
+}
+
+func TestWriteProviderHookContextCodexPreCompactUniversalOnly(t *testing.T) {
+	var out bytes.Buffer
+	err := writeProviderHookContextForEvent(&out, "codex", "PreCompact", "Handoff: sent auto mail gc-abc12 (restart skipped).\n")
+	if err != nil {
+		t.Fatalf("writeProviderHookContextForEvent: %v", err)
+	}
+
+	// Codex denies unknown fields on PreCompact output; DisallowUnknownFields
+	// reproduces that so hookSpecificOutput/additionalContext output fails here
+	// exactly as Codex 0.146 rejects it at compaction time.
+	dec := json.NewDecoder(bytes.NewReader(out.Bytes()))
+	dec.DisallowUnknownFields()
+	var payload codexPreCompactCommandOutputWire
+	if err := dec.Decode(&payload); err != nil {
+		t.Fatalf("PreCompact output rejected by Codex PreCompactCommandOutputWire: %v\n%s", err, out.String())
+	}
+
+	// The handoff reference must survive through the one allowed string field.
+	if payload.SystemMessage == nil {
+		t.Fatalf("systemMessage missing; handoff reference not preserved:\n%s", out.String())
+	}
+	if got, want := *payload.SystemMessage, "Handoff: sent auto mail gc-abc12 (restart skipped)."; got != want {
+		t.Fatalf("systemMessage = %q, want %q", got, want)
+	}
+
+	// PreCompact must not carry compaction-blocking signals.
+	if payload.Continue != nil && !*payload.Continue {
+		t.Fatalf("PreCompact output set continue=false, which would block compaction:\n%s", out.String())
+	}
+	if payload.StopReason != nil {
+		t.Fatalf("PreCompact output set stopReason, which pairs with a stop:\n%s", out.String())
+	}
+}
+
 func TestWriteProviderHookContextPlain(t *testing.T) {
 	var out bytes.Buffer
 	err := writeProviderHookContextForEvent(&out, "", "", "<system-reminder>\nhello\n</system-reminder>\n")

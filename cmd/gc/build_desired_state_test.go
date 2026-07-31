@@ -6473,6 +6473,74 @@ func TestBuildDesiredState_NamedBackingPoolNoCap_RoutedDemandDoesNotSpawnPhantom
 	}
 }
 
+// NamedSessionRoutedDemand exists only to compensate for alias suppression, and
+// alias suppression applies exactly to canonical singleton identities. On a
+// multi-instance backing pool nothing suppresses the standby, so emitting the
+// signal there would wake the named holder AND mint a standby for the same
+// routed work — overprovisioning. Routed demand must still reach ordinary pool
+// sizing in that case; only the named wake is withheld.
+func TestBuildDesiredState_RoutedDemandWakesOnlyCanonicalSingletonNamedSessions(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	const singletonTemplate = "solo"
+	const multiTemplate = "crew"
+	for _, template := range []string{singletonTemplate, multiTemplate} {
+		if _, err := store.Create(beads.Bead{
+			Title:    template + " routed work",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": template},
+		}); err != nil {
+			t.Fatalf("create routed demand for %q: %v", template, err)
+		}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:              singletonTemplate,
+				StartCommand:      "true",
+				WorkQuery:         "printf ''",
+				MaxActiveSessions: intPtr(1), // UsesCanonicalSingletonPoolIdentity() == true
+			},
+			{
+				Name:              multiTemplate,
+				StartCommand:      "true",
+				WorkQuery:         "printf ''",
+				MaxActiveSessions: intPtr(2), // multi-instance: standby is legitimate
+			},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: singletonTemplate, Mode: "on_demand"},
+			{Template: multiTemplate, Mode: "on_demand"},
+		},
+	}
+	singletonIdentity := cfg.NamedSessions[0].QualifiedName()
+	multiIdentity := cfg.NamedSessions[1].QualifiedName()
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	// Control: the singleton keeps the wake signal, so this test fails loudly if
+	// the gate is simply switched off rather than made selective.
+	if !dsResult.NamedSessionRoutedDemand[singletonIdentity] {
+		t.Fatalf("canonical singleton %q lost its routed wake signal; routed_demand=%v scale_counts=%v",
+			singletonIdentity, dsResult.NamedSessionRoutedDemand, dsResult.ScaleCheckCounts)
+	}
+	// Regression: the multi-instance pool must NOT also wake its named holder.
+	if dsResult.NamedSessionRoutedDemand[multiIdentity] {
+		t.Fatalf("multi-instance backing pool %q emitted NamedSessionRoutedDemand for %q; "+
+			"its standby already serves routed demand, so waking the named holder overprovisions "+
+			"(routed_demand=%v scale_counts=%v)",
+			multiTemplate, multiIdentity, dsResult.NamedSessionRoutedDemand, dsResult.ScaleCheckCounts)
+	}
+	// ...and routed demand still reaches ordinary pool sizing for that template.
+	if dsResult.ScaleCheckCounts[multiTemplate] <= 0 {
+		t.Fatalf("multi-instance template %q lost routed demand entirely (scale_counts=%v); "+
+			"the gate must withhold only the named wake, not the pool demand",
+			multiTemplate, dsResult.ScaleCheckCounts)
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_RuntimeAssigneeDoesNotMaterialize(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "fixture")
@@ -7359,6 +7427,63 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckZeroDoesNotMaterialize
 	}
 	if dsResult.ScaleCheckCounts["dog"] != 0 {
 		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0", dsResult.ScaleCheckCounts["dog"])
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_ColdCustomScaleCheckWakesOnRoutedDemand(t *testing.T) {
+	// FR-S0.1 cold-wake bootstrap (ga-d5au8t): a named-session-backing pool
+	// with a custom scale_check that is cold (zero running sessions, min=0)
+	// must still wake from generic gc.routed_to demand it cannot see while
+	// asleep, exactly like the already-correct generic (non-named) cold
+	// custom-scale_check pool branch (build_desired_state.go:588-593). Before
+	// the fix, the cold-wake probe targets for this named+custom-scale_check
+	// +cold combination were appended only to
+	// defaultNamedScaleTargets, which feeds defaultNamedSessionDemand -- a
+	// function that by design never populates real demand from routed_to
+	// (named sessions wake only via direct Assignee=<identity> matches). So
+	// the routed bead below was stranded forever: scale_check reports 0, and
+	// nothing else ever woke the pool to re-evaluate it.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title: "queued dog job",
+		Metadata: map[string]string{
+			"gc.routed_to": "dog",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "echo 0",
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "dog",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if dsResult.ScaleCheckCounts["dog"] != 1 {
+		t.Fatalf("ScaleCheckCounts[dog] = %d, want 1 (cold-wake probe should surface routed demand the custom scale_check can't see while asleep)", dsResult.ScaleCheckCounts["dog"])
+	}
+	dogCount := 0
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "dog" {
+			dogCount++
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("cold-wake probe materialized configured named identity: %+v", tp)
+			}
+		}
+	}
+	if dogCount != 1 {
+		t.Fatalf("dog ephemeral desired count = %d, want 1 (cold-wake probe should spawn exactly one ephemeral session, clamped, not zero and not name-N phantoms)", dogCount)
 	}
 }
 

@@ -123,8 +123,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   535,
-			BaselineFiles:   163,
+			BaselineCalls:   545,
+			BaselineFiles:   164,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -136,7 +136,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   427,
+			BaselineCalls:   424,
 			BaselineFiles:   156,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -164,8 +164,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   396,
-			BaselineFiles:   112,
+			BaselineCalls:   406,
+			BaselineFiles:   113,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -177,8 +177,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   288,
-			BaselineFiles:   111,
+			BaselineCalls:   279,
+			BaselineFiles:   110,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
@@ -216,7 +216,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   57,
+			BaselineCalls:   58,
 			BaselineFiles:   24,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
@@ -442,8 +442,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   391,
-			BaselineFiles:   109,
+			BaselineCalls:   401,
+			BaselineFiles:   110,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -455,8 +455,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   288,
-			BaselineFiles:   111,
+			BaselineCalls:   279,
+			BaselineFiles:   110,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -494,7 +494,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   57,
+			BaselineCalls:   58,
 			BaselineFiles:   24,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
@@ -2052,14 +2052,34 @@ const (
 
 // CheckedMarkdownBlock returns the single generated inventory block.
 func CheckedMarkdownBlock(document string) (string, error) {
-	if strings.Count(document, markdownBegin) != 1 || strings.Count(document, markdownEnd) != 1 {
-		return "", errors.New("TESTING.md must contain exactly one checked test resource ledger marker pair")
+	start, end, err := markdownBlockSpan(document)
+	if err != nil {
+		return "", err
 	}
-	start := strings.Index(document, markdownBegin)
-	end := strings.Index(document, markdownEnd)
+	return document[start:end], nil
+}
+
+// ReplaceMarkdownBlock returns document with its single checked test resource
+// ledger block replaced by replacement. Content outside the marker pair is
+// preserved byte-for-byte. Pass RenderMarkdown's output as replacement to
+// regenerate the block from a Ledger.
+func ReplaceMarkdownBlock(document, replacement string) (string, error) {
+	start, end, err := markdownBlockSpan(document)
+	if err != nil {
+		return "", err
+	}
+	return document[:start] + replacement + document[end:], nil
+}
+
+func markdownBlockSpan(document string) (start, end int, err error) {
+	if strings.Count(document, markdownBegin) != 1 || strings.Count(document, markdownEnd) != 1 {
+		return 0, 0, errors.New("TESTING.md must contain exactly one checked test resource ledger marker pair")
+	}
+	start = strings.Index(document, markdownBegin)
+	end = strings.Index(document, markdownEnd)
 	if end < start {
-		return "", errors.New("TESTING.md resource ledger end marker precedes begin marker")
+		return 0, 0, errors.New("TESTING.md resource ledger end marker precedes begin marker")
 	}
 	end += len(markdownEnd)
-	return document[start:end], nil
+	return start, end, nil
 }

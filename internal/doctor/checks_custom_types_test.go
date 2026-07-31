@@ -59,6 +59,22 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	}
 }
 
+// retryRemoveAllForTest retries os.RemoveAll briefly to absorb a lingering
+// embedded-dolt background writer that can hold files open a few dozen ms
+// past the owning bd subprocess's apparent exit — which otherwise races
+// t.TempDir()'s single-shot RemoveAll cleanup with an intermittent
+// "directory not empty" error. Falls through silently on final failure so
+// TempDir's own best-effort cleanup still gets the last word.
+func retryRemoveAllForTest(t *testing.T, dir string) {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		if err := os.RemoveAll(dir); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestCustomTypesCheck_TableDrift proves detect+heal of the bug this bead
 // fixes: config.yaml's types.custom CSV can list a type (e.g. "step") that
 // the normalized custom_types TABLE doesn't have a row for. bd's create
@@ -105,22 +121,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	dir := t.TempDir()
-	t.Cleanup(func() {
-		// This test's embedded dolt store can still have a background
-		// writer holding files open a few dozen ms after the bd subprocess
-		// exits, racing t.TempDir()'s single-shot RemoveAll cleanup with an
-		// intermittent "directory not empty" error. Retry briefly; fall
-		// through to let TempDir's own best-effort cleanup have the last
-		// word either way. See
-		// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which
-		// hits the same race for the same reason.
-		for i := 0; i < 10; i++ {
-			if err := os.RemoveAll(dir); err == nil {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	})
+	t.Cleanup(func() { retryRemoveAllForTest(t, dir) })
 
 	runBD := func(args ...string) string {
 		t.Helper()
@@ -214,24 +215,7 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	dir := t.TempDir()
-	t.Cleanup(func() {
-		// Unlike TableDrift (which currently fails before reaching a live
-		// store), this test completes a full bd init against an embedded
-		// dolt store, and that store's background writer can still hold
-		// files open under dir for a few dozen ms after the bd subprocess
-		// exits. That races t.TempDir()'s own single-shot RemoveAll and
-		// intermittently fails with "directory not empty" when this test
-		// runs back-to-back with others in the same test binary. Retry
-		// briefly so a slow release doesn't fail the whole run; fall
-		// through to let TempDir's own best-effort cleanup have the last
-		// word either way.
-		for i := 0; i < 10; i++ {
-			if err := os.RemoveAll(dir); err == nil {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	})
+	t.Cleanup(func() { retryRemoveAllForTest(t, dir) })
 
 	runBD := func(args ...string) string {
 		t.Helper()

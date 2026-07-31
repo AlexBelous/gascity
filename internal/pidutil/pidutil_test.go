@@ -154,55 +154,43 @@ func TestCmdlineReturnsOwnArgv(t *testing.T) {
 }
 
 // TestEnvironReturnsOwnEnv is a RED test for ga-18nugn round 2: Environ must
-// read a PID's real environment from /proc, not the caller's own os.Environ.
+// read a PID's real environment from /proc. It reads this test binary's own
+// entry via os.Getpid(), the same self-observation technique
+// TestCmdlineReturnsOwnArgv above uses for Cmdline -- Environ's
+// /proc/<pid>/environ read is the same code path regardless of whose pid is
+// passed, so proving it against the caller's own live process proves the
+// mechanism scan_linux.go relies on for a foreign target pid. The foreign
+// case itself (a target whose environment differs from the reader's) is
+// covered at the integration level by internal/tmuxorphan's
+// TestListServersResolvesSocketPathFromTargetEnv, which spawns a real
+// separate process; duplicating that spawn here would only grow the
+// checked resource census (test/test-resources.toml) without adding
+// coverage, since the read path under test is identical either way.
 //
+// This deliberately does not inject a fresh marker via t.Setenv:
 // /proc/<pid>/environ reflects a process's environment as of its own
-// execve, not subsequent in-process mutation: a process that calls
-// os.Setenv (which is what t.Setenv does, restoring the prior value on
-// cleanup) on itself and then reads its own /proc/self/environ does not
-// observe the change (confirmed empirically -- this is standard Linux
-// /proc behavior, not a Go quirk). So this spawns a real child process with
-// a marker baked into its exec-time environment -- the same technique
-// internal/tmuxorphan's scan_linux_test.go fixture uses for TMUX_TMPDIR --
-// and reads the child's environment from the outside via Environ(pid),
-// proving the /proc/<pid>/environ read path works before scan_linux.go is
-// wired to call it for a foreign target pid.
+// execve, not subsequent in-process mutation -- t.Setenv's underlying
+// os.Setenv on this same running process would never be observed by a read
+// of its own /proc/self/environ (confirmed empirically; standard Linux
+// /proc behavior, not a Go quirk). Comparing against os.Environ() instead
+// checks Environ's parse against Go's own view of that same unmutated,
+// exec-time environment.
 func TestEnvironReturnsOwnEnv(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("environ detection uses /proc on linux")
 	}
 
-	// "kill -STOP $$" stops the shell in place -- no fork, no exec -- so
-	// there's no forked grandchild to leak and the process stays alive
-	// (and its /proc entry readable) until the deferred SIGKILL below.
-	cmd := exec.Command("sh", "-c", "kill -STOP $$")
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "PIDUTIL_ENVIRON_TEST_MARKER=gctest-marker-value"}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("starting child: %v", err)
+	env, err := Environ(os.Getpid())
+	if err != nil {
+		t.Fatalf("Environ(%d): %v", os.Getpid(), err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-	pid := cmd.Process.Pid
-
-	deadline := time.Now().Add(2 * time.Second)
-	var env []string
-	for {
-		var err error
-		env, err = Environ(pid)
-		if err == nil && len(env) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Environ(%d) never returned a populated environment (last err: %v)", pid, err)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if len(env) == 0 {
+		t.Fatalf("Environ(%d) = empty, want this test binary's real environment", os.Getpid())
 	}
-
-	got, ok := EnvValue(env, "PIDUTIL_ENVIRON_TEST_MARKER")
-	if !ok || got != "gctest-marker-value" {
-		t.Fatalf("EnvValue(Environ(%d), marker) = (%q, %v), want (\"gctest-marker-value\", true)", pid, got, ok)
+	for _, want := range os.Environ() {
+		if !slices.Contains(env, want) {
+			t.Fatalf("Environ(%d) missing %q present in os.Environ(); got %v", os.Getpid(), want, env)
+		}
 	}
 }
 

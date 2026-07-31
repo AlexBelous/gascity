@@ -18,8 +18,16 @@ const defaultDemandMismatchThreshold = 3
 //
 // recordIdleKillCycle is called once per idle-timeout kill. The caller
 // supplies whether the killed session still held open assigned work and the
-// template's current pool demand — both already computed by the reconciler
-// for other purposes, so tracking a cycle costs no new store queries.
+// template's current pool demand. Pool demand is already computed by the
+// reconciler for other purposes; the assigned-work answer costs one store
+// query at the kill site.
+//
+// That query is deliberately the Open variant, not the Awake variant the
+// idle-timeout ladder itself gathers (ga-nllza6). Reaching the kill means no
+// *awake* assigned work held the session up, so asking the broader Open
+// question here is what separates a session killed holding nothing at all —
+// the stranded-demand cycle this tracker counts — from one killed by the
+// ladder's same-bead defer backstop while it still held open work.
 type demandMismatchTracker struct {
 	mu         sync.Mutex
 	threshold  int

@@ -135,6 +135,7 @@ type CityRuntime struct {
 	sessionStartController *sessionStartController
 	sessionStartOwnership  sessionStartOwnership
 	sessionStartMode       rollout.Mode
+	poolMembershipShadow   *poolMembershipIndex
 	// guarded by sessionStartMu; startup retries reuse this runtime's one
 	// controller-state admission owner.
 	readyRoutedWorkEventAdmissionInstalled bool
@@ -391,6 +392,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
 		lifecycleShadowWorker:   p.LifecycleShadowWorker,
+		poolMembershipShadow:    newPoolMembershipIndex(),
 		convergenceReqCh:        p.ConvergenceReqCh,
 		reloadReqCh: func() chan reloadRequest {
 			if p.ReloadReqCh != nil {
@@ -499,6 +501,10 @@ func (cr *CityRuntime) recordReadyRoutedWorkDemandContribution(contribution read
 		contribution.DecidedAt.Before(contribution.ObservedAt) {
 		return
 	}
+	lookupStarted := time.Now()
+	membership := cr.poolMembershipShadow.observe(contribution.PoolTarget)
+	capacityDecidedAt := time.Now().UTC()
+	lookupDuration := time.Since(lookupStarted)
 	cr.serviceStateMu.RLock()
 	cfg := cr.cfg
 	cr.serviceStateMu.RUnlock()
@@ -517,22 +523,38 @@ func (cr *CityRuntime) recordReadyRoutedWorkDemandContribution(contribution read
 	if eventTimestampValid {
 		eventToDecision = contribution.DecidedAt.Sub(contribution.EventAt).Nanoseconds()
 	}
+	eventToCapacityDecision := int64(0)
+	if !contribution.EventAt.IsZero() && !capacityDecidedAt.Before(contribution.EventAt) {
+		eventToCapacityDecision = capacityDecidedAt.Sub(contribution.EventAt).Nanoseconds()
+	}
+	demandToCapacityDecision := int64(0)
+	if !capacityDecidedAt.Before(contribution.DecidedAt) {
+		demandToCapacityDecision = capacityDecidedAt.Sub(contribution.DecidedAt).Nanoseconds()
+	}
 	cycle.RecordControllerOperation(
 		TraceSitePoolDemandContributionShadow,
 		reason,
 		outcome,
 		"pool_demand.contribution.shadow",
-		contribution.DecidedAt.Sub(contribution.ObservedAt),
+		capacityDecidedAt.Sub(contribution.ObservedAt),
 		map[string]any{
-			"work_id":                           contribution.WorkID,
-			"pool_target":                       contribution.PoolTarget,
-			"source_actor":                      contribution.SourceActor,
-			"source_store":                      contribution.SourceStore,
-			"contribution_present":              contribution.ContributionPresent,
-			"event_timestamp_valid":             eventTimestampValid,
-			"event_to_shadow_decision_ns":       eventToDecision,
-			"observation_to_shadow_decision_ns": contribution.DecidedAt.Sub(contribution.ObservedAt).Nanoseconds(),
-			"effect_applied":                    false,
+			"work_id":                               contribution.WorkID,
+			"pool_target":                           contribution.PoolTarget,
+			"source_actor":                          contribution.SourceActor,
+			"source_store":                          contribution.SourceStore,
+			"contribution_present":                  contribution.ContributionPresent,
+			"event_timestamp_valid":                 eventTimestampValid,
+			"event_to_shadow_decision_ns":           eventToDecision,
+			"observation_to_shadow_decision_ns":     contribution.DecidedAt.Sub(contribution.ObservedAt).Nanoseconds(),
+			"pool_member_count":                     membership.members,
+			"pool_occupancy":                        membership.occupied,
+			"pool_membership_certified":             membership.certified,
+			"pool_membership_revision":              membership.revision,
+			"pool_membership_reason":                string(membership.reason),
+			"pool_membership_lookup_ns":             lookupDuration.Nanoseconds(),
+			"event_to_capacity_shadow_decision_ns":  eventToCapacityDecision,
+			"demand_to_capacity_shadow_decision_ns": demandToCapacityDecision,
+			"effect_applied":                        false,
 		},
 	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
@@ -3692,16 +3714,63 @@ func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {
 }
 
 func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapshot, bool) {
+	var (
+		membership      *poolMembershipIndex
+		membershipToken uint64
+		membershipCfg   *config.City
+	)
+	if cr.poolMembershipShadow != nil && cr.sessionStartOwnershipState() == sessionStartOwnershipKeyed {
+		membershipSnapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+		if err != nil {
+			cr.poolMembershipShadow.invalidate(poolMembershipUncertifiedSnapshotGap)
+		} else {
+			cr.serviceStateMu.RLock()
+			configCurrent := cr.cfg == membershipSnapshot.Config
+			cr.serviceStateMu.RUnlock()
+			if !configCurrent {
+				release()
+				cr.poolMembershipShadow.invalidate(poolMembershipUncertifiedConfigChanged)
+			} else {
+				defer release()
+				membership = cr.poolMembershipShadow
+				membershipToken = membership.rebuildToken()
+				membershipCfg = membershipSnapshot.Config
+			}
+		}
+	}
 	// The session-bead snapshot is a sessions-class read, so route it through the
 	// sessions accessor (identity to the city store today).
 	store := cr.sessionsBeadStore()
 	if store.Store == nil {
+		if membership != nil {
+			membership.invalidate(poolMembershipUncertifiedSnapshotGap)
+		}
 		return nil, false
 	}
 	sessionBeads, err := loadSessionBeadSnapshot(store.Store)
 	if err != nil {
+		if membership != nil {
+			membership.invalidate(poolMembershipUncertifiedSnapshotGap)
+		}
 		fmt.Fprintf(cr.stderr, "%s: loading session beads: %v\n", cr.logPrefix, err) //nolint:errcheck
 		return nil, true
+	}
+	if membership != nil {
+		candidate, buildErr := buildPoolMembershipState(membershipCfg, sessionBeads.OpenInfos())
+		if buildErr != nil {
+			membership.invalidate(poolMembershipUncertifiedInvalidSnapshot)
+			fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: pool membership shadow rebuild: %v\n", cr.logPrefix, buildErr) //nolint:errcheck // shadow failure must not affect reconciliation
+		} else {
+			cr.serviceStateMu.RLock()
+			configCurrent := cr.cfg == membershipCfg
+			if configCurrent {
+				membership.publishRebuild(membershipToken, candidate)
+			}
+			cr.serviceStateMu.RUnlock()
+			if !configCurrent {
+				membership.invalidate(poolMembershipUncertifiedConfigChanged)
+			}
+		}
 	}
 	return sessionBeads, false
 }

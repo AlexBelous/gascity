@@ -170,6 +170,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 	}
 	admit := func(id string) {
 		outcome, admitErr := controller.Admit(id, sessionStartAdmissionInProcess)
+		cr.refreshPoolMembershipSession(id)
 		if admitErr != nil {
 			fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting session-start event for %s: %v\n", cr.sessionStartLogPrefix(), id, admitErr) //nolint:errcheck // admission failure is recoverable via audit
 			return

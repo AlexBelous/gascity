@@ -112,6 +112,47 @@ func TestCityRuntimeSessionStartControllerExecutesDrainAckStopPendingOnTypedEven
 	}
 }
 
+func TestCityRuntimeKeyedDrainAckIncompleteCompletionReadmitsDurableMarker(t *testing.T) {
+	oldTimeout := drainAckStopConfirmDeadTimeout
+	drainAckStopConfirmDeadTimeout = 0
+	t.Cleanup(func() { drainAckStopConfirmDeadTimeout = oldTimeout })
+
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state":            string(session.StateDraining),
+		"state_reason":     session.DrainAckStopPendingReason,
+		"instance_token":   "drain-token",
+		"awake_started_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	})
+
+	provider := &incompleteThenDeadUnattendedProvider{Fake: runtime.NewFake()}
+	if err := provider.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if err := provider.SetMeta("worker", "GC_INSTANCE_TOKEN", "drain-token"); err != nil {
+		t.Fatalf("set runtime token: %v", err)
+	}
+	cs := coherentSessionStartControllerStateForTest(env.cfg, provider, env.store, rollout.Auto)
+	cr := &CityRuntime{cfg: env.cfg, sp: provider, cs: cs, rec: events.Discard, stdout: io.Discard, stderr: io.Discard}
+	t.Cleanup(cr.stopSessionStartController)
+	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensure session-start controller: %v", err)
+	}
+
+	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, bead))
+	awaitCond(t, func() bool {
+		return !isDrainAckStopPendingInfo(env.sessionInfo(bead.ID))
+	}, "incomplete exact stop completion to re-admit and finalize its durable marker")
+	if got := provider.observations.Load(); got < 3 {
+		t.Fatalf("fresh liveness observations = %d, want live, incomplete-dead, then complete-dead", got)
+	}
+	if got := provider.CountCalls("Stop", "worker"); got != 1 {
+		t.Fatalf("provider Stop calls = %d, want exactly one", got)
+	}
+}
+
 type sequenceGetMetaProvider struct {
 	*runtime.Fake
 	results []getMetaResult
@@ -119,6 +160,33 @@ type sequenceGetMetaProvider struct {
 }
 
 type freshBlockingStopProvider struct{ *blockingStopProvider }
+
+type incompleteThenDeadUnattendedProvider struct {
+	*runtime.Fake
+	observations atomic.Int32
+}
+
+func (p *incompleteThenDeadUnattendedProvider) ObserveFreshLiveness(runtime.LivenessTarget) runtime.Liveness {
+	switch p.observations.Add(1) {
+	case 1:
+		return runtime.Liveness{Running: true, Alive: true, Complete: true}
+	case 2:
+		return runtime.Liveness{}
+	default:
+		return runtime.Liveness{Complete: true}
+	}
+}
+
+func (p *incompleteThenDeadUnattendedProvider) StopUnattendedSession(name, expectedToken string) error {
+	actualToken, err := p.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return err
+	}
+	if actualToken != expectedToken {
+		return fmt.Errorf("instance token = %q, want %q", actualToken, expectedToken)
+	}
+	return p.Stop(name)
+}
 
 func (p *freshBlockingStopProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
 	running := p.IsRunning(target.SessionName)
@@ -532,13 +600,23 @@ func TestDrainAckIncarnationStartedAtDoesNotUseAdoptedBeadCreation(t *testing.T)
 		t.Fatalf("adopted bead creation time = %v, want no trusted runtime boundary", got)
 	}
 
-	wokeAt := createdAt.Add(time.Minute)
+	awakeStartedAt := createdAt.Add(time.Minute)
 	got := drainAckIncarnationStartedAt(session.Info{
-		CreatedAt:  createdAt,
-		LastWokeAt: wokeAt.Format(time.RFC3339),
+		CreatedAt:      createdAt,
+		AwakeStartedAt: awakeStartedAt.Format(time.RFC3339),
+	})
+	if !got.Equal(awakeStartedAt) {
+		t.Fatalf("awake-interval boundary = %v, want %v", got, awakeStartedAt)
+	}
+
+	wokeAt := awakeStartedAt.Add(time.Minute)
+	got = drainAckIncarnationStartedAt(session.Info{
+		CreatedAt:      createdAt,
+		AwakeStartedAt: awakeStartedAt.Format(time.RFC3339),
+		LastWokeAt:     wokeAt.Format(time.RFC3339),
 	})
 	if !got.Equal(wokeAt) {
-		t.Fatalf("pre-wake boundary = %v, want %v", got, wokeAt)
+		t.Fatalf("wake-attempt boundary = %v, want %v", got, wokeAt)
 	}
 }
 
@@ -554,7 +632,7 @@ func TestQueueExactDrainAckAsyncStopCompletionPanicDoesNotLeakTracker(t *testing
 		t.Fatalf("set runtime token: %v", err)
 	}
 	tracker := &asyncStartTracker{}
-	if !queueExactDrainAckAsyncStop("", beads.NewMemStore(), provider, &config.City{}, "gcs-stop", "worker", "drain-token", nil, time.Time{}, tracker, io.Discard, func(bool) {
+	if !queueExactDrainAckAsyncStop("", beads.NewMemStore(), provider, &config.City{}, "gcs-stop", "worker", "drain-token", nil, time.Time{}, tracker, io.Discard, func(drainAckAsyncStopCompletion) {
 		panic("completion callback failure")
 	}) {
 		t.Fatal("queue exact drain-ack stop = false, want true")

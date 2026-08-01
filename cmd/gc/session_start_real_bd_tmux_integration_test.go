@@ -199,7 +199,7 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 }
 
 // TestExactSessionStartNativeV59RealBDTmuxJourney proves exact socket admission
-// against both an already-live no-op and a v59 durable start-to-stop lifecycle.
+// against an already-live no-op and a v59 durable start, status heal, and stop.
 func TestExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	t.Run("live_socket_noop", testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow)
 	t.Run("native_v59_start_stop", testExactSessionStartNativeV59RealBDTmuxJourney)
@@ -235,7 +235,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		Workspace: config.Workspace{Name: guard.CityName()},
 		Beads: config.BeadsConfig{
 			Provider:          "bd",
-			ConditionalWrites: "auto",
+			ConditionalWrites: "require",
 		},
 		Daemon: config.DaemonConfig{
 			SessionReconciler: "auto",
@@ -435,6 +435,63 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if startedTmuxID == "" {
 		t.Fatalf("exact-start tmux identity for %q is empty: %v", created.SessionName, sessionIDs)
 	}
+
+	if err := sessionFrontDoor(backingStore).ApplyPatch(created.SessionID, sessionpkg.MetadataPatch{
+		"wake_request": string(sessionpkg.WakeCauseExplicit),
+	}); err != nil {
+		t.Fatalf("stamp explicit wake marker on live session: %v", err)
+	}
+	preHeal, err := backingStore.Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("read v59 pre-heal session: %v", err)
+	}
+	if preHeal.Revision == 0 || preHeal.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("v59 pre-heal revision/state = %d/%q, want nonzero/active", preHeal.Revision, preHeal.Metadata["state"])
+	}
+	runGC(10*time.Second,
+		"--city", cityPath,
+		"event", "emit", "bead.updated",
+		"--subject", created.SessionID,
+		"--bead-payload", created.SessionID,
+		"--actor", "bd-hook",
+		"--json",
+	)
+	var healedBead beads.Bead
+	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
+		current, getErr := backingStore.Get(created.SessionID)
+		if getErr != nil {
+			return false, getErr
+		}
+		if current.Metadata["state"] != string(sessionpkg.StateAwake) {
+			return false, nil
+		}
+		healedBead = current
+		return true, nil
+	}); err != nil {
+		t.Fatalf("v59 status heal did not converge: %v; controller stdout=%q stderr=%q",
+			err, controllerStdout.String(), controllerStderr.String())
+	}
+	if healedBead.Revision == 0 || healedBead.Revision == preHeal.Revision ||
+		healedBead.Metadata["wake_request"] != string(sessionpkg.WakeCauseExplicit) ||
+		healedBead.Metadata["session_name"] != created.SessionName ||
+		healedBead.Metadata["instance_token"] != started.InstanceToken ||
+		healedBead.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("v59 healed row = revision %d metadata %#v, want a new revision with identity preserved",
+			healedBead.Revision, healedBead.Metadata)
+	}
+	healedSession, err := sessionFrontDoor(backingStore).Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("project v59 healed session: %v", err)
+	}
+	if healedSession.MetadataState != string(sessionpkg.StateAwake) {
+		t.Fatalf("v59 healed session state = %q, want awake", healedSession.MetadataState)
+	}
+	sessionIDs, err = tmuxClient.ListSessionIDs()
+	if err != nil || strings.TrimSpace(sessionIDs[created.SessionName]) != startedTmuxID {
+		t.Fatalf("v59 status heal changed tmux identity: before=%q after=%q all=%v err=%v",
+			startedTmuxID, strings.TrimSpace(sessionIDs[created.SessionName]), sessionIDs, err)
+	}
+	started = healedSession
 
 	stopPending, err := sessionFrontDoor(backingStore).ApplyPatchInfo(
 		started,
@@ -717,13 +774,21 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		shadowWitness.Fields["effect_applied"] != false {
 		t.Fatalf("legacy START-shadow witness = %#v, want matched legacy-owned no-effect evidence", shadowWitness)
 	}
-	shadowStartSuccessLog := fmt.Sprintf(
-		"session lifecycle: op=start wave=0 session=%s template=worker outcome=success",
-		shadowCreated.SessionName,
-	)
-	if count := strings.Count(legacyControllerStderr.String(), shadowStartSuccessLog); count != 1 {
-		t.Fatalf("legacy shadow provider starts = %d, want exactly 1; controller stderr=%q",
-			count, legacyControllerStderr.String())
+	startRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+		RecordType:  TraceRecordOperation,
+		SiteCode:    TraceSiteLifecycleStartRun,
+		Template:    "worker",
+		SessionName: shadowCreated.SessionName,
+	})
+	if err != nil {
+		t.Fatalf("read legacy provider-start trace: %v", err)
+	}
+	// Legacy starts execute asynchronously: this operation record owns the
+	// dispatch boundary and therefore reports start_enqueued. Exactly one
+	// enqueue plus the durable-active and exact-tmux-identity assertions above
+	// proves one successful provider execution without depending on stderr text.
+	if len(startRecords) != 1 || startRecords[0].OutcomeCode != TraceOutcomeStartEnqueued {
+		t.Fatalf("legacy provider-start trace = %#v, want exactly one async start enqueue", startRecords)
 	}
 }
 

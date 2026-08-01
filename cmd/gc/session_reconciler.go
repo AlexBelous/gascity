@@ -284,15 +284,30 @@ var (
 	drainAckStopConfirmDeadPoll    = 250 * time.Millisecond
 )
 
+type drainAckAsyncStopCompletion uint8
+
+const (
+	// drainAckAsyncStopParked means a safety fence or provider operation failed.
+	// The durable marker remains authoritative, but this completion must not
+	// create a tight destructive retry loop.
+	drainAckAsyncStopParked drainAckAsyncStopCompletion = iota
+	// drainAckAsyncStopRetry means the bounded post-kill observation remained
+	// live or incomplete. Re-admit the durable marker through the keyed owner.
+	drainAckAsyncStopRetry
+	// drainAckAsyncStopConfirmed means the target is authoritatively absent.
+	// Re-admit so the keyed owner can finalize the durable marker.
+	drainAckAsyncStopConfirmed
+)
+
 func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer) {
 	_ = queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, time.Time{}, tracker, stderr, false, nil)
 }
 
-func queueExactDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, incarnationStartedAt time.Time, tracker *asyncStartTracker, stderr io.Writer, onComplete func(bool)) bool {
+func queueExactDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, incarnationStartedAt time.Time, tracker *asyncStartTracker, stderr io.Writer, onComplete func(drainAckAsyncStopCompletion)) bool {
 	return queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, incarnationStartedAt, tracker, stderr, true, onComplete)
 }
 
-func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, incarnationStartedAt time.Time, tracker *asyncStartTracker, stderr io.Writer, strictTokenFence bool, onComplete func(bool)) bool {
+func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, incarnationStartedAt time.Time, tracker *asyncStartTracker, stderr io.Writer, strictTokenFence bool, onComplete func(drainAckAsyncStopCompletion)) bool {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return false
@@ -313,7 +328,7 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 	// confines each goroutine to the seam that was live when its stop was queued.
 	poke := drainAckAsyncStopPokeController
 	go func() {
-		confirmed := false
+		completion := drainAckAsyncStopParked
 		defer done()
 		defer func() {
 			if r := recover(); r != nil {
@@ -331,7 +346,7 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 							fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s completion callback panicked: %v\n%s", name, r, debug.Stack()) //nolint:errcheck
 						}
 					}()
-					onComplete(confirmed)
+					onComplete(completion)
 				}()
 			}
 		}()
@@ -362,7 +377,10 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 		// (the reassigned next step stays runtime-missing). The expected token is
 		// threaded through so each re-kill stays fenced against a re-woken
 		// same-name replacement. Mirrors #4089's confirm-dead contract.
-		confirmed = confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, incarnationStartedAt, strictTokenFence)
+		completion = confirmDrainAckRuntimeDeadCompletion(
+			cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames,
+			stderr, incarnationStartedAt, strictTokenFence,
+		)
 		// Legacy drain-ack uses its existing best-effort poke. Exact drain-ack
 		// re-admits the durable marker through the keyed owner instead.
 		if !strictTokenFence {
@@ -384,6 +402,13 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 // and false if it outlived the deadline (caller proceeds best-effort). Mirrors
 // #4089's confirm-dead contract.
 func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, stderr io.Writer, incarnationStartedAt time.Time, strictTokenFence bool) bool {
+	return confirmDrainAckRuntimeDeadCompletion(
+		cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames,
+		stderr, incarnationStartedAt, strictTokenFence,
+	) == drainAckAsyncStopConfirmed
+}
+
+func confirmDrainAckRuntimeDeadCompletion(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, stderr io.Writer, incarnationStartedAt time.Time, strictTokenFence bool) drainAckAsyncStopCompletion {
 	deadline := time.Now().Add(drainAckStopConfirmDeadTimeout)
 	for {
 		if strictTokenFence {
@@ -395,11 +420,11 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 			})
 			if !liveness.Running && !liveness.Alive {
 				if liveness.Complete {
-					return true
+					return drainAckAsyncStopConfirmed
 				}
 				if !time.Now().Before(deadline) {
 					fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: runtime death not confirmed before deadline; slot may stay occupied\n", name) //nolint:errcheck
-					return false
+					return drainAckAsyncStopRetry
 				}
 				time.Sleep(drainAckStopConfirmDeadPoll)
 				continue
@@ -407,12 +432,12 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 		} else {
 			running, alive := observeRuntimeProviderLiveness(sp, name, processNames)
 			if !running && !alive {
-				return true
+				return drainAckAsyncStopConfirmed
 			}
 		}
 		if !time.Now().Before(deadline) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: runtime still alive after confirm-dead deadline; slot may stay occupied\n", name) //nolint:errcheck
-			return false
+			return drainAckAsyncStopRetry
 		}
 		// Legacy re-kills still target by name. Strict re-kills use one bound
 		// unattended-stop operation so a replacement cannot slip between a
@@ -421,13 +446,13 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 			actualToken, tokenErr := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
 			if tokenErr == nil && actualToken != "" && actualToken != expectedToken {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s confirm-dead skipped re-kill: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
-				return true
+				return drainAckAsyncStopConfirmed
 			}
 		}
 		if strictTokenFence {
 			if err := workerStopUnattendedSessionByIDWithConfig(cityPath, store, sp, cfg, sessionID, expectedToken); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s parked before re-kill: %v\n", name, err) //nolint:errcheck
-				return false
+				return drainAckAsyncStopParked
 			}
 		} else if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s re-kill: %v\n", name, err) //nolint:errcheck

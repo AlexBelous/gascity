@@ -127,12 +127,12 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				Stderr:            cr.sessionStartStderr(),
 				StartOptions:      startOptions,
 				AsyncStopTracker:  &cr.asyncStops,
-				AsyncStopCompletion: func(confirmed bool) {
+				AsyncStopCompletion: func(completion drainAckAsyncStopCompletion) {
 					release()
-					if !confirmed {
+					if completion == drainAckAsyncStopParked {
 						return
 					}
-					cr.admitConfirmedDrainAckStop(admission.SessionID)
+					cr.admitDrainAckStopCompletion(admission.SessionID)
 				},
 				AsyncStopQueued: func() {
 					leaseTransferred = true
@@ -207,10 +207,10 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 	return nil
 }
 
-// admitConfirmedDrainAckStop sends confirmed-stop recovery through the current
-// keyed owner. The durable stop marker, not the completed controller instance,
-// is the recovery record across a provider reload.
-func (cr *CityRuntime) admitConfirmedDrainAckStop(id string) {
+// admitDrainAckStopCompletion sends confirmed or retryable stop completion
+// through the current keyed owner. The durable stop marker, not the completed
+// controller instance, is the recovery record across a provider reload.
+func (cr *CityRuntime) admitDrainAckStopCompletion(id string) {
 	if cr == nil {
 		return
 	}
@@ -224,7 +224,7 @@ func (cr *CityRuntime) admitConfirmedDrainAckStop(id string) {
 	}
 	outcome, err := controller.Admit(id, sessionStartAdmissionInProcess)
 	if err != nil {
-		fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting confirmed drain-ack stop for %s: %v\n", cr.sessionStartLogPrefix(), id, err) //nolint:errcheck // durable audit remains recovery path
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting drain-ack stop completion for %s: %v\n", cr.sessionStartLogPrefix(), id, err) //nolint:errcheck // durable audit remains recovery path
 		cr.seedActiveSessionStartController(cr.loadSessionBeadSnapshot())
 		controller.RequestAudit()
 		return

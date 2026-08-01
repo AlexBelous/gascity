@@ -48,7 +48,7 @@ type exactSessionStartParams struct {
 	ObserveLoadedSession exactLoadedSessionObserver
 	StartOptions         []startExecutionOption
 	AsyncStopTracker     *asyncStartTracker
-	AsyncStopCompletion  func(bool)
+	AsyncStopCompletion  func(drainAckAsyncStopCompletion)
 	AsyncStopQueued      func()
 	RolloutMode          rollout.Mode
 	RigStores            map[string]beads.Store
@@ -546,9 +546,9 @@ func reconcileExactSessionStartWithOwner(
 			incarnationStartedAt,
 			params.AsyncStopTracker,
 			stderr,
-			func(confirmed bool) {
+			func(completion drainAckAsyncStopCompletion) {
 				if params.AsyncStopCompletion != nil {
-					params.AsyncStopCompletion(confirmed)
+					params.AsyncStopCompletion(completion)
 				}
 			},
 		) && params.AsyncStopQueued != nil {
@@ -716,6 +716,9 @@ func reconcileExactSessionStartWithOwner(
 func drainAckIncarnationStartedAt(info sessionpkg.Info) time.Time {
 	if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok {
 		return wokeAt
+	}
+	if awakeStartedAt, ok := parseRFC3339Metadata(info.AwakeStartedAt); ok {
+		return awakeStartedAt
 	}
 	return time.Time{}
 }

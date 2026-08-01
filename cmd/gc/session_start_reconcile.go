@@ -54,6 +54,7 @@ type exactSessionStartParams struct {
 	RigStores            map[string]beads.Store
 	DrainOps             drainOps
 	DrainTracker         *drainTracker
+	Trace                *SessionReconcilerTracer
 }
 
 // planExactSessionWaitDependencyStartShadow reads one dependency-ready session
@@ -627,7 +628,7 @@ func reconcileExactSessionStartWithOwner(
 		if statusResult.Context != exactSessionLifecycleStatusContextDesired ||
 			statusResult.Disposition != exactSessionLifecycleStatusDispositionCandidate ||
 			statusResult.RequestedID == "" || statusResult.RequestedID != statusResult.LoadedID ||
-			statusResult.RequestedID != plan.SessionID || statusResult.LoadedRevision <= 0 || len(plan.Patch) == 0 {
+			statusResult.RequestedID != plan.SessionID || statusResult.LoadedRevision == 0 || len(plan.Patch) == 0 {
 			return owner, fmt.Errorf("reconciling exact session start %q: malformed session-status heal candidate", info.ID)
 		}
 		if err := params.StatusWriter.UpdateIfMatch(statusResult.RequestedID, statusResult.LoadedRevision, beads.UpdateOpts{Metadata: plan.Patch}); err != nil {
@@ -710,7 +711,44 @@ func reconcileExactSessionStartWithOwner(
 		}
 		return owner, fmt.Errorf("reconciling exact session start %q: start result did not commit", info.ID)
 	}
+	recordExactSessionStartCommit(params, admission, result)
 	return owner, nil
+}
+
+func recordExactSessionStartCommit(params exactSessionStartParams, admission sessionStartAdmission, result startResult) {
+	if params.Trace == nil {
+		return
+	}
+	info := result.prepared.candidate.info
+	template := result.prepared.candidate.tp.TemplateName
+	cycle := params.Trace.BeginCycle(TraceTickTriggerControl, "exact_session_start_commit", time.Now().UTC(), params.Config)
+	if cycle == nil {
+		return
+	}
+	if cycle.detailEnabled(template) {
+		cycle.recordAdmittedDetailOperation(
+			TraceSiteLifecycleStartCommit,
+			TraceReasonStart,
+			TraceOutcomeSuccess,
+			"exact_session_start_commit",
+			template,
+			info.ID,
+			info.SessionName,
+			TraceSource(cycle.sourceFor(template)),
+			0,
+			traceRecordPayload{
+				"admission":         string(admission.Source),
+				"admission_version": admission.Version,
+				"generation":        params.Generation,
+				"session_id":        info.ID,
+				"instance_token":    info.InstanceToken,
+				"effect_applied":    true,
+			},
+		)
+	}
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
+		fmt.Fprintf(params.Stderr, "session reconciler: recording exact start commit trace: %v\n", err) //nolint:errcheck
+	}
 }
 
 func drainAckIncarnationStartedAt(info sessionpkg.Info) time.Time {

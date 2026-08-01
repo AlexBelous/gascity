@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -68,6 +69,165 @@ func TestReconcileExactSessionStartStartsPendingCreateAndCommitsActive(t *testin
 	if got.PendingCreateClaim {
 		t.Fatal("pending_create_claim remained set after successful start")
 	}
+}
+
+func TestReconcileExactSessionStartRecordsSocketCommitAfterDurableStart(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	params := exactSessionStartTestParams(t, env)
+	trace := newSessionReconcilerTraceManager(params.CityPath, params.CityName, io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	if _, err := newSessionReconcilerTraceArmStore(params.CityPath).upsertArm(TraceArm{
+		ScopeType:  TraceArmScopeTemplate,
+		ScopeValue: "worker",
+		Source:     TraceArmSourceManual,
+		Level:      TraceModeDetail,
+		ExpiresAt:  time.Now().Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("arm detail trace: %v", err)
+	}
+	params.Trace = trace
+	admission := sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionSocket, Version: 7}
+	if err := reconcileExactSessionStart(context.Background(), admission, params); err != nil {
+		t.Fatalf("reconcile exact socket start: %v", err)
+	}
+	woken := env.sessionInfo(bead.ID)
+	records, err := ReadTraceRecords(traceCityRuntimeDir(params.CityPath), TraceFilter{
+		RecordType:  TraceRecordOperation,
+		SiteCode:    TraceSiteLifecycleStartCommit,
+		SessionName: "worker",
+	})
+	if err != nil {
+		t.Fatalf("read socket commit trace: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("socket commit traces = %#v, want exactly one", records)
+	}
+	record := records[0]
+	if record.Template != "worker" || record.SessionBeadID != bead.ID ||
+		record.Fields["admission"] != string(sessionStartAdmissionSocket) ||
+		record.Fields["admission_version"] != float64(admission.Version) ||
+		record.Fields["generation"] != float64(params.Generation) ||
+		record.Fields["session_id"] != bead.ID ||
+		record.Fields["instance_token"] != woken.InstanceToken ||
+		record.Fields["effect_applied"] != true {
+		t.Fatalf("socket commit trace = %#v, want durable socket commit identity", record)
+	}
+}
+
+func TestReconcileExactSessionStartStatusHealUsesNegativeRevisionToken(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		writeErr  error
+		wantError bool
+	}{
+		{name: "applies heal"},
+		{
+			name:      "stale writer does not overwrite",
+			writeErr:  &beads.PreconditionFailedError{ID: "placeholder", Expected: -17, Current: -16},
+			wantError: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+			}
+			bead := env.createSessionBead("worker", "worker")
+			if err := env.store.SetMetadata(bead.ID, "wake_request", string(session.WakeCauseExplicit)); err != nil {
+				t.Fatalf("configure exact status heal: %v", err)
+			}
+			provider := &exactStartCachedLivenessProvider{Fake: env.sp}
+			if err := provider.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+				t.Fatalf("seed live runtime: %v", err)
+			}
+			before, err := env.store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("read session before exact status heal: %v", err)
+			}
+			conditionalStore, ok := env.store.(beads.ConditionalWriter)
+			if !ok {
+				t.Fatalf("session store %T does not support conditional writes", env.store)
+			}
+			writer := &recordingExactStatusWriter{
+				ConditionalWriter: conditionalStore,
+				store:             env.store,
+				err:               tt.writeErr,
+			}
+			params := exactSessionStartTestParams(t, env)
+			params.Generation = 1
+			params.Provider = provider
+			params.Store = negativeRevisionSessionStore{Store: env.store, revision: -17}
+			params.StatusWriter = writer
+			var reports []exactSessionLifecycleStatusResult
+			params.StartOptions = append(params.StartOptions, withExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
+				reports = append(reports, result)
+			}))
+			owner, reconcileErr := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
+				SessionID: bead.ID,
+				Source:    sessionStartAdmissionInProcess,
+				Version:   1,
+			}, params)
+			if owner != exactSessionStartKeyedOwner {
+				t.Fatalf("owner = %v, want keyed", owner)
+			}
+			if tt.wantError != (reconcileErr != nil) {
+				t.Fatalf("reconcile error = %v, want error=%t", reconcileErr, tt.wantError)
+			}
+			if len(writer.expected) != 1 || writer.expected[0] != -17 {
+				t.Fatalf("UpdateIfMatch revisions = %v, want [-17]; status reports=%#v invalidations=%v", writer.expected, reports, provider.invalidations)
+			}
+			after, err := env.store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("read session after exact status heal: %v", err)
+			}
+			if tt.wantError {
+				if !reflect.DeepEqual(after, before) {
+					t.Fatalf("stale status writer overwrote session:\nbefore=%#v\nafter=%#v", before, after)
+				}
+				return
+			}
+			if after.Metadata["state"] != string(session.StateAwake) {
+				t.Fatalf("healed state = %q, want awake", after.Metadata["state"])
+			}
+		})
+	}
+}
+
+type negativeRevisionSessionStore struct {
+	beads.Store
+	revision int64
+}
+
+func (s negativeRevisionSessionStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.Store.Get(id)
+	if err == nil {
+		bead.Revision = s.revision
+	}
+	return bead, err
+}
+
+type recordingExactStatusWriter struct {
+	beads.ConditionalWriter
+	store    beads.Store
+	err      error
+	expected []int64
+}
+
+func (w *recordingExactStatusWriter) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	w.expected = append(w.expected, revision)
+	if w.err != nil {
+		return w.err
+	}
+	return w.store.Update(id, opts)
 }
 
 func TestResolveExactSessionStartTemplateEmptyPromptDoesNotInvokeGit(t *testing.T) {

@@ -33,8 +33,10 @@ type exactSessionStartStopDurableSample struct {
 	SchemaStatus                   string `json:"schema_status"`
 	StartAdmissionToFinalizationNS int64  `json:"start_admission_to_finalization_ns"`
 	StopAdmissionToFinalizationNS  int64  `json:"stop_admission_to_finalization_ns"`
+	WakeCommandToFinalizationNS    int64  `json:"wake_command_to_finalization_ns"`
 	StartPersistedState            string `json:"start_persisted_state"`
 	StopPersistedState             string `json:"stop_persisted_state"`
+	WakePersistedState             string `json:"wake_persisted_state"`
 }
 
 func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testing.T) {
@@ -121,8 +123,8 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 	if err != nil {
 		t.Fatalf("read live session row before socket admission: %v", err)
 	}
-	if beforeRow.Revision <= 0 {
-		t.Fatalf("live session row revision = %d, want positive", beforeRow.Revision)
+	if beforeRow.Revision == 0 {
+		t.Fatalf("live session row revision = %d, want nonzero", beforeRow.Revision)
 	}
 	if reply := cr.admitSessionStartSocketKey(bead.ID); reply != sessionStartSocketReplyOK {
 		t.Fatalf("exact session-start admission = %q, want %q", reply, sessionStartSocketReplyOK)
@@ -223,8 +225,50 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("BEADS_DOLT_AUTO_START", "1")
-	if tracePath := strings.TrimSpace(os.Getenv("GC_TEST_BD_TRACE_JSON")); tracePath != "" {
-		t.Setenv("GC_BD_TRACE_JSON", tracePath)
+	bdTracePath := strings.TrimSpace(os.Getenv("GC_TEST_BD_TRACE_JSON"))
+	if bdTracePath == "" {
+		bdTracePath = filepath.Join(t.TempDir(), "bd-trace.jsonl")
+	}
+	t.Setenv("GC_BD_TRACE_JSON", bdTracePath)
+	type bdTraceRecord struct {
+		Args    []string `json:"args"`
+		Callers []string `json:"callers"`
+	}
+	readBDTrace := func() []bdTraceRecord {
+		t.Helper()
+		data, readErr := os.ReadFile(bdTracePath)
+		if readErr != nil {
+			t.Fatalf("read Bd trace %q: %v", bdTracePath, readErr)
+		}
+		lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+		records := make([]bdTraceRecord, 0, len(lines))
+		for _, line := range lines {
+			if len(line) == 0 {
+				continue
+			}
+			var record bdTraceRecord
+			if decodeErr := json.Unmarshal(line, &record); decodeErr != nil {
+				t.Fatalf("decode isolated bd trace record %q: %v", line, decodeErr)
+			}
+			records = append(records, record)
+		}
+		return records
+	}
+	hasTraceArgument := func(args []string, want string) bool {
+		for _, arg := range args {
+			if arg == want {
+				return true
+			}
+		}
+		return false
+	}
+	hasTraceCaller := func(callers []string, want string) bool {
+		for _, caller := range callers {
+			if strings.Contains(caller, want) {
+				return true
+			}
+		}
+		return false
 	}
 
 	guard := tmuxtest.NewGuard(t)
@@ -435,6 +479,10 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if startedTmuxID == "" {
 		t.Fatalf("exact-start tmux identity for %q is empty: %v", created.SessionName, sessionIDs)
 	}
+	startedTmuxServerPID := guard.ServerPID()
+	if startedTmuxServerPID <= 0 {
+		t.Fatalf("exact-start tmux server PID = %d, want positive", startedTmuxServerPID)
+	}
 
 	if err := sessionFrontDoor(backingStore).ApplyPatch(created.SessionID, sessionpkg.MetadataPatch{
 		"wake_request": string(sessionpkg.WakeCauseExplicit),
@@ -448,28 +496,35 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if preHeal.Revision == 0 || preHeal.Metadata["state"] != string(sessionpkg.StateActive) {
 		t.Fatalf("v59 pre-heal revision/state = %d/%q, want nonzero/active", preHeal.Revision, preHeal.Metadata["state"])
 	}
-	runGC(10*time.Second,
-		"--city", cityPath,
-		"event", "emit", "bead.updated",
-		"--subject", created.SessionID,
-		"--bead-payload", created.SessionID,
-		"--actor", "bd-hook",
-		"--json",
+	healReply, err := sendControllerCommandWithReadTimeout(
+		cityPath,
+		sessionStartCommandPrefix+created.SessionID,
+		10*time.Second,
 	)
-	var healedBead beads.Bead
+	if err != nil {
+		t.Fatalf("submit exact status-heal key through controller socket: %v", err)
+	}
+	if got := strings.TrimSpace(string(healReply)); got != string(sessionStartSocketReplyOK) {
+		t.Fatalf("exact status-heal socket reply = %q, want %q", got, sessionStartSocketReplyOK)
+	}
+	var (
+		healedBead     beads.Bead
+		lastHealedBead beads.Bead
+	)
 	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
 		current, getErr := backingStore.Get(created.SessionID)
 		if getErr != nil {
 			return false, getErr
 		}
+		lastHealedBead = current
 		if current.Metadata["state"] != string(sessionpkg.StateAwake) {
 			return false, nil
 		}
 		healedBead = current
 		return true, nil
 	}); err != nil {
-		t.Fatalf("v59 status heal did not converge: %v; controller stdout=%q stderr=%q",
-			err, controllerStdout.String(), controllerStderr.String())
+		t.Fatalf("v59 status heal did not converge: %v; current=%+v controller stdout=%q stderr=%q",
+			err, lastHealedBead, controllerStdout.String(), controllerStderr.String())
 	}
 	if healedBead.Revision == 0 || healedBead.Revision == preHeal.Revision ||
 		healedBead.Metadata["wake_request"] != string(sessionpkg.WakeCauseExplicit) ||
@@ -491,7 +546,23 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("v59 status heal changed tmux identity: before=%q after=%q all=%v err=%v",
 			startedTmuxID, strings.TrimSpace(sessionIDs[created.SessionName]), sessionIDs, err)
 	}
-	started = healedSession
+	if err := sessionFrontDoor(backingStore).ApplyPatch(created.SessionID, sessionpkg.MetadataPatch{
+		"wake_request":      "",
+		"wake_requested_at": "",
+	}); err != nil {
+		t.Fatalf("clear status-heal wake marker before drain: %v", err)
+	}
+	clearedBeforeDrain, err := backingStore.Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("read session after clearing status-heal wake marker: %v", err)
+	}
+	if clearedBeforeDrain.Metadata["wake_request"] != "" || clearedBeforeDrain.Metadata["wake_requested_at"] != "" {
+		t.Fatalf("status-heal wake marker before drain = %#v, want both fields cleared", clearedBeforeDrain.Metadata)
+	}
+	started, err = sessionFrontDoor(backingStore).Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("project session after clearing status-heal wake marker: %v", err)
+	}
 
 	stopPending, err := sessionFrontDoor(backingStore).ApplyPatchInfo(
 		started,
@@ -574,14 +645,140 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("successful provider starts = %d, want exactly 1; controller stderr=%q", count, controllerStderr.String())
 	}
 
+	runGC(10*time.Second,
+		"--city", cityPath,
+		"trace", "start",
+		"--template", "worker",
+		"--for", "2m",
+		"--level", string(TraceModeDetail),
+	)
+	preWakeBDTraceCount := len(readBDTrace())
+	wakeCommandAt := time.Now().UTC()
+	wakeOutput := runGC(30*time.Second,
+		"--city", cityPath,
+		"session", "wake", created.SessionID,
+		"--json",
+	)
+	var wakeResult sessionActionResult
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(wakeOutput)), &wakeResult); err != nil {
+		t.Fatalf("decode exact session wake: %v\n%s", err, wakeOutput)
+	}
+	if wakeResult.Action != "wake" || wakeResult.SessionID != created.SessionID || wakeResult.State != "wake_requested" {
+		t.Fatalf("exact session wake result = %+v, want wake_requested for durable session %q", wakeResult, created.SessionID)
+	}
+
+	var (
+		woken           sessionpkg.Info
+		wakeFinalizedAt time.Time
+	)
+	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
+		info, getErr := sessionFrontDoor(backingStore).Get(created.SessionID)
+		if getErr != nil {
+			return false, getErr
+		}
+		if info.MetadataState != string(sessionpkg.StateAwake) || info.PendingCreateClaim {
+			return false, nil
+		}
+		woken = info
+		wakeFinalizedAt = time.Now().UTC()
+		return true, nil
+	}); err != nil {
+		current, currentErr := sessionFrontDoor(backingStore).Get(created.SessionID)
+		t.Fatalf("exact wake did not converge: %v; current=%+v current_err=%v controller stdout=%q stderr=%q",
+			err, current, currentErr, controllerStdout.String(), controllerStderr.String())
+	}
+	if !wakeFinalizedAt.After(wakeCommandAt) {
+		t.Fatalf("exact wake finalized at %s before command at %s", wakeFinalizedAt, wakeCommandAt)
+	}
+	wokenBead, err := backingStore.Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("read exact wake bead from real bd: %v", err)
+	}
+	if woken.ID != created.SessionID || woken.SessionName != created.SessionName ||
+		wokenBead.Metadata["wake_request"] != "" || wokenBead.Metadata["wake_requested_at"] != "" ||
+		strings.TrimSpace(woken.InstanceToken) == "" || woken.InstanceToken == started.InstanceToken {
+		t.Fatalf("exact wake durable session/bead = %+v/%+v, want same identity, cleared wake marker, and a new non-empty instance token", woken, wokenBead)
+	}
+	wakeToken, err := tmuxClient.GetEnvironment(created.SessionName, "GC_INSTANCE_TOKEN")
+	if err != nil || strings.TrimSpace(wakeToken) == "" || wakeToken != woken.InstanceToken {
+		t.Fatalf("exact wake live/durable token = %q/%q err=%v, want same new non-empty token", wakeToken, woken.InstanceToken, err)
+	}
+	wakeIDs, err := tmuxClient.ListSessionIDs()
+	if err != nil {
+		t.Fatalf("read exact wake tmux identity: %v", err)
+	}
+	wakeTmuxID := strings.TrimSpace(wakeIDs[created.SessionName])
+	wakeTmuxServerPID := guard.ServerPID()
+	if wakeTmuxServerPID <= 0 {
+		t.Fatalf("exact wake tmux server PID = %d, want positive", wakeTmuxServerPID)
+	}
+	if wakeTmuxID == "" {
+		t.Fatalf("exact wake tmux identity for %q is empty: %v", created.SessionName, wakeIDs)
+	}
+	if wakeTmuxServerPID == startedTmuxServerPID && wakeTmuxID == startedTmuxID {
+		t.Fatalf("exact wake tmux incarnation reused server/session identity: server=%d session=%q all=%v",
+			wakeTmuxServerPID, wakeTmuxID, wakeIDs)
+	}
+	postWakeBDTrace := readBDTrace()[preWakeBDTraceCount:]
+	var exactWakeWitnesses []bdTraceRecord
+	for _, record := range postWakeBDTrace {
+		if hasTraceArgument(record.Args, created.SessionID) &&
+			hasTraceArgument(record.Args, "--set-metadata") &&
+			hasTraceArgument(record.Args, "instance_token="+woken.InstanceToken) &&
+			hasTraceArgument(record.Args, "state=creating") &&
+			hasTraceCaller(record.Callers, "prepareExactStartCandidateForCity") {
+			exactWakeWitnesses = append(exactWakeWitnesses, record)
+		}
+	}
+	if len(exactWakeWitnesses) == 0 {
+		t.Fatalf("exact wake has no target-specific exact-start Bd witness; target=%q token=%q post_wake_trace=%#v",
+			created.SessionID, woken.InstanceToken, postWakeBDTrace)
+	}
+	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		count := strings.Count(controllerStderr.String(), startSuccessLog)
+		if count > 2 {
+			return false, fmt.Errorf("successful provider starts after wake = %d, want exactly 2; controller stderr=%q", count, controllerStderr.String())
+		}
+		return count == 2, nil
+	}); err != nil {
+		t.Fatalf("successful provider starts after wake did not settle at exactly 2: %v; controller stderr=%q",
+			err, controllerStderr.String())
+	}
+	wakeStartRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+		RecordType:  TraceRecordOperation,
+		SiteCode:    TraceSiteLifecycleStartRun,
+		SessionName: created.SessionName,
+	})
+	if err != nil {
+		t.Fatalf("read exact wake provider-start trace: %v", err)
+	}
+	for _, record := range wakeStartRecords {
+		if record.OutcomeCode == TraceOutcomeStartEnqueued {
+			t.Fatalf("exact wake used legacy async start for %q: %#v", created.SessionName, wakeStartRecords)
+		}
+	}
+	traceStatusOutput := runGC(10*time.Second, "--city", cityPath, "trace", "status", "--json")
+	var wakeTraceStatus traceStatusResultJSON
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(traceStatusOutput)), &wakeTraceStatus); err != nil {
+		t.Fatalf("decode trace status after exact wake: %v\n%s", err, traceStatusOutput)
+	}
+	if !wakeTraceStatus.SessionReconciler.Available || wakeTraceStatus.SessionReconciler.ConfiguredMode != "auto" || wakeTraceStatus.SessionReconciler.EffectiveOwner != "keyed" {
+		t.Fatalf("trace status after exact wake = %+v, want available auto/keyed", wakeTraceStatus.SessionReconciler)
+	}
+
 	sample := exactSessionStartStopDurableSample{
-		Version:                        "exact-session-start-stop-v1",
+		Version:                        "exact-session-start-stop-v2",
 		SessionID:                      created.SessionID,
 		SchemaStatus:                   schemaStatus,
 		StartAdmissionToFinalizationNS: startFinalizedAt.Sub(startAdmittedAt).Nanoseconds(),
 		StopAdmissionToFinalizationNS:  stopFinalizedAt.Sub(stopAdmittedAt).Nanoseconds(),
+		WakeCommandToFinalizationNS:    wakeFinalizedAt.Sub(wakeCommandAt).Nanoseconds(),
 		StartPersistedState:            started.MetadataState,
 		StopPersistedState:             stopped.MetadataState,
+		WakePersistedState:             woken.MetadataState,
+	}
+	if sample.WakeCommandToFinalizationNS <= 0 {
+		t.Fatalf("wake command-to-finalization latency = %d, want positive", sample.WakeCommandToFinalizationNS)
 	}
 	wire, err := json.Marshal(sample)
 	if err != nil {
@@ -605,6 +802,95 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("keyed production controller did not exit; stdout=%q stderr=%q",
 			controllerStdout.String(), controllerStderr.String())
 	}
+	if count := strings.Count(controllerStderr.String(), startSuccessLog); count != 2 {
+		t.Fatalf("successful provider starts after keyed controller exit = %d, want exactly 2; controller stderr=%q",
+			count, controllerStderr.String())
+	}
+	wakeCommitRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+		RecordType:  TraceRecordOperation,
+		SiteCode:    TraceSiteLifecycleStartCommit,
+		SessionName: created.SessionName,
+		TraceMode:   TraceModeDetail,
+		TraceSource: TraceSourceManual,
+	})
+	if err != nil {
+		t.Fatalf("read exact wake commit trace after keyed controller exit: %v", err)
+	}
+	var socketWakeCommitRecords []SessionReconcilerTraceRecord
+	for _, record := range wakeCommitRecords {
+		if record.SessionBeadID == created.SessionID &&
+			record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+			record.Fields["session_id"] == created.SessionID &&
+			record.Fields["instance_token"] == woken.InstanceToken &&
+			record.Fields["effect_applied"] == true {
+			socketWakeCommitRecords = append(socketWakeCommitRecords, record)
+		}
+	}
+	if len(socketWakeCommitRecords) != 1 {
+		t.Fatalf("socket wake commit traces after keyed controller exit = %#v, want exactly one durable committed socket start for session %q token %q",
+			socketWakeCommitRecords, created.SessionID, woken.InstanceToken)
+	}
+	if err := ensureBeadsProvider(cityPath); err != nil {
+		t.Fatalf("restart test-owned bead provider for fixture reset: %v", err)
+	}
+	fixtureIDs, fixtureListErr := tmuxClient.ListSessionIDs()
+	if fixtureListErr != nil && !strings.Contains(strings.ToLower(fixtureListErr.Error()), "no server running") {
+		t.Fatalf("list isolated tmux sessions before fixture reset: %v", fixtureListErr)
+	}
+	if strings.TrimSpace(fixtureIDs[created.SessionName]) != "" {
+		if err := tmuxClient.KillSession(created.SessionName); err != nil {
+			fixtureIDs, fixtureListErr = tmuxClient.ListSessionIDs()
+			if fixtureListErr != nil && !strings.Contains(strings.ToLower(fixtureListErr.Error()), "no server running") {
+				t.Fatalf("remove original tmux session %q: %v; list error: %v", created.SessionName, err, fixtureListErr)
+			}
+			if strings.TrimSpace(fixtureIDs[created.SessionName]) != "" {
+				t.Fatalf("remove original tmux session %q: %v; all=%v", created.SessionName, err, fixtureIDs)
+			}
+		}
+	}
+	fixtureResetPatch := sessionpkg.AcknowledgeDrainPatch(false)
+	fixtureResetPatch["wake_request"] = ""
+	fixtureResetPatch["wake_requested_at"] = ""
+	fixtureResetPatch["pending_create_claim"] = ""
+	fixtureResetPatch["pending_create_started_at"] = ""
+	fixtureResetPatch["state_reason"] = ""
+	fixtureResetPatch["sleep_reason"] = ""
+	if err := sessionFrontDoor(backingStore).ApplyPatch(created.SessionID, fixtureResetPatch); err != nil {
+		t.Fatalf("reset original session fixture to drained: %v", err)
+	}
+	// An open manual session remains desired under the legacy reconciler even
+	// after a drain. The wake journey is complete, so retire only this fixture
+	// before measuring the unrelated legacy-shadow session.
+	if err := backingStore.Close(created.SessionID); err != nil {
+		t.Fatalf("close original session fixture after wake journey: %v", err)
+	}
+	fixtureInfo, err := sessionFrontDoor(backingStore).Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("read original session after fixture reset: %v", err)
+	}
+	fixtureBead, err := backingStore.Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("read original bead after fixture reset: %v", err)
+	}
+	fixtureLifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(fixtureInfo))
+	fixtureIDs, fixtureListErr = tmuxClient.ListSessionIDs()
+	if fixtureListErr != nil && !strings.Contains(strings.ToLower(fixtureListErr.Error()), "no server running") {
+		t.Fatalf("list isolated tmux sessions after fixture reset: %v", fixtureListErr)
+	}
+	if !fixtureInfo.Closed || fixtureBead.Status != "closed" ||
+		fixtureBead.Metadata["state"] != string(sessionpkg.StateDrained) ||
+		fixtureLifecycle.BaseState != sessionpkg.BaseStateClosed ||
+		!fixtureLifecycle.Terminal ||
+		fixtureBead.Metadata["wake_request"] != "" ||
+		fixtureBead.Metadata["wake_requested_at"] != "" ||
+		fixtureBead.Metadata["pending_create_claim"] != "" ||
+		fixtureBead.Metadata["pending_create_started_at"] != "" ||
+		fixtureBead.Metadata["state_reason"] != "" ||
+		fixtureBead.Metadata["sleep_reason"] != "" ||
+		strings.TrimSpace(fixtureIDs[created.SessionName]) != "" {
+		t.Fatalf("original fixture after reset = session %#v bead %#v lifecycle %#v tmux=%v, want terminal closed with stored drained state, cleared markers, and no runtime",
+			fixtureInfo, fixtureBead, fixtureLifecycle, fixtureIDs)
+	}
 
 	cityConfigPath := filepath.Join(cityPath, "city.toml")
 	legacyConfig, err := os.ReadFile(cityConfigPath)
@@ -626,6 +912,13 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		0o644,
 	); err != nil {
 		t.Fatalf("write legacy shadow config: %v", err)
+	}
+	beforeLegacyIDs, err := tmuxClient.ListSessionIDs()
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no server running") {
+		t.Fatalf("list isolated tmux sessions before legacy shadow: %v", err)
+	}
+	if originalID := strings.TrimSpace(beforeLegacyIDs[created.SessionName]); originalID != "" {
+		t.Fatalf("original session resurrected before legacy shadow: %q; all=%v", originalID, beforeLegacyIDs)
 	}
 
 	legacyControllerCtx, cancelLegacyController := context.WithCancel(t.Context())
@@ -733,6 +1026,34 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if strings.TrimSpace(shadowToken) == "" || shadowToken != shadowStarted.InstanceToken {
 		t.Fatalf("legacy shadow live/durable instance tokens = %q/%q, want the same non-empty token",
 			shadowToken, shadowStarted.InstanceToken)
+	}
+	afterLegacyStartIDs, err := tmuxClient.ListSessionIDs()
+	if err != nil {
+		t.Fatalf("list isolated tmux sessions after legacy shadow start: %v", err)
+	}
+	if originalID := strings.TrimSpace(afterLegacyStartIDs[created.SessionName]); originalID != "" {
+		t.Fatalf("legacy shadow start resurrected original session: %q; all=%v", originalID, afterLegacyStartIDs)
+	}
+	originalAfterLegacyStart, err := sessionFrontDoor(backingStore).Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("read original session after legacy shadow start: %v", err)
+	}
+	originalBeadAfterLegacyStart, err := backingStore.Get(created.SessionID)
+	if err != nil {
+		t.Fatalf("read original bead after legacy shadow start: %v", err)
+	}
+	originalLifecycleAfterLegacyStart := sessionpkg.ProjectLifecycle(
+		sessionpkg.LifecycleInputFromInfo(originalAfterLegacyStart),
+	)
+	if !originalAfterLegacyStart.Closed || originalBeadAfterLegacyStart.Status != "closed" ||
+		originalLifecycleAfterLegacyStart.BaseState != sessionpkg.BaseStateClosed ||
+		!originalLifecycleAfterLegacyStart.Terminal ||
+		originalAfterLegacyStart.MetadataState != string(sessionpkg.StateDrained) ||
+		originalBeadAfterLegacyStart.Metadata["wake_request"] != "" ||
+		originalBeadAfterLegacyStart.Metadata["wake_requested_at"] != "" ||
+		originalBeadAfterLegacyStart.Metadata["sleep_reason"] != "" {
+		t.Fatalf("original session/bead after legacy shadow start = %#v/%#v (lifecycle=%#v), want terminal closed with stored drained state and cleared wake markers",
+			originalAfterLegacyStart, originalBeadAfterLegacyStart, originalLifecycleAfterLegacyStart)
 	}
 
 	var shadowWitness SessionReconcilerTraceRecord

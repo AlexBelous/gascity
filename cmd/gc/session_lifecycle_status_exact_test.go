@@ -503,15 +503,17 @@ func TestEvaluateExactSessionLifecycleStatusRequiresRevisionOnlyForHeal(t *testi
 	}
 
 	if got := evaluateExactSessionLifecycleStatus(heal); got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Reason != exactSessionLifecycleStatusReasonCandidate || got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusHeal || got.LoadedRevision != 17 {
-		t.Fatalf("positive-revision heal = %#v, want candidate heal carrying revision", got)
+		t.Fatalf("nonzero-revision heal = %#v, want candidate heal carrying revision", got)
 	}
-	for _, revision := range []int64{0, -1} {
-		withoutRevision := heal
-		withoutRevision.LoadedRevision = revision
-		got := evaluateExactSessionLifecycleStatus(withoutRevision)
-		if got.Disposition != exactSessionLifecycleStatusDispositionPark || got.Reason != exactSessionLifecycleStatusReasonPrerequisiteUnavailable || got.Plan != nil || got.LoadedRevision != revision || got.Error != "" {
-			t.Fatalf("heal revision %d = %#v, want prerequisite-unavailable park without plan", revision, got)
-		}
+	negativeRevision := heal
+	negativeRevision.LoadedRevision = -17
+	if got := evaluateExactSessionLifecycleStatus(negativeRevision); got.Disposition != exactSessionLifecycleStatusDispositionCandidate || got.Reason != exactSessionLifecycleStatusReasonCandidate || got.Plan == nil || got.Plan.Outcome != sessionLifecycleStatusHeal || got.LoadedRevision != -17 {
+		t.Fatalf("negative nonzero-revision heal = %#v, want candidate heal carrying revision", got)
+	}
+	withoutRevision := heal
+	withoutRevision.LoadedRevision = 0
+	if got := evaluateExactSessionLifecycleStatus(withoutRevision); got.Disposition != exactSessionLifecycleStatusDispositionPark || got.Reason != exactSessionLifecycleStatusReasonPrerequisiteUnavailable || got.Plan != nil || got.LoadedRevision != 0 || got.Error != "" {
+		t.Fatalf("zero-revision heal = %#v, want prerequisite-unavailable park without plan", got)
 	}
 
 	converged := heal

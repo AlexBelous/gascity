@@ -141,6 +141,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				RigStores:    cr.rigBeadStores(),
 				DrainOps:     cr.dops,
 				DrainTracker: cr.sessionDrains,
+				Trace:        cr.trace,
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				cr.requestLegacySessionStartFallback()

@@ -132,7 +132,7 @@ func evaluateExactSessionLifecycleStatus(input exactSessionLifecycleStatusInput)
 		StartupTimeout:    input.StartupTimeout,
 		RollbackAvailable: true,
 	})
-	if plan.Outcome == sessionLifecycleStatusHeal && (!input.HealInputsRowBacked || input.LoadedRevision <= 0) {
+	if plan.Outcome == sessionLifecycleStatusHeal && (!input.HealInputsRowBacked || input.LoadedRevision == 0) {
 		result.Reason = exactSessionLifecycleStatusReasonPrerequisiteUnavailable
 		return result
 	}

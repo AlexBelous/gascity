@@ -2134,6 +2134,368 @@ func TestControllerStateAppliesTypedExternalBeadEventsThroughPolicyWrappedCache(
 	}
 }
 
+type readyRoutedWorkReadAuditStore struct {
+	beads.Store
+	getCalls     atomic.Int64
+	listCalls    atomic.Int64
+	readyCalls   atomic.Int64
+	depListCalls atomic.Int64
+}
+
+func (s *readyRoutedWorkReadAuditStore) Get(id string) (beads.Bead, error) {
+	s.getCalls.Add(1)
+	return s.Store.Get(id)
+}
+
+func (s *readyRoutedWorkReadAuditStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls.Add(1)
+	return s.Store.List(query)
+}
+
+func (s *readyRoutedWorkReadAuditStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	s.readyCalls.Add(1)
+	return s.Store.Ready(query...)
+}
+
+func (s *readyRoutedWorkReadAuditStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.depListCalls.Add(1)
+	return s.Store.DepList(id, direction)
+}
+
+func readyRoutedWorkMax(n int) *int { return &n }
+
+func readyRoutedWorkEvent(t *testing.T, bead beads.Bead, deps []beads.Dep) events.Event {
+	t.Helper()
+	payload, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatalf("marshal routed-work event: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode routed-work event fields: %v", err)
+	}
+	if deps == nil {
+		deps = []beads.Dep{}
+	}
+	fields["dependencies"], err = json.Marshal(deps)
+	if err != nil {
+		t.Fatalf("marshal routed-work dependencies: %v", err)
+	}
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal complete routed-work event: %v", err)
+	}
+	return events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "bd-hook",
+		Subject: bead.ID,
+		Payload: payload,
+	}
+}
+
+func readyRoutedWorkEventWithoutDependencies(t *testing.T, bead beads.Bead) events.Event {
+	t.Helper()
+	payload, err := json.Marshal(bead)
+	if err != nil {
+		t.Fatalf("marshal routed-work event without dependencies: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode routed-work event without dependencies: %v", err)
+	}
+	delete(fields, "dependencies")
+	delete(fields, "needs")
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal routed-work event without dependency fields: %v", err)
+	}
+	return events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "bd-hook",
+		Subject: bead.ID,
+		Payload: payload,
+	}
+}
+
+func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name             string
+		work             beads.Bead
+		configure        func(*config.City)
+		afterCreate      func(*testing.T, *readyRoutedWorkReadAuditStore, beads.Bead)
+		partial          bool
+		malformed        bool
+		omitDependencies bool
+		auditExactReads  bool
+		wantTarget       string
+		wantGetCalls     int64
+		wantDepListCalls int64
+	}{
+		{
+			name: "ready unassigned instance route",
+			work: beads.Bead{
+				Title:    "ready work",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			},
+			wantTarget: "worker",
+		},
+		{
+			name: "schema 59 ready update omits dependencies",
+			work: beads.Bead{
+				Title:    "ready work with omitted dependencies",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			},
+			omitDependencies: true,
+			auditExactReads:  true,
+			wantTarget:       "worker",
+			wantGetCalls:     1,
+			wantDepListCalls: 1,
+		},
+		{
+			name: "blocked",
+			work: beads.Bead{Title: "blocked work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			afterCreate: func(t *testing.T, store *readyRoutedWorkReadAuditStore, work beads.Bead) {
+				t.Helper()
+				blocker, err := store.Create(beads.Bead{Title: "open blocker", Type: "task", Status: "open"})
+				if err != nil {
+					t.Fatalf("create blocker: %v", err)
+				}
+				if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+					t.Fatalf("add blocking dependency: %v", err)
+				}
+			},
+		},
+		{
+			name:             "schema 59 blocked update omits dependencies",
+			work:             beads.Bead{Title: "blocked work with omitted dependencies", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			omitDependencies: true,
+			auditExactReads:  true,
+			afterCreate: func(t *testing.T, store *readyRoutedWorkReadAuditStore, work beads.Bead) {
+				t.Helper()
+				blocker, err := store.Create(beads.Bead{Title: "open blocker", Type: "task", Status: "open"})
+				if err != nil {
+					t.Fatalf("create blocker: %v", err)
+				}
+				if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+					t.Fatalf("add blocking dependency: %v", err)
+				}
+			},
+			wantGetCalls:     2,
+			wantDepListCalls: 1,
+		},
+		{
+			name: "deferred",
+			work: beads.Bead{Title: "deferred work", Type: "task", Status: "open", DeferUntil: func() *time.Time {
+				deferred := now.Add(time.Hour)
+				return &deferred
+			}(), Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			name: "assigned",
+			work: beads.Bead{Title: "assigned work", Type: "task", Status: "open", Assignee: "worker-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			name: "closed",
+			work: beads.Bead{Title: "closed work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			afterCreate: func(t *testing.T, store *readyRoutedWorkReadAuditStore, work beads.Bead) {
+				t.Helper()
+				if err := store.Close(work.ID); err != nil {
+					t.Fatalf("close work: %v", err)
+				}
+			},
+		},
+		{
+			name: "ready-excluded type",
+			work: beads.Bead{Title: "container", Type: "molecule", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			name: "unknown route",
+			work: beads.Bead{Title: "unknown route", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "missing"}},
+		},
+		{
+			name: "suspended pool",
+			work: beads.Bead{Title: "suspended target", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			configure: func(cfg *config.City) {
+				cfg.Agents[0].Suspended = true
+			},
+		},
+		{
+			name: "zero-capacity pool",
+			work: beads.Bead{Title: "disabled target", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			configure: func(cfg *config.City) {
+				cfg.Agents[0].MaxActiveSessions = readyRoutedWorkMax(0)
+			},
+		},
+		{
+			name:      "malformed payload",
+			work:      beads.Bead{Title: "malformed event", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			malformed: true,
+		},
+		{
+			name:    "partial cache",
+			work:    beads.Bead{Title: "partial projection", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			partial: true,
+		},
+		{
+			name:             "partial cache update omits dependencies",
+			work:             beads.Bead{Title: "partial omitted projection", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			partial:          true,
+			omitDependencies: true,
+			auditExactReads:  true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backing := &readyRoutedWorkReadAuditStore{Store: beads.NewMemStore()}
+			created, err := backing.Create(test.work)
+			if err != nil {
+				t.Fatalf("create work: %v", err)
+			}
+			if test.afterCreate != nil {
+				test.afterCreate(t, backing, created)
+			}
+			created, err = backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("reload work: %v", err)
+			}
+
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			if test.partial {
+				err = cache.PrimeActive()
+			} else {
+				err = cache.Prime(context.Background())
+			}
+			if err != nil {
+				t.Fatalf("prime cache: %v", err)
+			}
+			if test.wantTarget != "" {
+				if cachedWork, ready := cache.CachedReadyByID(created.ID, now); !ready {
+					t.Fatalf("exact cached readiness = (%+v, false), cache stats=%+v", cachedWork, cache.Stats())
+				}
+			}
+			cfg := &config.City{Agents: []config.Agent{{
+				Name:              "worker",
+				MaxActiveSessions: readyRoutedWorkMax(2),
+			}}}
+			if test.configure != nil {
+				test.configure(cfg)
+			}
+			cs := &controllerState{
+				cfg:        cfg,
+				beadStores: map[string]beads.Store{"work": cache},
+				pokeCh:     make(chan struct{}, 1),
+			}
+			var targets []string
+			if err := cs.installReadyRoutedWorkEventAdmission(func(target string) {
+				targets = append(targets, target)
+			}); err != nil {
+				t.Fatalf("install routed-work admission: %v", err)
+			}
+			t.Cleanup(cs.stopReadyRoutedWorkEventAdmission)
+
+			var evt events.Event
+			if test.omitDependencies {
+				evt = readyRoutedWorkEventWithoutDependencies(t, created)
+			} else {
+				deps, err := backing.DepList(created.ID, "down")
+				if err != nil {
+					t.Fatalf("read event dependencies: %v", err)
+				}
+				evt = readyRoutedWorkEvent(t, created, deps)
+			}
+			if test.malformed {
+				evt.Payload = json.RawMessage(`{`)
+			}
+			getCallsBefore := backing.getCalls.Load()
+			listCallsBefore := backing.listCalls.Load()
+			readyCallsBefore := backing.readyCalls.Load()
+			depListCallsBefore := backing.depListCalls.Load()
+			cs.applyBeadEventToStores(evt)
+
+			if test.wantTarget == "" {
+				if len(targets) != 0 {
+					t.Fatalf("priority targets = %v, want ordinary fallback only", targets)
+				}
+			} else if len(targets) != 1 || targets[0] != test.wantTarget {
+				t.Fatalf("priority targets = %v, want [%s]", targets, test.wantTarget)
+			}
+			if got := len(cs.pokeCh); got != 1 {
+				t.Fatalf("ordinary fallback poke count = %d, want 1", got)
+			}
+			if got := backing.listCalls.Load(); got != listCallsBefore {
+				t.Fatalf("backing List calls after event = %d, want unchanged %d", got, listCallsBefore)
+			}
+			if got := backing.readyCalls.Load(); got != readyCallsBefore {
+				t.Fatalf("backing Ready calls after event = %d, want unchanged %d", got, readyCallsBefore)
+			}
+			if test.auditExactReads {
+				if got := backing.getCalls.Load() - getCallsBefore; got != test.wantGetCalls {
+					t.Fatalf("backing Get calls after event = %d, want %d", got, test.wantGetCalls)
+				}
+				if got := backing.depListCalls.Load() - depListCallsBefore; got != test.wantDepListCalls {
+					t.Fatalf("backing DepList calls after event = %d, want %d", got, test.wantDepListCalls)
+				}
+			}
+		})
+	}
+}
+
+func TestReadyRoutedWorkPriorityPokesRequireKeyedOwnershipAndCoalesce(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		ownership sessionStartOwnership
+		want      bool
+	}{
+		{name: "keyed", ownership: sessionStartOwnershipKeyed, want: true},
+		{name: "legacy", ownership: sessionStartOwnershipLegacy},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			work, err := backing.Create(beads.Bead{
+				Title:    "ready work",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			})
+			if err != nil {
+				t.Fatalf("create work: %v", err)
+			}
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("prime cache: %v", err)
+			}
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: readyRoutedWorkMax(2)}}}
+			pokeCh := make(chan struct{}, 1)
+			cs := &controllerState{cfg: cfg, beadStores: map[string]beads.Store{"work": cache}, pokeCh: pokeCh}
+			cr := &CityRuntime{cs: cs, cfg: cfg, pokeCh: pokeCh, sessionStartOwnership: test.ownership}
+			if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
+				t.Fatalf("install runtime routed-work admission: %v", err)
+			}
+			if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
+				t.Fatalf("repeat runtime routed-work admission installation: %v", err)
+			}
+			t.Cleanup(cs.stopReadyRoutedWorkEventAdmission)
+
+			evt := readyRoutedWorkEvent(t, work, nil)
+			cs.applyBeadEventToStores(evt)
+			cs.applyBeadEventToStores(evt)
+
+			if got := cr.readyRoutedWorkPokePending.Load(); got != test.want {
+				t.Fatalf("priority poke pending = %t, want %t", got, test.want)
+			}
+			if got := len(pokeCh); got != 1 {
+				t.Fatalf("buffered poke count = %d, want 1 after duplicate events", got)
+			}
+		})
+	}
+}
+
 func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 	backing := beads.NewMemStore()
 	created, err := backing.Create(beads.Bead{Title: "non-bd backing"})

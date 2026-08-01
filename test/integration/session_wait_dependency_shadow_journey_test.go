@@ -16,12 +16,14 @@ import (
 const sessionWaitDependencyShadowJourneyWitnessTimeout = 10 * time.Second
 
 type sessionWaitDependencyShadowJourneySessionList struct {
-	Sessions []struct {
-		ID          string `json:"id"`
-		Template    string `json:"template"`
-		SessionName string `json:"session_name"`
-		Closed      bool   `json:"closed"`
-	} `json:"sessions"`
+	Sessions []sessionWaitDependencyShadowJourneySessionItem `json:"sessions"`
+}
+
+type sessionWaitDependencyShadowJourneySessionItem struct {
+	ID          string `json:"id"`
+	Template    string `json:"template"`
+	SessionName string `json:"session_name"`
+	Closed      bool   `json:"closed"`
 }
 
 type sessionWaitDependencyShadowJourneyBead struct {
@@ -199,20 +201,201 @@ tick_debounce = "10m"
 	}
 }
 
-func sessionWaitDependencyShadowJourneySession(t *testing.T, cityDir string) struct {
-	ID          string `json:"id"`
-	Template    string `json:"template"`
-	SessionName string `json:"session_name"`
-	Closed      bool   `json:"closed"`
-} {
-	t.Helper()
+// TestReadyRoutedWorkPriorityStartsLegacySessionBeforeDebounce proves that a
+// schema-59-style routed-work update with no dependency field accelerates the
+// existing legacy tick. The event admission itself does not create a session;
+// the typed session projection remains the user-visible legacy-owned result.
+func TestReadyRoutedWorkPriorityStartsLegacySessionBeforeDebounce(t *testing.T) {
+	if usingSubprocess() {
+		t.Skip("exact ready routed-work journey requires tmux")
+	}
+
+	cityDir := setupReconcilerCityWithDaemon(t, `session_reconciler = "auto"
+
+[[agent]]
+name = "worker"
+start_command = "sleep 3600"
+min_active_sessions = 0
+max_active_sessions = 2
+`, `patrol_interval = "1h"
+tick_debounce = "10m"
+`, "")
+	if out, err := gc("", "stop", cityDir); err != nil {
+		t.Fatalf("stop empty city before priming routed work: %v\n%s", err, out)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForControllerStop(t.Context(), cityDir, sessionWaitDependencyShadowJourneyWitnessTimeout); err != nil {
+		t.Fatalf("wait for empty city controller to stop: %v", err)
+	}
+
+	out, err := bd(cityDir, "create", "ready routed-work priority journey", "--json")
+	if err != nil {
+		t.Fatalf("create ready routed work while city is stopped: %v\n%s", err, out)
+	}
+	workID := sessionWaitDependencyShadowJourneyBeadID(t, out)
+	if out, err = gc("", "start", cityDir); err != nil {
+		t.Fatalf("restart city with unrouted work in its initial cache prime: %v\n%s", err, out)
+	}
+
+	initial, err := sessionWaitDependencyShadowJourneyListSessions(cityDir)
+	if err != nil {
+		t.Fatalf("list initial worker sessions: %v", err)
+	}
+	for _, session := range initial.Sessions {
+		if session.Template == "worker" && !session.Closed {
+			t.Fatalf("initial worker session = %+v, want no unclosed worker session", session)
+		}
+	}
+
+	out, err = runCommand(cityDir, replaceEnv(commandEnvForDir(cityDir, false), "GC_BEADS", "file"), integrationBDCommandTimeout,
+		bdBinary, "update", workID, "--set-metadata", "gc.routed_to=worker")
+	if err != nil {
+		t.Fatalf("route ready work to worker: %v\n%s", err, out)
+	}
+
+	started := time.Now()
+	out, err = gc(cityDir, "event", "emit", "bead.updated",
+		"--subject", workID,
+		"--bead-payload", workID,
+		"--actor", "bd-hook",
+		"--json")
+	if err != nil {
+		t.Fatalf("emit routed-work update: %v\n%s", err, out)
+	}
+	var emitted sessionWaitDependencyShadowJourneyEventEmit
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &emitted); err != nil {
+		t.Fatalf("decode routed-work update event: %v\n%s", err, out)
+	}
+	if !emitted.HasPayload || !emitted.Submitted {
+		t.Fatalf("routed-work update event = %+v, want typed payload submitted", emitted)
+	}
+	if err := sessionWaitDependencyShadowJourneyRequireOmittedDependenciesEvent(cityDir, workID); err != nil {
+		t.Fatalf("routed-work update did not retain schema-59 omitted-dependencies shape: %v", err)
+	}
+
+	session, latency, err := sessionWaitDependencyShadowJourneyWaitForWorkerSession(
+		t.Context(),
+		cityDir,
+		started,
+		sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
+	if err != nil {
+		t.Fatalf(
+			"ready routed-work session did not materialize before the ten-minute debounce: %v\n%s",
+			err,
+			sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID),
+		)
+	}
+	t.Logf("ready routed-work event materialized legacy-owned session %s after %s", session.ID, latency)
+}
+
+func sessionWaitDependencyShadowJourneyWaitForControllerStop(ctx context.Context, cityDir string, timeout time.Duration) error {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if controllerAlive(cityDir) == 0 {
+			return nil
+		}
+		select {
+		case <-deadline.Done():
+			return fmt.Errorf("controller still answered after stop: %w", deadline.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func sessionWaitDependencyShadowJourneyRequireOmittedDependenciesEvent(cityDir, workID string) error {
+	data, err := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil {
+		return fmt.Errorf("read event log: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var event struct {
+			Type    string          `json:"type"`
+			Actor   string          `json:"actor"`
+			Subject string          `json:"subject"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &event); err != nil ||
+			event.Type != "bead.updated" || event.Actor != "bd-hook" || event.Subject != workID {
+			continue
+		}
+		var envelope struct {
+			Bead map[string]json.RawMessage `json:"bead"`
+		}
+		if err := json.Unmarshal(event.Payload, &envelope); err != nil {
+			return fmt.Errorf("decode event payload: %w", err)
+		}
+		if _, ok := envelope.Bead["dependencies"]; ok {
+			return fmt.Errorf("payload unexpectedly contains dependencies")
+		}
+		if _, ok := envelope.Bead["needs"]; ok {
+			return fmt.Errorf("payload unexpectedly contains needs")
+		}
+		return nil
+	}
+	return fmt.Errorf("typed bead.updated event for %s not found", workID)
+}
+
+func sessionWaitDependencyShadowJourneyListSessions(cityDir string) (sessionWaitDependencyShadowJourneySessionList, error) {
 	out, err := gc(cityDir, "session", "list", "--state", "all", "--template", "worker", "--json")
 	if err != nil {
-		t.Fatalf("list live worker session: %v\n%s", err, out)
+		return sessionWaitDependencyShadowJourneySessionList{}, fmt.Errorf("gc session list: %w: %s", err, out)
 	}
 	var result sessionWaitDependencyShadowJourneySessionList
 	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &result); err != nil {
-		t.Fatalf("decode worker session list: %v\n%s", err, out)
+		return sessionWaitDependencyShadowJourneySessionList{}, fmt.Errorf("decode gc session list: %w: %s", err, out)
+	}
+	return result, nil
+}
+
+func sessionWaitDependencyShadowJourneyWaitForWorkerSession(
+	ctx context.Context,
+	cityDir string,
+	started time.Time,
+	timeout time.Duration,
+) (sessionWaitDependencyShadowJourneySessionItem, time.Duration, error) {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	var last sessionWaitDependencyShadowJourneySessionList
+	var lastErr error
+	for {
+		current, err := sessionWaitDependencyShadowJourneyListSessions(cityDir)
+		if err != nil {
+			lastErr = err
+		} else {
+			last = current
+			lastErr = nil
+			for _, session := range current.Sessions {
+				if session.Template == "worker" && !session.Closed && session.ID != "" {
+					return session, time.Since(started), nil
+				}
+			}
+		}
+
+		select {
+		case <-deadline.Done():
+			return sessionWaitDependencyShadowJourneySessionItem{}, time.Since(started), fmt.Errorf(
+				"waiting for an unclosed worker session: %w; last error: %v; last sessions: %+v",
+				deadline.Err(),
+				lastErr,
+				last.Sessions,
+			)
+		case <-ticker.C:
+		}
+	}
+}
+
+func sessionWaitDependencyShadowJourneySession(t *testing.T, cityDir string) sessionWaitDependencyShadowJourneySessionItem {
+	t.Helper()
+	result, err := sessionWaitDependencyShadowJourneyListSessions(cityDir)
+	if err != nil {
+		t.Fatalf("list live worker session: %v", err)
 	}
 	for _, session := range result.Sessions {
 		if session.Template == "worker" && !session.Closed && session.ID != "" && session.SessionName != "" {
@@ -220,12 +403,7 @@ func sessionWaitDependencyShadowJourneySession(t *testing.T, cityDir string) str
 		}
 	}
 	t.Fatalf("live worker session absent from typed session list: %+v", result)
-	return struct {
-		ID          string `json:"id"`
-		Template    string `json:"template"`
-		SessionName string `json:"session_name"`
-		Closed      bool   `json:"closed"`
-	}{}
+	return sessionWaitDependencyShadowJourneySessionItem{}
 }
 
 func sessionWaitDependencyShadowJourneyTmuxIdentity(t *testing.T, cityDir, sessionName string) string {
@@ -367,6 +545,11 @@ func sessionWaitDependencyShadowJourneyWaitForDependencyCommit(
 
 func sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID string) string {
 	var sections []string
+	if out, err := gc(cityDir, "session", "list", "--state", "all", "--json"); err != nil {
+		sections = append(sections, fmt.Sprintf("session list: %v: %s", err, out))
+	} else {
+		sections = append(sections, "session list:\n"+tailText(out, 100))
+	}
 
 	eventsPath := filepath.Join(cityDir, ".gc", "events.jsonl")
 	if data, err := os.ReadFile(eventsPath); err != nil {

@@ -135,11 +135,14 @@ type CityRuntime struct {
 	sessionStartController *sessionStartController
 	sessionStartOwnership  sessionStartOwnership
 	sessionStartMode       rollout.Mode
-	nudgeKeyMu             sync.Mutex
-	nudgeKeyController     *nudgeKeyController
-	nudgeKeyFallback       map[string]struct{}
-	nudgeKeyMode           rollout.Mode
-	nudgeShadowSelection   nudgeshadow.Selection
+	// guarded by sessionStartMu; startup retries reuse this runtime's one
+	// controller-state admission owner.
+	readyRoutedWorkEventAdmissionInstalled bool
+	nudgeKeyMu                             sync.Mutex
+	nudgeKeyController                     *nudgeKeyController
+	nudgeKeyFallback                       map[string]struct{}
+	nudgeKeyMode                           rollout.Mode
+	nudgeShadowSelection                   nudgeshadow.Selection
 	// sessionStartOptions is empty in production. Focused tests install the
 	// existing deterministic start waiters here so composition tests prove the
 	// real exact-start path without wall-clock stability delays.
@@ -166,6 +169,9 @@ type CityRuntime struct {
 	// A certified dependency-ready result upgrades the next coalesced poke so
 	// it does not wait behind the ordinary fleet-tick debounce.
 	sessionWaitDependencyReadyPokePending atomic.Bool
+	// A certified ready routed-work result uses the same legacy tick, but keeps
+	// an independent bit so either exact source can consume its own request.
+	readyRoutedWorkPokePending atomic.Bool
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
@@ -456,6 +462,34 @@ func (cr *CityRuntime) stopSessionLifecycleShadowWorker() {
 		return
 	}
 	cr.lifecycleShadowWorker.Stop()
+}
+
+func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
+	if cr == nil || cr.cs == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	if cr.readyRoutedWorkEventAdmissionInstalled {
+		return nil
+	}
+	if cr.sessionStartOwnership != sessionStartOwnershipKeyed {
+		return nil
+	}
+	if err := cr.cs.installReadyRoutedWorkEventAdmission(func(string) {
+		cr.sessionStartMu.Lock()
+		stillKeyed := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+		cr.sessionStartMu.Unlock()
+		if !stillKeyed {
+			return
+		}
+		cr.readyRoutedWorkPokePending.Store(true)
+		cr.requestLegacySessionStartFallback()
+	}); err != nil {
+		return err
+	}
+	cr.readyRoutedWorkEventAdmissionInstalled = true
+	return nil
 }
 
 func shadowWorkerStderr(stderr io.Writer) io.Writer {
@@ -775,6 +809,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			fmt.Fprintf(cr.stderr, "%s: session-start controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
 			return
 		}
+		if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: ready routed-work admission: %v (using ordinary reconciler pokes)\n", cr.logPrefix, err) //nolint:errcheck // optimization failure retains legacy convergence
+		}
 		if err := cr.ensureNudgeKeyControllerForSelection(ctx); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: keyed nudge controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
 			return
@@ -946,7 +983,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// Certified dependency readiness is already exact-key filtered, so it
 			// bypasses the ordinary fleet-tick debounce. The serialized full tick
 			// remains the sole legacy mutation/effect owner.
-			if cr.sessionWaitDependencyReadyPokePending.Swap(false) {
+			waitDependencyReady := cr.sessionWaitDependencyReadyPokePending.Swap(false)
+			routedWorkReady := cr.readyRoutedWorkPokePending.Swap(false)
+			if waitDependencyReady || routedWorkReady {
 				pokeDB.cancelPending()
 				runTick("poke")
 			} else {
@@ -3954,6 +3993,7 @@ func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
 		if cr.cs != nil {
 			cr.cs.stopSessionWaitDependencyShadowAdmission()
+			cr.cs.stopReadyRoutedWorkEventAdmission()
 		}
 		cr.stopSessionWaitDependencyProducer()
 		cr.stopSessionStartController()

@@ -143,6 +143,13 @@ type controllerState struct {
 	sessionStartEventAdmissionStopping bool
 	sessionStartEventAdmissionWG       sync.WaitGroup
 
+	// readyRoutedWorkEventAdmission upgrades exact, cache-certified pool
+	// demand to an immediate legacy tick. It is installed only while keyed
+	// session-start ownership is active and drained before stores close.
+	readyRoutedWorkEventAdmission         func(string)
+	readyRoutedWorkEventAdmissionStopping bool
+	readyRoutedWorkEventAdmissionWG       sync.WaitGroup
+
 	// sessionWaitShadowAdmission is a read-only, joined refresh callback for
 	// the private dependency-wait index. Events only mark the projection
 	// pending; the callback rebuilds from the observed cache.
@@ -626,6 +633,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			cached.ApplyEvent(evt.Type, evt.Payload)
 		}
 	}
+	cs.admitReadyRoutedWorkEvent(evt, stores)
 	cs.admitSessionStartEvent(evt)
 	if evt.Actor != "cache-reconcile" {
 		cs.Poke()
@@ -634,6 +642,103 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
 	}
 	cs.admitSessionWaitDependencyShadowEvent(evt)
+}
+
+func (cs *controllerState) installReadyRoutedWorkEventAdmission(admit func(string)) error {
+	if cs == nil {
+		return fmt.Errorf("installing ready routed-work event admission: controller state is nil")
+	}
+	if admit == nil {
+		return fmt.Errorf("installing ready routed-work event admission: callback is nil")
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.readyRoutedWorkEventAdmissionStopping {
+		return fmt.Errorf("installing ready routed-work event admission: admission is stopping")
+	}
+	if cs.readyRoutedWorkEventAdmission != nil {
+		return fmt.Errorf("installing ready routed-work event admission: callback is already installed")
+	}
+	cs.readyRoutedWorkEventAdmission = admit
+	return nil
+}
+
+func (cs *controllerState) stopReadyRoutedWorkEventAdmission() {
+	if cs == nil {
+		return
+	}
+	cs.mu.Lock()
+	cs.readyRoutedWorkEventAdmissionStopping = true
+	cs.readyRoutedWorkEventAdmission = nil
+	cs.mu.Unlock()
+	cs.readyRoutedWorkEventAdmissionWG.Wait()
+	cs.mu.Lock()
+	cs.readyRoutedWorkEventAdmissionStopping = false
+	cs.mu.Unlock()
+}
+
+func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []beads.Store) {
+	if cs == nil || evt.Actor == "cache-reconcile" || !isBeadMutationEvent(evt.Type) {
+		return
+	}
+	eventBead, ok := beads.DecodeBeadEventPayload(evt.Payload)
+	if !ok {
+		return
+	}
+	if subject := strings.TrimSpace(evt.Subject); subject != "" && subject != eventBead.ID {
+		return
+	}
+
+	cs.mu.Lock()
+	admit := cs.readyRoutedWorkEventAdmission
+	cfg := cs.cfg
+	if admit != nil && cfg != nil && !cs.readyRoutedWorkEventAdmissionStopping {
+		cs.readyRoutedWorkEventAdmissionWG.Add(1)
+	} else {
+		admit = nil
+	}
+	cs.mu.Unlock()
+	if admit == nil {
+		return
+	}
+	defer cs.readyRoutedWorkEventAdmissionWG.Done()
+
+	templates := make(map[string]struct{}, len(cfg.Agents))
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		templates[agent.QualifiedName()] = struct{}{}
+	}
+	if len(templates) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(eventBead.Assignee) != "" ||
+		!beads.IsReadyCandidateForTier(eventBead, now, beads.TierBoth) ||
+		controllerDemandRouteTarget(cfg, eventBead, templates) == "" {
+		return
+	}
+
+	for _, store := range stores {
+		inner, _, _ := unwrapBeadPolicyStore(store)
+		cached, ok := inner.(*beads.CachingStore)
+		if !ok {
+			continue
+		}
+		work, ready := cached.CachedReadyByID(eventBead.ID, now)
+		if !ready {
+			work, ready = cached.LiveReadyByID(eventBead.ID, now)
+		}
+		if !ready || strings.TrimSpace(work.Assignee) != "" {
+			continue
+		}
+		if target := controllerDemandRouteTarget(cfg, work, templates); target != "" {
+			admit(target)
+			return
+		}
+	}
 }
 
 // autocloseStoreRefLocked returns the storeRef string for the store that owns

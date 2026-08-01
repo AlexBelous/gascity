@@ -6,7 +6,7 @@ Last updated 2026-08-01. Supersedes `beads-guarded-ops-handoff.md` for everythin
 
 A campaign to give beads one guarded issue-lifecycle surface, used by the `bd` CLI, linked-library
 consumers (Gas City's `NativeDoltStore`), and eventually the HTTP/proxied path — so that close/reopen/update
-policy is implemented once instead of three times. Two PRs have merged; a queue of follow-ups remains.
+policy is implemented once instead of three times. Six PRs have merged; a queue of follow-ups remains.
 
 ## Where it stands
 
@@ -18,6 +18,8 @@ policy is implemented once instead of three times. Two PRs have merged; a queue 
 | `ff6eeedbf` | #5206 | A generic status update crossing into a done category now enforces close policy; `bd update --force` gains a dual meaning. |
 | `532dadf98` | #5211 | `ga-2kkue`: the proxied single-create path consults `cctx.InfraTypes`, so `bd create -t <infra-type>` lands in `wisps` like every other create surface. |
 | `29af03b8c` | #5212 | `ga-z3vht`: `NotPinned` refuses on `issue.Pinned` **or** `status == pinned` (ruling 10). Strictly additive. |
+| `252e42c70` | #5217 | `ga-z0qmv`: the assignee-transfer fence enforced in `uow.issueOperations.Update`, predicate shared via `AuthorizeAssigneeTransferWithPools`, plus the cross-backend conformance case the contract never had. |
+| `ed8526721` | #5218 | `ga-e6h6i`: `BEADS_DIR` honors `BEADS_TEST_IGNORE_REPO_CONFIG`, closing the config leak that let a dispatched command re-import the repo's `issue-prefix`. |
 
 ### Open
 
@@ -107,15 +109,19 @@ Both shipped; see the merged table above. Two scoping lessons worth carrying for
 
 ### Wave 2 (P2)
 
-- **`ga-z0qmv`** — the uow `Lifecycle` backend no longer enforces the foreign-assignee transfer fence.
-  It delegated to `domain.ApplyUpdate`, whose fence was removed as a rider. dolt/embeddeddolt enforce via
-  `issueops.AuthorizeAssigneeTransfer` (`aggregate.go:142`, reached from `execution.go:133`). Fix by
-  relocating the check into `uow.issueOperations.Update` at the facade layer, **with a cross-backend
-  conformance case** — the suite has no assignee-transfer case today, which is why nothing caught it.
-- **`ga-kjkv1`** — `closed_at` / `close_reason` / `closed_by_session` are writable as standalone
-  generic-update fields, so close metadata can be stamped without a `status` key. #5206's gate keys off the
-  status change, so this is now the visible seam in an otherwise closed hole. Confirm pre-existing against
-  `origin/main` before fixing.
+- **`ga-kjkv1`** — **blocked on an owner ruling**, and the bead's framing turned out to be wrong.
+  Investigated but deliberately not implemented. A metadata-only write moves no status, so the row never
+  crosses into done and #5206's gate has nothing to catch — the issue stays open. This is not a policy
+  bypass; it is an **integrity** violation. `types.Validate` (`internal/types/types.go:345-351`) declares
+  "`closed_at` set iff `status == closed`" a hard invariant and enforces it on create and import, but the
+  update funnels do not — `ValidateScalarUpdates` checks only `issue_type`/`assignee`/`owner`. So a generic
+  update can mint rows the type's own validator calls invalid. Pre-existing is *confirmed*, not assumed:
+  both allowlists (`issueops/update.go:23` and `domain/db/issue.go:43`) have carried the three keys since
+  `46be5594d` (#3665), long before `ff6eeedbf`. The only in-repo map builder that sets `closed_at` is
+  `internal/linear/mapping.go:860`, which is dead code with test-only callers. Options and per-option
+  broken-caller tables are recorded on the bead; the advisory lean is to drop `closed_at` and
+  `close_reason` from **both** funnels while keeping `closed_by_session`. **Whichever option is chosen,
+  both funnels must change in the same commit or they drift.**
 - **`ga-dpfii`** — federated cross-prefix dependency targets classify differently across write plumbings.
   `ExecuteCreate` treats cross-prefix as external and skips the existence check; the uow path only treats a
   literal `external:` prefix as external. Share one classifier, mirroring how `ClassifyPublicCreateError`
@@ -123,12 +129,23 @@ Both shipped; see the merged table above. Two scoping lessons worth carrying for
 - **`ga-tsjxb`** — domain `issue_type` validation skips typed `types.IssueType` values (type-asserts only
   `string`). `TestIssueUpdateAcceptsLegacyIssueTypeRepresentations` pins that typed values round-trip, so
   widening changes accept/reject behavior and needs cross-backend verification.
-- **`ga-e6h6i`** — `cmd/bd` leaks `issue-prefix` into viper across tests, surviving `initConfigForTest`.
 
-### Filed by the Wave 1 fable review council
+`ga-z0qmv` and `ga-e6h6i` shipped — see the merged table. Two things they taught:
 
-All five came out of reviewing #5211/#5212 and were filed rather than folded in. **The first three need
-an owner ruling before anyone implements them.**
+- The `ga-z0qmv` fence was **not** put back where it was removed from. It went into
+  `uow.issueOperations.Update` at the facade layer, and the predicate was extracted into
+  `issueops.AuthorizeAssigneeTransferWithPools` — pure, pools-injected — so the DBTX path and the uow path
+  evaluate one function instead of two copies that can drift. Putting it back in `domain.ApplyUpdate`
+  would have repeated the original incident verbatim.
+- `ga-e6h6i`'s bead described the mechanism backwards, and it is worth knowing which way round it is:
+  nothing was cached and nothing survived a reset. `ResetForTesting` nils the package viper and
+  `Initialize` builds a fresh one. The repo config was **re-read from disk on every `Initialize`** because
+  in-process dispatch leaks `BEADS_DIR` via a raw `os.Setenv` with no restore, and `BEADS_DIR` was the one
+  source that never consulted the ignore set. A fix aimed at cache invalidation would not have worked.
+
+### Filed by the fable review councils
+
+Filed rather than folded in. **`.8`, `.9` and `.10` need an owner ruling before anyone implements them.**
 
 - **`ga-ktn9pe.4.8`** (P2, owner ruling) — `bd close --force` leaves `pinned=true` residue, so the new
   boolean trigger now refuses the *idempotent re-close* that used to exit 0. `closeIssueInTx` sets only
@@ -152,6 +169,9 @@ an owner ruling before anyone implements them.**
   (`internal/validation/issue.go:204-240`) are production-dead; `validateIssueClosable` hand-rolls the
   same chains. #5212 had to update `forClose`'s test purely to keep dead code consistent. Wire it or
   delete it.
+- **`ga-ktn9pe.4.13`** (P3) — the new assignee-transfer conformance case seeds only the `issues` table, so
+  wisp foreign-assignee transfers are covered by no cross-backend test. A wisp-specific fast path added on
+  one backend would reopen the exact divergence class #5217 just closed, on the other table.
 
 ### Wave 3 — CLI consistency (all four approved by the owner)
 
@@ -249,7 +269,7 @@ export GOFLAGS=-mod=readonly
 
 ## Verification baselines
 
-As of `29af03b8c`. Count with `grep -cE '^[[:space:]]*--- PASS'` — `domain/db` nests four levels deep and a
+As of `ed8526721`. Count with `grep -cE '^[[:space:]]*--- PASS'` — `domain/db` nests four levels deep and a
 shallower pattern undercounts by an order of magnitude.
 
 ```bash
@@ -258,9 +278,10 @@ go test -v -count=1 -run TestDomainDB ./internal/storage/domain/db/             
 go test -v -count=1 -run TestIssueOperations ./internal/storage/dolt/            # 73
 BEADS_TEST_EMBEDDED_DOLT=1 CGO_ENABLED=1 \
   go test -v -count=1 -run TestEmbeddedIssueOperations ./internal/storage/embeddeddolt/   # 56
-go test -v -count=1 ./internal/storage/uow/                                      # 135
-go test -v -count=1 ./internal/storage/issueops/                                 # 338
+go test -v -count=1 ./internal/storage/uow/                                      # 136
+go test -v -count=1 ./internal/storage/issueops/                                 # 350
 go test -v -count=1 ./internal/validation/                                       # 218
+go test -v -count=1 ./internal/config/                                           # 297
 BASE_SHA=origin/main bash scripts/check-migration-hygiene.sh                     # clean
 ```
 

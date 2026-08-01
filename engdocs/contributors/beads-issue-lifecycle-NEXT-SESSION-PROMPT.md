@@ -8,12 +8,14 @@ Pick up the beads issue-lifecycle follow-up queue. Read the handoff first, in fu
 
     /data/projects/gascity/engdocs/contributors/beads-issue-lifecycle-handoff.md
 
-Short version: six PRs have merged upstream — `b92442d1a` #5191 (the `issueops.Lifecycle` facade reached
+Short version: eight PRs have merged upstream — `b92442d1a` #5191 (the `issueops.Lifecycle` facade reached
 via `store.IssueLifecycle()`, three backends, conformance suite, CLI adoption), `ff6eeedbf` #5206 (a
 generic done-crossing status update now enforces close policy, with `bd update --force` overriding it),
 the two Wave 1 P1s (`532dadf98` #5211, `29af03b8c` #5212), and two of Wave 2 (`252e42c70` #5217 —
 the uow assignee fence plus the conformance case the contract never had; `ed8526721` #5218 — the
-`BEADS_DIR` config leak). A queue of follow-up beads remains. Your job is to work that queue.
+`BEADS_DIR` config leak), plus `8f421b64f` #5236 (`ga-ktn9pe.4.8` — idempotent re-close by ordering, not
+by clearing the pin) and `dd3ad8f98` #5255 (`ga-kjkv1` — a done-crossing generic update now closes like
+`bd close`). A queue of follow-up beads remains. Your job is to work that queue.
 
 Work in `/data/projects/beads-public-issueops-simple`, branching fresh off `origin/main` for each item.
 
@@ -35,14 +37,18 @@ the test fails, restore it verbatim, confirm `git diff` is empty. Copy the file 
 
 **Wave 1 (P1) is done** — #5211 and #5212 are merged. Do not re-open them.
 
-**Wave 2 remaining:** `ga-dpfii` and `ga-tsjxb` — details in the handoff. `ga-z0qmv` and `ga-e6h6i`
-have shipped. `ga-kjkv1` is investigated but **blocked on an owner ruling**, and its premise turned out
-to be wrong: it is an integrity violation against `types.Validate`, not a close-policy bypass. Read the
-bead's notes before touching it; do not re-derive.
+**Wave 2 remaining:** `ga-dpfii` and `ga-tsjxb` — details in the handoff. `ga-z0qmv`, `ga-e6h6i` and
+`ga-kjkv1` have shipped.
 
-**Also queued, from the Wave 1 review council:** `ga-ktn9pe.4.8`, `.9`, `.10`, `.11`, `.12`. The first
-three need an owner ruling before you implement — bring the options, do not pick. `.11` and `.12` are
-straightforward and can go whenever.
+**Check the premise before you start.** Two Wave 2 beads in a row described their own defect wrongly:
+`ga-e6h6i` blamed a cache when the value was re-read from disk every `Initialize`, and `ga-kjkv1` was
+filed as a close-policy bypass when it was an integrity defect. Both fixes only worked because someone
+re-derived the mechanism instead of trusting the bead text.
+
+**Also queued, from the review councils:** `.9`, `.10`, `.11`, `.12`, `.13`, `.14`, `.15`. `.8` has
+shipped. `.9`, `.10` and `.14` need an owner ruling before you implement — bring the options, do not
+pick. `.14` is the one to raise first: it is the pin-vs-deletion-protection question, and `issue.Pinned`
+gates six destructive call sites, so getting it wrong deletes beads.
 
 **Wave 3:** `ga-c69el` plus two items that still need beads (unify partial-failure exit codes; unify the
 `--json` contract) and four review findings owed beads. **Both unification items are breaking wire changes —
@@ -94,13 +100,13 @@ Commit trailers, exactly, after one blank line:
 Count with `grep -cE '^[[:space:]]*--- PASS'`; `domain/db` nests four levels and a shallower pattern
 undercounts badly.
 
-    cmd/bd -run TestParity                                     40
+    cmd/bd -run TestParity                                     43
     internal/storage/domain/db -run TestDomainDB               800
-    internal/storage/dolt -run TestIssueOperations             74
+    internal/storage/dolt -run TestIssueOperations             75
     internal/storage/embeddeddolt -run TestEmbeddedIssueOperations  56   (needs BEADS_TEST_EMBEDDED_DOLT=1 CGO_ENABLED=1)
-    internal/storage/uow                                       136
-    internal/storage/issueops                                  350
-    internal/validation                                        218
+    internal/storage/uow                                       145
+    internal/storage/issueops                                  372
+    internal/validation                                        220
     internal/config                                            297
 
 `go test ./cmd/bd/` has ~25 pre-existing top-level failures (init/config/doctor/completion) identical on

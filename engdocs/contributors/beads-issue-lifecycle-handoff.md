@@ -6,7 +6,7 @@ Last updated 2026-08-01. Supersedes `beads-guarded-ops-handoff.md` for everythin
 
 A campaign to give beads one guarded issue-lifecycle surface, used by the `bd` CLI, linked-library
 consumers (Gas City's `NativeDoltStore`), and eventually the HTTP/proxied path — so that close/reopen/update
-policy is implemented once instead of three times. Six PRs have merged; a queue of follow-ups remains.
+policy is implemented once instead of three times. Eight PRs have merged; a queue of follow-ups remains.
 
 ## Where it stands
 
@@ -20,6 +20,8 @@ policy is implemented once instead of three times. Six PRs have merged; a queue 
 | `29af03b8c` | #5212 | `ga-z3vht`: `NotPinned` refuses on `issue.Pinned` **or** `status == pinned` (ruling 10). Strictly additive. |
 | `252e42c70` | #5217 | `ga-z0qmv`: the assignee-transfer fence enforced in `uow.issueOperations.Update`, predicate shared via `AuthorizeAssigneeTransferWithPools`, plus the cross-backend conformance case the contract never had. |
 | `ed8526721` | #5218 | `ga-e6h6i`: `BEADS_DIR` honors `BEADS_TEST_IGNORE_REPO_CONFIG`, closing the config leak that let a dispatched command re-import the repo's `issue-prefix`. |
+| `8f421b64f` | #5236 | `ga-ktn9pe.4.8`: idempotent re-close restored by ordering the already-closed no-op ahead of validation — **not** by clearing the pin. |
+| `dd3ad8f98` | #5255 | `ga-kjkv1`: a done-crossing generic update applies close's field effects in both funnels; an explicit `closed_at` is judged against the row's status. |
 
 ### Open
 
@@ -109,19 +111,6 @@ Both shipped; see the merged table above. Two scoping lessons worth carrying for
 
 ### Wave 2 (P2)
 
-- **`ga-kjkv1`** — **blocked on an owner ruling**, and the bead's framing turned out to be wrong.
-  Investigated but deliberately not implemented. A metadata-only write moves no status, so the row never
-  crosses into done and #5206's gate has nothing to catch — the issue stays open. This is not a policy
-  bypass; it is an **integrity** violation. `types.Validate` (`internal/types/types.go:345-351`) declares
-  "`closed_at` set iff `status == closed`" a hard invariant and enforces it on create and import, but the
-  update funnels do not — `ValidateScalarUpdates` checks only `issue_type`/`assignee`/`owner`. So a generic
-  update can mint rows the type's own validator calls invalid. Pre-existing is *confirmed*, not assumed:
-  both allowlists (`issueops/update.go:23` and `domain/db/issue.go:43`) have carried the three keys since
-  `46be5594d` (#3665), long before `ff6eeedbf`. The only in-repo map builder that sets `closed_at` is
-  `internal/linear/mapping.go:860`, which is dead code with test-only callers. Options and per-option
-  broken-caller tables are recorded on the bead; the advisory lean is to drop `closed_at` and
-  `close_reason` from **both** funnels while keeping `closed_by_session`. **Whichever option is chosen,
-  both funnels must change in the same commit or they drift.**
 - **`ga-dpfii`** — federated cross-prefix dependency targets classify differently across write plumbings.
   `ExecuteCreate` treats cross-prefix as external and skips the existence check; the uow path only treats a
   literal `external:` prefix as external. Share one classifier, mirroring how `ClassifyPublicCreateError`
@@ -130,7 +119,7 @@ Both shipped; see the merged table above. Two scoping lessons worth carrying for
   `string`). `TestIssueUpdateAcceptsLegacyIssueTypeRepresentations` pins that typed values round-trip, so
   widening changes accept/reject behavior and needs cross-backend verification.
 
-`ga-z0qmv` and `ga-e6h6i` shipped — see the merged table. Two things they taught:
+`ga-z0qmv`, `ga-e6h6i` and `ga-kjkv1` shipped — see the merged table. Three things they taught:
 
 - The `ga-z0qmv` fence was **not** put back where it was removed from. It went into
   `uow.issueOperations.Update` at the facade layer, and the predicate was extracted into
@@ -142,6 +131,10 @@ Both shipped; see the merged table above. Two scoping lessons worth carrying for
   `Initialize` builds a fresh one. The repo config was **re-read from disk on every `Initialize`** because
   in-process dispatch leaks `BEADS_DIR` via a raw `os.Setenv` with no restore, and `BEADS_DIR` was the one
   source that never consulted the ignore set. A fix aimed at cache invalidation would not have worked.
+- `ga-kjkv1` was filed as a close-policy bypass and was not one. A metadata-only write moves no status, so
+  the row never crosses into done and #5206's gate has nothing to catch. It was an **integrity** defect
+  against the `closed_at`-iff-`status == closed` biconditional `types.Validate` enforces on create and
+  import but not on the update funnels. Two beads in a row had their premise wrong; check the premise.
 
 ### Filed by the fable review councils
 
@@ -172,6 +165,16 @@ Filed rather than folded in. **`.8`, `.9` and `.10` need an owner ruling before 
 - **`ga-ktn9pe.4.13`** (P3) — the new assignee-transfer conformance case seeds only the `issues` table, so
   wisp foreign-assignee transfers are covered by no cross-backend test. A wisp-specific fast path added on
   one backend would reopen the exact divergence class #5217 just closed, on the other table.
+- **`ga-ktn9pe.4.14`** (P2, owner ruling) — **two** divergences, not one. `bd close` keeps the pin while the
+  `issueops` funnel auto-clears it on any status change away from `pinned` (`update.go:329-343`); and the
+  `domain/db` funnel has **no pin auto-clear at all**, so the same `bd update --status closed` behaves
+  oppositely on the two write plumbings. This is not cosmetic: `issue.Pinned` is the deletion-protection
+  flag at six destructive call sites — `bd gc` (`gc.go:97`, `gc_proxied_server.go:72`), `bd purge`
+  (`purge.go:279`, `purge_proxied_server.go:90`) and `bd cleanup` (`cleanup.go:107`). Note that a shared
+  helper did **not** prevent this: both funnels already call `ManageClosedAt`, yet the pin block exists in
+  one. Whichever direction is ruled, both funnels move in the same commit with a conformance case.
+- **`ga-ktn9pe.4.15`** (P3) — the generic-update reopen branch is literal-keyed and, unlike the reopen verb,
+  skips `defer_until` clearing and the reopen comment event. Deferred out of `ga-kjkv1` by ruling.
 
 ### Wave 3 — CLI consistency (all four approved by the owner)
 
@@ -269,18 +272,18 @@ export GOFLAGS=-mod=readonly
 
 ## Verification baselines
 
-As of `ed8526721`. Count with `grep -cE '^[[:space:]]*--- PASS'` — `domain/db` nests four levels deep and a
+As of `dd3ad8f98`. Count with `grep -cE '^[[:space:]]*--- PASS'` — `domain/db` nests four levels deep and a
 shallower pattern undercounts by an order of magnitude.
 
 ```bash
-go test -v -count=1 -run TestParity ./cmd/bd/                                    # 40
+go test -v -count=1 -run TestParity ./cmd/bd/                                    # 43
 go test -v -count=1 -run TestDomainDB ./internal/storage/domain/db/              # 800
 go test -v -count=1 -run TestIssueOperations ./internal/storage/dolt/            # 73
 BEADS_TEST_EMBEDDED_DOLT=1 CGO_ENABLED=1 \
   go test -v -count=1 -run TestEmbeddedIssueOperations ./internal/storage/embeddeddolt/   # 56
-go test -v -count=1 ./internal/storage/uow/                                      # 136
-go test -v -count=1 ./internal/storage/issueops/                                 # 350
-go test -v -count=1 ./internal/validation/                                       # 218
+go test -v -count=1 ./internal/storage/uow/                                      # 145
+go test -v -count=1 ./internal/storage/issueops/                                 # 372
+go test -v -count=1 ./internal/validation/                                       # 220
 go test -v -count=1 ./internal/config/                                           # 297
 BASE_SHA=origin/main bash scripts/check-migration-hygiene.sh                     # clean
 ```

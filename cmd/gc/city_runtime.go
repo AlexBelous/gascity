@@ -1979,8 +1979,14 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if configName == "" {
 		configName = cr.cityName
 	}
-	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
+	result, err := cr.loadConfigSnapshot(ctx, configName, cityRoot)
 	if err != nil {
+		if errors.Is(err, errConfigMutationInProgress) {
+			// Preserve the level-triggered retry without immediately poking: the
+			// mutation completion pokes on success, while an immediate retry would
+			// only hit the same held barrier and hot-loop full reconciliation ticks.
+			cr.markConfigReloadDirty()
+		}
 		if result != nil {
 			for _, warning := range result.Warnings {
 				appendWarning(warning)
@@ -2021,6 +2027,25 @@ func (cr *CityRuntime) reloadConfigTraced(
 			Warnings: warnings,
 		}
 	}
+	oldRevision := cr.configRev
+	rejectSuperseded := func(phase string) reloadControlReply {
+		cr.requestConfigReloadRetry()
+		err := fmt.Errorf(
+			"config reload revision %s was superseded %s; retry scheduled",
+			shortRev(result.Revision), phase,
+		)
+		fmt.Fprintf(cr.stderr, "%s: %v (keeping current runtime config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
 		if orderErr != nil {
@@ -2037,8 +2062,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
+		if cr.cs != nil && !cr.cs.runtimeUpdateWouldBeAccepted(result.Cfg, result.Revision) {
+			return rejectSuperseded("during same-revision preparation")
+		}
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
-			cr.cs.update(result.Cfg, cr.sp)
+			if !cr.publishRuntimeConfig(result.Cfg, cr.sp, cr.dops, result.Revision) {
+				return rejectSuperseded("during same-revision metadata publication")
+			}
 			message := fmt.Sprintf("Config reloaded: bead store metadata changed (rev %s)", shortRev(result.Revision))
 			if ordersChanged {
 				message = fmt.Sprintf("Config reloaded: bead store metadata changed; orders reloaded: %s (rev %s)", orderSummary, shortRev(result.Revision))
@@ -2083,27 +2113,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	oldAgentCount := len(cr.cfg.Agents)
 	oldRigCount := len(cr.cfg.Rigs)
-	oldRevision := cr.configRev
 	nextCfg := result.Cfg
 	applyRuntimeCityIdentity(nextCfg, cr.cityName)
-	rejectSuperseded := func(phase string) reloadControlReply {
-		cr.requestConfigReloadRetry()
-		err := fmt.Errorf(
-			"config reload revision %s was superseded %s; retry scheduled",
-			shortRev(result.Revision), phase,
-		)
-		fmt.Fprintf(cr.stderr, "%s: %v (keeping current runtime config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
-		if trace != nil {
-			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
-		}
-		return reloadControlReply{
-			Outcome:  reloadOutcomeFailed,
-			Error:    err.Error(),
-			Revision: result.Revision,
-			Warnings: warnings,
-		}
-	}
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
@@ -2396,6 +2407,29 @@ func (cr *CityRuntime) reloadConfigTraced(
 		Revision: result.Revision,
 		Warnings: warnings,
 	}
+}
+
+// loadConfigSnapshot reads one candidate config generation. A pack mutation
+// owns its multi-file write and controller refresh before this helper may read
+// it; the runtime deliberately releases that barrier before provider, session,
+// and order effects begin.
+func (cr *CityRuntime) loadConfigSnapshot(ctx context.Context, configName, cityRoot string) (*reloadResult, error) {
+	var result *reloadResult
+	load := func() error {
+		var err error
+		result, err = tryReloadConfig(cr.tomlPath, configName, cityRoot)
+		return err
+	}
+	if cr.cs != nil {
+		if err := cr.cs.withConfigSnapshotIfIdle(ctx, load); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	if err := load(); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // hasInFlightDrainAckStops reports whether a keyed drain-ack stop still owns

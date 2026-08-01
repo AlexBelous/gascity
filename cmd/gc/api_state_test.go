@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -1640,9 +1642,10 @@ func TestControllerStateMutationRestoresSymlinkedCityTomlWhenRefreshFails(t *tes
 	cs := &controllerState{
 		cityPath: cityDir,
 		cfg:      &config.City{Workspace: config.Workspace{Name: "city1"}},
+		editor:   configedit.NewEditor(fsys.OSFS{}, liveCityPath),
 	}
 
-	mutErr := cs.mutateAndPoke(func() error {
+	mutErr := cs.mutateAndPoke(func(*configedit.Editor) error {
 		// Forward mutation writes through the resolved symlink target, exactly
 		// like the config editor's ResolveCityRewritePath path. The broken TOML
 		// then makes refreshConfigSnapshot fail and triggers rollback -- the
@@ -4202,6 +4205,8 @@ func TestConfigMutationSnapshotRestoresThroughSymlinks(t *testing.T) {
 	for link, target := range map[string]string{
 		filepath.Join(cityDir, "city.toml"):        filepath.Join(checkoutDir, "city.toml"),
 		filepath.Join(cityDir, ".gc", "site.toml"): filepath.Join(checkoutDir, "site.toml"),
+		filepath.Join(cityDir, "pack.toml"):        filepath.Join(checkoutDir, "pack.toml"),
+		filepath.Join(cityDir, "packs.lock"):       filepath.Join(checkoutDir, "packs.lock"),
 	} {
 		if err := os.WriteFile(target, []byte("original = true\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -4243,6 +4248,254 @@ func TestConfigMutationSnapshotRestoresThroughSymlinks(t *testing.T) {
 			t.Fatalf("%s target content = %q, want original bytes restored", link, data)
 		}
 	}
+}
+
+func TestControllerStatePackConfigMutationRollbackPreservesSymlinkedPackFiles(t *testing.T) {
+	cityDir := t.TempDir()
+	checkoutDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	originals := map[string][]byte{
+		"pack.toml":  []byte("[pack]\nname = \"city1\"\nschema = 2\n"),
+		"packs.lock": []byte("schema = 1\n"),
+	}
+	for name, content := range originals {
+		target := filepath.Join(checkoutDir, name)
+		if err := os.WriteFile(target, content, 0o644); err != nil {
+			t.Fatalf("write %s target: %v", name, err)
+		}
+		if err := os.Symlink(target, filepath.Join(cityDir, name)); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+	}
+
+	cs := &controllerState{
+		cityPath:              cityDir,
+		cfg:                   &config.City{Workspace: config.Workspace{Name: "city1"}},
+		editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")),
+		pokeCh:                make(chan struct{}, 1),
+		configDirty:           &atomic.Bool{},
+		configMutationBarrier: make(chan struct{}, 1),
+	}
+	wantErr := errors.New("fail after pack files were written")
+	err := cs.MutatePackConfig(context.Background(), func() error {
+		packTarget, resolveErr := fsys.ResolveSymlinks(fsys.OSFS{}, filepath.Join(cityDir, "pack.toml"))
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if writeErr := fsys.WriteFileAtomic(fsys.OSFS{}, packTarget, []byte("partial pack\n"), 0o644); writeErr != nil {
+			return writeErr
+		}
+		if writeErr := packman.WriteLockfile(fsys.OSFS{}, cityDir, &packman.Lockfile{
+			Packs: map[string]packman.LockedPack{"example": {Version: "1.0.0", Commit: "abc"}},
+		}); writeErr != nil {
+			return writeErr
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("MutatePackConfig error = %v, want %v", err, wantErr)
+	}
+
+	for name, want := range originals {
+		link := filepath.Join(cityDir, name)
+		info, statErr := os.Lstat(link)
+		if statErr != nil {
+			t.Fatalf("Lstat %s: %v", name, statErr)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s symlink was replaced by mode %v", name, info.Mode())
+		}
+		got, readErr := os.ReadFile(filepath.Join(checkoutDir, name))
+		if readErr != nil {
+			t.Fatalf("read %s target: %v", name, readErr)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("%s target = %q, want original bytes %q", name, got, want)
+		}
+	}
+}
+
+func TestControllerStatePackConfigMutationRollsBackPartialCallbackWrite(t *testing.T) {
+	cityDir := t.TempDir()
+	originals := map[string][]byte{
+		"city.toml":  []byte("[workspace]\nname = \"city1\"\n"),
+		"pack.toml":  []byte("[pack]\nname = \"city1\"\nschema = 2\n"),
+		"packs.lock": []byte("original lock bytes\n"),
+	}
+	for name, content := range originals {
+		if err := os.WriteFile(filepath.Join(cityDir, name), content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	cs := &controllerState{
+		cityPath:              cityDir,
+		cfg:                   &config.City{Workspace: config.Workspace{Name: "city1"}},
+		editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")),
+		pokeCh:                make(chan struct{}, 1),
+		configDirty:           &atomic.Bool{},
+		configMutationBarrier: make(chan struct{}, 1),
+	}
+	wantErr := errors.New("import failed after writing manifest")
+	err := cs.MutatePackConfig(context.Background(), func() error {
+		for name := range originals {
+			if writeErr := os.WriteFile(filepath.Join(cityDir, name), []byte("partial "+name), 0o644); writeErr != nil {
+				return writeErr
+			}
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("MutatePackConfig error = %v, want %v", err, wantErr)
+	}
+	for name, want := range originals {
+		got, readErr := os.ReadFile(filepath.Join(cityDir, name))
+		if readErr != nil {
+			t.Fatalf("read restored %s: %v", name, readErr)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("%s = %q, want original bytes %q", name, got, want)
+		}
+	}
+	if cs.configMutationPending.Load() || cs.pendingConfigRevision() != "" {
+		t.Fatal("failed pack mutation published a pending config revision")
+	}
+	if cs.configDirty.Load() {
+		t.Fatal("failed pack mutation marked config dirty")
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("failed pack mutation poked the controller")
+	default:
+	}
+}
+
+func TestControllerStatePackConfigMutationRestoresAllFilesWhenRefreshRefuses(t *testing.T) {
+	cityDir := t.TempDir()
+	originals := map[string][]byte{
+		"city.toml":  []byte("[workspace]\nname = \"city1\"\n"),
+		"pack.toml":  []byte("[pack]\nname = \"city1\"\nschema = 2\n"),
+		"packs.lock": []byte("original lock bytes\n"),
+	}
+	for name, content := range originals {
+		if err := os.WriteFile(filepath.Join(cityDir, name), content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	cs := &controllerState{
+		cityPath:              cityDir,
+		cfg:                   &config.City{Workspace: config.Workspace{Name: "city1"}},
+		editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")),
+		pokeCh:                make(chan struct{}, 1),
+		configDirty:           &atomic.Bool{},
+		configMutationBarrier: make(chan struct{}, 1),
+	}
+	err := cs.MutatePackConfig(context.Background(), func() error {
+		if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("partial pack"), 0o644); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "packs.lock"), []byte("partial lock"), 0o644); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("["), 0o644)
+	})
+	if err == nil || !strings.Contains(err.Error(), "refreshing updated city config") {
+		t.Fatalf("MutatePackConfig error = %v, want refresh refusal", err)
+	}
+	for name, want := range originals {
+		got, readErr := os.ReadFile(filepath.Join(cityDir, name))
+		if readErr != nil {
+			t.Fatalf("read restored %s: %v", name, readErr)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("%s = %q, want original bytes %q", name, got, want)
+		}
+	}
+	if cs.configMutationPending.Load() || cs.pendingConfigRevision() != "" || cs.configDirty.Load() {
+		t.Fatal("refresh-refused pack mutation published config state")
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("refresh-refused pack mutation poked the controller")
+	default:
+	}
+}
+
+func TestControllerStateConfigMutationBarrierCancelsWaiterAndRemainsReusable(t *testing.T) {
+	cs := &controllerState{
+		editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(t.TempDir(), "city.toml")),
+		configMutationBarrier: make(chan struct{}, 1),
+	}
+	enteredMutation := make(chan struct{})
+	releaseMutation := make(chan struct{})
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- cs.MutatePackConfig(context.Background(), func() error {
+			close(enteredMutation)
+			<-releaseMutation
+			return nil
+		})
+	}()
+	<-enteredMutation
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cs.MutatePackConfig(canceled, func() error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled pack-mutation waiter error = %v, want context.Canceled", err)
+	}
+	close(releaseMutation)
+	if err := <-mutationDone; err != nil {
+		t.Fatalf("held pack mutation: %v", err)
+	}
+	if err := cs.MutatePackConfig(context.Background(), func() error { return nil }); err != nil {
+		t.Fatalf("barrier was not reusable after cancellation: %v", err)
+	}
+}
+
+func TestControllerStatePackConfigMutationBlocksOrdinaryMutationUntilCommit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cs := &controllerState{
+			editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(t.TempDir(), "city.toml")),
+			configMutationBarrier: make(chan struct{}, 1),
+		}
+		packEntered := make(chan struct{})
+		releasePack := make(chan struct{})
+		packDone := make(chan error, 1)
+		go func() {
+			packDone <- cs.MutatePackConfig(context.Background(), func() error {
+				close(packEntered)
+				<-releasePack
+				return nil
+			})
+		}()
+		<-packEntered
+
+		var ordinaryEntered atomic.Bool
+		ordinaryDone := make(chan error, 1)
+		go func() {
+			ordinaryDone <- cs.mutateAndPoke(func(*configedit.Editor) error {
+				ordinaryEntered.Store(true)
+				return nil
+			})
+		}()
+		synctest.Wait()
+		enteredBeforeCommit := ordinaryEntered.Load()
+
+		close(releasePack)
+		synctest.Wait()
+		if err := <-packDone; err != nil {
+			t.Fatalf("pack mutation: %v", err)
+		}
+		if err := <-ordinaryDone; err != nil {
+			t.Fatalf("ordinary mutation: %v", err)
+		}
+		if enteredBeforeCommit {
+			t.Fatal("ordinary mutation entered while a pack generation was in flight")
+		}
+	})
 }
 
 func TestConfigMutationSnapshotRestoresSymlinkedAgentTomlTarget(t *testing.T) {

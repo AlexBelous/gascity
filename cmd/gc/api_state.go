@@ -33,6 +33,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -47,7 +48,7 @@ import (
 )
 
 // controllerState implements api.State, api.StateMutator, and
-// api.ConfigWriteSerializer.
+// api.PackConfigMutationTransaction.
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
@@ -97,6 +98,13 @@ type controllerState struct {
 	// until the loop observes and applies the same or a newer on-disk config.
 	configMutationPending atomic.Bool
 	pendingConfigRev      string
+
+	// configMutationBarrier serializes each durable config generation from its
+	// rollback snapshot through controller publication. Runtime candidate loads
+	// take the same barrier without waiting, so the reconciler never observes a
+	// tentative multi-file generation or stalls behind a slow import.
+	configMutationBarrierMu sync.Mutex
+	configMutationBarrier   chan struct{}
 
 	// rolloutFlags is the boot-latched rollout-gate snapshot: written once in
 	// newControllerState, never reassigned (reads are lock-free by construction,
@@ -162,6 +170,8 @@ type controllerState struct {
 var controllerStateInitRigDirIfReady = initDirIfReady
 
 var beadEventWatcherRetryDelay = time.Second
+
+var errConfigMutationInProgress = errors.New("config mutation in progress; reload retry scheduled")
 
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
@@ -231,6 +241,7 @@ func newControllerState(
 		beadEventStartSeqOK:    beadEventStartSeqOK,
 		rolloutFlags:           rolloutFlags,
 		sessionStartGeneration: 1,
+		configMutationBarrier:  make(chan struct{}, 1),
 	}
 	// Boot-resolved rollout notices are retained on the Flags value; echo
 	// them once at startup so an env override contradicting explicit config
@@ -1596,8 +1607,8 @@ func (cs *controllerState) OrdersAll() []orders.Order {
 // EnableOrder creates or updates an override with enabled=true.
 func (cs *controllerState) EnableOrder(name, rig string) error {
 	enabled := true
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.MergeOrderOverride(config.OrderOverride{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.MergeOrderOverride(config.OrderOverride{
 			Name:    name,
 			Rig:     rig,
 			Enabled: &enabled,
@@ -1608,8 +1619,8 @@ func (cs *controllerState) EnableOrder(name, rig string) error {
 // DisableOrder creates or updates an override with enabled=false.
 func (cs *controllerState) DisableOrder(name, rig string) error {
 	enabled := false
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.MergeOrderOverride(config.OrderOverride{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.MergeOrderOverride(config.OrderOverride{
 			Name:    name,
 			Rig:     rig,
 			Enabled: &enabled,
@@ -1617,51 +1628,100 @@ func (cs *controllerState) DisableOrder(name, rig string) error {
 	})
 }
 
-// SerializeConfigWrite runs fn under the same per-city mutation lock the
-// configedit.Editor uses for agent/rig/provider/formula edits. The HTTP pack
-// import add/remove handlers write pack.toml, packs.lock, and sometimes
-// city.toml outside the Editor callback shape, so routing them through this
-// shared lock keeps concurrent config writers from interleaving and losing an
-// update or desyncing the manifest and lockfile.
-func (cs *controllerState) SerializeConfigWrite(fn func() error) error {
-	return cs.editor.Do(fn)
+// MutatePackConfig runs the multi-file pack import callback through the
+// controller's canonical mutation refresh path. ctx cancels only while waiting
+// for the config barrier; it does not cancel a later wait on the editor or an
+// importsvc operation after fn starts, because either may already be running
+// filesystem or git work.
+func (cs *controllerState) MutatePackConfig(ctx context.Context, fn func() error) error {
+	return cs.withConfigMutation(ctx, func(*configedit.Editor) error {
+		return cs.mutateAndPokeLocked(fn, true)
+	})
 }
 
-var _ api.ConfigWriteSerializer = (*controllerState)(nil)
+var _ api.PackConfigMutationTransaction = (*controllerState)(nil)
+
+func (cs *controllerState) withConfigMutation(ctx context.Context, fn func(*configedit.Editor) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	barrier := cs.configMutationGate()
+	select {
+	case barrier <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-barrier }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return cs.editor.DoWithEditor(fn)
+}
+
+func (cs *controllerState) withConfigSnapshotIfIdle(ctx context.Context, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	barrier := cs.configMutationGate()
+	select {
+	case barrier <- struct{}{}:
+		defer func() { <-barrier }()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fn()
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return errConfigMutationInProgress
+	}
+}
+
+func (cs *controllerState) configMutationGate() chan struct{} {
+	cs.configMutationBarrierMu.Lock()
+	defer cs.configMutationBarrierMu.Unlock()
+	if cs.configMutationBarrier == nil {
+		cs.configMutationBarrier = make(chan struct{}, 1)
+	}
+	return cs.configMutationBarrier
+}
 
 // SuspendAgent writes suspended=true to durable agent config.
 // Uses configedit.Editor for provenance-aware edit (inline vs discovered vs patch).
 func (cs *controllerState) SuspendAgent(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SuspendAgent(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SuspendAgent(name)
 	})
 }
 
 // ResumeAgent clears suspended in durable agent config.
 func (cs *controllerState) ResumeAgent(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.ResumeAgent(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.ResumeAgent(name)
 	})
 }
 
 // SuspendRig writes suspended=true on the rig in city.toml.
 func (cs *controllerState) SuspendRig(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SuspendRig(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SuspendRig(name)
 	})
 }
 
 // ResumeRig clears suspended on the rig in city.toml.
 func (cs *controllerState) ResumeRig(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.ResumeRig(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.ResumeRig(name)
 	})
 }
 
 // SuspendCity sets workspace.suspended = true.
 func (cs *controllerState) SuspendCity() error {
-	if err := cs.mutateAndPoke(func() error {
-		return cs.editor.SuspendCity()
+	if err := cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SuspendCity()
 	}); err != nil {
 		return err
 	}
@@ -1673,8 +1733,8 @@ func (cs *controllerState) SuspendCity() error {
 
 // ResumeCity sets workspace.suspended = false.
 func (cs *controllerState) ResumeCity() error {
-	if err := cs.mutateAndPoke(func() error {
-		return cs.editor.ResumeCity()
+	if err := cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.ResumeCity()
 	}); err != nil {
 		return err
 	}
@@ -1686,8 +1746,8 @@ func (cs *controllerState) ResumeCity() error {
 
 // CreateAgent adds a new agent to city.toml.
 func (cs *controllerState) CreateAgent(a config.Agent) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.CreateAgent(a)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.CreateAgent(a)
 	})
 }
 
@@ -1707,43 +1767,30 @@ func (cs *controllerState) FormulaSource(name string) ([]byte, bool, error) {
 // never silent. If a prior source exists but cannot be read, the mutation aborts
 // before any write, since rollback would have no basis to restore it.
 func (cs *controllerState) UpsertFormula(name string, content []byte) error {
-	// The read-prior -> write -> refresh -> rollback sequence is not atomic across
-	// concurrent editor ops (the pre-existing mutateAndPoke rollback race class):
-	// a same-name racing upsert could see this rollback's delete-on-no-prior erase
-	// its committed file. Very low risk on a single-operator control plane; a
-	// coarse per-city mutation lock is deferred as out of scope for this change.
-	prior, hadPrior, readErr := cs.editor.FormulaSource(name)
-	if readErr != nil {
-		// FormulaSource reports a missing source as (nil, false, nil); a non-nil
-		// error means a prior source exists but is unreadable. Treating that as
-		// absent would let a refresh failure delete or overwrite the only
-		// restorable copy, so abort before mutating.
-		return fmt.Errorf("reading prior formula %q before upsert: %w", name, readErr)
-	}
-	err := cs.mutateAndPoke(func() error {
-		return cs.editor.UpsertFormula(name, content)
-	})
-	if err != nil {
-		var rollbackErr error
-		if hadPrior {
-			rollbackErr = cs.editor.UpsertFormula(name, prior)
-		} else {
-			// No prior file existed, so the desired rollback post-state is
-			// "absent". A brand-new write that faulted before creating the file
-			// leaves nothing to delete, and DeleteFormula then returns
-			// ErrNotFound — that desired state, not a rollback failure. Joining it
-			// would let mutationError map the create's real infrastructure or
-			// validation failure to HTTP 404, masking the true error class, so
-			// treat ErrNotFound here as a satisfied rollback.
-			if rb := cs.editor.DeleteFormula(name); rb != nil && !errors.Is(rb, configedit.ErrNotFound) {
+	return cs.withConfigMutation(context.Background(), func(editor *configedit.Editor) error {
+		prior, hadPrior, readErr := editor.FormulaSource(name)
+		if readErr != nil {
+			// FormulaSource reports a missing source as (nil, false, nil); a
+			// non-nil error means rollback has no safe basis, so abort before
+			// mutating.
+			return fmt.Errorf("reading prior formula %q before upsert: %w", name, readErr)
+		}
+		err := cs.mutateAndPokeLocked(func() error {
+			return editor.UpsertFormula(name, content)
+		}, false)
+		if err != nil {
+			var rollbackErr error
+			if hadPrior {
+				rollbackErr = editor.UpsertFormula(name, prior)
+			} else if rb := editor.DeleteFormula(name); rb != nil && !errors.Is(rb, configedit.ErrNotFound) {
 				rollbackErr = rb
 			}
+			if rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("rolling back formula %q write: %w", name, rollbackErr))
+			}
 		}
-		if rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back formula %q write: %w", name, rollbackErr))
-		}
-	}
-	return err
+		return err
+	})
 }
 
 // DeleteFormula removes a city-local formula source and refreshes state. A failed
@@ -1752,19 +1799,21 @@ func (cs *controllerState) UpsertFormula(name string, content []byte) error {
 // be read, the delete aborts before mutating, since rollback would have no basis
 // to restore it.
 func (cs *controllerState) DeleteFormula(name string) error {
-	prior, hadPrior, readErr := cs.editor.FormulaSource(name)
-	if readErr != nil {
-		return fmt.Errorf("reading prior formula %q before delete: %w", name, readErr)
-	}
-	err := cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteFormula(name)
-	})
-	if err != nil && hadPrior {
-		if rollbackErr := cs.editor.UpsertFormula(name, prior); rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back formula %q delete: %w", name, rollbackErr))
+	return cs.withConfigMutation(context.Background(), func(editor *configedit.Editor) error {
+		prior, hadPrior, readErr := editor.FormulaSource(name)
+		if readErr != nil {
+			return fmt.Errorf("reading prior formula %q before delete: %w", name, readErr)
 		}
-	}
-	return err
+		err := cs.mutateAndPokeLocked(func() error {
+			return editor.DeleteFormula(name)
+		}, false)
+		if err != nil && hadPrior {
+			if rollbackErr := editor.UpsertFormula(name, prior); rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("rolling back formula %q delete: %w", name, rollbackErr))
+			}
+		}
+		return err
+	})
 }
 
 // WaitForAgentVisibility blocks until findAgent in the controller's hot-reloaded
@@ -1778,8 +1827,8 @@ func (cs *controllerState) WaitForAgentVisibility(ctx context.Context, qualified
 
 // UpdateAgent partially updates an existing agent definition in city.toml.
 func (cs *controllerState) UpdateAgent(name string, patch api.AgentUpdate) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.UpdateAgent(name, configedit.AgentUpdate{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.UpdateAgent(name, configedit.AgentUpdate{
 			Provider:  patch.Provider,
 			Scope:     patch.Scope,
 			Suspended: patch.Suspended,
@@ -1789,8 +1838,8 @@ func (cs *controllerState) UpdateAgent(name string, patch api.AgentUpdate) error
 
 // DeleteAgent removes an agent from city.toml.
 func (cs *controllerState) DeleteAgent(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteAgent(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteAgent(name)
 	})
 }
 
@@ -1874,8 +1923,8 @@ func realPathForContainment(target string) (string, error) {
 // rolls back through Provision's own topology snapshot (mutateAndPoke returns
 // the mutate error without touching its config snapshot), while a post-write
 // refresh failure rolls back through mutateAndPoke's config snapshot. The two
-// restore layers never overlap. The whole handshake runs under
-// SerializeConfigWrite so a concurrent config edit cannot interleave with
+// restore layers never overlap. The whole handshake runs under the common
+// config transaction so a concurrent config edit cannot interleave with
 // Provision's read-modify-append of city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
 	rigPath := strings.TrimSpace(r.Path)
@@ -2228,7 +2277,7 @@ func (cs *controllerState) sweepOrphanRigProvisions(ctx context.Context) error {
 }
 
 // provisionRigLocked runs the config-write half of a rig add under the per-city
-// guard (SerializeConfigWrite → mutateAndPoke). r.Path must already be resolved
+// config transaction. r.Path must already be resolved
 // absolute. onStep, when non-nil, wires rig.Deps.OnStep so the caller can
 // project provisioning progress onto events; nil onStep produces the exact
 // git-blind behavior CreateRig has always had. It returns the provisioned rig.
@@ -2247,12 +2296,10 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 	}
 
 	var provisionedRig config.Rig
-	if err := cs.SerializeConfigWrite(func() error {
-		return cs.mutateAndPoke(func() error {
-			var err error
-			provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
-			return err
-		})
+	if err := cs.mutateAndPoke(func(*configedit.Editor) error {
+		var err error
+		provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
+		return err
 	}); err != nil {
 		return config.Rig{}, err
 	}
@@ -2287,8 +2334,8 @@ func rigConfigHasRigNamed(cfg *config.City, name string) bool {
 }
 
 // provisionRigWrite performs the config-mutating half of a git_url rig add. It
-// MUST run inside cs.SerializeConfigWrite → cs.mutateAndPoke (the per-city write
-// lock plus refresh/poke): it loads the raw for-edit config, re-asserts the
+// MUST run inside cs.mutateAndPoke (the per-city transaction plus refresh/poke):
+// it loads the raw for-edit config, re-asserts the
 // duplicate-name guard authoritatively under the lock, registers the city dolt
 // config for the beads-init path, and runs rig.Provision. A best-effort
 // PostProvision failure is logged, not returned, so mutateAndPoke still commits
@@ -2443,8 +2490,8 @@ func ensurePublicGitHost(gitURL string) (resolveOverride string, err error) {
 
 // UpdateRig partially updates a rig in city.toml.
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.UpdateRig(name, configedit.RigUpdate{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.UpdateRig(name, configedit.RigUpdate{
 			Path:          patch.Path,
 			Prefix:        patch.Prefix,
 			DefaultBranch: patch.DefaultBranch,
@@ -2455,22 +2502,22 @@ func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
 
 // DeleteRig removes a rig from city.toml.
 func (cs *controllerState) DeleteRig(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteRig(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteRig(name)
 	})
 }
 
 // CreateProvider adds a new city-level provider to city.toml.
 func (cs *controllerState) CreateProvider(name string, spec config.ProviderSpec) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.CreateProvider(name, spec)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.CreateProvider(name, spec)
 	})
 }
 
 // UpdateProvider partially updates an existing city-level provider.
 func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.UpdateProvider(name, configedit.ProviderUpdate{
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.UpdateProvider(name, configedit.ProviderUpdate{
 			DisplayName:        patch.DisplayName,
 			Base:               patch.Base,
 			Command:            patch.Command,
@@ -2491,50 +2538,50 @@ func (cs *controllerState) UpdateProvider(name string, patch api.ProviderUpdate)
 
 // DeleteProvider removes a city-level provider from city.toml.
 func (cs *controllerState) DeleteProvider(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteProvider(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteProvider(name)
 	})
 }
 
 // SetAgentPatch creates or replaces an agent patch in city.toml.
 func (cs *controllerState) SetAgentPatch(patch config.AgentPatch) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SetAgentPatch(patch)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SetAgentPatch(patch)
 	})
 }
 
 // DeleteAgentPatch removes an agent patch from city.toml.
 func (cs *controllerState) DeleteAgentPatch(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteAgentPatch(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteAgentPatch(name)
 	})
 }
 
 // SetRigPatch creates or replaces a rig patch in city.toml.
 func (cs *controllerState) SetRigPatch(patch config.RigPatch) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SetRigPatch(patch)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SetRigPatch(patch)
 	})
 }
 
 // DeleteRigPatch removes a rig patch from city.toml.
 func (cs *controllerState) DeleteRigPatch(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteRigPatch(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteRigPatch(name)
 	})
 }
 
 // SetProviderPatch creates or replaces a provider patch in city.toml.
 func (cs *controllerState) SetProviderPatch(patch config.ProviderPatch) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.SetProviderPatch(patch)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.SetProviderPatch(patch)
 	})
 }
 
 // DeleteProviderPatch removes a provider patch from city.toml.
 func (cs *controllerState) DeleteProviderPatch(name string) error {
-	return cs.mutateAndPoke(func() error {
-		return cs.editor.DeleteProviderPatch(name)
+	return cs.mutateAndPoke(func(editor *configedit.Editor) error {
+		return editor.DeleteProviderPatch(name)
 	})
 }
 
@@ -2576,6 +2623,8 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 	for _, path := range []string{
 		cityToml,
 		filepath.Join(cityPath, ".gc", "site.toml"),
+		filepath.Join(cityPath, "pack.toml"),
+		filepath.Join(cityPath, packman.LockfileName),
 	} {
 		if err := capture(path); err != nil {
 			return nil, err
@@ -2649,7 +2698,19 @@ func (s *configMutationSnapshot) restore() error {
 	return restoreErr
 }
 
-func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+func (cs *controllerState) mutateAndPoke(mutate func(*configedit.Editor) error) error {
+	return cs.withConfigMutation(context.Background(), func(editor *configedit.Editor) error {
+		return cs.mutateAndPokeLocked(func() error {
+			return mutate(editor)
+		}, false)
+	})
+}
+
+// mutateAndPokeLocked retains ordinary config mutations' legacy behavior
+// on callback errors. Pack imports opt in because importsvc can have written
+// several config files before returning an error. The caller holds both the
+// config mutation barrier and the editor lock.
+func (cs *controllerState) mutateAndPokeLocked(mutate func() error, rollbackCallbackError bool) error {
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
 		var err error
@@ -2659,6 +2720,11 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 	}
 	if err := mutate(); err != nil {
+		if rollbackCallbackError && snapshot != nil {
+			if restoreErr := snapshot.restore(); restoreErr != nil {
+				return fmt.Errorf("mutating city config: %w", errors.Join(err, fmt.Errorf("restoring previous city config: %w", restoreErr)))
+			}
+		}
 		return err
 	}
 	_, err := cs.refreshConfigSnapshot()

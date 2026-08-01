@@ -14288,6 +14288,10 @@ export type AddPackErrors = {
      */
     404: ErrorModel;
     /**
+     * Request Timeout
+     */
+    408: ErrorModel;
+    /**
      * Conflict
      */
     409: ErrorModel;
@@ -14300,9 +14304,17 @@ export type AddPackErrors = {
      */
     500: ErrorModel;
     /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+    /**
      * Bad Gateway
      */
     502: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
 };
 
 export type AddPackError = AddPackErrors[keyof AddPackErrors];
@@ -14356,6 +14368,10 @@ export type DeleteV0CityByCityNamePacksByNameErrors = {
      */
     404: ErrorModel;
     /**
+     * Request Timeout
+     */
+    408: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -14363,6 +14379,14 @@ export type DeleteV0CityByCityNamePacksByNameErrors = {
      * Internal Server Error
      */
     500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
 };
 
 export type DeleteV0CityByCityNamePacksByNameError = DeleteV0CityByCityNamePacksByNameErrors[keyof DeleteV0CityByCityNamePacksByNameErrors];

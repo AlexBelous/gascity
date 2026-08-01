@@ -8,11 +8,16 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -21,6 +26,34 @@ type rewriteConfigOnListProvider struct {
 	once    sync.Once
 	rewrite func()
 }
+
+type triggerOnNthDoneContext struct {
+	context.Context
+	mu      sync.Mutex
+	calls   int
+	trigger int
+	fn      func()
+}
+
+func (c *triggerOnNthDoneContext) Done() <-chan struct{} {
+	c.mu.Lock()
+	c.calls++
+	var fn func()
+	if c.calls == c.trigger {
+		fn = c.fn
+		c.fn = nil
+	}
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+	return c.Context.Done()
+}
+
+type immediateOrderDispatcher struct{}
+
+func (immediateOrderDispatcher) dispatch(context.Context, string, time.Time) {}
+func (immediateOrderDispatcher) drain(context.Context) bool                  { return true }
 
 func (p *rewriteConfigOnListProvider) ListRunning(prefix string) ([]string, error) {
 	if p.rewrite != nil {
@@ -105,6 +138,132 @@ func TestCityRuntimeConfigReloadRetryIsLevelTriggeredAndImmediate(t *testing.T) 
 	case <-cr.pokeCh:
 	default:
 		t.Fatal("retry did not request an immediate controller tick")
+	}
+}
+
+func TestCityRuntimeReloadDoesNotWaitForInFlightConfigMutation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cs := &controllerState{
+			editor:                configedit.NewEditor(fsys.OSFS{}, filepath.Join(t.TempDir(), "city.toml")),
+			configMutationBarrier: make(chan struct{}, 1),
+		}
+		mutationEntered := make(chan struct{})
+		releaseMutation := make(chan struct{})
+		mutationDone := make(chan error, 1)
+		go func() {
+			mutationDone <- cs.MutatePackConfig(context.Background(), func() error {
+				close(mutationEntered)
+				<-releaseMutation
+				return nil
+			})
+		}()
+		<-mutationEntered
+
+		cr := &CityRuntime{
+			cs:          cs,
+			tomlPath:    filepath.Join(t.TempDir(), "city.toml"),
+			cityName:    "test-city",
+			configDirty: &atomic.Bool{},
+			pokeCh:      make(chan struct{}, 1),
+			stdout:      io.Discard,
+			stderr:      io.Discard,
+		}
+		lastProviderName := "fake"
+		reloadDone := make(chan reloadControlReply, 1)
+		go func() {
+			reloadDone <- cr.reloadConfigTraced(context.Background(), &lastProviderName, t.TempDir(), nil, reloadSourceWatch)
+		}()
+		synctest.Wait()
+
+		var reply reloadControlReply
+		completedBeforeCommit := false
+		select {
+		case reply = <-reloadDone:
+			completedBeforeCommit = true
+		default:
+		}
+		retryDirty := cr.configDirty.Load()
+		retryPoked := false
+		select {
+		case <-cr.pokeCh:
+			retryPoked = true
+		default:
+		}
+
+		close(releaseMutation)
+		synctest.Wait()
+		if err := <-mutationDone; err != nil {
+			t.Fatalf("pack mutation: %v", err)
+		}
+		if !completedBeforeCommit {
+			<-reloadDone
+			t.Fatal("config reload blocked behind an in-flight pack mutation")
+		}
+		if reply.Outcome != reloadOutcomeFailed || !strings.Contains(reply.Error, "config mutation") {
+			t.Fatalf("reload reply = %+v, want retryable in-flight mutation failure", reply)
+		}
+		if !retryDirty || retryPoked {
+			t.Fatalf("reload retry dirty/poked = %t/%t, want true/false", retryDirty, retryPoked)
+		}
+	})
+}
+
+func TestCityRuntimeSameRevisionMetadataRefreshRejectsSupersededSnapshot(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	writeBackendMetadata(t, cityPath, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+
+	initialCfg, initialRevision := loadCityRuntimeControllerConfig(t, cityPath)
+	provider := runtime.NewFake()
+	cs := newControllerState(context.Background(), initialCfg, provider, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: initialRevision,
+		Cfg:       initialCfg,
+		SP:        provider,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(provider),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cr.setControllerState(cs)
+	cr.od = immediateOrderDispatcher{}
+	cr.orderSetSignature = "force-rescan"
+	writeBackendMetadata(t, cityPath, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+
+	var mutationErr error
+	ctx := &triggerOnNthDoneContext{
+		Context: context.Background(),
+		trigger: 2,
+		fn: func() {
+			mutationErr = cs.MutatePackConfig(context.Background(), func() error {
+				writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
+				return nil
+			})
+			writeBackendMetadata(t, cityPath, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+		},
+	}
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if mutationErr != nil {
+		t.Fatalf("newer config mutation: %v", mutationErr)
+	}
+	if reply.Outcome != reloadOutcomeFailed || !strings.Contains(reply.Error, "superseded") {
+		t.Fatalf("reload reply = %+v, want superseded failure", reply)
+	}
+	if got := cs.Config().Daemon.ShutdownTimeoutDuration(); got != time.Second {
+		t.Fatalf("controller timeout = %v, want newer one-second mutation", got)
+	}
+	if cr.configDirty == nil || !cr.configDirty.Load() {
+		t.Fatal("superseded same-revision reload did not schedule a retry")
 	}
 }
 

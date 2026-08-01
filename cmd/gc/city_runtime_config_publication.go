@@ -37,14 +37,21 @@ func (cr *CityRuntime) requestConfigReloadRetry() {
 	if cr == nil {
 		return
 	}
+	cr.markConfigReloadDirty()
+	select {
+	case cr.pokeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (cr *CityRuntime) markConfigReloadDirty() {
+	if cr == nil {
+		return
+	}
 	cr.reloadMu.Lock()
 	if cr.configDirty == nil {
 		cr.configDirty = &atomic.Bool{}
 	}
 	cr.configDirty.Store(true)
 	cr.reloadMu.Unlock()
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
 }

@@ -8,10 +8,11 @@ Pick up the beads issue-lifecycle follow-up queue. Read the handoff first, in fu
 
     /data/projects/gascity/engdocs/contributors/beads-issue-lifecycle-handoff.md
 
-Short version: two PRs have merged upstream (`b92442d1a` #5191 — the `issueops.Lifecycle` facade reached via
-`store.IssueLifecycle()`, three backends, conformance suite, CLI adoption; `ff6eeedbf` #5206 — a generic
-done-crossing status update now enforces close policy, with `bd update --force` overriding it). A queue of
-follow-up beads remains. Your job is to work that queue.
+Short version: four PRs have merged upstream — `b92442d1a` #5191 (the `issueops.Lifecycle` facade reached
+via `store.IssueLifecycle()`, three backends, conformance suite, CLI adoption), `ff6eeedbf` #5206 (a
+generic done-crossing status update now enforces close policy, with `bd update --force` overriding it),
+and the two Wave 1 P1s, `532dadf98` #5211 and `29af03b8c` #5212. A queue of follow-up beads remains. Your
+job is to work that queue.
 
 Work in `/data/projects/beads-public-issueops-simple`, branching fresh off `origin/main` for each item.
 
@@ -24,18 +25,23 @@ One PR per bead. Never Sonnet; prefer fable for councils, fall back to Opus on 4
 empty findings array, check `agents_error` before believing it — an all-429 run is indistinguishable from a
 clean pass.
 
+Give the council three *distinct* lenses — blast-radius, test-adequacy, correctness — not three identical
+reviewers. And mutation-check every new test before you open the PR: revert the production hunk, confirm
+the test fails, restore it verbatim, confirm `git diff` is empty. Copy the file aside and back; never
+`git stash`.
+
 ## Order
 
-**Wave 1 (P1), start here:**
-- `ga-2kkue` — `bd create -t <infra-type>` lands in `issues` on the proxied path.
-  `cmd/bd/create_proxied_server.go:142` routes on `Ephemeral || NoHistory` and never consults infra types;
-  `domain.CreateContext` already carries an `InfraTypes` field, so this is ~2 lines plus tests.
-- `ga-z3vht` — `bd close` ignores `issue.Pinned`. `internal/validation/issue.go:53-63` checks
-  `Status == StatusPinned` instead of the boolean. **The owner has ruled: refuse if the boolean is set OR
-  the status is `pinned`** — strictly additive. That ruling came from an audit showing Gas Town pins by
-  *status* at 21 sites, so a boolean-only check would strip its protection.
+**Wave 1 (P1) is done** — #5211 and #5212 are merged. Do not re-open them.
 
-**Wave 2 (P2):** `ga-z0qmv`, `ga-kjkv1`, `ga-dpfii`, `ga-tsjxb`, `ga-e6h6i` — details in the handoff.
+**Start with Wave 2 (P2):** `ga-z0qmv`, `ga-kjkv1`, `ga-dpfii`, `ga-tsjxb`, `ga-e6h6i` — details in the
+handoff. `ga-z0qmv` is the one to take first: the uow `Lifecycle` backend silently lost the
+foreign-assignee transfer fence, and the conformance suite has no assignee-transfer case, which is
+exactly why nothing caught it. Fix it *with* a cross-backend conformance case.
+
+**Also queued, from the Wave 1 review council:** `ga-ktn9pe.4.8`, `.9`, `.10`, `.11`, `.12`. The first
+three need an owner ruling before you implement — bring the options, do not pick. `.11` and `.12` are
+straightforward and can go whenever.
 
 **Wave 3:** `ga-c69el` plus two items that still need beads (unify partial-failure exit codes; unify the
 `--json` contract) and four review findings owed beads. **Both unification items are breaking wire changes —
@@ -93,6 +99,7 @@ undercounts badly.
     internal/storage/embeddeddolt -run TestEmbeddedIssueOperations  56   (needs BEADS_TEST_EMBEDDED_DOLT=1 CGO_ENABLED=1)
     internal/storage/uow                                       135
     internal/storage/issueops                                  338
+    internal/validation                                        218
 
 `go test ./cmd/bd/` has ~25 pre-existing top-level failures (init/config/doctor/completion) identical on
 `origin/main` — compare the failing set **by name**, not by count. `make ci-pr-lint` fails on `origin/main`

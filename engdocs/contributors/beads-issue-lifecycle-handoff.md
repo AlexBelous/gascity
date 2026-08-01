@@ -16,6 +16,8 @@ policy is implemented once instead of three times. Two PRs have merged; a queue 
 | --- | --- | --- |
 | `b92442d1a` | #5191 | The facade: `issueops.Lifecycle` (Create/Update/Close/Reopen), reached via `store.IssueLifecycle()`. Three backends, a cross-backend conformance suite, CLI adoption, and ~10 bug fixes. |
 | `ff6eeedbf` | #5206 | A generic status update crossing into a done category now enforces close policy; `bd update --force` gains a dual meaning. |
+| `532dadf98` | #5211 | `ga-2kkue`: the proxied single-create path consults `cctx.InfraTypes`, so `bd create -t <infra-type>` lands in `wisps` like every other create surface. |
+| `29af03b8c` | #5212 | `ga-z3vht`: `NotPinned` refuses on `issue.Pinned` **or** `status == pinned` (ruling 10). Strictly additive. |
 
 ### Open
 
@@ -80,16 +82,28 @@ Never Sonnet. Prefer fable for red-teams/councils; fall back to Opus on 429, nev
 `agents_error` / `<failures>` before trusting an empty findings array** — an all-429 council returns
 `{"findings":[]}` which is indistinguishable from a clean pass.
 
+Give the council **three distinct lenses** rather than three identical reviewers: blast-radius (build the
+caller table yourself, do not trust the author's), test-adequacy (assume the tests are lying), and
+correctness (produce a concrete wrong outcome or downgrade the severity). On Wave 1 those three found
+overlapping-but-different things; redundant reviewers would have found one of them.
+
+**Mutation-check every new test before opening the PR.** Revert the production hunk, confirm the new test
+fails, restore it verbatim, and confirm `git diff` is empty. A test that passes both ways is worse than no
+test, because it reads as coverage. Never do this with `git stash` — the stack is shared across worktrees;
+copy the file aside and copy it back.
+
 ## Remaining work
 
-### Wave 1 (P1)
+### Wave 1 (P1) — done
 
-- **`ga-2kkue`** — `bd create -t <infra-type>` lands in `issues` on the proxied path.
-  `cmd/bd/create_proxied_server.go:142` routes on `Ephemeral || NoHistory` and never consults infra types,
-  while the embedded path (`create_atomic.go:44`) checks `IsInfraTypeCtx`. `domain.CreateContext` now
-  carries an `InfraTypes` field, making this ~2 lines.
-- **`ga-z3vht`** — `bd close` ignores `issue.Pinned`. `internal/validation/issue.go:53-63` checks
-  `Status == StatusPinned` rather than the boolean. Implement ruling 10 (boolean OR status).
+Both shipped; see the merged table above. Two scoping lessons worth carrying forward:
+
+- `ga-2kkue` was filed as "~2 lines" and the production change really was three, but only after
+  establishing that the markdown-batch and graph-plan proxied paths are *also* infra-type-blind. Those
+  were left alone deliberately: their embedded counterparts route on flags too, so the two sides are at
+  parity with each other, and a mixed-type batch cannot be expressed by one boolean at all.
+- `ga-z3vht` stayed at the validation layer on purpose. `bd batch` close bypasses all close validation
+  and has no force lever, so a shared-layer guard would have reproduced failure pattern 1 below.
 
 ### Wave 2 (P2)
 
@@ -110,6 +124,34 @@ Never Sonnet. Prefer fable for red-teams/councils; fall back to Opus on 429, nev
   `string`). `TestIssueUpdateAcceptsLegacyIssueTypeRepresentations` pins that typed values round-trip, so
   widening changes accept/reject behavior and needs cross-backend verification.
 - **`ga-e6h6i`** — `cmd/bd` leaks `issue-prefix` into viper across tests, surviving `initConfigForTest`.
+
+### Filed by the Wave 1 fable review council
+
+All five came out of reviewing #5211/#5212 and were filed rather than folded in. **The first three need
+an owner ruling before anyone implements them.**
+
+- **`ga-ktn9pe.4.8`** (P2, owner ruling) — `bd close --force` leaves `pinned=true` residue, so the new
+  boolean trigger now refuses the *idempotent re-close* that used to exit 0. `closeIssueInTx` sets only
+  status/closed_at/updated_at/close_reason/closed_by_session/row_lock; there is no pinned-clear anywhere
+  in the dolt close lane, and `bd batch` produces the same residue. This matters beyond tidiness: per
+  `close.go:189-200` the idempotent re-close is the *only* mechanism that re-drives a stranded molecule
+  auto-close. Fix is either clearing pinned on close (mirroring `update.go:329-343`) or exempting
+  `status == closed` from the boolean trigger — the latter narrows ruling 10, so it is not an
+  implementer's call.
+- **`ga-ktn9pe.4.9`** (P2, owner ruling) — `issueops/close.go` has **no pinned check of either kind**, so
+  linked-library consumers reaching `store.IssueLifecycle().Close()` are unprotected, and `bd batch`
+  bypasses all close validation with no force lever. Needs a ruling on whether `CloseRequest.Force` grows
+  yet another meaning (it already gained a dual one in #5206) and whether batch gets a force lever.
+- **`ga-ktn9pe.4.10`** (P3, owner ruling) — `bd update --status closed` bypasses the pinned refusal
+  entirely and then auto-clears the pin at `update.go:338`. Possibly sanctioned, since update *is* the
+  pin/unpin verb. #5206 added blocker/open-children policy to that path but omitted pinned.
+- **`ga-ktn9pe.4.11`** (P3) — `bd create --dry-run` previews `ephemeral:false` for an infra type on
+  *both* the proxied and embedded paths, because both build the preview from flags alone. Before #5211
+  the proxied preview and proxied behavior agreed by both being wrong. Fix both paths together.
+- **`ga-ktn9pe.4.12`** (P3) — `forClose`/`forUpdate`/`forDelete`/`forReopen`
+  (`internal/validation/issue.go:204-240`) are production-dead; `validateIssueClosable` hand-rolls the
+  same chains. #5212 had to update `forClose`'s test purely to keep dead code consistent. Wire it or
+  delete it.
 
 ### Wave 3 — CLI consistency (all four approved by the owner)
 
@@ -207,7 +249,7 @@ export GOFLAGS=-mod=readonly
 
 ## Verification baselines
 
-As of `ff6eeedbf`. Count with `grep -cE '^[[:space:]]*--- PASS'` — `domain/db` nests four levels deep and a
+As of `29af03b8c`. Count with `grep -cE '^[[:space:]]*--- PASS'` — `domain/db` nests four levels deep and a
 shallower pattern undercounts by an order of magnitude.
 
 ```bash
@@ -218,6 +260,7 @@ BEADS_TEST_EMBEDDED_DOLT=1 CGO_ENABLED=1 \
   go test -v -count=1 -run TestEmbeddedIssueOperations ./internal/storage/embeddeddolt/   # 56
 go test -v -count=1 ./internal/storage/uow/                                      # 135
 go test -v -count=1 ./internal/storage/issueops/                                 # 338
+go test -v -count=1 ./internal/validation/                                       # 218
 BASE_SHA=origin/main bash scripts/check-migration-hygiene.sh                     # clean
 ```
 

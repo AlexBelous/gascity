@@ -143,10 +143,11 @@ type controllerState struct {
 	sessionStartEventAdmissionStopping bool
 	sessionStartEventAdmissionWG       sync.WaitGroup
 
-	// readyRoutedWorkEventAdmission upgrades exact, cache-certified pool
-	// demand to an immediate legacy tick. It is installed only while keyed
-	// session-start ownership is active and drained before stores close.
-	readyRoutedWorkEventAdmission         func(string)
+	// readyRoutedWorkEventAdmission reports an exact, cache-certified pool
+	// demand contribution before upgrading the same event to an immediate
+	// legacy tick. It is installed only while keyed session-start ownership is
+	// active and drained before stores close.
+	readyRoutedWorkEventAdmission         func(readyRoutedWorkDemandContribution)
 	readyRoutedWorkEventAdmissionStopping bool
 	readyRoutedWorkEventAdmissionWG       sync.WaitGroup
 
@@ -621,14 +622,10 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(evt)
-	var storeRef string
-	if evt.Type == events.BeadClosed {
-		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
-	}
 	cs.mu.RUnlock()
 
-	for _, store := range stores {
-		inner, _, _ := unwrapBeadPolicyStore(store)
+	for _, candidate := range stores {
+		inner, _, _ := unwrapBeadPolicyStore(candidate.store)
 		if cached, ok := inner.(*beads.CachingStore); ok {
 			cached.ApplyEvent(evt.Type, evt.Payload)
 		}
@@ -639,12 +636,23 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
-		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+		cs.runBeadCloseAutoclose(evt.Subject, stores[0].store, stores[0].ref)
 	}
 	cs.admitSessionWaitDependencyShadowEvent(evt)
 }
 
-func (cs *controllerState) installReadyRoutedWorkEventAdmission(admit func(string)) error {
+type readyRoutedWorkDemandContribution struct {
+	WorkID              string
+	PoolTarget          string
+	SourceActor         string
+	SourceStore         string
+	ContributionPresent bool
+	EventAt             time.Time
+	ObservedAt          time.Time
+	DecidedAt           time.Time
+}
+
+func (cs *controllerState) installReadyRoutedWorkEventAdmission(admit func(readyRoutedWorkDemandContribution)) error {
 	if cs == nil {
 		return fmt.Errorf("installing ready routed-work event admission: controller state is nil")
 	}
@@ -677,10 +685,11 @@ func (cs *controllerState) stopReadyRoutedWorkEventAdmission() {
 	cs.mu.Unlock()
 }
 
-func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []beads.Store) {
+func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []beadEventStore) {
 	if cs == nil || evt.Actor == "cache-reconcile" || !isBeadMutationEvent(evt.Type) {
 		return
 	}
+	observedAt := time.Now().UTC()
 	eventBead, ok := beads.DecodeBeadEventPayload(evt.Payload)
 	if !ok {
 		return
@@ -703,13 +712,21 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 	}
 	defer cs.readyRoutedWorkEventAdmissionWG.Done()
 
+	namedTemplates := make(map[string]struct{}, len(cfg.NamedSessions))
+	for i := range cfg.NamedSessions {
+		namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
+	}
 	templates := make(map[string]struct{}, len(cfg.Agents))
+	shadowSupported := make(map[string]bool, len(cfg.Agents))
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
 			continue
 		}
-		templates[agent.QualifiedName()] = struct{}{}
+		target := agent.QualifiedName()
+		templates[target] = struct{}{}
+		_, hasNamedSession := namedTemplates[target]
+		shadowSupported[target] = strings.TrimSpace(agent.ScaleCheck) == "" && !hasNamedSession
 	}
 	if len(templates) == 0 {
 		return
@@ -721,8 +738,8 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 		return
 	}
 
-	for _, store := range stores {
-		inner, _, _ := unwrapBeadPolicyStore(store)
+	for _, candidate := range stores {
+		inner, _, _ := unwrapBeadPolicyStore(candidate.store)
 		cached, ok := inner.(*beads.CachingStore)
 		if !ok {
 			continue
@@ -735,15 +752,24 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 			continue
 		}
 		if target := controllerDemandRouteTarget(cfg, work, templates); target != "" {
-			admit(target)
+			admit(readyRoutedWorkDemandContribution{
+				WorkID:              work.ID,
+				PoolTarget:          target,
+				SourceActor:         evt.Actor,
+				SourceStore:         candidate.ref,
+				ContributionPresent: shadowSupported[target],
+				EventAt:             evt.Ts.UTC(),
+				ObservedAt:          observedAt,
+				DecidedAt:           time.Now().UTC(),
+			})
 			return
 		}
 	}
 }
 
-// autocloseStoreRefLocked returns the storeRef string for the store that owns
+// beadEventStoreRefLocked returns the storeRef string for the store that owns
 // beadID. Called under cs.mu read lock.
-func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
+func (cs *controllerState) beadEventStoreRefLocked(beadID string) string {
 	if cs.cfg == nil {
 		return ""
 	}
@@ -785,22 +811,31 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	})
 }
 
-func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store {
+type beadEventStore struct {
+	store beads.Store
+	ref   string
+}
+
+func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beadEventStore {
 	if id := beadEventID(evt); id != "" && cs.cfg != nil {
 		if store, known := cs.beadEventConfiguredStoreLocked(id); known {
 			if store == nil {
 				return nil
 			}
-			return []beads.Store{store}
+			return []beadEventStore{{store: store, ref: cs.beadEventStoreRefLocked(id)}}
 		}
 	}
 
-	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
-	for _, s := range cs.beadStores {
-		stores = append(stores, s)
+	stores := make([]beadEventStore, 0, len(cs.beadStores)+1)
+	for name, store := range cs.beadStores {
+		stores = append(stores, beadEventStore{store: store, ref: "rig:" + name})
 	}
 	if cs.cityBeadStore != nil {
-		stores = append(stores, cs.cityBeadStore)
+		cityName := loadedCityName(cs.cfg, cs.cityPath)
+		if cityName == "" {
+			cityName = "city"
+		}
+		stores = append(stores, beadEventStore{store: cs.cityBeadStore, ref: "city:" + cityName})
 	}
 	return stores
 }

@@ -476,7 +476,7 @@ func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
 	if cr.sessionStartOwnership != sessionStartOwnershipKeyed {
 		return nil
 	}
-	if err := cr.cs.installReadyRoutedWorkEventAdmission(func(string) {
+	if err := cr.cs.installReadyRoutedWorkEventAdmission(func(contribution readyRoutedWorkDemandContribution) {
 		cr.sessionStartMu.Lock()
 		stillKeyed := cr.sessionStartOwnership == sessionStartOwnershipKeyed
 		cr.sessionStartMu.Unlock()
@@ -485,11 +485,59 @@ func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
 		}
 		cr.readyRoutedWorkPokePending.Store(true)
 		cr.requestLegacySessionStartFallback()
+		cr.recordReadyRoutedWorkDemandContribution(contribution)
 	}); err != nil {
 		return err
 	}
 	cr.readyRoutedWorkEventAdmissionInstalled = true
 	return nil
+}
+
+func (cr *CityRuntime) recordReadyRoutedWorkDemandContribution(contribution readyRoutedWorkDemandContribution) {
+	if cr == nil || cr.trace == nil || contribution.WorkID == "" || contribution.PoolTarget == "" ||
+		contribution.ObservedAt.IsZero() || contribution.DecidedAt.IsZero() ||
+		contribution.DecidedAt.Before(contribution.ObservedAt) {
+		return
+	}
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+	cycle := cr.trace.BeginCycle(TraceTickTriggerControl, "pool_demand.contribution.shadow", contribution.DecidedAt, cfg)
+	if cycle == nil {
+		return
+	}
+	reason := TraceReasonRetained
+	outcome := TraceOutcomeAccepted
+	if !contribution.ContributionPresent {
+		reason = TraceReasonNoEffectTemplateMatch
+		outcome = TraceOutcomeSkipped
+	}
+	eventToDecision := int64(0)
+	eventTimestampValid := !contribution.EventAt.IsZero() && !contribution.DecidedAt.Before(contribution.EventAt)
+	if eventTimestampValid {
+		eventToDecision = contribution.DecidedAt.Sub(contribution.EventAt).Nanoseconds()
+	}
+	cycle.RecordControllerOperation(
+		TraceSitePoolDemandContributionShadow,
+		reason,
+		outcome,
+		"pool_demand.contribution.shadow",
+		contribution.DecidedAt.Sub(contribution.ObservedAt),
+		map[string]any{
+			"work_id":                           contribution.WorkID,
+			"pool_target":                       contribution.PoolTarget,
+			"source_actor":                      contribution.SourceActor,
+			"source_store":                      contribution.SourceStore,
+			"contribution_present":              contribution.ContributionPresent,
+			"event_timestamp_valid":             eventTimestampValid,
+			"event_to_shadow_decision_ns":       eventToDecision,
+			"observation_to_shadow_decision_ns": contribution.DecidedAt.Sub(contribution.ObservedAt).Nanoseconds(),
+			"effect_applied":                    false,
+		},
+	)
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: routed-work demand shadow trace: %v\n", cr.logPrefix, err) //nolint:errcheck // tracing must not affect legacy reconciliation
+	}
 }
 
 func shadowWorkerStderr(stderr io.Writer) io.Writer {

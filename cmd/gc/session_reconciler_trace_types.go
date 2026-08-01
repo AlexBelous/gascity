@@ -111,6 +111,7 @@ const (
 	TraceSiteLifecycleStatusShadow          TraceSiteCode = "lifecycle.status.shadow"
 	TraceSiteLifecycleStartSelectionShadow  TraceSiteCode = "lifecycle.start_selection.shadow"
 	TraceSiteWaitDependencyShadow           TraceSiteCode = "lifecycle.wait_dependency.shadow"
+	TraceSitePoolDemandContributionShadow   TraceSiteCode = "pool_demand.contribution.shadow"
 	TraceSiteLifecycleStartPrepare          TraceSiteCode = "lifecycle.start.prepare"
 	TraceSiteLifecycleStartExecute          TraceSiteCode = "lifecycle.start.execute"
 	TraceSiteLifecycleStartCommit           TraceSiteCode = "lifecycle.start.commit"

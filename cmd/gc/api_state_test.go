@@ -2229,6 +2229,7 @@ func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
 		omitDependencies bool
 		auditExactReads  bool
 		wantTarget       string
+		wantContribution bool
 		wantGetCalls     int64
 		wantDepListCalls int64
 	}{
@@ -2240,7 +2241,8 @@ func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
 				Status:   "open",
 				Metadata: map[string]string{"gc.routed_to": "worker"},
 			},
-			wantTarget: "worker",
+			wantTarget:       "worker",
+			wantContribution: true,
 		},
 		{
 			name: "schema 59 ready update omits dependencies",
@@ -2253,8 +2255,25 @@ func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
 			omitDependencies: true,
 			auditExactReads:  true,
 			wantTarget:       "worker",
+			wantContribution: true,
 			wantGetCalls:     1,
 			wantDepListCalls: 1,
+		},
+		{
+			name: "custom scale check remains legacy only",
+			work: beads.Bead{Title: "custom scale work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			configure: func(cfg *config.City) {
+				cfg.Agents[0].ScaleCheck = "printf 1"
+			},
+			wantTarget: "worker",
+		},
+		{
+			name: "named session template remains legacy only",
+			work: beads.Bead{Title: "named session work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			configure: func(cfg *config.City) {
+				cfg.NamedSessions = []config.NamedSession{{Template: "worker", Mode: "on_demand"}}
+			},
+			wantTarget: "worker",
 		},
 		{
 			name: "blocked",
@@ -2391,9 +2410,9 @@ func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
 				beadStores: map[string]beads.Store{"work": cache},
 				pokeCh:     make(chan struct{}, 1),
 			}
-			var targets []string
-			if err := cs.installReadyRoutedWorkEventAdmission(func(target string) {
-				targets = append(targets, target)
+			var contributions []readyRoutedWorkDemandContribution
+			if err := cs.installReadyRoutedWorkEventAdmission(func(contribution readyRoutedWorkDemandContribution) {
+				contributions = append(contributions, contribution)
 			}); err != nil {
 				t.Fatalf("install routed-work admission: %v", err)
 			}
@@ -2419,11 +2438,17 @@ func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
 			cs.applyBeadEventToStores(evt)
 
 			if test.wantTarget == "" {
-				if len(targets) != 0 {
-					t.Fatalf("priority targets = %v, want ordinary fallback only", targets)
+				if len(contributions) != 0 {
+					t.Fatalf("demand contributions = %+v, want ordinary fallback only", contributions)
 				}
-			} else if len(targets) != 1 || targets[0] != test.wantTarget {
-				t.Fatalf("priority targets = %v, want [%s]", targets, test.wantTarget)
+			} else if len(contributions) != 1 ||
+				contributions[0].WorkID != created.ID ||
+				contributions[0].PoolTarget != test.wantTarget ||
+				contributions[0].SourceActor != evt.Actor ||
+				contributions[0].ContributionPresent != test.wantContribution ||
+				contributions[0].ObservedAt.IsZero() ||
+				contributions[0].DecidedAt.Before(contributions[0].ObservedAt) {
+				t.Fatalf("demand contributions = %+v, want one exact contribution for %s with present=%t", contributions, test.wantTarget, test.wantContribution)
 			}
 			if got := len(cs.pokeCh); got != 1 {
 				t.Fatalf("ordinary fallback poke count = %d, want 1", got)
@@ -2493,6 +2518,91 @@ func TestReadyRoutedWorkPriorityPokesRequireKeyedOwnershipAndCoalesce(t *testing
 				t.Fatalf("buffered poke count = %d, want 1 after duplicate events", got)
 			}
 		})
+	}
+}
+
+func TestReadyRoutedWorkAdmissionRecordsExactEffectFreeDemandShadow(t *testing.T) {
+	cityPath := t.TempDir()
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{
+		Title:    "ready work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Prefix: "hq"},
+		Rigs:      []config.Rig{{Name: "work", Path: "work", Prefix: "gc"}},
+		Agents:    []config.Agent{{Name: "worker", MaxActiveSessions: readyRoutedWorkMax(2)}},
+	}
+	pokeCh := make(chan struct{}, 1)
+	cs := &controllerState{
+		cfg:        cfg,
+		cityPath:   cityPath,
+		beadStores: map[string]beads.Store{"work": cache},
+		pokeCh:     pokeCh,
+	}
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+	cr := &CityRuntime{
+		cityPath:              cityPath,
+		cityName:              "test-city",
+		cs:                    cs,
+		cfg:                   cfg,
+		pokeCh:                pokeCh,
+		trace:                 trace,
+		stderr:                io.Discard,
+		sessionStartOwnership: sessionStartOwnershipKeyed,
+	}
+	if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
+		t.Fatalf("install runtime routed-work admission: %v", err)
+	}
+	t.Cleanup(cs.stopReadyRoutedWorkEventAdmission)
+
+	eventAt := time.Now().UTC().Add(-time.Second)
+	evt := readyRoutedWorkEvent(t, work, nil)
+	evt.Ts = eventAt
+	cs.applyBeadEventToStores(evt)
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read routed-work demand shadow trace: %v", err)
+	}
+	var matches []SessionReconcilerTraceRecord
+	for _, record := range records {
+		if record.RecordType == TraceRecordOperation && string(record.SiteCode) == "pool_demand.contribution.shadow" {
+			matches = append(matches, record)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("routed-work demand shadow records = %d, want 1: %+v", len(matches), matches)
+	}
+	record := matches[0]
+	if record.Fields["work_id"] != work.ID ||
+		record.Fields["pool_target"] != "worker" ||
+		record.Fields["source_actor"] != "bd-hook" ||
+		record.Fields["source_store"] != "rig:work" ||
+		record.Fields["contribution_present"] != true ||
+		record.Fields["effect_applied"] != false {
+		t.Fatalf("routed-work demand shadow record = %+v, want exact effect-free contribution", record)
+	}
+	eventLatency, ok := record.Fields["event_to_shadow_decision_ns"].(float64)
+	if !ok || eventLatency <= 0 {
+		t.Fatalf("event-to-shadow latency = %#v, want positive nanoseconds after %s", record.Fields["event_to_shadow_decision_ns"], eventAt)
+	}
+	decisionLatency, ok := record.Fields["observation_to_shadow_decision_ns"].(float64)
+	if !ok || decisionLatency < 0 {
+		t.Fatalf("observation-to-shadow latency = %#v, want non-negative nanoseconds", record.Fields["observation_to_shadow_decision_ns"])
+	}
+	if !cr.readyRoutedWorkPokePending.Load() || len(pokeCh) != 1 {
+		t.Fatalf("legacy fallback = (pending=%t, pokes=%d), want unchanged priority ownership", cr.readyRoutedWorkPokePending.Load(), len(pokeCh))
 	}
 }
 

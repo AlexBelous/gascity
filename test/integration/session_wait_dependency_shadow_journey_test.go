@@ -55,16 +55,24 @@ type sessionWaitDependencyShadowJourneyTraceRecord struct {
 	SiteCode             string `json:"site_code"`
 	OutcomeCode          string `json:"outcome_code"`
 	Fields               struct {
-		Cause         string `json:"cause"`
-		WaitOutcome   string `json:"wait_outcome"`
-		StartOutcome  string `json:"start_outcome"`
-		StartReason   string `json:"start_reason"`
-		WaitID        string `json:"wait_id"`
-		SessionID     string `json:"session_id"`
-		Admission     string `json:"admission"`
-		StatusOutcome string `json:"status_outcome"`
-		StatusReason  string `json:"status_reason"`
-		EffectApplied *bool  `json:"effect_applied"`
+		Cause                         string `json:"cause"`
+		WaitOutcome                   string `json:"wait_outcome"`
+		StartOutcome                  string `json:"start_outcome"`
+		StartReason                   string `json:"start_reason"`
+		WaitID                        string `json:"wait_id"`
+		SessionID                     string `json:"session_id"`
+		Admission                     string `json:"admission"`
+		StatusOutcome                 string `json:"status_outcome"`
+		StatusReason                  string `json:"status_reason"`
+		EffectApplied                 *bool  `json:"effect_applied"`
+		WorkID                        string `json:"work_id"`
+		PoolTarget                    string `json:"pool_target"`
+		SourceActor                   string `json:"source_actor"`
+		SourceStore                   string `json:"source_store"`
+		ContributionPresent           bool   `json:"contribution_present"`
+		EventTimestampValid           bool   `json:"event_timestamp_valid"`
+		EventToShadowDecisionNS       int64  `json:"event_to_shadow_decision_ns"`
+		ObservationToShadowDecisionNS int64  `json:"observation_to_shadow_decision_ns"`
 	} `json:"fields"`
 }
 
@@ -285,7 +293,34 @@ tick_debounce = "10m"
 			sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID),
 		)
 	}
-	t.Logf("ready routed-work event materialized legacy-owned session %s after %s", session.ID, latency)
+	trace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+	if err != nil {
+		t.Fatalf("read routed-work demand shadow trace: %v", err)
+	}
+	shadowRecords := sessionWaitDependencyShadowJourneyRoutedWorkDemandRecords(trace, workID)
+	if len(shadowRecords) != 1 {
+		t.Fatalf("routed-work demand shadow records = %d, want 1: %+v\n%s", len(shadowRecords), shadowRecords, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+	}
+	shadow := shadowRecords[0]
+	if shadow.Seq == 0 || shadow.RecordID == "" ||
+		shadow.RecordType != "operation" ||
+		shadow.OutcomeCode != "accepted" ||
+		shadow.Fields.PoolTarget != "worker" ||
+		shadow.Fields.SourceActor != "bd-hook" ||
+		shadow.Fields.SourceStore == "" ||
+		!shadow.Fields.ContributionPresent ||
+		!shadow.Fields.EventTimestampValid ||
+		shadow.Fields.EventToShadowDecisionNS <= 0 ||
+		shadow.Fields.ObservationToShadowDecisionNS < 0 ||
+		shadow.Fields.EffectApplied == nil || *shadow.Fields.EffectApplied {
+		t.Fatalf("routed-work demand shadow record = %+v, want committed exact no-effect contribution", shadow)
+	}
+	t.Logf(
+		"ready routed-work event reached the keyed demand shadow in %s and materialized legacy-owned session %s in %s",
+		time.Duration(shadow.Fields.EventToShadowDecisionNS),
+		session.ID,
+		latency,
+	)
 }
 
 func sessionWaitDependencyShadowJourneyWaitForControllerStop(ctx context.Context, cityDir string, timeout time.Duration) error {
@@ -608,6 +643,19 @@ func sessionWaitDependencyShadowJourneyExactRecords(
 		if record.SiteCode == "lifecycle.wait_dependency.shadow" &&
 			record.Fields.WaitID == waitID &&
 			record.Fields.SessionID == sessionID {
+			matches = append(matches, record)
+		}
+	}
+	return matches
+}
+
+func sessionWaitDependencyShadowJourneyRoutedWorkDemandRecords(
+	trace sessionWaitDependencyShadowJourneyTraceShow,
+	workID string,
+) []sessionWaitDependencyShadowJourneyTraceRecord {
+	var matches []sessionWaitDependencyShadowJourneyTraceRecord
+	for _, record := range trace.Records {
+		if record.SiteCode == "pool_demand.contribution.shadow" && record.Fields.WorkID == workID {
 			matches = append(matches, record)
 		}
 	}

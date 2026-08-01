@@ -474,13 +474,20 @@ func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, si
 // ResetInterruptedTurn discards the just-interrupted Gemini user turn without
 // restarting the session.
 func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
-	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
+	providerNativeRewind := p.tm.requiresHiddenAttachedInterrupt(name)
+	if providerNativeRewind && p.tm.hiddenAttachClient(name) == nil && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
 			return fmt.Errorf("preparing detached gemini rewind: %w", err)
 		}
 	}
-	if err := p.NudgeNow(name, runtime.TextContent("/rewind")); err != nil {
-		return fmt.Errorf("opening gemini rewind: %w", err)
+	var rewindErr error
+	if providerNativeRewind && p.tm.hiddenAttachClient(name) != nil {
+		rewindErr = p.tm.sendHiddenAttachedRewind(name)
+	} else {
+		rewindErr = p.NudgeNow(name, runtime.TextContent("/rewind"))
+	}
+	if rewindErr != nil {
+		return fmt.Errorf("opening gemini rewind: %w", rewindErr)
 	}
 	if err := p.waitForPane(ctx, name, geminiRewindDialogVisible); err != nil {
 		return fmt.Errorf("waiting for gemini rewind picker: %w", err)
@@ -556,12 +563,6 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 				}
 				return fenceErr
 			}
-			// Not idle within the window. A mid-session Codex/GPT model-switch
-			// modal ("approaching rate limits — switch model?") blocks input and
-			// would otherwise hang the session; dismiss it (keep current model,
-			// no downgrade) so the nudge can land. No-op if the modal is absent,
-			// so this never disturbs a genuinely busy pane.
-			p.tm.DismissModelSwitchModalIfPresent(name)
 		}
 	}
 	return p.NudgeNow(name, content)
@@ -569,6 +570,9 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	// Keep the whole-session census as the broad guard: a user can be in copy
+	// mode on a non-target pane. NudgeSessionBound repeats the target's state in
+	// the server-queued effect command so this preflight cannot open a race.
 	if err := p.nudgeInputFence(name); err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return nil
@@ -599,21 +603,7 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	if message == "" {
 		return nil
 	}
-	if err := p.nudgeInputFence(name); err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return nil
-		}
-		return err
-	}
-
-	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	err := p.tm.NudgeSession(name, message)
+	err := p.tm.NudgeSessionBound(name, message)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil
 	}

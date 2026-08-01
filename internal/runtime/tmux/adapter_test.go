@@ -355,8 +355,76 @@ func TestProviderNudgeFencesCopyModeAcrossNamedSessionPanes(t *testing.T) {
 	if _, err := p.tm.run("select-window", "-t", "="+name+":^"); err != nil {
 		t.Fatalf("reselect input window after copy-mode cancel: %v", err)
 	}
+	inputPane, err := p.tm.run("display-message", "-t", name, "-p", "#{pane_id}")
+	if err != nil || !wellFormedTmuxID(inputPane, '%') {
+		t.Fatalf("resolve exact input pane: pane=%q err=%v", inputPane, err)
+	}
+	if _, err := p.tm.run("set-hook", "-t", name, "window-resized", "copy-mode -t "+inputPane); err != nil {
+		t.Fatalf("arm resize-to-copy-mode race: %v", err)
+	}
+	raceMessage := message + "-resize-race"
+	raceErr := p.NudgeNow(name, runtime.TextContent(raceMessage))
+	if _, err := p.tm.run("set-hook", "-u", "-t", name, "window-resized"); err != nil {
+		t.Fatalf("disarm resize-to-copy-mode race: %v", err)
+	}
+	if !errors.Is(raceErr, runtime.ErrInputFenced) {
+		t.Fatalf("NudgeNow when copy mode enters during guarded delay = %v, want ErrInputFenced", raceErr)
+	}
+	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read nudge marker after resize race: %v", err)
+	} else if len(data) != 0 {
+		t.Fatalf("nudge marker = %q after resize race, want zero input", data)
+	}
+	if _, err := p.tm.run("send-keys", "-t", inputPane, "-X", "cancel"); err != nil {
+		t.Fatalf("clear resize-race copy mode: %v", err)
+	}
+	// A second provider's hidden PTY is intentionally opaque to p, exactly as a
+	// human client is. The provider's final if-shell fence, not the earlier
+	// census, must prevent this nudge from reaching stdin.
+	other := NewProviderWithConfig(cfg)
+	if err := other.tm.ensureHiddenAttachedClient(name); err != nil {
+		t.Fatalf("attach independent PTY: %v", err)
+	}
+	if err := p.NudgeNow(name, runtime.TextContent(message)); !errors.Is(err, runtime.ErrInputFenced) {
+		t.Fatalf("NudgeNow with attached PTY = %v, want ErrInputFenced", err)
+	}
+	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read nudge marker while PTY is attached: %v", err)
+	} else if len(data) != 0 {
+		t.Fatalf("nudge marker = %q while PTY is attached, want no delivery", data)
+	}
+	other.tm.CloseHiddenAttachClient(name)
+
+	// The same window can be visible through another attached session while
+	// this source session still reports detached. Refuse that linked ownership.
+	linkedName := name + "-linked"
+	if _, err := p.tm.run("new-session", "-d", "-s", linkedName, "sleep 300"); err != nil {
+		t.Fatalf("create linked witness session: %v", err)
+	}
+	if _, err := p.tm.run("link-window", "-d", "-s", inputPane, "-t", "="+linkedName+":9"); err != nil {
+		t.Fatalf("link input window into witness session: %v", err)
+	}
+	if _, err := p.tm.run("select-window", "-t", "="+linkedName+":9"); err != nil {
+		t.Fatalf("select linked input window: %v", err)
+	}
+	linkedClient := NewProviderWithConfig(cfg)
+	if err := linkedClient.tm.ensureHiddenAttachedClient(linkedName); err != nil {
+		t.Fatalf("attach client through linked session: %v", err)
+	}
+	if err := p.NudgeNow(name, runtime.TextContent(message)); !errors.Is(err, runtime.ErrInputFenced) {
+		t.Fatalf("NudgeNow through an attached linked session = %v, want ErrInputFenced", err)
+	}
+	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read nudge marker through linked session: %v", err)
+	} else if len(data) != 0 {
+		t.Fatalf("nudge marker = %q through linked session, want no delivery", data)
+	}
+	linkedClient.tm.CloseHiddenAttachClient(linkedName)
+	if _, err := p.tm.run("kill-session", "-t", "="+linkedName); err != nil {
+		t.Fatalf("remove linked witness session: %v", err)
+	}
 	if err := p.NudgeNow(name, runtime.TextContent(message)); err != nil {
-		t.Fatalf("NudgeNow after copy mode cancels: %v", err)
+		t.Fatalf("NudgeNow after fences clear: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
 	defer cancel()

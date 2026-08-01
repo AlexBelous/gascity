@@ -1701,6 +1701,20 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	return true, nil
 }
 
+// sendHiddenAttachedRewind is the provider-native Gemini reset input. It is
+// intentionally separate from generic nudges because stdin on this gc-owned
+// attached PTY cannot participate in tmux's server-queued input fence.
+func (t *Tmux) sendHiddenAttachedRewind(target string) error {
+	used, err := t.sendHiddenAttachedText(target, "/rewind")
+	if err != nil {
+		return err
+	}
+	if !used {
+		return fmt.Errorf("%w: hidden tmux client is unavailable for rewind", runtime.ErrInputFenced)
+	}
+	return nil
+}
+
 // isTransientSendKeysError returns true if the error from tmux send-keys is
 // transient and safe to retry. "not in a mode" occurs when the target pane's
 // TUI hasn't initialized its input handling yet (common during cold startup).
@@ -1717,6 +1731,128 @@ func isCommandTooLongError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "command too long")
+}
+
+const (
+	boundInputFenceMarker     = "__gc_input_fenced__"
+	boundInputDeliveredMarker = "__gc_input_delivered__"
+)
+
+type boundInputTarget struct {
+	sessionID string
+	windowID  string
+	paneID    string
+}
+
+// NudgeSessionBound sends a nudge only when tmux can prove, in the same server
+// command queue entry as the input effect, that the named server and target
+// pane are still the observed ones and no client has attached or entered copy
+// mode. The false branch has no input effect and reports runtime.ErrInputFenced.
+func (t *Tmux) NudgeSessionBound(session, message string) error {
+	if message == "" {
+		return nil
+	}
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return fmt.Errorf("%w: witnessing tmux server: %w", runtime.ErrInputFenced, err)
+	}
+	target, err := t.boundInputTarget(session, witness)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", runtime.ErrInputFenced, err)
+	}
+
+	tmp, err := os.CreateTemp("", "gc-tmux-bound-input-*")
+	if err != nil {
+		return fmt.Errorf("creating bound tmux input buffer: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.WriteString(message); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing bound tmux input buffer: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing bound tmux input buffer: %w", err)
+	}
+
+	bufferName := nextPasteBufferName()
+	if _, err := t.runForAttachWitness(witness, "load-buffer", "-b", bufferName, tmpName); err != nil {
+		return fmt.Errorf("loading bound tmux input buffer: %w", err)
+	}
+	loaded := true
+	defer func() {
+		if loaded {
+			_, _ = t.runForAttachWitness(witness, "delete-buffer", "-b", bufferName)
+		}
+	}()
+
+	debounce := t.nudgeSubmitDebounce(target.paneID)
+	commitPoke := t.beginPoke(session)
+	condition := boundInputCondition(target, witness)
+	elseCommand := fmt.Sprintf("delete-buffer -b %s ; display-message -p %s", bufferName, boundInputFenceMarker)
+	thenCommand := boundInputThenCommand(condition, target.windowID, target.paneID, bufferName, debounce+50*time.Millisecond, elseCommand)
+	out, err := t.runForAttachWitness(witness, "if-shell", "-t", target.paneID, "-F", condition, thenCommand, elseCommand)
+	if err != nil {
+		return fmt.Errorf("sending bound tmux input: %w", err)
+	}
+	switch strings.TrimSpace(out) {
+	case boundInputFenceMarker:
+		loaded = false
+		return fmt.Errorf("%w: tmux input target changed or is attached/copy-mode", runtime.ErrInputFenced)
+	case boundInputDeliveredMarker:
+		loaded = false // paste-buffer -d consumed the buffer in the successful branch.
+		commitPoke()
+		return nil
+	default:
+		return fmt.Errorf("sending bound tmux input: missing submission confirmation")
+	}
+}
+
+func boundInputThenCommand(condition, windowID, paneID, bufferName string, settle time.Duration, fenceCommand string) string {
+	inputCommand := fmt.Sprintf("paste-buffer -p -d -b %s -t %s ; send-keys -t %s Enter ; display-message -p %s", bufferName, paneID, paneID, boundInputDeliveredMarker)
+	recheck := shellquote.Join([]string{"if-shell", "-t", paneID, "-F", condition, inputCommand, fenceCommand})
+	return fmt.Sprintf(
+		"resize-window -t %s -D 1 ; run-shell 'sleep %.3f' ; resize-window -t %s -U 1 ; %s",
+		windowID, settle.Seconds(), windowID, recheck,
+	)
+}
+
+func (t *Tmux) boundInputTarget(session string, witness namedSocketWitness) (boundInputTarget, error) {
+	target := session
+	if pane, err := t.FindAgentPane(session); err == nil && pane != "" {
+		target = pane
+	}
+	out, err := t.runForAttachWitness(witness, "display-message", "-t", target, "-p", "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}")
+	if err != nil {
+		return boundInputTarget{}, err
+	}
+	fields := strings.Split(strings.TrimSpace(out), "\t")
+	if len(fields) != 4 || fields[1] != session || !wellFormedTmuxID(fields[0], '$') || !wellFormedTmuxID(fields[2], '@') || !wellFormedTmuxID(fields[3], '%') {
+		return boundInputTarget{}, fmt.Errorf("invalid exact tmux input target for session %q", session)
+	}
+	return boundInputTarget{sessionID: fields[0], windowID: fields[2], paneID: fields[3]}, nil
+}
+
+func boundInputCondition(target boundInputTarget, witness namedSocketWitness) string {
+	checks := []string{
+		fmt.Sprintf("#{==:#{session_id},%s}", target.sessionID),
+		fmt.Sprintf("#{==:#{window_id},%s}", target.windowID),
+		fmt.Sprintf("#{==:#{pane_id},%s}", target.paneID),
+		"#{==:#{session_attached},0}",
+		"#{==:#{pane_in_mode},0}",
+		"#{==:#{window_linked_sessions_list},#{session_name}}",
+	}
+	if witness.serverPID > 0 {
+		checks = append([]string{fmt.Sprintf("#{==:#{pid},%d}", witness.serverPID)}, checks...)
+	}
+	condition := checks[len(checks)-1]
+	for index := len(checks) - 2; index >= 0; index-- {
+		condition = fmt.Sprintf("#{&&:%s,%s}", checks[index], condition)
+	}
+	return condition
 }
 
 func nextPasteBufferName() string {

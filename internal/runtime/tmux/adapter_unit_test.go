@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -40,6 +41,145 @@ func TestBuildLaunchCommandUnsetsColorKillersForInteractiveExecutables(t *testin
 			}
 		})
 	}
+}
+
+func TestNudgeSessionBoundFencesAtSingleTmuxEffectCommand(t *testing.T) {
+	fe := &fakeExecutor{outs: []string{
+		"41",                      // named socket server witness
+		"$7\tworker\t@3\t%9\t123", // agent-pane scan
+		"$7\tworker\t@3\t%9",      // exact target identity
+		"",                        // load-buffer
+		"GC_PROVIDER=codex",       // submit debounce family
+		"123",                     // pre-effect activity snapshot
+		boundInputFenceMarker,     // if-shell false branch
+	}}
+	tm := NewTmuxWithConfig(Config{SocketName: "city-socket"})
+	tm.exec = fe
+	tm.namedSocketLstat = stableNamedSocketLstat(t)
+
+	err := tm.NudgeSessionBound("worker", "do not inject")
+	if !errors.Is(err, runtime.ErrInputFenced) {
+		t.Fatalf("NudgeSessionBound = %v, want ErrInputFenced", err)
+	}
+	if got, want := len(fe.calls), 7; got != want {
+		t.Fatalf("tmux calls = %v, want %d", fe.calls, want)
+	}
+	if got := fe.calls[6]; !slices.Contains(got, "if-shell") || !slices.Contains(got, "-t") || !slices.Contains(got, "%9") {
+		t.Fatalf("effect command = %#v, want one pane-targeted if-shell", got)
+	}
+	if got := strings.Join(fe.calls[6], " "); !strings.Contains(got, "#{==:#{pid},41}") ||
+		!strings.Contains(got, "#{==:#{session_id},$7}") ||
+		!strings.Contains(got, "#{==:#{window_id},@3}") ||
+		!strings.Contains(got, "#{==:#{pane_id},%9}") ||
+		!strings.Contains(got, "#{==:#{session_attached},0}") ||
+		!strings.Contains(got, "#{==:#{pane_in_mode},0}") {
+		t.Fatalf("effect condition = %q, want socket/session/window/pane/attachment/copy-mode fence", got)
+	}
+	if got := strings.Count(strings.Join(fe.calls[6], " "), "#{==:#{window_linked_sessions_list},#{session_name}}"); got != 2 {
+		t.Fatalf("window-linked fence occurs %d times, want outer and post-yield predicates", got)
+	}
+	for _, call := range fe.calls[:6] {
+		if strings.Contains(strings.Join(call, " "), "send-keys") || strings.Contains(strings.Join(call, " "), "paste-buffer") {
+			t.Fatalf("input escaped the final guarded effect command: %#v", fe.calls)
+		}
+	}
+}
+
+func TestNudgeSessionBoundRestoresDetachedSubmissionInsideGuard(t *testing.T) {
+	fe := &fakeExecutor{outs: []string{
+		"41",
+		"$7\tworker\t@3\t%9\t123",
+		"$7\tworker\t@3\t%9",
+		"",
+		"GC_PROVIDER=codex",
+		"123",
+		"__gc_input_delivered__",
+	}}
+	tm := NewTmuxWithConfig(Config{SocketName: "city-socket"})
+	tm.exec = fe
+	tm.namedSocketLstat = stableNamedSocketLstat(t)
+
+	if err := tm.NudgeSessionBound("worker", "deliver once"); err != nil {
+		t.Fatalf("NudgeSessionBound: %v", err)
+	}
+	effect := strings.Join(fe.calls[len(fe.calls)-1], " ")
+	for _, required := range []string{
+		"if-shell",
+		"resize-window -t @3 -D 1",
+		"resize-window -t @3 -U 1",
+		"run-shell 'sleep 0.550'",
+		"paste-buffer -p -d",
+		"send-keys -t %9 Enter",
+		"display-message -p __gc_input_delivered__",
+	} {
+		if !strings.Contains(effect, required) {
+			t.Fatalf("guarded effect = %q, want %q", effect, required)
+		}
+	}
+	if got := strings.Count(effect, "#{==:#{session_id},$7}"); got < 2 {
+		t.Fatalf("guarded effect rechecks complete predicate %d times, want at least 2 around the yielding wake", got)
+	}
+	debounce := strings.Index(effect, "run-shell 'sleep 0.550'")
+	input := strings.Index(effect, "paste-buffer")
+	if debounce < 0 || input < 0 || debounce > input {
+		t.Fatalf("guarded effect = %q, want every yielding debounce before the final input", effect)
+	}
+	if strings.Contains(effect[input:], "run-shell") {
+		t.Fatalf("guarded effect = %q, want no yield after input begins", effect)
+	}
+}
+
+func TestNudgeTimeoutNeverDismissesModalWithUnguardedInput(t *testing.T) {
+	const session = "worker"
+	fe := &nudgeTimeoutExecutor{session: session}
+	tm := NewTmuxWithConfig(Config{NudgeIdleTimeout: time.Nanosecond})
+	tm.exec = fe
+	p := &Provider{tm: tm}
+
+	if err := p.Nudge(session, runtime.TextContent("wake")); err != nil {
+		t.Fatalf("Nudge after idle timeout: %v", err)
+	}
+	for _, call := range fe.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "send-keys") && !strings.Contains(joined, "if-shell") {
+			t.Fatalf("idle-timeout path emitted unguarded input: %#v", call)
+		}
+	}
+}
+
+type nudgeTimeoutExecutor struct {
+	session string
+	calls   [][]string
+}
+
+func (e *nudgeTimeoutExecutor) execute(args []string) (string, error) {
+	cp := append([]string(nil), args...)
+	e.calls = append(e.calls, cp)
+	joined := strings.Join(args, " ")
+	switch {
+	case strings.Contains(joined, "if-shell"):
+		return boundInputDeliveredMarker, nil
+	case strings.Contains(joined, "capture-pane"):
+		return "Approaching rate limits\nSwitch to gpt-5.4-mini for lower credit usage?\n  2. Keep current model\nPress enter to confirm or esc to go back", nil
+	case strings.Contains(joined, "show-environment") && strings.Contains(joined, "GC_PROVIDER"):
+		return "GC_PROVIDER=codex", nil
+	case strings.Contains(joined, "show-environment"):
+		return "", nil
+	case strings.Contains(joined, "list-panes") && strings.Contains(joined, "session_attached"):
+		return "$7\t" + e.session + "\t@3\t%9\t0\t0\t0", nil
+	case strings.Contains(joined, "list-panes"):
+		return "%9\tsh\t123", nil
+	case strings.Contains(joined, "display-message") && strings.Contains(joined, "session_id"):
+		return "$7\t" + e.session + "\t@3\t%9", nil
+	case strings.Contains(joined, "list-windows"):
+		return "123", nil
+	default:
+		return "", nil
+	}
+}
+
+func (e *nudgeTimeoutExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
 }
 
 func TestBuildLaunchCommandColorWrapsLongPromptCommand(t *testing.T) {

@@ -214,6 +214,11 @@ func (cr *CityRuntime) enableSessionWaitDependencyLifecycleShadowSink(ctx contex
 			traceFailed = err != nil
 			return false, err
 		}
+		if ctx == nil || ctx.Err() != nil {
+			return false, nil
+		}
+		cr.sessionWaitDependencyReadyPokePending.Store(true)
+		cr.requestLegacySessionStartFallback()
 		plan, err := planExactSessionWaitDependencyStartShadow(ctx, target.SessionID, exactSessionStartParams{
 			Generation: snapshot.Generation,
 			CityPath:   snapshot.CityPath,

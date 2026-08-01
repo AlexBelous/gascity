@@ -76,8 +76,8 @@ func TestSessionWaitDependencyShadowExactBinaryJourney(t *testing.T) {
 [[agent]]
 name = "worker"
 start_command = "sleep 3600"
-`, `patrol_interval = "1m"
-tick_debounce = "30s"
+`, `patrol_interval = "1h"
+tick_debounce = "10m"
 `, "")
 	waitForExpectedTmuxSessions(t, cityDir, []string{"worker"})
 
@@ -189,8 +189,8 @@ tick_debounce = "30s"
 	if err != nil {
 		t.Fatalf("inspect durable wait after shadow witness: %v", err)
 	}
-	if durableWait.Wait.ID != waitID || durableWait.Wait.State != "pending" || durableWait.Wait.Status != "open" {
-		t.Fatalf("durable wait after shadow witness = %+v, want id=%q state=pending status=open", durableWait.Wait, waitID)
+	if durableWait.Wait.ID != waitID || durableWait.Wait.State != "ready" || durableWait.Wait.Status != "open" {
+		t.Fatalf("durable wait after shadow witness = %+v, want id=%q state=ready status=open", durableWait.Wait, waitID)
 	}
 
 	afterIdentity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, session.SessionName)
@@ -315,6 +315,7 @@ func sessionWaitDependencyShadowJourneyWaitForDependencyCommit(
 	defer ticker.Stop()
 
 	var lastTrace sessionWaitDependencyShadowJourneyTraceShow
+	var lastWait sessionWaitDependencyShadowJourneyWaitInspect
 	var lastErr error
 	for {
 		trace, traceErr := sessionWaitDependencyShadowJourneyTrace(cityDir)
@@ -326,7 +327,16 @@ func sessionWaitDependencyShadowJourneyWaitForDependencyCommit(
 			matches := sessionWaitDependencyShadowJourneyDependencyCommitRecords(trace, waitID, sessionID)
 			switch len(matches) {
 			case 1:
-				return trace, time.Since(started), nil
+				wait, waitErr := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
+				if waitErr != nil {
+					lastErr = waitErr
+					break
+				}
+				lastWait = wait
+				if wait.Wait.ID == waitID && wait.Wait.State == "ready" && wait.Wait.Status == "open" {
+					return trace, time.Since(started), nil
+				}
+				lastErr = fmt.Errorf("durable wait = %+v, want id=%q state=ready status=open", wait.Wait, waitID)
 			case 0:
 			default:
 				return trace, time.Since(started), fmt.Errorf(
@@ -342,11 +352,12 @@ func sessionWaitDependencyShadowJourneyWaitForDependencyCommit(
 		select {
 		case <-deadline.Done():
 			return lastTrace, time.Since(started), fmt.Errorf(
-				"waiting for dependency-commit shadow record for wait %s and session %s: %w; last error: %v; exact records: %+v",
+				"waiting for dependency-commit shadow record and durable ready wait for wait %s and session %s: %w; last error: %v; last wait: %+v; exact records: %+v",
 				waitID,
 				sessionID,
 				deadline.Err(),
 				lastErr,
+				lastWait.Wait,
 				sessionWaitDependencyShadowJourneyExactRecords(lastTrace, waitID, sessionID),
 			)
 		case <-ticker.C:

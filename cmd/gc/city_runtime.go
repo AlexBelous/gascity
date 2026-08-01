@@ -163,6 +163,10 @@ type CityRuntime struct {
 	managedDoltOwned    func(string) (bool, error)
 	managedDoltPort     func(string) string
 
+	// A certified dependency-ready result upgrades the next coalesced poke so
+	// it does not wait behind the ordinary fleet-tick debounce.
+	sessionWaitDependencyReadyPokePending atomic.Bool
+
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
 	forceStopShutdown        *atomic.Bool
@@ -939,10 +943,16 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			ctrlDB.cancelPending()
 			runTick("patrol")
 		case <-cr.pokeCh:
-			// Event-driven wake path: sling or API assigned work to a sleeping
-			// session. Arm the debouncer; the deferred fire runs runTick("poke")
-			// once the burst settles.
-			pokeDB.arm(debounce)
+			// Certified dependency readiness is already exact-key filtered, so it
+			// bypasses the ordinary fleet-tick debounce. The serialized full tick
+			// remains the sole legacy mutation/effect owner.
+			if cr.sessionWaitDependencyReadyPokePending.Swap(false) {
+				pokeDB.cancelPending()
+				runTick("poke")
+			} else {
+				// Other event-driven wakes retain burst coalescing.
+				pokeDB.arm(debounce)
+			}
 		case <-pokeDB.fired():
 			runTick("poke")
 		case <-cr.nudgeWakeCh:

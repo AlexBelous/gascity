@@ -832,6 +832,155 @@ func TestValidateExactSessionWaitDependencyShadow(t *testing.T) {
 	}
 }
 
+func TestSessionWaitDependencyReadyPokesLegacyReconcileOnly(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		mutate      func(t *testing.T, env *reconcilerTestEnv, wait, dependency beads.Bead)
+		wantPoke    bool
+		invocations int
+		readError   bool
+	}{
+		{name: "ready", wantPoke: true, invocations: 2},
+		{
+			name: "pending",
+			mutate: func(t *testing.T, env *reconcilerTestEnv, _ beads.Bead, dependency beads.Bead) {
+				t.Helper()
+				if err := env.store.Reopen(dependency.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			invocations: 1,
+		},
+		{name: "read error", invocations: 1, readError: true},
+		{
+			name: "stale target",
+			mutate: func(t *testing.T, env *reconcilerTestEnv, wait, _ beads.Bead) {
+				t.Helper()
+				if err := env.store.SetMetadata(wait.ID, "session_id", "replacement-session"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			invocations: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+			dependency, err := env.store.Create(beads.Bead{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := env.store.Close(dependency.ID); err != nil {
+				t.Fatal(err)
+			}
+			target := env.createSessionBead("worker", "worker")
+			wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.mutate != nil {
+				test.mutate(t, env, wait, dependency)
+			}
+			pokeCh := make(chan struct{}, 1)
+			store := env.store
+			if test.readError {
+				store = &sessionWaitShadowReadAuditStore{Store: env.store, failID: target.ID, failErr: errors.New("target unavailable")}
+			}
+			cs := &controllerState{
+				cfg: env.cfg, sp: env.sp, cityPath: t.TempDir(), cityBeadStore: store,
+				eventProv: events.NewFake(), pokeCh: pokeCh,
+				rolloutFlags:           rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+				sessionStartGeneration: 1, sessionStartStoreGeneration: 1,
+			}
+			cr := &CityRuntime{cs: cs, cfg: env.cfg, pokeCh: pokeCh, stderr: io.Discard, sessionStartOwnership: sessionStartOwnershipKeyed}
+			cr.enableSessionWaitDependencyLifecycleShadowSink(t.Context())
+			if cr.waitDependencyEnqueue == nil {
+				t.Fatal("active keyed shadow did not install dependency sink")
+			}
+			targetRef := sessionWaitDependencyTarget{WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all"}
+			for range test.invocations {
+				_, err := cr.waitDependencyEnqueue(targetRef, sessionWaitDependencyCauseDependency)
+				if test.readError {
+					if !errors.Is(err, errSessionWaitDependencyTargetReadUnavailable) {
+						t.Fatalf("enqueue read error = %v, want target-read sentinel", err)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("enqueue dependency target: %v", err)
+				}
+			}
+			select {
+			case <-pokeCh:
+				if !test.wantPoke {
+					t.Fatal("non-ready dependency target poked legacy reconciliation")
+				}
+			default:
+				if test.wantPoke {
+					t.Fatal("ready dependency target did not poke legacy reconciliation")
+				}
+			}
+			select {
+			case <-pokeCh:
+				t.Fatal("ready dependency targets did not coalesce on the bounded poke channel")
+			default:
+			}
+			if got := cr.sessionWaitDependencyReadyPokePending.Load(); got != test.wantPoke {
+				t.Fatalf("priority poke pending = %t, want %t", got, test.wantPoke)
+			}
+		})
+	}
+}
+
+func TestSessionWaitDependencyCanceledReadyValidationDoesNotRequestPriorityPoke(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	dependency, err := env.store.Create(beads.Bead{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.Close(dependency.ID); err != nil {
+		t.Fatal(err)
+	}
+	target := env.createSessionBead("worker", "worker")
+	wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	store := &sessionWaitShadowReadAuditStore{Store: env.store, blockID: target.ID, entered: entered, release: release}
+	pokeCh := make(chan struct{}, 1)
+	cs := &controllerState{
+		cfg: env.cfg, sp: env.sp, cityPath: t.TempDir(), cityBeadStore: store,
+		eventProv: events.NewFake(), pokeCh: pokeCh,
+		rolloutFlags:           rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+		sessionStartGeneration: 1, sessionStartStoreGeneration: 1,
+	}
+	cr := &CityRuntime{cs: cs, cfg: env.cfg, pokeCh: pokeCh, stderr: io.Discard, sessionStartOwnership: sessionStartOwnershipKeyed}
+	ctx, cancel := context.WithCancel(t.Context())
+	cr.enableSessionWaitDependencyLifecycleShadowSink(ctx)
+	done := make(chan error, 1)
+	go func() {
+		_, err := cr.waitDependencyEnqueue(sessionWaitDependencyTarget{WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all"}, sessionWaitDependencyCauseDependency)
+		done <- err
+	}()
+	awaitClose(t, entered, "blocked exact dependency target read")
+	cancel()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("canceled ready validation: %v", err)
+	}
+	if cr.sessionWaitDependencyReadyPokePending.Load() {
+		t.Fatal("canceled ready validation retained priority poke")
+	}
+	select {
+	case <-pokeCh:
+		t.Fatal("canceled ready validation poked reconciliation")
+	default:
+	}
+}
+
 func TestSessionWaitDependencyTraceStartOutcomeLiterals(t *testing.T) {
 	tests := []struct {
 		outcome sessionLifecycleStartSelectionOutcome

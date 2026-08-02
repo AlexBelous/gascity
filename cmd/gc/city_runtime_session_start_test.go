@@ -312,18 +312,20 @@ func (p *unattendedStopProvider) stopSnapshot() []unattendedStopCall {
 	return append([]unattendedStopCall(nil), p.stopCalls...)
 }
 
-func markDrainAckStopPendingForTest(env *reconcilerTestEnv, bead *beads.Bead, token string) {
+const drainAckTestInstanceToken = "drain-token"
+
+func markDrainAckStopPendingForTest(env *reconcilerTestEnv, bead *beads.Bead) {
 	patch := session.DrainAckStopPendingPatch(env.clk.Now().UTC())
-	patch["instance_token"] = token
+	patch["instance_token"] = drainAckTestInstanceToken
 	env.setSessionMetadata(bead, patch)
 }
 
-func installRecoveredDrainAckLeaseForTest(params *exactSessionStartParams, sessionID, token string) routedWorkPoolDrainAckLease {
+func installRecoveredDrainAckLeaseForTest(params *exactSessionStartParams, sessionID string) routedWorkPoolDrainAckLease {
 	lease := routedWorkPoolDrainAckLease{
 		SessionID:              sessionID,
-		InstanceToken:          token,
+		InstanceToken:          drainAckTestInstanceToken,
 		RequesterSessionID:     sessionID,
-		RequesterInstanceToken: token,
+		RequesterInstanceToken: drainAckTestInstanceToken,
 		ControllerGeneration:   1,
 		PoolTarget:             "worker",
 		WorkID:                 "ga-work",
@@ -412,7 +414,7 @@ func TestReconcileExactSessionStartDrainAckStopPendingStrictBoundStopParksTokenF
 			env := newReconcilerTestEnv()
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 			bead := env.createSessionBead("worker", "worker")
-			markDrainAckStopPendingForTest(env, &bead, "drain-token")
+			markDrainAckStopPendingForTest(env, &bead)
 			provider := &sequenceGetMetaProvider{Fake: runtime.NewFake(), results: test.results}
 			if err := provider.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 				t.Fatalf("start runtime: %v", err)
@@ -421,7 +423,7 @@ func TestReconcileExactSessionStartDrainAckStopPendingStrictBoundStopParksTokenF
 			params.Provider = provider
 			tracker := &asyncStartTracker{}
 			params.AsyncStopTracker = tracker
-			installRecoveredDrainAckLeaseForTest(&params, bead.ID, "drain-token")
+			installRecoveredDrainAckLeaseForTest(&params, bead.ID)
 			owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionInProcess}, params)
 			if owner != exactSessionStartKeyedOwner || !errors.Is(err, errSessionStartPoolDrainAckPending) {
 				t.Fatalf("reconcile exact marker = (%v, %v), want keyed pending", owner, err)
@@ -443,7 +445,7 @@ func TestReconcileExactSessionStartDrainAckStopPendingStrictBoundStopParksWrappe
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
-	markDrainAckStopPendingForTest(env, &bead, "drain-token")
+	markDrainAckStopPendingForTest(env, &bead)
 	provider := &unattendedStopProvider{
 		Fake: runtime.NewFake(),
 		stopErrors: []error{
@@ -457,7 +459,7 @@ func TestReconcileExactSessionStartDrainAckStopPendingStrictBoundStopParksWrappe
 	params.Provider = provider
 	tracker := &asyncStartTracker{}
 	params.AsyncStopTracker = tracker
-	installRecoveredDrainAckLeaseForTest(&params, bead.ID, "drain-token")
+	installRecoveredDrainAckLeaseForTest(&params, bead.ID)
 
 	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
 		SessionID: bead.ID,
@@ -488,7 +490,7 @@ func TestCityRuntimeKeyedDrainAckStopParksAttachedThenRetriesDetached(t *testing
 	// STOP already owns bead.ID, so it must not re-resolve that durable identity
 	// through the reusable runtime name or fall back to a runtime-only handle.
 	env.createSessionBead("worker", "worker")
-	markDrainAckStopPendingForTest(env, &bead, "drain-token")
+	markDrainAckStopPendingForTest(env, &bead)
 	provider := &unattendedStopProvider{
 		Fake:       runtime.NewFake(),
 		stopErrors: []error{errors.New("session has an attached client"), nil},
@@ -543,7 +545,7 @@ func TestCityRuntimeKeyedDrainAckStopParksWithoutUnattendedStopper(t *testing.T)
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
-	markDrainAckStopPendingForTest(env, &bead, "drain-token")
+	markDrainAckStopPendingForTest(env, &bead)
 	provider := &freshLivenessProvider{
 		Fake: runtime.NewFake(),
 		sequence: []runtime.Liveness{
@@ -563,7 +565,7 @@ func TestCityRuntimeKeyedDrainAckStopParksWithoutUnattendedStopper(t *testing.T)
 	params.RolloutMode = rollout.Auto
 	tracker := &asyncStartTracker{}
 	params.AsyncStopTracker = tracker
-	installRecoveredDrainAckLeaseForTest(&params, bead.ID, "drain-token")
+	installRecoveredDrainAckLeaseForTest(&params, bead.ID)
 	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
 		SessionID: bead.ID,
 		Source:    sessionStartAdmissionInProcess,
@@ -595,7 +597,7 @@ func TestCityRuntimeKeyedDrainAckStopRecertifiesBeforeEveryRekill(t *testing.T) 
 			env := newReconcilerTestEnv()
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 			bead := env.createSessionBead("worker", "worker")
-			markDrainAckStopPendingForTest(env, &bead, "drain-token")
+			markDrainAckStopPendingForTest(env, &bead)
 			provider := &unattendedStopProvider{
 				Fake:       runtime.NewFake(),
 				stopErrors: []error{nil, test.stopErr},
@@ -636,7 +638,7 @@ func TestReconcileExactSessionStartAuthoritativeDrainAckDeathFinalizes(t *testin
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	incarnationStartedAt := bead.CreatedAt.Add(time.Minute).UTC().Truncate(time.Second)
-	markDrainAckStopPendingForTest(env, &bead, "drain-token")
+	markDrainAckStopPendingForTest(env, &bead)
 	env.setSessionMetadata(&bead, map[string]string{
 		"last_woke_at": incarnationStartedAt.Format(time.RFC3339),
 	})
@@ -647,7 +649,7 @@ func TestReconcileExactSessionStartAuthoritativeDrainAckDeathFinalizes(t *testin
 	}
 	params.Provider = provider
 	params.RolloutMode = rollout.Auto
-	installRecoveredDrainAckLeaseForTest(&params, bead.ID, "drain-token")
+	installRecoveredDrainAckLeaseForTest(&params, bead.ID)
 
 	owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{
 		SessionID: bead.ID,
@@ -806,7 +808,7 @@ func TestQueueExactDrainAckAsyncStopConfirmedCompletionReleasesTrackerBeforeCall
 func TestSessionStartControllerZeroDelayRetryDoesNotDuplicateDrainAckStop(t *testing.T) {
 	env := newReconcilerTestEnv()
 	bead := env.createSessionBead("worker", "worker")
-	markDrainAckStopPendingForTest(env, &bead, "drain-token")
+	markDrainAckStopPendingForTest(env, &bead)
 	provider := &unattendedStopProvider{Fake: env.sp}
 	if err := provider.Start(t.Context(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("start runtime: %v", err)
@@ -917,11 +919,11 @@ func TestReconcileExactSessionStartDrainAckRetainsUncertainOrUnsupportedObservat
 			env := newReconcilerTestEnv()
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 			bead := env.createSessionBead("worker", "worker")
-			markDrainAckStopPendingForTest(env, &bead, "drain-token")
+			markDrainAckStopPendingForTest(env, &bead)
 			params := exactSessionStartTestParams(t, env)
 			params.Provider = test.provider
 			params.RolloutMode = test.mode
-			lease := installRecoveredDrainAckLeaseForTest(&params, bead.ID, "drain-token")
+			lease := installRecoveredDrainAckLeaseForTest(&params, bead.ID)
 			params.RecoverPoolDrainAck = func(session.Info) (routedWorkPoolDrainAckLease, bool, bool, error) {
 				return lease, test.agentAck, test.legacyMarker, nil
 			}
@@ -946,11 +948,11 @@ func TestReconcileExactSessionStartDrainAckFinalizationRetriesWithoutStop(t *tes
 	env.store = failing
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
-	markDrainAckStopPendingForTest(env, &bead, "drain-token")
+	markDrainAckStopPendingForTest(env, &bead)
 	params := exactSessionStartTestParams(t, env)
 	params.Provider = &freshLivenessProvider{Fake: env.sp, fresh: runtime.Liveness{Complete: true}}
 	params.RolloutMode = rollout.Auto
-	installRecoveredDrainAckLeaseForTest(&params, bead.ID, "drain-token")
+	installRecoveredDrainAckLeaseForTest(&params, bead.ID)
 	failing.failBatch = true
 
 	if _, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionAntiEntropy}, params); err == nil {
@@ -991,7 +993,7 @@ func TestReconcileExactSessionStartStaleWakeYieldsToDrainAckStopPending(t *testi
 		done <- reconcileExactSessionStart(context.Background(), sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionInProcess}, params)
 	}()
 	awaitClose(t, entered, "exact pre-wake reread")
-	markDrainAckStopPendingForTest(env, &bead, "drain-token")
+	markDrainAckStopPendingForTest(env, &bead)
 	close(release)
 	select {
 	case err := <-done:
@@ -1256,7 +1258,7 @@ func TestReconcileExactSessionStartDrainAckStopPendingParksInvalidIdentity(t *te
 			params.Provider = &sequenceGetMetaProvider{Fake: env.sp}
 			tracker := &asyncStartTracker{}
 			params.AsyncStopTracker = tracker
-			installRecoveredDrainAckLeaseForTest(&params, bead.ID, "drain-token")
+			installRecoveredDrainAckLeaseForTest(&params, bead.ID)
 			owner, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionInProcess}, params)
 			if owner != exactSessionStartKeyedOwner || !errors.Is(err, errSessionStartPoolDrainAckPending) {
 				t.Fatalf("owner/error = %v/%v, want keyed/pending", owner, err)
@@ -1360,7 +1362,7 @@ func TestDrainAckStopPendingOffModeKeepsLegacyProviderEntry(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
-	markDrainAckStopPendingForTest(env, &bead, "drain-token")
+	markDrainAckStopPendingForTest(env, &bead)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("start runtime: %v", err)
 	}

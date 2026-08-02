@@ -150,12 +150,6 @@ func (c *StateCache) freshState() (runtimeStateSnapshot, bool) {
 	}
 }
 
-func (c *StateCache) snapshot() runtimeStateSnapshot {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.state
-}
-
 func (c *StateCache) setScanBySessionID(scan func(string, time.Time) exactProcessScan) {
 	c.scanMu.Lock()
 	c.scanBySessionID = scan

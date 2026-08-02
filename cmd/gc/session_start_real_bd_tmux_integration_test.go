@@ -264,7 +264,37 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	// processes. This proves exact process absence without host-wide scanner
 	// incompleteness from unrelated same-UID processes.
 	processScanRoot := t.TempDir()
-	gcBinary := currentGCBinaryForTestsWithProcessScanRoot(t, processScanRoot)
+	processScanRoot, err = filepath.Abs(processScanRoot)
+	if err != nil {
+		t.Fatalf("resolve controlled process-scan root: %v", err)
+	}
+	info, err := os.Stat(processScanRoot)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("controlled process-scan root %q is not a directory: info=%v err=%v", processScanRoot, info, err)
+	}
+	buildDir := t.TempDir()
+	realBinPath := filepath.Join(buildDir, "gc-real")
+	gcBinary := filepath.Join(buildDir, "gc")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	const scanRootSymbol = "github.com/gastownhall/gascity/internal/runtime/proctable.scanRoot"
+	buildGC := exec.Command("go", "build", "-ldflags", "-X="+scanRootSymbol+"="+processScanRoot, "-o", realBinPath, ".")
+	buildGC.Dir = wd
+	out, err := buildGC.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build controlled-process-scan gc binary: %v\n%s", err, out)
+	}
+	wrapper := fmt.Sprintf("#!/bin/sh\nexport %s=1\nif [ -z \"${%s:-}\" ]; then\n  export %s=$PPID\nfi\nexec %q \"$@\"\n",
+		managedDoltTestModeEnv,
+		managedDoltTestParentPIDEnv,
+		managedDoltTestParentPIDEnv,
+		realBinPath,
+	)
+	if err := os.WriteFile(gcBinary, []byte(wrapper), 0o755); err != nil {
+		t.Fatalf("write controlled-process-scan gc wrapper: %v", err)
+	}
 	registerLivePaneProcess := func(pid string) {
 		t.Helper()
 		if _, err := strconv.Atoi(pid); err != nil {

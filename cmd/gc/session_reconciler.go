@@ -4891,15 +4891,19 @@ func sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store beads.Store, id
 	if store == nil {
 		return false, nil
 	}
-	wantedStatuses := make(map[string]struct{}, len(statuses))
+	wantedStatuses := make([]string, 0, len(statuses))
+	seenStatuses := make(map[string]struct{}, len(statuses))
 	for _, status := range statuses {
-		wantedStatuses[status] = struct{}{}
+		if _, duplicate := seenStatuses[status]; duplicate {
+			continue
+		}
+		seenStatuses[status] = struct{}{}
+		wantedStatuses = append(wantedStatuses, status)
 	}
 	if len(wantedStatuses) == 0 {
 		return false, nil
 	}
 
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	seen := make(map[string]struct{}, len(identifiers))
 	for _, assignee := range identifiers {
 		if assignee == "" {
@@ -4909,13 +4913,12 @@ func sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store beads.Store, id
 			continue
 		}
 		seen[assignee] = struct{}{}
-		items, err := wa.OpenAssignedTo(assignee, "", beads.TierBoth, true)
-		if err != nil {
-			return false, err
-		}
-		for _, item := range items {
-			if _, wanted := wantedStatuses[item.Status]; wanted && !sessionpkg.IsSessionBeadOrRepairable(item) {
-				return true, nil
+		for _, status := range wantedStatuses {
+			if has, err := sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierIssues, true); err != nil || has {
+				return has, err
+			}
+			if has, err := sessionHasOpenAssignedWispWork(store, assignee, status); err != nil || has {
+				return has, err
 			}
 		}
 	}

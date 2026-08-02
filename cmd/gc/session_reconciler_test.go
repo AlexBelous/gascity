@@ -3654,7 +3654,7 @@ type assignOnListStore struct {
 }
 
 func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if q.Assignee == s.sessionID && q.Status == "" && q.Live && q.TierMode == beads.TierBoth {
+	if q.Assignee == s.sessionID && q.Status == "open" && q.Live && q.TierMode == beads.TierIssues {
 		s.sessionProbeCalls++
 	}
 	if !s.assigned && s.sessionProbeCalls == 2 {
@@ -3671,7 +3671,7 @@ func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(q)
 }
 
-func TestSessionHasAssignedWorkBatchesStatusesAndTiersPerIdentity(t *testing.T) {
+func TestSessionHasAssignedWorkDeduplicatesIdentitiesAcrossStatusesAndTiers(t *testing.T) {
 	store := newRecordingWorkStore()
 
 	has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(
@@ -3685,13 +3685,14 @@ func TestSessionHasAssignedWorkBatchesStatusesAndTiersPerIdentity(t *testing.T) 
 	if has {
 		t.Fatal("empty store reported assigned work")
 	}
-	want := beads.ListQuery{
-		Assignee: "worker-session",
-		Live:     true,
-		TierMode: beads.TierBoth,
+	want := []beads.ListQuery{
+		{Assignee: "worker-session", Status: "open", Live: true, TierMode: beads.TierIssues},
+		{Assignee: "worker-session", Status: "open", Live: true, TierMode: beads.TierWisps},
+		{Assignee: "worker-session", Status: "in_progress", Live: true, TierMode: beads.TierIssues},
+		{Assignee: "worker-session", Status: "in_progress", Live: true, TierMode: beads.TierWisps},
 	}
-	if len(store.listQueries) != 1 || !reflect.DeepEqual(store.listQueries[0], want) {
-		t.Fatalf("assignment probes = %#v, want one batched live both-tier query %#v", store.listQueries, want)
+	if !reflect.DeepEqual(store.listQueries, want) {
+		t.Fatalf("assignment probes = %#v, want one live issue/wisp pair per status for one deduplicated identity %#v", store.listQueries, want)
 	}
 }
 

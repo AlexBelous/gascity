@@ -691,7 +691,7 @@ func (c *sessionStartController) reconcileKey(key string) {
 	legacyFallback := errors.Is(err, errSessionStartLegacyFallbackRequired)
 	legacyFallbackErr := error(nil)
 	if legacyFallback {
-		if !errors.Is(err, errSessionStartLegacyFallbackRequired) {
+		if err.Error() != errSessionStartLegacyFallbackRequired.Error() {
 			legacyFallbackErr = err
 		}
 		err = nil

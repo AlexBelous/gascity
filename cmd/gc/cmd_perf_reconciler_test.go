@@ -481,9 +481,7 @@ func TestReconcilerPerfStopMismatchAndFailureAreNotSuccess(t *testing.T) {
 			if _, err := reconcileExactSessionStartWithOwner(context.Background(), sessionStartAdmission{SessionID: fixture.info.ID, Source: sessionStartAdmissionInProcess, PoolDrainAck: &lease}, exactSessionStartParams{
 				CityPath: fixture.cityPath, Config: fixture.cfg, Provider: fixture.provider, Store: fixture.store,
 				Clock: clock.Real{}, Recorder: events.Discard, Stdout: io.Discard, Stderr: io.Discard, AsyncStopTracker: tracker,
-				AuthorizePoolDrainAck: func(info sessionpkg.Info, candidate routedWorkPoolDrainAckLease) (bool, error) {
-					return info.ID == fixture.info.ID && candidate == fixture.lease, nil
-				},
+				AuthorizePoolDrainAck: fixture.authorizePoolDrainAck,
 			}); !errors.Is(err, errSessionStartPoolDrainAckPending) {
 				t.Fatalf("keyed stop reconciliation: %v", err)
 			}

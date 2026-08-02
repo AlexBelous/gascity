@@ -14,6 +14,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -280,6 +281,8 @@ type unattendedStopProvider struct {
 	*runtime.Fake
 	mu         sync.Mutex
 	stopErrors []error
+	stopError  func(int) error
+	beforeStop func(int)
 	stopCalls  []unattendedStopCall
 }
 
@@ -296,10 +299,16 @@ func (p *unattendedStopProvider) StopUnattendedSession(name, expectedToken strin
 	})
 	index := len(p.stopCalls) - 1
 	var err error
-	if index < len(p.stopErrors) {
+	if p.stopError != nil {
+		err = p.stopError(index)
+	} else if index < len(p.stopErrors) {
 		err = p.stopErrors[index]
 	}
+	beforeStop := p.beforeStop
 	p.mu.Unlock()
+	if beforeStop != nil {
+		beforeStop(index)
+	}
 	if err != nil {
 		return err
 	}
@@ -483,51 +492,76 @@ func TestReconcileExactSessionStartDrainAckStopPendingStrictBoundStopParksWrappe
 }
 
 func TestCityRuntimeKeyedDrainAckStopParksAttachedThenRetriesDetached(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
-	bead := env.createSessionBead("worker", "worker")
-	// A second live record deliberately makes "worker" ambiguous. Strict keyed
-	// STOP already owns bead.ID, so it must not re-resolve that durable identity
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	if err := fixture.store.SetMetadataBatch(fixture.info.ID, session.DrainAckStopPendingPatch(time.Now().UTC())); err != nil {
+		t.Fatalf("mark durable drain acknowledgement stop-pending: %v", err)
+	}
+	bead, err := fixture.store.Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read durable stop-pending session: %v", err)
+	}
+	// A second live record deliberately makes the runtime name ambiguous. Strict
+	// keyed STOP already owns fixture.info.ID, so it must not re-resolve that durable identity
 	// through the reusable runtime name or fall back to a runtime-only handle.
-	env.createSessionBead("worker", "worker")
-	markDrainAckStopPendingForTest(env, &bead)
+	if _, err := fixture.store.Create(beads.Bead{
+		Title:  "ambiguous sibling",
+		Type:   session.BeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: beads.StringMap{
+			"session_name":   fixture.info.SessionName,
+			"agent_name":     "ambiguous-sibling",
+			"template":       "worker",
+			"generation":     "1",
+			"instance_token": "replacement-token",
+			"state":          string(session.StateActive),
+		},
+	}); err != nil {
+		t.Fatalf("create ambiguous sibling: %v", err)
+	}
 	provider := &unattendedStopProvider{
-		Fake:       runtime.NewFake(),
+		Fake:       fixture.provider,
 		stopErrors: []error{errors.New("session has an attached client"), nil},
 	}
-	if err := provider.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
-		t.Fatalf("start runtime: %v", err)
+	secondStopEntered := make(chan struct{})
+	releaseSecondStop := make(chan struct{})
+	secondStopReleased := false
+	provider.beforeStop = func(index int) {
+		if index == 1 {
+			close(secondStopEntered)
+			<-releaseSecondStop
+		}
 	}
-	if err := provider.SetMeta("worker", "GC_INSTANCE_TOKEN", "drain-token"); err != nil {
-		t.Fatalf("set runtime token: %v", err)
-	}
-	cs := coherentSessionStartControllerStateForTest(env.cfg, provider, env.store, rollout.Auto)
-	cr := &CityRuntime{cfg: env.cfg, sp: provider, cs: cs, rec: events.Discard, stdout: io.Discard, stderr: io.Discard}
-	t.Cleanup(cr.stopSessionStartController)
-	if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+	t.Cleanup(func() {
+		if !secondStopReleased {
+			close(releaseSecondStop)
+		}
+	})
+	fixture.cr.sp = provider
+	fixture.cr.dops = newDrainOps(provider)
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.sp = provider
+	fixture.cr.cs.mu.Unlock()
+	t.Cleanup(fixture.cr.stopSessionStartController)
+	if err := fixture.cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
 		t.Fatalf("ensure session-start controller: %v", err)
 	}
 
-	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, bead))
-	awaitCond(t, func() bool {
-		return len(provider.stopSnapshot()) > 0 || provider.CountCalls("Stop", "worker") > 0
-	}, "attached keyed stop to reach its destructive gate")
-	awaitCond(t, func() bool { return !hasInFlightDrainAckStops(&cr.asyncStops) }, "attached keyed stop to settle")
-	if got := provider.CountCalls("Stop", "worker"); got != 0 {
+	fixture.cr.cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, bead))
+	awaitClose(t, secondStopEntered, "detached keyed retry to reach its destructive gate")
+	if got := provider.CountCalls("Stop", fixture.info.SessionName); got != 0 {
 		t.Fatalf("attached provider Stop calls = %d, want 0", got)
 	}
-	if got := provider.CountCalls("GetMeta", "worker"); got != 0 {
-		t.Fatalf("strict keyed stop GetMeta calls = %d, want 0 before the bound unattended-stop operation", got)
-	}
-	if !isDrainAckStopPendingInfo(env.sessionInfo(bead.ID)) {
+	if info, getErr := sessionFrontDoor(fixture.store).Get(fixture.info.ID); getErr != nil || !isDrainAckStopPendingInfo(info) {
 		t.Fatal("attached unattended-stop failure cleared the durable stop marker")
 	}
 
-	cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, bead))
+	close(releaseSecondStop)
+	secondStopReleased = true
 	awaitCond(t, func() bool {
-		return !isDrainAckStopPendingInfo(env.sessionInfo(bead.ID))
+		info, getErr := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+		return getErr == nil && !isDrainAckStopPendingInfo(info)
 	}, "detached keyed stop finalization")
-	if got := provider.CountCalls("Stop", "worker"); got != 1 {
+	if got := provider.CountCalls("Stop", fixture.info.SessionName); got != 1 {
 		t.Fatalf("detached provider Stop calls = %d, want exactly 1", got)
 	}
 	calls := provider.stopSnapshot()
@@ -535,8 +569,8 @@ func TestCityRuntimeKeyedDrainAckStopParksAttachedThenRetriesDetached(t *testing
 		t.Fatalf("unattended stop calls = %#v, want attached attempt plus detached retry", calls)
 	}
 	for _, call := range calls {
-		if call.name != "worker" || call.expectedToken != "drain-token" {
-			t.Fatalf("unattended stop call = %#v, want worker/drain-token", call)
+		if call.name != fixture.info.SessionName || call.expectedToken != fixture.info.InstanceToken {
+			t.Fatalf("unattended stop call = %#v, want exact runtime %s/%s for session %s", call, fixture.info.SessionName, fixture.info.InstanceToken, fixture.info.ID)
 		}
 	}
 }
@@ -594,40 +628,61 @@ func TestCityRuntimeKeyedDrainAckStopRecertifiesBeforeEveryRekill(t *testing.T) 
 		{name: "certified pane disappeared", stopErr: fmt.Errorf("reading certified pane: %w", runtime.ErrSessionNotFound)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			env := newReconcilerTestEnv()
-			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
-			bead := env.createSessionBead("worker", "worker")
-			markDrainAckStopPendingForTest(env, &bead)
+			fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+			if err := fixture.store.SetMetadataBatch(fixture.info.ID, session.DrainAckStopPendingPatch(time.Now().UTC())); err != nil {
+				t.Fatalf("mark durable drain acknowledgement stop-pending: %v", err)
+			}
+			bead, err := fixture.store.Get(fixture.info.ID)
+			if err != nil {
+				t.Fatalf("read durable stop-pending session: %v", err)
+			}
 			provider := &unattendedStopProvider{
-				Fake:       runtime.NewFake(),
-				stopErrors: []error{nil, test.stopErr},
+				Fake: fixture.provider,
 			}
-			provider.StopLeavesRunning["worker"] = true
-			if err := provider.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
-				t.Fatalf("start runtime: %v", err)
+			provider.stopError = func(index int) error {
+				if index == 0 {
+					return nil
+				}
+				return test.stopErr
 			}
-			if err := provider.SetMeta("worker", "GC_INSTANCE_TOKEN", "drain-token"); err != nil {
-				t.Fatalf("set runtime token: %v", err)
+			thirdStopEntered := make(chan struct{})
+			releaseThirdStop := make(chan struct{})
+			thirdStopReleased := false
+			provider.beforeStop = func(index int) {
+				if index == 2 {
+					close(thirdStopEntered)
+					<-releaseThirdStop
+				}
 			}
-			cs := coherentSessionStartControllerStateForTest(env.cfg, provider, env.store, rollout.Auto)
-			cr := &CityRuntime{cfg: env.cfg, sp: provider, cs: cs, rec: events.Discard, stdout: io.Discard, stderr: io.Discard}
-			t.Cleanup(cr.stopSessionStartController)
-			if err := cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+			t.Cleanup(func() {
+				if !thirdStopReleased {
+					close(releaseThirdStop)
+				}
+			})
+			provider.StopLeavesRunning[fixture.info.SessionName] = true
+			fixture.cr.sp = provider
+			fixture.cr.dops = newDrainOps(provider)
+			fixture.cr.cs.mu.Lock()
+			fixture.cr.cs.sp = provider
+			fixture.cr.cs.mu.Unlock()
+			t.Cleanup(fixture.cr.stopSessionStartController)
+			if err := fixture.cr.ensureSessionStartController(context.Background(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
 				t.Fatalf("ensure session-start controller: %v", err)
 			}
 
-			cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, bead))
-			awaitCond(t, func() bool {
-				return len(provider.stopSnapshot()) >= 2 ||
-					provider.CountCalls("Stop", "worker") >= 2 ||
-					(provider.CountCalls("Stop", "worker") == 1 && !hasInFlightDrainAckStops(&cr.asyncStops))
-			}, "keyed stop to reach re-kill unattended stop")
-			awaitCond(t, func() bool { return !hasInFlightDrainAckStops(&cr.asyncStops) }, "keyed re-kill to settle")
-			if got := provider.CountCalls("Stop", "worker"); got != 1 {
+			fixture.cr.cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, bead))
+			awaitClose(t, thirdStopEntered, "keyed stop retry after failed recertification")
+			if got := provider.CountCalls("Stop", fixture.info.SessionName); got != 1 {
 				t.Fatalf("provider Stop calls = %d, want initial kill only", got)
 			}
-			if !isDrainAckStopPendingInfo(env.sessionInfo(bead.ID)) {
+			if info, getErr := sessionFrontDoor(fixture.store).Get(fixture.info.ID); getErr != nil || !isDrainAckStopPendingInfo(info) {
 				t.Fatal("failed re-kill unattended stop cleared the durable stop marker")
+			}
+			fixture.cr.stopSessionStartController()
+			close(releaseThirdStop)
+			thirdStopReleased = true
+			if !fixture.cr.asyncStops.wait(testutil.GoroutineRaceTimeout) {
+				t.Fatal("blocked keyed retry did not settle after controller stop")
 			}
 		})
 	}
@@ -1069,12 +1124,33 @@ func TestCityRuntimeProviderReloadDefersForKeyedDrainAckStop(t *testing.T) {
 	cr := fixture.cr
 	oldConfig := cr.cfg
 	store := cr.cs.cityBeadStore
+	unlimited := -1
+	oldConfig.Agents = []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: &unlimited}}
+	work, err := store.Create(beads.Bead{
+		Title:  "completed routed work",
+		Type:   "task",
+		Status: "open",
+		Metadata: beads.StringMap{
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create routed work: %v", err)
+	}
+	if err := store.Close(work.ID); err != nil {
+		t.Fatalf("close routed work: %v", err)
+	}
+	sourceStore := "city:test-city"
+	sessionName := "worker-1"
 	metadata := session.DrainAckStopPendingPatch(time.Now().UTC())
-	metadata["session_name"] = "worker"
-	metadata["agent_name"] = "worker"
+	metadata["session_name"] = sessionName
+	metadata["agent_name"] = sessionName
 	metadata["template"] = "worker"
 	metadata["generation"] = "1"
 	metadata["instance_token"] = "drain-token"
+	metadata[poolManagedMetadataKey] = boolMetadata(true)
+	metadata[beadmeta.TriggerBeadIDMetadataKey] = work.ID
+	metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = sourceStore
 	bead, err := store.Create(beads.Bead{
 		Title:    "worker",
 		Type:     session.BeadType,
@@ -1084,11 +1160,55 @@ func TestCityRuntimeProviderReloadDefersForKeyedDrainAckStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create drain-ack session: %v", err)
 	}
-	if err := provider.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+	if err := provider.Start(context.Background(), sessionName, runtime.Config{Command: "test-cmd"}); err != nil {
 		t.Fatalf("start runtime: %v", err)
 	}
-	if err := provider.SetMeta("worker", "GC_INSTANCE_TOKEN", "drain-token"); err != nil {
-		t.Fatalf("set runtime token: %v", err)
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":                   bead.ID,
+		"GC_INSTANCE_TOKEN":               "drain-token",
+		reconcilerDrainAckSourceKey:       drainAckSourceAgentValue,
+		drainAckRequesterSessionIDKey:     bead.ID,
+		drainAckRequesterInstanceTokenKey: "drain-token",
+		"GC_DRAIN_ACK":                    "1",
+	} {
+		if err := provider.SetMeta(sessionName, key, value); err != nil {
+			t.Fatalf("set runtime metadata %s: %v", key, err)
+		}
+	}
+	cr.poolMembershipShadow = newPoolMembershipIndex()
+	if !cr.poolMembershipShadow.publishRebuild(0, newPoolMembershipState()) {
+		t.Fatal("publish empty pool membership")
+	}
+	info, err := sessionFrontDoor(store).Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read stop-pending pool session: %v", err)
+	}
+	if err := cr.poolMembershipShadow.replace(oldConfig, info); err != nil {
+		t.Fatalf("publish pool session membership: %v", err)
+	}
+	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember("worker", bead.ID)
+	if !occupied {
+		t.Fatal("stop-pending pool session is not an occupied member")
+	}
+	lease := routedWorkPoolDrainAckLease{
+		SessionID:              bead.ID,
+		InstanceToken:          "drain-token",
+		RequesterSessionID:     bead.ID,
+		RequesterInstanceToken: "drain-token",
+		ControllerGeneration:   cr.cs.sessionStartGeneration,
+		PoolTarget:             "worker",
+		WorkID:                 work.ID,
+		SourceStore:            sourceStore,
+		MembershipRevision:     observation.revision,
+	}
+	snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+	if err != nil {
+		t.Fatalf("acquire drain-ack authorization snapshot: %v", err)
+	}
+	authorized, authorizeErr := cr.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
+	release()
+	if authorizeErr != nil || !authorized {
+		t.Fatalf("baseline drain-ack authorization = (%t, %v), want true", authorized, authorizeErr)
 	}
 	t.Cleanup(cr.stopSessionStartController)
 	providerReleased := false

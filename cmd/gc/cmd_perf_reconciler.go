@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -593,6 +594,8 @@ type reconcilerPerfStopFixture struct {
 	cfg         *config.City
 	store       beads.Store
 	provider    *reconcilerPerfStopProvider
+	cityRuntime *CityRuntime
+	snapshot    controllerSessionStartSnapshot
 	lease       routedWorkPoolDrainAckLease
 }
 
@@ -602,22 +605,45 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 	token := "perf-stop-token-" + pairID
 	store := beads.NewMemStore()
 	provider := &reconcilerPerfStopProvider{Fake: gcruntime.NewFake()}
+	unlimited := -1
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: cityName},
 		Agents: []config.Agent{{
-			Name:         reconcilerPerfStartTemplate,
-			StartCommand: "true",
+			Name:              reconcilerPerfStartTemplate,
+			StartCommand:      "true",
+			MaxActiveSessions: &unlimited,
 		}},
+	}
+	sourceStore := "city:" + cityName
+	work, err := store.Create(beads.Bead{
+		Title:  "completed routed work " + pairID,
+		Type:   "task",
+		Status: "open",
+		Metadata: beads.StringMap{
+			"gc.routed_to": reconcilerPerfStartTemplate,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating drain-ack trigger work: %w", err)
+	}
+	if err := store.Close(work.ID); err != nil {
+		return nil, fmt.Errorf("closing drain-ack trigger work: %w", err)
 	}
 	metadata := sessionpkg.DrainAckStopPendingPatch(time.Now().UTC())
 	metadata["session_name"] = sessionName
-	metadata["agent_name"] = reconcilerPerfStartTemplate
+	metadata["agent_name"] = reconcilerPerfStartTemplate + "-1"
 	metadata["template"] = reconcilerPerfStartTemplate
 	metadata["generation"] = "1"
 	metadata["instance_token"] = token
+	metadata["pool_slot"] = "1"
+	metadata[poolManagedMetadataKey] = boolMetadata(true)
+	metadata[beadmeta.TriggerBeadIDMetadataKey] = work.ID
+	metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = sourceStore
+	metadata[sessionpkg.CanonicalInstanceNameMetadata] = reconcilerPerfStartTemplate + "-1"
+	metadata[sessionpkg.CanonicalPoolSlotMetadata] = "1"
 	info, err := sessionFrontDoor(store).CreateSessionInfo(sessionpkg.CreateSpec{
 		Title:     pairID,
-		AgentName: reconcilerPerfStartTemplate,
+		AgentName: reconcilerPerfStartTemplate + "-1",
 		Metadata:  metadata,
 	})
 	if err != nil {
@@ -626,23 +652,75 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 	if err := provider.Start(context.Background(), sessionName, gcruntime.Config{Command: "true"}); err != nil {
 		return nil, fmt.Errorf("starting drain-ack stop runtime: %w", err)
 	}
-	if err := provider.SetMeta(sessionName, "GC_INSTANCE_TOKEN", token); err != nil {
-		return nil, fmt.Errorf("setting drain-ack stop runtime token: %w", err)
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":                   info.ID,
+		"GC_INSTANCE_TOKEN":               token,
+		reconcilerDrainAckSourceKey:       drainAckSourceAgentValue,
+		drainAckRequesterSessionIDKey:     info.ID,
+		drainAckRequesterInstanceTokenKey: token,
+		"GC_DRAIN_ACK":                    "1",
+	} {
+		if err := provider.SetMeta(sessionName, key, value); err != nil {
+			return nil, fmt.Errorf("setting drain-ack stop runtime metadata %s: %w", key, err)
+		}
 	}
-	lease := routedWorkPoolDrainAckLease{
-		SessionID:              info.ID,
-		InstanceToken:          token,
-		RequesterSessionID:     info.ID,
-		RequesterInstanceToken: token,
-		ControllerGeneration:   1,
-		PoolTarget:             reconcilerPerfStartTemplate,
-		WorkID:                 "perf-stop-work-" + pairID,
-		SourceStore:            "city:" + cityName,
-		MembershipRevision:     1,
+	cs := &controllerState{
+		cfg:                         cfg,
+		sp:                          provider,
+		cityBeadStore:               store,
+		cityName:                    cityName,
+		cityPath:                    cityPath,
+		sessionStartGeneration:      1,
+		sessionStartStoreGeneration: 1,
+	}
+	cityRuntime := &CityRuntime{
+		cityPath:             cityPath,
+		cityName:             cityName,
+		cfg:                  cfg,
+		sp:                   provider,
+		cs:                   cs,
+		poolMembershipShadow: newPoolMembershipIndex(),
+	}
+	if !cityRuntime.poolMembershipShadow.publishRebuild(0, newPoolMembershipState()) {
+		return nil, errors.New("publishing empty drain-ack pool membership")
+	}
+	if err := cityRuntime.poolMembershipShadow.replace(cfg, info); err != nil {
+		return nil, fmt.Errorf("publishing drain-ack pool membership: %w", err)
+	}
+	snapshot := controllerSessionStartSnapshot{
+		Generation: 1,
+		CityPath:   cityPath,
+		CityName:   cityName,
+		Config:     cfg,
+		Provider:   provider,
+		Store:      store,
+		Recorder:   events.Discard,
+	}
+	lease, agentDrainAck, err := cityRuntime.newRoutedWorkPoolDrainAckLease(snapshot, info)
+	if err != nil {
+		return nil, fmt.Errorf("creating production drain-ack lease: %w", err)
+	}
+	if !agentDrainAck {
+		return nil, errors.New("creating production drain-ack lease: requester was not authorized")
+	}
+	authorized, err := cityRuntime.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
+	if err != nil {
+		return nil, fmt.Errorf("authorizing production drain-ack lease: %w", err)
+	}
+	if !authorized {
+		return nil, errors.New("authorizing production drain-ack lease: authorization did not hold")
 	}
 	return &reconcilerPerfStopFixture{
-		cityPath: cityPath, sessionName: sessionName, info: info, cfg: cfg, store: store, provider: provider, lease: lease,
+		cityPath: cityPath, sessionName: sessionName, info: info, cfg: cfg, store: store,
+		provider: provider, cityRuntime: cityRuntime, snapshot: snapshot, lease: lease,
 	}, nil
+}
+
+func (f *reconcilerPerfStopFixture) authorizePoolDrainAck(
+	info sessionpkg.Info,
+	lease routedWorkPoolDrainAckLease,
+) (bool, error) {
+	return f.cityRuntime.authorizeRoutedWorkPoolDrainAck(f.snapshot, info, lease)
 }
 
 func waitReconcilerPerfStopTracker(ctx context.Context, tracker *asyncStartTracker, timeout time.Duration) error {
@@ -689,16 +767,26 @@ func measureKeyedReconcilerPerfStop(ctx context.Context, cityPath, pairID string
 		return reconcilerPerfStopMeasurement{}, err
 	}
 	tracker := &asyncStartTracker{}
-	results := make(chan sessionStartReconcileResult, 1)
+	results := make(chan sessionStartReconcileResult, 8)
+	stopEntered := make(chan struct{}, 1)
+	stopRelease := make(chan struct{})
+	fixture.provider.entered = stopEntered
+	fixture.provider.block = stopRelease
+	stopReleased := false
+	releaseStop := func() {
+		if !stopReleased {
+			close(stopRelease)
+			stopReleased = true
+		}
+	}
+	defer releaseStop()
 	controller, err := newSessionStartController(sessionStartControllerOptions{
 		Workers: 1, MaxDistinct: 1, MaxRetries: 0,
 		Reconcile: func(reconcileCtx context.Context, admission sessionStartAdmission) error {
 			return reconcileExactSessionStart(reconcileCtx, admission, exactSessionStartParams{
 				CityPath: fixture.cityPath, Config: fixture.cfg, Provider: fixture.provider, Store: fixture.store,
 				Clock: clock.Real{}, Recorder: events.Discard, Stdout: io.Discard, Stderr: io.Discard, AsyncStopTracker: tracker,
-				AuthorizePoolDrainAck: func(info sessionpkg.Info, lease routedWorkPoolDrainAckLease) (bool, error) {
-					return info.ID == fixture.info.ID && lease == fixture.lease, nil
-				},
+				AuthorizePoolDrainAck: fixture.authorizePoolDrainAck,
 			})
 		},
 		Observer: func(result sessionStartReconcileResult) { results <- result }, Stderr: io.Discard,
@@ -710,7 +798,14 @@ func measureKeyedReconcilerPerfStop(ctx context.Context, cityPath, pairID string
 		controller.Stop()
 		return reconcilerPerfStopMeasurement{}, fmt.Errorf("starting keyed stop controller: %w", err)
 	}
-	defer controller.Stop()
+	controllerStopped := false
+	stopController := func() {
+		if !controllerStopped {
+			controller.Stop()
+			controllerStopped = true
+		}
+	}
+	defer stopController()
 	neededAt := time.Now().UTC()
 	if _, err := controller.AdmitPoolDrainAck(fixture.lease); err != nil {
 		return fixture.finish(neededAt, time.Now().UTC(), fmt.Errorf("admitting keyed stop: %w", err)), nil
@@ -719,18 +814,29 @@ func measureKeyedReconcilerPerfStop(ctx context.Context, cityPath, pairID string
 	defer cancel()
 	for {
 		select {
+		case <-stopEntered:
+			// This comparison deliberately ends at the first provider effect. Stop
+			// the keyed worker while that effect is held at its entry barrier so its
+			// immediate finalization retry cannot race the legacy arm's equivalent
+			// pending-finalization state.
+			stopController()
+			releaseStop()
+			if err := waitReconcilerPerfStopTracker(ctx, tracker, reconcilerPerfArmTimeout); err != nil {
+				return fixture.finish(neededAt, time.Now().UTC(), fmt.Errorf("keyed async stop: %w", err)), nil
+			}
+			return fixture.finish(neededAt, time.Now().UTC(), nil), nil
 		case result := <-results:
 			if result.Outcome == sessionStartReconcileRetrying {
+				if result.Err == nil || result.Err.Error() != errSessionStartPoolDrainAckPending.Error() {
+					return fixture.finish(neededAt, time.Now().UTC(), reconcilerPerfStopResultError(result)), nil
+				}
 				continue
 			}
 			resultErr := reconcilerPerfStopResultError(result)
 			if result.Outcome != sessionStartReconcileSucceeded || resultErr != nil {
 				return fixture.finish(neededAt, time.Now().UTC(), resultErr), nil
 			}
-			if err := waitReconcilerPerfStopTracker(ctx, tracker, reconcilerPerfArmTimeout); err != nil {
-				return fixture.finish(neededAt, time.Now().UTC(), fmt.Errorf("keyed async stop: %w", err)), nil
-			}
-			return fixture.finish(neededAt, time.Now().UTC(), nil), nil
+			return fixture.finish(neededAt, time.Now().UTC(), errors.New("keyed stop completed before entering the provider effect")), nil
 		case <-waitCtx.Done():
 			return fixture.finish(neededAt, time.Now().UTC(), waitCtx.Err()), nil
 		}

@@ -142,13 +142,23 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				DrainOps:     cr.dops,
 				DrainTracker: cr.sessionDrains,
 				Trace:        cr.trace,
+				AuthorizePoolStart: func(authorizeCtx context.Context, info sessionpkg.Info, lease routedWorkPoolStartLease) (bool, error) {
+					return cr.authorizeRoutedWorkPoolStart(authorizeCtx, snapshot, info, lease)
+				},
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
-				cr.requestLegacySessionStartFallback()
+				return errSessionStartLegacyFallbackRequired
 			}
 			return reconcileErr
 		},
 		Observer: func(result sessionStartReconcileResult) {
+			if result.Outcome == sessionStartReconcileSucceeded && result.LegacyFallback {
+				if result.Admission.PoolAllocation != nil {
+					cr.requestReadyRoutedWorkLegacyFallback()
+				} else {
+					cr.requestLegacySessionStartFallback()
+				}
+			}
 			if result.Outcome == sessionStartReconcileSucceeded {
 				// A queued nudge can arrive while this exact session is still
 				// starting. Once lifecycle work completes, re-poke the nudge
@@ -157,6 +167,9 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			}
 			if result.Outcome == sessionStartReconcileExhausted {
 				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start reconciliation exhausted for %s: %v; authoritative audit requested\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // terminal retry diagnostic
+				if result.Admission.PoolAllocation != nil {
+					cr.requestReadyRoutedWorkLegacyFallback()
+				}
 			}
 		},
 		Stderr: cr.sessionStartStderr(),
@@ -490,6 +503,7 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 
 	cr.sessionStartMu.Lock()
 	state := cr.sessionStartOwnership
+	controller := cr.sessionStartController
 	cr.sessionStartMu.Unlock()
 	if state != sessionStartOwnershipKeyed {
 		return startOption
@@ -504,7 +518,8 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 	}
 	statusOption := withLegacyStatusHealExclusion(func(info sessionpkg.Info) bool {
 		return validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) == nil &&
-			resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
+			(resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC()) ||
+				(controller != nil && controller.ownsPoolAllocationStart(info.ID, info.InstanceToken)))
 	})
 	return func(opts *startExecutionOptions) {
 		startOption(opts)
@@ -523,6 +538,7 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 	cr.sessionStartMu.Lock()
 	state := cr.sessionStartOwnership
 	mode := cr.sessionStartMode
+	controller := cr.sessionStartController
 	cr.sessionStartMu.Unlock()
 	if state != sessionStartOwnershipKeyed && state != sessionStartOwnershipRequiredBlocked {
 		return nil
@@ -554,6 +570,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 			if _, ok := snapshot.Provider.(runtime.FreshLivenessObserver); !ok {
 				return false
 			}
+		}
+		if controller != nil && controller.ownsPoolAllocationStart(info.ID, info.InstanceToken) {
+			return true
 		}
 		return resolveExactSessionStartOrDrainAckStopOwnership(info, snapshot.Config, time.Now().UTC())
 	}

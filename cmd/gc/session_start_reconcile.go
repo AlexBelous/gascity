@@ -55,6 +55,7 @@ type exactSessionStartParams struct {
 	DrainOps             drainOps
 	DrainTracker         *drainTracker
 	Trace                *SessionReconcilerTracer
+	AuthorizePoolStart   func(context.Context, sessionpkg.Info, routedWorkPoolStartLease) (bool, error)
 }
 
 // planExactSessionWaitDependencyStartShadow reads one dependency-ready session
@@ -560,6 +561,23 @@ func reconcileExactSessionStartWithOwner(
 
 	ownershipNow := clk.Now().UTC()
 	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, ownershipNow)
+	poolStartAuthorized := false
+	if owner == exactSessionStartLegacyOwner && admission.PoolAllocation != nil && params.AuthorizePoolStart != nil &&
+		isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) {
+		authorized, authorizeErr := params.AuthorizePoolStart(ctx, info, *admission.PoolAllocation)
+		if authorizeErr != nil {
+			return owner, fmt.Errorf("reconciling exact pool session start %q: authorizing allocation: %w", info.ID, authorizeErr)
+		}
+		if authorized {
+			template := resolvedSessionTemplateInfo(info, params.Config)
+			cfgAgent = findAgentByTemplate(params.Config, template)
+			if cfgAgent == nil {
+				return owner, fmt.Errorf("reconciling exact pool session start %q: authorized template %q is unavailable", info.ID, template)
+			}
+			owner = exactSessionStartKeyedOwner
+			poolStartAuthorized = true
+		}
+	}
 	if owner != exactSessionStartKeyedOwner {
 		reason := exactSessionLifecycleStatusReasonNotObserved
 		if owner == exactSessionStartLegacyOwner {
@@ -666,6 +684,24 @@ func reconcileExactSessionStartWithOwner(
 		return owner, nil
 	}
 
+	var preWakeRead func(beads.Store, string) (sessionpkg.Info, error)
+	if poolStartAuthorized {
+		lease := *admission.PoolAllocation
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
+			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
+			if readErr != nil {
+				return sessionpkg.Info{}, readErr
+			}
+			authorized, authorizeErr := params.AuthorizePoolStart(ctx, current, lease)
+			if authorizeErr != nil {
+				return sessionpkg.Info{}, authorizeErr
+			}
+			if !authorized {
+				return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
+			}
+			return current, nil
+		}
+	}
 	prepared, err := prepareExactStartCandidateForCity(
 		startCandidate{info: info, tp: tp},
 		params.CityPath,
@@ -676,6 +712,7 @@ func reconcileExactSessionStartWithOwner(
 		clk,
 		stderr,
 		startOpts.workDirResolver,
+		preWakeRead,
 	)
 	if err != nil {
 		var skip *exactSessionStartPreWakeSkip

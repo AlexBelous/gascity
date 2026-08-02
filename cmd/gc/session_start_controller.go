@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"runtime/debug"
@@ -13,6 +14,8 @@ import (
 )
 
 const sessionStartAdmissionMaxIDBytes = 256
+
+var errSessionStartLegacyFallbackRequired = errors.New("session start requires legacy fallback")
 
 type sessionStartAdmissionSource string
 
@@ -28,6 +31,8 @@ type sessionStartAdmission struct {
 	SessionID        string
 	Source           sessionStartAdmissionSource
 	Version          uint64
+	PoolAllocation   *routedWorkPoolStartLease
+	PoolStartEntered bool
 	CensusGeneration uint64
 	Culled           bool
 	AdmittedAt       time.Time
@@ -53,11 +58,12 @@ const (
 )
 
 type sessionStartReconcileResult struct {
-	Admission  sessionStartAdmission
-	Outcome    sessionStartReconcileOutcome
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Err        error
+	Admission      sessionStartAdmission
+	Outcome        sessionStartReconcileOutcome
+	StartedAt      time.Time
+	FinishedAt     time.Time
+	LegacyFallback bool
+	Err            error
 }
 
 type sessionStartAuthoritativeSeedResult struct {
@@ -184,15 +190,26 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 		return "", err
 	}
 
-	outcome, _, err := c.admit(id, source, false, 0)
+	outcome, _, err := c.admit(id, source, false, 0, nil)
+	return outcome, err
+}
+
+func (c *sessionStartController) AdmitPoolAllocation(lease routedWorkPoolStartLease) (sessionStartAdmissionOutcome, error) {
+	if c == nil {
+		return "", fmt.Errorf("admitting pool allocation: controller is nil")
+	}
+	if err := validateRoutedWorkPoolStartLease(lease); err != nil {
+		return "", err
+	}
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease)
 	return outcome, err
 }
 
 func (c *sessionStartController) admitAuthoritative(id string, censusGeneration uint64) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
-	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration)
+	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil)
 }
 
-func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
+func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
 	if err := validateSessionStartAdmission(id, source); err != nil {
 		return "", sessionStartAdmission{}, err
 	}
@@ -225,11 +242,26 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		source = previous.Source
 		admittedAt = previous.AdmittedAt
 	}
+	poolStartEntered := false
+	if poolAllocation == nil && existed {
+		poolAllocation = previous.PoolAllocation
+		poolStartEntered = previous.PoolStartEntered
+	} else if poolAllocation != nil && existed && previous.PoolAllocation != nil &&
+		previous.PoolAllocation.SessionID == poolAllocation.SessionID &&
+		previous.PoolAllocation.InstanceToken == poolAllocation.InstanceToken {
+		poolStartEntered = previous.PoolStartEntered
+	}
+	if poolAllocation != nil {
+		copied := *poolAllocation
+		poolAllocation = &copied
+	}
 	admission := sessionStartAdmission{
-		SessionID:  id,
-		Source:     source,
-		Version:    c.nextVersion,
-		AdmittedAt: admittedAt,
+		SessionID:        id,
+		Source:           source,
+		Version:          c.nextVersion,
+		PoolAllocation:   poolAllocation,
+		PoolStartEntered: poolStartEntered,
+		AdmittedAt:       admittedAt,
 	}
 	if authoritative && admission.Source == sessionStartAdmissionAntiEntropy {
 		admission.CensusGeneration = censusGeneration
@@ -453,6 +485,25 @@ func (c *sessionStartController) Pending() int {
 	return len(c.admissions)
 }
 
+// ownsPoolAllocationStart requires the durable token to match before the first
+// attempt enters. Once entered, pre-wake may rotate that token, so the retained
+// admission remains the exclusion authority through retries until it terminates.
+func (c *sessionStartController) ownsPoolAllocationStart(sessionID, instanceToken string) bool {
+	instanceToken = strings.TrimSpace(instanceToken)
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	if !ok || admission.PoolAllocation == nil {
+		return false
+	}
+	lease := admission.PoolAllocation
+	return lease.SessionID == sessionID &&
+		(admission.PoolStartEntered || (instanceToken != "" && lease.InstanceToken == instanceToken))
+}
+
 func (c *sessionStartController) Stop() {
 	if c == nil {
 		return
@@ -533,12 +584,17 @@ func (c *sessionStartController) reconcileKey(key string) {
 	defer c.clearInFlightIfVersion(key, admission.Version)
 	startedAt := c.now()
 	err := c.callReconcile(admission)
+	legacyFallback := errors.Is(err, errSessionStartLegacyFallbackRequired)
+	if legacyFallback {
+		err = nil
+	}
 	finishedAt := c.now()
 	result := sessionStartReconcileResult{
-		Admission:  admission,
-		StartedAt:  startedAt,
-		FinishedAt: finishedAt,
-		Err:        err,
+		Admission:      admission,
+		StartedAt:      startedAt,
+		FinishedAt:     finishedAt,
+		LegacyFallback: legacyFallback,
+		Err:            err,
 	}
 
 	if c.ctx.Err() != nil {
@@ -601,6 +657,10 @@ func (c *sessionStartController) markInFlightIfVersion(key string, version uint6
 	current, ok := c.admissions[key]
 	if !ok || current.Version != version || current.Culled {
 		return false
+	}
+	if current.PoolAllocation != nil && !current.PoolStartEntered {
+		current.PoolStartEntered = true
+		c.admissions[key] = current
 	}
 	c.inFlight[key] = version
 	return true

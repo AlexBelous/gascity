@@ -30,6 +30,10 @@ func TestPoolAllocationShadowPolicyKeepsNontrivialClassesLegacyOwned(t *testing.
 			agent.ScaleCheck = "printf 1"
 			return nil
 		}, want: poolAllocationShadowCustomScaleCheck},
+		{name: "dependency-bearing template", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.DependsOn = []string{"database"}
+			return nil
+		}, want: poolAllocationShadowDependencies},
 		{name: "named session binding", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
 			return map[string]struct{}{agent.QualifiedName(): {}}
 		}, want: poolAllocationShadowNamedSession},

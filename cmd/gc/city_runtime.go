@@ -173,6 +173,9 @@ type CityRuntime struct {
 	// A certified ready routed-work result uses the same legacy tick, but keeps
 	// an independent bit so either exact source can consume its own request.
 	readyRoutedWorkPokePending atomic.Bool
+	// Stable exact-key hints enter the serialized runtime loop through this
+	// bounded channel. Overflow remains legacy-owned.
+	routedWorkPoolAllocationCh chan routedWorkPoolAllocationHint
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
@@ -412,16 +415,17 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		nudgeWakeCh:          make(chan struct{}, 1),
-		nudgeShadowSelection: p.NudgeShadowSelection,
-		onStarted:            p.OnStarted,
-		onStatus:             p.OnStatus,
-		managedDoltHealth:    managedDoltHealth,
-		managedDoltOwned:     managedDoltOwned,
-		managedDoltPort:      managedDoltPort,
-		logPrefix:            logPrefix,
-		stdout:               p.Stdout,
-		stderr:               p.Stderr,
+		nudgeWakeCh:                make(chan struct{}, 1),
+		routedWorkPoolAllocationCh: make(chan routedWorkPoolAllocationHint, routedWorkPoolAllocationQueueSize),
+		nudgeShadowSelection:       p.NudgeShadowSelection,
+		onStarted:                  p.OnStarted,
+		onStatus:                   p.OnStatus,
+		managedDoltHealth:          managedDoltHealth,
+		managedDoltOwned:           managedDoltOwned,
+		managedDoltPort:            managedDoltPort,
+		logPrefix:                  logPrefix,
+		stdout:                     p.Stdout,
+		stderr:                     p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if cr.lifecycleShadowWorker == nil {
@@ -485,9 +489,10 @@ func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
 		if !stillKeyed {
 			return
 		}
-		cr.readyRoutedWorkPokePending.Store(true)
-		cr.requestLegacySessionStartFallback()
 		cr.recordReadyRoutedWorkDemandContribution(contribution)
+		if !cr.enqueueRoutedWorkPoolAllocation(contribution) {
+			cr.requestReadyRoutedWorkLegacyFallback()
+		}
 	}); err != nil {
 		return err
 	}
@@ -1073,6 +1078,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.safeTick(func() {
 				cr.nudgeDispatchTick(ctx)
 			}, "nudge-wake")
+		case hint := <-cr.routedWorkPoolAllocationCh:
+			cr.safeTick(func() {
+				cr.handleRoutedWorkPoolAllocation(ctx, hint)
+			}, "pool-allocation")
 		case <-cr.controlDispatcherCh:
 			ctrlDB.arm(debounce)
 		case <-ctrlDB.fired():

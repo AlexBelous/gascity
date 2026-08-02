@@ -911,7 +911,13 @@ func prepareExactStartCandidateForCity(
 	clk clock.Clock,
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
+	readCurrent func(beads.Store, string) (sessionpkg.Info, error),
 ) (*preparedStart, error) {
+	if readCurrent == nil {
+		readCurrent = func(store beads.Store, id string) (sessionpkg.Info, error) {
+			return getAuthoritativeExactSessionStartInfoBeforeWake(store, id, cfg, clk.Now().UTC())
+		}
+	}
 	return prepareStartCandidateForCityWithNamedRefresh(
 		candidate,
 		cityPath,
@@ -923,9 +929,7 @@ func prepareExactStartCandidateForCity(
 		stderr,
 		workDirResolver,
 		false,
-		func(store beads.Store, id string) (sessionpkg.Info, error) {
-			return getAuthoritativeExactSessionStartInfoBeforeWake(store, id, cfg, clk.Now().UTC())
-		},
+		readCurrent,
 	)
 }
 

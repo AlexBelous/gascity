@@ -254,6 +254,31 @@ func (i *poolMembershipIndex) observe(poolTarget string) poolMembershipObservati
 	}
 }
 
+// observeSoleMember returns the same certified observation plus whether the
+// named session is its only capacity-occupying member. The check and snapshot
+// are taken under one read lock so an allocation lease cannot combine fields
+// from different revisions.
+func (i *poolMembershipIndex) observeSoleMember(poolTarget, sessionID string) (poolMembershipObservation, bool) {
+	if i == nil {
+		return poolMembershipObservation{reason: poolMembershipUncertifiedNotInitialized}, false
+	}
+	poolTarget = strings.TrimSpace(poolTarget)
+	sessionID = strings.TrimSpace(sessionID)
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	observation := poolMembershipObservation{
+		members:   i.state.members[poolTarget],
+		occupied:  i.state.occupied[poolTarget],
+		certified: i.certified,
+		revision:  i.revision,
+		reason:    i.reason,
+	}
+	contribution, present := i.state.bySession[sessionID]
+	sole := observation.certified && observation.members == 1 && observation.occupied == 1 &&
+		present && contribution.poolTarget == poolTarget && contribution.countsAgainstCap
+	return observation, sole
+}
+
 // refreshPoolMembershipSession performs one authoritative exact-key read after
 // the start controller has admitted the same event. It can never delay keyed
 // start admission and never performs a provider or store write.

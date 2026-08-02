@@ -23,6 +23,7 @@ const (
 	poolAllocationShadowSuspended             poolAllocationShadowReason = "suspended"
 	poolAllocationShadowDisabled              poolAllocationShadowReason = "disabled"
 	poolAllocationShadowCustomScaleCheck      poolAllocationShadowReason = "custom_scale_check"
+	poolAllocationShadowDependencies          poolAllocationShadowReason = "dependencies"
 	poolAllocationShadowNamedSession          poolAllocationShadowReason = "named_session"
 	poolAllocationShadowMinFloor              poolAllocationShadowReason = "min_floor"
 	poolAllocationShadowWorkspaceCap          poolAllocationShadowReason = "workspace_cap"
@@ -72,6 +73,11 @@ func newPoolAllocationShadowPolicy(
 	}
 	if strings.TrimSpace(agent.ScaleCheck) != "" {
 		policy.reason = poolAllocationShadowCustomScaleCheck
+		policy.contributionPresent = false
+		return policy
+	}
+	if len(agent.DependsOn) > 0 {
+		policy.reason = poolAllocationShadowDependencies
 		policy.contributionPresent = false
 		return policy
 	}

@@ -1652,6 +1652,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info := infoByID[id]
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		tp, desired := desiredState[name]
+		if reconcileOpts.legacyStartExcluded != nil && reconcileOpts.legacyStartExcluded(info) {
+			if trace != nil {
+				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonCode("keyed_start_owner"), TraceOutcomeSkipped, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
+					"session_id": info.ID,
+				})
+			}
+			continue
+		}
 		if shadowTick != nil {
 			// 3a: durable facts from the already-observed coherent typed Info (the
 			// priming + canonical mirrors are projected Info fields). The predicted

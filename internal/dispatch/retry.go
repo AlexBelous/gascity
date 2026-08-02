@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -302,6 +303,12 @@ func typedDeliverableCloseFor(subject beads.Bead) bool {
 		Producer        *string `json:"producer"`
 	}
 	if err := decoder.Decode(&envelope); err != nil {
+		return false
+	}
+	// Reject trailing data after the envelope: DisallowUnknownFields only guards the
+	// first object, so a valid envelope followed by more JSON or garbage must fail
+	// closed rather than forge a pass.
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
 		return false
 	}
 	switch envelope.Disposition {

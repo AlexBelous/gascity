@@ -316,6 +316,16 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
 		},
 		{
+			// A valid envelope followed by trailing JSON/garbage must fail closed:
+			// json.Decoder consumes only the first value and DisallowUnknownFields
+			// guards only that first object.
+			name: "deliverable with trailing data stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"} {"junk":1}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
 			name: "malformed json stays missing_outcome",
 			metadata: map[string]string{
 				"gc.coordinator_outcome.producer_disposition": "{not json",

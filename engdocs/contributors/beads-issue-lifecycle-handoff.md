@@ -68,10 +68,18 @@ the whole discipline. `storage.Storage` reached 71 methods because it lacked thi
 9. **A generic done-crossing update enforces close policy**, and **`bd update --force` overrides both**
    the assignee fence and close policy. Shipped in #5206.
 10. **`bd close` pinned check**: refuse if `issue.Pinned` **OR** `status == pinned`. Strictly additive.
-    This was decided by audit: Gas Town pins by *status* at 21 sites (`b.List(ListOptions{Status:
-    StatusPinned})` in `hook_check.go`, `prime_output.go`, `molecule_step.go`, `up.go`), so a
-    boolean-only check would strip its protection. Gas City reads the boolean
-    (`compute_awake_set.go:443,467`).
+    Decided by audit: Gas Town pins by *status* — an independent 2026-08-02 recount found ~22
+    functional non-test sites (`b.List(ListOptions{Status: StatusPinned})` in `hook_check.go`,
+    `prime_output.go`, `molecule_step.go`, `up.go` and others), so a boolean-only check would strip
+    its protection. That leg is verified and the ruling stands on it.
+    **Correction:** the other stated premise — "Gas City reads the boolean
+    (`compute_awake_set.go:443,467`)" — is **false**, and it appears in #5212's commit message and PR
+    body as well as here. That field is declared `Pinned bool // pin_awake durable wake reason`
+    (`cmd/gc/compute_awake_set.go:69`) and populated from `session.WakeCausePinned`
+    (`compute_awake_bridge.go:130`). Gas City has **zero** consumers of the beads boolean; its beads
+    client has no `Pinned` field and `git log --all -S 'issue.Pinned' -- cmd/gc/` is empty. The
+    boolean half of the check is harmless and strictly additive, but do not reason further from the
+    Gas City claim.
 11. **Commit identity**: author `Julian Knutsen <julianknutsen@users.noreply.github.com>`; trailers
     `Agent-Signature: <model>` and `Co-authored-by: CI Bot <ci@beads.test>`. A council suggested the repo's
     `<agent> on behalf of <human>` form instead — the owner's choice stands.

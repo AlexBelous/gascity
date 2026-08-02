@@ -248,10 +248,8 @@ func resolveLocalPackReleaseSource(source, packPath string) (repoDir, resolvedPa
 	if err != nil {
 		return "", "", fmt.Errorf("resolving source path: %w", err)
 	}
-	// Resolve symlinks so filepath.Rel agrees with git's real-path repo root (macOS: /tmp -> /private/tmp).
-	if resolved, evalErr := filepath.EvalSymlinks(absSource); evalErr == nil {
-		absSource = resolved
-	}
+	// Normalize (incl. symlink resolution) so filepath.Rel agrees with git's real-path repo root (macOS: /tmp -> /private/tmp).
+	absSource = normalizePathForCompare(absSource)
 	repoDir, err = localGitRoot(absSource)
 	if err != nil {
 		return "", "", err

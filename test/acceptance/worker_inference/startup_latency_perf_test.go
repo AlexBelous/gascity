@@ -182,6 +182,20 @@ func newAgentStartPerfHarness(t *testing.T) (*agentStartPerfHarness, error) {
 	if err := installLiveProviderCommandOverrideWithArgs(city.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames, liveProviderArgsAppend()); err != nil {
 		return nil, fmt.Errorf("install live provider override: %w", err)
 	}
+	if err := agentStartPerfPinHookHome(city.Dir, liveSetup.Provider, liveEnv.Get("GC_HOME")); err != nil {
+		return nil, fmt.Errorf("pin managed hook gc binary: %w", err)
+	}
+	measuredGC, err := helpers.ResolveGCPath(liveEnv)
+	if err != nil {
+		return nil, fmt.Errorf("resolve measured gc binary: %w", err)
+	}
+	hookGC, err := agentStartPerfResolveHookGC(liveEnv.Get("GC_HOME"), liveEnv.Get("PATH"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve managed hook gc binary: %w", err)
+	}
+	if err := agentStartPerfRequireSameGC(measuredGC, hookGC); err != nil {
+		return nil, err
+	}
 	if err := agentStartPerfRequireReconciler(city.Dir); err != nil {
 		return nil, err
 	}
@@ -373,6 +387,79 @@ func agentStartPerfProvenance(cityDir, promptPath, socket string, readiness agen
 		return provenance, err
 	}
 	return provenance, nil
+}
+
+func agentStartPerfPinHookHome(cityDir, provider, hookHome string) error {
+	provider = strings.TrimSpace(provider)
+	hookHome = strings.TrimSpace(hookHome)
+	if provider == "" || hookHome == "" {
+		return fmt.Errorf("provider and hook HOME must be non-empty")
+	}
+	configPath := filepath.Join(cityDir, "city.toml")
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, configPath)
+	if err != nil {
+		return fmt.Errorf("load city config: %w", err)
+	}
+	spec, ok := cfg.Providers[provider]
+	if !ok {
+		return fmt.Errorf("provider %q is not configured", provider)
+	}
+	if configured := strings.TrimSpace(spec.Env["HOME"]); configured != "" {
+		if filepath.Clean(configured) != filepath.Clean(hookHome) {
+			return fmt.Errorf("provider %q HOME %q does not match isolated hook HOME %q", provider, configured, hookHome)
+		}
+		return nil
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	header := fmt.Sprintf("[providers.%s.env]", provider)
+	if strings.Contains(string(data), header) {
+		return fmt.Errorf("provider %q has an env table without HOME", provider)
+	}
+	updated := append(append([]byte(nil), data...), []byte(fmt.Sprintf("\n%s\nHOME = %s\n", header, strconv.Quote(hookHome)))...)
+	if err := os.WriteFile(configPath, updated, 0o644); err != nil {
+		return err
+	}
+	return nil
+}
+
+func agentStartPerfResolveHookGC(hookHome, pathEnv string) (string, error) {
+	searchPath := strings.Join([]string{
+		filepath.Join(hookHome, "go", "bin"),
+		filepath.Join(hookHome, ".local", "bin"),
+		pathEnv,
+	}, string(os.PathListSeparator))
+	for _, dir := range filepath.SplitList(searchPath) {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, "gc")
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		return filepath.Abs(candidate)
+	}
+	return "", fmt.Errorf("gc is not executable on managed hook PATH")
+}
+
+func agentStartPerfRequireSameGC(measuredPath, hookPath string) error {
+	measuredData, err := os.ReadFile(measuredPath)
+	if err != nil {
+		return fmt.Errorf("read measured gc binary: %w", err)
+	}
+	hookData, err := os.ReadFile(hookPath)
+	if err != nil {
+		return fmt.Errorf("read managed hook gc binary: %w", err)
+	}
+	measuredHash := sha256.Sum256(measuredData)
+	hookHash := sha256.Sum256(hookData)
+	if measuredHash != hookHash {
+		return fmt.Errorf("managed hook gc %q does not match measured gc %q", hookPath, measuredPath)
+	}
+	return nil
 }
 
 func agentStartPerfCollectBinaries() ([]agentStartLatencyBinary, string, error) {
@@ -1162,6 +1249,59 @@ func TestAgentStartPerfRecognizesProviderDescendant(t *testing.T) {
 	}
 	if agentStartProcessTreeContains(100, []string{"codex"}, processes) {
 		t.Fatal("unrelated provider was recognized")
+	}
+}
+
+func TestAgentStartPerfPinsManagedHookGCToMeasuredBinary(t *testing.T) {
+	cityDir := t.TempDir()
+	cityConfig := "[workspace]\nname = \"perf\"\n\n[providers.test]\nbase = \"\"\ncommand = \"provider\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hookHome := t.TempDir()
+	if err := agentStartPerfPinHookHome(cityDir, "test", hookHome); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Providers["test"].Env["HOME"]; got != hookHome {
+		t.Fatalf("provider HOME = %q, want %q", got, hookHome)
+	}
+
+	measuredDir := t.TempDir()
+	measuredGC := filepath.Join(measuredDir, "gc")
+	if err := os.WriteFile(measuredGC, []byte("measured gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := agentStartPerfResolveHookGC(hookHome, measuredDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != measuredGC {
+		t.Fatalf("managed hook gc = %q, want measured binary %q", resolved, measuredGC)
+	}
+}
+
+func TestAgentStartPerfRejectsManagedHookGCBinaryDrift(t *testing.T) {
+	dir := t.TempDir()
+	measuredGC := filepath.Join(dir, "measured-gc")
+	hookGC := filepath.Join(dir, "hook-gc")
+	if err := os.WriteFile(measuredGC, []byte("measured"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookGC, []byte("different"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentStartPerfRequireSameGC(measuredGC, hookGC); err == nil {
+		t.Fatal("different managed hook gc binary was accepted")
+	}
+	if err := os.WriteFile(hookGC, []byte("measured"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentStartPerfRequireSameGC(measuredGC, hookGC); err != nil {
+		t.Fatalf("byte-identical managed hook gc was rejected: %v", err)
 	}
 }
 

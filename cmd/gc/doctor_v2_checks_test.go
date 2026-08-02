@@ -1825,6 +1825,38 @@ scope = "city"
 	}
 }
 
+// doctorPathWithinCity must be fail-closed: a candidate path that is
+// lexically nested under cityPath but actually escapes it through a
+// symlink must be reported as outside the city, even when the leaf of
+// the candidate does not exist yet (e.g. a path doctor is about to
+// create). The current implementation falls back to a lexical-only
+// check (return true) whenever filepath.EvalSymlinks fails on the
+// candidate, which it always does for a not-yet-existing leaf — so it
+// fails open here instead.
+func TestDoctorPathWithinCityDetectsSymlinkEscapeWithMissingLeaf(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cityPath := filepath.Join(root, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(cityPath, "escape")
+	if err := os.Symlink(outside, escape); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	candidate := filepath.Join(escape, "not-yet-created", "leaf")
+
+	if doctorPathWithinCity(cityPath, candidate) {
+		t.Fatalf("doctorPathWithinCity(%q, %q) = true, want false: candidate escapes cityPath through the %q symlink even though its leaf does not exist yet", cityPath, candidate, escape)
+	}
+}
+
 func writeDoctorFile(t *testing.T, root, rel, contents string) {
 	t.Helper()
 	path := filepath.Join(root, rel)

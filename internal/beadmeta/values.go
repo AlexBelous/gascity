@@ -57,6 +57,17 @@ const (
 	OutcomeMissingRoot = "missing_root"
 )
 
+// Values of the CoordinatorOutcomeProducerDispositionMetadataKey typed-close
+// envelope written by the gc-outcome-close helper. CoordinatorOutcomeContractVersion
+// pins the JSON shape. A clean close is deliverable or non-deliverable; gc-outcome-close
+// never records a failure (failures take the gc.outcome=fail path), so the controller
+// folds either disposition as a pass.
+const (
+	CoordinatorOutcomeContractVersion    = 1
+	CoordinatorDispositionDeliverable    = "deliverable"
+	CoordinatorDispositionNonDeliverable = "non-deliverable"
+)
+
 // Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record
 // close disposition (ADR-0009). Deliberately disjoint from the control-plane
 // OutcomeMetadataKey vocabulary above so the two never collide on one key. Only

@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -215,6 +216,99 @@ func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
 	want := retryEvalResult{Outcome: "canceled"}
 	if got != want {
 		t.Fatalf("classifyRetryAttempt(canceled) = %+v, want %+v", got, want)
+	}
+}
+
+// TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome pins the graph.v2
+// controller missing_outcome race (gc-e2xqk). An attempt closed through the
+// gc-outcome-close typed contract records its disposition under
+// gc.coordinator_outcome.producer_disposition (plus gc.outcome.producer), leaving
+// gc.outcome empty. Before the fix that empty gc.outcome fell to the
+// missing_outcome transient branch and the controller minted a spurious retry
+// even though a valid typed outcome existed. A valid contract_version=1 clean
+// close — deliverable or non-deliverable, since gc-outcome-close never records a
+// failure — must fold as pass exactly once; a malformed, wrong-version,
+// foreign-work_id, or unknown-disposition record must stay missing_outcome.
+func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
+	t.Parallel()
+
+	const attemptID = "gc-attempt1"
+	typedClose := func(disposition, workID string) string {
+		return fmt.Sprintf(`{"contract_version":1,"disposition":%q,"work_id":%q,"recorded_by":"formula-step","reason":"done","producer":"formula-step"}`, disposition, workID)
+	}
+
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     retryEvalResult
+	}{
+		{
+			name: "deliverable typed close folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": typedClose("deliverable", attemptID),
+				"gc.outcome.producer":                         "formula-step",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "non-deliverable typed close folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": typedClose("non-deliverable", attemptID),
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "explicit gc.outcome takes precedence over typed close",
+			metadata: map[string]string{
+				"gc.outcome": "pass",
+				"gc.coordinator_outcome.producer_disposition": typedClose("deliverable", attemptID),
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "malformed typed close stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": "{not json",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "wrong contract_version stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":2,"disposition":"deliverable","work_id":"gc-attempt1"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "foreign work_id stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": typedClose("deliverable", "gc-someone-else"),
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unknown disposition stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": typedClose("mystery", attemptID),
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name:     "no typed outcome stays missing_outcome",
+			metadata: map[string]string{},
+			want:     retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyRetryAttempt(beads.Bead{ID: attemptID, Metadata: tt.metadata})
+			if got != tt.want {
+				t.Fatalf("classifyRetryAttempt() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 

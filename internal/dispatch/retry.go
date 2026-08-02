@@ -268,8 +268,51 @@ type retryEvalResult struct {
 	Reason  string
 }
 
+// typedCoordinatorOutcomeIsCleanClose reports whether the subject carries a valid
+// gc-outcome-close typed close for itself. That helper records the step outcome
+// under CoordinatorOutcomeProducerDispositionMetadataKey (a JSON envelope), NOT
+// gc.outcome, so an attempt it closed has an empty gc.outcome. The controller must
+// fold that typed close instead of misreading the empty gc.outcome as a missing
+// outcome and minting a spurious retry (gc-e2xqk). It is a clean close, exactly
+// once, when the envelope is contract_version 1, names this subject as its work_id
+// (so a propagated/foreign record is ignored), and carries a known disposition.
+// gc-outcome-close only records clean closes (deliverable / non-deliverable);
+// failures take the gc.outcome=fail path, so either disposition folds as a pass.
+func typedCoordinatorOutcomeIsCleanClose(subject beads.Bead) bool {
+	raw := strings.TrimSpace(subject.Metadata[beadmeta.CoordinatorOutcomeProducerDispositionMetadataKey])
+	if raw == "" {
+		return false
+	}
+	var envelope struct {
+		ContractVersion int    `json:"contract_version"`
+		Disposition     string `json:"disposition"`
+		WorkID          string `json:"work_id"`
+	}
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		return false
+	}
+	if envelope.ContractVersion != beadmeta.CoordinatorOutcomeContractVersion || envelope.WorkID != subject.ID {
+		return false
+	}
+	switch envelope.Disposition {
+	case beadmeta.CoordinatorDispositionDeliverable, beadmeta.CoordinatorDispositionNonDeliverable:
+		return true
+	default:
+		return false
+	}
+}
+
 func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
+	if outcome == "" && typedCoordinatorOutcomeIsCleanClose(subject) {
+		// The attempt closed through the gc-outcome-close typed contract, which
+		// records its disposition under CoordinatorOutcomeProducerDispositionMetadataKey
+		// and leaves gc.outcome empty. Fold that clean typed close as a pass so it is
+		// consumed exactly once rather than misread as a missing outcome (gc-e2xqk).
+		// Normalizing to OutcomePass keeps the pass-path postconditions (failure
+		// metadata, required output/artifacts) applying uniformly below.
+		outcome = beadmeta.OutcomePass
+	}
 	switch outcome {
 	case beadmeta.OutcomePass:
 		if strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) != "" || strings.TrimSpace(subject.Metadata[beadmeta.FailureReasonMetadataKey]) != "" {

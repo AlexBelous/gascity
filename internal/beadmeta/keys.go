@@ -61,8 +61,14 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
-	CurrentRunIDMetadataKey              = "gc.current_run_id"
-	CwdMetadataKey                       = "gc.cwd"
+	// CoordinatorOutcomeProducerDispositionMetadataKey holds the JSON typed-close
+	// envelope written by the gc-outcome-close helper (contract_version, disposition,
+	// work_id, recorded_by, reason, [producer]). It is the authoritative typed
+	// step-close record; the controller folds it so a helper-closed attempt whose
+	// gc.outcome is empty is not misread as a missing outcome (gc-e2xqk).
+	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
+	CurrentRunIDMetadataKey                          = "gc.current_run_id"
+	CwdMetadataKey                                   = "gc.cwd"
 	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
 	// between speculative (deferred, non-runnable) creation and the CAS-last
 	// epoch fence committing. Cleared on activation; a root still carrying it
@@ -308,6 +314,7 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
 	AttachFencePendingMetadataKey,

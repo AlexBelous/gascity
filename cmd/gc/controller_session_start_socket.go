@@ -9,12 +9,18 @@ import (
 
 const sessionStartCommandPrefix = "session-start:"
 
+// errSessionStartControllerBlocked distinguishes an explicit controller safety
+// refusal from an unavailable or older controller, which still permits the
+// established generic-poke compatibility fallback.
+var errSessionStartControllerBlocked = errors.New("session-start controller blocked admission")
+
 type sessionStartSocketReply string
 
 const (
 	sessionStartSocketReplyOK       sessionStartSocketReply = "ok"
 	sessionStartSocketReplyFallback sessionStartSocketReply = "fallback"
 	sessionStartSocketReplyInvalid  sessionStartSocketReply = "invalid"
+	sessionStartSocketReplyBlocked  sessionStartSocketReply = "blocked"
 )
 
 type (
@@ -46,6 +52,8 @@ func pokeSessionStartControllerWith(
 			exactErr = err
 		case strings.TrimSpace(string(response)) == string(sessionStartSocketReplyOK):
 			return nil
+		case strings.TrimSpace(string(response)) == string(sessionStartSocketReplyBlocked):
+			return fmt.Errorf("sending exact session-start hint for %q: %w", sessionID, errSessionStartControllerBlocked)
 		default:
 			exactErr = fmt.Errorf("controller returned %q", strings.TrimSpace(string(response)))
 		}
@@ -61,7 +69,7 @@ func pokeSessionStartControllerWith(
 		// requested through either path.
 		return err
 	}
-	return nil
+	return fmt.Errorf("exact session-start hint for %q in city %q was not admitted (%w); generic fallback requested", sessionID, cityPath, exactErr)
 }
 
 func handleSessionStartSocketCmd(conn net.Conn, payload string, admit sessionStartSocketAdmitter) {

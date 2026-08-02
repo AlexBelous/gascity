@@ -988,6 +988,430 @@ func TestAuthorizeRoutedWorkPoolStartRetainsExactMemberAuthorityAfterPoolGrowth(
 	}
 }
 
+func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*routedWorkPoolDrainAckAuthorizationFixture)
+		wantError bool
+	}{
+		{
+			name: "config generation changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.lease.ControllerGeneration++
+			},
+		},
+		{
+			name: "config instance changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				next := *f.snapshot.Config
+				f.cr.cfg = &next
+			},
+		},
+		{
+			name: "durable instance token changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.info.InstanceToken = "replacement-token"
+			},
+		},
+		{
+			name: "durable trigger changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.info.TriggerBeadID = "ga-other-work"
+			},
+		},
+		{
+			name: "requester session changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.lease.RequesterSessionID = "gc-other-session"
+			},
+		},
+		{
+			name: "requester runtime token changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				if err := f.provider.SetMeta(f.info.SessionName, drainAckRequesterInstanceTokenKey, "replacement-token"); err != nil {
+					f.t.Fatalf("change requester runtime token: %v", err)
+				}
+			},
+		},
+		{
+			name:      "source store unavailable",
+			wantError: true,
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.info.TriggerBeadStoreRef = "city:missing"
+				f.lease.SourceStore = "city:missing"
+			},
+		},
+		{
+			name: "runtime session id changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				if err := f.provider.SetMeta(f.info.SessionName, "GC_SESSION_ID", "gcs-other"); err != nil {
+					f.t.Fatalf("change runtime session id: %v", err)
+				}
+			},
+		},
+		{
+			name: "runtime token changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				if err := f.provider.SetMeta(f.info.SessionName, "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
+					f.t.Fatalf("change runtime token: %v", err)
+				}
+			},
+		},
+		{
+			name: "ack source is not agent",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				if err := f.provider.SetMeta(f.info.SessionName, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue); err != nil {
+					f.t.Fatalf("change acknowledgement source: %v", err)
+				}
+			},
+		},
+		{
+			name: "ack bit cleared",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				if err := f.provider.RemoveMeta(f.info.SessionName, "GC_DRAIN_ACK"); err != nil {
+					f.t.Fatalf("clear acknowledgement: %v", err)
+				}
+			},
+		},
+		{
+			name: "pending interaction",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.provider.SetPendingInteraction(f.info.SessionName, &runtime.PendingInteraction{RequestID: "approval-1"})
+			},
+		},
+		{
+			name:      "provider cannot prove pending interaction",
+			wantError: true,
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.snapshot.Provider = poolDrainAckProviderWithoutInteraction{Provider: f.provider}
+			},
+		},
+		{
+			name:      "runtime metadata read failed",
+			wantError: true,
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.snapshot.Provider = runtime.NewFailFake()
+			},
+		},
+		{
+			name: "trigger work reopened",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				status := "open"
+				if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+					f.t.Fatalf("reopen trigger work: %v", err)
+				}
+			},
+		},
+		{
+			name:      "trigger work disappeared",
+			wantError: true,
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.info.TriggerBeadID = "ga-missing-work"
+				f.lease.WorkID = "ga-missing-work"
+			},
+		},
+		{
+			name: "other awake assigned work",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				if _, err := f.store.Create(beads.Bead{
+					Title:    "new assigned work",
+					Type:     "task",
+					Status:   "in_progress",
+					Assignee: f.info.SessionName,
+				}); err != nil {
+					f.t.Fatalf("create assigned work: %v", err)
+				}
+			},
+		},
+		{
+			name: "unsupported pool policy",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.snapshot.Config.Agents[0].DependsOn = []string{"database"}
+			},
+		},
+		{
+			name: "membership lost exact member",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.cr.poolMembershipShadow.remove(f.info.ID)
+			},
+		},
+		{
+			name: "membership revision not observed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.lease.MembershipRevision++
+			},
+		},
+		{
+			name: "session already closed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.info.Closed = true
+			},
+		},
+		{
+			name: "unsupported pre-CAS lifecycle shape",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				f.info.MetadataState = string(sessionpkg.StateAsleep)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+			test.mutate(&fixture)
+			before, err := fixture.store.Get(fixture.info.ID)
+			if err != nil {
+				t.Fatalf("read row before authorization: %v", err)
+			}
+
+			authorized, authorizeErr := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, fixture.lease)
+			if authorized {
+				t.Fatal("stale or unsafe drain acknowledgement retained stop authority")
+			}
+			if (authorizeErr != nil) != test.wantError {
+				t.Fatalf("authorization error = %v, wantError=%t", authorizeErr, test.wantError)
+			}
+			after, err := fixture.store.Get(fixture.info.ID)
+			if err != nil {
+				t.Fatalf("read row after authorization: %v", err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("authorization mutated durable row:\nbefore=%+v\nafter=%+v", before, after)
+			}
+			if got := fixture.provider.CountCalls("Stop", fixture.info.SessionName); got != 0 {
+				t.Fatalf("provider Stop calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestAuthorizeRoutedWorkPoolDrainAckAcceptsExactStopPendingRow(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	if err := fixture.store.SetMetadataBatch(fixture.info.ID, sessionpkg.DrainAckStopPendingPatch(time.Now().UTC())); err != nil {
+		t.Fatalf("mark drain acknowledgement stop-pending: %v", err)
+	}
+	info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read stop-pending pool session: %v", err)
+	}
+	if !isDrainAckStopPendingInfo(info) {
+		t.Fatal("fixture did not enter drain-ack stop-pending")
+	}
+
+	authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, fixture.lease)
+	if err != nil || !authorized {
+		t.Fatalf("authorize exact stop-pending drain acknowledgement = (%t, %v), want true", authorized, err)
+	}
+}
+
+func TestRecoverRoutedWorkPoolDrainAckLeaseDistinguishesLegacyFromUnknownProvenance(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	if err := fixture.provider.SetMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue); err != nil {
+		t.Fatalf("set legacy drain acknowledgement source: %v", err)
+	}
+	_, agent, legacy, err := fixture.cr.recoverRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+	if err != nil || agent || !legacy {
+		t.Fatalf("recover legacy provenance = (agent=%t, legacy=%t, err=%v), want false/true/nil", agent, legacy, err)
+	}
+	if err := fixture.provider.RemoveMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey); err != nil {
+		t.Fatalf("remove drain acknowledgement source: %v", err)
+	}
+	_, agent, legacy, err = fixture.cr.recoverRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+	if err == nil || agent || legacy {
+		t.Fatalf("recover unknown provenance = (agent=%t, legacy=%t, err=%v), want false/false/error", agent, legacy, err)
+	}
+}
+
+func TestRecoverRoutedWorkPoolDrainAckLeaseRejectsUnadmittedAgentAcknowledgement(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	fixture.cr.poolMembershipShadow.remove(fixture.info.ID)
+	lease, agent, legacy, err := fixture.cr.recoverRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+	if err == nil || agent || legacy || lease != (routedWorkPoolDrainAckLease{}) {
+		t.Fatalf("recover unadmitted agent acknowledgement = (%+v, agent=%t, legacy=%t, err=%v), want zero/false/false/error", lease, agent, legacy, err)
+	}
+}
+
+func TestNewRoutedWorkPoolDrainAckLeaseDistinguishesAgentAckFromOrdinaryStart(t *testing.T) {
+	t.Run("certified agent acknowledgement", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err != nil || !agentAck || lease != fixture.lease {
+			t.Fatalf("new drain acknowledgement lease = (%+v, %t, %v), want %+v", lease, agentAck, err, fixture.lease)
+		}
+	})
+
+	t.Run("admission does not reread work stores", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		store := &poolDrainAckAdmissionReadRejectStore{Store: fixture.store}
+		fixture.snapshot.Store = store
+		fixture.cr.cs.cityBeadStore = store
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err != nil || !agentAck || lease != fixture.lease {
+			t.Fatalf("new drain acknowledgement lease = (%+v, %t, %v), want cheap lease %+v", lease, agentAck, err, fixture.lease)
+		}
+		if store.reads != 0 {
+			t.Fatalf("admission store reads = %d, want 0 before effect-time authorization", store.reads)
+		}
+	})
+
+	t.Run("ordinary live session", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		if err := fixture.provider.RemoveMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey); err != nil {
+			t.Fatalf("clear acknowledgement source: %v", err)
+		}
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err != nil || agentAck || lease != (routedWorkPoolDrainAckLease{}) {
+			t.Fatalf("ordinary session drain lease = (%+v, %t, %v), want no acknowledgement", lease, agentAck, err)
+		}
+	})
+
+	t.Run("ordinary live session without membership index", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		if err := fixture.provider.RemoveMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey); err != nil {
+			t.Fatalf("clear acknowledgement source: %v", err)
+		}
+		fixture.cr.poolMembershipShadow = nil
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err != nil || agentAck || lease != (routedWorkPoolDrainAckLease{}) {
+			t.Fatalf("ordinary session drain lease = (%+v, %t, %v), want no acknowledgement", lease, agentAck, err)
+		}
+	})
+
+	t.Run("agent acknowledgement without membership index", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		fixture.cr.poolMembershipShadow = nil
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err == nil || !agentAck || lease != (routedWorkPoolDrainAckLease{}) || !strings.Contains(err.Error(), "keyed state is unavailable") {
+			t.Fatalf("uncertain drain lease = (%+v, %t, %v), want visible acknowledged uncertainty", lease, agentAck, err)
+		}
+	})
+
+	t.Run("agent acknowledgement without requester binding", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		if err := fixture.provider.RemoveMeta(fixture.info.SessionName, drainAckRequesterInstanceTokenKey); err != nil {
+			t.Fatalf("clear acknowledgement requester token: %v", err)
+		}
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err != nil || !agentAck || lease != (routedWorkPoolDrainAckLease{}) {
+			t.Fatalf("unbound drain lease = (%+v, %t, %v), want acknowledged but unadmitted", lease, agentAck, err)
+		}
+	})
+
+	t.Run("uncertified occupied member", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		fixture.cr.poolMembershipShadow.remove(fixture.info.ID)
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err != nil || !agentAck || lease != (routedWorkPoolDrainAckLease{}) {
+			t.Fatalf("uncertified drain lease = (%+v, %t, %v), want acknowledged but unadmitted", lease, agentAck, err)
+		}
+	})
+
+	t.Run("running provider metadata uncertainty", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		fixture.snapshot.Provider = poolDrainAckGetMetaErrorProvider{
+			Provider: fixture.provider,
+			err:      errors.New("runtime metadata unavailable"),
+		}
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err == nil || !agentAck || lease != (routedWorkPoolDrainAckLease{}) || !strings.Contains(err.Error(), "runtime metadata unavailable") {
+			t.Fatalf("uncertain drain lease = (%+v, %t, %v), want visible acknowledged uncertainty", lease, agentAck, err)
+		}
+	})
+}
+
+func TestCityRuntimeSocketReportsDrainAckAdmissionUncertainty(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	readErr := errors.New("runtime metadata unavailable")
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.sp = poolDrainAckGetMetaErrorProvider{Provider: fixture.provider, err: readErr}
+	fixture.cr.cs.mu.Unlock()
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 1,
+		MaxRetries:  0,
+		Reconcile:   func(context.Context, sessionStartAdmission) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("create exact controller: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+	var stderr bytes.Buffer
+	fixture.cr.stderr = &stderr
+	fixture.cr.sessionStartController = controller
+	fixture.cr.sessionStartOwnership = sessionStartOwnershipKeyed
+
+	if reply := fixture.cr.admitSessionStartSocketKey(fixture.info.ID); reply != sessionStartSocketReplyFallback {
+		t.Fatalf("socket reply = %q, want fallback", reply)
+	}
+	if !strings.Contains(stderr.String(), readErr.Error()) {
+		t.Fatalf("socket fallback diagnostic = %q, want %q", stderr.String(), readErr)
+	}
+}
+
+func TestCityRuntimeSocketRequireRefusesDrainAckAdmissionUncertainty(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	readErr := errors.New("runtime metadata unavailable")
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.sp = poolDrainAckGetMetaErrorProvider{Provider: fixture.provider, err: readErr}
+	fixture.cr.cs.mu.Unlock()
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 1,
+		MaxRetries:  0,
+		Reconcile:   func(context.Context, sessionStartAdmission) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("create exact controller: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+	var stderr bytes.Buffer
+	fixture.cr.stderr = &stderr
+	fixture.cr.sessionStartController = controller
+	fixture.cr.sessionStartOwnership = sessionStartOwnershipKeyed
+	fixture.cr.sessionStartMode = rollout.Require
+
+	if reply := fixture.cr.admitSessionStartSocketKey(fixture.info.ID); reply != sessionStartSocketReplyBlocked {
+		t.Fatalf("socket reply = %q, want blocked", reply)
+	}
+	if !strings.Contains(stderr.String(), readErr.Error()) {
+		t.Fatalf("socket refusal diagnostic = %q, want %q", stderr.String(), readErr)
+	}
+}
+
+func TestSessionStartLegacyExclusionRequireRetainsAgentDrainAckAfterAdmissionEnds(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	fixture.cr.sessionStartOwnership = sessionStartOwnershipKeyed
+	fixture.cr.sessionStartMode = rollout.Require
+	fixture.cr.sessionStartController = nil
+	excluded := fixture.cr.sessionStartLegacyExclusionPredicate()
+	if excluded == nil || !excluded(fixture.info) {
+		t.Fatal("require mode allowed legacy drain-ack entry after exact admission ended")
+	}
+}
+
+func TestSessionStartLegacyExclusionLeavesConfirmedLegacyDrainAckOwned(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	if err := fixture.store.SetMetadataBatch(fixture.info.ID, sessionpkg.DrainAckStopPendingPatch(time.Now().UTC())); err != nil {
+		t.Fatalf("mark legacy drain acknowledgement stop-pending: %v", err)
+	}
+	if err := fixture.provider.SetMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue); err != nil {
+		t.Fatalf("mark reconciler-authored acknowledgement: %v", err)
+	}
+	info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read legacy stop-pending session: %v", err)
+	}
+	fixture.cr.sessionStartOwnership = sessionStartOwnershipKeyed
+	fixture.cr.sessionStartController = nil
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		fixture.cr.sessionStartMode = mode
+		excluded := fixture.cr.sessionStartLegacyExclusionPredicate()
+		if excluded == nil || excluded(info) {
+			t.Fatalf("%s mode excluded a confirmed reconciler-authored stop-pending row", mode)
+		}
+	}
+}
+
 func TestReconcileExactSessionStartKeepsOrdinaryPoolRowsLegacyOwned(t *testing.T) {
 	fixture := newRoutedWorkPoolAuthorizationFixture(t)
 
@@ -1032,6 +1456,114 @@ type routedWorkPoolAuthorizationFixture struct {
 	work     beads.Bead
 	info     sessionpkg.Info
 	lease    routedWorkPoolStartLease
+}
+
+type routedWorkPoolDrainAckAuthorizationFixture struct {
+	*routedWorkPoolAuthorizationFixture
+	lease routedWorkPoolDrainAckLease
+}
+
+type poolDrainAckProviderWithoutInteraction struct {
+	runtime.Provider
+}
+
+type poolDrainAckGetMetaErrorProvider struct {
+	runtime.Provider
+	err error
+}
+
+type poolDrainAckAdmissionReadRejectStore struct {
+	beads.Store
+	reads int
+}
+
+func (s *poolDrainAckAdmissionReadRejectStore) Get(string) (beads.Bead, error) {
+	s.reads++
+	return beads.Bead{}, errors.New("work-store read attempted during admission")
+}
+
+func (s *poolDrainAckAdmissionReadRejectStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	s.reads++
+	return nil, errors.New("work-store list attempted during admission")
+}
+
+func (s *poolDrainAckAdmissionReadRejectStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	s.reads++
+	return nil, errors.New("work-store ready scan attempted during admission")
+}
+
+func (s *poolDrainAckAdmissionReadRejectStore) DepList(string, string) ([]beads.Dep, error) {
+	s.reads++
+	return nil, errors.New("work-store dependency scan attempted during admission")
+}
+
+func (s *poolDrainAckAdmissionReadRejectStore) Handles() beads.StoreHandles {
+	return beads.StoreHandles{Cached: s, Live: s, Writer: s.Store}
+}
+
+func (p poolDrainAckGetMetaErrorProvider) GetMeta(string, string) (string, error) {
+	return "", p.err
+}
+
+func newRoutedWorkPoolDrainAckAuthorizationFixture(t *testing.T) routedWorkPoolDrainAckAuthorizationFixture {
+	t.Helper()
+	base := newRoutedWorkPoolAuthorizationFixture(t)
+	if err := base.provider.Start(t.Context(), base.info.SessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start pool runtime: %v", err)
+	}
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":                   base.info.ID,
+		"GC_INSTANCE_TOKEN":               base.info.InstanceToken,
+		reconcilerDrainAckSourceKey:       drainAckSourceAgentValue,
+		drainAckRequesterSessionIDKey:     base.info.ID,
+		drainAckRequesterInstanceTokenKey: base.info.InstanceToken,
+		"GC_DRAIN_ACK":                    "1",
+	} {
+		if err := base.provider.SetMeta(base.info.SessionName, key, value); err != nil {
+			t.Fatalf("set runtime metadata %s: %v", key, err)
+		}
+	}
+	if err := base.store.SetMetadataBatch(base.info.ID, map[string]string{
+		"state":                     string(sessionpkg.StateActive),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}); err != nil {
+		t.Fatalf("mark pool session active: %v", err)
+	}
+	if err := base.store.Close(base.work.ID); err != nil {
+		t.Fatalf("close trigger work: %v", err)
+	}
+	info, err := sessionFrontDoor(base.store).Get(base.info.ID)
+	if err != nil {
+		t.Fatalf("read active pool session: %v", err)
+	}
+	base.info = info
+	if err := base.cr.poolMembershipShadow.replace(base.snapshot.Config, info); err != nil {
+		t.Fatalf("publish active pool membership: %v", err)
+	}
+	observation, occupied := base.cr.poolMembershipShadow.observeOccupiedMember("worker", info.ID)
+	if !occupied {
+		t.Fatal("active pool session is not an occupied member")
+	}
+	lease := routedWorkPoolDrainAckLease{
+		SessionID:              info.ID,
+		InstanceToken:          info.InstanceToken,
+		RequesterSessionID:     info.ID,
+		RequesterInstanceToken: info.InstanceToken,
+		ControllerGeneration:   base.snapshot.Generation,
+		PoolTarget:             "worker",
+		WorkID:                 base.work.ID,
+		SourceStore:            "city:test-city",
+		MembershipRevision:     observation.revision,
+	}
+	authorized, err := base.cr.authorizeRoutedWorkPoolDrainAck(base.snapshot, info, lease)
+	if err != nil || !authorized {
+		t.Fatalf("baseline drain acknowledgement authorization = (%t, %v), want true", authorized, err)
+	}
+	return routedWorkPoolDrainAckAuthorizationFixture{
+		routedWorkPoolAuthorizationFixture: &base,
+		lease:                              lease,
+	}
 }
 
 func newRoutedWorkPoolAuthorizationFixture(t *testing.T) routedWorkPoolAuthorizationFixture {

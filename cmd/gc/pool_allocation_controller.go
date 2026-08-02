@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -43,6 +44,22 @@ type routedWorkPoolStartLease struct {
 	MembershipRevision   uint64
 }
 
+// routedWorkPoolDrainAckLease binds one exact drain acknowledgement to the
+// durable pool member and terminal routed-work trigger it was observed for.
+// It is deliberately separate from the start lease: stop admission has a
+// different effect-time proof and must never inherit start authority.
+type routedWorkPoolDrainAckLease struct {
+	SessionID              string
+	InstanceToken          string
+	RequesterSessionID     string
+	RequesterInstanceToken string
+	ControllerGeneration   uint64
+	PoolTarget             string
+	WorkID                 string
+	SourceStore            string
+	MembershipRevision     uint64
+}
+
 func validateRoutedWorkPoolStartLease(lease routedWorkPoolStartLease) error {
 	if err := validateSessionStartAdmission(lease.SessionID, sessionStartAdmissionInProcess); err != nil {
 		return err
@@ -65,6 +82,221 @@ func validateRoutedWorkPoolStartLease(lease routedWorkPoolStartLease) error {
 		}
 	}
 	return nil
+}
+
+func validateRoutedWorkPoolDrainAckLease(lease routedWorkPoolDrainAckLease) error {
+	if err := validateSessionStartAdmission(lease.SessionID, sessionStartAdmissionInProcess); err != nil {
+		return err
+	}
+	if lease.ControllerGeneration == 0 || lease.MembershipRevision == 0 {
+		return fmt.Errorf("admitting pool drain acknowledgement %q: generation and membership revision must be positive", lease.SessionID)
+	}
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{name: "instance token", value: lease.InstanceToken},
+		{name: "requester session ID", value: lease.RequesterSessionID},
+		{name: "requester instance token", value: lease.RequesterInstanceToken},
+		{name: "pool target", value: lease.PoolTarget},
+		{name: "work ID", value: lease.WorkID},
+		{name: "source store", value: lease.SourceStore},
+	}
+	for _, field := range fields {
+		if field.value == "" || strings.TrimSpace(field.value) != field.value {
+			return fmt.Errorf("admitting pool drain acknowledgement %q: %s is not canonical", lease.SessionID, field.name)
+		}
+	}
+	return nil
+}
+
+// newRoutedWorkPoolDrainAckLease accepts only the intentionally narrow subset
+// of agent acknowledgements that the keyed pool controller can prove safe. A
+// false result is not an error: its caller must leave the legacy reconciler as
+// the only writer. Any failed observation is returned as an error so it cannot
+// be mistaken for a clean "no work" or "no interaction" result.
+func (cr *CityRuntime) newRoutedWorkPoolDrainAckLease(
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+) (routedWorkPoolDrainAckLease, bool, error) {
+	if cr == nil || cr.cs == nil || snapshot.Config == nil || snapshot.Provider == nil || snapshot.Store == nil {
+		return routedWorkPoolDrainAckLease{}, false, fmt.Errorf("authorizing pool drain acknowledgement: keyed state is unavailable")
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		return routedWorkPoolDrainAckLease{}, false, nil
+	}
+	source, err := snapshot.Provider.GetMeta(name, reconcilerDrainAckSourceKey)
+	if err != nil {
+		if snapshot.Provider.IsRunning(name) {
+			return routedWorkPoolDrainAckLease{}, true, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading acknowledgement source: %w", info.ID, err)
+		}
+		return routedWorkPoolDrainAckLease{}, false, nil
+	}
+	if source != drainAckSourceAgentValue {
+		return routedWorkPoolDrainAckLease{}, false, nil
+	}
+	requesterSessionID, err := snapshot.Provider.GetMeta(name, drainAckRequesterSessionIDKey)
+	if err != nil {
+		return routedWorkPoolDrainAckLease{}, true, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading requester session ID: %w", info.ID, err)
+	}
+	requesterInstanceToken, err := snapshot.Provider.GetMeta(name, drainAckRequesterInstanceTokenKey)
+	if err != nil {
+		return routedWorkPoolDrainAckLease{}, true, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading requester instance token: %w", info.ID, err)
+	}
+	if cr.poolMembershipShadow == nil {
+		return routedWorkPoolDrainAckLease{}, true, fmt.Errorf("authorizing pool drain acknowledgement: keyed state is unavailable")
+	}
+	template := normalizedSessionTemplateInfo(info, snapshot.Config)
+	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(template, info.ID)
+	if !occupied {
+		return routedWorkPoolDrainAckLease{}, true, nil
+	}
+	lease := routedWorkPoolDrainAckLease{
+		SessionID:              info.ID,
+		InstanceToken:          strings.TrimSpace(info.InstanceToken),
+		RequesterSessionID:     strings.TrimSpace(requesterSessionID),
+		RequesterInstanceToken: strings.TrimSpace(requesterInstanceToken),
+		ControllerGeneration:   snapshot.Generation,
+		PoolTarget:             template,
+		WorkID:                 strings.TrimSpace(info.TriggerBeadID),
+		SourceStore:            strings.TrimSpace(info.TriggerBeadStoreRef),
+		MembershipRevision:     observation.revision,
+	}
+	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
+		return routedWorkPoolDrainAckLease{}, true, nil
+	}
+	return lease, true, nil
+}
+
+// recoverRoutedWorkPoolDrainAckLease distinguishes a confirmed legacy marker
+// from an unavailable or malformed provenance witness. Only the former may
+// yield to legacy; unknown provenance remains parked with zero STOP effects.
+func (cr *CityRuntime) recoverRoutedWorkPoolDrainAckLease(
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+) (routedWorkPoolDrainAckLease, bool, bool, error) {
+	lease, agentDrainAck, err := cr.newRoutedWorkPoolDrainAckLease(snapshot, info)
+	if err != nil {
+		return routedWorkPoolDrainAckLease{}, false, false, err
+	}
+	if agentDrainAck {
+		if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
+			return routedWorkPoolDrainAckLease{}, false, false, fmt.Errorf("validating recovered drain acknowledgement lease: %w", err)
+		}
+		return lease, true, false, nil
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" || snapshot.Provider == nil {
+		return routedWorkPoolDrainAckLease{}, false, false, errors.New("drain acknowledgement provenance is unavailable")
+	}
+	source, sourceErr := snapshot.Provider.GetMeta(name, reconcilerDrainAckSourceKey)
+	if sourceErr != nil {
+		return routedWorkPoolDrainAckLease{}, false, false, fmt.Errorf("reading drain acknowledgement provenance: %w", sourceErr)
+	}
+	if source == reconcilerDrainAckSourceValue {
+		return routedWorkPoolDrainAckLease{}, false, true, nil
+	}
+	return routedWorkPoolDrainAckLease{}, false, false, errors.New("drain acknowledgement provenance is not a confirmed legacy marker")
+}
+
+// authorizeRoutedWorkPoolDrainAck repeats every destructive precondition at
+// the effect boundary. It intentionally uses live exact reads and strict
+// provider probes rather than the legacy reconciler's best-effort snapshots.
+func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+	lease routedWorkPoolDrainAckLease,
+) (bool, error) {
+	if cr == nil || cr.cs == nil || cr.poolMembershipShadow == nil || snapshot.Config == nil || snapshot.Provider == nil || snapshot.Store == nil {
+		return false, fmt.Errorf("authorizing pool drain acknowledgement: keyed state is unavailable")
+	}
+	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
+		return false, err
+	}
+	cr.serviceStateMu.RLock()
+	configCurrent := cr.cfg == snapshot.Config
+	cr.serviceStateMu.RUnlock()
+	if !configCurrent || snapshot.Generation != lease.ControllerGeneration || info.ID != lease.SessionID || info.Closed ||
+		!isRoutedWorkPoolDrainAckLifecycleShape(info) || !isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) ||
+		lease.RequesterSessionID != info.ID || lease.RequesterInstanceToken != lease.InstanceToken ||
+		strings.TrimSpace(info.InstanceToken) != lease.InstanceToken || normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget ||
+		strings.TrimSpace(info.TriggerBeadID) != lease.WorkID || strings.TrimSpace(info.TriggerBeadStoreRef) != lease.SourceStore {
+		return false, nil
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		return false, nil
+	}
+	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
+	if agent == nil || isAgentEffectivelySuspendedWith(snapshot.Config, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
+		return false, nil
+	}
+	namedTemplates := make(map[string]struct{}, len(snapshot.Config.NamedSessions))
+	for i := range snapshot.Config.NamedSessions {
+		namedTemplates[snapshot.Config.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
+	}
+	if !newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates).
+		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore).supported() {
+		return false, nil
+	}
+	for _, check := range []struct{ key, want string }{
+		{"GC_SESSION_ID", info.ID},
+		{"GC_INSTANCE_TOKEN", lease.InstanceToken},
+		{reconcilerDrainAckSourceKey, drainAckSourceAgentValue},
+		{drainAckRequesterSessionIDKey, lease.RequesterSessionID},
+		{drainAckRequesterInstanceTokenKey, lease.RequesterInstanceToken},
+		{"GC_DRAIN_ACK", "1"},
+	} {
+		got, err := snapshot.Provider.GetMeta(name, check.key)
+		if err != nil {
+			return false, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading %s: %w", info.ID, check.key, err)
+		}
+		if got != check.want {
+			return false, nil
+		}
+	}
+	interactionProvider, ok := snapshot.Provider.(runtime.InteractionProvider)
+	if !ok {
+		return false, fmt.Errorf("authorizing pool drain acknowledgement for %q: provider cannot prove pending-interaction state", info.ID)
+	}
+	pending, err := interactionProvider.Pending(name)
+	if err != nil {
+		return false, fmt.Errorf("authorizing pool drain acknowledgement for %q: checking pending interaction: %w", info.ID, err)
+	}
+	if pending != nil {
+		return false, nil
+	}
+	sourceStore, ok := cr.cs.routedWorkStore(snapshot.Config, lease.SourceStore)
+	if !ok || sourceStore == nil {
+		return false, fmt.Errorf("authorizing pool drain acknowledgement for %q: source store %q is unavailable", info.ID, lease.SourceStore)
+	}
+	work, err := beads.HandlesFor(sourceStore).Live.Get(lease.WorkID)
+	if err != nil {
+		return false, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading trigger work %q: %w", info.ID, lease.WorkID, err)
+	}
+	if work.ID != lease.WorkID || work.Status != "closed" {
+		return false, nil
+	}
+	hasAssigned, err := sessionHasAwakeAssignedWorkForReachableStore(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), info)
+	if err != nil {
+		return false, fmt.Errorf("authorizing pool drain acknowledgement for %q: checking assigned work: %w", info.ID, err)
+	}
+	if hasAssigned {
+		return false, nil
+	}
+	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)
+	if !occupied || observation.revision < lease.MembershipRevision {
+		return false, nil
+	}
+	return true, nil
+}
+
+func isRoutedWorkPoolDrainAckLifecycleShape(info sessionpkg.Info) bool {
+	if isDrainAckStopPendingInfo(info) {
+		return true
+	}
+	return strings.TrimSpace(info.MetadataState) == string(sessionpkg.StateActive)
 }
 
 // authoritativeReadyRoutedWorkByID verifies one work bead and its blocking

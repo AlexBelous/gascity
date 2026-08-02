@@ -1995,6 +1995,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		RowVersion:  b.Revision,
 	}
 	if b.Priority != nil {
 		issue.Priority = *b.Priority
@@ -2059,6 +2060,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:   issue.Ephemeral,
 		NoHistory:   issue.NoHistory,
 		DeferUntil:  cloneTimePtr(issue.DeferUntil),
+		Revision:    issue.RowVersion,
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {

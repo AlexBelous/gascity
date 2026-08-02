@@ -916,3 +916,13 @@ func TestClosePatchKeepsShortStateCode(t *testing.T) {
 			patch["close_reason"], len(trimmed))
 	}
 }
+
+func TestClosePatchClearsTransientStateReason(t *testing.T) {
+	merged := ClosePatch(time.Now().UTC(), "drained").Apply(map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": DrainAckStopPendingReason,
+	})
+	if got := merged["state_reason"]; got != "" {
+		t.Fatalf("state_reason = %q, want terminal close to clear transient reason", got)
+	}
+}

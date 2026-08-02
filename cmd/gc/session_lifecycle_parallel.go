@@ -513,6 +513,14 @@ func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
 	}, true
 }
 
+func (t *asyncStartTracker) drainAckStopInFlight(key string) bool {
+	if t == nil || strings.TrimSpace(key) == "" {
+		return false
+	}
+	_, ok := t.drainAckStopKeys.Load(key)
+	return ok
+}
+
 func (t *asyncStartTracker) wait(timeout time.Duration) bool {
 	return t.waitUntil(timeout, nil)
 }

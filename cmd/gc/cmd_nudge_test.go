@@ -925,8 +925,8 @@ func TestDeliverSessionNudgeWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueued
 	if !strings.Contains(stdout.String(), "Queued nudge for "+info.ID) {
 		t.Fatalf("stdout = %q, want queued confirmation", stdout.String())
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
+	if !strings.Contains(stderr.String(), "warning: poke failed:") || !strings.Contains(stderr.String(), "generic fallback requested") {
+		t.Fatalf("stderr = %q, want exact-ingress fallback diagnostic", stderr.String())
 	}
 	if withdraws != 1 {
 		t.Fatalf("withdraws = %d, want 1", withdraws)

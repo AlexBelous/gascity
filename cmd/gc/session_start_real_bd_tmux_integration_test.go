@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ type exactSessionStartStopDurableSample struct {
 	SessionID                      string `json:"session_id"`
 	SchemaStatus                   string `json:"schema_status"`
 	StartAdmissionToFinalizationNS int64  `json:"start_admission_to_finalization_ns"`
-	StopAdmissionToFinalizationNS  int64  `json:"stop_admission_to_finalization_ns"`
+	StopCommandToFinalizationNS    int64  `json:"stop_command_to_finalization_ns"`
 	WakeCommandToFinalizationNS    int64  `json:"wake_command_to_finalization_ns"`
 	StartPersistedState            string `json:"start_persisted_state"`
 	StopPersistedState             string `json:"stop_persisted_state"`
@@ -78,7 +79,6 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 	if len(beforeSessionIDs) != 1 || strings.TrimSpace(beforeSessionIDs[sessionName]) == "" {
 		t.Fatalf("isolated tmux sessions before admission = %v, want exactly live target %q with a non-empty ID", beforeSessionIDs, sessionName)
 	}
-	t.Logf("LIVE_SOCKET_NOOP before starts=%d server_pid=%d socket=%s sessions=%v", beforeStarts, beforeServerPID, guard.SocketPath(), beforeSessionIDs)
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: guard.CityName()},
@@ -175,8 +175,6 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 		t.Fatalf("isolated tmux sessions/live state = %v/%t/%t, want unchanged sessions %v and live target",
 			afterSessionIDs, provider.IsRunning(sessionName), guard.HasSession(sessionName), beforeSessionIDs)
 	}
-	t.Logf("LIVE_SOCKET_NOOP after starts=%d server_pid=%d socket_same=%t sessions=%v", len(provider.snapshotStartCalls()), afterServerPID, os.SameFile(beforeSocket, afterSocket), afterSessionIDs)
-
 	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
 	if err != nil {
 		t.Fatalf("read detached socket shadow trace: %v", err)
@@ -225,56 +223,12 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("BEADS_DOLT_AUTO_START", "1")
-	bdTracePath := strings.TrimSpace(os.Getenv("GC_TEST_BD_TRACE_JSON"))
-	if bdTracePath == "" {
-		bdTracePath = filepath.Join(t.TempDir(), "bd-trace.jsonl")
-	}
-	t.Setenv("GC_BD_TRACE_JSON", bdTracePath)
-	type bdTraceRecord struct {
-		Args    []string `json:"args"`
-		Callers []string `json:"callers"`
-	}
-	readBDTrace := func() []bdTraceRecord {
-		t.Helper()
-		data, readErr := os.ReadFile(bdTracePath)
-		if readErr != nil {
-			t.Fatalf("read Bd trace %q: %v", bdTracePath, readErr)
-		}
-		lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
-		records := make([]bdTraceRecord, 0, len(lines))
-		for _, line := range lines {
-			if len(line) == 0 {
-				continue
-			}
-			var record bdTraceRecord
-			if decodeErr := json.Unmarshal(line, &record); decodeErr != nil {
-				t.Fatalf("decode isolated bd trace record %q: %v", line, decodeErr)
-			}
-			records = append(records, record)
-		}
-		return records
-	}
-	hasTraceArgument := func(args []string, want string) bool {
-		for _, arg := range args {
-			if arg == want {
-				return true
-			}
-		}
-		return false
-	}
-	hasTraceCaller := func(callers []string, want string) bool {
-		for _, caller := range callers {
-			if strings.Contains(caller, want) {
-				return true
-			}
-		}
-		return false
-	}
 
 	guard := tmuxtest.NewGuard(t)
 	cityPath := t.TempDir()
 	cleanupManagedDoltTestCity(t, cityPath)
 	configPath := filepath.Join(t.TempDir(), "city.toml")
+	unlimitedSessions := -1
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: guard.CityName()},
 		Beads: config.BeadsConfig{
@@ -283,7 +237,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		},
 		Daemon: config.DaemonConfig{
 			SessionReconciler: "auto",
-			PatrolInterval:    "1m",
+			PatrolInterval:    "1h",
 			TickDebounce:      "30s",
 		},
 		Session: config.SessionConfig{
@@ -292,9 +246,10 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			StartupTimeout: "10s",
 		},
 		Agents: []config.Agent{{
-			Name:         "worker",
-			StartCommand: "sleep 600",
-			Env:          map[string]string{"GC_PROVIDER": "codex"},
+			Name:              "worker",
+			StartCommand:      "sleep 600",
+			MaxActiveSessions: &unlimitedSessions,
+			Env:               map[string]string{"GC_PROVIDER": "codex"},
 		}},
 	}
 	configData, err := cfg.Marshal()
@@ -305,7 +260,39 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("write exact start-stop city config: %v", err)
 	}
 
-	gcBinary := currentGCBinaryForTests(t)
+	// Restrict the production scanner to live procfs views of test-owned pane
+	// processes. This proves exact process absence without host-wide scanner
+	// incompleteness from unrelated same-UID processes.
+	processScanRoot := t.TempDir()
+	gcBinary := currentGCBinaryForTestsWithProcessScanRoot(t, processScanRoot)
+	registerLivePaneProcess := func(pid string) {
+		t.Helper()
+		if _, err := strconv.Atoi(pid); err != nil {
+			t.Fatalf("controlled process-scan pane PID = %q, want numeric: %v", pid, err)
+		}
+		procDir := filepath.Join(processScanRoot, pid)
+		if err := os.MkdirAll(procDir, 0o755); err != nil {
+			t.Fatalf("create controlled procfs entry for pane PID %q: %v", pid, err)
+		}
+		for _, name := range []string{"status", "environ", "stat"} {
+			source := filepath.Join("/proc", pid, name)
+			if _, err := os.Stat(source); err != nil {
+				t.Fatalf("stat live procfs %s for pane PID %q: %v", name, pid, err)
+			}
+			if err := os.Symlink(source, filepath.Join(procDir, name)); err != nil {
+				t.Fatalf("link live procfs %s for pane PID %q: %v", name, pid, err)
+			}
+		}
+	}
+	removeExitedPaneProcess := func(pid string) error {
+		if !exactStartStopProcessExited(pid) {
+			return nil
+		}
+		if err := os.RemoveAll(filepath.Join(processScanRoot, pid)); err != nil {
+			return fmt.Errorf("remove exited controlled procfs entry for pane PID %q: %w", pid, err)
+		}
+		return nil
+	}
 	runtimeDir := t.TempDir()
 	gcHome := t.TempDir()
 	commandEnv := append([]string(nil), os.Environ()...)
@@ -328,6 +315,19 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		out, runErr := cmd.CombinedOutput()
 		if runErr != nil {
 			t.Fatalf("gc %s: %v\n%s", strings.Join(args, " "), runErr, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	runGCAsSession := func(timeout time.Duration, sessionID, instanceToken string, args ...string) string {
+		t.Helper()
+		env := replaceEnvEntry(commandEnv, "GC_SESSION_ID", sessionID)
+		env = replaceEnvEntry(env, "GC_INSTANCE_TOKEN", instanceToken)
+		ctx, cancel := context.WithTimeout(t.Context(), timeout)
+		defer cancel()
+		cmd := newExactStartStopGCCommand(ctx, env, gcBinary, args...)
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			t.Fatalf("gc %s as session %q: %v\n%s", strings.Join(args, " "), sessionID, runErr, out)
 		}
 		return strings.TrimSpace(string(out))
 	}
@@ -479,6 +479,16 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if startedTmuxID == "" {
 		t.Fatalf("exact-start tmux identity for %q is empty: %v", created.SessionName, sessionIDs)
 	}
+	startedPanePID, err := tmuxClient.GetPanePID(created.SessionName)
+	if err != nil {
+		t.Fatalf("read exact-start pane PID: %v", err)
+	}
+	if _, err := strconv.Atoi(startedPanePID); err != nil {
+		t.Fatalf("exact-start pane PID = %q, want a numeric live process identity: %v", startedPanePID, err)
+	}
+	if exactStartStopProcessExited(startedPanePID) {
+		t.Fatalf("exact-start pane PID %q was already dead before drain admission", startedPanePID)
+	}
 	startedTmuxServerPID := guard.ServerPID()
 	if startedTmuxServerPID <= 0 {
 		t.Fatalf("exact-start tmux server PID = %d, want positive", startedTmuxServerPID)
@@ -564,77 +574,50 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("project session after clearing status-heal wake marker: %v", err)
 	}
 
-	stopPending, err := sessionFrontDoor(backingStore).ApplyPatchInfo(
-		started,
-		sessionpkg.DrainAckStopPendingPatch(time.Now().UTC()),
-	)
-	if err != nil {
-		t.Fatalf("persist drain-ack stop-pending through session front door: %v", err)
-	}
-	if !isDrainAckStopPendingInfo(stopPending) {
-		t.Fatalf("stop-pending projection = %#v, want durable drain-ack marker", stopPending)
-	}
-
-	stopAdmittedAt := time.Now().UTC()
-	eventOutput := runGC(10*time.Second,
+	killOutput := runGC(10*time.Second,
 		"--city", cityPath,
-		"event", "emit", "bead.updated",
-		"--subject", created.SessionID,
-		"--bead-payload", created.SessionID,
-		"--actor", "bd-hook",
+		"session", "kill", created.SessionID,
 		"--json",
 	)
-	var emitted struct {
-		HasPayload bool `json:"has_payload"`
-		Submitted  bool `json:"submitted"`
+	var killResult sessionActionResult
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(killOutput)), &killResult); err != nil {
+		t.Fatalf("decode exact session kill: %v\n%s", err, killOutput)
 	}
-	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(eventOutput)), &emitted); err != nil {
-		t.Fatalf("decode typed stop event: %v\n%s", err, eventOutput)
-	}
-	if !emitted.HasPayload || !emitted.Submitted {
-		t.Fatalf("typed stop event = %+v, want submitted bead payload; output=%q", emitted, eventOutput)
+	if !killResult.OK || killResult.Action != "kill" || killResult.SessionID != created.SessionID {
+		t.Fatalf("exact session kill result = %+v, want successful kill for durable session %q", killResult, created.SessionID)
 	}
 
-	var (
-		stopped         sessionpkg.Info
-		stopFinalizedAt time.Time
-	)
 	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		if !exactStartStopProcessExited(startedPanePID) {
+			return false, nil
+		}
 		info, getErr := sessionFrontDoor(backingStore).Get(created.SessionID)
 		if getErr != nil {
 			return false, getErr
 		}
-		if info.MetadataState != string(sessionpkg.StateDrained) || isDrainAckStopPendingInfo(info) {
+		if info.MetadataState != string(sessionpkg.StateAsleep) {
 			return false, nil
 		}
-		stopped = info
-		stopFinalizedAt = time.Now().UTC()
 		return true, nil
 	}); err != nil {
 		current, currentErr := sessionFrontDoor(backingStore).Get(created.SessionID)
 		currentIDs, idsErr := tmuxClient.ListSessionIDs()
-		t.Fatalf("exact stop did not converge: %v; current=%+v current_err=%v tmux_ids=%v tmux_err=%v controller stdout=%q stderr=%q",
-			err, current, currentErr, currentIDs, idsErr, controllerStdout.String(), controllerStderr.String())
+		t.Fatalf("exact session kill did not converge to an exited runtime and asleep durable state: %v; current=%+v current_err=%v tmux_ids=%v tmux_err=%v pane_pid=%q pane_exited=%t controller stdout=%q stderr=%q",
+			err, current, currentErr, currentIDs, idsErr, startedPanePID, exactStartStopProcessExited(startedPanePID), controllerStdout.String(), controllerStderr.String())
 	}
-	if !stopFinalizedAt.After(stopAdmittedAt) {
-		t.Fatalf("exact-stop finalized at %s before admission at %s", stopFinalizedAt, stopAdmittedAt)
-	}
-	if stopped.Closed {
-		t.Fatal("exact stop closed the durable session bead; want open drained bead")
-	}
-	stoppedBead, err := backingStore.Get(created.SessionID)
+	killedBead, err := backingStore.Get(created.SessionID)
 	if err != nil {
-		t.Fatalf("read exact-stop bead from real bd: %v", err)
+		t.Fatalf("read exact session-kill bead from real bd: %v", err)
 	}
-	if stoppedBead.Status != "open" {
-		t.Fatalf("exact-stop bead status = %q, want open", stoppedBead.Status)
+	if killedBead.Status != "open" || killedBead.Metadata["state"] != string(sessionpkg.StateAsleep) {
+		t.Fatalf("exact session-kill bead = %+v, want open asleep session bead", killedBead)
 	}
 	afterIDs, listErr := tmuxClient.ListSessionIDs()
 	if listErr != nil && !strings.Contains(strings.ToLower(listErr.Error()), "no server running") {
-		t.Fatalf("list isolated tmux sessions after exact stop: %v", listErr)
+		t.Fatalf("list isolated tmux sessions after exact session kill: %v", listErr)
 	}
 	if afterID := strings.TrimSpace(afterIDs[created.SessionName]); afterID != "" {
-		t.Fatalf("exact stop left or replaced tmux target %q: before=%q after=%q all=%v",
+		t.Fatalf("exact session kill left or replaced tmux target %q: before=%q after=%q all=%v",
 			created.SessionName, startedTmuxID, afterID, afterIDs)
 	}
 	startSuccessLog := fmt.Sprintf(
@@ -652,7 +635,6 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		"--for", "2m",
 		"--level", string(TraceModeDetail),
 	)
-	preWakeBDTraceCount := len(readBDTrace())
 	wakeCommandAt := time.Now().UTC()
 	wakeOutput := runGC(30*time.Second,
 		"--city", cityPath,
@@ -719,20 +701,35 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("exact wake tmux incarnation reused server/session identity: server=%d session=%q all=%v",
 			wakeTmuxServerPID, wakeTmuxID, wakeIDs)
 	}
-	postWakeBDTrace := readBDTrace()[preWakeBDTraceCount:]
-	var exactWakeWitnesses []bdTraceRecord
-	for _, record := range postWakeBDTrace {
-		if hasTraceArgument(record.Args, created.SessionID) &&
-			hasTraceArgument(record.Args, "--set-metadata") &&
-			hasTraceArgument(record.Args, "instance_token="+woken.InstanceToken) &&
-			hasTraceArgument(record.Args, "state=creating") &&
-			hasTraceCaller(record.Callers, "prepareExactStartCandidateForCity") {
-			exactWakeWitnesses = append(exactWakeWitnesses, record)
+	var socketWakeCommitRecords []SessionReconcilerTraceRecord
+	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+			RecordType:  TraceRecordOperation,
+			SiteCode:    TraceSiteLifecycleStartCommit,
+			SessionName: created.SessionName,
+			TraceMode:   TraceModeDetail,
+			TraceSource: TraceSourceManual,
+		})
+		if readErr != nil {
+			return false, readErr
 		}
-	}
-	if len(exactWakeWitnesses) == 0 {
-		t.Fatalf("exact wake has no target-specific exact-start Bd witness; target=%q token=%q post_wake_trace=%#v",
-			created.SessionID, woken.InstanceToken, postWakeBDTrace)
+		socketWakeCommitRecords = socketWakeCommitRecords[:0]
+		for _, record := range records {
+			if record.SessionBeadID == created.SessionID &&
+				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+				record.Fields["session_id"] == created.SessionID &&
+				record.Fields["instance_token"] == woken.InstanceToken &&
+				record.Fields["effect_applied"] == true {
+				socketWakeCommitRecords = append(socketWakeCommitRecords, record)
+			}
+		}
+		if len(socketWakeCommitRecords) > 1 {
+			return false, fmt.Errorf("socket wake commit traces = %d, want exactly one", len(socketWakeCommitRecords))
+		}
+		return len(socketWakeCommitRecords) == 1, nil
+	}); err != nil {
+		t.Fatalf("exact wake commit trace did not converge: %v; matching=%#v controller stderr=%q",
+			err, socketWakeCommitRecords, controllerStderr.String())
 	}
 	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
 		count := strings.Count(controllerStderr.String(), startSuccessLog)
@@ -766,15 +763,321 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("trace status after exact wake = %+v, want available auto/keyed", wakeTraceStatus.SessionReconciler)
 	}
 
+	// Prove the real event-to-allocation-to-exact-drain path for generic
+	// ephemeral sessions. The manual session above deliberately cannot
+	// authorize this path; these sessions are controller-created and retain an
+	// exact binding to their routed trigger work.
+	sourceStore := workflowStoreRefForDir(cityPath, cityPath, loadedCityName(loaded, cityPath), loaded)
+	if strings.TrimSpace(sourceStore) == "" {
+		t.Fatal("routed-work source store is empty")
+	}
+	createRoutedWork := func(title string) beads.Bead {
+		t.Helper()
+		work, createErr := backingStore.Create(beads.Bead{
+			Title:  title,
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": "worker",
+			},
+		})
+		if createErr != nil {
+			t.Fatalf("create %s: %v", title, createErr)
+		}
+		return work
+	}
+	emitRoutedWorkCreated := func(work beads.Bead) {
+		t.Helper()
+		output := runGC(10*time.Second,
+			"--city", cityPath,
+			"event", "emit", "bead.created",
+			"--subject", work.ID,
+			"--bead-payload", work.ID,
+			"--actor", "bd-hook",
+			"--json",
+		)
+		var emitted eventEmitJSONResult
+		if decodeErr := json.Unmarshal([]byte(exactStartStopJSONPayload(output)), &emitted); decodeErr != nil {
+			t.Fatalf("decode routed-work event for %s: %v\n%s", work.ID, decodeErr, output)
+		}
+		if !emitted.HasPayload || !emitted.Submitted {
+			t.Fatalf("routed-work event for %s = %+v, want submitted bead payload; output=%q", work.ID, emitted, output)
+		}
+	}
+	type startedPoolSession struct {
+		info    sessionpkg.Info
+		bead    beads.Bead
+		tmuxID  string
+		token   string
+		panePID string
+	}
+	waitRoutedPoolStart := func(work beads.Bead) startedPoolSession {
+		t.Helper()
+		hint := routedWorkPoolAllocationHint{
+			WorkID:      work.ID,
+			PoolTarget:  "worker",
+			SourceStore: sourceStore,
+		}
+		var last sessionpkg.Info
+		var result startedPoolSession
+		if waitErr := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
+			info, found, findErr := findRoutedWorkPoolSession(backingStore, loaded, hint)
+			if findErr != nil {
+				return false, findErr
+			}
+			if !found {
+				return false, nil
+			}
+			last = info
+			lifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
+			if lifecycle.BaseState != sessionpkg.BaseStateActive || info.PendingCreateClaim ||
+				strings.TrimSpace(info.SessionName) == "" || strings.TrimSpace(info.InstanceToken) == "" {
+				return false, nil
+			}
+			stored, getErr := backingStore.Get(info.ID)
+			if getErr != nil {
+				return false, getErr
+			}
+			ids, listErr := tmuxClient.ListSessionIDs()
+			if listErr != nil {
+				return false, listErr
+			}
+			tmuxID := strings.TrimSpace(ids[info.SessionName])
+			if tmuxID == "" {
+				return false, nil
+			}
+			token, tokenErr := tmuxClient.GetEnvironment(info.SessionName, "GC_INSTANCE_TOKEN")
+			if tokenErr != nil {
+				return false, tokenErr
+			}
+			if token != info.InstanceToken {
+				return false, nil
+			}
+			panePID, paneErr := tmuxClient.GetPanePID(info.SessionName)
+			if paneErr != nil {
+				return false, paneErr
+			}
+			if exactStartStopProcessExited(panePID) {
+				return false, nil
+			}
+			registerLivePaneProcess(panePID)
+			result = startedPoolSession{info: info, bead: stored, tmuxID: tmuxID, token: token, panePID: panePID}
+			return true, nil
+		}); waitErr != nil {
+			t.Fatalf("routed-work pool session for %s did not start: %v; current=%+v controller stdout=%q stderr=%q",
+				work.ID, waitErr, last, controllerStdout.String(), controllerStderr.String())
+		}
+		return result
+	}
+	firstRoutedWork := createRoutedWork("first exact routed-work drain fixture")
+	secondRoutedWork := createRoutedWork("second exact routed-work drain fixture")
+	emitRoutedWorkCreated(firstRoutedWork)
+	emitRoutedWorkCreated(secondRoutedWork)
+	firstPool := waitRoutedPoolStart(firstRoutedWork)
+	secondPool := waitRoutedPoolStart(secondRoutedWork)
+	if firstPool.bead.Status != "open" || firstPool.bead.Revision == 0 ||
+		secondPool.bead.Status != "open" || secondPool.bead.Revision == 0 {
+		t.Fatalf("routed-work pool persisted rows = first(status=%q revision=%d) second(status=%q revision=%d), want exact open revisioned rows",
+			firstPool.bead.Status, firstPool.bead.Revision, secondPool.bead.Status, secondPool.bead.Revision)
+	}
+	if firstPool.info.ID == secondPool.info.ID || firstPool.info.SessionName == secondPool.info.SessionName ||
+		firstPool.tmuxID == secondPool.tmuxID {
+		t.Fatalf("routed work shared a pool runtime: first=%+v second=%+v", firstPool, secondPool)
+	}
+	poolSlots := map[string]bool{
+		firstPool.info.PoolSlot:  true,
+		secondPool.info.PoolSlot: true,
+	}
+	if len(poolSlots) != 2 || !poolSlots["1"] || !poolSlots["2"] {
+		t.Fatalf("routed-work pool slots = %q/%q, want distinct slots 1 and 2", firstPool.info.PoolSlot, secondPool.info.PoolSlot)
+	}
+	if err := backingStore.Close(firstRoutedWork.ID); err != nil {
+		t.Fatalf("close first routed trigger %s: %v", firstRoutedWork.ID, err)
+	}
+	closedTrigger, err := backingStore.Get(firstRoutedWork.ID)
+	if err != nil || closedTrigger.Status != "closed" {
+		t.Fatalf("first routed trigger after close = %+v err=%v, want closed", closedTrigger, err)
+	}
+	traceBeforeDrain, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read trace before routed-work drain acknowledgement: %v", err)
+	}
+	var traceSeqBeforeDrain uint64
+	for _, record := range traceBeforeDrain {
+		if record.Seq > traceSeqBeforeDrain {
+			traceSeqBeforeDrain = record.Seq
+		}
+	}
+	drainAckCommandAt := time.Now().UTC()
+	drainAckOutput := runGCAsSession(10*time.Second, firstPool.info.ID, firstPool.token,
+		"--city", cityPath,
+		"runtime", "drain-ack", firstPool.info.ID,
+		"--json",
+	)
+	var drainAck runtimeActionJSON
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(drainAckOutput)), &drainAck); err != nil {
+		t.Fatalf("decode exact routed-work drain acknowledgement: %v\n%s", err, drainAckOutput)
+	}
+	if !drainAck.OK || drainAck.Action != "drain-ack" || drainAck.Status != "acknowledged" ||
+		drainAck.Session != firstPool.info.SessionName || drainAck.Target != firstPool.info.Alias {
+		t.Fatalf("exact routed-work drain acknowledgement = %+v, want resolved target %q and runtime %q acknowledged",
+			drainAck, firstPool.info.Alias, firstPool.info.SessionName)
+	}
+	for key, want := range map[string]string{
+		"GC_DRAIN_ACK":                    "1",
+		reconcilerDrainAckSourceKey:       drainAckSourceAgentValue,
+		drainAckRequesterSessionIDKey:     firstPool.info.ID,
+		drainAckRequesterInstanceTokenKey: firstPool.token,
+	} {
+		got, getErr := tmuxClient.GetEnvironment(firstPool.info.SessionName, key)
+		if getErr != nil || got != want {
+			t.Fatalf("exact routed-work drain acknowledgement runtime metadata %s = %q, %v; want %q", key, got, getErr, want)
+		}
+	}
+
+	var (
+		firstPoolFinalInfo sessionpkg.Info
+		firstPoolFinalBead beads.Bead
+		drainFinalizedAt   time.Time
+	)
+	if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
+		if removeErr := removeExitedPaneProcess(firstPool.panePID); removeErr != nil {
+			return false, removeErr
+		}
+		info, getErr := sessionFrontDoor(backingStore).Get(firstPool.info.ID)
+		if getErr != nil {
+			return false, getErr
+		}
+		if !info.Closed || info.MetadataState != string(sessionpkg.StateDrained) ||
+			info.StateReason != "" || isDrainAckStopPendingInfo(info) {
+			return false, nil
+		}
+		stored, getErr := backingStore.Get(firstPool.info.ID)
+		if getErr != nil {
+			return false, getErr
+		}
+		if stored.Status != "closed" {
+			return false, nil
+		}
+		ids, listErr := tmuxClient.ListSessionIDs()
+		if listErr != nil {
+			return false, listErr
+		}
+		if strings.TrimSpace(ids[firstPool.info.SessionName]) != "" {
+			return false, nil
+		}
+		firstPoolFinalInfo = info
+		firstPoolFinalBead = stored
+		drainFinalizedAt = time.Now().UTC()
+		return true, nil
+	}); err != nil {
+		current, currentErr := sessionFrontDoor(backingStore).Get(firstPool.info.ID)
+		ids, idsErr := tmuxClient.ListSessionIDs()
+		censusCtx, cancelCensus := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancelCensus()
+		censusCmd := exec.CommandContext(censusCtx, "tmux", "-L", guard.SocketName(), "list-panes", "-s", "-t", "="+firstPool.info.SessionName,
+			"-F", "#{session_id}\\t#{session_name}\\t#{window_id}\\t#{pane_id}\\t#{session_attached}\\t#{pane_in_mode}\\t#{window_linked}")
+		censusOutput, censusErr := censusCmd.CombinedOutput()
+		postDrainTrace, traceErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+		t.Fatalf("exact routed-work drain did not finalize: %v; drain_ack_output=%q current=%+v current_err=%v tmux=%v tmux_err=%v target_census=%q target_census_err=%v post_drain_trace=%#v trace_err=%v controller stdout=%q stderr=%q",
+			err, drainAckOutput, current, currentErr, ids, idsErr, censusOutput, censusErr, postDrainTrace, traceErr, controllerStdout.String(), controllerStderr.String())
+	}
+	if !drainFinalizedAt.After(drainAckCommandAt) ||
+		firstPoolFinalBead.Metadata["close_reason"] != sessionpkg.CanonicalCloseReason("drained") ||
+		firstPoolFinalBead.Revision == 0 || firstPoolFinalBead.Revision == firstPool.bead.Revision {
+		t.Fatalf("exact routed-work drain final state = info %+v bead %+v at %s, want post-command closed/drained with a fresh nonzero revision token",
+			firstPoolFinalInfo, firstPoolFinalBead, drainFinalizedAt)
+	}
+	postDrainTrace, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read trace after routed-work drain acknowledgement: %v", err)
+	}
+	for _, record := range postDrainTrace {
+		if record.Seq <= traceSeqBeforeDrain || record.Ts.Before(drainAckCommandAt) || record.Ts.After(drainFinalizedAt) ||
+			record.RecordType != TraceRecordCycleStart {
+			continue
+		}
+		if record.TickTrigger == TraceTickTriggerPatrol || record.TickTrigger == TraceTickTriggerPoke {
+			t.Fatalf("legacy reconciliation cycle ran during exact routed-work drain: %+v", record)
+		}
+	}
+
+	secondPoolAfter, err := backingStore.Get(secondPool.info.ID)
+	if err != nil {
+		t.Fatalf("read sibling pool session after exact drain: %v", err)
+	}
+	secondIDsAfter, err := tmuxClient.ListSessionIDs()
+	if err != nil {
+		t.Fatalf("read sibling tmux identity after exact drain: %v", err)
+	}
+	secondTokenAfter, err := tmuxClient.GetEnvironment(secondPool.info.SessionName, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		t.Fatalf("read sibling token after exact drain: %v", err)
+	}
+	if secondPoolAfter.Revision != secondPool.bead.Revision ||
+		!reflect.DeepEqual(secondPoolAfter.Metadata, secondPool.bead.Metadata) ||
+		secondPoolAfter.Status != secondPool.bead.Status ||
+		strings.TrimSpace(secondIDsAfter[secondPool.info.SessionName]) != secondPool.tmuxID ||
+		secondTokenAfter != secondPool.token {
+		t.Fatalf("sibling pool session changed during exact drain: before=%+v after=%+v tmux_before=%q tmux_after=%q token_before=%q token_after=%q",
+			secondPool.bead, secondPoolAfter, secondPool.tmuxID,
+			strings.TrimSpace(secondIDsAfter[secondPool.info.SessionName]), secondPool.token, secondTokenAfter)
+	}
+
+	// Retire the sibling through the same user-visible path so the later
+	// legacy-shadow leg cannot see or resurrect a live pool fixture.
+	if err := backingStore.Close(secondRoutedWork.ID); err != nil {
+		t.Fatalf("close sibling routed trigger %s: %v", secondRoutedWork.ID, err)
+	}
+	secondDrainAckOutput := runGCAsSession(10*time.Second, secondPool.info.ID, secondPool.token,
+		"--city", cityPath,
+		"runtime", "drain-ack", secondPool.info.ID,
+		"--json",
+	)
+	var secondDrainAck runtimeActionJSON
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(secondDrainAckOutput)), &secondDrainAck); err != nil {
+		t.Fatalf("decode sibling routed-work drain acknowledgement: %v\n%s", err, secondDrainAckOutput)
+	}
+	if !secondDrainAck.OK || secondDrainAck.Action != "drain-ack" || secondDrainAck.Status != "acknowledged" ||
+		secondDrainAck.Session != secondPool.info.SessionName || secondDrainAck.Target != secondPool.info.Alias {
+		t.Fatalf("sibling routed-work drain acknowledgement = %+v, want resolved target %q and runtime %q acknowledged",
+			secondDrainAck, secondPool.info.Alias, secondPool.info.SessionName)
+	}
+	if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
+		if removeErr := removeExitedPaneProcess(secondPool.panePID); removeErr != nil {
+			return false, removeErr
+		}
+		info, getErr := sessionFrontDoor(backingStore).Get(secondPool.info.ID)
+		if getErr != nil {
+			return false, getErr
+		}
+		durablyRetired := info.Closed && info.MetadataState == string(sessionpkg.StateDrained) &&
+			!isDrainAckStopPendingInfo(info)
+		if !durablyRetired {
+			return false, nil
+		}
+		ids, listErr := tmuxClient.ListSessionIDs()
+		if listErr != nil {
+			return false, listErr
+		}
+		tmuxGone := strings.TrimSpace(ids[secondPool.info.SessionName]) == ""
+		return durablyRetired && tmuxGone, nil
+	}); err != nil {
+		current, currentErr := sessionFrontDoor(backingStore).Get(secondPool.info.ID)
+		ids, idsErr := tmuxClient.ListSessionIDs()
+		t.Fatalf("retire sibling routed-work pool session: %v; drain_ack_output=%q current=%+v current_err=%v tmux=%v tmux_err=%v controller stdout=%q stderr=%q",
+			err, secondDrainAckOutput, current, currentErr, ids, idsErr, controllerStdout.String(), controllerStderr.String())
+	}
+
 	sample := exactSessionStartStopDurableSample{
-		Version:                        "exact-session-start-stop-v2",
-		SessionID:                      created.SessionID,
+		Version:                        "exact-session-start-stop-v3",
+		SessionID:                      firstPool.info.ID,
 		SchemaStatus:                   schemaStatus,
 		StartAdmissionToFinalizationNS: startFinalizedAt.Sub(startAdmittedAt).Nanoseconds(),
-		StopAdmissionToFinalizationNS:  stopFinalizedAt.Sub(stopAdmittedAt).Nanoseconds(),
+		StopCommandToFinalizationNS:    drainFinalizedAt.Sub(drainAckCommandAt).Nanoseconds(),
 		WakeCommandToFinalizationNS:    wakeFinalizedAt.Sub(wakeCommandAt).Nanoseconds(),
 		StartPersistedState:            started.MetadataState,
-		StopPersistedState:             stopped.MetadataState,
+		StopPersistedState:             firstPoolFinalInfo.MetadataState,
 		WakePersistedState:             woken.MetadataState,
 	}
 	if sample.WakeCommandToFinalizationNS <= 0 {
@@ -805,30 +1108,6 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if count := strings.Count(controllerStderr.String(), startSuccessLog); count != 2 {
 		t.Fatalf("successful provider starts after keyed controller exit = %d, want exactly 2; controller stderr=%q",
 			count, controllerStderr.String())
-	}
-	wakeCommitRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
-		RecordType:  TraceRecordOperation,
-		SiteCode:    TraceSiteLifecycleStartCommit,
-		SessionName: created.SessionName,
-		TraceMode:   TraceModeDetail,
-		TraceSource: TraceSourceManual,
-	})
-	if err != nil {
-		t.Fatalf("read exact wake commit trace after keyed controller exit: %v", err)
-	}
-	var socketWakeCommitRecords []SessionReconcilerTraceRecord
-	for _, record := range wakeCommitRecords {
-		if record.SessionBeadID == created.SessionID &&
-			record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
-			record.Fields["session_id"] == created.SessionID &&
-			record.Fields["instance_token"] == woken.InstanceToken &&
-			record.Fields["effect_applied"] == true {
-			socketWakeCommitRecords = append(socketWakeCommitRecords, record)
-		}
-	}
-	if len(socketWakeCommitRecords) != 1 {
-		t.Fatalf("socket wake commit traces after keyed controller exit = %#v, want exactly one durable committed socket start for session %q token %q",
-			socketWakeCommitRecords, created.SessionID, woken.InstanceToken)
 	}
 	if err := ensureBeadsProvider(cityPath); err != nil {
 		t.Fatalf("restart test-owned bead provider for fixture reset: %v", err)
@@ -1189,4 +1468,23 @@ func exactStartStopJSONPayload(raw string) string {
 		}
 	}
 	return raw
+}
+
+// exactStartStopProcessExited observes the real procfs process identified by
+// tmux before drain admission. A missing process or a zombie has exited; every
+// other state remains live, so durable finalization cannot be accepted first.
+func exactStartStopProcessExited(pid string) bool {
+	data, err := os.ReadFile(filepath.Join("/proc", pid, "stat"))
+	if os.IsNotExist(err) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	end := strings.LastIndexByte(string(data), ')')
+	if end < 0 || len(data) <= end+2 {
+		return false
+	}
+	state := data[end+2]
+	return state == 'Z' || state == 'X'
 }

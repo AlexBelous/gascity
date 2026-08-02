@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/rollout"
 	"k8s.io/client-go/util/workqueue"
 )
 
@@ -78,6 +79,124 @@ func TestSessionStartControllerCoalescesQueuedHintsAndReplaysInFlightUpdates(t *
 	}
 }
 
+func TestSessionStartControllerPoolDrainAckSupersedesMatchingInFlightPoolStart(t *testing.T) {
+	startEntered := make(chan struct{})
+	releaseStart := make(chan struct{})
+	reconciled := make(chan sessionStartAdmission, 2)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseStart) }) }
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers: 1, MaxDistinct: 1, MaxRetries: 0,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.PoolAllocation != nil {
+				close(startEntered)
+				<-releaseStart
+			}
+			reconciled <- admission
+			return nil
+		},
+	})
+	t.Cleanup(release)
+
+	start := routedWorkPoolStartLease{
+		SessionID: "gcs-pool-handoff", InstanceToken: "live-token", ControllerGeneration: 7,
+		PoolTarget: "worker", WorkID: "ga-work", SourceStore: "city:test-city", MembershipRevision: 11,
+	}
+	if outcome, err := controller.AdmitPoolAllocation(start); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("AdmitPoolAllocation = (%q, %v), want accepted", outcome, err)
+	}
+	awaitClose(t, startEntered, "pool-start reconciliation to enter")
+
+	drain := routedWorkPoolDrainAckLease{
+		SessionID: "gcs-pool-handoff", InstanceToken: "live-token",
+		RequesterSessionID: "gcs-pool-handoff", RequesterInstanceToken: "live-token",
+		ControllerGeneration: 7, PoolTarget: "worker", WorkID: "ga-work", SourceStore: "city:test-city", MembershipRevision: 12,
+	}
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*routedWorkPoolDrainAckLease)
+	}{
+		{name: "instance token", mutate: func(lease *routedWorkPoolDrainAckLease) { lease.InstanceToken = "replacement-token" }},
+		{name: "requester session", mutate: func(lease *routedWorkPoolDrainAckLease) { lease.RequesterSessionID = "gcs-other" }},
+		{name: "requester token", mutate: func(lease *routedWorkPoolDrainAckLease) { lease.RequesterInstanceToken = "replacement-token" }},
+		{name: "generation", mutate: func(lease *routedWorkPoolDrainAckLease) { lease.ControllerGeneration++ }},
+		{name: "pool target", mutate: func(lease *routedWorkPoolDrainAckLease) { lease.PoolTarget = "other" }},
+		{name: "work", mutate: func(lease *routedWorkPoolDrainAckLease) { lease.WorkID = "ga-other-work" }},
+		{name: "source store", mutate: func(lease *routedWorkPoolDrainAckLease) { lease.SourceStore = "city:other" }},
+		{name: "older membership", mutate: func(lease *routedWorkPoolDrainAckLease) { lease.MembershipRevision = 10 }},
+	} {
+		t.Run("rejects mismatched "+testCase.name, func(t *testing.T) {
+			mismatched := drain
+			testCase.mutate(&mismatched)
+			if outcome, err := controller.AdmitPoolDrainAck(mismatched); err == nil || outcome != "" {
+				t.Fatalf("AdmitPoolDrainAck = (%q, %v), want rejected", outcome, err)
+			}
+		})
+	}
+	if outcome, err := controller.AdmitPoolDrainAck(drain); err != nil || outcome != sessionStartAdmissionCoalesced {
+		t.Fatalf("AdmitPoolDrainAck = (%q, %v), want matching start superseded", outcome, err)
+	}
+	admission, ok := controller.readAdmission(start.SessionID)
+	if !ok || admission.PoolAllocation != nil || admission.PoolDrainAck == nil || *admission.PoolDrainAck != drain {
+		t.Fatalf("superseding admission = %+v, want only drain lease %+v", admission, drain)
+	}
+
+	release()
+	first := receiveSessionStartAdmission(t, reconciled)
+	second := receiveSessionStartAdmission(t, reconciled)
+	if first.PoolAllocation == nil || *first.PoolAllocation != start || first.PoolDrainAck != nil {
+		t.Fatalf("first reconciliation = %+v, want retained pool start", first)
+	}
+	if second.PoolAllocation != nil || second.PoolDrainAck == nil || *second.PoolDrainAck != drain {
+		t.Fatalf("second reconciliation = %+v, want queued matching pool drain acknowledgement", second)
+	}
+	if got := controller.Pending(); got != 0 {
+		t.Fatalf("pending admissions = %d, want 0 after start-to-stop handoff", got)
+	}
+}
+
+func TestSessionStartControllerPoolDrainAckDoesNotSupersedeUnenteredPoolStart(t *testing.T) {
+	blockerEntered := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBlocker) }) }
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers: 1, MaxDistinct: 2, MaxRetries: 0,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			if admission.SessionID == "gcs-pool-handoff-blocker" {
+				close(blockerEntered)
+				<-releaseBlocker
+			}
+			return nil
+		},
+	})
+	t.Cleanup(release)
+	if outcome, err := controller.Admit("gcs-pool-handoff-blocker", sessionStartAdmissionExplicitWake); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("Admit blocker = (%q, %v), want accepted", outcome, err)
+	}
+	awaitClose(t, blockerEntered, "blocker reconciliation to enter")
+
+	start := routedWorkPoolStartLease{
+		SessionID: "gcs-pool-not-live", InstanceToken: "not-live-token", ControllerGeneration: 7,
+		PoolTarget: "worker", WorkID: "ga-work", SourceStore: "city:test-city", MembershipRevision: 11,
+	}
+	drain := routedWorkPoolDrainAckLease{
+		SessionID: "gcs-pool-not-live", InstanceToken: "not-live-token",
+		RequesterSessionID: "gcs-pool-not-live", RequesterInstanceToken: "not-live-token",
+		ControllerGeneration: 7, PoolTarget: "worker", WorkID: "ga-work", SourceStore: "city:test-city", MembershipRevision: 11,
+	}
+	if outcome, err := controller.AdmitPoolAllocation(start); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("AdmitPoolAllocation = (%q, %v), want accepted", outcome, err)
+	}
+	if outcome, err := controller.AdmitPoolDrainAck(drain); err == nil || outcome != "" {
+		t.Fatalf("AdmitPoolDrainAck before start enters = (%q, %v), want rejected", outcome, err)
+	}
+	admission, ok := controller.readAdmission(start.SessionID)
+	if !ok || admission.PoolAllocation == nil || *admission.PoolAllocation != start || admission.PoolDrainAck != nil {
+		t.Fatalf("unentered admission = %+v, want retained start lease %+v", admission, start)
+	}
+}
+
 func TestSessionStartControllerPreservesInProcessAdmissionAcrossAntiEntropy(t *testing.T) {
 	blockerStarted := make(chan struct{})
 	releaseBlocker := make(chan struct{})
@@ -117,6 +236,103 @@ func TestSessionStartControllerPreservesInProcessAdmissionAcrossAntiEntropy(t *t
 	got := receiveSessionStartAdmission(t, reconciled)
 	if got.Source != sessionStartAdmissionInProcess || !got.AdmittedAt.Equal(original.AdmittedAt) || got.Version <= original.Version {
 		t.Fatalf("queued reconciliation = %+v from %+v, want preserved in-process source/time with newer version", got, original)
+	}
+}
+
+func TestSessionStartControllerRetainsPoolDrainAckLeaseAcrossGenericCoalescing(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 4,
+		MaxRetries:  0,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new exact-start controller: %v", err)
+	}
+	if err := controller.Start(t.Context()); err != nil {
+		t.Fatalf("start exact-start controller: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+	defer close(release)
+
+	lease := routedWorkPoolDrainAckLease{
+		SessionID:              "gcs-pool-drain1",
+		InstanceToken:          "instance-token",
+		RequesterSessionID:     "gcs-pool-drain1",
+		RequesterInstanceToken: "instance-token",
+		ControllerGeneration:   7,
+		PoolTarget:             "worker",
+		WorkID:                 "ga-work",
+		SourceStore:            "city:test-city",
+		MembershipRevision:     11,
+	}
+	if outcome, err := controller.AdmitPoolDrainAck(lease); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("admit pool drain acknowledgement = (%q, %v), want accepted", outcome, err)
+	}
+	awaitClose(t, entered, "pool drain acknowledgement reconcile to enter")
+	if outcome, err := controller.Admit(lease.SessionID, sessionStartAdmissionInProcess); err != nil || outcome != sessionStartAdmissionCoalesced {
+		t.Fatalf("coalesce generic event = (%q, %v), want coalesced", outcome, err)
+	}
+
+	admission, ok := controller.readAdmission(lease.SessionID)
+	if !ok || admission.PoolDrainAck == nil || *admission.PoolDrainAck != lease {
+		t.Fatalf("coalesced admission drain lease = %+v, want %+v", admission.PoolDrainAck, lease)
+	}
+	if !controller.ownsPoolDrainAckStop(lease.SessionID, lease.InstanceToken) {
+		t.Fatal("matching retained drain acknowledgement lease did not exclude legacy")
+	}
+	if controller.ownsPoolDrainAckStop(lease.SessionID, "replacement-token") {
+		t.Fatal("mismatched instance token retained drain acknowledgement ownership")
+	}
+}
+
+func TestPoolDrainAckLeaseExcludesLegacyWhenControllerSnapshotIsUnavailable(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 1,
+		MaxRetries:  0,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			close(entered)
+			<-release
+			return nil
+		},
+	})
+	defer close(release)
+
+	fixture.cr.sessionStartMu.Lock()
+	fixture.cr.sessionStartController = controller
+	fixture.cr.sessionStartOwnership = sessionStartOwnershipKeyed
+	fixture.cr.sessionStartMode = rollout.Auto
+	fixture.cr.sessionStartMu.Unlock()
+	if outcome, err := controller.AdmitPoolDrainAck(fixture.lease); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("admit pool drain acknowledgement = (%q, %v), want accepted", outcome, err)
+	}
+	awaitClose(t, entered, "pool drain acknowledgement reconcile to enter")
+
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.sessionStartStoreGeneration = 0
+	fixture.cr.cs.mu.Unlock()
+	option := fixture.cr.sessionStartLegacyExclusionOption()
+	if option == nil || !legacySessionStartExcluded(option, fixture.info) {
+		t.Fatal("in-flight exact drain acknowledgement did not exclude legacy during snapshot loss")
+	}
+	sibling := fixture.info
+	sibling.ID = "gcs-sibling"
+	sibling.InstanceToken = "sibling-token"
+	if legacySessionStartExcluded(option, sibling) {
+		t.Fatal("exact drain acknowledgement lease excluded a different occupied slot")
 	}
 }
 
@@ -190,6 +406,132 @@ func TestSessionStartControllerRetriesThenYieldsToAudit(t *testing.T) {
 	}
 	if got := controller.Pending(); got != 0 {
 		t.Fatalf("pending admissions = %d, want 0 after exhaustion", got)
+	}
+}
+
+func TestSessionStartControllerRetriesPoolDrainAckPastRetryBudgetUntilReconciled(t *testing.T) {
+	results := make(chan sessionStartReconcileResult, 2)
+	var attempts atomic.Int32
+	lease := routedWorkPoolDrainAckLease{
+		SessionID:              "gcs-pool-drain-retry1",
+		InstanceToken:          "instance-token",
+		RequesterSessionID:     "gcs-pool-drain-retry1",
+		RequesterInstanceToken: "instance-token",
+		ControllerGeneration:   7,
+		PoolTarget:             "worker",
+		WorkID:                 "ga-work",
+		SourceStore:            "city:test-city",
+		MembershipRevision:     11,
+	}
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 1,
+		MaxRetries:  0,
+		RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[string](0, 0),
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			if attempts.Add(1) == 1 {
+				return errors.New("temporary store outage")
+			}
+			return nil
+		},
+		Observer: func(result sessionStartReconcileResult) {
+			results <- result
+		},
+	})
+
+	if outcome, err := controller.AdmitPoolDrainAck(lease); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("AdmitPoolDrainAck = (%q, %v), want accepted", outcome, err)
+	}
+	first := receiveSessionStartResult(t, results)
+	if first.Outcome != sessionStartReconcileRetrying {
+		t.Fatalf("first outcome = %q, want retrying", first.Outcome)
+	}
+	second := receiveSessionStartResult(t, results)
+	if second.Outcome != sessionStartReconcileSucceeded {
+		t.Fatalf("second outcome = %q, want succeeded", second.Outcome)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("reconcile attempts = %d, want 2", got)
+	}
+	for _, result := range []sessionStartReconcileResult{first, second} {
+		if result.Admission.PoolDrainAck == nil || *result.Admission.PoolDrainAck != lease {
+			t.Fatalf("reconcile lease = %+v, want %+v", result.Admission.PoolDrainAck, lease)
+		}
+	}
+	if got := controller.Pending(); got != 0 {
+		t.Fatalf("pending admissions = %d, want 0 after successful reconciliation", got)
+	}
+}
+
+func TestSessionStartControllerYieldPoolDrainAckRequiresMatchingLease(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	lease := routedWorkPoolDrainAckLease{
+		SessionID:              "gcs-pool-drain-yield1",
+		InstanceToken:          "instance-token",
+		RequesterSessionID:     "gcs-pool-drain-yield1",
+		RequesterInstanceToken: "instance-token",
+		ControllerGeneration:   7,
+		PoolTarget:             "worker",
+		WorkID:                 "ga-work",
+		SourceStore:            "city:test-city",
+		MembershipRevision:     11,
+	}
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers: 1, MaxDistinct: 1, MaxRetries: 0,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			close(entered)
+			<-release
+			return nil
+		},
+	})
+	t.Cleanup(func() { close(release) })
+	if outcome, err := controller.AdmitPoolDrainAck(lease); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("AdmitPoolDrainAck = (%q, %v), want accepted", outcome, err)
+	}
+	awaitClose(t, entered, "drain-ack reconciliation start")
+
+	stale := lease
+	stale.InstanceToken = "replacement-token"
+	if controller.YieldPoolDrainAck(stale) {
+		t.Fatal("stale drain-ack completion yielded the retained lease")
+	}
+	if got := controller.Pending(); got != 1 {
+		t.Fatalf("pending after stale yield = %d, want 1", got)
+	}
+	if !controller.YieldPoolDrainAck(lease) {
+		t.Fatal("matching drain-ack completion did not yield retained lease")
+	}
+	if got := controller.Pending(); got != 0 {
+		t.Fatalf("pending after matching yield = %d, want 0", got)
+	}
+}
+
+func TestSessionStartControllerPreservesLegacyFallbackDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	results := make(chan sessionStartReconcileResult, 1)
+	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
+		Workers:     1,
+		MaxDistinct: 1,
+		MaxRetries:  0,
+		Reconcile: func(context.Context, sessionStartAdmission) error {
+			return fmt.Errorf("%w: drain acknowledgement CAS conflict", errSessionStartLegacyFallbackRequired)
+		},
+		Observer: func(result sessionStartReconcileResult) {
+			results <- result
+		},
+	})
+
+	if _, err := controller.Admit("gcs-fallback1", sessionStartAdmissionSocket); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	result := receiveSessionStartResult(t, results)
+	if result.Outcome != sessionStartReconcileSucceeded || !result.LegacyFallback {
+		t.Fatalf("fallback result = %#v, want successful legacy handoff", result)
+	}
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "CAS conflict") {
+		t.Fatalf("fallback diagnostic = %v, want preserved CAS conflict", result.Err)
 	}
 }
 
@@ -580,6 +922,8 @@ func TestSessionStartControllerBlockedWorkersKeepDistinctCensusQueueBounded(t *t
 		outcome, _, err := controller.admitAuthoritative(
 			fmt.Sprintf("gcs-census-%03d", i),
 			presentGeneration,
+			nil,
+			false,
 		)
 		if err != nil {
 			t.Fatalf("admit census key %d: %v", i, err)

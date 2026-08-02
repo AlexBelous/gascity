@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,9 +18,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -69,6 +73,405 @@ func TestReconcileExactSessionStartStartsPendingCreateAndCommitsActive(t *testin
 	if got.PendingCreateClaim {
 		t.Fatal("pending_create_claim remained set after successful start")
 	}
+}
+
+func TestReconcileExactSessionStartPoolDrainAckTransitionFailureHonorsRolloutMode(t *testing.T) {
+	tests := []struct {
+		name            string
+		authorized      bool
+		authorizeErr    error
+		withWriter      bool
+		writerSetupErr  error
+		writerCommitErr error
+		wantDiagnostic  string
+		wantWriterCalls int
+	}{
+		{name: "authorization denied", withWriter: true, wantDiagnostic: "authorization no longer holds"},
+		{name: "authorization read failed", authorizeErr: errors.New("trigger read unavailable"), withWriter: true, wantDiagnostic: "trigger read unavailable"},
+		{name: "conditional writer unavailable", authorized: true, wantDiagnostic: "conditional writer is unavailable"},
+		{name: "conditional writer setup failed", authorized: true, withWriter: true, writerSetupErr: errors.New("conditional writer setup failed"), wantDiagnostic: "conditional writer setup failed"},
+		{name: "revision CAS lost", authorized: true, withWriter: true, writerCommitErr: errors.New("revision conflict"), wantDiagnostic: "revision conflict", wantWriterCalls: 1},
+	}
+
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		t.Run(string(mode), func(t *testing.T) {
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					env := newReconcilerTestEnv()
+					env.cfg = &config.City{
+						Workspace: config.Workspace{Name: "test-city"},
+						Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+					}
+					bead := env.createSessionBead("worker", "worker")
+					env.setSessionMetadata(&bead, map[string]string{
+						"state":          string(session.StateActive),
+						"instance_token": "drain-token",
+					})
+					before, err := env.store.Get(bead.ID)
+					if err != nil {
+						t.Fatalf("read pre-reconcile row: %v", err)
+					}
+
+					writer := &recordingExactStatusWriter{store: env.store, err: test.writerCommitErr}
+					params := exactSessionStartTestParams(t, env)
+					params.RolloutMode = mode
+					if test.withWriter {
+						params.StatusWriter = writer
+					}
+					params.StatusWriterError = test.writerSetupErr
+					params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+						return test.authorized, test.authorizeErr
+					}
+					owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+						SessionID: bead.ID,
+						Source:    sessionStartAdmissionSocket,
+						PoolDrainAck: &routedWorkPoolDrainAckLease{
+							SessionID:     bead.ID,
+							InstanceToken: "drain-token",
+						},
+					}, params)
+					switch mode {
+					case rollout.Auto:
+						if owner != exactSessionStartLegacyOwner || !errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+							t.Fatalf("reconcile result = (owner=%v, err=%v), want visible legacy fallback", owner, reconcileErr)
+						}
+					case rollout.Require:
+						if owner != exactSessionStartKeyedOwner || reconcileErr == nil || errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+							t.Fatalf("reconcile result = (owner=%v, err=%v), want visible required refusal", owner, reconcileErr)
+						}
+					}
+					if !strings.Contains(reconcileErr.Error(), test.wantDiagnostic) {
+						t.Fatalf("transition diagnostic = %q, want %q", reconcileErr, test.wantDiagnostic)
+					}
+					if got := len(writer.expected); got != test.wantWriterCalls {
+						t.Fatalf("conditional writer calls = %d, want %d", got, test.wantWriterCalls)
+					}
+					after, err := env.store.Get(bead.ID)
+					if err != nil {
+						t.Fatalf("read post-reconcile row: %v", err)
+					}
+					if !reflect.DeepEqual(after, before) {
+						t.Fatalf("failed transition mutated row:\nbefore=%+v\nafter=%+v", before, after)
+					}
+					if got := env.sp.CountCalls("Stop", "worker"); got != 0 {
+						t.Fatalf("provider Stop calls = %d, want 0", got)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestReconcileExactSessionStartPoolDrainAckUsesNegativeRevisionToken(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state":          string(session.StateActive),
+		"instance_token": "drain-token",
+	})
+
+	writer := &recordingExactStatusWriter{
+		store: env.store,
+		err:   &beads.PreconditionFailedError{ID: bead.ID, Expected: -17, Current: -16},
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.RolloutMode = rollout.Auto
+	params.Store = negativeRevisionSessionStore{Store: env.store, revision: -17}
+	params.StatusWriter = writer
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+		return true, nil
+	}
+
+	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionSocket,
+		PoolDrainAck: &routedWorkPoolDrainAckLease{
+			SessionID:     bead.ID,
+			InstanceToken: "drain-token",
+		},
+	}, params)
+	if owner != exactSessionStartLegacyOwner || !errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+		t.Fatalf("owner/error = %v/%v, want visible legacy fallback after CAS conflict", owner, reconcileErr)
+	}
+	if len(writer.expected) != 1 || writer.expected[0] != -17 {
+		t.Fatalf("UpdateIfMatch revisions = %v, want [-17]", writer.expected)
+	}
+	if got := env.sp.CountCalls("Stop", "worker"); got != 0 {
+		t.Fatalf("provider Stop calls = %d, want 0", got)
+	}
+}
+
+func TestDrainAckStopPendingFenceAcceptsNegativeRevisionToken(t *testing.T) {
+	drainAt := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	response := session.PersistedResponse{
+		Status: "open",
+		Metadata: map[string]string{
+			"state":                     string(session.StateDraining),
+			"state_reason":              session.DrainAckStopPendingReason,
+			"drain_at":                  drainAt,
+			"pending_create_claim":      "",
+			"pending_create_started_at": "",
+		},
+		Revision: -17,
+	}
+	info := session.Info{
+		ID:            "session-1",
+		MetadataState: string(session.StateDraining),
+		StateReason:   session.DrainAckStopPendingReason,
+		InstanceToken: "drain-token",
+	}
+
+	fence := newDrainAckStopPendingFence(response)
+	if !fence.matches(info, response, info.ID, info.InstanceToken) {
+		t.Fatal("negative nonzero revision did not form a canonical stop-pending fence")
+	}
+}
+
+func TestReconcileExactSessionStartPoolDrainAckPostCASAuthorizationHonorsRolloutMode(t *testing.T) {
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		t.Run(string(mode), func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+			bead := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&bead, map[string]string{
+				"state":                     string(session.StateActive),
+				"state_reason":              "before-drain",
+				"drain_at":                  "before-drain-at",
+				"pending_create_claim":      "true",
+				"pending_create_started_at": "before-create-at",
+				"instance_token":            "drain-token",
+			})
+			before, err := env.store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("read pre-transition row: %v", err)
+			}
+			writer, ok := env.store.(beads.ConditionalWriter)
+			if !ok {
+				t.Fatal("test store does not implement conditional writer")
+			}
+			params := exactSessionStartTestParams(t, env)
+			params.RolloutMode = mode
+			params.StatusWriter = writer
+			var authorizations int
+			params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+				authorizations++
+				return authorizations == 1, nil
+			}
+
+			owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+				SessionID: bead.ID,
+				Source:    sessionStartAdmissionSocket,
+				PoolDrainAck: &routedWorkPoolDrainAckLease{
+					SessionID:     bead.ID,
+					InstanceToken: "drain-token",
+				},
+			}, params)
+			if authorizations != 2 {
+				t.Fatalf("authorization calls = %d, want initial and post-CAS checks", authorizations)
+			}
+			after, err := env.store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("read post-transition row: %v", err)
+			}
+			switch mode {
+			case rollout.Auto:
+				if owner != exactSessionStartLegacyOwner || !errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+					t.Fatalf("Auto owner/error = %v/%v, want legacy fenced fallback", owner, reconcileErr)
+				}
+				for _, key := range drainAckStopPendingRollbackKeys {
+					if after.Metadata[key] != before.Metadata[key] {
+						t.Fatalf("Auto rollback metadata[%q] = %q, want original %q", key, after.Metadata[key], before.Metadata[key])
+					}
+				}
+			case rollout.Require:
+				if owner != exactSessionStartKeyedOwner || reconcileErr == nil || errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+					t.Fatalf("Require owner/error = %v/%v, want parked refusal", owner, reconcileErr)
+				}
+				if after.Metadata["state"] != string(session.StateDraining) || after.Metadata["state_reason"] != session.DrainAckStopPendingReason {
+					t.Fatalf("Require row = %#v, want drain-ack stop-pending", after.Metadata)
+				}
+			}
+			if got := env.sp.CountCalls("Stop", "worker"); got != 0 {
+				t.Fatalf("provider Stop calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestReconcileExactSessionStartPoolDrainAckAsyncAuthorizationChangeRollsBackBeforeStop(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state":                     string(session.StateActive),
+		"state_reason":              "before-drain",
+		"drain_at":                  "before-drain-at",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": "before-create-at",
+		"instance_token":            "drain-token",
+	})
+	before, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read pre-transition row: %v", err)
+	}
+	provider := &freshLivenessProvider{Fake: env.sp, fresh: runtime.Liveness{Running: true, Alive: true, Complete: true}}
+	writer, ok := env.store.(beads.ConditionalWriter)
+	if !ok {
+		t.Fatal("test store does not implement conditional writer")
+	}
+	preStopAuthorization := make(chan struct{})
+	releasePreStopAuthorization := make(chan struct{})
+	completion := make(chan drainAckAsyncStopCompletion, 1)
+	params := exactSessionStartTestParams(t, env)
+	params.Provider = provider
+	params.RolloutMode = rollout.Auto
+	params.StatusWriter = writer
+	params.AsyncStopTracker = &asyncStartTracker{}
+	params.AsyncStopCompletion = func(result drainAckAsyncStopCompletion) { completion <- result }
+	var authorizations atomic.Int32
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+		switch authorizations.Add(1) {
+		case 1, 2:
+			return true, nil
+		case 3:
+			close(preStopAuthorization)
+			<-releasePreStopAuthorization
+			return false, nil
+		default:
+			return false, errors.New("unexpected further authorization")
+		}
+	}
+
+	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionSocket,
+		PoolDrainAck: &routedWorkPoolDrainAckLease{
+			SessionID:     bead.ID,
+			InstanceToken: "drain-token",
+		},
+	}, params)
+	if owner != exactSessionStartKeyedOwner || !errors.Is(reconcileErr, errSessionStartPoolDrainAckPending) {
+		t.Fatalf("initial owner/error = %v/%v, want keyed pending", owner, reconcileErr)
+	}
+	select {
+	case <-preStopAuthorization:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("async stop did not reach effect-boundary authorization")
+	}
+	close(releasePreStopAuthorization)
+	select {
+	case result := <-completion:
+		if result != drainAckAsyncStopYielded {
+			t.Fatalf("async completion = %v, want yielded", result)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("async stop did not complete after authorization denial")
+	}
+	after, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read rolled-back row: %v", err)
+	}
+	for _, key := range drainAckStopPendingRollbackKeys {
+		if after.Metadata[key] != before.Metadata[key] {
+			t.Fatalf("rollback metadata[%q] = %q, want %q", key, after.Metadata[key], before.Metadata[key])
+		}
+	}
+	if got := provider.CountCalls("Stop", "worker"); got != 0 {
+		t.Fatalf("provider Stop calls = %d, want 0", got)
+	}
+}
+
+func TestReconcileExactSessionStartPoolDrainAckAutoRollbackConflictParks(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token"})
+	writer, ok := env.store.(beads.ConditionalWriter)
+	if !ok {
+		t.Fatal("test store does not implement conditional writer")
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.RolloutMode = rollout.Auto
+	params.StatusWriter = &failSecondConditionalWriter{ConditionalWriter: writer}
+	var authorizations int
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+		authorizations++
+		return authorizations == 1, nil
+	}
+
+	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionSocket,
+		PoolDrainAck: &routedWorkPoolDrainAckLease{
+			SessionID: bead.ID, InstanceToken: "drain-token",
+		},
+	}, params)
+	if owner != exactSessionStartKeyedOwner || reconcileErr == nil || errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+		t.Fatalf("owner/error = %v/%v, want keyed rollback-conflict park", owner, reconcileErr)
+	}
+	if !isDrainAckStopPendingInfo(env.sessionInfo(bead.ID)) {
+		t.Fatal("rollback conflict cleared drain-ack stop-pending marker")
+	}
+	if got := env.sp.CountCalls("Stop", "worker"); got != 0 {
+		t.Fatalf("provider Stop calls = %d, want 0", got)
+	}
+}
+
+func TestReconcileExactSessionStartPoolDrainAckAmbiguousCASCommitRetainsKeyedOwnership(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token"})
+	writer, ok := env.store.(beads.ConditionalWriter)
+	if !ok {
+		t.Fatal("test store does not implement conditional writer")
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.RolloutMode = rollout.Auto
+	params.Provider = &freshLivenessProvider{Fake: env.sp, fresh: runtime.Liveness{Running: true, Alive: true, Complete: true}}
+	params.StatusWriter = &ambiguousCommitConditionalWriter{ConditionalWriter: writer}
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) { return true, nil }
+
+	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID,
+		Source:    sessionStartAdmissionSocket,
+		PoolDrainAck: &routedWorkPoolDrainAckLease{
+			SessionID: bead.ID, InstanceToken: "drain-token",
+		},
+	}, params)
+	if owner != exactSessionStartKeyedOwner || !errors.Is(reconcileErr, errSessionStartPoolDrainAckPending) {
+		t.Fatalf("owner/error = %v/%v, want keyed self-win retained for async stop", owner, reconcileErr)
+	}
+	if !isDrainAckStopPendingInfo(env.sessionInfo(bead.ID)) {
+		t.Fatal("ambiguous committed CAS did not retain drain-ack stop-pending marker")
+	}
+}
+
+type failSecondConditionalWriter struct {
+	beads.ConditionalWriter
+	calls atomic.Int32
+}
+
+type ambiguousCommitConditionalWriter struct {
+	beads.ConditionalWriter
+}
+
+func (w *ambiguousCommitConditionalWriter) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if err := w.ConditionalWriter.UpdateIfMatch(id, revision, opts); err != nil {
+		return err
+	}
+	return errors.New("conditional write committed but acknowledgement was lost")
+}
+
+func (w *failSecondConditionalWriter) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if w.calls.Add(1) == 2 {
+		return errors.New("rollback revision conflict")
+	}
+	return w.ConditionalWriter.UpdateIfMatch(id, revision, opts)
 }
 
 func TestReconcileExactSessionStartRecordsSocketCommitAfterDurableStart(t *testing.T) {

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -65,6 +67,8 @@ func (o *providerDrainOps) clearDrain(sessionName string) error {
 	return errors.Join(
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK"),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey),
+		o.sp.RemoveMeta(sessionName, drainAckRequesterSessionIDKey),
+		o.sp.RemoveMeta(sessionName, drainAckRequesterInstanceTokenKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN"),
@@ -95,10 +99,14 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
+	requesterSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	requesterInstanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
 	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
+		o.sp.SetMeta(sessionName, drainAckRequesterSessionIDKey, requesterSessionID),
+		o.sp.SetMeta(sessionName, drainAckRequesterInstanceTokenKey, requesterInstanceToken),
 		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
 	)
 }
@@ -472,13 +480,18 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		target, err = bindExplicitDrainAckRequester(target, os.Getenv("GC_SESSION_ID"), os.Getenv("GC_INSTANCE_TOKEN"))
+		if err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		sp, err := newSessionProvider()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAckTarget(dops, target, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -492,7 +505,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		return 1
 	}
 	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	return doRuntimeDrainAckTarget(dops, current, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -692,15 +705,45 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 // Tests that swap it MUST NOT call t.Parallel().
 var drainAckPokeController = pokeController
 
+// drainAckPokeSessionStartController is the exact-key controller handoff.
+// Tests that swap it MUST NOT call t.Parallel().
+var drainAckPokeSessionStartController = pokeSessionStartController
+
 // doRuntimeDrainAck sets the drain-ack flag on the session, then pokes the
 // controller so the reconciler observes the drained state immediately instead
 // of waiting for its next patrol tick.
 func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
-	if err := dops.setDrainAck(sn); err != nil {
+	return doRuntimeDrainAckTarget(dops, sessionRuntimeTarget{
+		cityPath:    cityPath,
+		display:     targetName,
+		sessionName: sn,
+	}, jsonOutput, stdout, stderr)
+}
+
+// doRuntimeDrainAckTarget persists the provider acknowledgement before it
+// hands its exact durable session identity to the keyed controller. An absent
+// identity deliberately preserves the old generic poke: the exact command is
+// a latency hint, never a new correctness dependency.
+func doRuntimeDrainAckTarget(dops drainOps, target sessionRuntimeTarget, jsonOutput bool, stdout, stderr io.Writer) int {
+	if target.requesterSessionID != "" && target.requesterInstanceToken == "" {
+		fmt.Fprintln(stderr, "gc runtime drain-ack: refusing self-context acknowledgement: missing GC_INSTANCE_TOKEN") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := dops.setDrainAck(target.sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := drainAckPokeController(cityPath); err != nil {
+	poke := func() error {
+		if target.sessionID != "" && target.requesterSessionID == target.sessionID && target.requesterInstanceToken != "" {
+			return drainAckPokeSessionStartController(target.cityPath, target.sessionID)
+		}
+		return drainAckPokeController(target.cityPath)
+	}
+	if err := poke(); err != nil {
+		if errors.Is(err, errSessionStartControllerBlocked) {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: controller refused acknowledgement: %v\n", err) //nolint:errcheck // explicit safety refusal is user-visible
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if jsonOutput {
@@ -709,8 +752,8 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutpu
 			OK:            true,
 			Command:       "runtime drain-ack",
 			Action:        "drain-ack",
-			Session:       sn,
-			Target:        targetName,
+			Session:       target.sessionName,
+			Target:        target.display,
 			Status:        "acknowledged",
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr

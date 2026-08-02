@@ -535,6 +535,7 @@ func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
 	return MetadataPatch{
 		"state":        stateCode,
+		"state_reason": "",
 		"close_reason": CanonicalCloseReason(stateCode),
 		"closed_at":    ts,
 		"synced_at":    ts,

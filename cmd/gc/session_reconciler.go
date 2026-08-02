@@ -297,17 +297,26 @@ const (
 	// drainAckAsyncStopConfirmed means the target is authoritatively absent.
 	// Re-admit so the keyed owner can finalize the durable marker.
 	drainAckAsyncStopConfirmed
+	// drainAckAsyncStopYielded means the effect-boundary authorization changed,
+	// the Auto path restored the exact pre-transition metadata, and its retained
+	// lease may now yield to legacy ownership.
+	drainAckAsyncStopYielded
 )
 
+var errDrainAckAsyncStopYielded = errors.New("drain-ack async stop yielded after fenced rollback")
+
 func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer) {
-	_ = queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, time.Time{}, tracker, stderr, false, nil)
+	_ = queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, time.Time{}, tracker, stderr, false, nil, nil)
 }
 
-func queueExactDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, incarnationStartedAt time.Time, tracker *asyncStartTracker, stderr io.Writer, onComplete func(drainAckAsyncStopCompletion)) bool {
-	return queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, incarnationStartedAt, tracker, stderr, true, onComplete)
+func queueExactDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, incarnationStartedAt time.Time, tracker *asyncStartTracker, stderr io.Writer, beforeStop func() error, onComplete func(drainAckAsyncStopCompletion)) bool {
+	if beforeStop == nil {
+		return false
+	}
+	return queueDrainAckAsyncStopWithFence(cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, incarnationStartedAt, tracker, stderr, true, beforeStop, onComplete)
 }
 
-func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, incarnationStartedAt time.Time, tracker *asyncStartTracker, stderr io.Writer, strictTokenFence bool, onComplete func(drainAckAsyncStopCompletion)) bool {
+func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, incarnationStartedAt time.Time, tracker *asyncStartTracker, stderr io.Writer, strictTokenFence bool, beforeStop func() error, onComplete func(drainAckAsyncStopCompletion)) bool {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return false
@@ -334,9 +343,11 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 			if r := recover(); r != nil {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n%s", name, r, debug.Stack()) //nolint:errcheck
 			}
-			// Re-admission must not coalesce behind this completed stop, but the
-			// wait-group entry remains live until its callback has returned.
-			if tracker != nil {
+			// A confirmed death has no remaining STOP work: release before its
+			// callback re-admits finalization so a zero-delay worker can consume
+			// it immediately. Other completions retain ownership through their
+			// callback so retries cannot queue a duplicate STOP.
+			if completion == drainAckAsyncStopConfirmed && tracker != nil {
 				tracker.drainAckStopKeys.Delete(key)
 			}
 			if onComplete != nil {
@@ -361,6 +372,16 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 			}
 		}
 		if strictTokenFence {
+			if beforeStop != nil {
+				if err := beforeStop(); err != nil {
+					if errors.Is(err, errDrainAckAsyncStopYielded) {
+						completion = drainAckAsyncStopYielded
+					} else {
+						fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s parked before effect-boundary authorization: %v\n", name, err) //nolint:errcheck
+					}
+					return
+				}
+			}
 			if err := workerStopUnattendedSessionByIDWithConfig(cityPath, store, sp, cfg, sessionID, expectedToken); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s parked before kill: %v\n", name, err) //nolint:errcheck
 				return
@@ -4870,22 +4891,31 @@ func sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store beads.Store, id
 	if store == nil {
 		return false, nil
 	}
-	seen := make(map[string]struct{}, len(identifiers))
+	wantedStatuses := make(map[string]struct{}, len(statuses))
 	for _, status := range statuses {
-		for _, assignee := range identifiers {
-			if assignee == "" {
-				continue
-			}
-			key := status + "\x00" + assignee
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			if has, err := sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierIssues, true); err != nil || has {
-				return has, err
-			}
-			if has, err := sessionHasOpenAssignedWispWork(store, assignee, status); err != nil || has {
-				return has, err
+		wantedStatuses[status] = struct{}{}
+	}
+	if len(wantedStatuses) == 0 {
+		return false, nil
+	}
+
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, assignee := range identifiers {
+		if assignee == "" {
+			continue
+		}
+		if _, ok := seen[assignee]; ok {
+			continue
+		}
+		seen[assignee] = struct{}{}
+		items, err := wa.OpenAssignedTo(assignee, "", beads.TierBoth, true)
+		if err != nil {
+			return false, err
+		}
+		for _, item := range items {
+			if _, wanted := wantedStatuses[item.Status]; wanted && !sessionpkg.IsSessionBeadOrRepairable(item) {
+				return true, nil
 			}
 		}
 	}

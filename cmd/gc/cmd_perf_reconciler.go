@@ -593,6 +593,7 @@ type reconcilerPerfStopFixture struct {
 	cfg         *config.City
 	store       beads.Store
 	provider    *reconcilerPerfStopProvider
+	lease       routedWorkPoolDrainAckLease
 }
 
 func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopFixture, error) {
@@ -608,18 +609,16 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 			StartCommand: "true",
 		}},
 	}
+	metadata := sessionpkg.DrainAckStopPendingPatch(time.Now().UTC())
+	metadata["session_name"] = sessionName
+	metadata["agent_name"] = reconcilerPerfStartTemplate
+	metadata["template"] = reconcilerPerfStartTemplate
+	metadata["generation"] = "1"
+	metadata["instance_token"] = token
 	info, err := sessionFrontDoor(store).CreateSessionInfo(sessionpkg.CreateSpec{
 		Title:     pairID,
 		AgentName: reconcilerPerfStartTemplate,
-		Metadata: map[string]string{
-			"session_name":   sessionName,
-			"agent_name":     reconcilerPerfStartTemplate,
-			"template":       reconcilerPerfStartTemplate,
-			"generation":     "1",
-			"instance_token": token,
-			"state":          string(sessionpkg.StateDraining),
-			"state_reason":   sessionpkg.DrainAckStopPendingReason,
-		},
+		Metadata:  metadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating drain-ack stop session: %w", err)
@@ -630,8 +629,19 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 	if err := provider.SetMeta(sessionName, "GC_INSTANCE_TOKEN", token); err != nil {
 		return nil, fmt.Errorf("setting drain-ack stop runtime token: %w", err)
 	}
+	lease := routedWorkPoolDrainAckLease{
+		SessionID:              info.ID,
+		InstanceToken:          token,
+		RequesterSessionID:     info.ID,
+		RequesterInstanceToken: token,
+		ControllerGeneration:   1,
+		PoolTarget:             reconcilerPerfStartTemplate,
+		WorkID:                 "perf-stop-work-" + pairID,
+		SourceStore:            "city:" + cityName,
+		MembershipRevision:     1,
+	}
 	return &reconcilerPerfStopFixture{
-		cityPath: cityPath, sessionName: sessionName, info: info, cfg: cfg, store: store, provider: provider,
+		cityPath: cityPath, sessionName: sessionName, info: info, cfg: cfg, store: store, provider: provider, lease: lease,
 	}, nil
 }
 
@@ -686,6 +696,9 @@ func measureKeyedReconcilerPerfStop(ctx context.Context, cityPath, pairID string
 			return reconcileExactSessionStart(reconcileCtx, admission, exactSessionStartParams{
 				CityPath: fixture.cityPath, Config: fixture.cfg, Provider: fixture.provider, Store: fixture.store,
 				Clock: clock.Real{}, Recorder: events.Discard, Stdout: io.Discard, Stderr: io.Discard, AsyncStopTracker: tracker,
+				AuthorizePoolDrainAck: func(info sessionpkg.Info, lease routedWorkPoolDrainAckLease) (bool, error) {
+					return info.ID == fixture.info.ID && lease == fixture.lease, nil
+				},
 			})
 		},
 		Observer: func(result sessionStartReconcileResult) { results <- result }, Stderr: io.Discard,
@@ -699,7 +712,7 @@ func measureKeyedReconcilerPerfStop(ctx context.Context, cityPath, pairID string
 	}
 	defer controller.Stop()
 	neededAt := time.Now().UTC()
-	if _, err := controller.Admit(fixture.info.ID, sessionStartAdmissionInProcess); err != nil {
+	if _, err := controller.AdmitPoolDrainAck(fixture.lease); err != nil {
 		return fixture.finish(neededAt, time.Now().UTC(), fmt.Errorf("admitting keyed stop: %w", err)), nil
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, reconcilerPerfArmTimeout)

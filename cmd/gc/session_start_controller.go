@@ -17,6 +17,8 @@ const sessionStartAdmissionMaxIDBytes = 256
 
 var errSessionStartLegacyFallbackRequired = errors.New("session start requires legacy fallback")
 
+var errSessionStartPoolDrainAckPending = errors.New("pool drain acknowledgement stop remains pending")
+
 type sessionStartAdmissionSource string
 
 const (
@@ -28,14 +30,19 @@ const (
 )
 
 type sessionStartAdmission struct {
-	SessionID        string
-	Source           sessionStartAdmissionSource
-	Version          uint64
-	PoolAllocation   *routedWorkPoolStartLease
-	PoolStartEntered bool
-	CensusGeneration uint64
-	Culled           bool
-	AdmittedAt       time.Time
+	SessionID      string
+	Source         sessionStartAdmissionSource
+	Version        uint64
+	PoolAllocation *routedWorkPoolStartLease
+	PoolDrainAck   *routedWorkPoolDrainAckLease
+	// PoolDrainAckUncertain retains a durable stop-pending row when an
+	// anti-entropy seed cannot reconstruct its agent acknowledgement lease.
+	// It is a retry fence, never destructive-stop authority.
+	PoolDrainAckUncertain bool
+	PoolStartEntered      bool
+	CensusGeneration      uint64
+	Culled                bool
+	AdmittedAt            time.Time
 }
 
 type sessionStartAdmissionOutcome string
@@ -67,9 +74,11 @@ type sessionStartReconcileResult struct {
 }
 
 type sessionStartAuthoritativeSeedResult struct {
-	SessionID string
-	Complete  bool
-	Err       error
+	SessionID             string
+	PoolDrainAck          *routedWorkPoolDrainAckLease
+	PoolDrainAckUncertain bool
+	Complete              bool
+	Err                   error
 }
 
 type sessionStartControllerOptions struct {
@@ -190,7 +199,7 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 		return "", err
 	}
 
-	outcome, _, err := c.admit(id, source, false, 0, nil)
+	outcome, _, err := c.admit(id, source, false, 0, nil, nil, false)
 	return outcome, err
 }
 
@@ -201,15 +210,44 @@ func (c *sessionStartController) AdmitPoolAllocation(lease routedWorkPoolStartLe
 	if err := validateRoutedWorkPoolStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease, nil, false)
 	return outcome, err
 }
 
-func (c *sessionStartController) admitAuthoritative(id string, censusGeneration uint64) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
-	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil)
+// AdmitPoolDrainAck retains the narrow ownership proof for one agent-sourced
+// pool drain acknowledgement until exact reconciliation has reread it.
+func (c *sessionStartController) AdmitPoolDrainAck(lease routedWorkPoolDrainAckLease) (sessionStartAdmissionOutcome, error) {
+	if c == nil {
+		return "", fmt.Errorf("admitting pool drain acknowledgement: controller is nil")
+	}
+	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
+		return "", err
+	}
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, nil, &lease, false)
+	return outcome, err
 }
 
-func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
+// poolDrainAckSupersedesPoolStart permits the one safe start-to-stop handoff:
+// the same active pool incarnation acknowledges completion of the exact work
+// that caused its start. A newer membership observation is allowed, but no
+// identity, work, source, generation, or requester proof may change.
+func poolDrainAckSupersedesPoolStart(start routedWorkPoolStartLease, drain routedWorkPoolDrainAckLease) bool {
+	return start.SessionID == drain.SessionID &&
+		start.InstanceToken == drain.InstanceToken &&
+		start.ControllerGeneration == drain.ControllerGeneration &&
+		start.PoolTarget == drain.PoolTarget &&
+		start.WorkID == drain.WorkID &&
+		start.SourceStore == drain.SourceStore &&
+		start.MembershipRevision <= drain.MembershipRevision &&
+		drain.RequesterSessionID == start.SessionID &&
+		drain.RequesterInstanceToken == start.InstanceToken
+}
+
+func (c *sessionStartController) admitAuthoritative(id string, censusGeneration uint64, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
+	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil, poolDrainAck, poolDrainAckUncertain)
+}
+
+func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
 	if err := validateSessionStartAdmission(id, source); err != nil {
 		return "", sessionStartAdmission{}, err
 	}
@@ -242,8 +280,21 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		source = previous.Source
 		admittedAt = previous.AdmittedAt
 	}
+	if poolAllocation != nil && poolDrainAck != nil {
+		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: pool start and drain acknowledgement leases conflict", id)
+	}
+	supersedesPoolStart := false
+	if existed && poolAllocation != nil && previous.PoolDrainAck != nil {
+		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained pool lease conflicts with new admission", id)
+	}
+	if existed && poolDrainAck != nil && previous.PoolAllocation != nil {
+		if !previous.PoolStartEntered || !poolDrainAckSupersedesPoolStart(*previous.PoolAllocation, *poolDrainAck) {
+			return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained pool lease conflicts with new admission", id)
+		}
+		supersedesPoolStart = true
+	}
 	poolStartEntered := false
-	if poolAllocation == nil && existed {
+	if poolAllocation == nil && existed && !supersedesPoolStart {
 		poolAllocation = previous.PoolAllocation
 		poolStartEntered = previous.PoolStartEntered
 	} else if poolAllocation != nil && existed && previous.PoolAllocation != nil &&
@@ -255,13 +306,23 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		copied := *poolAllocation
 		poolAllocation = &copied
 	}
+	if poolDrainAck == nil && existed {
+		poolDrainAck = previous.PoolDrainAck
+		poolDrainAckUncertain = previous.PoolDrainAckUncertain
+	}
+	if poolDrainAck != nil {
+		copied := *poolDrainAck
+		poolDrainAck = &copied
+	}
 	admission := sessionStartAdmission{
-		SessionID:        id,
-		Source:           source,
-		Version:          c.nextVersion,
-		PoolAllocation:   poolAllocation,
-		PoolStartEntered: poolStartEntered,
-		AdmittedAt:       admittedAt,
+		SessionID:             id,
+		Source:                source,
+		Version:               c.nextVersion,
+		PoolAllocation:        poolAllocation,
+		PoolDrainAck:          poolDrainAck,
+		PoolDrainAckUncertain: poolDrainAckUncertain,
+		PoolStartEntered:      poolStartEntered,
+		AdmittedAt:            admittedAt,
 	}
 	if authoritative && admission.Source == sessionStartAdmissionAntiEntropy {
 		admission.CensusGeneration = censusGeneration
@@ -320,6 +381,8 @@ func (c *sessionStartController) runAuthoritativeSeed(generation uint64, next fu
 	}()
 
 	pendingID := ""
+	var pendingDrainAck *routedWorkPoolDrainAckLease
+	pendingDrainAckUncertain := false
 	for {
 		if err := c.ctx.Err(); err != nil || !c.seedGenerationCurrent(generation) {
 			return
@@ -343,8 +406,10 @@ func (c *sessionStartController) runAuthoritativeSeed(generation uint64, next fu
 				return
 			}
 			pendingID = result.SessionID
+			pendingDrainAck = result.PoolDrainAck
+			pendingDrainAckUncertain = result.PoolDrainAckUncertain
 		}
-		outcome, _, err := c.admitAuthoritative(pendingID, generation)
+		outcome, _, err := c.admitAuthoritative(pendingID, generation, pendingDrainAck, pendingDrainAckUncertain)
 		if err != nil {
 			c.failAuthoritativeSeed(generation)
 			return
@@ -352,6 +417,8 @@ func (c *sessionStartController) runAuthoritativeSeed(generation uint64, next fu
 		switch outcome {
 		case sessionStartAdmissionAccepted, sessionStartAdmissionCoalesced:
 			pendingID = ""
+			pendingDrainAck = nil
+			pendingDrainAckUncertain = false
 		case sessionStartAdmissionOverflow:
 			if !c.waitForSeedCapacity() {
 				return
@@ -504,6 +571,43 @@ func (c *sessionStartController) ownsPoolAllocationStart(sessionID, instanceToke
 		(admission.PoolStartEntered || (instanceToken != "" && lease.InstanceToken == instanceToken))
 }
 
+// ownsPoolDrainAckStop keeps legacy from entering a stop only while the exact
+// drain acknowledgement it names is retained. Unlike a start lease, the
+// runtime incarnation never rotates before the destructive stop effect.
+func (c *sessionStartController) ownsPoolDrainAckStop(sessionID, instanceToken string) bool {
+	instanceToken = strings.TrimSpace(instanceToken)
+	if c == nil || sessionID == "" || instanceToken == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	if !ok || admission.PoolDrainAck == nil {
+		return false
+	}
+	lease := admission.PoolDrainAck
+	return lease.SessionID == sessionID && lease.InstanceToken == instanceToken
+}
+
+// YieldPoolDrainAck releases a retained agent drain acknowledgement only when
+// the same durable lease still owns the key. An async pre-stop rollback must
+// not erase a newer admission for a replacement runtime incarnation.
+func (c *sessionStartController) YieldPoolDrainAck(lease routedWorkPoolDrainAckLease) bool {
+	if c == nil || validateRoutedWorkPoolDrainAckLease(lease) != nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[lease.SessionID]
+	if !ok || admission.PoolDrainAck == nil || *admission.PoolDrainAck != lease {
+		return false
+	}
+	delete(c.admissions, lease.SessionID)
+	c.releaseAuthoritativeSlotLocked(lease.SessionID)
+	c.queue.Forget(lease.SessionID)
+	return true
+}
+
 func (c *sessionStartController) Stop() {
 	if c == nil {
 		return
@@ -585,7 +689,11 @@ func (c *sessionStartController) reconcileKey(key string) {
 	startedAt := c.now()
 	err := c.callReconcile(admission)
 	legacyFallback := errors.Is(err, errSessionStartLegacyFallbackRequired)
+	legacyFallbackErr := error(nil)
 	if legacyFallback {
+		if !errors.Is(err, errSessionStartLegacyFallbackRequired) {
+			legacyFallbackErr = err
+		}
 		err = nil
 	}
 	finishedAt := c.now()
@@ -594,7 +702,7 @@ func (c *sessionStartController) reconcileKey(key string) {
 		StartedAt:      startedAt,
 		FinishedAt:     finishedAt,
 		LegacyFallback: legacyFallback,
-		Err:            err,
+		Err:            errors.Join(err, legacyFallbackErr),
 	}
 
 	if c.ctx.Err() != nil {
@@ -618,7 +726,7 @@ func (c *sessionStartController) reconcileKey(key string) {
 		c.observe(result)
 		return
 	}
-	if c.queue.NumRequeues(key) < c.maxRetries {
+	if admission.PoolDrainAck != nil || admission.PoolDrainAckUncertain || errors.Is(err, errSessionStartPoolDrainAckPending) || c.queue.NumRequeues(key) < c.maxRetries {
 		c.queue.AddRateLimited(key)
 		result.Outcome = sessionStartReconcileRetrying
 		c.observe(result)

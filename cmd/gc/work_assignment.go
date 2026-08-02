@@ -44,15 +44,17 @@ func (w workAssignment) unwrapped() beads.Store {
 	return w.store.Store
 }
 
-// OpenAssignedTo returns the open or in-progress WORK beads in this store
-// assigned to the given identity for the given tier mode, excluding session
-// beads and mail message beads. It is the typed form of the raw
+// OpenAssignedTo returns the open or in-progress beads in this store assigned
+// to the given identity for the given tier mode, excluding mail message beads.
+// It is the typed form of the raw
 // List{Assignee,Status,Live,TierMode} probe the reconciler ran directly.
-// status selects the bead status ("open" / "in_progress"); live mirrors the
-// raw ListQuery.Live flag. Session beads (and repairable session beads) are
-// filtered out, matching the raw probes; mail message beads are filtered out
-// here too (ra-59207) — a mail wisp has no claim/routing semantics, so every
-// caller that reassigns or releases what this returns must never see one.
+// status selects the bead status ("open" / "in_progress"); an empty status
+// returns every non-closed status so callers can batch a small status set and
+// filter it in memory. live mirrors the raw ListQuery.Live flag. Callers filter
+// session beads (and repairable session beads) with HasNonSessionWork or the
+// equivalent typed predicate. Mail message beads are filtered here (ra-59207):
+// a mail wisp has no claim/routing semantics, so callers that reassign or
+// release results must never see one.
 func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.TierMode, live bool) ([]beads.Bead, error) {
 	store := w.unwrapped()
 	if store == nil {

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -64,11 +66,32 @@ func TestPokeSessionStartControllerFallsBackWhenExactIngressIsUnavailable(t *tes
 			return nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("pokeSessionStartControllerWith: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "exact session-start hint for \"ga-session-1\" in city \"/city\" was not admitted") || !strings.Contains(err.Error(), "controller returned \"fallback\"") || !strings.Contains(err.Error(), "generic fallback requested") {
+		t.Fatalf("pokeSessionStartControllerWith = %v, want exact-ingress fallback diagnostic", err)
 	}
 	if fallbackCalls != 1 {
 		t.Fatalf("fallback calls = %d, want 1", fallbackCalls)
+	}
+}
+
+func TestPokeSessionStartControllerDoesNotFallBackWhenRequireRefusesClosed(t *testing.T) {
+	fallbackCalls := 0
+	err := pokeSessionStartControllerWith(
+		"/city",
+		"ga-session-1",
+		func(string, string) ([]byte, error) {
+			return []byte(sessionStartSocketReplyBlocked), nil
+		},
+		func(string) error {
+			fallbackCalls++
+			return nil
+		},
+	)
+	if !errors.Is(err, errSessionStartControllerBlocked) {
+		t.Fatalf("require refusal error = %v, want errors.Is(errSessionStartControllerBlocked)", err)
+	}
+	if fallbackCalls != 0 {
+		t.Fatalf("fallback calls = %d, want 0", fallbackCalls)
 	}
 }
 
@@ -198,9 +221,13 @@ func TestCityRuntimeAdmitsSessionStartSocketKey(t *testing.T) {
 }
 
 func TestCityRuntimeSessionStartSocketIngressFallsBackToLegacyOwner(t *testing.T) {
-	cr := &CityRuntime{sessionStartOwnership: sessionStartOwnershipLegacy}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{stderr: &stderr, sessionStartOwnership: sessionStartOwnershipLegacy}
 	if got := cr.admitSessionStartSocketKey("ga-session-1"); got != sessionStartSocketReplyFallback {
 		t.Fatalf("reply = %q, want %q", got, sessionStartSocketReplyFallback)
+	}
+	if !strings.Contains(stderr.String(), "exact session-start socket fallback for ga-session-1: controller unavailable or not keyed") {
+		t.Fatalf("fallback diagnostic = %q, want unavailable-owner reason", stderr.String())
 	}
 }
 
@@ -231,15 +258,20 @@ func TestCityRuntimeSessionStartSocketIngressFallsBackForLegacyOwnedKey(t *testi
 	}
 	t.Cleanup(controller.Stop)
 
+	var stderr bytes.Buffer
 	cr := &CityRuntime{
 		cfg:                    env.cfg,
 		sp:                     runtime.NewFake(),
 		cs:                     coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto),
 		sessionStartController: controller,
 		sessionStartOwnership:  sessionStartOwnershipKeyed,
+		stderr:                 &stderr,
 	}
 	if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyFallback {
 		t.Fatalf("reply = %q, want %q for a dependency-bearing legacy-owned start", got, sessionStartSocketReplyFallback)
+	}
+	if !strings.Contains(stderr.String(), "exact session-start socket fallback for "+bead.ID+": clean legacy ownership classification") {
+		t.Fatalf("fallback diagnostic = %q, want clean legacy-owner reason", stderr.String())
 	}
 }
 

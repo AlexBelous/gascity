@@ -3648,14 +3648,16 @@ func (s *listErrStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 
 type assignOnListStore struct {
 	beads.Store
-	sessionID string
-	calls     int
-	assigned  bool
+	sessionID         string
+	sessionProbeCalls int
+	assigned          bool
 }
 
 func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	s.calls++
-	if !s.assigned && s.calls == 3 {
+	if q.Assignee == s.sessionID && q.Status == "" && q.Live && q.TierMode == beads.TierBoth {
+		s.sessionProbeCalls++
+	}
+	if !s.assigned && s.sessionProbeCalls == 2 {
 		if _, err := s.Create(beads.Bead{
 			Title:    "raced assigned work",
 			Type:     "task",
@@ -3667,6 +3669,30 @@ func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 		s.assigned = true
 	}
 	return s.Store.List(q)
+}
+
+func TestSessionHasAssignedWorkBatchesStatusesAndTiersPerIdentity(t *testing.T) {
+	store := newRecordingWorkStore()
+
+	has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(
+		store,
+		[]string{"worker-session", "worker-session"},
+		[]string{"open", "in_progress"},
+	)
+	if err != nil {
+		t.Fatalf("sessionHasAssignedWorkInStoreByIdentifiersForStatuses: %v", err)
+	}
+	if has {
+		t.Fatal("empty store reported assigned work")
+	}
+	want := beads.ListQuery{
+		Assignee: "worker-session",
+		Live:     true,
+		TierMode: beads.TierBoth,
+	}
+	if len(store.listQueries) != 1 || !reflect.DeepEqual(store.listQueries[0], want) {
+		t.Fatalf("assignment probes = %#v, want one batched live both-tier query %#v", store.listQueries, want)
+	}
 }
 
 type failSetMetadataBatchStore struct {

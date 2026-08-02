@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout"
-	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -129,7 +129,23 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				AsyncStopTracker:  &cr.asyncStops,
 				AsyncStopCompletion: func(completion drainAckAsyncStopCompletion) {
 					release()
+					cr.sessionStartMu.Lock()
+					activeController := cr.sessionStartController
+					cr.sessionStartMu.Unlock()
+					if completion == drainAckAsyncStopYielded {
+						if admission.PoolDrainAck != nil && activeController != nil && activeController.YieldPoolDrainAck(*admission.PoolDrainAck) {
+							cr.requestLegacySessionStartFallback()
+						}
+						return
+					}
 					if completion == drainAckAsyncStopParked {
+						if admission.PoolDrainAck != nil && activeController != nil {
+							if _, err := activeController.AdmitPoolDrainAck(*admission.PoolDrainAck); err != nil {
+								fmt.Fprintf(cr.sessionStartStderr(), "%s: retaining parked drain-ack stop for %s: %v\n", cr.sessionStartLogPrefix(), admission.SessionID, err) //nolint:errcheck
+							}
+						} else {
+							cr.admitDrainAckStopCompletion(admission.SessionID)
+						}
 						return
 					}
 					cr.admitDrainAckStopCompletion(admission.SessionID)
@@ -145,6 +161,12 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				AuthorizePoolStart: func(authorizeCtx context.Context, info sessionpkg.Info, lease routedWorkPoolStartLease) (bool, error) {
 					return cr.authorizeRoutedWorkPoolStart(authorizeCtx, snapshot, info, lease)
 				},
+				AuthorizePoolDrainAck: func(info sessionpkg.Info, lease routedWorkPoolDrainAckLease) (bool, error) {
+					return cr.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
+				},
+				RecoverPoolDrainAck: func(info sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error) {
+					return cr.recoverRoutedWorkPoolDrainAckLease(snapshot, info)
+				},
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				return errSessionStartLegacyFallbackRequired
@@ -152,7 +174,15 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			return reconcileErr
 		},
 		Observer: func(result sessionStartReconcileResult) {
+			if result.Outcome == sessionStartReconcileRetrying &&
+				(result.Admission.PoolDrainAck != nil || result.Admission.PoolDrainAckUncertain) &&
+				result.Err != nil && result.Err.Error() != errSessionStartPoolDrainAckPending.Error() {
+				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation retrying for %s: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // non-exhausting safety retries must retain their cause
+			}
 			if result.Outcome == sessionStartReconcileSucceeded && result.LegacyFallback {
+				if result.Err != nil {
+					fmt.Fprintf(cr.sessionStartStderr(), "%s: exact session reconciliation yielded %s to priority legacy fallback: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // fallback cause must remain visible
+				}
 				if result.Admission.PoolAllocation != nil {
 					cr.requestReadyRoutedWorkLegacyFallback()
 				} else {
@@ -169,6 +199,8 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start reconciliation exhausted for %s: %v; authoritative audit requested\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // terminal retry diagnostic
 				if result.Admission.PoolAllocation != nil {
 					cr.requestReadyRoutedWorkLegacyFallback()
+				} else if result.Admission.PoolDrainAck != nil && mode == rollout.Auto {
+					cr.requestLegacySessionStartFallback()
 				}
 			}
 		},
@@ -383,6 +415,24 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 				!resolveExactSessionStartOrDrainAckStopOwnership(info, stateSnapshot.Config, now) {
 				continue
 			}
+			if isDrainAckStopPendingInfo(info) {
+				lease, agentDrainAck, legacyMarker, leaseErr := cr.recoverRoutedWorkPoolDrainAckLease(stateSnapshot, info)
+				if leaseErr != nil {
+					return sessionStartAuthoritativeSeedResult{
+						SessionID:             info.ID,
+						PoolDrainAckUncertain: true,
+					}
+				}
+				if !agentDrainAck && legacyMarker {
+					// A definitely non-agent acknowledgement is legacy-owned. Do
+					// not manufacture a keyed STOP admission for it.
+					continue
+				}
+				if !agentDrainAck {
+					return sessionStartAuthoritativeSeedResult{SessionID: info.ID, PoolDrainAckUncertain: true}
+				}
+				return sessionStartAuthoritativeSeedResult{SessionID: info.ID, PoolDrainAck: &lease}
+			}
 			return sessionStartAuthoritativeSeedResult{SessionID: info.ID}
 		}
 	})
@@ -447,9 +497,17 @@ func (cr *CityRuntime) sessionStartOwnershipState() sessionStartOwnership {
 	return cr.sessionStartOwnership
 }
 
+// sessionStartSocketFallback records why the exact socket handoff yielded to
+// the established legacy poke path. It deliberately does not change the reply
+// or admission semantics.
+func (cr *CityRuntime) sessionStartSocketFallback(sessionID, reason string) sessionStartSocketReply {
+	fmt.Fprintf(cr.sessionStartStderr(), "%s: exact session-start socket fallback for %s: %s\n", cr.sessionStartLogPrefix(), sessionID, reason) //nolint:errcheck // fallback diagnostics must not affect admission
+	return sessionStartSocketReplyFallback
+}
+
 func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStartSocketReply {
 	if cr == nil {
-		return sessionStartSocketReplyFallback
+		return cr.sessionStartSocketFallback(sessionID, "controller runtime is nil")
 	}
 	if err := validateSessionStartAdmission(sessionID, sessionStartAdmissionSocket); err != nil {
 		return sessionStartSocketReplyInvalid
@@ -458,22 +516,63 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 	cr.sessionStartMu.Lock()
 	controller := cr.sessionStartController
 	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	mode := cr.sessionStartMode
 	cr.sessionStartMu.Unlock()
 	if !owned || controller == nil {
-		return sessionStartSocketReplyFallback
+		if mode == rollout.Require {
+			return sessionStartSocketReplyBlocked
+		}
+		return cr.sessionStartSocketFallback(sessionID, "controller unavailable or not keyed")
 	}
 	snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
 	if err != nil {
-		return sessionStartSocketReplyFallback
+		if mode == rollout.Require {
+			return sessionStartSocketReplyBlocked
+		}
+		return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("acquiring controller snapshot: %v", err))
 	}
 	defer release()
-	owner, err := exactSessionStartOwnerForKey(snapshot.Store, snapshot.Config, sessionID, time.Now().UTC())
-	if err != nil || owner != exactSessionStartKeyedOwner {
-		return sessionStartSocketReplyFallback
+	info, _, err := getAuthoritativeSessionStartRecord(snapshot.Store, sessionID)
+	if err != nil {
+		if mode == rollout.Require {
+			return sessionStartSocketReplyBlocked
+		}
+		return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("reading authoritative session row: %v", err))
+	}
+	lease, agentDrainAck, leaseErr := cr.newRoutedWorkPoolDrainAckLease(snapshot, info)
+	if leaseErr != nil {
+		if mode == rollout.Require {
+			fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting exact pool drain acknowledgement for %s: %v; required path refused closed\n", cr.sessionStartLogPrefix(), sessionID, leaseErr) //nolint:errcheck // required refusal must remain visible
+			return sessionStartSocketReplyBlocked
+		}
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting exact pool drain acknowledgement for %s: %v; priority legacy fallback requested\n", cr.sessionStartLogPrefix(), sessionID, leaseErr) //nolint:errcheck // admission uncertainty must remain visible
+		return cr.sessionStartSocketFallback(sessionID, "pool drain acknowledgement admission uncertainty")
+	}
+	if agentDrainAck {
+		outcome, admitErr := controller.AdmitPoolDrainAck(lease)
+		if admitErr != nil || outcome == sessionStartAdmissionOverflow {
+			if mode == rollout.Require {
+				fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting exact pool drain acknowledgement for %s: outcome=%s err=%v; required path refused closed\n", cr.sessionStartLogPrefix(), sessionID, outcome, admitErr) //nolint:errcheck // required refusal must remain visible
+				return sessionStartSocketReplyBlocked
+			}
+			fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting exact pool drain acknowledgement for %s: outcome=%s err=%v; priority legacy fallback requested\n", cr.sessionStartLogPrefix(), sessionID, outcome, admitErr) //nolint:errcheck // queue rejection must remain visible
+			return cr.sessionStartSocketFallback(sessionID, "pool drain acknowledgement admission rejected")
+		}
+		return sessionStartSocketReplyOK
+	}
+	_, _, owner := classifyExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
+	if owner != exactSessionStartKeyedOwner {
+		if mode == rollout.Require {
+			return sessionStartSocketReplyBlocked
+		}
+		return cr.sessionStartSocketFallback(sessionID, "clean legacy ownership classification")
 	}
 	outcome, err := controller.Admit(sessionID, sessionStartAdmissionSocket)
 	if err != nil || outcome == sessionStartAdmissionOverflow {
-		return sessionStartSocketReplyFallback
+		if mode == rollout.Require {
+			return sessionStartSocketReplyBlocked
+		}
+		return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("exact session-start admission rejected (outcome=%s err=%v)", outcome, err))
 	}
 	return sessionStartSocketReplyOK
 }
@@ -554,8 +653,14 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 		if validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) != nil {
 			return false
 		}
+		if controller != nil && controller.ownsPoolDrainAckStop(info.ID, info.InstanceToken) {
+			return true
+		}
 		snapshot, err := cr.cs.sessionStartSnapshot()
 		if err != nil {
+			if mode == rollout.Require {
+				return !info.Closed
+			}
 			// Once ownership has transferred, an incoherent state generation must
 			// stall its start family rather than let both writers enter.
 			input := sessionpkg.LifecycleInputFromInfo(info)
@@ -566,10 +671,27 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 			return !info.Closed && (!lifecycle.Terminal || isDrainAckStopPendingInfo(info)) &&
 				(isDrainAckStopPendingInfo(info) || lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) || lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit))
 		}
-		if isDrainAckStopPendingInfo(info) && mode == rollout.Auto {
-			if _, ok := snapshot.Provider.(runtime.FreshLivenessObserver); !ok {
+		if mode == rollout.Require {
+			name := strings.TrimSpace(info.SessionNameMetadata)
+			if name != "" {
+				source, sourceErr := snapshot.Provider.GetMeta(name, reconcilerDrainAckSourceKey)
+				if sourceErr != nil || source == drainAckSourceAgentValue {
+					return !info.Closed
+				}
+			}
+		}
+		if isDrainAckStopPendingInfo(info) {
+			name := strings.TrimSpace(info.SessionNameMetadata)
+			if name == "" {
+				return true
+			}
+			source, sourceErr := snapshot.Provider.GetMeta(name, reconcilerDrainAckSourceKey)
+			if sourceErr == nil && source == reconcilerDrainAckSourceValue {
 				return false
 			}
+			// Agent, missing, or unreadable provenance is never a reason to
+			// let legacy enter the destructive stop path.
+			return true
 		}
 		if controller != nil && controller.ownsPoolAllocationStart(info.ID, info.InstanceToken) {
 			return true

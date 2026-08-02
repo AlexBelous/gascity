@@ -503,8 +503,9 @@ func (cr *CityRuntime) recordReadyRoutedWorkDemandContribution(contribution read
 	}
 	lookupStarted := time.Now()
 	membership := cr.poolMembershipShadow.observe(contribution.PoolTarget)
-	capacityDecidedAt := time.Now().UTC()
 	lookupDuration := time.Since(lookupStarted)
+	allocation := decideRoutedWorkPoolAllocationShadow(contribution, membership)
+	capacityDecidedAt := time.Now().UTC()
 	cr.serviceStateMu.RLock()
 	cfg := cr.cfg
 	cr.serviceStateMu.RUnlock()
@@ -554,6 +555,10 @@ func (cr *CityRuntime) recordReadyRoutedWorkDemandContribution(contribution read
 			"pool_membership_lookup_ns":             lookupDuration.Nanoseconds(),
 			"event_to_capacity_shadow_decision_ns":  eventToCapacityDecision,
 			"demand_to_capacity_shadow_decision_ns": demandToCapacityDecision,
+			"allocation_action":                     string(allocation.action),
+			"allocation_reason":                     string(allocation.reason),
+			"allocation_start_count":                allocation.startCount,
+			"allocation_supported":                  allocation.action == poolAllocationShadowStartOne,
 			"effect_applied":                        false,
 		},
 	)

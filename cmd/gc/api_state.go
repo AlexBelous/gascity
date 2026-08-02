@@ -647,6 +647,7 @@ type readyRoutedWorkDemandContribution struct {
 	SourceActor         string
 	SourceStore         string
 	ContributionPresent bool
+	AllocationPolicy    poolAllocationShadowPolicy
 	EventAt             time.Time
 	ObservedAt          time.Time
 	DecidedAt           time.Time
@@ -717,7 +718,8 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 		namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
 	}
 	templates := make(map[string]struct{}, len(cfg.Agents))
-	shadowSupported := make(map[string]bool, len(cfg.Agents))
+	allocationPolicies := make(map[string]poolAllocationShadowPolicy, len(cfg.Agents))
+	allocationAgents := make(map[string]*config.Agent, len(cfg.Agents))
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
@@ -725,8 +727,8 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 		}
 		target := agent.QualifiedName()
 		templates[target] = struct{}{}
-		_, hasNamedSession := namedTemplates[target]
-		shadowSupported[target] = strings.TrimSpace(agent.ScaleCheck) == "" && !hasNamedSession
+		allocationPolicies[target] = newPoolAllocationShadowPolicy(cfg, agent, namedTemplates)
+		allocationAgents[target] = agent
 	}
 	if len(templates) == 0 {
 		return
@@ -752,12 +754,14 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 			continue
 		}
 		if target := controllerDemandRouteTarget(cfg, work, templates); target != "" {
+			policy := allocationPolicies[target].forSourceStore(cfg, allocationAgents[target], cs.cityPath, candidate.ref)
 			admit(readyRoutedWorkDemandContribution{
 				WorkID:              work.ID,
 				PoolTarget:          target,
 				SourceActor:         evt.Actor,
 				SourceStore:         candidate.ref,
-				ContributionPresent: shadowSupported[target],
+				ContributionPresent: policy.contributionPresent,
+				AllocationPolicy:    policy,
 				EventAt:             evt.Ts.UTC(),
 				ObservedAt:          observedAt,
 				DecidedAt:           time.Now().UTC(),

@@ -1,0 +1,246 @@
+package main
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+func TestPoolAllocationShadowPolicyKeepsNontrivialClassesLegacyOwned(t *testing.T) {
+	base := func() (*config.City, *config.Agent) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "rig"}},
+			Agents: []config.Agent{{
+				Name: "worker",
+				Dir:  "rig",
+			}},
+		}
+		return cfg, &cfg.Agents[0]
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*config.City, *config.Agent) map[string]struct{}
+		want   poolAllocationShadowReason
+	}{
+		{name: "default multi-session pool", want: poolAllocationShadowEligible},
+		{name: "custom scale check", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.ScaleCheck = "printf 1"
+			return nil
+		}, want: poolAllocationShadowCustomScaleCheck},
+		{name: "named session binding", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			return map[string]struct{}{agent.QualifiedName(): {}}
+		}, want: poolAllocationShadowNamedSession},
+		{name: "minimum floor", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			minimum := 1
+			agent.MinActiveSessions = &minimum
+			return nil
+		}, want: poolAllocationShadowMinFloor},
+		{name: "workspace cap", mutate: func(cfg *config.City, _ *config.Agent) map[string]struct{} {
+			maximum := 10
+			cfg.Workspace.MaxActiveSessions = &maximum
+			return nil
+		}, want: poolAllocationShadowWorkspaceCap},
+		{name: "rig cap", mutate: func(cfg *config.City, _ *config.Agent) map[string]struct{} {
+			maximum := 10
+			cfg.Rigs[0].MaxActiveSessions = &maximum
+			return nil
+		}, want: poolAllocationShadowRigCap},
+		{name: "namepool", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.Namepool = "names.txt"
+			return nil
+		}, want: poolAllocationShadowNamepool},
+		{name: "loaded namepool", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.NamepoolNames = []string{"one"}
+			return nil
+		}, want: poolAllocationShadowNamepool},
+		{name: "canonical singleton", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			maximum := 1
+			agent.MaxActiveSessions = &maximum
+			return nil
+		}, want: poolAllocationShadowSingletonIdentity},
+		{name: "bounded agent cap", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			maximum := 2
+			agent.MaxActiveSessions = &maximum
+			return nil
+		}, want: poolAllocationShadowAgentCap},
+		{name: "disabled", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			maximum := 0
+			agent.MaxActiveSessions = &maximum
+			return nil
+		}, want: poolAllocationShadowDisabled},
+		{name: "suspended", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.Suspended = true
+			return nil
+		}, want: poolAllocationShadowSuspended},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, agent := base()
+			var namedTemplates map[string]struct{}
+			if test.mutate != nil {
+				namedTemplates = test.mutate(cfg, agent)
+			}
+			policy := newPoolAllocationShadowPolicy(cfg, agent, namedTemplates)
+			if policy.reason != test.want {
+				t.Fatalf("policy reason = %q, want %q", policy.reason, test.want)
+			}
+			if got := policy.supported(); got != (test.want == poolAllocationShadowEligible) {
+				t.Fatalf("policy supported = %t for reason %q", got, policy.reason)
+			}
+		})
+	}
+}
+
+func TestPoolAllocationShadowPolicyRejectsUnreachableSourceStore(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig", Path: "rig"}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "rig"}},
+	}
+	policy := newPoolAllocationShadowPolicy(cfg, &cfg.Agents[0], nil)
+
+	if got := policy.forSourceStore(cfg, &cfg.Agents[0], "/city", "rig:rig"); !got.supported() {
+		t.Fatalf("reachable source policy = %+v, want supported", got)
+	}
+	if got := policy.forSourceStore(cfg, &cfg.Agents[0], "/city", "city:test-city"); got.reason != poolAllocationShadowSourceStore {
+		t.Fatalf("unreachable source policy = %+v, want %q", got, poolAllocationShadowSourceStore)
+	}
+}
+
+func TestDecideRoutedWorkPoolAllocationShadow(t *testing.T) {
+	supported := poolAllocationShadowPolicy{reason: poolAllocationShadowEligible}
+	baseContribution := readyRoutedWorkDemandContribution{
+		WorkID:              "ga-ready",
+		PoolTarget:          "rig/worker",
+		ContributionPresent: true,
+		AllocationPolicy:    supported,
+	}
+	baseMembership := poolMembershipObservation{certified: true, revision: 7}
+
+	tests := []struct {
+		name         string
+		contribution readyRoutedWorkDemandContribution
+		membership   poolMembershipObservation
+		wantAction   poolAllocationShadowAction
+		wantReason   poolAllocationShadowReason
+		wantStarts   int
+	}{
+		{
+			name:         "certified cold pool starts one",
+			contribution: baseContribution,
+			membership:   baseMembership,
+			wantAction:   poolAllocationShadowStartOne,
+			wantReason:   poolAllocationShadowColdFromZero,
+			wantStarts:   1,
+		},
+		{
+			name: "unsupported demand remains legacy owned",
+			contribution: func() readyRoutedWorkDemandContribution {
+				value := baseContribution
+				value.ContributionPresent = false
+				value.AllocationPolicy.reason = poolAllocationShadowCustomScaleCheck
+				return value
+			}(),
+			membership: baseMembership,
+			wantAction: poolAllocationShadowLegacy,
+			wantReason: poolAllocationShadowCustomScaleCheck,
+		},
+		{
+			name:         "uncertified membership remains legacy owned",
+			contribution: baseContribution,
+			membership: poolMembershipObservation{
+				revision: 8,
+				reason:   poolMembershipUncertifiedSnapshotGap,
+			},
+			wantAction: poolAllocationShadowLegacy,
+			wantReason: poolAllocationShadowMembershipUncertified,
+		},
+		{
+			name:         "asleep reusable member remains legacy owned",
+			contribution: baseContribution,
+			membership:   poolMembershipObservation{members: 1, certified: true, revision: 9},
+			wantAction:   poolAllocationShadowLegacy,
+			wantReason:   poolAllocationShadowNonemptyPool,
+		},
+		{
+			name:         "occupied member remains legacy owned",
+			contribution: baseContribution,
+			membership:   poolMembershipObservation{members: 1, occupied: 1, certified: true, revision: 10},
+			wantAction:   poolAllocationShadowLegacy,
+			wantReason:   poolAllocationShadowNonemptyPool,
+		},
+		{
+			name:         "impossible membership fails closed",
+			contribution: baseContribution,
+			membership:   poolMembershipObservation{occupied: 1, certified: true, revision: 11},
+			wantAction:   poolAllocationShadowLegacy,
+			wantReason:   poolAllocationShadowInvalidMembership,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := decideRoutedWorkPoolAllocationShadow(test.contribution, test.membership)
+			if got.action != test.wantAction || got.reason != test.wantReason || got.startCount != test.wantStarts {
+				t.Fatalf("decision = %+v, want action=%q reason=%q starts=%d", got, test.wantAction, test.wantReason, test.wantStarts)
+			}
+			if got.workID != test.contribution.WorkID || got.poolTarget != test.contribution.PoolTarget || got.membershipRevision != test.membership.revision {
+				t.Fatalf("decision provenance = %+v, want contribution and membership revision retained", got)
+			}
+		})
+	}
+}
+
+func TestColdPoolAllocationShadowMatchesLegacyMinimumAction(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	policy := newPoolAllocationShadowPolicy(cfg, &cfg.Agents[0], nil)
+	decision := decideRoutedWorkPoolAllocationShadow(readyRoutedWorkDemandContribution{
+		WorkID:              "ga-ready",
+		PoolTarget:          "worker",
+		ContributionPresent: true,
+		AllocationPolicy:    policy,
+	}, poolMembershipObservation{certified: true})
+
+	legacy := ComputePoolDesiredStates(cfg, nil, nil, map[string]int{"worker": 1})
+	if len(legacy) != 1 || len(legacy[0].Requests) != decision.startCount || decision.action != poolAllocationShadowStartOne {
+		t.Fatalf("legacy=%+v shadow=%+v, want the same one cold start", legacy, decision)
+	}
+}
+
+func BenchmarkRoutedWorkPoolAllocationShadowFleetSize(b *testing.B) {
+	for _, size := range []int{1, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("fleet-%d", size), func(b *testing.B) {
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "rig", Path: "rig"}},
+				Agents:    make([]config.Agent, size),
+			}
+			for i := range cfg.Agents {
+				cfg.Agents[i] = config.Agent{Name: fmt.Sprintf("unrelated-%d", i)}
+			}
+			cfg.Agents[size-1] = config.Agent{Name: "worker", Dir: "rig"}
+			target := &cfg.Agents[size-1]
+			membership := poolMembershipObservation{certified: true, revision: 7}
+			var decision poolAllocationShadowDecision
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				policy := newPoolAllocationShadowPolicy(cfg, target, nil).
+					forSourceStore(cfg, target, "/city", "rig:rig")
+				decision = decideRoutedWorkPoolAllocationShadow(readyRoutedWorkDemandContribution{
+					WorkID:              "ga-ready",
+					PoolTarget:          "rig/worker",
+					ContributionPresent: policy.contributionPresent,
+					AllocationPolicy:    policy,
+				}, membership)
+			}
+			if decision.action != poolAllocationShadowStartOne {
+				b.Fatalf("decision = %+v, want start one", decision)
+			}
+		})
+	}
+}

@@ -73,6 +73,10 @@ type sessionWaitDependencyShadowJourneyTraceRecord struct {
 		EventTimestampValid           bool   `json:"event_timestamp_valid"`
 		EventToShadowDecisionNS       int64  `json:"event_to_shadow_decision_ns"`
 		ObservationToShadowDecisionNS int64  `json:"observation_to_shadow_decision_ns"`
+		AllocationAction              string `json:"allocation_action"`
+		AllocationReason              string `json:"allocation_reason"`
+		AllocationStartCount          int    `json:"allocation_start_count"`
+		AllocationSupported           bool   `json:"allocation_supported"`
 	} `json:"fields"`
 }
 
@@ -224,7 +228,7 @@ func TestReadyRoutedWorkPriorityStartsLegacySessionBeforeDebounce(t *testing.T) 
 name = "worker"
 start_command = "sleep 3600"
 min_active_sessions = 0
-max_active_sessions = 2
+max_active_sessions = -1
 `, `patrol_interval = "1h"
 tick_debounce = "10m"
 `, "")
@@ -312,11 +316,15 @@ tick_debounce = "10m"
 		!shadow.Fields.EventTimestampValid ||
 		shadow.Fields.EventToShadowDecisionNS <= 0 ||
 		shadow.Fields.ObservationToShadowDecisionNS < 0 ||
+		shadow.Fields.AllocationAction != "start_one" ||
+		shadow.Fields.AllocationReason != "cold_from_zero" ||
+		shadow.Fields.AllocationStartCount != 1 ||
+		!shadow.Fields.AllocationSupported ||
 		shadow.Fields.EffectApplied == nil || *shadow.Fields.EffectApplied {
-		t.Fatalf("routed-work demand shadow record = %+v, want committed exact no-effect contribution", shadow)
+		t.Fatalf("routed-work demand shadow record = %+v, want committed exact no-effect cold allocation", shadow)
 	}
 	t.Logf(
-		"ready routed-work event reached the keyed demand shadow in %s and materialized legacy-owned session %s in %s",
+		"ready routed-work event produced start-one shadow allocation in %s and materialized legacy-owned session %s in %s",
 		time.Duration(shadow.Fields.EventToShadowDecisionNS),
 		session.ID,
 		latency,

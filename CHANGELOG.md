@@ -96,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound or explicitly configured endpoints keep bd's own output unchanged
   (gastownhall/gascity#1374).
 
+- **Mail archive and delete now expand whitespace-joined message IDs.** Each
+  positional argument is split into individual IDs before single-versus-batch
+  dispatch, so shell variables containing multiple IDs no longer look like one
+  already-handled message.
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report

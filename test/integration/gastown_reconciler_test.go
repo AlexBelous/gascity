@@ -30,11 +30,15 @@ func renderReconcilerToml(cityName string, agentBlocks string) string {
 }
 
 func renderReconcilerTomlWithDaemon(cityName, agentBlocks, daemonSettings, beadsSettings string) string {
+	return renderReconcilerTomlWithDaemonAndProvider(cityName, agentBlocks, daemonSettings, beadsSettings, "file")
+}
+
+func renderReconcilerTomlWithDaemonAndProvider(cityName, agentBlocks, daemonSettings, beadsSettings, beadsProvider string) string {
 	return fmt.Sprintf(`[workspace]
 name = %s
 
 [beads]
-provider = "file"
+provider = %s
 %s
 
 [daemon]
@@ -42,7 +46,7 @@ provider = "file"
 
 %s
 %s
-`, quote(cityName), beadsSettings, daemonSettings, agentBlocks, reconcilerNamedSessions(agentBlocks))
+`, quote(cityName), quote(beadsProvider), beadsSettings, daemonSettings, agentBlocks, reconcilerNamedSessions(agentBlocks))
 }
 
 var (
@@ -107,12 +111,29 @@ func setupReconcilerCity(t *testing.T, agentBlocks string) string {
 
 func setupReconcilerCityWithDaemon(t *testing.T, agentBlocks, daemonSettings, beadsSettings string) string {
 	t.Helper()
-	env := newIsolatedCommandEnv(t, false)
+	return setupReconcilerCityWithStore(t, agentBlocks, daemonSettings, beadsSettings, false)
+}
+
+func setupReconcilerCityWithManagedDolt(t *testing.T, agentBlocks, daemonSettings, beadsSettings string) string {
+	t.Helper()
+	return setupReconcilerCityWithStore(t, agentBlocks, daemonSettings, beadsSettings, true)
+}
+
+func setupReconcilerCityWithStore(t *testing.T, agentBlocks, daemonSettings, beadsSettings string, useDolt bool) string {
+	t.Helper()
+	env := newIsolatedCommandEnv(t, useDolt)
+	beadsProvider := "file"
+	runGC := runGCWithEnv
+	if useDolt {
+		beadsProvider = "bd"
+		runGC = runGCDoltWithEnv
+	}
 
 	cityName := uniqueCityName()
 	cityDir := filepath.Join(t.TempDir(), cityName)
 	configPath := filepath.Join(t.TempDir(), cityName+".toml")
-	if err := os.WriteFile(configPath, []byte(renderReconcilerTomlWithDaemon(cityName, agentBlocks, daemonSettings, beadsSettings)), 0o644); err != nil {
+	config := renderReconcilerTomlWithDaemonAndProvider(cityName, agentBlocks, daemonSettings, beadsSettings, beadsProvider)
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
 	}
 
@@ -120,20 +141,24 @@ func setupReconcilerCityWithDaemon(t *testing.T, agentBlocks, daemonSettings, be
 	// final filesystem layout.
 	copyE2EScripts(t, cityDir)
 
-	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-	if err != nil {
-		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
+	if useDolt {
+		initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
+	} else {
+		out, err := runGC(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+		if err != nil {
+			t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
+		}
 	}
 	registerCityCommandEnv(cityDir, env)
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
+		if out, err := runGC(env, "", "stop", cityDir); err != nil {
 			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
 		}
 		// --wait so the supervisor and its controller subprocesses are
 		// confirmed exited before t.TempDir() / fixRootOwnedFiles run.
-		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+		if out, err := runGC(env, "", "supervisor", "stop", "--wait"); err != nil {
 			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
 		}
 		if !usingSubprocess() {

@@ -54,6 +54,8 @@ type sessionWaitDependencyShadowJourneyTraceRecord struct {
 	RecordType           string `json:"record_type"`
 	SiteCode             string `json:"site_code"`
 	OutcomeCode          string `json:"outcome_code"`
+	SessionBeadID        string `json:"session_bead_id"`
+	SessionName          string `json:"session_name"`
 	Fields               struct {
 		Cause                         string `json:"cause"`
 		WaitOutcome                   string `json:"wait_outcome"`
@@ -61,6 +63,7 @@ type sessionWaitDependencyShadowJourneyTraceRecord struct {
 		StartReason                   string `json:"start_reason"`
 		WaitID                        string `json:"wait_id"`
 		SessionID                     string `json:"session_id"`
+		InstanceToken                 string `json:"instance_token"`
 		Admission                     string `json:"admission"`
 		StatusOutcome                 string `json:"status_outcome"`
 		StatusReason                  string `json:"status_reason"`
@@ -71,13 +74,21 @@ type sessionWaitDependencyShadowJourneyTraceRecord struct {
 		SourceStore                   string `json:"source_store"`
 		ContributionPresent           bool   `json:"contribution_present"`
 		EventTimestampValid           bool   `json:"event_timestamp_valid"`
+		EventToMaterializationNS      int64  `json:"event_to_materialization_ns"`
 		EventToShadowDecisionNS       int64  `json:"event_to_shadow_decision_ns"`
 		ObservationToShadowDecisionNS int64  `json:"observation_to_shadow_decision_ns"`
 		AllocationAction              string `json:"allocation_action"`
 		AllocationReason              string `json:"allocation_reason"`
 		AllocationStartCount          int    `json:"allocation_start_count"`
 		AllocationSupported           bool   `json:"allocation_supported"`
+		EffectOwner                   string `json:"effect_owner"`
 	} `json:"fields"`
+}
+
+type sessionWaitDependencyShadowJourneyTmuxSession struct {
+	ID         string
+	Name       string
+	SocketPath string
 }
 
 func TestSessionWaitDependencyShadowExactBinaryJourney(t *testing.T) {
@@ -213,16 +224,16 @@ tick_debounce = "10m"
 	}
 }
 
-// TestReadyRoutedWorkPriorityStartsLegacySessionBeforeDebounce proves that a
-// schema-59-style routed-work update with no dependency field accelerates the
-// existing legacy tick. The event admission itself does not create a session;
-// the typed session projection remains the user-visible legacy-owned result.
-func TestReadyRoutedWorkPriorityStartsLegacySessionBeforeDebounce(t *testing.T) {
+// TestReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce proves
+// that a schema-59-style routed-work update with no dependency field creates
+// and starts one cold ephemeral session through the keyed controller without
+// waiting for the fleet-global legacy builder or its debounce.
+func TestReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce(t *testing.T) {
 	if usingSubprocess() {
 		t.Skip("exact ready routed-work journey requires tmux")
 	}
 
-	cityDir := setupReconcilerCityWithDaemon(t, `session_reconciler = "auto"
+	cityDir := setupReconcilerCityWithManagedDolt(t, `session_reconciler = "auto"
 
 [[agent]]
 name = "worker"
@@ -232,19 +243,19 @@ max_active_sessions = -1
 `, `patrol_interval = "1h"
 tick_debounce = "10m"
 `, "")
-	if out, err := gc("", "stop", cityDir); err != nil {
+	if out, err := gcDolt("", "stop", cityDir); err != nil {
 		t.Fatalf("stop empty city before priming routed work: %v\n%s", err, out)
 	}
 	if err := sessionWaitDependencyShadowJourneyWaitForControllerStop(t.Context(), cityDir, sessionWaitDependencyShadowJourneyWitnessTimeout); err != nil {
 		t.Fatalf("wait for empty city controller to stop: %v", err)
 	}
 
-	out, err := bd(cityDir, "create", "ready routed-work priority journey", "--json")
+	out, err := bdDolt(cityDir, "create", "ready routed-work priority journey", "--json")
 	if err != nil {
 		t.Fatalf("create ready routed work while city is stopped: %v\n%s", err, out)
 	}
 	workID := sessionWaitDependencyShadowJourneyBeadID(t, out)
-	if out, err = gc("", "start", cityDir); err != nil {
+	if out, err = gcDolt("", "start", cityDir); err != nil {
 		t.Fatalf("restart city with unrouted work in its initial cache prime: %v\n%s", err, out)
 	}
 
@@ -258,14 +269,16 @@ tick_debounce = "10m"
 		}
 	}
 
-	out, err = runCommand(cityDir, replaceEnv(commandEnvForDir(cityDir, false), "GC_BEADS", "file"), integrationBDCommandTimeout,
-		bdBinary, "update", workID, "--set-metadata", "gc.routed_to=worker")
+	out, err = bdDolt(cityDir, "update", workID, "--set-metadata", "gc.routed_to=worker")
 	if err != nil {
 		t.Fatalf("route ready work to worker: %v\n%s", err, out)
 	}
+	if out, err = gcDolt(cityDir, "trace", "start", "--template", "worker", "--for", "2m", "--level", "detail"); err != nil {
+		t.Fatalf("arm worker detail trace: %v\n%s", err, out)
+	}
 
 	started := time.Now()
-	out, err = gc(cityDir, "event", "emit", "bead.updated",
+	out, err = gcDolt(cityDir, "event", "emit", "bead.updated",
 		"--subject", workID,
 		"--bead-payload", workID,
 		"--actor", "bd-hook",
@@ -284,7 +297,7 @@ tick_debounce = "10m"
 		t.Fatalf("routed-work update did not retain schema-59 omitted-dependencies shape: %v", err)
 	}
 
-	session, latency, err := sessionWaitDependencyShadowJourneyWaitForWorkerSession(
+	session, projectionLatency, err := sessionWaitDependencyShadowJourneyWaitForWorkerSession(
 		t.Context(),
 		cityDir,
 		started,
@@ -297,37 +310,81 @@ tick_debounce = "10m"
 			sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID),
 		)
 	}
-	trace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+	tmuxSession, liveLatency, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+		t.Context(),
+		cityDir,
+		session.SessionName,
+		started,
+		sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
 	if err != nil {
-		t.Fatalf("read routed-work demand shadow trace: %v", err)
+		t.Fatalf("keyed session %s did not reach exact live tmux: %v\n%s", session.ID, err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
 	}
-	shadowRecords := sessionWaitDependencyShadowJourneyRoutedWorkDemandRecords(trace, workID)
-	if len(shadowRecords) != 1 {
-		t.Fatalf("routed-work demand shadow records = %d, want 1: %+v\n%s", len(shadowRecords), shadowRecords, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+	current, err := sessionWaitDependencyShadowJourneyListSessions(cityDir)
+	if err != nil {
+		t.Fatalf("list materialized worker sessions: %v", err)
 	}
-	shadow := shadowRecords[0]
-	if shadow.Seq == 0 || shadow.RecordID == "" ||
-		shadow.RecordType != "operation" ||
-		shadow.OutcomeCode != "accepted" ||
-		shadow.Fields.PoolTarget != "worker" ||
-		shadow.Fields.SourceActor != "bd-hook" ||
-		shadow.Fields.SourceStore == "" ||
-		!shadow.Fields.ContributionPresent ||
-		!shadow.Fields.EventTimestampValid ||
-		shadow.Fields.EventToShadowDecisionNS <= 0 ||
-		shadow.Fields.ObservationToShadowDecisionNS < 0 ||
-		shadow.Fields.AllocationAction != "start_one" ||
-		shadow.Fields.AllocationReason != "cold_from_zero" ||
-		shadow.Fields.AllocationStartCount != 1 ||
-		!shadow.Fields.AllocationSupported ||
-		shadow.Fields.EffectApplied == nil || *shadow.Fields.EffectApplied {
-		t.Fatalf("routed-work demand shadow record = %+v, want committed exact no-effect cold allocation", shadow)
+	liveWorkerSessions := 0
+	for _, candidate := range current.Sessions {
+		if candidate.Template == "worker" && !candidate.Closed {
+			liveWorkerSessions++
+		}
+	}
+	if liveWorkerSessions != 1 {
+		t.Fatalf("unclosed worker sessions = %d, want exactly 1: %+v", liveWorkerSessions, current.Sessions)
+	}
+	trace, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForPoolStartCommit(
+		t.Context(),
+		cityDir,
+		workID,
+		session,
+		started,
+		sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
+	if err != nil {
+		t.Fatalf("wait for routed-work pool start proof: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+	}
+	materializationRecords := sessionWaitDependencyShadowJourneyPoolMaterializationRecords(trace, workID)
+	if len(materializationRecords) != 1 {
+		t.Fatalf("routed-work pool materialization records = %d, want 1: %+v\n%s", len(materializationRecords), materializationRecords, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+	}
+	materialized := materializationRecords[0]
+	if materialized.Seq == 0 || materialized.RecordID == "" ||
+		materialized.RecordType != "operation" ||
+		materialized.OutcomeCode != "applied" ||
+		materialized.Fields.WorkID != workID ||
+		materialized.Fields.PoolTarget != "worker" ||
+		materialized.Fields.SessionID != session.ID ||
+		materialized.Fields.EffectOwner != "keyed" ||
+		materialized.Fields.EffectApplied == nil || !*materialized.Fields.EffectApplied ||
+		!materialized.Fields.EventTimestampValid ||
+		materialized.Fields.EventToMaterializationNS <= 0 {
+		t.Fatalf("routed-work pool materialization record = %+v, want one applied keyed effect", materialized)
+	}
+	commitRecords := sessionWaitDependencyShadowJourneyPoolStartCommitRecords(trace, session)
+	if len(commitRecords) != 1 {
+		t.Fatalf("routed-work pool start commit records = %d, want 1: %+v", len(commitRecords), commitRecords)
+	}
+	commit := commitRecords[0]
+	if commit.Seq == 0 || commit.RecordID == "" ||
+		commit.RecordType != "operation" ||
+		commit.OutcomeCode != "success" ||
+		commit.Fields.Admission != "in_process" ||
+		commit.Fields.SessionID != session.ID ||
+		commit.Fields.InstanceToken == "" ||
+		commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
+		t.Fatalf("routed-work pool start commit record = %+v, want one applied in-process exact start", commit)
 	}
 	t.Logf(
-		"ready routed-work event produced start-one shadow allocation in %s and materialized legacy-owned session %s in %s",
-		time.Duration(shadow.Fields.EventToShadowDecisionNS),
+		"ready routed-work event materialized keyed session %s in %s, projected it in %s, reached live tmux in %s, and committed its exact start in %s (%s|%s|%s)",
 		session.ID,
-		latency,
+		time.Duration(materialized.Fields.EventToMaterializationNS),
+		projectionLatency,
+		liveLatency,
+		commitLatency,
+		tmuxSession.ID,
+		tmuxSession.Name,
+		tmuxSession.SocketPath,
 	)
 }
 
@@ -415,7 +472,7 @@ func sessionWaitDependencyShadowJourneyWaitForWorkerSession(
 			last = current
 			lastErr = nil
 			for _, session := range current.Sessions {
-				if session.Template == "worker" && !session.Closed && session.ID != "" {
+				if session.Template == "worker" && !session.Closed && session.ID != "" && session.SessionName != "" {
 					return session, time.Since(started), nil
 				}
 			}
@@ -428,6 +485,112 @@ func sessionWaitDependencyShadowJourneyWaitForWorkerSession(
 				deadline.Err(),
 				lastErr,
 				last.Sessions,
+			)
+		case <-ticker.C:
+		}
+	}
+}
+
+func sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+	ctx context.Context,
+	cityDir string,
+	sessionName string,
+	started time.Time,
+	timeout time.Duration,
+) (sessionWaitDependencyShadowJourneyTmuxSession, time.Duration, error) {
+	if strings.TrimSpace(sessionName) == "" {
+		return sessionWaitDependencyShadowJourneyTmuxSession{}, time.Since(started), fmt.Errorf("durable session name is empty")
+	}
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastOutput string
+	var lastErr error
+	for {
+		out, err := runCommand("", commandEnvForDir(cityDir, false), integrationGCCommandTimeout,
+			"tmux", "-L", filepath.Base(cityDir), "list-sessions", "-F",
+			"#{session_id}|#{session_name}|#{socket_path}")
+		lastOutput, lastErr = out, err
+		if err == nil {
+			var matches []sessionWaitDependencyShadowJourneyTmuxSession
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				parts := strings.Split(line, "|")
+				if len(parts) != 3 || parts[1] != sessionName {
+					continue
+				}
+				matches = append(matches, sessionWaitDependencyShadowJourneyTmuxSession{
+					ID: parts[0], Name: parts[1], SocketPath: parts[2],
+				})
+			}
+			if len(matches) > 1 {
+				return sessionWaitDependencyShadowJourneyTmuxSession{}, time.Since(started), fmt.Errorf("exact tmux sessions named %q = %d, want 1: %q", sessionName, len(matches), out)
+			}
+			if len(matches) == 1 {
+				match := matches[0]
+				if match.ID == "" || match.Name == "" || match.SocketPath == "" {
+					return sessionWaitDependencyShadowJourneyTmuxSession{}, time.Since(started), fmt.Errorf("exact tmux session has empty identity field: %+v", match)
+				}
+				return match, time.Since(started), nil
+			}
+		}
+
+		select {
+		case <-deadline.Done():
+			return sessionWaitDependencyShadowJourneyTmuxSession{}, time.Since(started), fmt.Errorf(
+				"waiting for exact tmux session %q: %w; last error: %v; last sessions: %q",
+				sessionName,
+				deadline.Err(),
+				lastErr,
+				lastOutput,
+			)
+		case <-ticker.C:
+		}
+	}
+}
+
+func sessionWaitDependencyShadowJourneyWaitForPoolStartCommit(
+	ctx context.Context,
+	cityDir string,
+	workID string,
+	session sessionWaitDependencyShadowJourneySessionItem,
+	started time.Time,
+	timeout time.Duration,
+) (sessionWaitDependencyShadowJourneyTraceShow, time.Duration, error) {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastTrace sessionWaitDependencyShadowJourneyTraceShow
+	var lastErr error
+	for {
+		trace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+		if err != nil {
+			lastErr = err
+		} else {
+			lastTrace = trace
+			materializations := sessionWaitDependencyShadowJourneyPoolMaterializationRecords(trace, workID)
+			commits := sessionWaitDependencyShadowJourneyPoolStartCommitRecords(trace, session)
+			if len(materializations) > 1 || len(commits) > 1 {
+				return trace, time.Since(started), fmt.Errorf(
+					"pool materializations/commits = %d/%d, want at most 1 each: materializations=%+v commits=%+v",
+					len(materializations), len(commits), materializations, commits,
+				)
+			}
+			if len(materializations) == 1 && len(commits) == 1 {
+				return trace, time.Since(started), nil
+			}
+			lastErr = fmt.Errorf("pool materializations/commits = %d/%d, want 1/1", len(materializations), len(commits))
+		}
+
+		select {
+		case <-deadline.Done():
+			return lastTrace, time.Since(started), fmt.Errorf(
+				"waiting for one keyed materialization and exact start commit: %w; last error: %v",
+				deadline.Err(),
+				lastErr,
 			)
 		case <-ticker.C:
 		}
@@ -664,6 +827,34 @@ func sessionWaitDependencyShadowJourneyRoutedWorkDemandRecords(
 	var matches []sessionWaitDependencyShadowJourneyTraceRecord
 	for _, record := range trace.Records {
 		if record.SiteCode == "pool_demand.contribution.shadow" && record.Fields.WorkID == workID {
+			matches = append(matches, record)
+		}
+	}
+	return matches
+}
+
+func sessionWaitDependencyShadowJourneyPoolMaterializationRecords(
+	trace sessionWaitDependencyShadowJourneyTraceShow,
+	workID string,
+) []sessionWaitDependencyShadowJourneyTraceRecord {
+	var matches []sessionWaitDependencyShadowJourneyTraceRecord
+	for _, record := range trace.Records {
+		if record.SiteCode == "pool_allocation.materialize" && record.Fields.WorkID == workID {
+			matches = append(matches, record)
+		}
+	}
+	return matches
+}
+
+func sessionWaitDependencyShadowJourneyPoolStartCommitRecords(
+	trace sessionWaitDependencyShadowJourneyTraceShow,
+	session sessionWaitDependencyShadowJourneySessionItem,
+) []sessionWaitDependencyShadowJourneyTraceRecord {
+	var matches []sessionWaitDependencyShadowJourneyTraceRecord
+	for _, record := range trace.Records {
+		if record.SiteCode == "lifecycle.start.commit" &&
+			record.SessionBeadID == session.ID &&
+			record.SessionName == session.SessionName {
 			matches = append(matches, record)
 		}
 	}

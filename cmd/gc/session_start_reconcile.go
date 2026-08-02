@@ -1007,6 +1007,13 @@ func recordExactSessionStartCommit(params exactSessionStartParams, admission ses
 		return
 	}
 	if cycle.detailEnabled(template) {
+		duration := result.finished.Sub(result.started)
+		payload := result.phases.tracePayload(info.ID, duration)
+		payload["admission"] = string(admission.Source)
+		payload["admission_version"] = admission.Version
+		payload["generation"] = params.Generation
+		payload["instance_token"] = info.InstanceToken
+		payload["effect_applied"] = true
 		cycle.recordAdmittedDetailOperation(
 			TraceSiteLifecycleStartCommit,
 			TraceReasonStart,
@@ -1016,15 +1023,8 @@ func recordExactSessionStartCommit(params exactSessionStartParams, admission ses
 			info.ID,
 			info.SessionName,
 			TraceSource(cycle.sourceFor(template)),
-			0,
-			traceRecordPayload{
-				"admission":         string(admission.Source),
-				"admission_version": admission.Version,
-				"generation":        params.Generation,
-				"session_id":        info.ID,
-				"instance_token":    info.InstanceToken,
-				"effect_applied":    true,
-			},
+			duration,
+			payload,
 		)
 	}
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {

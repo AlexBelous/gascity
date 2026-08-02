@@ -292,6 +292,22 @@ func (p startPhaseTimings) formatLog() string {
 	return " phases=[" + strings.Join(parts, " ") + "]"
 }
 
+// tracePayload preserves the exact, unrounded phase durations for a single
+// correlated start. Lifecycle logs stay human-readable and millisecond-rounded;
+// the trace is the machine-readable measurement seam.
+func (p startPhaseTimings) tracePayload(sessionID string, total time.Duration) traceRecordPayload {
+	return traceRecordPayload{
+		"session_id":             strings.TrimSpace(sessionID),
+		"duration_ms":            total.Milliseconds(),
+		"duration_ns":            total.Nanoseconds(),
+		"start_call_ns":          p.StartCall.Nanoseconds(),
+		"zombie_recycle_ns":      p.ZombieRecycle.Nanoseconds(),
+		"state_sync_recovery_ns": p.StateSyncRecovery.Nanoseconds(),
+		"post_start_observe_ns":  p.PostStartObserve.Nanoseconds(),
+		"commit_refresh_ns":      p.CommitRefresh.Nanoseconds(),
+	}
+}
+
 type startExecutionOptions struct {
 	async                          bool
 	asyncFollowUp                  func()
@@ -3024,10 +3040,10 @@ func executePlannedStartsTraced(
 			}
 			for _, result := range results {
 				if trace != nil {
-					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
-						"rollback_pending": result.rollbackPending,
-						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
-					})
+					duration := result.finished.Sub(result.started)
+					payload := result.phases.tracePayload(result.prepared.candidate.info.ID, duration)
+					payload["rollback_pending"] = result.rollbackPending
+					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), duration, payload)
 				}
 				if result.outcome == TraceOutcomeStartEnqueued {
 					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), string(result.outcome), result.started, result.finished, nil)

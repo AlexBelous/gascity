@@ -523,6 +523,14 @@ func TestReconcileExactSessionStartRecordsSocketCommitAfterDurableStart(t *testi
 		record.Fields["effect_applied"] != true {
 		t.Fatalf("socket commit trace = %#v, want durable socket commit identity", record)
 	}
+	for _, field := range []string{"duration_ns", "start_call_ns", "zombie_recycle_ns", "state_sync_recovery_ns", "post_start_observe_ns", "commit_refresh_ns"} {
+		if _, ok := record.Fields[field]; !ok {
+			t.Fatalf("socket commit trace missing %q: %#v", field, record)
+		}
+	}
+	if traceFieldInt(record.Fields["duration_ns"]) <= 0 || traceFieldInt(record.Fields["start_call_ns"]) <= 0 {
+		t.Fatalf("socket commit timing = duration_ns:%v start_call_ns:%v, want positive exact timings", record.Fields["duration_ns"], record.Fields["start_call_ns"])
+	}
 }
 
 func TestReconcileExactSessionStartStatusHealUsesNegativeRevisionToken(t *testing.T) {

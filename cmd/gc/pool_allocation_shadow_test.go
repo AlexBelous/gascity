@@ -173,9 +173,24 @@ func TestDecideRoutedWorkPoolAllocationShadow(t *testing.T) {
 		{
 			name:         "occupied member remains legacy owned",
 			contribution: baseContribution,
-			membership:   poolMembershipObservation{members: 1, occupied: 1, certified: true, revision: 10},
+			membership:   poolMembershipObservation{members: 1, occupied: 1, nextFreeSlot: 2, certified: true, revision: 10},
+			wantAction:   poolAllocationShadowStartOne,
+			wantReason:   poolAllocationShadowOccupiedGrowth,
+			wantStarts:   1,
+		},
+		{
+			name:         "mixed occupied and asleep members remain legacy owned",
+			contribution: baseContribution,
+			membership:   poolMembershipObservation{members: 2, occupied: 1, nextFreeSlot: 3, certified: true, revision: 10},
 			wantAction:   poolAllocationShadowLegacy,
 			wantReason:   poolAllocationShadowNonemptyPool,
+		},
+		{
+			name:         "occupied members without a certified free slot remain legacy owned",
+			contribution: baseContribution,
+			membership:   poolMembershipObservation{members: 1, occupied: 1, certified: true, revision: 10},
+			wantAction:   poolAllocationShadowLegacy,
+			wantReason:   poolAllocationShadowInvalidMembership,
 		},
 		{
 			name:         "impossible membership fails closed",

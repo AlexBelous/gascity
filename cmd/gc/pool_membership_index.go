@@ -25,6 +25,7 @@ const (
 type poolMembershipContribution struct {
 	sessionID        string
 	poolTarget       string
+	slot             int
 	baseState        sessionpkg.BaseState
 	countsAgainstCap bool
 }
@@ -33,14 +34,16 @@ type poolMembershipState struct {
 	bySession map[string]poolMembershipContribution
 	members   map[string]int
 	occupied  map[string]int
+	slots     map[string]map[int]string
 }
 
 type poolMembershipObservation struct {
-	members   int
-	occupied  int
-	certified bool
-	revision  uint64
-	reason    poolMembershipUncertifiedReason
+	members      int
+	occupied     int
+	nextFreeSlot int
+	certified    bool
+	revision     uint64
+	reason       poolMembershipUncertifiedReason
 }
 
 // poolMembershipIndex is the shadow read model for exact ephemeral-pool
@@ -66,6 +69,7 @@ func newPoolMembershipState() poolMembershipState {
 		bySession: make(map[string]poolMembershipContribution),
 		members:   make(map[string]int),
 		occupied:  make(map[string]int),
+		slots:     make(map[string]map[int]string),
 	}
 }
 
@@ -90,7 +94,9 @@ func buildPoolMembershipState(cfg *config.City, infos []sessionpkg.Info) (poolMe
 			return poolMembershipState{}, fmt.Errorf("building pool membership for %q: %w", id, err)
 		}
 		if present {
-			state.add(contribution)
+			if err := state.add(contribution); err != nil {
+				return poolMembershipState{}, fmt.Errorf("adding pool membership for %q: %w", id, err)
+			}
 		}
 	}
 	return state, nil
@@ -120,9 +126,17 @@ func poolMembershipContributionFromInfo(cfg *config.City, info sessionpkg.Info) 
 	if !knownPoolMembershipBaseState(view.BaseState) || view.BaseState == sessionpkg.BaseStateNone {
 		return poolMembershipContribution{}, false, fmt.Errorf("unsupported lifecycle state %q", view.BaseState)
 	}
+	slot := 0
+	if !agent.UsesCanonicalSingletonPoolIdentity() {
+		slot = existingPoolSlotWithConfigInfo(cfg, agent, info)
+		if slot <= 0 {
+			return poolMembershipContribution{}, false, fmt.Errorf("expandable pool session has no valid concrete slot")
+		}
+	}
 	return poolMembershipContribution{
 		sessionID:        id,
 		poolTarget:       agent.QualifiedName(),
+		slot:             slot,
 		baseState:        view.BaseState,
 		countsAgainstCap: view.CountsAgainstCap,
 	}, true, nil
@@ -151,12 +165,24 @@ func knownPoolMembershipBaseState(state sessionpkg.BaseState) bool {
 	}
 }
 
-func (s *poolMembershipState) add(contribution poolMembershipContribution) {
+func (s *poolMembershipState) add(contribution poolMembershipContribution) error {
+	if contribution.slot > 0 {
+		slots := s.slots[contribution.poolTarget]
+		if slots == nil {
+			slots = make(map[int]string)
+			s.slots[contribution.poolTarget] = slots
+		}
+		if existing, duplicate := slots[contribution.slot]; duplicate && existing != contribution.sessionID {
+			return fmt.Errorf("duplicate pool slot %d occupied by %q and %q", contribution.slot, existing, contribution.sessionID)
+		}
+		slots[contribution.slot] = contribution.sessionID
+	}
 	s.bySession[contribution.sessionID] = contribution
 	s.members[contribution.poolTarget]++
 	if contribution.countsAgainstCap {
 		s.occupied[contribution.poolTarget]++
 	}
+	return nil
 }
 
 func (s *poolMembershipState) remove(sessionID string) {
@@ -165,6 +191,14 @@ func (s *poolMembershipState) remove(sessionID string) {
 		return
 	}
 	delete(s.bySession, sessionID)
+	if old.slot > 0 {
+		if slots := s.slots[old.poolTarget]; slots != nil && slots[old.slot] == sessionID {
+			delete(slots, old.slot)
+			if len(slots) == 0 {
+				delete(s.slots, old.poolTarget)
+			}
+		}
+	}
 	decrementPoolMembershipCount(s.members, old.poolTarget)
 	if old.countsAgainstCap {
 		decrementPoolMembershipCount(s.occupied, old.poolTarget)
@@ -212,7 +246,11 @@ func (i *poolMembershipIndex) replace(cfg *config.City, info sessionpkg.Info) er
 	}
 	i.state.remove(info.ID)
 	if present {
-		i.state.add(contribution)
+		if err := i.state.add(contribution); err != nil {
+			i.certified = false
+			i.reason = poolMembershipUncertifiedInvalidDelta
+			return err
+		}
 	}
 	return nil
 }
@@ -246,19 +284,20 @@ func (i *poolMembershipIndex) observe(poolTarget string) poolMembershipObservati
 	defer i.mu.RUnlock()
 	poolTarget = strings.TrimSpace(poolTarget)
 	return poolMembershipObservation{
-		members:   i.state.members[poolTarget],
-		occupied:  i.state.occupied[poolTarget],
-		certified: i.certified,
-		revision:  i.revision,
-		reason:    i.reason,
+		members:      i.state.members[poolTarget],
+		occupied:     i.state.occupied[poolTarget],
+		nextFreeSlot: lowestFreePositivePoolSlot(i.state.slots[poolTarget]),
+		certified:    i.certified,
+		revision:     i.revision,
+		reason:       i.reason,
 	}
 }
 
-// observeSoleMember returns the same certified observation plus whether the
-// named session is its only capacity-occupying member. The check and snapshot
-// are taken under one read lock so an allocation lease cannot combine fields
-// from different revisions.
-func (i *poolMembershipIndex) observeSoleMember(poolTarget, sessionID string) (poolMembershipObservation, bool) {
+// observeOccupiedMember returns the same certified observation plus whether
+// the named session is an occupied member. The check and snapshot are taken
+// under one read lock so an allocation lease cannot combine fields from
+// different revisions.
+func (i *poolMembershipIndex) observeOccupiedMember(poolTarget, sessionID string) (poolMembershipObservation, bool) {
 	if i == nil {
 		return poolMembershipObservation{reason: poolMembershipUncertifiedNotInitialized}, false
 	}
@@ -267,16 +306,25 @@ func (i *poolMembershipIndex) observeSoleMember(poolTarget, sessionID string) (p
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	observation := poolMembershipObservation{
-		members:   i.state.members[poolTarget],
-		occupied:  i.state.occupied[poolTarget],
-		certified: i.certified,
-		revision:  i.revision,
-		reason:    i.reason,
+		members:      i.state.members[poolTarget],
+		occupied:     i.state.occupied[poolTarget],
+		nextFreeSlot: lowestFreePositivePoolSlot(i.state.slots[poolTarget]),
+		certified:    i.certified,
+		revision:     i.revision,
+		reason:       i.reason,
 	}
 	contribution, present := i.state.bySession[sessionID]
-	sole := observation.certified && observation.members == 1 && observation.occupied == 1 &&
+	occupied := observation.certified &&
 		present && contribution.poolTarget == poolTarget && contribution.countsAgainstCap
-	return observation, sole
+	return observation, occupied
+}
+
+func lowestFreePositivePoolSlot(used map[int]string) int {
+	for slot := 1; ; slot++ {
+		if _, occupied := used[slot]; !occupied {
+			return slot
+		}
+	}
 }
 
 // refreshPoolMembershipSession performs one authoritative exact-key read after

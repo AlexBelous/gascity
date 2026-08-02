@@ -212,6 +212,34 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 	if target := controllerDemandRouteTarget(snapshot.Config, work, map[string]struct{}{hint.PoolTarget: {}}); target != hint.PoolTarget {
 		return routedWorkPoolAllocationResult{}, nil
 	}
+	if !policy.supported() {
+		return routedWorkPoolAllocationResult{}, nil
+	}
+	existing, found, findErr := findRoutedWorkPoolSession(snapshot.Store, snapshot.Config, hint)
+	if findErr != nil {
+		return routedWorkPoolAllocationResult{}, findErr
+	}
+	if found {
+		if err := cr.poolMembershipShadow.replace(snapshot.Config, existing); err != nil {
+			return routedWorkPoolAllocationResult{}, fmt.Errorf("publishing existing session membership: %w", err)
+		}
+		lifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(existing))
+		if lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) {
+			lease, leaseErr := cr.newRoutedWorkPoolStartLease(snapshot, existing, hint)
+			if leaseErr != nil {
+				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, leaseErr
+			}
+			if err := cr.admitRoutedWorkPoolSession(lease); err != nil {
+				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, err
+			}
+			return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+		}
+		_, occupied := cr.poolMembershipShadow.observeOccupiedMember(hint.PoolTarget, existing.ID)
+		if lifecycle.BaseState == sessionpkg.BaseStateActive && occupied && existing.SessionName != "" && snapshot.Provider.IsRunning(existing.SessionName) {
+			return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+		}
+		return routedWorkPoolAllocationResult{}, nil
+	}
 	decision := decideRoutedWorkPoolAllocationShadow(readyRoutedWorkDemandContribution{
 		WorkID:              work.ID,
 		PoolTarget:          hint.PoolTarget,
@@ -219,27 +247,7 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 		ContributionPresent: policy.contributionPresent,
 		AllocationPolicy:    policy,
 	}, cr.poolMembershipShadow.observe(hint.PoolTarget))
-	if decision.action != poolAllocationShadowStartOne {
-		if decision.reason != poolAllocationShadowNonemptyPool {
-			return routedWorkPoolAllocationResult{}, nil
-		}
-		existing, found, findErr := findRoutedWorkPoolSession(snapshot.Store, snapshot.Config, hint)
-		if findErr != nil {
-			return routedWorkPoolAllocationResult{}, findErr
-		}
-		if found {
-			if err := cr.poolMembershipShadow.replace(snapshot.Config, existing); err != nil {
-				return routedWorkPoolAllocationResult{}, fmt.Errorf("publishing existing session membership: %w", err)
-			}
-			lease, leaseErr := cr.newRoutedWorkPoolStartLease(snapshot, existing, hint)
-			if leaseErr != nil {
-				return routedWorkPoolAllocationResult{}, leaseErr
-			}
-			if err := cr.admitRoutedWorkPoolSession(lease); err != nil {
-				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, err
-			}
-			return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
-		}
+	if decision.action != poolAllocationShadowStartOne || decision.poolSlot <= 0 {
 		return routedWorkPoolAllocationResult{}, nil
 	}
 	if !routedWorkPoolProviderHealthy(snapshot.CityPath, snapshot.Config, agent) {
@@ -270,7 +278,7 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 		beadStore: snapshot.Store,
 		stderr:    cr.sessionStartStderr(),
 	}
-	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(agent, 1)
+	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(agent, decision.poolSlot)
 	metadata := poolTriggerMetadata(bp, agent, qualifiedInstance, request)
 	info, err := createPoolSessionBeadWithGuardedAlias(bp, agent, hint.PoolTarget, qualifiedInstance, poolSlot, metadata)
 	if err != nil {
@@ -295,9 +303,9 @@ func (cr *CityRuntime) newRoutedWorkPoolStartLease(
 	info sessionpkg.Info,
 	hint routedWorkPoolAllocationHint,
 ) (routedWorkPoolStartLease, error) {
-	observation, sole := cr.poolMembershipShadow.observeSoleMember(hint.PoolTarget, info.ID)
-	if !sole {
-		return routedWorkPoolStartLease{}, fmt.Errorf("certifying created session %q: pool membership is not one occupied member", info.ID)
+	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(hint.PoolTarget, info.ID)
+	if !occupied {
+		return routedWorkPoolStartLease{}, fmt.Errorf("certifying created session %q: pool membership does not contain an occupied member", info.ID)
 	}
 	lease := routedWorkPoolStartLease{
 		SessionID:            info.ID,
@@ -378,8 +386,8 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	if !ready || controllerDemandRouteTarget(snapshot.Config, work, map[string]struct{}{lease.PoolTarget: {}}) != lease.PoolTarget {
 		return false, nil
 	}
-	observation, sole := cr.poolMembershipShadow.observeSoleMember(lease.PoolTarget, lease.SessionID)
-	if !sole || observation.revision < lease.MembershipRevision || !routedWorkPoolProviderHealthy(snapshot.CityPath, snapshot.Config, agent) {
+	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)
+	if !occupied || observation.revision < lease.MembershipRevision || !routedWorkPoolProviderHealthy(snapshot.CityPath, snapshot.Config, agent) {
 		return false, nil
 	}
 	return true, nil
@@ -425,16 +433,20 @@ func findRoutedWorkPoolSession(store beads.Store, cfg *config.City, hint routedW
 	if err != nil {
 		return sessionpkg.Info{}, false, fmt.Errorf("finding existing routed-work pool session: %w", err)
 	}
+	var found sessionpkg.Info
 	for _, row := range rows {
 		if row.Status != "closed" && isPoolManagedSessionBead(row) && normalizedSessionTemplate(row, cfg) == hint.PoolTarget {
 			info, err := sessionFrontDoor(store).Get(row.ID)
 			if err != nil {
 				return sessionpkg.Info{}, false, fmt.Errorf("projecting existing routed-work pool session %q: %w", row.ID, err)
 			}
-			return info, true, nil
+			if found.ID != "" {
+				return sessionpkg.Info{}, false, fmt.Errorf("ambiguous routed-work pool sessions %q and %q", found.ID, info.ID)
+			}
+			found = info
 		}
 	}
-	return sessionpkg.Info{}, false, nil
+	return found, found.ID != "", nil
 }
 
 func routedWorkPoolProviderHealthy(cityPath string, cfg *config.City, agent *config.Agent) bool {

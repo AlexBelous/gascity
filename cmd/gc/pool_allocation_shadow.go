@@ -36,6 +36,7 @@ const (
 	poolAllocationShadowMembershipUncertified poolAllocationShadowReason = "membership_uncertified"
 	poolAllocationShadowInvalidMembership     poolAllocationShadowReason = "invalid_membership"
 	poolAllocationShadowNonemptyPool          poolAllocationShadowReason = "nonempty_pool"
+	poolAllocationShadowOccupiedGrowth        poolAllocationShadowReason = "occupied_growth"
 )
 
 type poolAllocationShadowPolicy struct {
@@ -140,6 +141,7 @@ type poolAllocationShadowDecision struct {
 	action             poolAllocationShadowAction
 	reason             poolAllocationShadowReason
 	startCount         int
+	poolSlot           int
 	membershipRevision uint64
 }
 
@@ -175,11 +177,23 @@ func decideRoutedWorkPoolAllocationShadow(
 		return decision
 	}
 	if membership.members != 0 {
+		if membership.members == membership.occupied && membership.occupied > 0 {
+			if membership.nextFreeSlot <= 0 {
+				decision.reason = poolAllocationShadowInvalidMembership
+				return decision
+			}
+			decision.action = poolAllocationShadowStartOne
+			decision.reason = poolAllocationShadowOccupiedGrowth
+			decision.startCount = 1
+			decision.poolSlot = membership.nextFreeSlot
+			return decision
+		}
 		decision.reason = poolAllocationShadowNonemptyPool
 		return decision
 	}
 	decision.action = poolAllocationShadowStartOne
 	decision.reason = poolAllocationShadowColdFromZero
 	decision.startCount = 1
+	decision.poolSlot = 1
 	return decision
 }

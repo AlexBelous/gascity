@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -203,6 +204,205 @@ func TestRoutedWorkPoolAllocationMaterializesOneDurableSessionAndUsesExactStart(
 		}
 		t.Fatalf("directly materialized pool session %q is not running; current=%+v snapshot=%v lease=%+v lease_err=%v authorized=%t authorize_err=%v membership=%+v fallback=%t controller stderr:\n%s\nruntime calls: %+v", first.Session.SessionName, current, snapshotErr, lease, leaseErr, authorized, authorizeErr, fixture.cr.poolMembershipShadow.observe("worker"), fixture.cr.readyRoutedWorkPokePending.Load(), fixture.stderr.String(), fixture.provider.SnapshotCalls())
 	}
+}
+
+func TestRoutedWorkPoolAllocationGrowsOccupiedUnlimitedPoolForDistinctRoutedWork(t *testing.T) {
+	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+
+	firstWork, err := fixture.store.Create(beads.Bead{
+		Title:    "first ready routed work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create first routed work: %v", err)
+	}
+	firstHint := routedWorkPoolAllocationHint{
+		WorkID:      firstWork.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+		EventAt:     time.Now().UTC().Add(-time.Second),
+		EnqueuedAt:  time.Now().UTC(),
+	}
+	first, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), firstHint)
+	if err != nil {
+		t.Fatalf("allocate first routed work: %v", err)
+	}
+	if !first.Handled || !first.Created || first.Session.PoolSlot != "1" {
+		t.Fatalf("first allocation = %+v, want created slot-1 session", first)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(first.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "first pool session to become active through keyed exact start")
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), firstHint)
+	awaitCond(t, func() bool { return fixture.cr.sessionStartController.Pending() == 0 }, "active duplicate to settle without another keyed start")
+	if starts := fixture.provider.CountCalls("Start", first.Session.SessionName); starts != 1 {
+		t.Fatalf("provider Start calls for active duplicate = %d, want 1", starts)
+	}
+	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after active duplicate = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	}
+
+	secondWork, err := fixture.store.Create(beads.Bead{
+		Title:    "second distinct ready routed work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create second routed work: %v", err)
+	}
+	secondHint := routedWorkPoolAllocationHint{
+		WorkID:      secondWork.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+		EventAt:     time.Now().UTC().Add(-time.Second),
+		EnqueuedAt:  time.Now().UTC(),
+	}
+	second, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), secondHint)
+	if err != nil {
+		t.Fatalf("allocate second routed work: %v", err)
+	}
+	if !second.Handled || !second.Created || second.Session.ID == first.Session.ID || second.Session.PoolSlot != "2" {
+		t.Fatalf("second allocation = %+v, want one distinct created slot-2 session", second)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(second.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "second pool session to become active through keyed exact start")
+
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load pool sessions after second allocation: %v", err)
+	}
+	if open := infos.OpenInfos(); len(open) != 2 {
+		t.Fatalf("open sessions after distinct routed work = %d, want 2: %+v", len(open), open)
+	}
+
+	replay, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), secondHint)
+	if err != nil {
+		t.Fatalf("replay second routed work: %v", err)
+	}
+	if !replay.Handled || replay.Created || replay.Session.ID != second.Session.ID {
+		t.Fatalf("replayed second allocation = %+v, want rediscovered session %q without create", replay, second.Session.ID)
+	}
+	awaitCond(t, func() bool { return fixture.cr.sessionStartController.Pending() == 0 }, "replayed exact start admission to settle")
+	infos, err = loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load pool sessions after replay: %v", err)
+	}
+	if open := infos.OpenInfos(); len(open) != 2 {
+		t.Fatalf("open sessions after replay = %d, want 2: %+v", len(open), open)
+	}
+	if starts := fixture.provider.CountCalls("Start", second.Session.SessionName); starts != 1 {
+		t.Fatalf("provider Start calls for replayed slot-2 session = %d, want 1", starts)
+	}
+}
+
+func TestRoutedWorkPoolAllocationRediscoverPendingBindingFromStaleEmptyIndex(t *testing.T) {
+	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+	work, err := fixture.store.Create(beads.Bead{
+		Title:    "ready routed work with preexisting pending binding",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create routed work: %v", err)
+	}
+	hint := routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"}
+	pending := createRoutedWorkPoolBinding(t, fixture.store, fixture.cr.cfg, hint, 1)
+
+	result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+	if err != nil {
+		t.Fatalf("reconcile stale-index pending binding: %v", err)
+	}
+	if !result.Handled || result.Created || result.Session.ID != pending.ID {
+		t.Fatalf("stale-index allocation = %+v, want rediscovered pending binding %q without create", result, pending.ID)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(pending.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "rediscovered pending binding to start through its exact lease")
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load sessions after stale-index recovery: %v", err)
+	}
+	if open := infos.OpenInfos(); len(open) != 1 || open[0].ID != pending.ID {
+		t.Fatalf("open sessions after stale-index recovery = %+v, want only %q", open, pending.ID)
+	}
+}
+
+func TestRoutedWorkPoolAllocationFailsClosedOnAmbiguousBinding(t *testing.T) {
+	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+	work, err := fixture.store.Create(beads.Bead{
+		Title:    "ready routed work with ambiguous bindings",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create routed work: %v", err)
+	}
+	hint := routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"}
+	first := createRoutedWorkPoolBinding(t, fixture.store, fixture.cr.cfg, hint, 1)
+	second := createRoutedWorkPoolBinding(t, fixture.store, fixture.cr.cfg, hint, 2)
+
+	if got, found, err := findRoutedWorkPoolSession(fixture.store, fixture.cr.cfg, hint); err == nil || found || got.ID != "" {
+		t.Fatalf("find ambiguous routed-work bindings = (%+v, %t, %v), want ambiguity error", got, found, err)
+	}
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), hint)
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	if got := fixture.provider.CountCalls("Start", first.SessionName) + fixture.provider.CountCalls("Start", second.SessionName); got != 0 {
+		t.Fatalf("provider starts for ambiguous bindings = %d, want 0", got)
+	}
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load ambiguous bindings: %v", err)
+	}
+	if open := infos.OpenInfos(); len(open) != 2 {
+		t.Fatalf("open sessions after ambiguous binding = %d, want 2", len(open))
+	}
+}
+
+func TestRoutedWorkPoolAllocationLeavesUnsafeExistingBindingsLegacyOwned(t *testing.T) {
+	newActiveBinding := func(t *testing.T) (routedWorkPoolAllocationFixture, routedWorkPoolAllocationHint, sessionpkg.Info) {
+		t.Helper()
+		fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+		work, err := fixture.store.Create(beads.Bead{
+			Title:    "ready routed work",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": "worker"},
+		})
+		if err != nil {
+			t.Fatalf("create routed work: %v", err)
+		}
+		hint := routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"}
+		result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+		if err != nil || !result.Created {
+			t.Fatalf("create active binding = (%+v, %v), want created", result, err)
+		}
+		awaitCond(t, func() bool {
+			return fixture.provider.IsRunning(result.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+		}, "initial keyed pool start to settle")
+		return fixture, hint, result.Session
+	}
+
+	t.Run("unsupported policy", func(t *testing.T) {
+		fixture, hint, _ := newActiveBinding(t)
+		fixture.cr.cfg.Agents[0].DependsOn = []string{"another-template"}
+		fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), hint)
+		assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	})
+
+	t.Run("asleep existing binding", func(t *testing.T) {
+		fixture, hint, session := newActiveBinding(t)
+		if err := fixture.store.SetMetadata(session.ID, "state", string(sessionpkg.StateAsleep)); err != nil {
+			t.Fatalf("mark existing binding asleep: %v", err)
+		}
+		fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), hint)
+		assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	})
 }
 
 func TestRoutedWorkPoolAllocationEventCoalescingDoesNotActivateLegacyFallback(t *testing.T) {
@@ -710,6 +910,12 @@ func TestAuthorizeRoutedWorkPoolStartRejectsStaleLeaseAuthority(t *testing.T) {
 			},
 		},
 		{
+			name: "allocated member disappeared",
+			mutate: func(f *routedWorkPoolAuthorizationFixture) {
+				f.cr.poolMembershipShadow.remove(f.info.ID)
+			},
+		},
+		{
 			name: "membership revision not observed",
 			mutate: func(f *routedWorkPoolAuthorizationFixture) {
 				f.lease.MembershipRevision++
@@ -745,6 +951,40 @@ func TestAuthorizeRoutedWorkPoolStartRejectsStaleLeaseAuthority(t *testing.T) {
 				t.Fatal("stale pool-allocation lease retained start authority")
 			}
 		})
+	}
+}
+
+func TestAuthorizeRoutedWorkPoolStartRetainsExactMemberAuthorityAfterPoolGrowth(t *testing.T) {
+	fixture := newRoutedWorkPoolAuthorizationFixture(t)
+	other, err := createPoolSessionBeadWithAlias(fixture.store, "worker", fixture.snapshot.Config, nil, time.Now().UTC(), poolSessionCreateIdentity{
+		AgentName: "worker-2",
+		Slot:      2,
+		Metadata: map[string]string{
+			beadmeta.TriggerBeadIDMetadataKey:       "gc-other-work",
+			beadmeta.TriggerBeadStoreRefMetadataKey: fixture.lease.SourceStore,
+		},
+	}, "")
+	if err != nil {
+		t.Fatalf("create second occupied pool session: %v", err)
+	}
+	if err := fixture.store.SetMetadata(other.ID, "state", string(sessionpkg.StateActive)); err != nil {
+		t.Fatalf("make second pool session active: %v", err)
+	}
+	other, err = sessionFrontDoor(fixture.store).Get(other.ID)
+	if err != nil {
+		t.Fatalf("read second occupied pool session: %v", err)
+	}
+	if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, other); err != nil {
+		t.Fatalf("publish second occupied pool session: %v", err)
+	}
+
+	observation := fixture.cr.poolMembershipShadow.observe("worker")
+	if !observation.certified || observation.members != 2 || observation.occupied != 2 {
+		t.Fatalf("grown pool membership = %+v, want two certified occupied members", observation)
+	}
+	authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, fixture.info, fixture.lease)
+	if err != nil || !authorized {
+		t.Fatalf("authorize original exact member after pool growth = (%t, %v), want true", authorized, err)
 	}
 }
 
@@ -939,6 +1179,22 @@ func assertNoPoolAllocationSession(t *testing.T, store beads.Store) {
 	if got := len(snapshot.OpenInfos()); got != 0 {
 		t.Fatalf("open sessions = %d, want 0", got)
 	}
+}
+
+func createRoutedWorkPoolBinding(t *testing.T, store beads.Store, cfg *config.City, hint routedWorkPoolAllocationHint, slot int) sessionpkg.Info {
+	t.Helper()
+	info, err := createPoolSessionBeadWithAlias(store, hint.PoolTarget, cfg, nil, time.Now().UTC(), poolSessionCreateIdentity{
+		AgentName: fmt.Sprintf("%s-%d", hint.PoolTarget, slot),
+		Slot:      slot,
+		Metadata: map[string]string{
+			beadmeta.TriggerBeadIDMetadataKey:       hint.WorkID,
+			beadmeta.TriggerBeadStoreRefMetadataKey: hint.SourceStore,
+		},
+	}, "")
+	if err != nil {
+		t.Fatalf("create slot-%d routed-work binding: %v", slot, err)
+	}
+	return info
 }
 
 type poolAllocationDepListErrorStore struct {

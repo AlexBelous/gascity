@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"testing"
 	"time"
 
@@ -90,6 +91,23 @@ func TestPoolMembershipContributionHandlesCanonicalSingletonAndNamedCollapse(t *
 	}
 }
 
+func TestPoolMembershipContributionKeepsCanonicalSingletonSlotZeroWhenPoolExpansionIsEnabled(t *testing.T) {
+	one := 1
+	cfg := poolMembershipTestConfig("worker")
+	cfg.Agents[0].MaxActiveSessions = &one
+	cfg.Agents[0].MinActiveSessions = &one
+	if !cfg.Agents[0].SupportsInstanceExpansion() || !cfg.Agents[0].UsesCanonicalSingletonPoolIdentity() {
+		t.Fatalf("fixture must be an expanding canonical singleton pool: %+v", cfg.Agents[0])
+	}
+
+	info := poolMembershipInfo(t, "session-pool", "worker", string(sessionpkg.StateActive), "", false)
+	info.PoolSlot = ""
+	contribution, present, err := poolMembershipContributionFromInfo(cfg, info)
+	if err != nil || !present || contribution.slot != 0 {
+		t.Fatalf("canonical singleton contribution = (%+v, %t, %v), want slot-0 member", contribution, present, err)
+	}
+}
+
 func TestPoolMembershipContributionRejectsNamedPoolIdentityConflict(t *testing.T) {
 	cfg := poolMembershipTestConfig("worker")
 	conflict := poolMembershipInfo(t, "session-conflict", "worker", "active", "", false)
@@ -105,6 +123,7 @@ func TestPoolMembershipIndexMovesOnlyTheChangedSession(t *testing.T) {
 	cfg := poolMembershipTestConfig("worker", "reviewer")
 	worker1 := poolMembershipInfo(t, "session-1", "worker", "active", "", false)
 	worker2 := poolMembershipInfo(t, "session-2", "worker", "asleep", "", false)
+	worker2.PoolSlot = "2"
 	reviewer := poolMembershipInfo(t, "session-3", "reviewer", "active", "", false)
 	index := rebuiltPoolMembershipIndex(t, cfg, []sessionpkg.Info{worker1, worker2, reviewer})
 
@@ -112,6 +131,7 @@ func TestPoolMembershipIndexMovesOnlyTheChangedSession(t *testing.T) {
 	assertCertifiedPoolMembership(t, index.observe("reviewer"), 1, 1)
 
 	moved := poolMembershipInfo(t, worker1.ID, "reviewer", "draining", "", false)
+	moved.PoolSlot = "2"
 	if err := index.replace(cfg, moved); err != nil {
 		t.Fatalf("replace moved session: %v", err)
 	}
@@ -122,8 +142,58 @@ func TestPoolMembershipIndexMovesOnlyTheChangedSession(t *testing.T) {
 	assertCertifiedPoolMembership(t, index.observe("worker"), 0, 0)
 }
 
+func TestPoolMembershipIndexCertifiesExpandablePoolSlots(t *testing.T) {
+	unlimited := -1
+	cfg := poolMembershipTestConfig("worker")
+	cfg.Agents[0].MaxActiveSessions = &unlimited
+
+	withSlot := func(id, slot string) sessionpkg.Info {
+		info := poolMembershipInfo(t, id, "worker", string(sessionpkg.StateActive), "", false)
+		info.PoolSlot = slot
+		return info
+	}
+
+	t.Run("selects lowest positive hole", func(t *testing.T) {
+		index := rebuiltPoolMembershipIndex(t, cfg, []sessionpkg.Info{withSlot("slot-1", "1"), withSlot("slot-3", "3")})
+		got := index.observe("worker")
+		if !got.certified || got.members != 2 || got.occupied != 2 || got.nextFreeSlot != 2 {
+			t.Fatalf("slot-hole observation = %+v, want certified occupied slots with next free 2", got)
+		}
+	})
+
+	t.Run("incremental duplicate invalidates certification", func(t *testing.T) {
+		index := rebuiltPoolMembershipIndex(t, cfg, []sessionpkg.Info{withSlot("first", "1")})
+		if err := index.replace(cfg, withSlot("second", "1")); err == nil {
+			t.Fatal("duplicate slot delta was accepted")
+		}
+		got := index.observe("worker")
+		if got.certified || got.reason != poolMembershipUncertifiedInvalidDelta {
+			t.Fatalf("membership after duplicate slot delta = %+v, want invalid_delta certification failure", got)
+		}
+	})
+
+	for _, test := range []struct {
+		name  string
+		infos []sessionpkg.Info
+	}{
+		{name: "missing slot", infos: []sessionpkg.Info{withSlot("missing", "")}},
+		{name: "invalid slot", infos: []sessionpkg.Info{withSlot("invalid", "not-a-slot")}},
+		{name: "duplicate slot", infos: []sessionpkg.Info{withSlot("first", "1"), withSlot("second", "1")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := buildPoolMembershipState(cfg, test.infos); err == nil {
+				t.Fatal("invalid expandable-pool slot census was certified")
+			}
+		})
+	}
+}
+
 func TestPoolMembershipIndexIncrementalHistoryMatchesFreshRebuild(t *testing.T) {
 	cfg := poolMembershipTestConfig("worker", "reviewer")
+	unlimited := -1
+	for i := range cfg.Agents {
+		cfg.Agents[i].MaxActiveSessions = &unlimited
+	}
 	current := map[string]sessionpkg.Info{}
 	incremental := rebuiltPoolMembershipIndex(t, cfg, nil)
 	states := []string{"start-pending", "creating", "active", "asleep", "suspended", "draining", "quarantined", "archived"}
@@ -139,6 +209,7 @@ func TestPoolMembershipIndexIncrementalHistoryMatchesFreshRebuild(t *testing.T) 
 				target = "reviewer"
 			}
 			info := poolMembershipInfo(t, id, target, states[step%len(states)], "", false)
+			info.PoolSlot = fmt.Sprintf("%d", step+1)
 			current[id] = info
 			if err := incremental.replace(cfg, info); err != nil {
 				t.Fatalf("step %d replace: %v", step, err)
@@ -152,7 +223,7 @@ func TestPoolMembershipIndexIncrementalHistoryMatchesFreshRebuild(t *testing.T) 
 		fresh := rebuiltPoolMembershipIndex(t, cfg, infos)
 		for _, target := range []string{"worker", "reviewer"} {
 			got, want := incremental.observe(target), fresh.observe(target)
-			if got.members != want.members || got.occupied != want.occupied || !got.certified {
+			if got.members != want.members || got.occupied != want.occupied || got.nextFreeSlot != want.nextFreeSlot || !got.certified {
 				t.Fatalf("step %d target %s incremental=%+v fresh=%+v", step, target, got, want)
 			}
 		}
@@ -331,11 +402,14 @@ func BenchmarkPoolMembershipIndexReplaceFleetSize(b *testing.B) {
 	for _, size := range []int{1, 1_000, 10_000} {
 		b.Run(fmt.Sprintf("fleet-%d", size), func(b *testing.B) {
 			cfg := poolMembershipTestConfig("worker")
+			unlimited := -1
+			cfg.Agents[0].MaxActiveSessions = &unlimited
 			infos := make([]sessionpkg.Info, size)
 			for i := range infos {
 				infos[i] = sessionpkg.Info{
 					ID:            fmt.Sprintf("session-%d", i+1),
 					Template:      "worker",
+					PoolSlot:      strconv.Itoa(i + 1),
 					MetadataState: "active",
 					PoolManaged:   true,
 					SessionOrigin: "ephemeral",

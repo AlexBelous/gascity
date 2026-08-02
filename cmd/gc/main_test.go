@@ -7311,7 +7311,35 @@ func TestDoPrimeClaudeHookPersistsProviderSessionKeyFromHookStdin(t *testing.T) 
 	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
 base = "builtin:claude"`)
 	setPrimeHookStdinJSON(t, map[string]string{
-		"session_id":      "claude-provider-session",
+		"session_id":      "a1473624-c72c-4e42-b379-9e27e753d1ec",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "a1473624-c72c-4e42-b379-9e27e753d1ec" {
+		t.Fatalf("session_key = %q, want Claude provider session id from hook stdin", got)
+	}
+}
+
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUntrustedProvider(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "kimi", `[providers.kimi]
+base = "builtin:kimi"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "untrusted-provider-session",
 		"hook_event_name": "SessionStart",
 		"source":          "startup",
 	})

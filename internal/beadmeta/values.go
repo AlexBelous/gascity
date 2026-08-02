@@ -59,9 +59,11 @@ const (
 
 // Values of the CoordinatorOutcomeProducerDispositionMetadataKey typed-close
 // envelope written by the gc-outcome-close helper. CoordinatorOutcomeContractVersion
-// pins the JSON shape. A clean close is deliverable or non-deliverable; gc-outcome-close
-// never records a failure (failures take the gc.outcome=fail path), so the controller
-// folds either disposition as a pass.
+// pins the JSON shape. A deliverable close is an explicit success and names some
+// producer (the actor kind is caller-supplied configuration, not enumerated here); a
+// non-deliverable close is a deliberate "intentionally not a deliverable" terminal
+// (e.g. obsolete work) and names no producer. Failures are NOT recorded here (they
+// take the gc.outcome=fail path).
 const (
 	CoordinatorOutcomeContractVersion    = 1
 	CoordinatorDispositionDeliverable    = "deliverable"

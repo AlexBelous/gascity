@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -222,20 +221,23 @@ func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
 // TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome pins the graph.v2
 // controller missing_outcome race (gc-e2xqk). An attempt closed through the
 // gc-outcome-close typed contract records its disposition under
-// gc.coordinator_outcome.producer_disposition (plus gc.outcome.producer), leaving
-// gc.outcome empty. Before the fix that empty gc.outcome fell to the
-// missing_outcome transient branch and the controller minted a spurious retry
-// even though a valid typed outcome existed. A valid contract_version=1 clean
-// close — deliverable or non-deliverable, since gc-outcome-close never records a
-// failure — must fold as pass exactly once; a malformed, wrong-version,
-// foreign-work_id, or unknown-disposition record must stay missing_outcome.
+// gc.coordinator_outcome.producer_disposition, leaving gc.outcome empty, and the
+// controller misread that as a missing outcome and minted a spurious retry.
+//
+// Only a fully validated *deliverable* close (an explicit producer-named success)
+// folds to pass, exactly once. A non-deliverable close ("intentionally not a
+// deliverable") is NOT synthesized to pass: the retry contract requires an explicit
+// gc.outcome and treats its absence as invalid, so it stays missing_outcome. The
+// deliverable envelope is accepted only when it is complete and self-referential —
+// contract_version 1, work_id == subject.ID, non-empty recorded_by and reason, a
+// known deliverable producer, and no unknown fields — so a truncated or schema-skewed
+// record cannot forge a pass.
 func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 	t.Parallel()
 
 	const attemptID = "gc-attempt1"
-	typedClose := func(disposition, workID string) string {
-		return fmt.Sprintf(`{"contract_version":1,"disposition":%q,"work_id":%q,"recorded_by":"formula-step","reason":"done","producer":"formula-step"}`, disposition, workID)
-	}
+	// A complete, valid deliverable typed close for attemptID.
+	const validDeliverable = `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`
 
 	tests := []struct {
 		name     string
@@ -243,17 +245,10 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 		want     retryEvalResult
 	}{
 		{
-			name: "deliverable typed close folds as pass",
+			name: "valid deliverable close folds as pass",
 			metadata: map[string]string{
-				"gc.coordinator_outcome.producer_disposition": typedClose("deliverable", attemptID),
+				"gc.coordinator_outcome.producer_disposition": validDeliverable,
 				"gc.outcome.producer":                         "formula-step",
-			},
-			want: retryEvalResult{Outcome: "pass"},
-		},
-		{
-			name: "non-deliverable typed close folds as pass",
-			metadata: map[string]string{
-				"gc.coordinator_outcome.producer_disposition": typedClose("non-deliverable", attemptID),
 			},
 			want: retryEvalResult{Outcome: "pass"},
 		},
@@ -261,12 +256,67 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 			name: "explicit gc.outcome takes precedence over typed close",
 			metadata: map[string]string{
 				"gc.outcome": "pass",
-				"gc.coordinator_outcome.producer_disposition": typedClose("deliverable", attemptID),
+				"gc.coordinator_outcome.producer_disposition": validDeliverable,
 			},
 			want: retryEvalResult{Outcome: "pass"},
 		},
 		{
-			name: "malformed typed close stays missing_outcome",
+			// A deliberate non-deliverable (obsolete/no-op) close carries no producer
+			// and no gc.outcome. The retry contract requires an explicit gc.outcome, so
+			// this must NOT synthesize pass (gc-e2xqk P1); it stays missing_outcome.
+			name: "non-deliverable close stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"non-deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"obsolete"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			// An arbitrary, novel producer string is accepted structurally: the actor
+			// kind is caller-supplied configuration, never matched against a hardcoded
+			// allowlist of role names (ZFC / zero hardcoded roles).
+			name: "deliverable with arbitrary producer folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"novel-writer-42"}`,
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "deliverable absent producer stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty producer stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":""}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty recorded_by stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty reason stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unknown envelope field stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","surprise":"x"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "malformed json stays missing_outcome",
 			metadata: map[string]string{
 				"gc.coordinator_outcome.producer_disposition": "{not json",
 			},
@@ -275,21 +325,21 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 		{
 			name: "wrong contract_version stays missing_outcome",
 			metadata: map[string]string{
-				"gc.coordinator_outcome.producer_disposition": `{"contract_version":2,"disposition":"deliverable","work_id":"gc-attempt1"}`,
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":2,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`,
 			},
 			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
 		},
 		{
 			name: "foreign work_id stays missing_outcome",
 			metadata: map[string]string{
-				"gc.coordinator_outcome.producer_disposition": typedClose("deliverable", "gc-someone-else"),
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-someone-else","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`,
 			},
 			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
 		},
 		{
 			name: "unknown disposition stays missing_outcome",
 			metadata: map[string]string{
-				"gc.coordinator_outcome.producer_disposition": typedClose("mystery", attemptID),
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"mystery","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped"}`,
 			},
 			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
 		},

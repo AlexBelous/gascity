@@ -1423,7 +1423,7 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 		OpenFileStore: func() (beads.Store, error) {
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
-		OpenBdStore:   openBd,
+		OpenBdStore: openBd,
 		OpenExecStore: func() (beads.Store, error) {
 			return openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
 		},

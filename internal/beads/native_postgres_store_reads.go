@@ -580,7 +580,8 @@ func scanNativeBeadRows(rows interface {
 	Scan(...any) error
 	Err() error
 	Close()
-}) ([]Bead, error) {
+},
+) ([]Bead, error) {
 	defer rows.Close()
 	var beads []Bead
 	tiers := make(map[string]int16)

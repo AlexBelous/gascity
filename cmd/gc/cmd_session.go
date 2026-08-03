@@ -282,126 +282,127 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 
 	// Try reconciler-first path only when this specific city is managed by a
 	// standalone controller or the machine-wide supervisor. A reachable
-	// supervisor socket alone is not enough for unmanaged ad-hoc cities.
+	// supervisor socket alone is not enough for unmanaged ad-hoc cities. The
+	// liveness check is sufficient here: waking before the durable intent exists
+	// only starts a useless reconcile tick. Exact keyed admission happens after
+	// creation below, with the established generic-poke compatibility fallback.
 	if cityUsesManagedReconciler(cityPath) {
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			// Controller is running — create bead only, let reconciler start it.
-			kindMeta := map[string]string{
-				"agent_name":     sessionQualifiedName,
-				"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+		// Controller is running — create bead only, let reconciler start it.
+		kindMeta := map[string]string{
+			"agent_name":     sessionQualifiedName,
+			"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+		}
+		if configuredOwner != "" && requestedAlias == "" {
+			kindMeta[session.NamedSessionMetadataKey] = "true"
+			kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
+		}
+		if family := resolvedProviderFamilyMetadata(resolved); family != "" {
+			kindMeta["provider_kind"] = family
+		}
+		if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+			kindMeta["builtin_ancestor"] = resolved.BuiltinAncestor
+		}
+		kindMeta, err = newSessionStoredMCPMetadata(
+			cityPath,
+			cfg,
+			alias,
+			canonicalTemplate,
+			resolved.Name,
+			workDir,
+			sessionTransport,
+			kindMeta,
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+			cityPath,
+			sessStore,
+			sp,
+			cfg,
+			alias,
+			explicitName,
+			canonicalTemplate,
+			title,
+			sessionCommand,
+			found.Provider,
+			workDir,
+			sessionTransport,
+			resolved,
+			kindMeta,
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		var info session.Info
+		err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+				return err
 			}
-			if configuredOwner != "" && requestedAlias == "" {
-				kindMeta[session.NamedSessionMetadataKey] = "true"
-				kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
-			}
-			if family := resolvedProviderFamilyMetadata(resolved); family != "" {
-				kindMeta["provider_kind"] = family
-			}
-			if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
-				kindMeta["builtin_ancestor"] = resolved.BuiltinAncestor
-			}
-			kindMeta, err = newSessionStoredMCPMetadata(
-				cityPath,
-				cfg,
-				alias,
-				canonicalTemplate,
-				resolved.Name,
-				workDir,
-				sessionTransport,
-				kindMeta,
-			)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
-				cityPath,
-				sessStore,
-				sp,
-				cfg,
-				alias,
-				explicitName,
-				canonicalTemplate,
-				title,
-				sessionCommand,
-				found.Provider,
-				workDir,
-				sessionTransport,
-				resolved,
-				kindMeta,
-			)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			var info session.Info
-			err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+			if reserveConcreteIdentity && sessionQualifiedName != alias {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 					return err
 				}
-				if reserveConcreteIdentity && sessionQualifiedName != alias {
-					if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
-						return err
-					}
-				}
-				if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
-					return err
-				}
-				var createErr error
-				info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
-				return createErr
-			})
-			if err != nil {
-				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+			if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+				return err
+			}
+			var createErr error
+			info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
+			return createErr
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+
+		titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
+		defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
+
+		// Admit the exact durable key after creation. Mixed-version or
+		// unavailable keyed controllers retain the generic-poke fallback.
+		_ = pokeSessionStartController(cityPath, info.ID)
+
+		if jsonOutput {
+			if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
+				SchemaVersion: "1",
+				OK:            true,
+				SessionID:     info.ID,
+				SessionName:   info.SessionName,
+				Alias:         info.Alias,
+				Template:      canonicalTemplate,
+				Transport:     sessionTransport,
+				WorkDir:       info.WorkDir,
+				DeferredStart: true,
+				Attached:      false,
+			}); err != nil {
 				return 1
 			}
+		} else {
+			fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+		}
 
-			titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
-			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
-
-			// Admit the exact durable key after creation. Mixed-version or
-			// unavailable keyed controllers retain the generic-poke fallback.
-			_ = pokeSessionStartController(cityPath, info.ID)
-
-			if jsonOutput {
-				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
-					SchemaVersion: "1",
-					OK:            true,
-					SessionID:     info.ID,
-					SessionName:   info.SessionName,
-					Alias:         info.Alias,
-					Template:      canonicalTemplate,
-					Transport:     sessionTransport,
-					WorkDir:       info.WorkDir,
-					DeferredStart: true,
-					Attached:      false,
-				}); err != nil {
-					return 1
-				}
-			} else {
-				fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
-			}
-
-			if !shouldAttachNewSession(noAttach, sessionTransport) {
-				if sessionTransport == config.SessionTransportACP && !noAttach && !jsonOutput {
-					fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
-				}
-				return 0
-			}
-
-			// Wait for the reconciler to start the session before attaching.
-			fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
-			if waitErr := waitForSession(sp, info.SessionName, waitTimeout, sessionFrontDoor(sessStore), info.ID, stderr); waitErr != nil {
-				fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-			if err := handle.Attach(context.Background()); err != nil {
-				fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
+		if !shouldAttachNewSession(noAttach, sessionTransport) {
+			if sessionTransport == config.SessionTransportACP && !noAttach && !jsonOutput {
+				fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
 			}
 			return 0
 		}
+
+		// Wait for the reconciler to start the session before attaching.
+		fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
+		if waitErr := waitForSession(sp, info.SessionName, waitTimeout, sessionFrontDoor(sessStore), info.ID, stderr); waitErr != nil {
+			fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
+		if err := handle.Attach(context.Background()); err != nil {
+			fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
 	}
 
 	// Fallback: controller not running — direct start via session manager.

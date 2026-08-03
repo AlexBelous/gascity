@@ -586,11 +586,11 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}
 	defer lis.Close() //nolint:errcheck
 
-	commands := make(chan string, 3)
+	commands := make(chan string, 2)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 2; i++ {
 			conn, err := lis.Accept()
 			if err != nil {
 				errCh <- err
@@ -623,9 +623,9 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 		t.Fatalf("cmdSessionNew(acp) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	gotCommands := make([]string, 0, 3)
+	gotCommands := make([]string, 0, 2)
 	deadline := time.After(testutil.GoroutineRaceTimeout)
-	for len(gotCommands) < 3 {
+	for len(gotCommands) < 2 {
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -633,8 +633,8 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 			}
 		case cmd, ok := <-commands:
 			if !ok {
-				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping, readiness poke, and exact start", gotCommands)
+				if len(gotCommands) != 2 {
+					t.Fatalf("controller commands = %v, want liveness ping and exact post-create start", gotCommands)
 				}
 				break
 			}
@@ -645,7 +645,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}
 
 	bead := onlySessionBead(t, cityDir)
-	wantCommands := []string{"ping\n", "poke\n", sessionStartCommandPrefix + bead.ID + "\n"}
+	wantCommands := []string{"ping\n", sessionStartCommandPrefix + bead.ID + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
@@ -2376,11 +2376,11 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}
 	defer lis.Close() //nolint:errcheck
 
-	commands := make(chan string, 3)
+	commands := make(chan string, 2)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 2; i++ {
 			conn, err := lis.Accept()
 			if err != nil {
 				errCh <- err
@@ -2413,9 +2413,9 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 		t.Fatalf("cmdSessionNew(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
-	gotCommands := make([]string, 0, 3)
+	gotCommands := make([]string, 0, 2)
 	deadline := time.After(testutil.GoroutineRaceTimeout)
-	for len(gotCommands) < 3 {
+	for len(gotCommands) < 2 {
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -2423,8 +2423,8 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 			}
 		case cmd, ok := <-commands:
 			if !ok {
-				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping, readiness poke, and exact start", gotCommands)
+				if len(gotCommands) != 2 {
+					t.Fatalf("controller commands = %v, want liveness ping and exact post-create start", gotCommands)
 				}
 				break
 			}
@@ -2434,7 +2434,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 		}
 	}
 	b := onlySessionBead(t, cityDir)
-	wantCommands := []string{"ping\n", "poke\n", sessionStartCommandPrefix + b.ID + "\n"}
+	wantCommands := []string{"ping\n", sessionStartCommandPrefix + b.ID + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)

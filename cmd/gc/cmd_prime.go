@@ -247,7 +247,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 
-	if citySuspended(cfg) {
+	if citySuspendedWithState(cfg, loadSuspensionStateBestEffort(cityPath)) {
 		// Suspended is a legitimate quiet state, not a strict failure —
 		// keep hook behavior consistent with non-strict (which already
 		// ran side effects eagerly above).
@@ -296,7 +296,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		// and when a valid template legitimately renders empty. Readability is
 		// the strict precondition, so check it before hook side effects.
 		for _, a := range resolvedAgents {
-			if isAgentEffectivelySuspended(cfg, &a) {
+			if isAgentEffectivelySuspendedWith(cfg, &a, loadSuspensionStateBestEffort(cityPath)) {
 				continue
 			}
 			if a.PromptTemplate == "" {
@@ -312,7 +312,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	}
 
 	for _, a := range resolvedAgents {
-		if isAgentEffectivelySuspended(cfg, &a) {
+		if isAgentEffectivelySuspendedWith(cfg, &a, loadSuspensionStateBestEffort(cityPath)) {
 			return 0
 		}
 		if resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath); rErr == nil && hookMode {

@@ -804,7 +804,7 @@ func TestQueueExactDrainAckAsyncStopRetainsTrackerThroughCompletion(t *testing.T
 	}
 }
 
-func TestQueueExactDrainAckAsyncStopConfirmedCompletionReleasesTrackerBeforeCallback(t *testing.T) {
+func TestQueueExactDrainAckAsyncStopConfirmedCompletionRetainsTrackerThroughCallback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		env := newReconcilerTestEnv()
 		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
@@ -839,8 +839,8 @@ func TestQueueExactDrainAckAsyncStopConfirmedCompletionReleasesTrackerBeforeCall
 		if got.completion != drainAckAsyncStopConfirmed {
 			t.Fatalf("completion = %v, want confirmed", got.completion)
 		}
-		if got.held {
-			t.Fatal("confirmed completion observed retained async-stop tracker key")
+		if !got.held {
+			t.Fatal("confirmed completion released async-stop tracker key before its callback returned")
 		}
 
 		waitReturned := make(chan bool, 1)
@@ -856,6 +856,9 @@ func TestQueueExactDrainAckAsyncStopConfirmedCompletionReleasesTrackerBeforeCall
 		synctest.Wait()
 		if !<-waitReturned {
 			t.Fatal("async-stop tracker did not settle after confirmed completion")
+		}
+		if tracker.drainAckStopInFlight(drainAckAsyncStopKey(bead.ID, "worker")) {
+			t.Fatal("confirmed completion retained async-stop tracker key after its callback returned")
 		}
 	})
 }
@@ -874,22 +877,35 @@ func TestSessionStartControllerZeroDelayRetryDoesNotDuplicateDrainAckStop(t *tes
 
 	tracker := &asyncStartTracker{}
 	completionEntered := make(chan struct{})
+	retryObserved := make(chan struct{})
 	releaseCompletion := make(chan struct{})
-	var attempts atomic.Int32
+	var completionStarted atomic.Bool
+	var completionCalls atomic.Int32
+	var retryQueued atomic.Bool
+	var retryOnce sync.Once
 	controller := mustStartSessionStartController(t, sessionStartControllerOptions{
 		Workers:     1,
 		MaxDistinct: 1,
 		MaxRetries:  0,
 		RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[string](0, 0),
 		Reconcile: func(context.Context, sessionStartAdmission) error {
-			attempts.Add(1)
-			queueExactDrainAckAsyncStop(
+			afterCompletion := completionStarted.Load()
+			queued := queueExactDrainAckAsyncStop(
 				"", env.store, provider, env.cfg, bead.ID, "worker", "drain-token", nil, time.Time{},
 				tracker, io.Discard, func() error { return nil }, func(drainAckAsyncStopCompletion) {
-					close(completionEntered)
-					<-releaseCompletion
+					if completionCalls.Add(1) == 1 {
+						completionStarted.Store(true)
+						close(completionEntered)
+						<-releaseCompletion
+					}
 				},
 			)
+			if afterCompletion {
+				retryOnce.Do(func() {
+					retryQueued.Store(queued)
+					close(retryObserved)
+				})
+			}
 			return errSessionStartPoolDrainAckPending
 		},
 	})
@@ -919,12 +935,15 @@ func TestSessionStartControllerZeroDelayRetryDoesNotDuplicateDrainAckStop(t *tes
 		t.Fatalf("admit drain acknowledgement: %v", err)
 	}
 	awaitClose(t, completionEntered, "initial drain-ack STOP completion callback")
-	awaitCond(t, func() bool { return attempts.Load() >= 2 }, "zero-delay retry while STOP completion is blocked")
+	awaitClose(t, retryObserved, "zero-delay retry while initial STOP completion is blocked")
+	if retryQueued.Load() {
+		t.Fatal("zero-delay retry queued a duplicate STOP while the initial completion callback was blocked")
+	}
 	if got := len(provider.stopSnapshot()); got != 1 {
-		t.Fatalf("unattended STOP effects = %d, want exactly 1 while completion owns the tracker", got)
+		t.Fatalf("unattended STOP effects = %d, want exactly 1 after zero-delay retry", got)
 	}
 	if !tracker.drainAckStopInFlight(drainAckAsyncStopKey(bead.ID, "worker")) {
-		t.Fatal("zero-delay retry released the initial STOP tracker before completion")
+		t.Fatal("initial STOP tracker released before its completion callback returned")
 	}
 
 	controller.Stop()

@@ -343,13 +343,6 @@ func queueDrainAckAsyncStopWithFence(cityPath string, store beads.Store, sp runt
 			if r := recover(); r != nil {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n%s", name, r, debug.Stack()) //nolint:errcheck
 			}
-			// A confirmed death has no remaining STOP work: release before its
-			// callback re-admits finalization so a zero-delay worker can consume
-			// it immediately. Other completions retain ownership through their
-			// callback so retries cannot queue a duplicate STOP.
-			if completion == drainAckAsyncStopConfirmed && tracker != nil {
-				tracker.drainAckStopKeys.Delete(key)
-			}
 			if onComplete != nil {
 				func() {
 					defer func() {

@@ -112,3 +112,29 @@ func TestValidateEvaluatePrompt_EmptyContent(t *testing.T) {
 		t.Errorf("error should mention missing 'convergence.agent_verdict', got: %v", err)
 	}
 }
+
+// Pins the canonical-path-at-ingest bug this migration fixes (ga-iawy13.4):
+// a relative cityPath (e.g. "." from an as-yet-unresolved city path) makes
+// the current bare EvalSymlinks-without-Abs canonicalization leave
+// canonCity relative, so the function silently succeeds but returns a
+// relative PromptPath instead of an absolute one. Once canonCity is
+// normalized via pathutil.NormalizePathForCompare (which absolutizes
+// first), PromptPath must be absolute.
+func TestResolveEvaluateStep_RelativeCityPathReturnsAbsolutePromptPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	f := Formula{Name: "test"}
+	step, err := ResolveEvaluateStep(".", f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !filepath.IsAbs(step.PromptPath) {
+		t.Fatalf("PromptPath = %q, want an absolute path — cityPath must be canonicalized to absolute before joining, not left relative", step.PromptPath)
+	}
+	want := filepath.Join(dir, DefaultEvaluatePromptPath)
+	if step.PromptPath != want {
+		t.Errorf("PromptPath = %q, want %q", step.PromptPath, want)
+	}
+}

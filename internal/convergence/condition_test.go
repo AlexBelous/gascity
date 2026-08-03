@@ -520,6 +520,44 @@ func TestResolveConditionPath(t *testing.T) {
 			t.Errorf("expected path traversal error, got: %v", err)
 		}
 	})
+
+	// Pins the canonical-path-at-ingest bug this migration fixes
+	// (ga-iawy13.4): a relative envelope (e.g. "." from an
+	// as-yet-unresolved city path) combined with a conditionPath that
+	// crosses a symlink component makes the current bare
+	// EvalSymlinks-without-Abs canonicalization produce an ABSOLUTE
+	// resolved target while canonEnvelope/canonBase stay RELATIVE.
+	// filepath.Rel(relative, absolute) errors, and containedIn treats any
+	// Rel error as "not contained" — so a completely legitimate, safely
+	// contained path is falsely rejected as escaping containment. Once
+	// canonEnvelope/canonBase are normalized via
+	// pathutil.NormalizePathForCompare (which absolutizes first), this
+	// must succeed.
+	t.Run("relative envelope combined with a symlinked conditionPath segment must not be falsely rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		dir := t.TempDir()
+		realDir := filepath.Join(dir, "real")
+		if err := os.MkdirAll(realDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(realDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(realDir, filepath.Join(dir, "alias")); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		t.Chdir(dir)
+
+		got, err := ResolveConditionPath(".", "", "alias/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v — envelope/base must be canonicalized to absolute before containment comparison, not left relative", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
 }
 
 func TestRunConditionPass(t *testing.T) {

@@ -189,6 +189,43 @@ func TestProjectEventNormalizesNativeStepDependencies(t *testing.T) {
 	}
 }
 
+func TestProjectEventExecutionFactsFailClosed(t *testing.T) {
+	on := Options{Salt: testSalt, ExportRef: true, EmitCorrelation: true}
+	work := TaggedEvent{
+		Seq: 1, Type: "execution.work_associated", Ts: fixedTS, Actor: "graph", Subject: "mc-work", RunID: "gcg-root",
+	}
+	if got, ok := ProjectEvent(work, on); !ok || got.Ref != "mc-work" || got.RunID != "gcg-root" || got.SessionID != "" || got.StepID != "" || got.DependsOnStepIDs != nil {
+		t.Fatalf("work association = %#v, %v; want exact envelope-only association", got, ok)
+	}
+	stepRoot := TaggedEvent{
+		Seq: 2, Type: "execution.step_defined", Ts: fixedTS, Actor: "graph", Subject: "gcg-step", RunID: "gcg-root", StepID: "root", DependsOnStepIDs: &[]string{},
+	}
+	if got, ok := ProjectEvent(stepRoot, on); !ok || got.Ref != "gcg-step" || got.RunID != "gcg-root" || got.StepID != "root" || got.DependsOnStepIDs == nil || len(*got.DependsOnStepIDs) != 0 {
+		t.Fatalf("step definition = %#v, %v; want known root", got, ok)
+	}
+	for _, tc := range []struct {
+		name  string
+		event TaggedEvent
+		opt   Options
+	}{
+		{name: "correlation disabled", event: work, opt: Options{Salt: testSalt, ExportRef: true}},
+		{name: "work missing subject", event: TaggedEvent{Seq: 3, Type: "execution.work_associated", Ts: fixedTS, RunID: "gcg-root"}, opt: on},
+		{name: "work missing run", event: TaggedEvent{Seq: 4, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work"}, opt: on},
+		{name: "work includes session", event: TaggedEvent{Seq: 5, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work", RunID: "gcg-root", SessionID: "gcs-1"}, opt: on},
+		{name: "work includes step", event: TaggedEvent{Seq: 6, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work", RunID: "gcg-root", StepID: "step"}, opt: on},
+		{name: "step missing subject", event: TaggedEvent{Seq: 7, Type: "execution.step_defined", Ts: fixedTS, RunID: "gcg-root", StepID: "root"}, opt: on},
+		{name: "step missing run", event: TaggedEvent{Seq: 8, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", StepID: "root"}, opt: on},
+		{name: "step missing semantic id", event: TaggedEvent{Seq: 9, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", RunID: "gcg-root"}, opt: on},
+		{name: "step includes session", event: TaggedEvent{Seq: 10, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", RunID: "gcg-root", SessionID: "gcs-1", StepID: "root"}, opt: on},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := ProjectEvent(tc.event, tc.opt); ok {
+				t.Fatalf("ProjectEvent() = %#v, true; want drop", got)
+			}
+		})
+	}
+}
+
 func TestProjectEventRejectsInvalidPresentNativeTopology(t *testing.T) {
 	deps := []string{"step-a", "step-a"}
 	if _, ok := ProjectEvent(TaggedEvent{

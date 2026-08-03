@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -48,6 +49,10 @@ func init() {
 
 // slingStdin returns the reader for --stdin input. Extracted for testability.
 var slingStdin = func() io.Reader { return os.Stdin }
+
+// slingCityRecorder is the command-owned recorder constructor. Keeping this
+// seam local to cmd_sling makes the command lifetime observable in tests.
+var slingCityRecorder func(string, io.Writer) events.Recorder = openCityRecorderAt
 
 // BeadQuerier is an alias for sling.BeadQuerier.
 type BeadQuerier = sling.BeadQuerier
@@ -503,6 +508,17 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	} else if graphRouted {
 		slingGraphStore = graphStore
 	}
+	recorder := events.Discard
+	if !dryRun {
+		recorder = slingCityRecorder(cityPath, stderr)
+		if closable, ok := recorder.(interface{ Close() error }); ok {
+			defer func() {
+				if err := closable.Close(); err != nil {
+					fmt.Fprintf(stderr, "gc sling: closing event recorder: %v\n", err) //nolint:errcheck // best-effort stderr
+				}
+			}()
+		}
+	}
 	deps := slingDeps{
 		CityName:   cityName,
 		CityPath:   cityPath,
@@ -512,6 +528,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		Store:      store,
 		StoreRef:   storeRef,
 		GraphStore: slingGraphStore,
+		Events:     recorder,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
 				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)

@@ -32,6 +32,16 @@ const (
 	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
 	// concurrent polecat claims) into an observable signal. ADR-0009.
 	BeadClaimRejected = "bead.claim_rejected"
+	// ExecutionWorkAssociated records an authoritative current-store association
+	// between a graph.v2 workflow run and one of its input work beads. The
+	// Event envelope carries the work bead as Subject and the workflow root as
+	// RunID; it deliberately has no free-form payload.
+	ExecutionWorkAssociated = "execution.work_associated"
+	// ExecutionStepDefined records one materialized native execution step. The
+	// Event envelope carries the physical step bead as Subject, the workflow
+	// root as RunID, and the semantic step topology in StepID and
+	// DependsOnStepIDs; it deliberately has no free-form payload.
+	ExecutionStepDefined = "execution.step_defined"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -268,6 +278,7 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,
 	BeadDeadAssigneeReopened,
+	ExecutionWorkAssociated, ExecutionStepDefined,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

@@ -123,6 +123,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		Store:      store,
 		StoreRef:   storeRef,
 		GraphStore: apiSlingGraphStore(s.state),
+		Events:     s.state.EventProvider(),
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},

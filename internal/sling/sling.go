@@ -16,6 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -124,6 +126,9 @@ type SlingDeps struct {
 	// default — so a single-store caller behaves exactly as before the seam.
 	GraphStore beads.Store
 	StoreRef   string
+	// Events receives best-effort current execution facts after a graph.v2
+	// workflow materializes. Nil leaves normal sling behavior unchanged.
+	Events events.Recorder
 	// ValidationQuerier overrides Store for existence checks when a caller has
 	// already resolved the bead through a narrower view.
 	ValidationQuerier BeadQuerier
@@ -1324,7 +1329,14 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	}
 
 	materialize := func() (*molecule.Result, error) {
-		return materializeCompiledSlingFormula(ctx, recipe, formulaName, opts, sourceBeadID, scopeKind, scopeRef, graphWorkflow, a, deps, forceGraphV2Replace...)
+		result, err := materializeCompiledSlingFormula(ctx, recipe, formulaName, opts, sourceBeadID, scopeKind, scopeRef, graphWorkflow, a, deps, forceGraphV2Replace...)
+		if err != nil || !graphWorkflow || deps.Events == nil {
+			return result, err
+		}
+		if err := executionevent.EmitCurrent(deps.Events, "graph-materializer", deps.graphStore(), result.RootID, deps.Store); err != nil {
+			depsTracef(deps, "execution event projection skipped root=%s err=%v", result.RootID, err)
+		}
+		return result, nil
 	}
 	if !graphWorkflow || rootKey == "" {
 		return materialize()

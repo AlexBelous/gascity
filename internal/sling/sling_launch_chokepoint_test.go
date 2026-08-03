@@ -10,7 +10,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -111,6 +114,57 @@ func TestLaunchWorkflowUsesCrossProcessFileLock(t *testing.T) {
 	}
 	if len(entries) == 0 {
 		t.Fatalf("sling-source-locks dir %s is empty; the launch did not take a cross-process file lock on the RootKey", lockDir)
+	}
+}
+
+func TestInstantiateSlingFormulaEmitsCurrentExecutionFactsBestEffort(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	deps := testDeps(graphV2SlingTestConfig(t, formulaDir), runtime.NewFake(), newFakeRunner().run)
+	deps.CityPath = t.TempDir()
+	deps.Events = events.NewFake()
+	work, err := deps.Store.Create(beads.Bead{Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	convoy, err := deps.Store.Create(beads.Bead{Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoycore.TrackItem(deps.Store, convoy.ID, work.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, molecule.Options{
+		Vars: map[string]string{graphv2.ConvoyIDVar: convoy.ID},
+	}, "", "", "", config.Agent{Name: "worker"}, deps)
+	if err != nil {
+		t.Fatalf("InstantiateSlingFormula: %v", err)
+	}
+	var association, step bool
+	for _, event := range deps.Events.(*events.Fake).Events {
+		switch event.Type {
+		case events.ExecutionWorkAssociated:
+			association = event.Subject == work.ID && event.RunID == result.RootID && len(event.Payload) == 0
+		case events.ExecutionStepDefined:
+			step = event.RunID == result.RootID && event.StepID != "" && len(event.Payload) == 0
+		}
+	}
+	if !association || !step {
+		t.Fatalf("execution events association=%t step=%t events=%#v", association, step, deps.Events.(*events.Fake).Events)
+	}
+	firstEmissionCount := len(deps.Events.(*events.Fake).Events)
+	again, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, molecule.Options{
+		Vars: map[string]string{graphv2.ConvoyIDVar: convoy.ID},
+	}, "", "", "", config.Agent{Name: "worker"}, deps)
+	if err != nil {
+		t.Fatalf("idempotent InstantiateSlingFormula: %v", err)
+	}
+	if again.RootID != result.RootID {
+		t.Fatalf("idempotent root = %q, want %q", again.RootID, result.RootID)
+	}
+	if got := len(deps.Events.(*events.Fake).Events); got <= firstEmissionCount {
+		t.Fatalf("idempotent launch emitted no current facts: events=%#v", deps.Events.(*events.Fake).Events)
 	}
 }
 

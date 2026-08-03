@@ -3194,6 +3194,12 @@ type Agent struct {
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
 	DrainTimeout string `toml:"drain_timeout,omitempty" jsonschema:"default=5m"`
+	// TerminalCreateCooldown is the minimum time to wait after a terminal
+	// (non-retryable) ephemeral session-create failure for this agent before
+	// attempting another fresh create at the same resolved worker directory.
+	// Duration string (e.g., "5m", "30m", "1h"). Defaults to "5m". Set to "0s"
+	// to disable the throttle.
+	TerminalCreateCooldown string `toml:"terminal_create_cooldown,omitempty" jsonschema:"default=5m"`
 	// OnBoot is a shell command template run once at controller startup for
 	// this agent. If it contains Go template placeholders, gc expands them
 	// using the same PathContext fields as work_dir and session_setup

@@ -21,11 +21,12 @@ func TestFilterReadyByRouteExcludesDispatchHoldLabels(t *testing.T) {
 		{ID: "ga-plain", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
 		{ID: "ga-held-mayor", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel}},
 		{ID: "ga-held-external", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{beadmeta.HoldExternalLabel}},
+		{ID: "ga-held-both", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel, beadmeta.HoldExternalLabel}},
 	}
 	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
 	want := []string{"ga-plain"}
 	if !stringSlicesEqual(beadIDs(got), want) {
-		t.Fatalf("filterReadyByRoute ids = %v, want %v (hold-labeled beads must be excluded)", beadIDs(got), want)
+		t.Fatalf("filterReadyByRoute ids = %v, want %v (hold-labeled beads must be excluded, including a bead carrying both hold labels at once)", beadIDs(got), want)
 	}
 }
 
@@ -53,10 +54,11 @@ func TestEvaluateControlReadyExcludesDispatchHoldLabels(t *testing.T) {
 	ready := []beads.Bead{
 		{ID: "ga-routed", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/control-dispatcher"}},
 		{ID: "ga-routed-held", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel}},
+		{ID: "ga-routed-held-both", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel, beadmeta.HoldExternalLabel}},
 	}
 	got := evaluateControlReady(ready, parsed, envList)
 	want := []string{"ga-routed"}
 	if !stringSlicesEqual(beadIDs(got), want) {
-		t.Fatalf("evaluateControlReady ids = %v, want %v (hold-labeled routed bead must be excluded)", beadIDs(got), want)
+		t.Fatalf("evaluateControlReady ids = %v, want %v (hold-labeled routed bead must be excluded, including a bead carrying both hold labels at once)", beadIDs(got), want)
 	}
 }

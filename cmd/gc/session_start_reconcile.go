@@ -211,9 +211,9 @@ func (e *exactSessionStartPreWakeSkip) Error() string {
 }
 
 // authoritativeSessionStartReadStore forces one exact-key read through the
-// store's live handle. It is deliberately confined to
-// getAuthoritativeSessionStartRecord: writes and ordinary reads must retain the
-// original store so optional write capabilities and cache refreshes survive.
+// store's live handle. It is deliberately confined to start admission and
+// commit fences: writes and ordinary reads must retain the original store so
+// optional write capabilities and cache refreshes survive.
 type authoritativeSessionStartReadStore struct {
 	beads.Store
 	live beads.LiveReader

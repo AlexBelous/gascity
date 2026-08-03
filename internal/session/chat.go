@@ -309,7 +309,32 @@ func sessionName(id string, b beads.Bead) string {
 }
 
 func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, string, error) {
-	b, err := m.store.Get(id)
+	return m.loadSessionBeadWith(id, allowClosed, m.store.Get)
+}
+
+func (m *Manager) loadLiveSessionBead(id string, allowClosed bool) (beads.Bead, string, error) {
+	return m.loadSessionBeadWith(id, allowClosed, beads.HandlesFor(m.store).Live.Get)
+}
+
+func (m *Manager) validateLiveRuntimeStartIntent(id string, prepared beads.Bead, sessionName string) error {
+	current, currentName, err := m.loadLiveSessionBead(id, false)
+	if err != nil {
+		return err
+	}
+	preparedLease := LeaseFromInfo(infoFromPersistedBead(prepared))
+	currentLease := LeaseFromInfo(infoFromPersistedBead(current))
+	if currentName != sessionName || !preparedLease.SameIdentity(currentLease) {
+		return fmt.Errorf("%w: durable runtime-start intent changed", ErrStateSync)
+	}
+	return nil
+}
+
+func (m *Manager) loadSessionBeadWith(
+	id string,
+	allowClosed bool,
+	get func(string) (beads.Bead, error),
+) (beads.Bead, string, error) {
+	b, err := get(id)
 	if err != nil {
 		return beads.Bead{}, "", fmt.Errorf("getting session: %w", err)
 	}
@@ -456,6 +481,12 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+	failStart := func(err error) error {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 	if m.sp.IsRunning(sessName) {
 		return nil
 	}
@@ -505,10 +536,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	// work bead. This is the reconciler respawn bridge on a stable/reused bead
 	// ID. No fresh-create to roll back, so unroute and propagate before Start.
 	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
-		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return failStart(fmt.Errorf("pre-start orphan cleanup: %w", orphanErr))
+	}
+	// Runtime creation cannot be committed atomically with the durable intent
+	// that requested it. Re-read through the live handle immediately before the
+	// provider effect so an external close or replacement cannot be
+	// hidden by the controller cache while this start was queued.
+	if err := m.validateLiveRuntimeStartIntent(id, b, sessName); err != nil {
+		return failStart(err)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {

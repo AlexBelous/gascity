@@ -1892,7 +1892,7 @@ func commitStartResultWithFreshness(
 // NOT a forbidden per-patch re-Get: it fires once per async start commit, on the
 // budget-limited start path, never once per reconciler metadata write.
 //
-// The read goes through the session front door via GetPersistedResponse, which
+// The read goes through the live store handle and session front door, which
 // returns the current Info directly (no raw-bead codec call in this file). The
 // staleness gates (asyncStartPreparedCommandStaleInfo, asyncStartSessionStillCurrentInfo)
 // and the commit-time decision reads (which project off candidate.info downstream)
@@ -1910,7 +1910,7 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
 		return result, true, false, false
 	}
-	currentInfo, _, err := sessionFrontDoor(store).GetPersistedResponse(preparedInfo.ID)
+	currentInfo, _, err := getAuthoritativeSessionStartPersistedRecord(store, preparedInfo.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
 		return result, false, false, true

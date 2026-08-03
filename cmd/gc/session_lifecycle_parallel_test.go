@@ -111,6 +111,27 @@ func (s *taskWorkDirLiveListCountingStore) List(query beads.ListQuery) ([]beads.
 	return s.Store.List(query)
 }
 
+type blockingSessionGetStore struct {
+	beads.Store
+	target      string
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func (s *blockingSessionGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.target {
+		s.enteredOnce.Do(func() { close(s.entered) })
+		<-s.release
+	}
+	return s.Store.Get(id)
+}
+
+func (s *blockingSessionGetStore) releaseGet() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
 type panicMetadataBatchStore struct {
 	*beads.MemStore
 }
@@ -2936,6 +2957,123 @@ func TestCommitAsyncStartResult_IgnoresClosedSessionSnapshot(t *testing.T) {
 	}
 	if got := updated.Metadata["pending_create_claim"]; got != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+}
+
+func TestQueuedStartRefusesExternallyRetiredSessionBehindStaleCache(t *testing.T) {
+	base := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 8, 3, 1, 0, 0, 0, time.UTC)}
+	created, err := base.Create(beads.Bead{
+		ID:     "gc-retired-before-start",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"command":              "true",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-retired",
+			"pending_create_claim": "true",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backing := &blockingSessionGetStore{
+		Store:   base,
+		target:  created.ID,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(backing.releaseGet)
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("prime stale controller cache: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessiontest.SeedBead(t, created),
+			tp: TemplateParams{
+				Command:      "true",
+				SessionName:  "worker",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "true"},
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	cityPath := t.TempDir()
+	resultsCh := make(chan []startResult, 1)
+	go func() {
+		resultsCh <- executePreparedStartWaveForCity(
+			context.Background(),
+			[]preparedStart{item},
+			cityPath,
+			sp,
+			cache,
+			cfg,
+			time.Second,
+			1,
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+		)
+	}()
+	select {
+	case <-backing.entered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		backing.releaseGet()
+		t.Fatal("queued start never reached the final live intent fence")
+	}
+
+	// Retire from another process while the queued start is at its final live
+	// read. The controller cache deliberately remains on the open creating row;
+	// releasing the read must expose the durable terminal row before Start.
+	if err := base.SetMetadata(created.ID, "state", string(sessionpkg.StateDrained)); err != nil {
+		t.Fatalf("mark session drained: %v", err)
+	}
+	if err := base.Close(created.ID); err != nil {
+		t.Fatalf("retire session: %v", err)
+	}
+	backing.releaseGet()
+
+	var results []startResult
+	select {
+	case results = <-resultsCh:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("queued start did not return after terminal fence release")
+	}
+	if len(results) != 1 {
+		t.Fatalf("start results = %d, want 1", len(results))
+	}
+	if !errors.Is(results[0].err, sessionpkg.ErrSessionClosed) {
+		t.Fatalf("start error = %v, want ErrSessionClosed", results[0].err)
+	}
+	if got := sp.CountCalls("Start", "worker"); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0 after durable retirement", got)
+	}
+
+	disposition := commitStartResultWithFreshness(
+		context.Background(), results[0], sp, cache, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil,
+	)
+	if disposition != startCommitSuperseded {
+		t.Fatalf("commit disposition = %v, want superseded terminal work", disposition)
+	}
+	got, err := base.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" || got.Metadata["state"] != string(sessionpkg.StateDrained) {
+		t.Fatalf("durable status/state = %q/%q, want closed/drained", got.Status, got.Metadata["state"])
+	}
+	if sp.IsRunning("worker") {
+		t.Fatal("retired queued start left a runtime running")
 	}
 }
 

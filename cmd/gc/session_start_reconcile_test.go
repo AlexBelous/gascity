@@ -714,11 +714,12 @@ func TestReconcileExactSessionStartColdCacheBackingGetBudget(t *testing.T) {
 		t.Fatalf("reconcileExactSessionStart: %v", err)
 	}
 
-	// One authoritative admission read, one pre-wake freshness read, and the
-	// authoritative refresh after each of the pre-wake and final commit writes
-	// are the only backing reads needed. Runtime observation must reuse the
-	// admission's loaded session record.
-	const wantGets = 4
+	// One authoritative admission read, one pre-wake freshness read, one final
+	// live fence immediately before provider.Start, one post-start freshness
+	// read, and the authoritative refresh after each of the pre-wake and final
+	// commit writes are the only backing reads needed. Runtime observation must
+	// reuse the admission's loaded session record.
+	const wantGets = 6
 	if got := counting.count(); got != wantGets {
 		t.Fatalf("cold-cache exact start issued %d backing store.Get calls, want %d", got, wantGets)
 	}

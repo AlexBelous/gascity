@@ -101,13 +101,14 @@ func TestAgentStartLatencyReportRetainsIncompleteErrorCanceledAndNotAttempted(t 
 func TestAgentStartLatencyReportRejectsInvalidCompletedSamples(t *testing.T) {
 	valid := completedAgentStartLatencySample(1, 20*time.Second)
 	for name, mutate := range map[string]func(*agentStartLatencySample){
-		"missing opaque session id": func(sample *agentStartLatencySample) { sample.SessionID = "" },
-		"missing runtime timestamp": func(sample *agentStartLatencySample) { sample.Timestamps.RuntimeAvailableAt = nil },
-		"missing prompt timestamp":  func(sample *agentStartLatencySample) { sample.Timestamps.PromptDeliveredAt = nil },
-		"missing first output":      func(sample *agentStartLatencySample) { sample.Timestamps.FirstAssistantOutputAt = nil },
-		"missing completion":        func(sample *agentStartLatencySample) { sample.Timestamps.FirstTurnCompletedAt = nil },
-		"missing cleanup":           func(sample *agentStartLatencySample) { sample.Timestamps.CleanupCompletedAt = nil },
-		"trace identity mismatch":   func(sample *agentStartLatencySample) { sample.Controller.SessionID = "other" },
+		"missing opaque run identity": func(sample *agentStartLatencySample) { sample.RunIdentity = "" },
+		"missing opaque session id":   func(sample *agentStartLatencySample) { sample.SessionID = "" },
+		"missing runtime timestamp":   func(sample *agentStartLatencySample) { sample.Timestamps.RuntimeAvailableAt = nil },
+		"missing prompt timestamp":    func(sample *agentStartLatencySample) { sample.Timestamps.PromptDeliveredAt = nil },
+		"missing first output":        func(sample *agentStartLatencySample) { sample.Timestamps.FirstAssistantOutputAt = nil },
+		"missing completion":          func(sample *agentStartLatencySample) { sample.Timestamps.FirstTurnCompletedAt = nil },
+		"missing cleanup":             func(sample *agentStartLatencySample) { sample.Timestamps.CleanupCompletedAt = nil },
+		"trace identity mismatch":     func(sample *agentStartLatencySample) { sample.Controller.SessionID = "other" },
 		"non-monotonic phases": func(sample *agentStartLatencySample) {
 			t := sample.Timestamps.StartInitiatedAt.Add(-time.Second)
 			sample.Timestamps.FirstAssistantOutputAt = &t
@@ -207,6 +208,7 @@ func completedAgentStartLatencySample(index int, total time.Duration) agentStart
 	return agentStartLatencySample{
 		Index:       index,
 		Outcome:     agentStartOutcomeCompleted,
+		RunIdentity: "latency-run-opaque",
 		SessionID:   "gc-session-opaque",
 		SessionName: "gc-test-probe",
 		Timestamps: agentStartLatencyTimestamps{

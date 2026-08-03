@@ -5,7 +5,9 @@ package workerinference_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
@@ -44,6 +47,9 @@ func TestAgentStartLatencyPerf(t *testing.T) {
 	reportPath := strings.TrimSpace(os.Getenv(agentStartPerfReportEnv))
 	if reportPath == "" || !filepath.IsAbs(reportPath) {
 		t.Fatalf("%s must name an absolute report path", agentStartPerfReportEnv)
+	}
+	if err := agentStartPerfPrepareReportPath(reportPath); err != nil {
+		t.Fatalf("prepare %s: %v", agentStartPerfReportEnv, err)
 	}
 	requested, err := agentStartPerfRequestedSamples(os.Getenv(agentStartPerfSamplesEnv))
 	if err != nil {
@@ -138,6 +144,7 @@ type agentStartPerfHarness struct {
 	outputPath   string
 	outputText   string
 	processNames []string
+	profile      workerpkg.Profile
 	readiness    agentStartLatencyReadiness
 	adapter      workerpkg.SessionLogAdapter
 	provenance   agentStartLatencyProvenance
@@ -147,6 +154,9 @@ func newAgentStartPerfHarness(t *testing.T) (*agentStartPerfHarness, error) {
 	t.Helper()
 	if liveSetup.SetupError != "" {
 		return nil, errors.New(liveSetup.SetupError)
+	}
+	if !requiresStableProviderSession(liveSetup.Profile) {
+		return nil, fmt.Errorf("profile %q has no stable provider identity for exact transcript correlation", liveSetup.Profile)
 	}
 	if bdPath := helpers.FindBD(); bdPath != "" {
 		originalPath := liveEnv.Get("PATH")
@@ -272,6 +282,7 @@ func newAgentStartPerfHarness(t *testing.T) (*agentStartPerfHarness, error) {
 		outputPath:   filepath.Join(city.Dir, agentStartPerfOutputFile),
 		outputText:   agentStartPerfOutputText,
 		processNames: processNames,
+		profile:      liveSetup.Profile,
 		readiness:    readiness,
 		adapter:      workerpkg.SessionLogAdapter{SearchPaths: liveSetup.SearchPaths},
 		provenance:   provenance,
@@ -289,6 +300,22 @@ func agentStartPerfBaseProvenance() agentStartLatencyProvenance {
 		CPUCount:        runtime.NumCPU(),
 		AuthSource:      liveSetup.AuthSource,
 	}
+}
+
+func agentStartPerfPrepareReportPath(reportPath string) error {
+	parent := filepath.Dir(reportPath)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create report parent %q: %w", parent, err)
+	}
+	return nil
+}
+
+func newAgentStartPerfRunIdentity() (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate opaque run identity: %w", err)
+	}
+	return "latency-" + hex.EncodeToString(token[:]), nil
 }
 
 func agentStartPerfRequireReconciler(cityDir string) error {
@@ -813,11 +840,24 @@ type agentStartSessionNewResult struct {
 
 func (h *agentStartPerfHarness) runSample(parent context.Context, index int) (agentStartLatencySample, bool) {
 	sample := agentStartLatencySample{Index: index, Outcome: agentStartOutcomeError}
+	runIdentity, err := newAgentStartPerfRunIdentity()
+	if err != nil {
+		sample.Error = err.Error()
+		return sample, true
+	}
+	sample.RunIdentity = runIdentity
 	if err := os.Remove(h.outputPath); err != nil && !os.IsNotExist(err) {
 		sample.Error = fmt.Sprintf("remove prior output: %v", err)
 		return sample, true
 	}
 	baseline := h.agentStartTranscriptBaseline()
+	store, storeErr := openLiveCityStore(h.cityDir)
+	if storeErr != nil {
+		sample.Error = "open session store before measurement: " + storeErr.Error()
+		return sample, true
+	}
+	defer closeLiveHandleStore(store)
+	front := sessionpkg.NewStore(beads.SessionStore{Store: store})
 	measurementCtx, cancelMeasurement := context.WithTimeout(parent, agentStartPerfSampleTimeout)
 	defer cancelMeasurement()
 	readyPrefix := ""
@@ -830,7 +870,7 @@ func (h *agentStartPerfHarness) runSample(parent context.Context, index int) (ag
 		return sample, true
 	}
 
-	alias := fmt.Sprintf("latency-%03d-%d", index, time.Now().UTC().UnixNano())
+	alias := runIdentity
 	sample.Timestamps.StartInitiatedAt = time.Now().UTC()
 	newOut, newErr := runGCWithTimeout(90*time.Second, liveEnv, h.cityDir,
 		"session", "new", inferenceProbeTemplate, "--alias", alias, "--no-attach", "--json")
@@ -857,7 +897,10 @@ func (h *agentStartPerfHarness) runSample(parent context.Context, index int) (ag
 		return sample, false
 	}
 
-	turn, turnErr := h.waitForFirstTurn(measurementCtx, sample.SessionID, baseline)
+	turn, turnErr := h.waitForFirstTurn(measurementCtx, sample.SessionID, baseline, func(id string) (sessionpkg.Info, error) {
+		info, _, err := front.GetPersistedResponse(id)
+		return info, err
+	})
 	observer.stop()
 	runtimeObservation := observer.snapshot(sample.SessionName)
 	sample.Timestamps.RuntimeAvailableAt = runtimeObservation.RuntimeAvailableAt
@@ -900,59 +943,40 @@ func (h *agentStartPerfHarness) runSample(parent context.Context, index int) (ag
 		problems = append(problems, "runtime observer: "+runtimeObservation.LastError)
 	}
 
-	store, storeErr := openLiveCityStore(h.cityDir)
-	if storeErr != nil {
-		problems = append(problems, "open session store after measured turn: "+storeErr.Error())
+	info, _, infoErr := front.GetPersistedResponse(sample.SessionID)
+	if infoErr != nil {
+		problems = append(problems, "read correlated session: "+infoErr.Error())
 	} else {
-		defer closeLiveHandleStore(store)
-		front := sessionpkg.NewStore(beads.SessionStore{Store: store})
-		info, _, infoErr := front.GetPersistedResponse(sample.SessionID)
-		if infoErr != nil {
-			problems = append(problems, "read correlated session: "+infoErr.Error())
-		} else {
-			if info.ID != sample.SessionID || info.SessionName != sample.SessionName {
-				problems = append(problems, fmt.Sprintf("durable identity = %q/%q, want %q/%q", info.ID, info.SessionName, sample.SessionID, sample.SessionName))
-			}
-			if requiresStableProviderSession(liveSetup.Profile) {
-				providerSessionID := ""
-				if turn.Snapshot != nil {
-					providerSessionID = strings.TrimSpace(turn.Snapshot.ProviderSessionID)
-				}
-				if strings.TrimSpace(info.SessionKey) == "" || providerSessionID == "" || !sameContinuationIdentity(liveSetup.Profile, info.SessionKey, providerSessionID) {
-					problems = append(problems, fmt.Sprintf("transcript provider identity %q does not match durable session key %q", providerSessionID, info.SessionKey))
-				}
-			}
+		if info.ID != sample.SessionID || info.SessionName != sample.SessionName {
+			problems = append(problems, fmt.Sprintf("durable identity = %q/%q, want %q/%q", info.ID, info.SessionName, sample.SessionID, sample.SessionName))
 		}
+		providerSessionID := ""
+		if turn.Snapshot != nil {
+			providerSessionID = strings.TrimSpace(turn.Snapshot.ProviderSessionID)
+		}
+		if strings.TrimSpace(info.SessionKey) == "" || providerSessionID == "" || !sameContinuationIdentity(h.profile, info.SessionKey, providerSessionID) {
+			problems = append(problems, fmt.Sprintf("transcript provider identity %q does not match durable session key %q", providerSessionID, info.SessionKey))
+		}
+	}
 
-		traceCtx, cancelTrace := context.WithTimeout(parent, 15*time.Second)
-		sample.Controller, err = h.waitForControllerTiming(traceCtx, sample.SessionID)
-		cancelTrace()
-		if err != nil {
-			problems = append(problems, "controller timing: "+err.Error())
-		}
+	traceCtx, cancelTrace := context.WithTimeout(parent, 15*time.Second)
+	sample.Controller, err = h.waitForControllerTiming(traceCtx, sample.SessionID)
+	cancelTrace()
+	if err != nil {
+		problems = append(problems, "controller timing: "+err.Error())
+	}
 
-		cleanupCtx, cancelCleanup := context.WithTimeout(parent, liveStopBarrierTimeout)
-		cleanupAt, cleanupProof, cleanupErr := h.cleanupSession(cleanupCtx, front, sample.SessionID, sample.SessionName)
-		cancelCleanup()
-		sample.Terminal.DurableSessionRetired = cleanupProof.DurableSessionRetired
-		sample.Terminal.TmuxSessionAbsent = cleanupProof.TmuxSessionAbsent
-		sample.Timestamps.CleanupCompletedAt = cleanupAt
-		if cleanupErr != nil {
-			problems = append(problems, "cleanup: "+cleanupErr.Error())
-		}
+	cleanupCtx, cancelCleanup := context.WithTimeout(parent, liveStopBarrierTimeout)
+	cleanupAt, cleanupProof, cleanupErr := h.cleanupSession(cleanupCtx, front, sample.SessionID, sample.SessionName)
+	cancelCleanup()
+	sample.Terminal.DurableSessionRetired = cleanupProof.DurableSessionRetired
+	sample.Terminal.TmuxSessionAbsent = cleanupProof.TmuxSessionAbsent
+	sample.Timestamps.CleanupCompletedAt = cleanupAt
+	if cleanupErr != nil {
+		problems = append(problems, "cleanup: "+cleanupErr.Error())
 	}
 
 	safe := sample.Terminal.DurableSessionRetired && sample.Terminal.TmuxSessionAbsent
-	if storeErr != nil {
-		fallbackCtx, cancelFallback := context.WithTimeout(parent, liveStopBarrierTimeout)
-		absent, fallbackErr := h.cleanupWithoutStore(fallbackCtx, sample.SessionID, sample.SessionName)
-		cancelFallback()
-		sample.Terminal.TmuxSessionAbsent = absent
-		if fallbackErr != nil {
-			problems = append(problems, "fallback cleanup: "+fallbackErr.Error())
-		}
-		safe = false
-	}
 
 	if len(problems) == 0 {
 		sample.Outcome = agentStartOutcomeCompleted
@@ -987,16 +1011,18 @@ func parseAgentStartSessionNew(output []byte) (agentStartSessionNewResult, error
 
 func (h *agentStartPerfHarness) agentStartTranscriptBaseline() map[string]struct{} {
 	baseline := make(map[string]struct{})
-	for _, path := range transcriptCandidatePaths(h.adapter, liveSetup.Profile, h.cityDir, "") {
+	for _, path := range transcriptCandidatePaths(h.adapter, h.profile, h.cityDir, "") {
 		baseline[path] = struct{}{}
 	}
-	if path := strings.TrimSpace(h.adapter.DiscoverWorkDirTranscript(string(liveSetup.Profile), h.cityDir)); path != "" {
+	if path := strings.TrimSpace(h.adapter.DiscoverWorkDirTranscript(string(h.profile), h.cityDir)); path != "" {
 		baseline[path] = struct{}{}
 	}
 	return baseline
 }
 
-func (h *agentStartPerfHarness) waitForFirstTurn(ctx context.Context, sessionID string, baseline map[string]struct{}) (agentStartTurnObservation, error) {
+type agentStartPerfSessionReader func(string) (sessionpkg.Info, error)
+
+func (h *agentStartPerfHarness) waitForFirstTurn(ctx context.Context, sessionID string, baseline map[string]struct{}, readSession agentStartPerfSessionReader) (agentStartTurnObservation, error) {
 	ticker := time.NewTicker(agentStartPerfObserverPeriod)
 	defer ticker.Stop()
 	var (
@@ -1005,21 +1031,35 @@ func (h *agentStartPerfHarness) waitForFirstTurn(ctx context.Context, sessionID 
 	)
 	for {
 		observedAt := time.Now().UTC()
-		candidates := transcriptCandidatePaths(h.adapter, liveSetup.Profile, h.cityDir, "")
-		if path := strings.TrimSpace(h.adapter.DiscoverWorkDirTranscript(string(liveSetup.Profile), h.cityDir)); path != "" {
-			candidates = append(candidates, path)
+		info, err := readSession(sessionID)
+		sessionKey := strings.TrimSpace(info.SessionKey)
+		var candidates []string
+		switch {
+		case err != nil:
+			lastErr = fmt.Errorf("read durable provider identity: %w", err)
+		case info.ID != sessionID:
+			lastErr = fmt.Errorf("durable session identity %q does not match %q", info.ID, sessionID)
+		case sessionKey == "":
+			lastErr = fmt.Errorf("durable provider identity is not available yet")
+		default:
+			candidates = transcriptCandidatePaths(h.adapter, h.profile, h.cityDir, sessionKey)
 		}
 		for _, path := range uniqueNonEmptyPaths(candidates) {
 			if _, old := baseline[path]; old {
 				continue
 			}
 			snapshot, err := h.adapter.LoadHistory(workerpkg.LoadRequest{
-				Provider:       string(liveSetup.Profile),
+				Provider:       string(h.profile),
 				TranscriptPath: path,
 				GCSessionID:    sessionID,
 			})
 			if err != nil {
 				lastErr = err
+				continue
+			}
+			providerSessionID := strings.TrimSpace(snapshot.ProviderSessionID)
+			if providerSessionID == "" || !sameContinuationIdentity(h.profile, sessionKey, providerSessionID) {
+				lastErr = fmt.Errorf("transcript provider identity %q does not match durable session key %q", providerSessionID, sessionKey)
 				continue
 			}
 			observed := observeAgentStartTranscript(snapshot, h.prompt, observedAt)
@@ -1135,30 +1175,6 @@ func (h *agentStartPerfHarness) cleanupSession(ctx context.Context, front *sessi
 	}
 }
 
-func (h *agentStartPerfHarness) cleanupWithoutStore(ctx context.Context, sessionID, sessionName string) (bool, error) {
-	closeOut, closeErr := runGCWithTimeout(30*time.Second, liveEnv, h.cityDir, "session", "close", sessionID)
-	var lastErr error
-	for {
-		exists, err := tmuxSessionExistsOnCitySocket(h.cityDir, sessionName)
-		if err != nil {
-			lastErr = err
-		} else if !exists {
-			if closeErr != nil {
-				return true, fmt.Errorf("gc session close returned %v after tmux disappeared: %s", closeErr, strings.TrimSpace(closeOut))
-			}
-			return true, nil
-		}
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return false, fmt.Errorf("%w: %v", ctx.Err(), lastErr)
-			}
-			return false, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-}
-
 func TestAgentStartPerfParsesOnlyCorrelatedCommitTrace(t *testing.T) {
 	payload := []byte(`{
 		"schema_version":"1",
@@ -1235,6 +1251,77 @@ func TestAgentStartPerfObservesPromptFirstOutputAndIdleCompletion(t *testing.T) 
 	}
 	if !got.AssistantAfterPrompt || !got.TranscriptIdle || !got.NoOpenToolUse || !got.NoPendingInteraction {
 		t.Fatalf("terminal observation = %+v, want complete idle transcript proof", got)
+	}
+}
+
+func TestAgentStartPerfWaitsForDurablyKeyedTranscript(t *testing.T) {
+	workDir := t.TempDir()
+	transcriptRoot := t.TempDir()
+	transcriptDir := filepath.Join(transcriptRoot, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prompt := "Create the exact startup proof file."
+	writeTranscript := func(id string) string {
+		path := filepath.Join(transcriptDir, id+".jsonl")
+		body := fmt.Sprintf("%s\n%s\n",
+			fmt.Sprintf(`{"uuid":"user-%s","type":"user","message":{"role":"user","content":%q},"timestamp":"2026-08-02T12:00:01Z","sessionId":%q}`, id, prompt, id),
+			fmt.Sprintf(`{"uuid":"assistant-%s","parentUuid":"user-%s","type":"assistant","message":{"role":"assistant","content":"DONE","stop_reason":"end_turn"},"timestamp":"2026-08-02T12:00:02Z","sessionId":%q}`, id, id, id),
+		)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	currentPath := writeTranscript("provider-current")
+	priorPath := writeTranscript("provider-prior")
+	now := time.Now()
+	if err := os.Chtimes(currentPath, now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(priorPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(workDir, agentStartPerfOutputFile)
+	if err := os.WriteFile(outputPath, []byte(agentStartPerfOutputText+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	harness := &agentStartPerfHarness{
+		cityDir:    workDir,
+		outputPath: outputPath,
+		prompt:     prompt,
+		outputText: agentStartPerfOutputText,
+		profile:    workerpkg.ProfileClaudeTmuxCLI,
+		adapter:    workerpkg.SessionLogAdapter{SearchPaths: []string{transcriptRoot}},
+	}
+	readSession := func(id string) (sessionpkg.Info, error) {
+		if id != "gc-current" {
+			t.Fatalf("session read id = %q, want gc-current", id)
+		}
+		return sessionpkg.Info{ID: id, SessionKey: "provider-current"}, nil
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	turn, err := harness.waitForFirstTurn(ctx, "gc-current", nil, readSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.TranscriptPath != currentPath || turn.Snapshot == nil || turn.Snapshot.ProviderSessionID != "provider-current" {
+		t.Fatalf("correlated turn = path %q snapshot %+v, want current path/key", turn.TranscriptPath, turn.Snapshot)
+	}
+}
+
+func TestAgentStartPerfPreparesReportParentBeforeMeasurement(t *testing.T) {
+	reportPath := filepath.Join(t.TempDir(), "nested", "report.json")
+	if err := agentStartPerfPrepareReportPath(reportPath); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Dir(reportPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("report parent %q is not a directory", info.Name())
 	}
 }
 

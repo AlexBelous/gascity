@@ -121,6 +121,7 @@ type agentStartLatencyDurations struct {
 type agentStartLatencySample struct {
 	Index       int                               `json:"index"`
 	Outcome     string                            `json:"outcome"`
+	RunIdentity string                            `json:"run_identity,omitempty"`
 	SessionID   string                            `json:"session_id,omitempty"`
 	SessionName string                            `json:"session_name,omitempty"`
 	Error       string                            `json:"error,omitempty"`
@@ -285,6 +286,9 @@ func validateAgentStartLatencySample(provenance agentStartLatencyProvenance, sam
 }
 
 func validateCompletedAgentStartLatencySample(provenance agentStartLatencyProvenance, sample *agentStartLatencySample) error {
+	if strings.TrimSpace(sample.RunIdentity) == "" {
+		return fmt.Errorf("opaque run identity is empty")
+	}
 	if strings.TrimSpace(sample.SessionID) == "" {
 		return fmt.Errorf("opaque session id is empty")
 	}

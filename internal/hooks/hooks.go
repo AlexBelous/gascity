@@ -1064,12 +1064,7 @@ func isManagedGCCommandEnvKey(key string) bool {
 }
 
 func parseManagedGCCommand(command string) (string, map[string]string, []string, bool) {
-	prefix := ""
-	body := command
-	if strings.HasPrefix(body, canonicalGCPathPrefix) {
-		prefix = canonicalGCPathPrefix
-		body = strings.TrimPrefix(body, canonicalGCPathPrefix)
-	}
+	prefix, body := splitManagedGCPathPrefix(command)
 	tokens := shellquote.Split(body)
 	if len(tokens) == 0 {
 		return "", nil, nil, false
@@ -1418,17 +1413,33 @@ func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
 	return changed
 }
 
-// canonicalGCPathPrefix is the env-setup prefix gc prepends to every
-// managed hook command. Legacy command bodies always appear either bare
-// or with this prefix; user-wrapped variants never have this exact prefix.
-const canonicalGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && `
+// canonicalGCPathPrefix is the env-setup prefix gc prepends to every managed
+// hook command. The stable install link must precede Go's build-output path so
+// an unrelated or stale go install cannot shadow the deployed gc binary.
+const canonicalGCPathPrefix = `export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH" && `
+
+// legacyGoBinFirstPathPrefix is recognized only so existing managed hooks can
+// be migrated. New hook commands must never emit this order.
+const legacyGoBinFirstPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && `
+
+func splitManagedGCPathPrefix(command string) (string, string) {
+	switch {
+	case strings.HasPrefix(command, canonicalGCPathPrefix):
+		return canonicalGCPathPrefix, strings.TrimPrefix(command, canonicalGCPathPrefix)
+	case strings.HasPrefix(command, legacyGoBinFirstPathPrefix):
+		return canonicalGCPathPrefix, strings.TrimPrefix(command, legacyGoBinFirstPathPrefix)
+	default:
+		return "", command
+	}
+}
 
 // commandBodyAfterCanonicalPrefix returns the portion of command following
 // the canonical gc PATH-export prefix if present, else returns command
 // unchanged. Used to anchor legacy-form matching against the post-prefix
 // body without matching arbitrary user-authored prefixes.
 func commandBodyAfterCanonicalPrefix(command string) string {
-	return strings.TrimPrefix(command, canonicalGCPathPrefix)
+	_, body := splitManagedGCPathPrefix(command)
+	return body
 }
 
 // isLegacyGCManagedCommand reports whether a hook command body matches a
@@ -1511,6 +1522,10 @@ func equalsLegacyCommandBody(command, token string) bool {
 // rewritten.
 func upgradeClaudeHookCommand(event, command string) (string, bool) {
 	body := commandBodyAfterCanonicalPrefix(command)
+	pathMigrated := strings.HasPrefix(command, legacyGoBinFirstPathPrefix)
+	if pathMigrated {
+		command = canonicalGCPathPrefix + body
+	}
 	switch event {
 	case "PreCompact":
 		// Older legacy: PreCompact used `gc prime --hook` before
@@ -1528,6 +1543,9 @@ func upgradeClaudeHookCommand(event, command string) (string, bool) {
 		if equalsLegacyCommandBody(body, `gc handoff "context cycle"`) {
 			return strings.Replace(command, `gc handoff "context cycle"`, `gc handoff --auto "context cycle"`, 1), true
 		}
+		if pathMigrated && isLegacyGCManagedCommand(event, command) {
+			return command, true
+		}
 	case "SessionStart":
 		// Legacy: bare `gc prime --hook` without the
 		// GC_MANAGED_SESSION_HOOK / GC_HOOK_EVENT_NAME env vars the
@@ -1538,8 +1556,16 @@ func upgradeClaudeHookCommand(event, command string) (string, bool) {
 			prefix := strings.TrimSuffix(command, body)
 			return prefix + sessionStartCurrentFormBody(""), true
 		}
+		if pathMigrated && isLegacyGCManagedCommand(event, command) {
+			return command, true
+		}
 	case "UserPromptSubmit":
-		return upgradeManagedPromptHookCommand(command, "", "")
+		if upgraded, ok := upgradeManagedPromptHookCommand(command, "", ""); ok {
+			return upgraded, true
+		}
+		if pathMigrated && isLegacyGCManagedCommand(event, command) {
+			return command, true
+		}
 	}
 	return "", false
 }

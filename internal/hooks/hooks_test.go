@@ -485,6 +485,73 @@ func TestInstallCodexWritesCanonicalHookBytes(t *testing.T) {
 	}
 }
 
+func TestInstallCodexMigratesGoBinFirstPathToStableInstall(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+      }]
+    }],
+    "PreCompact": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto --hook-format codex \"context cycle\""
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex"
+      }, {
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if strings.Contains(got, `$HOME/go/bin:$HOME/.local/bin`) {
+		t.Fatalf("Go-bin-first hook path survived migration:\n%s", got)
+	}
+	if count := strings.Count(got, `$HOME/.local/bin:$HOME/go/bin`); count != 4 {
+		t.Fatalf("stable-install-first hook path count = %d, want 4:\n%s", count, got)
+	}
+}
+
+func TestUpgradeClaudeHookCommandMigratesGoBinFirstPath(t *testing.T) {
+	tests := []struct {
+		event string
+		body  string
+	}{
+		{"SessionStart", sessionStartCurrentFormBody("")},
+		{"PreCompact", preCompactCurrentFormBody("")},
+		{"UserPromptSubmit", `gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.event, func(t *testing.T) {
+			got, changed := upgradeClaudeHookCommand(test.event, legacyGoBinFirstPathPrefix+test.body)
+			if !changed {
+				t.Fatal("Go-bin-first managed hook was not migrated")
+			}
+			if want := canonicalGCPathPrefix + test.body; got != want {
+				t.Fatalf("migrated command = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestInstallCodexBindsExplicitCity(t *testing.T) {
 	fs := fsys.NewFake()
 	cityDir := "/city with spaces"
@@ -542,7 +609,12 @@ func TestCodexHooksNeedManagedUpgrade(t *testing.T) {
 		t.Fatal("managed Codex hooks with stale city binding were not reported stale")
 	}
 
-	currentCity := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
+	oldPathOrder := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
+	if !CodexHooksNeedManagedUpgrade(oldPathOrder, "/old/city") {
+		t.Fatal("managed Codex hooks with Go-bin-first path were not reported stale")
+	}
+
+	currentCity := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/.local/bin:$HOME/go/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/.local/bin:$HOME/go/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
 	if CodexHooksNeedManagedUpgrade(currentCity, "/old/city") {
 		t.Fatal("managed Codex hooks already bound to requested city were reported stale")
 	}

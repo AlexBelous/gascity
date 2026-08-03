@@ -43,13 +43,13 @@ func TestCodexHooksDriftCheckPassesCurrentHooks(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city %s prime --hook --hook-format codex"
+        "command": "export PATH=\"$HOME/.local/bin:$HOME/go/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city %s prime --hook --hook-format codex"
       }]
     }],
     "PreCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city %s handoff --auto --hook-format codex \"context cycle\""
+        "command": "export PATH=\"$HOME/.local/bin:$HOME/go/bin:$PATH\" && gc --city %s handoff --auto --hook-format codex \"context cycle\""
       }]
     }]
   }
@@ -111,6 +111,12 @@ func TestCodexHooksDriftCheckFixUpgradesManagedHooks(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "PreCompact") {
 		t.Fatalf("fixed hooks missing PreCompact:\n%s", string(data))
+	}
+	if strings.Contains(string(data), `$HOME/go/bin:$HOME/.local/bin`) {
+		t.Fatalf("fixed hooks retained Go-bin-first PATH:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), `$HOME/.local/bin:$HOME/go/bin`) {
+		t.Fatalf("fixed hooks missing stable-install-first PATH:\n%s", string(data))
 	}
 }
 

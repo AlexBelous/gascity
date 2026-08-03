@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
@@ -22,13 +23,20 @@ type primeHookContextInjection struct {
 // consumeHandoff gates only the destructive archive: preview callers (--json)
 // still render the exact text the hook would emit, but must not consume the
 // durable mail out from under the real SessionStart invocation.
-func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
+func primeHookContextSuffix(cityPath string, sessionStartStore beads.Store, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
 	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath)}
 	if primeHookSessionStart(hookContext) {
-		autoHandoff, autoHandoffIDs, ordinaryMailProvider := sessionStartAutoHandoffInjection(stderr)
+		var autoHandoff primeHookContextInjection
+		var autoHandoffIDs map[string]bool
+		var ordinaryMailProvider mail.Provider
+		if sessionStartStore != nil {
+			autoHandoff, autoHandoffIDs, ordinaryMailProvider = sessionStartAutoHandoffInjectionWithStore(sessionStartStore, cityPath, stderr)
+		} else {
+			autoHandoff, autoHandoffIDs, ordinaryMailProvider = sessionStartAutoHandoffInjection(stderr)
+		}
 		injection.text += autoHandoff.text
 		if consumeHandoff {
 			injection.afterDelivery = autoHandoff.afterDelivery
@@ -107,6 +115,16 @@ func primeUnreadMailInjectionWithProvider(skip map[string]bool, mp mail.Provider
 func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjection, map[string]bool, mail.Provider) {
 	store, cityPath, code := openCityStoreWithPath(io.Discard, "gc prime")
 	if store == nil || code != 0 {
+		return primeHookContextInjection{}, nil, nil
+	}
+	return sessionStartAutoHandoffInjectionWithStore(store, cityPath, stderr)
+}
+
+// sessionStartAutoHandoffInjectionWithStore builds SessionStart mail context
+// from a caller-owned base store. Class-store routing still runs normally; only
+// the redundant base city-store open is skipped.
+func sessionStartAutoHandoffInjectionWithStore(store beads.Store, cityPath string, stderr io.Writer) (primeHookContextInjection, map[string]bool, mail.Provider) {
+	if store == nil {
 		return primeHookContextInjection{}, nil, nil
 	}
 	cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)

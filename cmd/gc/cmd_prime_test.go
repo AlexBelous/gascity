@@ -277,6 +277,54 @@ func TestSessionStartAutoHandoffCarriesConfiguredOrdinaryMailProvider(t *testing
 	}
 }
 
+func TestSessionStartAutoHandoffUsesProvidedStoreWithoutOpeningCity(t *testing.T) {
+	clearGCEnv(t)
+	store := beads.NewMemStore()
+	sessionInfo, err := store.Create(beads.Bead{
+		Title:  "gastown--worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "gastown--worker",
+			"state":        "active",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionInfo.ID, sessionInfo.ID,
+		[]string{"context cycle", "continue from the provided store"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, io.Discard)
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+
+	missingCity := filepath.Join(t.TempDir(), "missing-city")
+	t.Setenv("GC_CITY", missingCity)
+	t.Setenv("GC_CITY_PATH", missingCity)
+	t.Setenv("GC_SESSION_ID", sessionInfo.ID)
+
+	injection, ids, _ := sessionStartAutoHandoffInjectionWithStore(store, missingCity, io.Discard)
+
+	for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+		if !strings.Contains(injection.text, want) {
+			t.Fatalf("injection = %q, want auto-handoff substring %q", injection.text, want)
+		}
+	}
+	if !ids[auto.ID] {
+		t.Fatalf("rendered IDs = %#v, want %q", ids, auto.ID)
+	}
+	if injection.afterDelivery == nil {
+		t.Fatal("afterDelivery = nil, want archive acknowledgement")
+	}
+	injection.afterDelivery()
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("provided store still contains archived auto-handoff: %v", err)
+	}
+}
+
 func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
 	clearGCEnv(t)
 

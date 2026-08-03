@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -219,13 +220,17 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 			return 0
 		}
-		injection := primeHookContextSuffix("", hookMode, hookContext, stderr, consumeHandoff)
+		injection := primeHookContextSuffix("", nil, hookMode, hookContext, stderr, consumeHandoff)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0
 	}
-	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
-		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
-		return 0
+	var sessionStartStore beads.Store
+	if hookMode && primeHookSessionStart(hookContext) {
+		sessionStartStore = primeHookLiveManagedSessionStore(cityPath)
+		if sessionStartStore == nil {
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+			return 0
+		}
 	}
 	if !strictMode && primeHookSessionStart(hookContext) {
 		runHookSideEffects()
@@ -236,7 +241,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
+		injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0
 	}
@@ -344,7 +349,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
-				injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
+				injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 				return 0
 			}
@@ -368,7 +373,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(promptFile); fErr == nil {
-					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
+					injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 					return 0
 				}
@@ -380,7 +385,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
+	injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0
 }
@@ -501,18 +506,22 @@ func primeHookSessionStart(ctx primeHookContext) bool {
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
 }
 
-func primeHookHasLiveManagedSession(cityPath string) bool {
+// primeHookLiveManagedSessionStore returns the base city store only after its
+// session-class projection proves the hook's exact live managed-session
+// identity. The caller may reuse that handle for the remainder of this one
+// SessionStart invocation, avoiding another base-store open without caching it.
+func primeHookLiveManagedSessionStore(cityPath string) beads.Store {
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	if sessionID == "" {
-		return false
+		return nil
 	}
 	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
 	if sessionName == "" {
-		return false
+		return nil
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
-		return false
+		return nil
 	}
 	// Route the session-bead read through the session coordination-class store so
 	// a [beads.classes.sessions] relocation reaches this prime hook, mirroring
@@ -525,27 +534,27 @@ func primeHookHasLiveManagedSession(cityPath string) bool {
 	// (ErrSessionNotFound), folding in the removed IsSessionBeadOrRepairable guard.
 	info, err := sessionFrontDoor(sessStore).Get(sessionID)
 	if err != nil {
-		return false
+		return nil
 	}
 	if info.Closed {
-		return false
+		return nil
 	}
 	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which
 	// falls back to sessionNameFor(ID) and would loosen the exact-match semantics.
 	if strings.TrimSpace(info.SessionNameMetadata) != sessionName {
-		return false
+		return nil
 	}
 	if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" &&
 		strings.TrimSpace(info.Template) != template {
-		return false
+		return nil
 	}
 	// MetadataState is the RAW state metadata; Info.State is blanked on closed
 	// beads, so the raw mirror preserves the original exact comparison.
 	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
 	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
-		return true
+		return store
 	default:
-		return false
+		return nil
 	}
 }
 

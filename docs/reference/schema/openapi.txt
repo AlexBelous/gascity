@@ -480,6 +480,12 @@
               "null"
             ]
           },
+          "TerminalCreateCooldown": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "TmuxAlias": {
             "type": [
               "string",
@@ -527,6 +533,7 @@
           "IdleTimeout",
           "MaxSessionAge",
           "MaxSessionAgeJitter",
+          "TerminalCreateCooldown",
           "AssignedWorkDeferLimit",
           "SleepAfterIdle",
           "InstallAgentHooks",

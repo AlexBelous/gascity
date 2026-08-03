@@ -710,6 +710,11 @@ type AgentOverride struct {
 	// MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.
 	// Duration string (e.g., "15m"). Empty disables jitter.
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// TerminalCreateCooldown overrides the minimum time to wait after a
+	// terminal ephemeral session-create failure before attempting another
+	// fresh create at the same resolved worker directory. Duration string
+	// (e.g., "5m", "30m", "1h"). Set to "0s" to disable the throttle.
+	TerminalCreateCooldown *string `toml:"terminal_create_cooldown,omitempty"`
 	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
 	// field for semantics).
 	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`

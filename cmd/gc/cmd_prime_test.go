@@ -226,6 +226,57 @@ func TestPrimeInjectMailContentSurfacesUnreadMailForPromptlessWake(t *testing.T)
 	}
 }
 
+func TestPrimeUnreadMailInjectionUsesProvidedProviderWithoutOpeningCity(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
+	t.Setenv("GC_ALIAS", "worker")
+	provider := mail.NewFake()
+	if _, err := provider.Send("boss", "worker", "ready", "review the result"); err != nil {
+		t.Fatalf("seed mail: %v", err)
+	}
+
+	got := primeUnreadMailInjectionWithProvider(nil, provider)
+
+	if !strings.Contains(got, "review the result") {
+		t.Fatalf("injection = %q, want mail from provided provider", got)
+	}
+}
+
+func TestSessionStartAutoHandoffCarriesConfiguredOrdinaryMailProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		envProvider string
+		wantErr     bool
+	}{
+		{name: "config provider", wantErr: true},
+		{name: "environment override", envProvider: "fake", wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[mail]\nprovider = \"fail\"\n"), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			t.Setenv("GC_MAIL", tc.envProvider)
+
+			_, _, provider := sessionStartAutoHandoffInjection(io.Discard)
+
+			if provider == nil {
+				t.Fatal("ordinary mail provider = nil, want reusable configured provider")
+			}
+			_, err := provider.Check("worker")
+			if got := err != nil; got != tc.wantErr {
+				t.Fatalf("Check error = %v, want error=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
 	clearGCEnv(t)
 

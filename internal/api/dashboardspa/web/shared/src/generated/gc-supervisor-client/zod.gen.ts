@@ -1069,6 +1069,7 @@ export const zAgentPatch = z.object({
     SleepAfterIdle: z.string().nullable(),
     StartCommand: z.string().nullable(),
     Suspended: z.boolean().nullable(),
+    TerminalCreateCooldown: z.string().nullable(),
     TmuxAlias: z.string().nullable(),
     Upstream: z.string().nullable(),
     WakeMode: z.string().nullable(),

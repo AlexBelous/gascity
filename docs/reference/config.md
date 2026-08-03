@@ -180,6 +180,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h"). |
 | `max_session_age` | string |  |  | MaxSessionAge overrides the max session age. Duration string (e.g., "5h"). Empty disables preemptive restart. |
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge. Duration string (e.g., "15m"). Empty disables jitter. |
+| `terminal_create_cooldown` | string |  |  | TerminalCreateCooldown overrides the minimum time to wait after a terminal ephemeral session-create failure before attempting another fresh create at the same resolved worker directory. Duration string (e.g., "5m", "30m", "1h"). Set to "0s" to disable the throttle. |
 | `assigned_work_defer_limit` | integer |  |  | AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that field for semantics). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
@@ -238,6 +239,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h"). |
 | `max_session_age` | string |  |  | MaxSessionAge overrides the max session age. Duration string (e.g., "5h"). |
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m"). |
+| `terminal_create_cooldown` | string |  |  | TerminalCreateCooldown overrides the minimum time to wait after a terminal ephemeral session-create failure before attempting another fresh create at the same resolved worker directory. Duration string (e.g., "5m", "30m", "1h"). Set to "0s" to disable the throttle. |
 | `assigned_work_defer_limit` | integer |  |  | AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that field for semantics). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |

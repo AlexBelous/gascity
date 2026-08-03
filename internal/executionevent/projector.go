@@ -239,16 +239,12 @@ func canonicalTopology(metadata map[string]string, stepID string) *[]string {
 	return &dependencies
 }
 
-// EmitCurrent records the current projection as envelope-only events. A nil
-// recorder is a no-op so graph materialization remains available when event
-// recording is disabled.
-func EmitCurrent(recorder events.Recorder, actor string, rootStore beads.Store, rootID string, memberStores ...beads.Store) error {
+// EmitProjection records a precomputed execution projection as envelope-only
+// events. A nil recorder is a no-op so graph materialization remains available
+// when event recording is disabled.
+func EmitProjection(recorder events.Recorder, actor string, projection Projection) error {
 	if recorder == nil {
 		return nil
-	}
-	projection, err := ProjectCurrent(rootStore, rootID, memberStores...)
-	if err != nil {
-		return err
 	}
 	actor = strings.TrimSpace(actor)
 	if actor == "" {
@@ -273,6 +269,18 @@ func EmitCurrent(recorder events.Recorder, actor string, rootStore beads.Store, 
 		})
 	}
 	return nil
+}
+
+// EmitCurrent projects and records the current execution facts.
+func EmitCurrent(recorder events.Recorder, actor string, rootStore beads.Store, rootID string, memberStores ...beads.Store) error {
+	if recorder == nil {
+		return nil
+	}
+	projection, err := ProjectCurrent(rootStore, rootID, memberStores...)
+	if err != nil {
+		return err
+	}
+	return EmitProjection(recorder, actor, projection)
 }
 
 func cloneTopology(dependencies *[]string) *[]string {

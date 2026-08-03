@@ -1466,7 +1466,21 @@ gc events --follow --after-cursor city-a:12,city-b:9
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc events reemit-execution](#gc-events-reemit-execution) | Re-emit current graph execution facts for one explicit local run |
 | [gc events rotate](#gc-events-rotate) | Force rotate the city event log |
+
+## gc events reemit-execution
+
+Re-emit current graph execution facts for one explicit local run
+
+```
+gc events reemit-execution [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | append the projected execution facts |
+| `--run` | string |  | exact graph.v2 workflow root id |
 
 ## gc events rotate
 

@@ -338,6 +338,36 @@ func TestProjectCurrentRejectsNonGraphRootOrMissingInputConvoy(t *testing.T) {
 	}
 }
 
+func TestEmitProjectionClonesTopologyAndPreservesProjection(t *testing.T) {
+	dependencies := []string{"prepare"}
+	projection := Projection{
+		WorkAssociations: []WorkAssociation{{WorkBeadID: "mc-work", ExecutionRunID: "gcg-root"}},
+		Steps: []StepDefinition{{
+			BeadID:           "gcg-step",
+			ExecutionRunID:   "gcg-root",
+			StepID:           "implement",
+			DependsOnStepIDs: &dependencies,
+		}},
+	}
+	recorder := events.NewFake()
+	if err := EmitProjection(recorder, "execution-reemit", projection); err != nil {
+		t.Fatalf("EmitProjection: %v", err)
+	}
+	if got, want := len(recorder.Events), 2; got != want {
+		t.Fatalf("event count = %d, want %d", got, want)
+	}
+	if got := recorder.Events[0]; got.Type != events.ExecutionWorkAssociated || got.Subject != "mc-work" || got.RunID != "gcg-root" {
+		t.Fatalf("work event = %#v", got)
+	}
+	if got := recorder.Events[1]; got.Type != events.ExecutionStepDefined || got.Subject != "gcg-step" || got.StepID != "implement" || !reflect.DeepEqual(got.DependsOnStepIDs, &dependencies) {
+		t.Fatalf("step event = %#v", got)
+	}
+	(*recorder.Events[1].DependsOnStepIDs)[0] = "mutated"
+	if got := (*projection.Steps[0].DependsOnStepIDs)[0]; got != "prepare" {
+		t.Fatalf("projection topology mutated to %q", got)
+	}
+}
+
 func ptr(values []string) *[]string { return &values }
 
 type projectionStore struct {

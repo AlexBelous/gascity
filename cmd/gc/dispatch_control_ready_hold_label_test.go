@@ -22,7 +22,7 @@ func TestFilterReadyByRouteExcludesDispatchHoldLabels(t *testing.T) {
 		{ID: "ga-held-mayor", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel}},
 		{ID: "ga-held-external", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{beadmeta.HoldExternalLabel}},
 	}
-	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher", workflowServeScanLimit)
+	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
 	want := []string{"ga-plain"}
 	if !stringSlicesEqual(beadIDs(got), want) {
 		t.Fatalf("filterReadyByRoute ids = %v, want %v (hold-labeled beads must be excluded)", beadIDs(got), want)

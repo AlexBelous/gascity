@@ -41,12 +41,13 @@ func ResolveEvaluateStep(cityPath string, formula Formula) (EvaluateStep, error)
 		promptPath = formula.EvaluatePrompt
 	}
 
-	// Canonicalize cityPath first so that symlinked workspace roots
-	// (e.g., /tmp -> /private/tmp on macOS) don't cause false rejections.
-	canonCity, err := filepath.EvalSymlinks(cityPath)
-	if err != nil {
-		canonCity = filepath.Clean(cityPath) // best-effort if city doesn't exist yet
-	}
+	// Canonicalize cityPath first via pathutil.NormalizePathForCompare, which
+	// absolutizes before resolving symlinks (falling back to a best-effort
+	// ancestor walk when the path doesn't exist yet). This keeps symlinked
+	// workspace roots (e.g., /tmp -> /private/tmp on macOS) from causing
+	// false rejections, and keeps a relative cityPath (e.g. ".") from
+	// producing a relative PromptPath below.
+	canonCity := pathutil.NormalizePathForCompare(cityPath)
 
 	resolved := filepath.Clean(filepath.Join(canonCity, promptPath))
 
@@ -57,6 +58,14 @@ func ResolveEvaluateStep(cityPath string, formula Formula) (EvaluateStep, error)
 	}
 
 	// Reject symlinks in the resolved path (matching ResolveConditionPath).
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. This deliberately checks whether the resolved path IS a
+	// symlink — a blanket "reject any symlink component" policy that is
+	// stricter than, and different in kind from, plain containment — and
+	// silently tolerates an unresolvable path (err != nil) rather than
+	// failing, so pathutil.NormalizePathForCompare's fallback-and-never-error
+	// contract would change this function's behavior, not just its
+	// canonicalization.
 	realResolved, err := filepath.EvalSymlinks(resolved)
 	if err == nil && realResolved != resolved {
 		return EvaluateStep{}, fmt.Errorf("evaluate prompt path contains symlinks: %s resolves to %s", resolved, realResolved)

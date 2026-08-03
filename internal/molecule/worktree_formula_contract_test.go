@@ -10,13 +10,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestProductionWorkspaceSetupFormulasUseTransactionalWorktreeOwner(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

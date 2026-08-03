@@ -181,11 +181,11 @@ func findKimiSessionFilesIn(root, workHash string) []kimiContextCandidate {
 }
 
 func findKimiSessionFileInVisited(root, workHash string, visited map[string]bool) string {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	key := canonicalKimiSessionRoot(root)
+	if key == "" || visited[key] {
 		return ""
 	}
-	visited[root] = true
+	visited[key] = true
 
 	workRoot := filepath.Join(root, workHash)
 	workRootExists := kimiDirectoryExists(workRoot)
@@ -220,11 +220,11 @@ func findKimiSessionFileInVisited(root, workHash string, visited map[string]bool
 }
 
 func findKimiSessionFilesInVisited(root, workHash string, visited map[string]bool) []kimiContextCandidate {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	key := canonicalKimiSessionRoot(root)
+	if key == "" || visited[key] {
 		return nil
 	}
-	visited[root] = true
+	visited[key] = true
 
 	workRoot := filepath.Join(root, workHash)
 	workRootExists := kimiDirectoryExists(workRoot)
@@ -259,11 +259,11 @@ func findKimiSessionFileByIDIn(root, workHash, sessionID string) string {
 }
 
 func findKimiSessionFileByIDInVisited(root, workHash, sessionID string, visited map[string]bool) string {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	key := canonicalKimiSessionRoot(root)
+	if key == "" || visited[key] {
 		return ""
 	}
-	visited[root] = true
+	visited[key] = true
 
 	path := filepath.Join(root, workHash, sessionID, "context.jsonl")
 	workRootExists := kimiDirectoryExists(filepath.Join(root, workHash))

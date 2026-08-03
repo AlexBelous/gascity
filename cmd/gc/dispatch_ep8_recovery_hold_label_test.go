@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,10 +22,11 @@ import (
 // dispatch_control_ready_hold_label_test.go); this composes both halves.
 
 // runLifecycleHookShellForTest executes a generated on_death/on_boot shell
-// command against a fake `bd` stubbed onto PATH. It mirrors
-// internal/config's runLifecycleHookCommand test helper, duplicated here
-// because that helper is unexported in internal/config and this composition
-// lives at the cmd/gc layer (where filterReadyByRoute is defined).
+// command against a fake `bd` stubbed onto PATH. It reuses
+// shellWorkQueryWithEnv (cmd_hook.go) -- the same subprocess path production
+// hook dispatch already runs work queries through -- instead of a new
+// exec.Command literal, so this composition doesn't add a second
+// independently-spawned subprocess call site next to the existing one.
 func runLifecycleHookShellForTest(t *testing.T, command string, bdScript string) string {
 	t.Helper()
 
@@ -37,13 +37,12 @@ func runLifecycleHookShellForTest(t *testing.T, command string, bdScript string)
 	}
 	logPath := filepath.Join(tmp, "bd.log")
 
-	cmd := exec.Command("sh", "-c", command)
-	cmd.Env = []string{
+	env := []string{
 		"PATH=" + tmp + ":" + os.Getenv("PATH"),
 		"BD_LOG=" + logPath,
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("run lifecycle hook: %v\n%s", err, out)
+	if _, err := shellWorkQueryWithEnv(command, tmp, env); err != nil {
+		t.Fatalf("run lifecycle hook: %v", err)
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {

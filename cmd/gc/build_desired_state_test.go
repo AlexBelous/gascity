@@ -969,6 +969,136 @@ func TestDefaultScaleCheckDemandRejectsUnpublishedOwnerWorktree(t *testing.T) {
 	}
 }
 
+// TestDefaultScaleCheckDemandAdvancesPastEvidenceInvalidBead reproduces the
+// dr-mh9k head-of-line starve: a routed bead whose worktree evidence is
+// invalid (conflicting canonical and legacy work_dir stamped by a dead pool
+// spawn) previously occupied a demand slot that realization then failed
+// closed, so the next valid routed bead behind it never spawned. The invalid
+// bead must be excluded from the counted demand list — the valid bead takes
+// the slot — while its error stays recorded so in-flight classification
+// still fails closed for sessions already bound to it.
+func TestDefaultScaleCheckDemandAdvancesPastEvidenceInvalidBead(t *testing.T) {
+	const template = "gascity/polecat"
+	store := beads.NewMemStore()
+	poisoned, err := store.Create(beads.Bead{
+		Title:  "step stamped by dead spawn",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:      template,
+			beadmeta.WorkDirMetadataKey:       "/worktrees/polecat-slots/polecat-1",
+			beadmeta.LegacyWorkDirMetadataKey: "/worktrees/gc-real",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create poisoned bead: %v", err)
+	}
+	healthy, err := store.Create(beads.Bead{
+		Title:  "spawnable work behind the poison",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create healthy bead: %v", err)
+	}
+
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("counts[%q] = %d, want 1 (evidence-invalid bead must not be counted)", template, got)
+	}
+	if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{healthy.ID}) {
+		t.Fatalf("WorkBeadIDs = %v, want [%s] (valid bead advances past the poisoned head)", got, healthy.ID)
+	}
+	worktreeErr := demand[template].WorktreeErrors[poisoned.ID]
+	if !strings.Contains(worktreeErr, "conflicting") {
+		t.Fatalf("WorktreeErrors[%s] = %q, want recorded conflicting-evidence error", poisoned.ID, worktreeErr)
+	}
+	classified := classifyInFlightWorktreeRequest(
+		SessionRequest{Tier: "new", WorkBeadID: poisoned.ID},
+		demand[template],
+	)
+	if classified.UnmanagedDirect || classified.WorktreeError == "" {
+		t.Fatalf("in-flight request for skipped bead = %+v, want fail-closed worktree error", classified)
+	}
+}
+
+// TestDefaultScaleCheckDemandAllInvalidYieldsZeroDemand: when every routed
+// bead carries invalid evidence the pool must report zero demand (idle), not
+// phantom poolDesired that realization can never satisfy.
+func TestDefaultScaleCheckDemandAllInvalidYieldsZeroDemand(t *testing.T) {
+	const template = "gascity/polecat"
+	store := beads.NewMemStore()
+	poisoned, err := store.Create(beads.Bead{
+		Title:  "only demand, invalid evidence",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:      template,
+			beadmeta.WorkDirMetadataKey:       "/worktrees/polecat-slots/polecat-2",
+			beadmeta.LegacyWorkDirMetadataKey: "/worktrees/gc-other",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create poisoned bead: %v", err)
+	}
+
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("counts[%q] = %d, want 0", template, got)
+	}
+	if got := len(demand[template].WorkBeadIDs); got != 0 {
+		t.Fatalf("WorkBeadIDs = %v, want empty", demand[template].WorkBeadIDs)
+	}
+	if got := demand[template].WorktreeErrors[poisoned.ID]; !strings.Contains(got, "conflicting") {
+		t.Fatalf("WorktreeErrors[%s] = %q, want recorded error for observability", poisoned.ID, got)
+	}
+}
+
+// TestMergeScaleCheckDemandCarriesUncountedWorktreeErrors: skipped
+// evidence-invalid beads are not in WorkBeadIDs, but their errors must
+// survive the merge so classifyInFlightWorktreeRequest can fail closed for a
+// session already holding one — including when the incoming demand has no
+// countable beads at all.
+func TestMergeScaleCheckDemandCarriesUncountedWorktreeErrors(t *testing.T) {
+	incoming := scaleCheckDemand{
+		WorktreeErrors: map[string]string{"gc-poisoned": "conflicting evidence"},
+	}
+	merged := mergeScaleCheckDemand(scaleCheckDemand{}, incoming, 0)
+	if got := merged.WorktreeErrors["gc-poisoned"]; got != "conflicting evidence" {
+		t.Fatalf("WorktreeErrors[gc-poisoned] = %q, want carried through merge with zero counted beads", got)
+	}
+
+	incoming = scaleCheckDemand{
+		WorkBeadIDs:    []string{"gc-healthy"},
+		Titles:         map[string]string{"gc-healthy": "ok"},
+		WorktreeErrors: map[string]string{"gc-poisoned": "conflicting evidence"},
+	}
+	merged = mergeScaleCheckDemand(scaleCheckDemand{}, incoming, 1)
+	if got := merged.WorktreeErrors["gc-poisoned"]; got != "conflicting evidence" {
+		t.Fatalf("WorktreeErrors[gc-poisoned] = %q, want carried even though gc-poisoned is not counted", got)
+	}
+	if got := merged.WorkBeadIDs; !reflect.DeepEqual(got, []string{"gc-healthy"}) {
+		t.Fatalf("WorkBeadIDs = %v, want [gc-healthy]", got)
+	}
+}
+
 // TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget
 // reproduces a writer that stamps gc.routed_to with an instance-suffixed pool
 // identity directly (e.g. `bd update --set-metadata gc.routed_to=hello-world/polecat-1`),

@@ -739,6 +739,21 @@ func buildDesiredStateWithSessionBeads(
 				// necessarily zero.
 				fmt.Fprintf(stderr, "buildDesiredState: %v (counts above may be a partial of one demand source)\n", err) //nolint:errcheck
 			}
+			for template, templateDemand := range defaultDemand {
+				counted := make(map[string]struct{}, len(templateDemand.WorkBeadIDs))
+				for _, id := range templateDemand.WorkBeadIDs {
+					counted[id] = struct{}{}
+				}
+				for id, worktreeErr := range templateDemand.WorktreeErrors {
+					if _, ok := counted[id]; ok {
+						continue
+					}
+					// One line per skipped bead: without it a strip/repair of
+					// the bead's evidence is unobservable (dr-mh9k was
+					// diagnosed from exactly this class of log line).
+					fmt.Fprintf(stderr, "scaleCheck: %s: skipping evidence-invalid demand bead %s: %s\n", template, id, worktreeErr) //nolint:errcheck
+				}
+			}
 			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, partialTemplates)
 			if scaleCheckCounts == nil {
 				scaleCheckCounts = make(map[string]int)
@@ -1613,10 +1628,33 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				continue
 			}
 			seen[b.ID] = struct{}{}
-			counts[template]++
 			entry := demand[template]
-			entry.Count++
 			entry.RepoDir = group.repoDirs[template]
+			spec, specErr := worktreeSpecForBead(b, group.storeKey)
+			worktreeError := ""
+			if specErr != nil {
+				worktreeError = specErr.Error()
+			} else if spec == nil {
+				worktreeError = unpublishedWorktreeOwnerEvidence(group.repoDirs[template], b.ID)
+			}
+			if worktreeError != "" {
+				// Evidence-invalid work must not occupy a demand slot:
+				// realization binds request slot j to demand bead j with no
+				// fallback, so counting this bead starves every valid bead
+				// behind it (dr-mh9k head-of-line). Record the error for
+				// in-flight classification and skip logging, but exclude the
+				// bead from the counted list — the next valid routed bead
+				// advances into the slot, and the bead itself stays
+				// fail-closed (never spawned).
+				if entry.WorktreeErrors == nil {
+					entry.WorktreeErrors = make(map[string]string)
+				}
+				entry.WorktreeErrors[b.ID] = worktreeError
+				demand[template] = entry
+				continue
+			}
+			counts[template]++
+			entry.Count++
 			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
 			if entry.Titles == nil {
 				entry.Titles = make(map[string]string)
@@ -1638,22 +1676,11 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				entry.StoreRefs = make(map[string]string)
 			}
 			entry.StoreRefs[b.ID] = group.storeKey
-			spec, specErr := worktreeSpecForBead(b, group.storeKey)
-			if specErr != nil {
-				if entry.WorktreeErrors == nil {
-					entry.WorktreeErrors = make(map[string]string)
-				}
-				entry.WorktreeErrors[b.ID] = specErr.Error()
-			} else if spec != nil {
+			if spec != nil {
 				if entry.WorktreeSpecs == nil {
 					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
 				}
 				entry.WorktreeSpecs[b.ID] = spec
-			} else if evidenceErr := unpublishedWorktreeOwnerEvidence(group.repoDirs[template], b.ID); evidenceErr != "" {
-				if entry.WorktreeErrors == nil {
-					entry.WorktreeErrors = make(map[string]string)
-				}
-				entry.WorktreeErrors[b.ID] = evidenceErr
 			}
 			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
 				if entry.ParentSIDs == nil {
@@ -1693,6 +1720,20 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.RepoDir == "" {
 		existing.RepoDir = incoming.RepoDir
 	}
+	// Worktree errors ride along even for beads excluded from the counted
+	// demand list (evidence-invalid skips) and even when nothing is counted
+	// at all: classifyInFlightWorktreeRequest needs them to fail closed for
+	// a session already bound to such a bead.
+	if len(incoming.WorktreeErrors) > 0 {
+		if existing.WorktreeErrors == nil {
+			existing.WorktreeErrors = make(map[string]string, len(incoming.WorktreeErrors))
+		}
+		for id, worktreeErr := range incoming.WorktreeErrors {
+			if worktreeErr != "" {
+				existing.WorktreeErrors[id] = worktreeErr
+			}
+		}
+	}
 	if count <= 0 || len(incoming.WorkBeadIDs) == 0 {
 		return existing
 	}
@@ -1717,9 +1758,6 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	}
 	if existing.WorktreeSpecs == nil && len(incoming.WorktreeSpecs) > 0 {
 		existing.WorktreeSpecs = make(map[string]*worktree.Spec, len(incoming.WorktreeSpecs))
-	}
-	if existing.WorktreeErrors == nil && len(incoming.WorktreeErrors) > 0 {
-		existing.WorktreeErrors = make(map[string]string, len(incoming.WorktreeErrors))
 	}
 	for _, id := range incoming.WorkBeadIDs[:limit] {
 		if strings.TrimSpace(id) == "" {
@@ -1746,11 +1784,6 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		if incoming.WorktreeSpecs != nil {
 			if spec := incoming.WorktreeSpecs[id]; spec != nil {
 				existing.WorktreeSpecs[id] = spec
-			}
-		}
-		if incoming.WorktreeErrors != nil {
-			if worktreeErr := incoming.WorktreeErrors[id]; worktreeErr != "" {
-				existing.WorktreeErrors[id] = worktreeErr
 			}
 		}
 	}

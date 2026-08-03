@@ -33,6 +33,7 @@ const (
 	agentStartMetricReadyToPrompt           = "cli_ready_to_prompt_delivered"
 	agentStartMetricPromptToFirstOutput     = "prompt_to_first_assistant_output"
 	agentStartMetricFirstOutputToCompletion = "first_assistant_output_to_turn_complete"
+	agentStartMetricUserPromptSubmitHook    = "user_prompt_submit_hook"
 	agentStartMetricControllerTotal         = "controller_start_total"
 	agentStartMetricControllerStartCall     = "controller_start_call"
 	agentStartMetricControllerZombieRecycle = "controller_zombie_recycle"
@@ -119,16 +120,18 @@ type agentStartLatencyDurations struct {
 }
 
 type agentStartLatencySample struct {
-	Index       int                               `json:"index"`
-	Outcome     string                            `json:"outcome"`
-	RunIdentity string                            `json:"run_identity,omitempty"`
-	SessionID   string                            `json:"session_id,omitempty"`
-	SessionName string                            `json:"session_name,omitempty"`
-	Error       string                            `json:"error,omitempty"`
-	Timestamps  agentStartLatencyTimestamps       `json:"timestamps"`
-	Terminal    agentStartLatencyTerminalProof    `json:"terminal"`
-	Controller  agentStartLatencyControllerTiming `json:"controller"`
-	Durations   *agentStartLatencyDurations       `json:"durations,omitempty"`
+	Index                     int                               `json:"index"`
+	Outcome                   string                            `json:"outcome"`
+	RunIdentity               string                            `json:"run_identity,omitempty"`
+	SessionID                 string                            `json:"session_id,omitempty"`
+	SessionName               string                            `json:"session_name,omitempty"`
+	Error                     string                            `json:"error,omitempty"`
+	Timestamps                agentStartLatencyTimestamps       `json:"timestamps"`
+	Terminal                  agentStartLatencyTerminalProof    `json:"terminal"`
+	Controller                agentStartLatencyControllerTiming `json:"controller"`
+	UserPromptSubmitHook      *time.Duration                    `json:"user_prompt_submit_hook_ns,omitempty"`
+	UserPromptSubmitHookError string                            `json:"user_prompt_submit_hook_error,omitempty"`
+	Durations                 *agentStartLatencyDurations       `json:"durations,omitempty"`
 }
 
 type agentStartLatencyPercentiles struct {
@@ -427,6 +430,9 @@ func agentStartLatencyMetricDefinitions() []agentStartLatencyMetricDefinition {
 			return &value
 		}
 	}
+	userPromptSubmitHook := func(sample agentStartLatencySample) *time.Duration {
+		return sample.UserPromptSubmitHook
+	}
 	return []agentStartLatencyMetricDefinition{
 		{name: agentStartMetricTotal, excluded: true, value: durationValue(func(value *agentStartLatencyDurations) time.Duration { return value.Total })},
 		{name: agentStartMetricNonInference, value: durationValue(func(value *agentStartLatencyDurations) time.Duration { return value.NonInference })},
@@ -436,6 +442,7 @@ func agentStartLatencyMetricDefinitions() []agentStartLatencyMetricDefinition {
 		{name: agentStartMetricReadyToPrompt, value: fromDurations(func(value *agentStartLatencyDurations) *time.Duration { return value.ReadyToPrompt })},
 		{name: agentStartMetricPromptToFirstOutput, excluded: true, value: durationValue(func(value *agentStartLatencyDurations) time.Duration { return value.PromptToFirstOutput })},
 		{name: agentStartMetricFirstOutputToCompletion, excluded: true, value: durationValue(func(value *agentStartLatencyDurations) time.Duration { return value.FirstOutputToCompletion })},
+		{name: agentStartMetricUserPromptSubmitHook, value: userPromptSubmitHook},
 		{name: agentStartMetricControllerTotal, value: controllerValue(func(value agentStartLatencyControllerTiming) time.Duration { return value.Total })},
 		{name: agentStartMetricControllerStartCall, value: controllerValue(func(value agentStartLatencyControllerTiming) time.Duration { return value.StartCall })},
 		{name: agentStartMetricControllerZombieRecycle, value: controllerValue(func(value agentStartLatencyControllerTiming) time.Duration { return value.ZombieRecycle })},

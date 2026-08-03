@@ -43,6 +43,42 @@ func TestAgentStartLatencyReportUsesNearestRankAndSeparatesInference(t *testing.
 	}
 }
 
+func TestAgentStartLatencyReportIncludesObservedUserPromptSubmitHook(t *testing.T) {
+	samples := make([]agentStartLatencySample, 20)
+	for i := range samples {
+		samples[i] = completedAgentStartLatencySample(i+1, 20*time.Second)
+		duration := time.Duration(i+1) * 100 * time.Millisecond
+		samples[i].UserPromptSubmitHook = &duration
+	}
+	samples[0].UserPromptSubmitHook = nil
+
+	report, err := buildAgentStartLatencyReport(
+		agentStartLatencyProvenanceForTest(),
+		agentStartLatencyRunState{
+			Requested: 20,
+			Warmup:    completedAgentStartLatencySample(0, 20*time.Second),
+			Samples:   samples,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	metric := requireAgentStartLatencyMetric(t, report, agentStartMetricUserPromptSubmitHook)
+	if metric.ObservedCount != 19 || metric.MissingCount != 1 {
+		t.Fatalf("UserPromptSubmit hook counts = %d observed, %d missing; want 19 observed, 1 missing", metric.ObservedCount, metric.MissingCount)
+	}
+	if got, want := []time.Duration{metric.Latency.P50, metric.Latency.P95, metric.Latency.P99, metric.Latency.Max}, []time.Duration{1100 * time.Millisecond, 2 * time.Second, 2 * time.Second, 2 * time.Second}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("UserPromptSubmit hook latency = %v, want %v", got, want)
+	}
+	if metric.ExcludedFromOptimization {
+		t.Fatal("UserPromptSubmit hook is Gas City-controlled latency and must remain an optimization metric")
+	}
+	if !report.OK || report.BaselineEligible {
+		t.Fatalf("missing optional hook evidence changed report eligibility: OK=%t baseline_eligible=%t", report.OK, report.BaselineEligible)
+	}
+}
+
 func TestAgentStartLatencyReportRequiresThirtyCleanSamplesForBaseline(t *testing.T) {
 	samples := make([]agentStartLatencySample, agentStartLatencyDefaultSamples)
 	for i := range samples {

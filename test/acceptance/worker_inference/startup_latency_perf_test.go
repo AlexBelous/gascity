@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -911,6 +912,11 @@ func (h *agentStartPerfHarness) runSample(parent context.Context, index int) (ag
 	sample.Timestamps.PromptDeliveredAt = turn.PromptAt
 	sample.Timestamps.FirstAssistantOutputAt = turn.FirstAssistantOutput
 	sample.Timestamps.FirstTurnCompletedAt = turn.FirstTurnCompletedAt
+	duration, hookErr := agentStartPerfUserPromptSubmitHookDuration(turn.TranscriptPath)
+	sample.UserPromptSubmitHook = duration
+	if hookErr != nil {
+		sample.UserPromptSubmitHookError = hookErr.Error()
+	}
 	sample.Terminal.ExpectedOutputMatched = turn.ExpectedOutputMatched
 	sample.Terminal.AssistantAfterPrompt = turn.AssistantAfterPrompt
 	sample.Terminal.TranscriptIdle = turn.TranscriptIdle
@@ -1021,6 +1027,58 @@ func (h *agentStartPerfHarness) agentStartTranscriptBaseline() map[string]struct
 }
 
 type agentStartPerfSessionReader func(string) (sessionpkg.Info, error)
+
+func agentStartPerfUserPromptSubmitHookDuration(path string) (*time.Duration, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open hook transcript %q: %w", path, err)
+	}
+	defer file.Close()
+
+	var observed *time.Duration
+	decoder := json.NewDecoder(file)
+	for {
+		var record struct {
+			Type       string          `json:"type"`
+			Attachment json.RawMessage `json:"attachment"`
+		}
+		if err := decoder.Decode(&record); err != nil {
+			if errors.Is(err, io.EOF) {
+				return observed, nil
+			}
+			return nil, fmt.Errorf("decode hook transcript %q: %w", path, err)
+		}
+		if record.Type != "attachment" || len(record.Attachment) == 0 {
+			continue
+		}
+		var attachment struct {
+			Type       string `json:"type"`
+			HookEvent  string `json:"hookEvent"`
+			DurationMS *int64 `json:"durationMs"`
+		}
+		if err := json.Unmarshal(record.Attachment, &attachment); err != nil {
+			return nil, fmt.Errorf("decode hook attachment in %q: %w", path, err)
+		}
+		if attachment.Type != "hook_success" || attachment.HookEvent != "UserPromptSubmit" {
+			continue
+		}
+		if attachment.DurationMS == nil || *attachment.DurationMS < 0 {
+			return nil, fmt.Errorf("UserPromptSubmit hook in %q has invalid duration", path)
+		}
+		const maxDurationMilliseconds = int64(^uint64(0)>>1) / int64(time.Millisecond)
+		if *attachment.DurationMS > maxDurationMilliseconds {
+			return nil, fmt.Errorf("UserPromptSubmit hook duration in %q overflows time.Duration", path)
+		}
+		if observed != nil {
+			return nil, fmt.Errorf("transcript %q has multiple UserPromptSubmit hook results", path)
+		}
+		duration := time.Duration(*attachment.DurationMS) * time.Millisecond
+		observed = &duration
+	}
+}
 
 func (h *agentStartPerfHarness) waitForFirstTurn(ctx context.Context, sessionID string, baseline map[string]struct{}, readSession agentStartPerfSessionReader) (agentStartTurnObservation, error) {
 	ticker := time.NewTicker(agentStartPerfObserverPeriod)
@@ -1251,6 +1309,50 @@ func TestAgentStartPerfObservesPromptFirstOutputAndIdleCompletion(t *testing.T) 
 	}
 	if !got.AssistantAfterPrompt || !got.TranscriptIdle || !got.NoOpenToolUse || !got.NoPendingInteraction {
 		t.Fatalf("terminal observation = %+v, want complete idle transcript proof", got)
+	}
+}
+
+func TestAgentStartPerfReadsUserPromptSubmitHookDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	data := strings.Join([]string{
+		`{"type":"attachment","attachment":{"type":"hook_success","hookEvent":"SessionStart","durationMs":3095}}`,
+		`{"type":"user","timestamp":"2026-08-03T20:19:50.918Z"}`,
+		`{"type":"attachment","attachment":{"type":"hook_success","hookEvent":"UserPromptSubmit","durationMs":2683}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := agentStartPerfUserPromptSubmitHookDuration(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != 2683*time.Millisecond {
+		t.Fatalf("UserPromptSubmit hook duration = %v, want 2.683s", got)
+	}
+}
+
+func TestAgentStartPerfLeavesUnavailableUserPromptSubmitHookUnset(t *testing.T) {
+	for name, data := range map[string]string{
+		"absent":    `{"type":"attachment","attachment":{"type":"hook_success","hookEvent":"SessionStart","durationMs":3095}}` + "\n",
+		"malformed": `{"type":"attachment","attachment":{"type":"hook_success","hookEvent":"UserPromptSubmit","durationMs":"slow"}}` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "transcript.jsonl")
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := agentStartPerfUserPromptSubmitHookDuration(path)
+			if name == "absent" {
+				if err != nil || got != nil {
+					t.Fatalf("absent hook = %v, %v; want nil, nil", got, err)
+				}
+				return
+			}
+			if err == nil || got != nil {
+				t.Fatalf("malformed hook = %v, %v; want nil, error", got, err)
+			}
+		})
 	}
 }
 

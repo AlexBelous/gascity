@@ -441,6 +441,20 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		fmt.Fprintln(stderr, "gc nudge drain: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
 		return 1
 	}
+	if inject {
+		if cityPath, ok := resolveExplicitCityPathEnv(); ok {
+			queueEmpty, queueErr := nudgeQueueEmpty(cityPath)
+			if queueErr == nil && queueEmpty {
+				wispExtra = wispStepInjectionContent(cityPath)
+				// Recheck under the queue lock after the wisp lookup so a nudge
+				// enqueued during that I/O takes the original resolution path.
+				queueEmpty, queueErr = nudgeQueueEmpty(cityPath)
+				if queueErr == nil && queueEmpty {
+					return 0
+				}
+			}
+		}
+	}
 
 	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
@@ -1831,6 +1845,15 @@ func (m *nudgeMaintenanceStore) close() error {
 // so the Dolt front door need not be opened for this tick.
 func nudgeQueueHasWork(state *nudgeQueueState) bool {
 	return len(state.Pending) > 0 || len(state.InFlight) > 0 || len(state.Dead) > 0
+}
+
+func nudgeQueueEmpty(cityPath string) (bool, error) {
+	empty := false
+	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		empty = !nudgeQueueHasWork(state)
+		return nil
+	})
+	return empty, err
 }
 
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {

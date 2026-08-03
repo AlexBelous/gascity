@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"debug/buildinfo"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -730,14 +731,21 @@ func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
 	}
-	wantVersion := strings.TrimPrefix(pinned, "v")
-
-	out, err := exec.Command(bdPath, "version").CombinedOutput()
+	builtInfo, err := buildinfo.ReadFile(bdPath)
 	if err != nil {
-		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
+		t.Fatalf("read %s build info: %v", bdPath, err)
 	}
-	if !strings.Contains(string(out), wantVersion) {
-		t.Fatalf("%s version output %q does not reflect pinned beads module version %q", bdPath, out, pinned)
+	if builtInfo.Main.Path != "github.com/steveyegge/beads" {
+		t.Fatalf("%s main module = %q, want github.com/steveyegge/beads", bdPath, builtInfo.Main.Path)
+	}
+	builtVersion := builtInfo.Main.Version
+	if builtInfo.Main.Replace != nil {
+		builtVersion = builtInfo.Main.Replace.Version
+	}
+	// The CLI's release label may remain 1.1.0 on a pseudo-version; embedded
+	// module provenance is the exact source/schema compatibility contract.
+	if builtVersion != pinned {
+		t.Fatalf("%s embedded beads module version = %q, want %q", bdPath, builtVersion, pinned)
 	}
 }
 

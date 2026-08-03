@@ -620,7 +620,7 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 		Type:   "task",
 		Status: "open",
 		Metadata: beads.StringMap{
-			"gc.routed_to": reconcilerPerfStartTemplate,
+			beadmeta.RoutedToMetadataKey: reconcilerPerfStartTemplate,
 		},
 	})
 	if err != nil {
@@ -649,6 +649,7 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 	if err != nil {
 		return nil, fmt.Errorf("creating drain-ack stop session: %w", err)
 	}
+	recordLegacyCompareWrites(info.ID, "newReconcilerPerfStopFixture.create", metadata)
 	if err := provider.Start(context.Background(), sessionName, gcruntime.Config{Command: "true"}); err != nil {
 		return nil, fmt.Errorf("starting drain-ack stop runtime: %w", err)
 	}

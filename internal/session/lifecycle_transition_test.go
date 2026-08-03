@@ -338,8 +338,10 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		{
 			name:  "close",
 			patch: ClosePatch(now, "orphaned"),
+			// Terminal close clears transient drain-ack-stop-pending ownership.
 			want: MetadataPatch{
 				"state":        "orphaned",
+				"state_reason": "",
 				"close_reason": "session orphaned: configured agent removed",
 				"closed_at":    now.Format(time.RFC3339),
 				"synced_at":    now.Format(time.RFC3339),

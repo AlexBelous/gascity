@@ -8200,6 +8200,31 @@ func TestPackDirsForRig(t *testing.T) {
 	}
 }
 
+// TestPackDirsForRigEmptyRigNameFallsBackToAllPackDirs guards the scope="city"
+// agent fix: an empty rigName must resolve every rig's pack dirs via
+// AllPackDirs, not just the city-level ones, so city-scope agents (e.g.
+// deep-investigator, supervisor, pack-author) can see rig-imported fragments.
+func TestPackDirsForRigEmptyRigNameFallsBackToAllPackDirs(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a"},
+		RigPackDirs: map[string][]string{
+			"zulu":  {"/rig/zulu/packs/z"},
+			"alpha": {"/rig/alpha/packs/x"},
+		},
+	}
+
+	got := c.PackDirsForRig("")
+	want := c.AllPackDirs()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(\"\") = %v, want AllPackDirs() = %v", got, want)
+	}
+
+	justCityDirs := []string{"/city/packs/a"}
+	if reflect.DeepEqual(got, justCityDirs) {
+		t.Fatalf("PackDirsForRig(\"\") = %v, regressed to city-only dirs (dropped RigPackDirs)", got)
+	}
+}
+
 func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 	cases := []struct {
 		provider string

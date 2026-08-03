@@ -1453,6 +1453,34 @@ func TestRenderPromptResolvesMultiRigPackFragments(t *testing.T) {
 	}
 }
 
+// TestRenderPromptResolvesMultiRigPackFragmentsForCityScopeAgent pins the
+// PackDirsForRig("") fix at the actual call-site level: a rendered prompt for
+// a rig-less (scope="city") agent must see every rig's fragments, not just
+// the city-level ones, mirroring how ga-bmjqvb's symptom was reported.
+func TestRenderPromptResolvesMultiRigPackFragmentsForCityScopeAgent(t *testing.T) {
+	f := fsys.NewFake()
+	alphaDir := "/city/.gc/cache/repos/aaa/packs/alpha"
+	bravoDir := "/city/.gc/cache/repos/bbb/packs/bravo"
+	f.Files[alphaDir+"/template-fragments/a.template.md"] = []byte(
+		`{{ define "a" }}A{{ end }}`)
+	f.Files[bravoDir+"/template-fragments/b.template.md"] = []byte(
+		`{{ define "b" }}B{{ end }}`)
+	f.Files["/city/agents/x/prompt.template.md"] = []byte(
+		`{{ template "a" . }}-{{ template "b" . }}`)
+
+	cfg := &config.City{
+		RigPackDirs: map[string][]string{
+			"alpha": {alphaDir},
+			"bravo": {bravoDir},
+		},
+	}
+	got := renderPrompt(f, "/city", "", "agents/x/prompt.template.md",
+		PromptContext{}, "", io.Discard, cfg.PackDirsForRig(""), nil, nil)
+	if got != "A-B" {
+		t.Errorf("renderPrompt(city-scope agent, PackDirsForRig(\"\")) = %q, want %q", got, "A-B")
+	}
+}
+
 // TestRenderPromptCityRootFragmentsAbsentNoEffect is the regression-safety
 // check: when the city root has no template-fragments/ or prompts/shared/,
 // rendered output is byte-identical to pre-fix behavior (i.e. the new

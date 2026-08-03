@@ -646,6 +646,11 @@ func applyResidencyResumeContext(req *SessionRequest, info sessionpkg.Info, dema
 	if parent := strings.TrimSpace(demand.ParentSIDs[workBeadID]); parent != "" {
 		req.BrainParentSID = parent
 	}
+	// Carry the worktree ownership evidence the stable line requires on every
+	// work-bound request: without it verifiedPoolTriggerWorkDir rejects the
+	// chosen resume and realization proceeds without trigger environment
+	// (gc-0ychy stable-line integration review HIGH-2).
+	*req = classifyInFlightWorktreeRequest(*req, demand)
 }
 
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {

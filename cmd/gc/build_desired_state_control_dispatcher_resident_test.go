@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // A deterministic control-dispatcher runs `gc convoy control --serve --follow`
@@ -535,6 +536,31 @@ func TestControlDispatcherResidency_RetainedResumePreservesRoutedContext(t *test
 				tc.state, r.WorkBeadID, r.WorkPack, r.WorkWorkspace, r.WorkStoreRef, r.BrainParentSID)
 		}
 	}
+	// The resume must also carry the stable line's worktree ownership evidence:
+	// a managed routed bead's WorktreeSpec classifies onto the request, an
+	// unmanaged routed bead classifies UnmanagedDirect, and a provision error
+	// classifies WorktreeError — otherwise verifiedPoolTriggerWorkDir rejects
+	// the chosen resume and realization proceeds without trigger environment
+	// (gc-0ychy stable-line integration review HIGH-2).
+	managed := routed
+	managed.WorktreeSpecs = map[string]*worktree.Spec{"gc-work-1": {Path: "/tmp/wt-gc-work-1"}}
+	r0 := residencyResumeRequestForState(t, "active", "", "", "", "", managed)
+	if r0.WorktreeSpec == nil || r0.WorktreeSpec.Path != "/tmp/wt-gc-work-1" || r0.UnmanagedDirect || r0.WorktreeError != "" {
+		t.Fatalf("managed routed demand: retained resume dropped worktree evidence: spec=%v unmanaged=%v err=%q (gc-0ychy integration HIGH-2)",
+			r0.WorktreeSpec, r0.UnmanagedDirect, r0.WorktreeError)
+	}
+	r0 = residencyResumeRequestForState(t, "active", "", "", "", "", routed)
+	if !r0.UnmanagedDirect || r0.WorktreeError != "" {
+		t.Fatalf("unmanaged routed demand: retained resume must classify UnmanagedDirect (got unmanaged=%v err=%q)",
+			r0.UnmanagedDirect, r0.WorktreeError)
+	}
+	broken := routed
+	broken.WorktreeErrors = map[string]string{"gc-work-1": "provision failed"}
+	r0 = residencyResumeRequestForState(t, "active", "", "", "", "", broken)
+	if r0.WorktreeError != "provision failed" {
+		t.Fatalf("errored routed demand: retained resume must carry WorktreeError (got %q)", r0.WorktreeError)
+	}
+
 	// An in-flight (creating) bead with its own trigger keeps it — the bind must
 	// not clear the trigger metadata. pack/workspace enrich from the demand keyed
 	// on the same work bead.

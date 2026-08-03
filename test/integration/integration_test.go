@@ -36,6 +36,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
@@ -200,16 +201,27 @@ func TestMain(m *testing.M) {
 	} else if ok {
 		realBDBinary = override
 	} else {
-		var err error
-		realBDBinary, err = exec.LookPath("bd")
+		// Build bd from the exact pinned github.com/steveyegge/beads module
+		// version rather than resolving it off ambient PATH: an ambient bd
+		// carries no guarantee of matching the schema/migration knowledge
+		// baked into gc's in-process beads code, and can fail deep inside a
+		// test with a cryptic schema-skew error instead of never drifting in
+		// the first place (ga-r9cvmi, ga-xp2m3v).
+		realBDBinDir := filepath.Join(tmpDir, "realbd")
+		if err := os.MkdirAll(realBDBinDir, 0o755); err != nil {
+			panic("integration: creating real bd build dir: " + err.Error())
+		}
+		built, err := testutil.BuildPinnedBDBinary(realBDBinDir)
 		if err != nil {
-			// bd not available — skip all integration tests.
+			// Toolchain/module cache unavailable — skip all integration
+			// tests, same as the prior ambient-PATH-lookup-failed behavior.
 			_ = os.RemoveAll(tmpDir)
 			if tmuxSocketParent != "" {
 				_ = os.RemoveAll(tmuxSocketParent)
 			}
 			os.Exit(0)
 		}
+		realBDBinary = built
 	}
 	bdBinary = filepath.Join(integrationToolBinDir, "bd")
 	shimCmd := exec.Command("go", "build", "-o", bdBinary, "./test/integration/filebdshim")

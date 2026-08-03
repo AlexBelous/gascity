@@ -209,7 +209,8 @@
               "worktree",
               "worktree-ensure",
               "worktree-verify",
-              "worktree-cleanup"
+              "worktree-cleanup",
+              "pack-registry-requests"
             ]
           },
           "event_id": {

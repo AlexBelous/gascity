@@ -38,15 +38,16 @@ func graphStoreWithEvents(store beads.Store, cityPath string, rec events.Recorde
 	if wrapped, ok := graphEmitWrappers.byKey[cityPath]; ok {
 		return wrapped
 	}
-	onChange := func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage) {
+	onChange := func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 		rec.Record(events.Event{
-			Type:      eventType,
-			Actor:     "graph-store",
-			Subject:   beadID,
-			RunID:     runID,
-			SessionID: sessionID,
-			StepID:    stepID,
-			Payload:   payload,
+			Type:             eventType,
+			Actor:            "graph-store",
+			Subject:          beadID,
+			RunID:            runID,
+			SessionID:        sessionID,
+			StepID:           stepID,
+			DependsOnStepIDs: dependsOnStepIDs,
+			Payload:          payload,
 		})
 	}
 	wrapped := beads.NewCachingStore(store, onChange)

@@ -215,7 +215,7 @@ func pendingDrainReasonCancelable(reason string) bool {
 const (
 	reconcilerDrainAckSourceKey       = "GC_DRAIN_ACK_SOURCE"
 	reconcilerDrainAckSourceValue     = "reconciler"
-	drainAckSourceAgentValue          = "agent"
+	drainAckSourceAgentValue          = sessions.DrainAckSourceAgentValue
 	drainAckRequesterSessionIDKey     = "GC_DRAIN_ACK_REQUESTER_SESSION_ID"
 	drainAckRequesterInstanceTokenKey = "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN"
 	reconcilerDrainAckReasonKey       = "GC_DRAIN_REASON"

@@ -678,6 +678,21 @@ func TestDrainAckStopPendingPatchOwnsDurableStopPendingMetadata(t *testing.T) {
 	}
 }
 
+func TestAgentDrainAckStopPendingPatchPersistsExactRequesterProvenance(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	patch := AgentDrainAckStopPendingPatch(now, "session-1", "instance-1")
+
+	for key, want := range map[string]string{
+		DrainAckSourceMetadataKey:                 DrainAckSourceAgentValue,
+		DrainAckRequesterSessionIDMetadataKey:     "session-1",
+		DrainAckRequesterInstanceTokenMetadataKey: "instance-1",
+	} {
+		if got := patch[key]; got != want {
+			t.Fatalf("patch[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
 	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
 	tests := []struct {

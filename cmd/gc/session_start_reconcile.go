@@ -264,9 +264,12 @@ var drainAckStopPendingRollbackKeys = [...]string{
 	"drain_at",
 	"pending_create_claim",
 	"pending_create_started_at",
+	sessionpkg.DrainAckSourceMetadataKey,
+	sessionpkg.DrainAckRequesterSessionIDMetadataKey,
+	sessionpkg.DrainAckRequesterInstanceTokenMetadataKey,
 }
 
-// drainAckStopPendingRollback captures the exact five durable values replaced
+// drainAckStopPendingRollback captures the exact durable values replaced
 // by DrainAckStopPendingPatch and the post-CAS revision that exclusively owns
 // their restoration. It intentionally derives both from PersistedResponse,
 // rather than adding raw metadata mirrors to session.Info.
@@ -298,6 +301,12 @@ func (f drainAckStopPendingFence) matches(info sessionpkg.Info, response session
 		}
 	}
 	return true
+}
+
+func (f drainAckStopPendingFence) hasAgentProvenance(expectedID, expectedToken string) bool {
+	return f.values[sessionpkg.DrainAckSourceMetadataKey] == sessionpkg.DrainAckSourceAgentValue &&
+		f.values[sessionpkg.DrainAckRequesterSessionIDMetadataKey] == expectedID &&
+		f.values[sessionpkg.DrainAckRequesterInstanceTokenMetadataKey] == expectedToken
 }
 
 func isCanonicalDrainAckStopPendingRow(info sessionpkg.Info, response sessionpkg.PersistedResponse, expectedID, expectedToken string) bool {
@@ -629,7 +638,9 @@ func reconcileExactSessionStartWithOwner(
 			return exactSessionStartKeyedOwner, fmt.Errorf("%w: drain acknowledgement initial row is not an exact open revisioned record", errSessionStartPoolDrainAckPending)
 		}
 		rollback := newDrainAckStopPendingRollback(initialResponse)
-		patch := sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC())
+		patch := sessionpkg.AgentDrainAckStopPendingPatch(
+			clk.Now().UTC(), admission.PoolDrainAck.RequesterSessionID, admission.PoolDrainAck.RequesterInstanceToken,
+		)
 		writeErr := params.StatusWriter.UpdateIfMatch(info.ID, loadedRevision, beads.UpdateOpts{Metadata: patch})
 		postTransitionFailure := func(cause error) (exactSessionStartOwner, error) {
 			if params.RolloutMode == rollout.Require {
@@ -680,8 +691,11 @@ func reconcileExactSessionStartWithOwner(
 		if drainAckStopPendingFence == nil {
 			return park(errors.New("drain acknowledgement stop-pending row is not canonical or lacks revision provenance"))
 		}
-		drainAckLease := admission.PoolDrainAck
-		if drainAckLease == nil {
+		var drainAckLease *routedWorkPoolDrainAckLease
+		recoverDrainAckLease := func() (exactSessionStartOwner, error) {
+			if drainAckLease != nil {
+				return exactSessionStartKeyedOwner, nil
+			}
 			if params.RecoverPoolDrainAck == nil {
 				return park(errors.New("drain acknowledgement lease recovery is unavailable"))
 			}
@@ -699,6 +713,13 @@ func reconcileExactSessionStartWithOwner(
 				return park(errors.New("drain acknowledgement provenance is not a confirmed legacy marker"))
 			}
 			drainAckLease = &recoveredLease
+			return exactSessionStartKeyedOwner, nil
+		}
+		if !drainAckStopPendingFence.hasAgentProvenance(info.ID, strings.TrimSpace(info.InstanceToken)) {
+			owner, recoverErr := recoverDrainAckLease()
+			if recoverErr != nil || owner != exactSessionStartKeyedOwner {
+				return owner, recoverErr
+			}
 		}
 		if _, ok := params.Provider.(runtime.FreshLivenessObserver); !ok {
 			switch params.RolloutMode {
@@ -740,6 +761,15 @@ func reconcileExactSessionStartWithOwner(
 				return park(fmt.Errorf("reconciling exact drain-ack stop %q: durable finalization made no progress", info.ID))
 			}
 			return exactSessionStartKeyedOwner, nil
+		}
+		if drainAckLease == nil && admission.PoolDrainAck != nil {
+			drainAckLease = admission.PoolDrainAck
+		}
+		if drainAckLease == nil {
+			owner, recoverErr := recoverDrainAckLease()
+			if recoverErr != nil || owner != exactSessionStartKeyedOwner {
+				return owner, recoverErr
+			}
 		}
 		if params.AsyncStopTracker == nil {
 			return park(errors.New("drain acknowledgement async stop tracker is unavailable"))

@@ -21,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/pgauth"
@@ -6420,7 +6419,6 @@ title = "Do work"
 }
 
 func TestDryRunOnFormulaGraphV2(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
 	formulaDir := t.TempDir()
 	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
 

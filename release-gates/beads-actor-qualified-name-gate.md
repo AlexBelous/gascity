@@ -3,13 +3,12 @@
 - Deploy bead: `ga-d6zqfj`
 - Build bead: `ga-jav9u9`
 - Source review: `ga-mfccbk`
-- Reviewed commit: `941812ce44b193ebfc3ab3903861bcf79467e3e3`
-- Remediated remote source tip: `1e1b25ca62e1ff6a259fe829bd20ce1fe73d1b77`
-- Main evaluated: `origin/main@e4c62220f24c7fb6db5c2454dd2c54b7edb20d07`
-- Source branch: `builder/ga-jav9u9`
-- Planned deploy branch: `deploy/ga-d6zqfj-gate`
-- Evaluated: `2026-08-03`
-- Overall verdict: **FAIL**
+- Reviewed feature commit: `941812ce44b193ebfc3ab3903861bcf79467e3e3`
+- Gate source tip: `072f6da09f487274385eedb1e3d8a83b228ed8b8`
+- Main evaluated: `origin/main@4f127d926ea346f8fa97055af87c6afaf5ea13bb`
+- Deploy branch: `deploy/ga-d6zqfj-gate`
+- Evaluated: `2026-08-04`
+- Overall verdict: **PASS**
 
 `docs/PROJECT_MANIFEST.md` is not present at the evaluated commit. This
 checklist therefore applies the deployer role's seven release criteria and
@@ -17,16 +16,17 @@ checklist therefore applies the deployer role's seven release criteria and
 
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
-| 6 | Branch diverges cleanly from main | **FAIL** | Evaluated first after fetching `origin/main` and `origin/builder/ga-jav9u9`. The remote source tip `1e1b25ca62e1ff6a259fe829bd20ce1fe73d1b77` does not contain `origin/main@e4c62220f24c7fb6db5c2454dd2c54b7edb20d07`. The required `attempt_bounded_self_rebase builder/ga-jav9u9 main` rebased locally to `b716a7e9d15e5a290ee532441f665869d37bf0e2` but returned `rc=14`: `push-ownership-guard` resolved closed build bead `ga-jav9u9` from the branch name and blocked the required force-with-lease push. `origin/builder/ga-jav9u9` remained at `1e1b25ca62e1ff6a259fe829bd20ce1fe73d1b77`; the unsuccessful local rebase emitted no authoritative `AFTER_SHA` and cannot satisfy the gate. |
-| 1 | Review PASS present | **SKIPPED** | Fail-fast after criterion 6. |
-| 2 | Acceptance criteria met | **SKIPPED** | Fail-fast after criterion 6. |
-| 3 | Tests pass | **SKIPPED** | Fail-fast after criterion 6; no test command was run on a shippable source SHA. |
-| 4 | No high-severity review findings open | **SKIPPED** | Fail-fast after criterion 6. |
-| 5 | Final branch is clean | **SKIPPED** | Fail-fast after criterion 6. |
-| 7 | Single feature theme | **SKIPPED** | Fail-fast after criterion 6. |
+| 6 | Branch diverges cleanly from main | **PASS** | Evaluated first after fetching `origin/main` and `origin/builder/ga-jav9u9`. `origin/main@4f127d926ea346f8fa97055af87c6afaf5ea13bb` is an ancestor of the remediated source tip `072f6da09f487274385eedb1e3d8a83b228ed8b8`; no self-rebase was needed. |
+| 1 | Review PASS present | **PASS** | Review bead `ga-mfccbk` is closed with reason `pass`; its notes record `verdict: pass` for reviewed feature commit `941812ce44b193ebfc3ab3903861bcf79467e3e3`. |
+| 2 | Acceptance criteria met | **PASS** | `cmd/gc/template_resolve.go` now sets `BEADS_ACTOR` to `qualifiedName`, matching `GC_ALIAS`, rather than the session name. `TestResolveTemplateSetsBeadsActorToQualifiedNameNotSessionName` proves the session name differs and asserts both identity values match; focused verification ran 2 PASS, 0 FAIL, 0 SKIP. |
+| 3 | Tests pass | **PASS** | The changed `cmd/gc/**` paths require the `cmd_gc_process` CI lane. `make test-cmd-gc-process-parallel` ran 7 jobs: 7 PASS, 0 FAIL, 0 SKIP (six process shards plus `productmetrics-testhook`). Required fast baseline `make test-fast-parallel` ran 10 jobs: 10 PASS, 0 FAIL, 0 SKIP. `go vet ./...` also passed. |
+| 4 | No high-severity review findings open | **PASS** | Review bead `ga-mfccbk` records no style or security findings and no blocker, major, minor, or HIGH finding; unresolved HIGH count is 0. |
+| 5 | Final branch is clean | **PASS** | The isolated deploy worktree was clean at the evaluated source before this checklist update; after committing the checklist, `git status --short` was rechecked and was empty. |
+| 7 | Single feature theme | **PASS** | The commit set is one `cmd/gc` identity-environment fix: align `BEADS_ACTOR` with the stable qualified alias and cover it with regression tests. The additional test-only HOME isolation changes remediate the prior environmental gate failure and introduce no independent product behavior. |
 
-## Required remediation
+## Test evidence
 
-The builder must publish a source tip containing current `origin/main` and
-route the deploy bead back for a full gate rerun. No isolated deploy branch was
-pushed and no pull request was opened.
+- CI-equivalent: `make test-cmd-gc-process-parallel` — 7 PASS, 0 FAIL, 0 SKIP jobs.
+- Fast baseline: `make test-fast-parallel` — 10 PASS, 0 FAIL, 0 SKIP jobs.
+- Focused acceptance: `go test ./cmd/gc -run '^(TestResolveTemplateSetsBeadsActorToQualifiedNameNotSessionName|TestBdRuntimeEnvPreservesInheritedBeadsActor)$' -count=1 -v` — 2 PASS, 0 FAIL, 0 SKIP tests.
+- Static analysis: `go vet ./...` — PASS.

@@ -39,7 +39,19 @@ fi
 append_session_list() {
     local session_fetch_tmp
     session_fetch_tmp=$(mktemp) || return 1
-    if "$@" >"$session_fetch_tmp" 2>/dev/null; then
+    if "$@" >"$session_fetch_tmp" 2>/dev/null \
+        && jq -e '
+            type == "object"
+            and .schema_version == "1"
+            and (.sessions | type == "array")
+            and (.summary | type == "object")
+            and (.filters | type == "object")
+            and all(.sessions[];
+                type == "object"
+                and ((.id // .ID // "") | type == "string" and length > 0)
+                and ((if has("closed") then .closed elif has("Closed") then .Closed else null end) | type == "boolean")
+            )
+        ' "$session_fetch_tmp" >/dev/null 2>&1; then
         cat "$session_fetch_tmp" >>"$SESSION_TMP"
         rm -f "$session_fetch_tmp"
         return 0
@@ -84,14 +96,15 @@ append_rig_scope() {
 # Step 1b: Get all known live session identities around each bead-list query.
 # The second liveness pass closes the session-list-before-bd-list race where a
 # newly spawned session can claim work after the first pass but before bd-list.
-# HQ liveness is required; per-rig failures only skip that rig's staged bead
-# rows so one stale or unreachable rig does not disable cleanup elsewhere.
+# Every liveness read must be complete. Releasing nothing is safer than
+# guessing that an omitted session is dead.
 append_hq_scope || exit 0
 
 while IFS= read -r rig; do
     [ -z "$rig" ] && continue
     if ! append_rig_scope "$rig"; then
-        echo "orphan-sweep: skipping rig $rig after session-list failure" >&2
+        echo "orphan-sweep: incomplete session liveness for rig $rig; skipping cycle" >&2
+        exit 0
     fi
 done <<<"$RIG_NAMES"
 
@@ -196,6 +209,10 @@ session_bead_candidates() {
 
     if [[ "$assignee" == *-mc-* ]]; then
         printf 'mc-%s\n' "${assignee##*-mc-}"
+    fi
+
+    if [[ "$assignee" =~ -gc-([0-9]+)$ ]]; then
+        printf 'gc-%s\n' "${BASH_REMATCH[1]}"
     fi
 
     printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [

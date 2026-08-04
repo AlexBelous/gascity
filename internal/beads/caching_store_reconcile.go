@@ -276,9 +276,16 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 		return 0
 	}
 
+	// Before the first successful reconcile, anchor the due time on the
+	// scan-scoped stamp (set only by prime and the reconcile snapshot merge),
+	// never on lastFreshAt: every applied event and local write advances
+	// lastFreshAt, so under sustained traffic the first full scan would be
+	// deferred forever (dr-radw first-scan starvation). A zero stamp (e.g.
+	// PrimeActive-only store that never completed a full scan) makes the
+	// reconcile due immediately, matching the convergence contract.
 	lastFullScanAt := c.stats.LastReconcileAt
 	if lastFullScanAt.IsZero() {
-		lastFullScanAt = c.lastFreshAt
+		lastFullScanAt = c.lastFullScanFreshAt
 	}
 	dueAt := lastFullScanAt.Add(c.adaptiveIntervalLocked())
 	if !now.Before(dueAt) {
@@ -626,6 +633,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 	c.primePartialErr = nil
 	c.promoteLiveLocked()
 	c.stats.LastReconcileAt = now
+	c.lastFullScanFreshAt = now
 	c.stats.Adds += res.adds
 	c.stats.Removes += res.removes
 	c.stats.Updates += res.updates

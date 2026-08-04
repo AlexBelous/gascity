@@ -75,19 +75,20 @@ func (in snapshotInputs) quiescent(st storeState) bool {
 // It captures every field the seam writes; the field-coverage census
 // (TestMergeOracleFieldCoverage) proves this list stays exhaustive.
 type mergeEndState struct {
-	beads          map[string]Bead
-	deps           map[string][]Dep
-	depsComplete   bool
-	dirty          map[string]struct{}
-	beadSeq        map[string]uint64
-	localBeadAt    map[string]time.Time
-	deletedSeq     map[string]uint64
-	state          cacheState
-	lastFreshAt    time.Time
-	mutationSeq    uint64
-	primeErr       string
-	syncFailures   int
-	circuitTripped bool
+	beads               map[string]Bead
+	deps                map[string][]Dep
+	depsComplete        bool
+	dirty               map[string]struct{}
+	beadSeq             map[string]uint64
+	localBeadAt         map[string]time.Time
+	deletedSeq          map[string]uint64
+	state               cacheState
+	lastFreshAt         time.Time
+	lastFullScanFreshAt time.Time
+	mutationSeq         uint64
+	primeErr            string
+	syncFailures        int
+	circuitTripped      bool
 	// stats fields the seam writes.
 	statsAdds            int64
 	statsRemoves         int64
@@ -286,6 +287,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		deletedSeq:           cloneU64Map(c.deletedSeq),
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
+		lastFullScanFreshAt:  c.lastFullScanFreshAt,
 		mutationSeq:          c.mutationSeq,
 		primeErr:             primeErr,
 		syncFailures:         c.syncFailures,
@@ -325,6 +327,10 @@ func runLegacyA(st storeState, in snapshotInputs) mergeImplResult {
 	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
 	res := legacyBranchAMerge(c, in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+	// The dr-radw scan-scoped stamp joined the seam's shared tail after the
+	// legacy branches were frozen; model it here (wrapper, not frozen code) so
+	// the compared end-state pins the new merge's `now` propagation.
+	c.lastFullScanFreshAt = in.now
 	c.mu.Unlock()
 	return mergeImplResult{end: captureEndState(c), notifications: res.notifications, backingCalls: counterCalls(counter)}
 }
@@ -334,6 +340,8 @@ func runLegacyB(st storeState, in snapshotInputs) mergeImplResult {
 	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
 	res := legacyBranchBMerge(c, in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+	// Same dr-radw stamp modeling as runLegacyA.
+	c.lastFullScanFreshAt = in.now
 	c.mu.Unlock()
 	return mergeImplResult{end: captureEndState(c), notifications: res.notifications, backingCalls: counterCalls(counter)}
 }

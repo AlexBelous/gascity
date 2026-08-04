@@ -7362,6 +7362,40 @@ base = "builtin:gemini"`)
 	}
 }
 
+func TestDoPrimeManagedSessionStartPersistsProviderKeyBeforeOutputGate(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "codex", `[providers.codex]
+base = "builtin:codex"`)
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_PROVIDER_SESSION_ID_REQUIRED", "codex")
+	t.Setenv("GC_PROVIDER_SESSION_ID", "0199aaaa-bbbb-7000-8000-c0ffee000042")
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "0199aaaa-bbbb-7000-8000-c0ffee000042" {
+		t.Fatalf("session_key = %q, want provider key persisted before SessionStart output gate", got)
+	}
+	if !strings.Contains(stderr.String(), "persisted resume session_key") {
+		t.Fatalf("stderr = %q, want successful provider session-key diagnostic", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Gas City Agent") {
+		t.Fatalf("stdout = %q, want SessionStart prompt output to remain gated", stdout.String())
+	}
+}
+
 func TestDoPrimeHookWarnsWhenRequiredProviderSessionKeyMissing(t *testing.T) {
 	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "kimi", `[providers.kimi]
 base = "builtin:kimi"`)

@@ -195,7 +195,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		hookContext = readPrimeHookContext()
 		suppressHookPrompt = managedSessionHookPromptAlreadyDelivered(hookContext)
 	}
-	// In non-strict mode, hook side effects fire eagerly (existing behavior).
+	// In non-strict mode, hook side effects fire eagerly for every event. The
+	// SessionStart live-session gate below controls prompt output only; provider
+	// resume-key persistence has its own session and provider guards.
 	// In strict mode, we defer them until after strict checks pass so that a
 	// failing --strict invocation does not update provider resume metadata for
 	// failed agent resolution or template validation.
@@ -205,7 +207,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		}
 		persistPrimeHookProviderSessionKey(hookContext.ProviderSessionID, stderr)
 	}
-	if !strictMode && !primeHookSessionStart(hookContext) {
+	if !strictMode {
 		runHookSideEffects()
 	}
 
@@ -226,9 +228,6 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
 		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 		return 0
-	}
-	if !strictMode && primeHookSessionStart(hookContext) {
-		runHookSideEffects()
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {

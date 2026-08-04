@@ -70,17 +70,18 @@ func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
 	return beads.OrdersStore{Store: resolveOrderStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
-// cityWorkStore returns the city-level store for ordinary WORK-class beads that
-// are not scoped to a named rig. Work is the default/residual coordination class
-// (everything Classify does not route elsewhere), so this is the typed accessor
-// for the work class — distinct from CityBeadStore(), which stays beads.Store as
-// the federation/by-id/default root. Returned as the strongly-typed
-// beads.WorkStore so the work class stays statically visible; the wrapper carries
-// the exact same underlying store value CityBeadStore() returns today, so it is
-// byte-identical. Pass the embedded .Store field to any generic beads.Store
-// helper shared across classes.
+// cityWorkStore returns the authoritative city-level store for ordinary
+// WORK-class beads that are not scoped to a named rig. Most cities collapse it
+// onto CityBeadStore. A split city may keep coordination classes on the
+// configured file provider while its persisted work ledger remains bd/Dolt;
+// cityWorkBeadStore owns that explicit split.
 func (cs *controllerState) cityWorkStore() beads.WorkStore {
-	return beads.WorkStore{Store: cs.CityBeadStore()}
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.cityWorkBeadStore != nil {
+		return beads.WorkStore{Store: cs.cityWorkBeadStore}
+	}
+	return beads.WorkStore{Store: cs.cityBeadStore}
 }
 
 // workBeadStores returns all rig WORK-class stores keyed by rig name, including
@@ -148,7 +149,10 @@ func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
 // cityBeadStore() returns today, so it is byte-identical; pass the embedded
 // .Store field to any generic beads.Store helper shared across classes.
 func (cr *CityRuntime) cityWorkStore() beads.WorkStore {
-	return beads.WorkStore{Store: cr.cityBeadStore()}
+	if cr.cs != nil {
+		return cr.cs.cityWorkStore()
+	}
+	return beads.WorkStore{Store: cr.standaloneCityStore}
 }
 
 // workBeadStores returns the runtime's per-rig WORK-class stores keyed by rig

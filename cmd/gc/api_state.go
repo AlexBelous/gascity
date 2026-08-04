@@ -65,7 +65,8 @@ type controllerState struct {
 	sp                     runtime.Provider
 	cacheCtx               context.Context
 	beadStores             map[string]beads.Store
-	cityBeadStore          beads.Store // city-level store for session beads
+	cityBeadStore          beads.Store // configured city-level store for coordination classes
+	cityWorkBeadStore      beads.Store // authoritative city-level work store when it differs from cityBeadStore
 	cityBeadsDiagnostic    *beads.BeadsDiagnostic
 	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv              events.Provider
@@ -137,6 +138,15 @@ var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (bea
 // this seam to avoid opening real native Dolt handles.
 var controllerStateOpenRigStoreAtForCity = beads.OpenStoreAtForCity
 
+// controllerStateOpenCityWorkStore opens the authoritative city-root store
+// used for work demand. A city can deliberately keep coordination classes on
+// the configured file provider while its ordinary work ledger remains in the
+// on-disk bd/Dolt store; authoritative resolution follows that persisted store
+// identity instead of the caller-scope provider default.
+var controllerStateOpenCityWorkStore = func(cityPath string, cfg *config.City, mode gate.Mode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfig(cityPath, cityPath, cfg, mode, true, true)
+}
+
 // controllerStateStoreCloseDelay gives handlers that already captured a store
 // reference a short drain window before reload closes replaced backings.
 var controllerStateStoreCloseDelay = 250 * time.Millisecond
@@ -200,7 +210,9 @@ func newControllerState(
 	for _, n := range cs.rolloutFlags.Notices() {
 		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
 	}
-	cs.beadStores = cs.buildStores(cfg)
+	builtStores := cs.buildStores(cfg)
+	cs.beadStores = builtStores.rigs
+	cs.cityWorkBeadStore = builtStores.cityWork
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
@@ -301,14 +313,30 @@ func primeThenStartReconciler(ctx context.Context, cs *beads.CachingStore, agent
 	cs.StartReconciler(ctx, beads.WithStaggerAuto(), agentID)
 }
 
-// buildStores creates bead stores for each rig in cfg.
-// Mail providers are NOT built here — all mail uses the city-level store.
-// Does not read or write mutable cs fields (safe to call unlocked); reads
-// the runtime suspension state file to gate per-rig cache refresh.
-func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store {
+type controllerStoreSet struct {
+	rigs     map[string]beads.Store
+	cityWork beads.Store
+}
+
+// buildStores creates bead stores for each rig in cfg plus an authoritative
+// city work store when the configured coordination provider points elsewhere.
+// Mail providers are NOT built here — all mail uses the configured city-level
+// store. It does not read or write mutable cs fields (safe to call unlocked).
+func (cs *controllerState) buildStores(cfg *config.City) controllerStoreSet {
 	cityProvider := rawBeadsProviderForScope(cs.cityPath, cs.cityPath)
+	authoritativeCityProvider := authoritativeBeadsProviderForScope(cs.cityPath, cs.cityPath)
 	suspState := loadSuspensionStateBestEffort(cs.cityPath)
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
+	built := controllerStoreSet{rigs: stores}
+	if authoritativeCityProvider != cityProvider {
+		opened, err := controllerStateOpenCityWorkStore(cs.cityPath, cfg, cs.rolloutFlags.BeadsConditionalWrites())
+		if err != nil {
+			cs.rolloutWarnf("api: authoritative city work store: %v\n", err)
+			built.cityWork = unavailableStore{err: fmt.Errorf("open authoritative city work store %s: %w", cs.cityPath, err)}
+		} else {
+			built.cityWork = wrapWithCachingStore(cs.cacheCtx, wrapStoreWithBeadPolicies(opened.Store, cfg), cs.eventProv, true)
+		}
+	}
 
 	var sharedLegacyFileStore beads.Store
 	var sharedLegacyCachedStore beads.Store
@@ -357,7 +385,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
 		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
 	}
-	return stores
+	return built
 }
 
 // rigStoreBackgroundRefresh reports whether the controller should run
@@ -670,12 +698,15 @@ func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store
 		}
 	}
 
-	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
+	stores := make([]beads.Store, 0, len(cs.beadStores)+2)
 	for _, s := range cs.beadStores {
 		stores = append(stores, s)
 	}
 	if cs.cityBeadStore != nil {
 		stores = append(stores, cs.cityBeadStore)
+	}
+	if cs.cityWorkBeadStore != nil && cs.cityWorkBeadStore != cs.cityBeadStore {
+		stores = append(stores, cs.cityWorkBeadStore)
 	}
 	return stores
 }
@@ -685,12 +716,11 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	// caller treats a (nil, true) result as "owned but absent here" and skips
 	// the all-stores fallback, so nil stores are passed in as candidates.
 	//
-	// The candidate set is class-tagged: the city store under the HQ prefix is
-	// the graph/sessions/mail/nudge/order class store, and each rig store under
-	// its rig prefix is that rig's work-class store. On a single-store city these
-	// all collapse to the same value, so the resolution is identical today; the
-	// tagging marks where a future per-class backend would diverge. These read
-	// the raw cs fields rather than the class accessors (graphBeadStore /
+	// The candidate set is class-tagged: the authoritative city work store owns
+	// the HQ prefix, and each rig store owns its rig prefix. Coordination-class
+	// city beads whose IDs do not use the HQ work prefix still take the all-store
+	// fallback above. On a single-store city these collapse to the same value.
+	// These read the raw cs fields rather than the class accessors (graphBeadStore /
 	// workBeadStores) because this runs under cs.mu and those accessors take the
 	// same lock.
 	//
@@ -711,7 +741,11 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 			matchedStore = store
 		}
 	}
-	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
+	cityWorkStore := cs.cityWorkBeadStore
+	if cityWorkStore == nil {
+		cityWorkStore = cs.cityBeadStore
+	}
+	match(config.EffectiveHQPrefix(cs.cfg), cityWorkStore)
 	for _, rig := range cs.cfg.Rigs {
 		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
 	}
@@ -742,7 +776,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.noteRolloutDrift(cfg)
 
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
-	stores := cs.buildStores(cfg)
+	builtStores := cs.buildStores(cfg)
+	stores := builtStores.rigs
+	cityWorkStore := builtStores.cityWork
 	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
 	// Capture the raw config from the same on-disk generation as cfg, outside
 	// the lock (it does a TOML parse). nil signals "keep the prior snapshot".
@@ -771,6 +807,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 
 	// Swap under short critical section.
 	var oldCityStore beads.Store
+	var oldCityWorkStore beads.Store
 	var oldRigStores map[string]beads.Store
 	cs.mu.Lock()
 	cs.cfg = cfg
@@ -781,6 +818,8 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.usageSink = usageSink
 	oldRigStores = cs.beadStores
 	cs.beadStores = stores
+	oldCityWorkStore = cs.cityWorkBeadStore
+	cs.cityWorkBeadStore = cityWorkStore
 	if cityStore != nil {
 		oldCityStore = cs.cityBeadStore
 		cs.cityBeadStore = cityStore
@@ -795,6 +834,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.mu.Unlock()
 	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
 		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
+	}
+	if oldCityWorkStore != nil && oldCityWorkStore != cityWorkStore {
+		scheduleCloseBeadStoreHandle("city work bead store", oldCityWorkStore)
 	}
 	scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)
 }
@@ -1284,10 +1326,14 @@ func (cs *controllerState) BeadStores() map[string]beads.Store {
 	defer cs.mu.RUnlock()
 	// Return a copy to avoid races.
 	m := make(map[string]beads.Store, len(cs.beadStores)+1)
-	// Include the HQ (city-level) bead store so the /v0/beads endpoint
-	// returns beads from the city root, not just from external rigs.
-	if cs.cityBeadStore != nil {
-		m[cs.cityName] = cs.cityBeadStore
+	// Include the HQ work store so work projections such as /v0/beads read the
+	// authoritative city ledger, not a split coordination-class store.
+	cityWorkStore := cs.cityWorkBeadStore
+	if cityWorkStore == nil {
+		cityWorkStore = cs.cityBeadStore
+	}
+	if cityWorkStore != nil {
+		m[cs.cityName] = cityWorkStore
 	}
 	for k, v := range cs.beadStores {
 		m[k] = v

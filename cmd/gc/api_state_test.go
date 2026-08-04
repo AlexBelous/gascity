@@ -2888,13 +2888,88 @@ provider = "file"
 	}
 
 	cs := &controllerState{cityPath: cityDir, cfg: cfg}
-	stores := cs.buildStores(cfg)
+	stores := cs.buildStores(cfg).rigs
 	store, ok := stores["frontend"]
 	if !ok {
 		t.Fatal("buildStores() missing frontend store")
 	}
 	if _, ok := store.(*beads.FileStore); ok {
 		t.Fatalf("buildStores() returned %T, want scope-aware non-file store for bd-backed rig", store)
+	}
+}
+
+func TestControllerStateBuildStoresOpensAuthoritativeCityWorkStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"demo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configuredStore := beads.NewMemStore()
+	authoritativeStore := beads.NewMemStore()
+	routed, err := authoritativeStore.Create(beads.Bead{
+		Title:  "city-routed demand",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prevCityOpen := newControllerStateOpenCityStore
+	prevWorkOpen := controllerStateOpenCityWorkStore
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityOpen
+		controllerStateOpenCityWorkStore = prevWorkOpen
+	})
+	newControllerStateOpenCityStore = func(_ string, _ gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: configuredStore}, nil
+	}
+	authoritativeOpened := false
+	controllerStateOpenCityWorkStore = func(gotCityPath string, _ *config.City, _ gate.Mode) (beads.StoreOpenResult, error) {
+		if gotCityPath != cityDir {
+			t.Fatalf("authoritative city path = %q, want %q", gotCityPath, cityDir)
+		}
+		authoritativeOpened = true
+		return beads.StoreOpenResult{Store: authoritativeStore}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo", Prefix: "gc"}}
+	cs := newControllerState(ctx, cfg, runtime.NewFake(), nil, "demo", cityDir)
+	if !authoritativeOpened {
+		t.Fatal("buildStores did not open the authoritative city work store")
+	}
+	got, err := cs.cityWorkStore().Get(routed.ID)
+	if err != nil {
+		t.Fatalf("cityWorkStore.Get(%q): %v", routed.ID, err)
+	}
+	if got.Title != routed.Title {
+		t.Fatalf("cityWorkStore.Get(%q).Title = %q, want %q", routed.ID, got.Title, routed.Title)
+	}
+	eventStore, known := cs.beadEventConfiguredStoreLocked(routed.ID)
+	if !known || eventStore != cs.cityWorkBeadStore {
+		t.Fatalf("bead event store = (%T, %v), want authoritative city work store", eventStore, known)
+	}
+	if got := cs.BeadStores()["demo"]; got != cs.cityWorkBeadStore {
+		t.Fatalf("BeadStores()[demo] = %T, want authoritative city work store", got)
 	}
 }
 
@@ -2955,7 +3030,7 @@ provider = "file"
 	}
 
 	cs := &controllerState{cityPath: cityDir, cfg: cfg}
-	stores := cs.buildStores(cfg)
+	stores := cs.buildStores(cfg).rigs
 
 	if !factoryCalled {
 		t.Fatal("buildStores did not route bd-backed rig through store factory")
@@ -3000,7 +3075,7 @@ provider = "file"
 	}
 
 	cs := &controllerState{cityPath: cityDir, cfg: cfg}
-	stores := cs.buildStores(cfg)
+	stores := cs.buildStores(cfg).rigs
 	rigStore, ok := stores["frontend"]
 	if !ok {
 		t.Fatal("buildStores() missing frontend store")
@@ -3928,7 +4003,7 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 	}
 
 	cs := &controllerState{cityPath: cityDir}
-	stores := cs.buildStores(cfg)
+	stores := cs.buildStores(cfg).rigs
 
 	if len(stores) != 2 {
 		t.Fatalf("buildStores returned %d stores, want 2", len(stores))
@@ -4046,7 +4121,7 @@ func TestBuildStoresBdProviderUsesPassedConfigForRigEnv(t *testing.T) {
 		cityPath: cityDir,
 	}
 
-	stores := cs.buildStores(nextCfg)
+	stores := cs.buildStores(nextCfg).rigs
 	if stores["alpha"] == nil {
 		t.Fatal("buildStores did not create alpha store")
 	}

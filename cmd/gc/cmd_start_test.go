@@ -595,7 +595,30 @@ func TestStandaloneBuildAgentsFnWithSessionBeads_UsesRigStoresForAssignedWork(t 
 	}
 
 	buildFn := standaloneBuildAgentsFnWithSessionBeads("city", "/tmp/city", time.Now().UTC(), io.Discard)
-	result := buildFn(cfg, runtime.NewFake(), cityStore, map[string]beads.Store{"repo": rigStore}, nil, nil)
+	result := buildFn(cfg, runtime.NewFake(), cityStore, cityStore, map[string]beads.Store{"repo": rigStore}, nil, nil)
+	if len(result.AssignedWorkBeads) != 1 {
+		t.Fatalf("AssignedWorkBeads len = %d, want 1 (%#v)", len(result.AssignedWorkBeads), result.AssignedWorkBeads)
+	}
+	if result.AssignedWorkBeads[0].ID != handoff.ID {
+		t.Fatalf("AssignedWorkBeads[0].ID = %q, want %q", result.AssignedWorkBeads[0].ID, handoff.ID)
+	}
+}
+
+func TestStandaloneBuildAgentsFnWithSessionBeads_UsesCityWorkStoreForAssignedWork(t *testing.T) {
+	sessionStore := beads.NewMemStore()
+	cityWorkStore := beads.NewMemStore()
+	handoff, err := cityWorkStore.Create(beads.Bead{
+		Title:    "city handoff",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "worker",
+	})
+	if err != nil {
+		t.Fatalf("cityWorkStore.Create: %v", err)
+	}
+
+	buildFn := standaloneBuildAgentsFnWithSessionBeads("city", t.TempDir(), time.Now().UTC(), io.Discard)
+	result := buildFn(&config.City{}, runtime.NewFake(), sessionStore, cityWorkStore, nil, nil, nil)
 	if len(result.AssignedWorkBeads) != 1 {
 		t.Fatalf("AssignedWorkBeads len = %d, want 1 (%#v)", len(result.AssignedWorkBeads), result.AssignedWorkBeads)
 	}

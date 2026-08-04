@@ -41,16 +41,17 @@ func standaloneBuildAgentsFnWithSessionBeads(
 	cityName, cityPath string,
 	beaconTime time.Time,
 	stderr io.Writer,
-) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+) func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 	return func(
 		c *config.City,
 		currentSP runtime.Provider,
-		store beads.Store,
+		sessionStore beads.Store,
+		cityWorkStore beads.Store,
 		rigStores map[string]beads.Store,
 		sessionBeads *sessionBeadSnapshot,
 		trace *sessionReconcilerTraceCycle,
 	) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, stderr)
+		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, sessionStore, rigStores, sessionBeads, trace, stderr, cityWorkStore)
 	}
 }
 

@@ -204,6 +204,89 @@ func TestStampRunSessionIdentityReassignmentRestamps(t *testing.T) {
 	}
 }
 
+func TestStampRunSessionIdentityPreservesWorktreeEvidence(t *testing.T) {
+	// dr-mh9k part b (gpk-5s0q5): a pool dispatch stamps the pool SLOT's
+	// work_dir (a label, not isolation) onto the work bead's gc.work_dir. When
+	// the bead already carries molecule worktree evidence under the legacy
+	// work_dir key pointing at a DIFFERENT directory, that stamp creates the
+	// canonical-vs-legacy conflict worktreeSpecForBead fails closed on, and
+	// the bead starves. The stamp must skip gc.work_dir (session_name still
+	// stamps) whenever it would conflict with existing legacy evidence.
+	const sn = "gascity-packs-polecat-gc-1"
+	const slotDir = "/home/ds/gascity-packs-worktrees/gascity-packs-polecat"
+	const evidenceDir = "/home/ds/gascity-packs-worktrees/gpk-lpzsk"
+
+	run := beads.Bead{
+		ID: "gpk-5s0q5", Type: "molecule", Status: "in_progress", Assignee: sn,
+		Metadata: map[string]string{
+			"work_dir":               evidenceDir,
+			"gc.worktree_repo":       "/home/ds/gascity-packs",
+			"gc.worktree_root":       "/home/ds/gascity-packs-worktrees",
+			"gc.work_branch":         "bd-gpk-lpzsk",
+			"gc.worktree_base_ref":   "main",
+			"gc.worktree_base_sha":   "deadbeef",
+			"gc.worktree_creator":    "gc",
+			"gc.worktree_owner":      "gpk-lpzsk",
+			"gc.worktree_generation": "1",
+			"gc.worktree_lifecycle":  "managed",
+		},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
+	store := &countingStore{Store: mem}
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sn, slotDir)})
+
+	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+
+	got, err := mem.Get("gpk-5s0q5")
+	if err != nil {
+		t.Fatalf("Get(gpk-5s0q5): %v", err)
+	}
+	if got.Metadata["gc.session_name"] != sn {
+		t.Errorf("gc.session_name = %q, want %q (session identity must still stamp)", got.Metadata["gc.session_name"], sn)
+	}
+	if v := got.Metadata["gc.work_dir"]; v != "" {
+		t.Errorf("gc.work_dir = %q, want unset (pool-slot label must not clobber legacy work_dir evidence %q)", v, evidenceDir)
+	}
+	spec, specErr := worktreeSpecForBead(got, "store-ref")
+	if specErr != nil {
+		t.Fatalf("worktreeSpecForBead after stamp: %v (fail-closed conflict — evidence was clobbered)", specErr)
+	}
+	if spec == nil || spec.Path != evidenceDir {
+		t.Errorf("worktreeSpecForBead path = %+v, want %q", spec, evidenceDir)
+	}
+}
+
+func TestStampRunRootFromStepPreservesRootWorktreeEvidence(t *testing.T) {
+	// Root-propagation mirror of the evidence guard: a workflow root carrying
+	// its own conflicting legacy work_dir evidence must not receive the
+	// pool-slot gc.work_dir from a worked step.
+	const sn = "gascity-packs-polecat-gc-1"
+	const slotDir = "/home/ds/gascity-packs-worktrees/gascity-packs-polecat"
+	const evidenceDir = "/home/ds/gascity-packs-worktrees/gpk-root-wt"
+
+	root := beads.Bead{
+		ID: "gpk-root2", Type: "molecule", Status: "in_progress",
+		Metadata: map[string]string{"gc.kind": "workflow", "work_dir": evidenceDir},
+	}
+	step := beads.Bead{
+		ID: "gpk-step2", Type: "step", Status: "in_progress", Assignee: sn,
+		Metadata: map[string]string{"gc.root_bead_id": "gpk-root2"},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	store := &countingStore{Store: mem}
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sn, slotDir)})
+
+	stampRunSessionIdentity([]beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+	gotRoot, _ := mem.Get("gpk-root2")
+	if gotRoot.Metadata["gc.session_name"] != sn {
+		t.Errorf("root gc.session_name = %q, want %q", gotRoot.Metadata["gc.session_name"], sn)
+	}
+	if v := gotRoot.Metadata["gc.work_dir"]; v != "" {
+		t.Errorf("root gc.work_dir = %q, want unset (pool-slot label must not clobber root legacy work_dir %q)", v, evidenceDir)
+	}
+}
+
 func TestStampRunSessionIdentitySkipsNonExecuting(t *testing.T) {
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession("worker-x", "/wd")})
 

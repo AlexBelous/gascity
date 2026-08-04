@@ -4318,7 +4318,8 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		if sessionName != "" && strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
-		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
+			workDirStampCompatible(wb.Metadata, workDir) {
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if len(patch) > 0 {
@@ -4333,6 +4334,20 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
 		stampRunRootFromStep(store, wb, sessionName, workDir, stampedRoots, stderr)
 	}
+}
+
+// workDirStampCompatible reports whether stamping gc.work_dir=workDir onto a
+// bead with the given metadata would be consistent with the bead's existing
+// legacy work_dir worktree evidence. A pool session's work_dir is a slot
+// LABEL, not isolation (the pool work_dir template keys on AgentBase); when a
+// pool-dispatched bead already carries molecule worktree evidence under the
+// legacy work_dir key pointing at a different directory, stamping the label
+// would create the canonical-vs-legacy conflict worktreeSpecForBead fails
+// closed on, starving the bead (dr-mh9k part b, bead gpk-5s0q5). Beads with
+// no legacy evidence, or whose evidence already matches, stamp as before.
+func workDirStampCompatible(metadata map[string]string, workDir string) bool {
+	legacy := strings.TrimSpace(metadata[beadmeta.LegacyWorkDirMetadataKey])
+	return legacy == "" || legacy == workDir
 }
 
 // stampRunRootFromStep copies a step's resolved session_name/work_dir onto its
@@ -4359,7 +4374,8 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 	if sessionName != "" && strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 		patch[beadmeta.SessionNameMetadataKey] = sessionName
 	}
-	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
+		workDirStampCompatible(root.Metadata, workDir) {
 		patch[beadmeta.WorkDirMetadataKey] = workDir
 	}
 	if len(patch) == 0 {

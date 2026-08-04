@@ -300,10 +300,15 @@ lint-changed: $(GOLANGCI_LINT)
 		echo "lint-changed: no changed Go files"; \
 		exit 0; \
 	fi; \
-	pkgs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u | while IFS= read -r dir; do \
+	dirs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u)"; \
+	pkgs="$$(for dir in $$dirs; do \
 		if [ "$$dir" = "." ]; then pkg="."; else pkg="./$$dir"; fi; \
-		if go list "$$pkg" >/dev/null 2>&1; then printf '%s\n' "$$pkg"; fi; \
-	done | sort -u)"; \
+		if ! go list "$$pkg" >/dev/null; then \
+			echo "lint-changed: unable to load $$pkg" >&2; \
+			exit 1; \
+		fi; \
+		printf '%s\n' "$$pkg"; \
+	done)" || exit $$?; \
 	if [ -z "$$pkgs" ]; then \
 		echo "lint-changed: no lintable Go packages"; \
 		exit 0; \

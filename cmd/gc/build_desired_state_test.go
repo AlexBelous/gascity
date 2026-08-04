@@ -12269,7 +12269,7 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 		Rigs:      []config.Rig{{Name: "city", Path: t.TempDir()}},
 	}
 
-	work, _, refs := collectOpenUnassignedRoutedWork(
+	work, _, refs, _ := collectOpenUnassignedRoutedWork(
 		cfg,
 		cityStore,
 		map[string]beads.Store{"city": rigStore},

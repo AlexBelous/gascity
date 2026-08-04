@@ -200,11 +200,12 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// In strict mode, we defer them until after strict checks pass so that a
 	// failing --strict invocation does not update provider resume metadata for
 	// failed agent resolution or template validation.
+	var hookSideEffectCityPath string
 	runHookSideEffects := func() {
 		if !hookMode {
 			return
 		}
-		persistPrimeHookProviderSessionKey(hookContext.ProviderSessionID, stderr)
+		persistPrimeHookProviderSessionKeyAtCity(hookContext.ProviderSessionID, hookSideEffectCityPath, stderr)
 	}
 	if !strictMode && !primeHookSessionStart(hookContext) {
 		runHookSideEffects()
@@ -224,6 +225,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0
 	}
+	hookSideEffectCityPath = cityPath
 	var sessionStartStore beads.Store
 	if hookMode && primeHookSessionStart(hookContext) {
 		sessionStartStore = primeHookLiveManagedSessionStore(cityPath)
@@ -642,7 +644,7 @@ func readPrimeHookStdin() *primeHookInput {
 	return &input
 }
 
-func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.Writer) {
+func persistPrimeHookProviderSessionKeyAtCity(hookProviderSessionID, cityPath string, stderr io.Writer) {
 	gcSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	providerSessionID := strings.TrimSpace(os.Getenv("GC_PROVIDER_SESSION_ID"))
 	if providerSessionID == "" {
@@ -673,10 +675,13 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		warn("provider session id equals GC_SESSION_ID %q", gcSessionID)
 		return
 	}
-	cityPath, err := resolveCity()
-	if err != nil {
-		warn("resolving city for session %q: %v", gcSessionID, err)
-		return
+	if cityPath == "" {
+		var err error
+		cityPath, err = resolveCity()
+		if err != nil {
+			warn("resolving city for session %q: %v", gcSessionID, err)
+			return
+		}
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {

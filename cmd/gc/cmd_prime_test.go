@@ -27,6 +27,36 @@ func (w primeHookFailWriter) Write([]byte) (int, error) {
 	return 0, w.err
 }
 
+func TestPersistPrimeHookProviderSessionKeyAtCityUsesSuppliedPath(t *testing.T) {
+	cityPath, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
+base = "builtin:claude"`)
+	t.Setenv("GC_PROVIDER_SESSION_ID", "provider-session-from-supplied-city")
+	for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG_ROOT"} {
+		t.Setenv(key, "")
+	}
+	if resolved, err := resolveCity(); err == nil {
+		t.Fatalf("test requires ambient city discovery to fail, resolved %q", resolved)
+	}
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKeyAtCity("", cityPath, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("persist stderr = %q, want empty", stderr.String())
+	}
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "provider-session-from-supplied-city" {
+		t.Fatalf("session_key = %q, want provider key persisted through supplied city path", got)
+	}
+}
+
 func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
 	t.Setenv("GC_RIG", "demo")
 	t.Setenv("GC_RIG_ROOT", "")

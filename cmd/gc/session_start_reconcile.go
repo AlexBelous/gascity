@@ -111,7 +111,7 @@ func planExactSessionWaitDependencyStartShadow(
 			ConfigSuppressed: true,
 		}), nil
 	}
-	if isAgentEffectivelySuspendedWith(params.Config, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
+	if isAgentEffectivelySuspendedWith(params.Config, params.CityPath, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
 		return planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
 			Info:                 info,
 			WakeDecisionObserved: true,
@@ -847,7 +847,7 @@ func reconcileExactSessionStartWithOwner(
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable})
 		return owner, nil
 	}
-	if isAgentEffectivelySuspendedWith(params.Config, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
+	if isAgentEffectivelySuspendedWith(params.Config, params.CityPath, cfgAgent, loadSuspensionStateBestEffort(params.CityPath)) {
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonNotObserved})
 		return owner, nil
 	}

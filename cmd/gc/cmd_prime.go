@@ -298,7 +298,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		// and when a valid template legitimately renders empty. Readability is
 		// the strict precondition, so check it before hook side effects.
 		for _, a := range resolvedAgents {
-			if isAgentEffectivelySuspendedWith(cfg, &a, loadSuspensionStateBestEffort(cityPath)) {
+			if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 				continue
 			}
 			if a.PromptTemplate == "" {
@@ -314,7 +314,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	}
 
 	for _, a := range resolvedAgents {
-		if isAgentEffectivelySuspendedWith(cfg, &a, loadSuspensionStateBestEffort(cityPath)) {
+		if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 			return 0
 		}
 		if resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath); rErr == nil && hookMode {

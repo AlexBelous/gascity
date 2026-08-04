@@ -229,7 +229,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 		return false, nil
 	}
 	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
-	if agent == nil || isAgentEffectivelySuspendedWith(snapshot.Config, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
+	if agent == nil || isAgentEffectivelySuspendedWith(snapshot.Config, snapshot.CityPath, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
 		return false, nil
 	}
 	namedTemplates := make(map[string]struct{}, len(snapshot.Config.NamedSessions))
@@ -432,7 +432,7 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 	}
 
 	agent := findAgentByTemplate(snapshot.Config, hint.PoolTarget)
-	if agent == nil || isAgentEffectivelySuspendedWith(snapshot.Config, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
+	if agent == nil || isAgentEffectivelySuspendedWith(snapshot.Config, snapshot.CityPath, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
 		return routedWorkPoolAllocationResult{}, nil
 	}
 	namedTemplates := make(map[string]struct{}, len(snapshot.Config.NamedSessions))
@@ -594,7 +594,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	}
 	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
 	if agent == nil || normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget ||
-		isAgentEffectivelySuspendedWith(snapshot.Config, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
+		isAgentEffectivelySuspendedWith(snapshot.Config, snapshot.CityPath, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
 		return false, nil
 	}
 	namedTemplates := make(map[string]struct{}, len(snapshot.Config.NamedSessions))

@@ -3523,7 +3523,7 @@ gc runtime
 | [gc runtime check](#gc-runtime-check) | Validate a runtime executable against the Runtime Provider Protocol |
 | [gc runtime conformance](#gc-runtime-conformance) | Run the golden RPP conformance suite against a runtime executable |
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
-| [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
+| [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the orchestrator to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
 | [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
@@ -3603,12 +3603,13 @@ gc runtime drain <name> [flags]
 
 ## gc runtime drain-ack
 
-Acknowledge a drain signal — tell the controller to stop this session.
+Acknowledge a drain signal — tell the orchestrator to stop this session.
 
-Sets GC_DRAIN_ACK metadata on the session, then pokes the controller
-socket so the reconciler stops the session immediately rather than on
-its next patrol tick. Call this after the session has finished its
-current work in response to a drain signal.
+When called from the current session, completes its exact trigger bead first,
+then sets GC_DRAIN_ACK metadata and notifies the orchestrator so the session
+stops immediately rather than on its next patrol tick.
+Call this after the session has finished its current work in response to a
+drain signal.
 
 ```
 gc runtime drain-ack [name] [flags]

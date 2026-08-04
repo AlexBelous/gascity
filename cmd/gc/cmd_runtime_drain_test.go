@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -666,7 +668,7 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, nil, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -678,16 +680,151 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 	}
 }
 
+func TestCompleteRuntimeDrainAckTriggerAdvancesOnlyItsWorkflow(t *testing.T) {
+	store := beads.NewMemStore()
+	const sessionName = "named-worker"
+	oldPoke := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = oldPoke })
+
+	create := func(bead beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := store.Create(bead)
+		if err != nil {
+			t.Fatalf("Create(%q): %v", bead.Title, err)
+		}
+		return created
+	}
+	workflow := create(beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+	}})
+	drain := create(beads.Bead{Title: "Signal completion", Type: "task", Status: "open", Assignee: sessionName, Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: workflow.ID,
+		beadmeta.StepRefMetadataKey:    "lifecycle.drain",
+	}})
+	finalizer := create(beads.Bead{Title: "Finalize workflow", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+		beadmeta.RootBeadIDMetadataKey: workflow.ID,
+	}})
+	if err := store.DepAdd(finalizer.ID, drain.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(finalizer, drain): %v", err)
+	}
+	if err := store.DepAdd(workflow.ID, finalizer.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(workflow, finalizer): %v", err)
+	}
+
+	unrelatedRoot := create(beads.Bead{Title: "unrelated workflow", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+	}})
+	unrelatedStep := create(beads.Bead{Title: "unrelated active work", Type: "task", Status: "in_progress", Assignee: "other-session", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: unrelatedRoot.ID,
+	}})
+	inProgress := "in_progress"
+	if err := store.Update(unrelatedStep.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark unrelated step in progress: %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	complete := func() error { return completeRuntimeDrainAckTrigger(store, drain.ID, []string{sessionName}) }
+	if code := doRuntimeDrainAck(dops, complete, "", sessionName, sessionName, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRuntimeDrainAck(first) = %d; stderr=%s", code, stderr.String())
+	}
+	if !dops.acked[sessionName] {
+		t.Fatal("successful drain-ack did not set the session acknowledgement")
+	}
+	closedDrain, err := store.Get(drain.ID)
+	if err != nil {
+		t.Fatalf("Get(drain): %v", err)
+	}
+	if closedDrain.Status != "closed" || closedDrain.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("drain after ack = status %q outcome %q, want closed/pass", closedDrain.Status, closedDrain.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if has, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(store, []string{sessionName}); err != nil {
+		t.Fatalf("session assigned-work query: %v", err)
+	} else if has {
+		t.Fatal("named-session reconciliation still sees the completed drain step as redispatchable work")
+	}
+
+	result, err := dispatch.ProcessControl(store, mustGetMemBead(t, store, finalizer.ID), dispatch.ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("first workflow-finalize result = %+v, want one processed workflow-pass", result)
+	}
+	if got := mustGetMemBead(t, store, workflow.ID).Status; got != "closed" {
+		t.Fatalf("workflow status = %q, want closed", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doRuntimeDrainAck(dops, complete, "", sessionName, sessionName, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRuntimeDrainAck(retry) = %d; stderr=%s", code, stderr.String())
+	}
+	result, err = dispatch.ProcessControl(store, mustGetMemBead(t, store, finalizer.ID), dispatch.ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize retry): %v", err)
+	}
+	if result.Processed {
+		t.Fatalf("workflow-finalize retry processed twice: %+v", result)
+	}
+	if got := mustGetMemBead(t, store, unrelatedRoot.ID).Status; got != "open" {
+		t.Fatalf("unrelated workflow status = %q, want open", got)
+	}
+	if got := mustGetMemBead(t, store, unrelatedStep.ID).Status; got != "in_progress" {
+		t.Fatalf("unrelated active step status = %q, want in_progress", got)
+	}
+}
+
 func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, nil, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime drain-ack: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestDoRuntimeDrainAckCompletionFailureDoesNotAcknowledge(t *testing.T) {
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, func() error { return errors.New("store unavailable") }, "", "worker", "worker", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if dops.acked["worker"] {
+		t.Fatal("drain ack was set even though trigger completion failed")
+	}
+	if got, want := stderr.String(), "gc runtime drain-ack: completing trigger bead: store unavailable\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestCompleteRuntimeDrainAckTriggerIgnoresStaleUnownedTrigger(t *testing.T) {
+	store := beads.NewMemStore()
+	trigger, err := store.Create(beads.Bead{
+		Title:    "other session's work",
+		Assignee: "other-session",
+	})
+	if err != nil {
+		t.Fatalf("Create(trigger): %v", err)
+	}
+	if err := completeRuntimeDrainAckTrigger(store, trigger.ID, []string{"current-session"}); err != nil {
+		t.Fatalf("completeRuntimeDrainAckTrigger: %v", err)
+	}
+	got, err := store.Get(trigger.ID)
+	if err != nil {
+		t.Fatalf("Get(trigger): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("stale trigger metadata closed work owned by another session")
 	}
 }
 
@@ -708,7 +845,7 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, nil, "", "worker", "worker", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -739,7 +876,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	// of the three adjacent string params in the new signature.
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, nil, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -766,7 +903,7 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, nil, "/city/path", "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -782,7 +919,7 @@ func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, nil, "/city/path", "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
 	}

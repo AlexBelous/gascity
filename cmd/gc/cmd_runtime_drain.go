@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -446,13 +450,14 @@ func newRuntimeDrainAckCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "drain-ack [name]",
-		Short: "Acknowledge drain — signal the controller to stop this session",
-		Long: `Acknowledge a drain signal — tell the controller to stop this session.
+		Short: "Acknowledge drain — signal the orchestrator to stop this session",
+		Long: `Acknowledge a drain signal — tell the orchestrator to stop this session.
 
-Sets GC_DRAIN_ACK metadata on the session, then pokes the controller
-socket so the reconciler stops the session immediately rather than on
-its next patrol tick. Call this after the session has finished its
-current work in response to a drain signal.`,
+When called from the current session, completes its exact trigger bead first,
+then sets GC_DRAIN_ACK metadata and notifies the orchestrator so the session
+stops immediately rather than on its next patrol tick.
+Call this after the session has finished its current work in response to a
+drain signal.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrainAck(args, jsonOutput, stdout, stderr) != 0 {
@@ -478,7 +483,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			return 1
 		}
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, nil, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -492,7 +497,88 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		return 1
 	}
 	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	return doRuntimeDrainAck(dops, func() error {
+		return completeCurrentRuntimeDrainAckTrigger(current)
+	}, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
+}
+
+func completeCurrentRuntimeDrainAckTrigger(current sessionRuntimeTarget) error {
+	triggerID := strings.TrimSpace(os.Getenv("GC_BEAD_ID"))
+	if triggerID == "" {
+		triggerID = strings.TrimSpace(os.Getenv("GC_TRIGGER_BEAD_ID"))
+	}
+	if triggerID == "" {
+		return nil
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
+	if err != nil {
+		return fmt.Errorf("loading city config: %w", err)
+	}
+	target, err := resolveBdScopeTarget(cfg, current.cityPath, "", []string{"update", triggerID}, false, io.Discard)
+	if err != nil {
+		return fmt.Errorf("resolving store for %s: %w", triggerID, err)
+	}
+	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, current.cityPath, cfg)
+	if err != nil {
+		return fmt.Errorf("opening store for %s: %w", triggerID, err)
+	}
+	defer func() { _ = closeBeadStoreHandle(store) }()
+	identities := hookClaimIdentityCandidates(
+		current.sessionName,
+		current.display,
+		os.Getenv("GC_SESSION_ID"),
+		os.Getenv("GC_ALIAS"),
+		os.Getenv("GC_AGENT"),
+	)
+	return completeRuntimeDrainAckTrigger(store, triggerID, identities)
+}
+
+func completeRuntimeDrainAckTrigger(store beads.Store, triggerID string, sessionIdentities []string) error {
+	triggerID = strings.TrimSpace(triggerID)
+	if store == nil || triggerID == "" {
+		return nil
+	}
+	bead, err := store.Get(triggerID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("reading trigger bead %s: %w", triggerID, err)
+	}
+	if strings.EqualFold(strings.TrimSpace(bead.Status), "closed") {
+		return nil
+	}
+	kind := strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])
+	if beadmeta.IsControlKind(kind) || slices.Contains(beadmeta.WorkflowTopologyKinds, kind) {
+		return fmt.Errorf("trigger bead %s has non-worker kind %q", triggerID, kind)
+	}
+	owned := hookClaimHasIdentity(bead.Assignee, sessionIdentities)
+	if !owned {
+		return nil
+	}
+	status := "closed"
+	opts := beads.UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
+		},
+	}
+	if writer, ok := beads.ConditionalWriterFor(store); ok {
+		if err := writer.UpdateIfMatch(triggerID, bead.Revision, opts); err != nil {
+			if beads.IsPreconditionFailed(err) {
+				fresh, readErr := store.Get(triggerID)
+				if readErr == nil && strings.EqualFold(strings.TrimSpace(fresh.Status), "closed") {
+					return nil
+				}
+			}
+			return fmt.Errorf("closing trigger bead %s: %w", triggerID, err)
+		}
+		return nil
+	}
+	if err := store.Update(triggerID, opts); err != nil {
+		return fmt.Errorf("closing trigger bead %s: %w", triggerID, err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -692,10 +778,16 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 // Tests that swap it MUST NOT call t.Parallel().
 var drainAckPokeController = pokeController
 
-// doRuntimeDrainAck sets the drain-ack flag on the session, then pokes the
-// controller so the reconciler observes the drained state immediately instead
-// of waiting for its next patrol tick.
-func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+// doRuntimeDrainAck completes the current trigger when requested, sets the
+// drain-ack flag, then pokes the controller so the reconciler observes the
+// drained state immediately instead of waiting for its next patrol tick.
+func doRuntimeDrainAck(dops drainOps, completeTrigger func() error, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+	if completeTrigger != nil {
+		if err := completeTrigger(); err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: completing trigger bead: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

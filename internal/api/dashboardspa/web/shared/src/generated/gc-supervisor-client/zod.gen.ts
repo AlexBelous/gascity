@@ -4379,6 +4379,7 @@ export const zTypedEventStreamEnvelopeRigProvisionProgress = z.object({
  */
 export const zTypedEventStreamEnvelopeRoutedDemandStranded = z.object({
     actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
     message: z.string().optional(),
     payload: zRoutedDemandStrandedPayload,
     run_id: z.string().optional(),
@@ -5991,6 +5992,7 @@ export const zTypedTaggedEventStreamEnvelopeRigProvisionProgress = z.object({
 export const zTypedTaggedEventStreamEnvelopeRoutedDemandStranded = z.object({
     actor: z.string(),
     city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
     message: z.string().optional(),
     payload: zRoutedDemandStrandedPayload,
     run_id: z.string().optional(),

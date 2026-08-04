@@ -6328,6 +6328,7 @@ export type TypedEventStreamEnvelopeRigProvisionProgress = {
  */
 export type TypedEventStreamEnvelopeRoutedDemandStranded = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RoutedDemandStrandedPayload;
     run_id?: string;
@@ -8012,6 +8013,7 @@ export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
 export type TypedTaggedEventStreamEnvelopeRoutedDemandStranded = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RoutedDemandStrandedPayload;
     run_id?: string;

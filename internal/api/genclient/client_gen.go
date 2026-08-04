@@ -6121,17 +6121,18 @@ type TypedEventStreamEnvelopeRigProvisionProgress struct {
 
 // TypedEventStreamEnvelopeRoutedDemandStranded defines model for TypedEventStreamEnvelopeRoutedDemandStranded.
 type TypedEventStreamEnvelopeRoutedDemandStranded struct {
-	Actor     string                      `json:"actor"`
-	Message   *string                     `json:"message,omitempty"`
-	Payload   RoutedDemandStrandedPayload `json:"payload"`
-	RunId     *string                     `json:"run_id,omitempty"`
-	Seq       int64                       `json:"seq"`
-	SessionId *string                     `json:"session_id,omitempty"`
-	StepId    *string                     `json:"step_id,omitempty"`
-	Subject   *string                     `json:"subject,omitempty"`
-	Ts        time.Time                   `json:"ts"`
-	Type      string                      `json:"type"`
-	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          RoutedDemandStrandedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
@@ -7478,18 +7479,19 @@ type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
 
 // TypedTaggedEventStreamEnvelopeRoutedDemandStranded defines model for TypedTaggedEventStreamEnvelopeRoutedDemandStranded.
 type TypedTaggedEventStreamEnvelopeRoutedDemandStranded struct {
-	Actor     string                      `json:"actor"`
-	City      string                      `json:"city"`
-	Message   *string                     `json:"message,omitempty"`
-	Payload   RoutedDemandStrandedPayload `json:"payload"`
-	RunId     *string                     `json:"run_id,omitempty"`
-	Seq       int64                       `json:"seq"`
-	SessionId *string                     `json:"session_id,omitempty"`
-	StepId    *string                     `json:"step_id,omitempty"`
-	Subject   *string                     `json:"subject,omitempty"`
-	Ts        time.Time                   `json:"ts"`
-	Type      string                      `json:"type"`
-	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          RoutedDemandStrandedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.

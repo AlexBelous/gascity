@@ -29,18 +29,25 @@ type CachingStore struct {
 	backing  Store // runtime: usually *BdStore; tests and projections may use any Store
 	idPrefix string
 
-	mu              sync.RWMutex
-	beads           map[string]Bead
-	deps            map[string][]Dep
-	depsComplete    bool
-	dirty           map[string]struct{}
-	beadSeq         map[string]uint64
-	localBeadAt     map[string]time.Time
-	deletedSeq      map[string]uint64
-	state           cacheState
-	lastFreshAt     time.Time
-	mutationSeq     uint64
-	primePartialErr error
+	mu           sync.RWMutex
+	beads        map[string]Bead
+	deps         map[string][]Dep
+	depsComplete bool
+	dirty        map[string]struct{}
+	beadSeq      map[string]uint64
+	localBeadAt  map[string]time.Time
+	deletedSeq   map[string]uint64
+	state        cacheState
+	lastFreshAt  time.Time
+	// lastFullScanFreshAt records when the cache last absorbed a complete
+	// full-scan snapshot (prime or reconcile merge). Unlike lastFreshAt it is
+	// NOT advanced by applied events or local writes, so it can anchor the
+	// first reconcile's due time: keying the zero-LastReconcileAt fallback on
+	// lastFreshAt let sustained traffic defer the first full scan forever
+	// (dr-radw first-scan starvation).
+	lastFullScanFreshAt time.Time
+	mutationSeq         uint64
+	primePartialErr     error
 
 	reconciling    atomic.Bool
 	syncFailures   int
@@ -927,6 +934,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.circuitTripped = false
 	c.stats.SyncFailures = 0
 	c.primePartialErr = partialErr
+	// A successful prime ran the identical cacheFullScanQuery() a reconcile
+	// would, so prime time is a sound anchor for the first reconcile's due
+	// time. Scan-scoped on purpose: stats.LastReconcileAt stays zero so the
+	// failed-prime/PrimeActive convergence path (promoteLiveLocked) is
+	// unaffected.
+	c.lastFullScanFreshAt = now
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil

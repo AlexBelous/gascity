@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -62,6 +63,72 @@ func TestNextReconcileDelay(t *testing.T) {
 			t.Fatalf("syncFailures=20: got %v, want %v (cap)", delay, maxBackoff)
 		}
 	})
+}
+
+// TestReconcileFirstScanNotStarvedByEventTraffic reproduces the dr-radw
+// first-scan starvation: before the first successful full scan
+// stats.LastReconcileAt is zero, and the pre-fix fallback keyed the due time
+// on lastFreshAt — which every applied event advances. Under sustained event
+// traffic (one mutating bead.updated per 20 simulated seconds) the first
+// reconcile was deferred forever. With the scan-scoped prime stamp the first
+// reconcile must become due within two cadence intervals of prime.
+func TestReconcileFirstScanNotStarvedByEventTraffic(t *testing.T) {
+	mem := NewMemStore()
+	bead, err := mem.Create(Bead{Title: "traffic"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cs := NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Prime stamps lastFreshAt and the scan-scoped stamp with the same
+	// instant; read it as the simulated clock origin t0.
+	cs.mu.RLock()
+	t0 := cs.lastFreshAt
+	cs.mu.RUnlock()
+
+	interval := cacheReconcileIntervalSmall
+	dueBy := t0.Add(2 * interval)
+	var dueAt time.Time
+	for k := 1; k <= 6; k++ {
+		now := t0.Add(time.Duration(k) * 20 * time.Second)
+		update := cloneBead(bead)
+		update.Title = fmt.Sprintf("traffic update %d", k)
+		payload, err := json.Marshal(update)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		cs.ApplyEvent("bead.updated", payload)
+		// ApplyEvent stamps lastFreshAt with wall-clock time.Now() (≈ t0);
+		// rewrite it to the simulated event time so the freshness pattern
+		// matches production traffic at 20s spacing.
+		cs.mu.Lock()
+		cs.lastFreshAt = now
+		cs.mu.Unlock()
+
+		if cs.nextReconcileDelay(now) == 0 {
+			dueAt = now
+			break
+		}
+	}
+
+	if dueAt.IsZero() {
+		t.Fatalf("first reconcile never became due within %s of prime under sustained event traffic (starved)", 6*20*time.Second)
+	}
+	if dueAt.After(dueBy) {
+		t.Fatalf("first reconcile became due at t0+%s, want within t0+%s", dueAt.Sub(t0), 2*interval)
+	}
+
+	cs.runReconciliation()
+	cs.mu.RLock()
+	lastReconcileAt := cs.stats.LastReconcileAt
+	cs.mu.RUnlock()
+	if lastReconcileAt.IsZero() {
+		t.Fatal("stats.LastReconcileAt still zero after due runReconciliation")
+	}
 }
 
 type reconcileRaceStore struct {

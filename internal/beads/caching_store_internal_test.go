@@ -2393,7 +2393,10 @@ func TestCachingStoreNextReconcileDelayUsesFreshnessWatchdog(t *testing.T) {
 
 	cache := NewCachingStoreForTest(NewMemStore(), nil)
 	cache.state = cacheLive
+	// A real prime stamps lastFreshAt and lastFullScanFreshAt with the same
+	// instant; mirror that when building a live cache by hand.
 	cache.lastFreshAt = time.Unix(100, 0)
+	cache.lastFullScanFreshAt = time.Unix(100, 0)
 
 	if got := cache.nextReconcileDelay(time.Unix(110, 0)); got != 20*time.Second {
 		t.Fatalf("nextReconcileDelay(fresh) = %s, want 20s", got)
@@ -2407,6 +2410,7 @@ func TestCachingStoreNextReconcileDelayUsesFreshnessWatchdog(t *testing.T) {
 
 	cache.stats.LastReconcileAt = time.Time{}
 	cache.lastFreshAt = time.Unix(70, 0)
+	cache.lastFullScanFreshAt = time.Unix(70, 0)
 	if got := cache.nextReconcileDelay(time.Unix(110, 0)); got != 0 {
 		t.Fatalf("nextReconcileDelay(stale) = %s, want immediate reconcile", got)
 	}
@@ -2415,6 +2419,19 @@ func TestCachingStoreNextReconcileDelayUsesFreshnessWatchdog(t *testing.T) {
 	cache.lastFreshAt = time.Unix(109, 0)
 	if got := cache.nextReconcileDelay(time.Unix(110, 0)); got != 0 {
 		t.Fatalf("nextReconcileDelay(degraded) = %s, want immediate reconcile", got)
+	}
+
+	// Pre-first-scan cell (dr-radw): before the first successful full scan,
+	// stats.LastReconcileAt is zero. Applied events and local writes advance
+	// lastFreshAt continuously, which must NOT defer the first scan — the due
+	// time keys on the scan-scoped prime stamp (lastFullScanFreshAt) instead.
+	cache.state = cacheLive
+	cache.stats.LastReconcileAt = time.Time{}
+	t0 := time.Unix(200, 0)
+	cache.lastFullScanFreshAt = t0               // prime stamp
+	cache.lastFreshAt = t0.Add(50 * time.Second) // sustained ApplyEvent traffic
+	if got := cache.nextReconcileDelay(t0.Add(61 * time.Second)); got != 0 {
+		t.Fatalf("nextReconcileDelay(pre-first-scan under traffic) = %s, want immediate reconcile", got)
 	}
 }
 

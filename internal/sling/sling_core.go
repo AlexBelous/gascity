@@ -731,12 +731,19 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 	}
 }
 
-// restampWorkBeadRouting stamps gc.routed_to on the work bead a graph workflow
-// was attached to. gc.routed_to on the WORK bead is what the claim path reads;
-// the cooked workflow root carries the graph-routing metadata instead, so an
-// attach that routes only the root leaves the work bead looking unrouted to
-// anything reading gc.routed_to directly. Failures are reported as metadata
-// errors rather than failing the launch: by this point the workflow is already
+// restampWorkBeadRouting stamps gc.execution_routed_to on the work bead a
+// graph workflow was attached to. A graph.v2 work bead must not get the
+// claim-semantics gc.routed_to key once its workflow has started, because the
+// pool's tier-3 claim query and the drain engine's own dispatch are two
+// uncoordinated authorities -- neither checks the bead's Assignee/the other's
+// lock field, so stamping gc.routed_to there is a structural double-dispatch
+// hazard, not merely an observability fix. The existing ExecutionRoutedToKey
+// (gc.execution_routed_to) is already read by the graphroute resolver, convoy
+// dispatch, dashboard orders feed, and dispatch engine. Apply
+// NormalizePoolRouteTarget to the computed target so slot-suffixed pool
+// instances collapse to their base template name (the same pass every other
+// gc.routed_to writer applies). Failures are reported as metadata errors
+// rather than failing the launch: by this point the workflow is already
 // running, and unwinding it over a routing restamp would be worse than a
 // surfaced warning.
 func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, result *SlingResult) {
@@ -744,13 +751,13 @@ func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, resul
 	if beadID == "" || deps.Store == nil || result == nil {
 		return
 	}
-	target := strings.TrimSpace(agentutil.RoutedToIdentity(&a))
+	target := agentutil.NormalizePoolRouteTarget(deps.Cfg, strings.TrimSpace(agentutil.RoutedToIdentity(&a)))
 	if target == "" {
 		return
 	}
-	if err := deps.Store.SetMetadata(beadID, beadmeta.RoutedToMetadataKey, target); err != nil {
+	if err := deps.Store.SetMetadata(beadID, beadmeta.ExecutionRoutedToMetadataKey, target); err != nil {
 		result.MetadataErrors = append(result.MetadataErrors,
-			fmt.Sprintf("setting %s on %s: %v", beadmeta.RoutedToMetadataKey, beadID, err))
+			fmt.Sprintf("setting %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, beadID, err))
 	}
 }
 

@@ -428,6 +428,108 @@ func TestReleaseOrphanedPoolAssignments_ReopensLegacyWorkflowRunTarget(t *testin
 	}
 }
 
+func TestReleaseOrphanedPoolAssignments_SkipsLiveEphemeralSessionAssignedByBareTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-mc-live",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "pool work assigned by route name",
+		Assignee: "worker",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{sessionBead},
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none: a live ephemeral session for template %q is open", released, "worker")
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "worker" {
+		t.Fatalf("assignee = %q, want %q", got.Assignee, "worker")
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_ReopensBareTemplateAssigneeWithNoLiveSession(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "pool work assigned by route name, no live session",
+		Assignee: "worker",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]: no live session exists for template %q", released, work.ID, "worker")
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+}
+
 func TestIsRecoverableUnassignedInProgressPoolWorkUsesLegacyWorkflowRunTarget(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 	work := beads.Bead{

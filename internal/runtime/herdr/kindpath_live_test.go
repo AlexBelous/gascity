@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -15,10 +16,14 @@ import (
 // and has herdr launch + detect claude in it (native claude-detection), the
 // agent is registered under the session name, liveness holds across checks
 // (with a re-issued Start refusing), and Stop tears the pane down. Skipped
-// when herdr or claude is unavailable or in -short mode.
+// when herdr or claude is unavailable, in -short mode, or in the fast unit
+// suite.
 func TestProviderLiveClaudeKindPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live herdr+claude test in -short mode")
+	}
+	if os.Getenv("GC_FAST_UNIT") == "1" {
+		t.Skip("skipping live herdr+claude test in fast-unit mode")
 	}
 	if _, err := exec.LookPath("herdr"); err != nil {
 		t.Skip("herdr not installed")

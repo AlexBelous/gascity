@@ -921,6 +921,7 @@ export type EventRotateResponse = {
 
 export type EventStreamEnvelope = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload?: EventPayload;
     run_id?: string;
@@ -5100,6 +5101,7 @@ export type SupervisorStartup = {
 export type TaggedEventStreamEnvelope = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload?: EventPayload;
     run_id?: string;
@@ -5168,6 +5170,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.step_defined';
+} & TypedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.work_associated';
+} & TypedEventStreamEnvelopeExecutionWorkAssociated) | ({
     type: 'extmsg.adapter_added';
 } & TypedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -5290,6 +5296,7 @@ export type TypedEventStreamEnvelope = ({
  */
 export type TypedEventStreamEnvelopeBeadClaimRejected = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadClaimRejectedPayload;
     run_id?: string;
@@ -5307,6 +5314,7 @@ export type TypedEventStreamEnvelopeBeadClaimRejected = {
  */
 export type TypedEventStreamEnvelopeBeadClosed = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadEventPayload;
     run_id?: string;
@@ -5324,6 +5332,7 @@ export type TypedEventStreamEnvelopeBeadClosed = {
  */
 export type TypedEventStreamEnvelopeBeadCreated = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadEventPayload;
     run_id?: string;
@@ -5341,6 +5350,7 @@ export type TypedEventStreamEnvelopeBeadCreated = {
  */
 export type TypedEventStreamEnvelopeBeadDeadAssigneeReopened = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadDeadAssigneeReopenedPayload;
     run_id?: string;
@@ -5358,6 +5368,7 @@ export type TypedEventStreamEnvelopeBeadDeadAssigneeReopened = {
  */
 export type TypedEventStreamEnvelopeBeadDeleted = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadEventPayload;
     run_id?: string;
@@ -5375,6 +5386,7 @@ export type TypedEventStreamEnvelopeBeadDeleted = {
  */
 export type TypedEventStreamEnvelopeBeadUpdated = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadEventPayload;
     run_id?: string;
@@ -5392,6 +5404,7 @@ export type TypedEventStreamEnvelopeBeadUpdated = {
  */
 export type TypedEventStreamEnvelopeBeadWorktreeReapSkipped = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadWorktreeReapSkippedPayload;
     run_id?: string;
@@ -5409,6 +5422,7 @@ export type TypedEventStreamEnvelopeBeadWorktreeReapSkipped = {
  */
 export type TypedEventStreamEnvelopeBeadWorktreeReaped = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadWorktreeReapedPayload;
     run_id?: string;
@@ -5426,6 +5440,7 @@ export type TypedEventStreamEnvelopeBeadWorktreeReaped = {
  */
 export type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: ConditionalWritesDegradedPayload;
     run_id?: string;
@@ -5443,6 +5458,7 @@ export type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
  */
 export type TypedEventStreamEnvelopeCityCreated = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: CityLifecyclePayload;
     run_id?: string;
@@ -5460,6 +5476,7 @@ export type TypedEventStreamEnvelopeCityCreated = {
  */
 export type TypedEventStreamEnvelopeCityResumed = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -5477,6 +5494,7 @@ export type TypedEventStreamEnvelopeCityResumed = {
  */
 export type TypedEventStreamEnvelopeCitySuspended = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -5494,6 +5512,7 @@ export type TypedEventStreamEnvelopeCitySuspended = {
  */
 export type TypedEventStreamEnvelopeCityUnregisterRequested = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: CityLifecyclePayload;
     run_id?: string;
@@ -5511,6 +5530,7 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
  */
 export type TypedEventStreamEnvelopeControllerStarted = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -5528,6 +5548,7 @@ export type TypedEventStreamEnvelopeControllerStarted = {
  */
 export type TypedEventStreamEnvelopeControllerStopped = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -5545,6 +5566,7 @@ export type TypedEventStreamEnvelopeControllerStopped = {
  */
 export type TypedEventStreamEnvelopeConvoyClosed = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -5562,6 +5584,7 @@ export type TypedEventStreamEnvelopeConvoyClosed = {
  */
 export type TypedEventStreamEnvelopeConvoyCreated = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -5579,6 +5602,7 @@ export type TypedEventStreamEnvelopeConvoyCreated = {
  */
 export type TypedEventStreamEnvelopeCustom = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: unknown;
     run_id?: string;
@@ -5596,6 +5620,7 @@ export type TypedEventStreamEnvelopeCustom = {
  */
 export type TypedEventStreamEnvelopeEmergencyAcked = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: Record;
     run_id?: string;
@@ -5613,6 +5638,7 @@ export type TypedEventStreamEnvelopeEmergencyAcked = {
  */
 export type TypedEventStreamEnvelopeEmergencySignaled = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: Record;
     run_id?: string;
@@ -5630,6 +5656,7 @@ export type TypedEventStreamEnvelopeEmergencySignaled = {
  */
 export type TypedEventStreamEnvelopeEventsRotated = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RotatedPayload;
     run_id?: string;
@@ -5643,10 +5670,47 @@ export type TypedEventStreamEnvelopeEventsRotated = {
 };
 
 /**
+ * TypedEventStreamEnvelope execution.step_defined
+ */
+export type TypedEventStreamEnvelopeExecutionStepDefined = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.work_associated
+ */
+export type TypedEventStreamEnvelopeExecutionWorkAssociated = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.work_associated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope extmsg.adapter_added
  */
 export type TypedEventStreamEnvelopeExtmsgAdapterAdded = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: AdapterEventPayload;
     run_id?: string;
@@ -5664,6 +5728,7 @@ export type TypedEventStreamEnvelopeExtmsgAdapterAdded = {
  */
 export type TypedEventStreamEnvelopeExtmsgAdapterRemoved = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: AdapterEventPayload;
     run_id?: string;
@@ -5681,6 +5746,7 @@ export type TypedEventStreamEnvelopeExtmsgAdapterRemoved = {
  */
 export type TypedEventStreamEnvelopeExtmsgBound = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BoundEventPayload;
     run_id?: string;
@@ -5698,6 +5764,7 @@ export type TypedEventStreamEnvelopeExtmsgBound = {
  */
 export type TypedEventStreamEnvelopeExtmsgGroupCreated = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: GroupCreatedEventPayload;
     run_id?: string;
@@ -5715,6 +5782,7 @@ export type TypedEventStreamEnvelopeExtmsgGroupCreated = {
  */
 export type TypedEventStreamEnvelopeExtmsgInbound = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: InboundEventPayload;
     run_id?: string;
@@ -5732,6 +5800,7 @@ export type TypedEventStreamEnvelopeExtmsgInbound = {
  */
 export type TypedEventStreamEnvelopeExtmsgOutbound = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: OutboundEventPayload;
     run_id?: string;
@@ -5749,6 +5818,7 @@ export type TypedEventStreamEnvelopeExtmsgOutbound = {
  */
 export type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: OutboundChannelMismatchPayload;
     run_id?: string;
@@ -5766,6 +5836,7 @@ export type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
  */
 export type TypedEventStreamEnvelopeExtmsgUnbound = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: UnboundEventPayload;
     run_id?: string;
@@ -5783,6 +5854,7 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
  */
 export type TypedEventStreamEnvelopeGcStoreDiskCritical = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: StoreDiskCriticalPayload;
     run_id?: string;
@@ -5800,6 +5872,7 @@ export type TypedEventStreamEnvelopeGcStoreDiskCritical = {
  */
 export type TypedEventStreamEnvelopeGcStoreDiskWarn = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: StoreDiskWarnPayload;
     run_id?: string;
@@ -5817,6 +5890,7 @@ export type TypedEventStreamEnvelopeGcStoreDiskWarn = {
  */
 export type TypedEventStreamEnvelopeGcStoreMaintenanceDone = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: StoreMaintenanceDonePayload;
     run_id?: string;
@@ -5834,6 +5908,7 @@ export type TypedEventStreamEnvelopeGcStoreMaintenanceDone = {
  */
 export type TypedEventStreamEnvelopeGcStoreMaintenanceFailed = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: StoreMaintenanceFailedPayload;
     run_id?: string;
@@ -5851,6 +5926,7 @@ export type TypedEventStreamEnvelopeGcStoreMaintenanceFailed = {
  */
 export type TypedEventStreamEnvelopeMailArchived = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -5868,6 +5944,7 @@ export type TypedEventStreamEnvelopeMailArchived = {
  */
 export type TypedEventStreamEnvelopeMailDeleted = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -5885,6 +5962,7 @@ export type TypedEventStreamEnvelopeMailDeleted = {
  */
 export type TypedEventStreamEnvelopeMailMarkedRead = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -5902,6 +5980,7 @@ export type TypedEventStreamEnvelopeMailMarkedRead = {
  */
 export type TypedEventStreamEnvelopeMailMarkedUnread = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -5919,6 +5998,7 @@ export type TypedEventStreamEnvelopeMailMarkedUnread = {
  */
 export type TypedEventStreamEnvelopeMailRead = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -5936,6 +6016,7 @@ export type TypedEventStreamEnvelopeMailRead = {
  */
 export type TypedEventStreamEnvelopeMailReplied = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -5953,6 +6034,7 @@ export type TypedEventStreamEnvelopeMailReplied = {
  */
 export type TypedEventStreamEnvelopeMailSent = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -5970,6 +6052,7 @@ export type TypedEventStreamEnvelopeMailSent = {
  */
 export type TypedEventStreamEnvelopeMoleculeResolved = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MoleculeResolvedPayload;
     run_id?: string;
@@ -5987,6 +6070,7 @@ export type TypedEventStreamEnvelopeMoleculeResolved = {
  */
 export type TypedEventStreamEnvelopeOrderCompleted = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6004,6 +6088,7 @@ export type TypedEventStreamEnvelopeOrderCompleted = {
  */
 export type TypedEventStreamEnvelopeOrderFailed = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6021,6 +6106,7 @@ export type TypedEventStreamEnvelopeOrderFailed = {
  */
 export type TypedEventStreamEnvelopeOrderFired = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6038,6 +6124,7 @@ export type TypedEventStreamEnvelopeOrderFired = {
  */
 export type TypedEventStreamEnvelopePgCredentialResolved = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: PostgresCredentialResolvedPayload;
     run_id?: string;
@@ -6055,6 +6142,7 @@ export type TypedEventStreamEnvelopePgCredentialResolved = {
  */
 export type TypedEventStreamEnvelopeProjectIdentityStamped = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: ProjectIdentityStampedPayload;
     run_id?: string;
@@ -6072,6 +6160,7 @@ export type TypedEventStreamEnvelopeProjectIdentityStamped = {
  */
 export type TypedEventStreamEnvelopeProviderSwapped = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6089,6 +6178,7 @@ export type TypedEventStreamEnvelopeProviderSwapped = {
  */
 export type TypedEventStreamEnvelopeRequestFailed = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RequestFailedPayload;
     run_id?: string;
@@ -6106,6 +6196,7 @@ export type TypedEventStreamEnvelopeRequestFailed = {
  */
 export type TypedEventStreamEnvelopeRequestResultCityCreate = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: CityCreateSucceededPayload;
     run_id?: string;
@@ -6123,6 +6214,7 @@ export type TypedEventStreamEnvelopeRequestResultCityCreate = {
  */
 export type TypedEventStreamEnvelopeRequestResultCityUnregister = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: CityUnregisterSucceededPayload;
     run_id?: string;
@@ -6140,6 +6232,7 @@ export type TypedEventStreamEnvelopeRequestResultCityUnregister = {
  */
 export type TypedEventStreamEnvelopeRequestResultRigCreate = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RigCreateSucceededPayload;
     run_id?: string;
@@ -6157,6 +6250,7 @@ export type TypedEventStreamEnvelopeRequestResultRigCreate = {
  */
 export type TypedEventStreamEnvelopeRequestResultSessionCreate = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionCreateSucceededPayload;
     run_id?: string;
@@ -6174,6 +6268,7 @@ export type TypedEventStreamEnvelopeRequestResultSessionCreate = {
  */
 export type TypedEventStreamEnvelopeRequestResultSessionMessage = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionMessageSucceededPayload;
     run_id?: string;
@@ -6191,6 +6286,7 @@ export type TypedEventStreamEnvelopeRequestResultSessionMessage = {
  */
 export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionSubmitSucceededPayload;
     run_id?: string;
@@ -6208,6 +6304,7 @@ export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
  */
 export type TypedEventStreamEnvelopeRigProvisionProgress = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RigProvisionProgressPayload;
     run_id?: string;
@@ -6225,6 +6322,7 @@ export type TypedEventStreamEnvelopeRigProvisionProgress = {
  */
 export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6242,6 +6340,7 @@ export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionLifecyclePayload;
     run_id?: string;
@@ -6259,6 +6358,7 @@ export type TypedEventStreamEnvelopeSessionCrashed = {
  */
 export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionDrainAckedWithAssignedWorkPayload;
     run_id?: string;
@@ -6276,6 +6376,7 @@ export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
  */
 export type TypedEventStreamEnvelopeSessionDraining = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6293,6 +6394,7 @@ export type TypedEventStreamEnvelopeSessionDraining = {
  */
 export type TypedEventStreamEnvelopeSessionIdleKilled = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6310,6 +6412,7 @@ export type TypedEventStreamEnvelopeSessionIdleKilled = {
  */
 export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6327,6 +6430,7 @@ export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
  */
 export type TypedEventStreamEnvelopeSessionQuarantined = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6344,6 +6448,7 @@ export type TypedEventStreamEnvelopeSessionQuarantined = {
  */
 export type TypedEventStreamEnvelopeSessionResetStalled = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionResetStalledPayload;
     run_id?: string;
@@ -6361,6 +6466,7 @@ export type TypedEventStreamEnvelopeSessionResetStalled = {
  */
 export type TypedEventStreamEnvelopeSessionStopped = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionLifecyclePayload;
     run_id?: string;
@@ -6378,6 +6484,7 @@ export type TypedEventStreamEnvelopeSessionStopped = {
  */
 export type TypedEventStreamEnvelopeSessionStranded = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionStrandedPayload;
     run_id?: string;
@@ -6395,6 +6502,7 @@ export type TypedEventStreamEnvelopeSessionStranded = {
  */
 export type TypedEventStreamEnvelopeSessionSuspended = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6412,6 +6520,7 @@ export type TypedEventStreamEnvelopeSessionSuspended = {
  */
 export type TypedEventStreamEnvelopeSessionUndrained = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6429,6 +6538,7 @@ export type TypedEventStreamEnvelopeSessionUndrained = {
  */
 export type TypedEventStreamEnvelopeSessionUnknownState = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionUnknownStatePayload;
     run_id?: string;
@@ -6446,6 +6556,7 @@ export type TypedEventStreamEnvelopeSessionUnknownState = {
  */
 export type TypedEventStreamEnvelopeSessionUpdated = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6463,6 +6574,7 @@ export type TypedEventStreamEnvelopeSessionUpdated = {
  */
 export type TypedEventStreamEnvelopeSessionWoke = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6480,6 +6592,7 @@ export type TypedEventStreamEnvelopeSessionWoke = {
  */
 export type TypedEventStreamEnvelopeSessionWorkQueryFailed = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionLifecyclePayload;
     run_id?: string;
@@ -6497,6 +6610,7 @@ export type TypedEventStreamEnvelopeSessionWorkQueryFailed = {
  */
 export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SupervisorFsPressureSkippedTickPayload;
     run_id?: string;
@@ -6514,6 +6628,7 @@ export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
  */
 export type TypedEventStreamEnvelopeSupervisorRequest = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SupervisorRequestPayload;
     run_id?: string;
@@ -6531,6 +6646,7 @@ export type TypedEventStreamEnvelopeSupervisorRequest = {
  */
 export type TypedEventStreamEnvelopeSupervisorShutdownRequested = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SupervisorShutdownPayload;
     run_id?: string;
@@ -6548,6 +6664,7 @@ export type TypedEventStreamEnvelopeSupervisorShutdownRequested = {
  */
 export type TypedEventStreamEnvelopeSupervisorStarted = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SupervisorStartedPayload;
     run_id?: string;
@@ -6565,6 +6682,7 @@ export type TypedEventStreamEnvelopeSupervisorStarted = {
  */
 export type TypedEventStreamEnvelopeWebhookReceived = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: WebhookReceivedPayload;
     run_id?: string;
@@ -6582,6 +6700,7 @@ export type TypedEventStreamEnvelopeWebhookReceived = {
  */
 export type TypedEventStreamEnvelopeWebhookRejected = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: WebhookRejectedPayload;
     run_id?: string;
@@ -6599,6 +6718,7 @@ export type TypedEventStreamEnvelopeWebhookRejected = {
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: WorkerOperationEventPayload;
     run_id?: string;
@@ -6657,6 +6777,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.step_defined';
+} & TypedTaggedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.work_associated';
+} & TypedTaggedEventStreamEnvelopeExecutionWorkAssociated) | ({
     type: 'extmsg.adapter_added';
 } & TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -6780,6 +6904,7 @@ export type TypedTaggedEventStreamEnvelope = ({
 export type TypedTaggedEventStreamEnvelopeBeadClaimRejected = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadClaimRejectedPayload;
     run_id?: string;
@@ -6798,6 +6923,7 @@ export type TypedTaggedEventStreamEnvelopeBeadClaimRejected = {
 export type TypedTaggedEventStreamEnvelopeBeadClosed = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadEventPayload;
     run_id?: string;
@@ -6816,6 +6942,7 @@ export type TypedTaggedEventStreamEnvelopeBeadClosed = {
 export type TypedTaggedEventStreamEnvelopeBeadCreated = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadEventPayload;
     run_id?: string;
@@ -6834,6 +6961,7 @@ export type TypedTaggedEventStreamEnvelopeBeadCreated = {
 export type TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadDeadAssigneeReopenedPayload;
     run_id?: string;
@@ -6852,6 +6980,7 @@ export type TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened = {
 export type TypedTaggedEventStreamEnvelopeBeadDeleted = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadEventPayload;
     run_id?: string;
@@ -6870,6 +6999,7 @@ export type TypedTaggedEventStreamEnvelopeBeadDeleted = {
 export type TypedTaggedEventStreamEnvelopeBeadUpdated = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadEventPayload;
     run_id?: string;
@@ -6888,6 +7018,7 @@ export type TypedTaggedEventStreamEnvelopeBeadUpdated = {
 export type TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadWorktreeReapSkippedPayload;
     run_id?: string;
@@ -6906,6 +7037,7 @@ export type TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped = {
 export type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BeadWorktreeReapedPayload;
     run_id?: string;
@@ -6924,6 +7056,7 @@ export type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped = {
 export type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: ConditionalWritesDegradedPayload;
     run_id?: string;
@@ -6942,6 +7075,7 @@ export type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
 export type TypedTaggedEventStreamEnvelopeCityCreated = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: CityLifecyclePayload;
     run_id?: string;
@@ -6960,6 +7094,7 @@ export type TypedTaggedEventStreamEnvelopeCityCreated = {
 export type TypedTaggedEventStreamEnvelopeCityResumed = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6978,6 +7113,7 @@ export type TypedTaggedEventStreamEnvelopeCityResumed = {
 export type TypedTaggedEventStreamEnvelopeCitySuspended = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -6996,6 +7132,7 @@ export type TypedTaggedEventStreamEnvelopeCitySuspended = {
 export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: CityLifecyclePayload;
     run_id?: string;
@@ -7014,6 +7151,7 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
 export type TypedTaggedEventStreamEnvelopeControllerStarted = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7032,6 +7170,7 @@ export type TypedTaggedEventStreamEnvelopeControllerStarted = {
 export type TypedTaggedEventStreamEnvelopeControllerStopped = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7050,6 +7189,7 @@ export type TypedTaggedEventStreamEnvelopeControllerStopped = {
 export type TypedTaggedEventStreamEnvelopeConvoyClosed = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7068,6 +7208,7 @@ export type TypedTaggedEventStreamEnvelopeConvoyClosed = {
 export type TypedTaggedEventStreamEnvelopeConvoyCreated = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7086,6 +7227,7 @@ export type TypedTaggedEventStreamEnvelopeConvoyCreated = {
 export type TypedTaggedEventStreamEnvelopeCustom = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: unknown;
     run_id?: string;
@@ -7104,6 +7246,7 @@ export type TypedTaggedEventStreamEnvelopeCustom = {
 export type TypedTaggedEventStreamEnvelopeEmergencyAcked = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: Record;
     run_id?: string;
@@ -7122,6 +7265,7 @@ export type TypedTaggedEventStreamEnvelopeEmergencyAcked = {
 export type TypedTaggedEventStreamEnvelopeEmergencySignaled = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: Record;
     run_id?: string;
@@ -7140,6 +7284,7 @@ export type TypedTaggedEventStreamEnvelopeEmergencySignaled = {
 export type TypedTaggedEventStreamEnvelopeEventsRotated = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RotatedPayload;
     run_id?: string;
@@ -7153,11 +7298,50 @@ export type TypedTaggedEventStreamEnvelopeEventsRotated = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope execution.step_defined
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionStepDefined = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.work_associated
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionWorkAssociated = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.work_associated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope extmsg.adapter_added
  */
 export type TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: AdapterEventPayload;
     run_id?: string;
@@ -7176,6 +7360,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded = {
 export type TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: AdapterEventPayload;
     run_id?: string;
@@ -7194,6 +7379,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved = {
 export type TypedTaggedEventStreamEnvelopeExtmsgBound = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: BoundEventPayload;
     run_id?: string;
@@ -7212,6 +7398,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgBound = {
 export type TypedTaggedEventStreamEnvelopeExtmsgGroupCreated = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: GroupCreatedEventPayload;
     run_id?: string;
@@ -7230,6 +7417,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgGroupCreated = {
 export type TypedTaggedEventStreamEnvelopeExtmsgInbound = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: InboundEventPayload;
     run_id?: string;
@@ -7248,6 +7436,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgInbound = {
 export type TypedTaggedEventStreamEnvelopeExtmsgOutbound = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: OutboundEventPayload;
     run_id?: string;
@@ -7266,6 +7455,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgOutbound = {
 export type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: OutboundChannelMismatchPayload;
     run_id?: string;
@@ -7284,6 +7474,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
 export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: UnboundEventPayload;
     run_id?: string;
@@ -7302,6 +7493,7 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
 export type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: StoreDiskCriticalPayload;
     run_id?: string;
@@ -7320,6 +7512,7 @@ export type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical = {
 export type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: StoreDiskWarnPayload;
     run_id?: string;
@@ -7338,6 +7531,7 @@ export type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn = {
 export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: StoreMaintenanceDonePayload;
     run_id?: string;
@@ -7356,6 +7550,7 @@ export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone = {
 export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: StoreMaintenanceFailedPayload;
     run_id?: string;
@@ -7374,6 +7569,7 @@ export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = {
 export type TypedTaggedEventStreamEnvelopeMailArchived = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -7392,6 +7588,7 @@ export type TypedTaggedEventStreamEnvelopeMailArchived = {
 export type TypedTaggedEventStreamEnvelopeMailDeleted = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -7410,6 +7607,7 @@ export type TypedTaggedEventStreamEnvelopeMailDeleted = {
 export type TypedTaggedEventStreamEnvelopeMailMarkedRead = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -7428,6 +7626,7 @@ export type TypedTaggedEventStreamEnvelopeMailMarkedRead = {
 export type TypedTaggedEventStreamEnvelopeMailMarkedUnread = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -7446,6 +7645,7 @@ export type TypedTaggedEventStreamEnvelopeMailMarkedUnread = {
 export type TypedTaggedEventStreamEnvelopeMailRead = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -7464,6 +7664,7 @@ export type TypedTaggedEventStreamEnvelopeMailRead = {
 export type TypedTaggedEventStreamEnvelopeMailReplied = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -7482,6 +7683,7 @@ export type TypedTaggedEventStreamEnvelopeMailReplied = {
 export type TypedTaggedEventStreamEnvelopeMailSent = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MailEventPayload;
     run_id?: string;
@@ -7500,6 +7702,7 @@ export type TypedTaggedEventStreamEnvelopeMailSent = {
 export type TypedTaggedEventStreamEnvelopeMoleculeResolved = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: MoleculeResolvedPayload;
     run_id?: string;
@@ -7518,6 +7721,7 @@ export type TypedTaggedEventStreamEnvelopeMoleculeResolved = {
 export type TypedTaggedEventStreamEnvelopeOrderCompleted = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7536,6 +7740,7 @@ export type TypedTaggedEventStreamEnvelopeOrderCompleted = {
 export type TypedTaggedEventStreamEnvelopeOrderFailed = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7554,6 +7759,7 @@ export type TypedTaggedEventStreamEnvelopeOrderFailed = {
 export type TypedTaggedEventStreamEnvelopeOrderFired = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7572,6 +7778,7 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
 export type TypedTaggedEventStreamEnvelopePgCredentialResolved = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: PostgresCredentialResolvedPayload;
     run_id?: string;
@@ -7590,6 +7797,7 @@ export type TypedTaggedEventStreamEnvelopePgCredentialResolved = {
 export type TypedTaggedEventStreamEnvelopeProjectIdentityStamped = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: ProjectIdentityStampedPayload;
     run_id?: string;
@@ -7608,6 +7816,7 @@ export type TypedTaggedEventStreamEnvelopeProjectIdentityStamped = {
 export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7626,6 +7835,7 @@ export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
 export type TypedTaggedEventStreamEnvelopeRequestFailed = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RequestFailedPayload;
     run_id?: string;
@@ -7644,6 +7854,7 @@ export type TypedTaggedEventStreamEnvelopeRequestFailed = {
 export type TypedTaggedEventStreamEnvelopeRequestResultCityCreate = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: CityCreateSucceededPayload;
     run_id?: string;
@@ -7662,6 +7873,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultCityCreate = {
 export type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: CityUnregisterSucceededPayload;
     run_id?: string;
@@ -7680,6 +7892,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister = {
 export type TypedTaggedEventStreamEnvelopeRequestResultRigCreate = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RigCreateSucceededPayload;
     run_id?: string;
@@ -7698,6 +7911,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultRigCreate = {
 export type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionCreateSucceededPayload;
     run_id?: string;
@@ -7716,6 +7930,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate = {
 export type TypedTaggedEventStreamEnvelopeRequestResultSessionMessage = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionMessageSucceededPayload;
     run_id?: string;
@@ -7734,6 +7949,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionMessage = {
 export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionSubmitSucceededPayload;
     run_id?: string;
@@ -7752,6 +7968,7 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
 export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: RigProvisionProgressPayload;
     run_id?: string;
@@ -7770,6 +7987,7 @@ export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
 export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7788,6 +8006,7 @@ export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
 export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionLifecyclePayload;
     run_id?: string;
@@ -7806,6 +8025,7 @@ export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
 export type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionDrainAckedWithAssignedWorkPayload;
     run_id?: string;
@@ -7824,6 +8044,7 @@ export type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
 export type TypedTaggedEventStreamEnvelopeSessionDraining = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7842,6 +8063,7 @@ export type TypedTaggedEventStreamEnvelopeSessionDraining = {
 export type TypedTaggedEventStreamEnvelopeSessionIdleKilled = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7860,6 +8082,7 @@ export type TypedTaggedEventStreamEnvelopeSessionIdleKilled = {
 export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7878,6 +8101,7 @@ export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
 export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7896,6 +8120,7 @@ export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
 export type TypedTaggedEventStreamEnvelopeSessionResetStalled = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionResetStalledPayload;
     run_id?: string;
@@ -7914,6 +8139,7 @@ export type TypedTaggedEventStreamEnvelopeSessionResetStalled = {
 export type TypedTaggedEventStreamEnvelopeSessionStopped = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionLifecyclePayload;
     run_id?: string;
@@ -7932,6 +8158,7 @@ export type TypedTaggedEventStreamEnvelopeSessionStopped = {
 export type TypedTaggedEventStreamEnvelopeSessionStranded = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionStrandedPayload;
     run_id?: string;
@@ -7950,6 +8177,7 @@ export type TypedTaggedEventStreamEnvelopeSessionStranded = {
 export type TypedTaggedEventStreamEnvelopeSessionSuspended = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7968,6 +8196,7 @@ export type TypedTaggedEventStreamEnvelopeSessionSuspended = {
 export type TypedTaggedEventStreamEnvelopeSessionUndrained = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -7986,6 +8215,7 @@ export type TypedTaggedEventStreamEnvelopeSessionUndrained = {
 export type TypedTaggedEventStreamEnvelopeSessionUnknownState = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionUnknownStatePayload;
     run_id?: string;
@@ -8004,6 +8234,7 @@ export type TypedTaggedEventStreamEnvelopeSessionUnknownState = {
 export type TypedTaggedEventStreamEnvelopeSessionUpdated = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -8022,6 +8253,7 @@ export type TypedTaggedEventStreamEnvelopeSessionUpdated = {
 export type TypedTaggedEventStreamEnvelopeSessionWoke = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: NoPayload;
     run_id?: string;
@@ -8040,6 +8272,7 @@ export type TypedTaggedEventStreamEnvelopeSessionWoke = {
 export type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SessionLifecyclePayload;
     run_id?: string;
@@ -8058,6 +8291,7 @@ export type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed = {
 export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SupervisorFsPressureSkippedTickPayload;
     run_id?: string;
@@ -8076,6 +8310,7 @@ export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
 export type TypedTaggedEventStreamEnvelopeSupervisorRequest = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SupervisorRequestPayload;
     run_id?: string;
@@ -8094,6 +8329,7 @@ export type TypedTaggedEventStreamEnvelopeSupervisorRequest = {
 export type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SupervisorShutdownPayload;
     run_id?: string;
@@ -8112,6 +8348,7 @@ export type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested = {
 export type TypedTaggedEventStreamEnvelopeSupervisorStarted = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: SupervisorStartedPayload;
     run_id?: string;
@@ -8130,6 +8367,7 @@ export type TypedTaggedEventStreamEnvelopeSupervisorStarted = {
 export type TypedTaggedEventStreamEnvelopeWebhookReceived = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: WebhookReceivedPayload;
     run_id?: string;
@@ -8148,6 +8386,7 @@ export type TypedTaggedEventStreamEnvelopeWebhookReceived = {
 export type TypedTaggedEventStreamEnvelopeWebhookRejected = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: WebhookRejectedPayload;
     run_id?: string;
@@ -8166,6 +8405,7 @@ export type TypedTaggedEventStreamEnvelopeWebhookRejected = {
 export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload: WorkerOperationEventPayload;
     run_id?: string;

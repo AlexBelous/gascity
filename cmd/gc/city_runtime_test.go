@@ -1229,6 +1229,64 @@ func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(
 	}
 }
 
+func TestCityRuntimeControlDispatcherTickUsesDistinctCityWorkStore(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Prefix: "gc"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	sessionStore := beads.NewMemStore()
+	workStore := beads.NewMemStore()
+	if _, err := workStore.Create(beads.Bead{
+		ID:     "gc-control-work",
+		Title:  "control work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": cfg.Agents[0].QualifiedName(),
+		},
+	}); err != nil {
+		t.Fatalf("Create work: %v", err)
+	}
+	sp := runtime.NewFake()
+	cr := &CityRuntime{
+		cityPath:      t.TempDir(),
+		cityName:      "test-city",
+		cfg:           cfg,
+		sp:            sp,
+		dops:          newDrainOps(sp),
+		rec:           events.Discard,
+		sessionDrains: newDrainTracker(),
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+	}
+	cr.setControllerState(&controllerState{
+		cfg:               cfg,
+		sp:                sp,
+		cityBeadStore:     sessionStore,
+		cityWorkBeadStore: workStore,
+		beadStores:        map[string]beads.Store{},
+		cityName:          "test-city",
+		cityPath:          cr.cityPath,
+	})
+
+	cr.controlDispatcherTick(context.Background())
+
+	sessions, err := loadSessionBeads(sessionStore)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	if len(sessions) == 0 {
+		t.Fatal("control dispatcher tick did not materialize a session for city work demand")
+	}
+}
+
 func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")

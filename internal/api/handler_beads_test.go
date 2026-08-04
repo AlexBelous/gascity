@@ -400,6 +400,20 @@ func TestBeadStoresForIDUsesConfiguredRigPrefixBeforeFallback(t *testing.T) {
 	}
 }
 
+func TestBeadStoresForIDUsesDistinctCityWorkStoreForHQPrefix(t *testing.T) {
+	state := newFakeState(t)
+	coordinationStore := beads.NewMemStore()
+	workStore := beads.NewMemStore()
+	state.cityBeadStore = coordinationStore
+	state.stores[state.cityName] = workStore
+	state.cfg.Workspace.Prefix = "gc"
+
+	stores := New(state).beadStoresForID("gc-work")
+	if len(stores) != 2 || stores[0] != workStore || stores[1] != coordinationStore {
+		t.Fatalf("beadStoresForID(gc-work) = %#v, want [work, coordination]", stores)
+	}
+}
+
 func TestBeadStoresForIDUsesConfiguredHyphenatedRigPrefix(t *testing.T) {
 	state := newFakeState(t)
 	cityStore := beads.NewMemStore()
@@ -845,6 +859,35 @@ func TestBeadReadyFederatesCityStore(t *testing.T) {
 	if !found {
 		t.Fatalf("ready Items = %+v, want city bead %s", resp.Items, cityBead.ID)
 	}
+}
+
+func TestBeadReadyFederatesDistinctCityWorkStore(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	cityWorkStore := beads.NewMemStore()
+	state.stores[state.cityName] = cityWorkStore
+	work, err := cityWorkStore.Create(beads.Bead{ID: "gc-work", Title: "city work"})
+	if err != nil {
+		t.Fatalf("Create(city work): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/beads/ready"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items []beads.Bead `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode response: %v", err)
+	}
+	for _, item := range resp.Items {
+		if item.ID == work.ID {
+			return
+		}
+	}
+	t.Fatalf("ready Items = %+v, want authoritative city work bead %s", resp.Items, work.ID)
 }
 
 // TestBeadReadyDedupesCityAliasedStore mirrors the production wiring where

@@ -23,6 +23,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -314,8 +315,9 @@ func primeThenStartReconciler(ctx context.Context, cs *beads.CachingStore, agent
 }
 
 type controllerStoreSet struct {
-	rigs     map[string]beads.Store
-	cityWork beads.Store
+	rigs        map[string]beads.Store
+	cityWork    beads.Store
+	cityWorkErr error
 }
 
 // buildStores creates bead stores for each rig in cfg plus an authoritative
@@ -332,7 +334,8 @@ func (cs *controllerState) buildStores(cfg *config.City) controllerStoreSet {
 		opened, err := controllerStateOpenCityWorkStore(cs.cityPath, cfg, cs.rolloutFlags.BeadsConditionalWrites())
 		if err != nil {
 			cs.rolloutWarnf("api: authoritative city work store: %v\n", err)
-			built.cityWork = unavailableStore{err: fmt.Errorf("open authoritative city work store %s: %w", cs.cityPath, err)}
+			built.cityWorkErr = fmt.Errorf("open authoritative city work store %s: %w", cs.cityPath, err)
+			built.cityWork = unavailableStore{err: built.cityWorkErr}
 		} else {
 			built.cityWork = wrapWithCachingStore(cs.cacheCtx, wrapStoreWithBeadPolicies(opened.Store, cfg), cs.eventProv, true)
 		}
@@ -625,7 +628,8 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	cs.mu.RUnlock()
 
 	for _, store := range stores {
-		if cached, ok := store.(*beads.CachingStore); ok {
+		base, _, _ := unwrapBeadPolicyStore(store)
+		if cached, ok := base.(*beads.CachingStore); ok {
 			cached.ApplyEvent(evt.Type, evt.Payload)
 		}
 	}
@@ -689,6 +693,12 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 }
 
 func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store {
+	if store, known := cs.beadEventClassStoreLocked(evt); known {
+		if store == nil {
+			return nil
+		}
+		return []beads.Store{store}
+	}
 	if id := beadEventID(evt); id != "" && cs.cfg != nil {
 		if store, known := cs.beadEventConfiguredStoreLocked(id); known {
 			if store == nil {
@@ -709,6 +719,29 @@ func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store
 		stores = append(stores, cs.cityWorkBeadStore)
 	}
 	return stores
+}
+
+func (cs *controllerState) beadEventClassStoreLocked(evt events.Event) (beads.Store, bool) {
+	bead, ok := beads.DecodeBeadEventPayload(evt.Payload)
+	if !ok || cs.cfg == nil {
+		return nil, false
+	}
+	switch coordclass.Classify(bead) {
+	case coordclass.ClassWork:
+		return cs.beadEventConfiguredStoreLocked(bead.ID)
+	case coordclass.ClassGraph:
+		return resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv), true
+	case coordclass.ClassMessaging:
+		return resolveMailMessagesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv), true
+	case coordclass.ClassSessions:
+		return resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv), true
+	case coordclass.ClassOrders:
+		return resolveOrderStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv), true
+	case coordclass.ClassNudges:
+		return resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv), true
+	default:
+		return nil, false
+	}
 }
 
 func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Store, bool) {
@@ -779,6 +812,14 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	builtStores := cs.buildStores(cfg)
 	stores := builtStores.rigs
 	cityWorkStore := builtStores.cityWork
+	if builtStores.cityWorkErr != nil {
+		cs.mu.RLock()
+		previousCityWorkStore := cs.cityWorkBeadStore
+		cs.mu.RUnlock()
+		if previousCityWorkStore != nil {
+			cityWorkStore = previousCityWorkStore
+		}
+	}
 	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
 	// Capture the raw config from the same on-disk generation as cfg, outside
 	// the lock (it does a TOML parse). nil signals "keep the prior snapshot".

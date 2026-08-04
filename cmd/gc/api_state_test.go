@@ -2145,6 +2145,82 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	}
 }
 
+func TestControllerStateAppliesBeadEventsThroughPolicyWrapper(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{ID: "gc-work", Title: "work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	wrapped := wrapStoreWithBeadPolicies(cached, &config.City{})
+	updated := created
+	updated.Status = "in_progress"
+	payload, err := json.Marshal(updated)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"city": wrapped},
+		pokeCh:     make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadUpdated, Subject: created.ID, Payload: payload})
+
+	got, err := cached.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get cached: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("cached status = %q, want in_progress", got.Status)
+	}
+}
+
+func TestControllerStateRoutesHQEventsByCoordinationClass(t *testing.T) {
+	coordinationCache := beads.NewCachingStoreForTestWithPrefix(beads.NewMemStore(), "gc", nil)
+	workCache := beads.NewCachingStoreForTestWithPrefix(beads.NewMemStore(), "gc", nil)
+	for name, store := range map[string]*beads.CachingStore{"coordination": coordinationCache, "work": workCache} {
+		if err := store.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime(%s): %v", name, err)
+		}
+	}
+	cs := &controllerState{
+		cfg:               &config.City{Workspace: config.Workspace{Prefix: "gc"}},
+		cityBeadStore:     coordinationCache,
+		cityWorkBeadStore: workCache,
+		beadStores:        map[string]beads.Store{},
+		pokeCh:            make(chan struct{}, 2),
+	}
+
+	sessionBead := beads.Bead{ID: "gc-session", Type: "session", Title: "session", Status: "open"}
+	sessionPayload, err := json.Marshal(sessionBead)
+	if err != nil {
+		t.Fatalf("Marshal session: %v", err)
+	}
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadCreated, Subject: sessionBead.ID, Payload: sessionPayload})
+	if _, err := coordinationCache.Get(sessionBead.ID); err != nil {
+		t.Fatalf("coordination cache Get(session): %v", err)
+	}
+	if _, err := workCache.Get(sessionBead.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("work cache Get(session) error = %v, want ErrNotFound", err)
+	}
+
+	workBead := beads.Bead{ID: "gc-work", Type: "task", Title: "work", Status: "open"}
+	workPayload, err := json.Marshal(workBead)
+	if err != nil {
+		t.Fatalf("Marshal work: %v", err)
+	}
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadCreated, Subject: workBead.ID, Payload: workPayload})
+	if _, err := workCache.Get(workBead.ID); err != nil {
+		t.Fatalf("work cache Get(work): %v", err)
+	}
+	if _, err := coordinationCache.Get(workBead.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("coordination cache Get(work) error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 	backing := beads.NewMemStore()
 	created, err := backing.Create(beads.Bead{Title: "non-bd backing"})
@@ -2970,6 +3046,51 @@ provider = "file"
 	}
 	if got := cs.BeadStores()["demo"]; got != cs.cityWorkBeadStore {
 		t.Fatalf("BeadStores()[demo] = %T, want authoritative city work store", got)
+	}
+}
+
+func TestControllerStateUpdateRetainsHealthyCityWorkStoreWhenReopenFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"demo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	previousCityOpen := newControllerStateOpenCityStore
+	previousWorkOpen := controllerStateOpenCityWorkStore
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = previousCityOpen
+		controllerStateOpenCityWorkStore = previousWorkOpen
+	})
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+	controllerStateOpenCityWorkStore = func(string, *config.City, gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, errors.New("transient reopen failure")
+	}
+
+	healthy := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:               &config.City{Workspace: config.Workspace{Name: "demo"}},
+		cacheCtx:          context.Background(),
+		cityPath:          cityDir,
+		cityName:          "demo",
+		cityBeadStore:     beads.NewMemStore(),
+		cityWorkBeadStore: healthy,
+		beadStores:        map[string]beads.Store{},
+	}
+	cs.update(&config.City{Workspace: config.Workspace{Name: "demo"}}, runtime.NewFake())
+
+	if got := cs.cityWorkStore().Store; got != healthy {
+		t.Fatalf("city work store = %T %p, want retained healthy store %p", got, got, healthy)
 	}
 }
 

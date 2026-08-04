@@ -391,13 +391,15 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			all = append(all, b)
 		}
 	}
-	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
-	// beads) lives in the city store, so federate it explicitly first or HTTP
-	// `bd ready` would never surface it. In production BeadStores() also returns
-	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
-	// duplicate key in the rig loop below to avoid querying it twice.
-	federate("city", s.state.CityBeadStore())
 	cityName := s.state.CityName()
+	cityWorkStore := s.cityWorkBeadStore()
+	// City work and coordination normally alias. Split-store cities keep ready
+	// backlog work in the city entry returned by BeadStores while graph/session
+	// coordination remains in CityBeadStore, so federate both distinct stores.
+	federate("city work", cityWorkStore)
+	if coordinationStore := s.state.CityBeadStore(); coordinationStore != cityWorkStore {
+		federate("city coordination", coordinationStore)
+	}
 	for _, rigName := range rigNames {
 		if rigName == cityName {
 			continue // city store already federated explicitly above; production

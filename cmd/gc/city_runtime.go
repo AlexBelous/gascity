@@ -3037,14 +3037,9 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
-	// The control-dispatcher tick threads one city store as two roles at once:
-	// the session-bead store the desired-state build creates and updates session
-	// beads through (sessions — the build-fn's leading store param flows into
-	// agentBuildParams.beadStore and the collectAllOpenSessionInfos "city" arm)
-	// and the per-rig work tail (work). The session-sync and reconcile arms below
-	// take the same sessions store. Split into the class accessors so a future
-	// per-class backend routes each role independently; both collapse to the same
-	// store today, so the tick is byte-identical.
+	// The targeted tick keeps session lifecycle writes on the coordination store
+	// while sourcing city demand from the authoritative work store. They alias in
+	// a normal city and diverge in the split-store topology.
 	sessionsStore := cr.sessionsBeadStore()
 	if sessionsStore.Store == nil || cr.sessionDrains == nil {
 		return
@@ -3069,6 +3064,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		sessionBeads,
 		nil,
 		cr.stderr,
+		cr.cityWorkStore().Store,
 	)
 	desiredState := wfcResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(filteredCfg, cr.cityName, sessionBeads)

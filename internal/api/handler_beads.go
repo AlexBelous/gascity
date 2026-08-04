@@ -152,18 +152,34 @@ func (s *Server) findStore(rig string) beads.Store {
 	return nil
 }
 
+// cityWorkBeadStore returns the authoritative HQ work store. Controller state
+// exposes it under the city-name entry in BeadStores; single-store and seeded
+// states fall back to the coordination store.
+func (s *Server) cityWorkBeadStore() beads.Store {
+	if store := s.state.BeadStores()[s.state.CityName()]; store != nil {
+		return store
+	}
+	return s.state.CityBeadStore()
+}
+
 // beadStoresForID resolves the authoritative store for a bead ID using its
 // prefix/routes mapping when possible. If there is no routed match, it falls
 // back to the legacy store scan order.
 //
 // The result is the per-class by-id candidate set: a successful prefix/route
-// match returns the single store that owns the ID's namespace (which is already
-// the bead's class+rig store), and the unrouted fallback leads with the
-// city/HQ store ahead of the per-rig work stores. A graph-relocated city adds a
-// class-prefix arm so graph-class ids reach the dedicated graph store.
+// match returns the store that owns the ID's namespace. An HQ match leads with
+// the work store and retains the coordination store as a fallback because both
+// classes share the HQ prefix. The unrouted fallback scans city/HQ ahead of the
+// per-rig work stores. A graph-relocated city adds a class-prefix arm so
+// graph-class ids reach the dedicated graph store.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	id = strings.TrimSpace(id)
 	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
+		if store == s.cityWorkBeadStore() {
+			if coordinationStore := s.state.CityBeadStore(); coordinationStore != nil && coordinationStore != store {
+				return []beads.Store{store, coordinationStore}
+			}
+		}
 		return []beads.Store{store}
 	}
 	if prefix := beadPrefix(id); prefix != "" {
@@ -225,7 +241,7 @@ func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {
 	var bestStore beads.Store
 	bestLen := -1
 	if prefix := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); beadIDHasConfiguredPrefix(id, prefix) {
-		if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		if cityStore := s.cityWorkBeadStore(); cityStore != nil {
 			bestStore = cityStore
 			bestLen = len(prefix)
 		}
@@ -267,7 +283,7 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 	cityPath := strings.TrimSpace(s.state.CityPath())
 
 	if prefix == config.EffectiveHQPrefix(cfg) {
-		if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		if cityStore := s.cityWorkBeadStore(); cityStore != nil {
 			return cityStore
 		}
 	}
@@ -307,7 +323,7 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 			}
 			// Route points to the city itself (e.g. prefix "mc" → ".").
 			if cleanPath == filepath.Clean(cityPath) {
-				if cityStore := s.state.CityBeadStore(); cityStore != nil {
+				if cityStore := s.cityWorkBeadStore(); cityStore != nil {
 					return cityStore
 				}
 			}

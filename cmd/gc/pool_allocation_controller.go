@@ -388,11 +388,21 @@ func (cr *CityRuntime) enqueueRoutedWorkPoolAllocation(contribution readyRoutedW
 
 func (cr *CityRuntime) handleRoutedWorkPoolAllocation(ctx context.Context, hint routedWorkPoolAllocationHint) {
 	result, err := cr.reconcileRoutedWorkPoolAllocation(ctx, hint)
-	if err != nil {
-		fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s: %v; falling back to legacy reconciliation\n", cr.sessionStartLogPrefix(), hint.WorkID, err) //nolint:errcheck // fallback must remain visible
-	}
 	if err != nil || !result.Handled {
-		cr.requestReadyRoutedWorkLegacyFallback()
+		if cr.sessionStartRolloutMode() == rollout.Require {
+			if err != nil {
+				fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s: %v; parked in required keyed reconciliation\n", cr.sessionStartLogPrefix(), hint.WorkID, err) //nolint:errcheck // required-mode park must remain visible
+			} else {
+				fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s was not handled; parked in required keyed reconciliation\n", cr.sessionStartLogPrefix(), hint.WorkID) //nolint:errcheck // required-mode park must remain visible
+			}
+		} else {
+			if err != nil {
+				fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s: %v; falling back to legacy reconciliation\n", cr.sessionStartLogPrefix(), hint.WorkID, err) //nolint:errcheck // fallback must remain visible
+			} else {
+				fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s was not handled; falling back to legacy reconciliation\n", cr.sessionStartLogPrefix(), hint.WorkID) //nolint:errcheck // fallback must remain visible
+			}
+			cr.requestReadyRoutedWorkLegacyFallback()
+		}
 	}
 	if !result.Handled {
 		return

@@ -1723,6 +1723,122 @@ func TestRoutedWorkPoolAllocationRefusedGenericReuseFallsBackWithoutGrowth(t *te
 	}
 }
 
+func TestRoutedWorkPoolAllocationReuseUncertaintyRespectsRolloutMode(t *testing.T) {
+	for _, failure := range []struct {
+		name      string
+		wantBound bool
+	}{
+		{name: "authorization refusal"},
+		{name: "assignment read error"},
+		{name: "unsupported fenced provider", wantBound: true},
+		{name: "post-idle authorization drift", wantBound: true},
+	} {
+		for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+			t.Run(failure.name+"/"+string(mode), func(t *testing.T) {
+				fixture, firstWork, info := prepareIdleGenericPoolMemberForReuse(t, true, 2)
+				fixture.cr.sessionStartMode = mode
+				if err := fixture.store.Close(firstWork.ID); err != nil {
+					t.Fatalf("close previous trigger work: %v", err)
+				}
+				work, err := fixture.store.Create(beads.Bead{
+					Title: "work under reuse uncertainty", Type: "task", Status: "open",
+					Metadata: map[string]string{"gc.routed_to": "worker"},
+				})
+				if err != nil {
+					t.Fatalf("create routed work: %v", err)
+				}
+				underlying := fixture.store
+				baselineNudges := providerAllNudgeCalls(fixture.provider)
+				baselineStarts := providerCallCount(fixture.provider, "Start")
+
+				switch failure.name {
+				case "authorization refusal":
+					if err := fixture.provider.SetMeta(info.SessionNameMetadata, "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
+						t.Fatalf("replace runtime token: %v", err)
+					}
+				case "assignment read error":
+					hooked := &poolReuseAssignedListErrorStore{Store: underlying, err: errors.New("assignment store unavailable")}
+					fixture.store = hooked
+					fixture.cr.cs.mu.Lock()
+					fixture.cr.cs.cityBeadStore = hooked
+					fixture.cr.cs.mu.Unlock()
+				case "unsupported fenced provider":
+					provider := &poolReuseNoFencedProvider{Provider: fixture.cr.cs.sp, fake: fixture.provider}
+					fixture.cr.sp = provider
+					fixture.cr.cs.mu.Lock()
+					fixture.cr.cs.sp = provider
+					fixture.cr.cs.mu.Unlock()
+				case "post-idle authorization drift":
+					idleStarted := make(chan struct{})
+					idleGate := make(chan struct{})
+					fixture.provider.WaitForIdleStarted[info.SessionNameMetadata] = idleStarted
+					fixture.provider.WaitForIdleGates[info.SessionNameMetadata] = idleGate
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+							WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+						})
+					}()
+					awaitClose(t, idleStarted, "pool reuse idle wait before authorization drift")
+					if err := underlying.SetMetadata(info.ID, "state_reason", "post-idle-authorization-drift"); err != nil {
+						t.Fatalf("advance rebound row during idle wait: %v", err)
+					}
+					close(idleGate)
+					awaitClose(t, done, "pool reuse after authorization drift")
+				}
+				if failure.name != "post-idle authorization drift" {
+					fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+						WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+					})
+				}
+
+				stored, err := underlying.Get(info.ID)
+				if err != nil {
+					t.Fatalf("read session after reuse uncertainty: %v", err)
+				}
+				if got := stored.Metadata[beadmeta.TriggerBeadIDMetadataKey]; (got == work.ID) != failure.wantBound {
+					t.Fatalf("trigger after %s = %q, want rebound=%t", failure.name, got, failure.wantBound)
+				}
+				if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
+					t.Fatalf("nudges after %s = %d, want unchanged %d", failure.name, got, baselineNudges)
+				}
+				if got := providerCallCount(fixture.provider, "Start"); got != baselineStarts {
+					t.Fatalf("starts after %s = %d, want unchanged %d", failure.name, got, baselineStarts)
+				}
+				if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
+					t.Fatalf("stops after %s = %d, want 0", failure.name, got)
+				}
+				if mode == rollout.Auto {
+					assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+					if !strings.Contains(fixture.stderr.String(), "falling back to legacy reconciliation") {
+						t.Fatalf("auto diagnostic = %q, want visible legacy fallback", fixture.stderr.String())
+					}
+				} else {
+					if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+						t.Fatalf("require fallback after %s = (pending=%t, pokes=%d), want parked", failure.name, fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+					}
+					if fixture.cr.sessionStartOwnershipState() != sessionStartOwnershipKeyed ||
+						!strings.Contains(fixture.stderr.String(), "parked in required keyed reconciliation") {
+						t.Fatalf("require disposition after %s = (ownership=%v, stderr=%q), want visible keyed park", failure.name, fixture.cr.sessionStartOwnershipState(), fixture.stderr.String())
+					}
+					if failure.wantBound {
+						fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+							WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+						})
+						if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
+							t.Fatalf("parked binding replay nudges = %d, want unchanged %d", got, baselineNudges)
+						}
+						if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+							t.Fatal("parked binding replay escaped to legacy")
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestRoutedWorkPoolAllocationStaleGenericReuseRevisionFallsBackWithoutGrowth(t *testing.T) {
 	fixture, firstWork, info := prepareIdleGenericPoolMemberForReuse(t, true, 2)
 	if err := fixture.store.Close(firstWork.ID); err != nil {
@@ -3752,6 +3868,39 @@ func (s *poolReuseAssignedListHookStore) List(query beads.ListQuery) ([]beads.Be
 
 func (s *poolReuseAssignedListHookStore) ConditionalWritesResolveTarget() beads.Store {
 	return s.Store
+}
+
+type poolReuseAssignedListErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s *poolReuseAssignedListErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Assignee != "" || len(query.Assignees) > 0 {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+func (s *poolReuseAssignedListErrorStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.Store
+}
+
+type poolReuseNoFencedProvider struct {
+	runtime.Provider
+	fake *runtime.Fake
+}
+
+func (p *poolReuseNoFencedProvider) Pending(name string) (*runtime.PendingInteraction, error) {
+	return p.fake.Pending(name)
+}
+
+func (p *poolReuseNoFencedProvider) Respond(name string, response runtime.InteractionResponse) error {
+	return p.fake.Respond(name, response)
+}
+
+func (p *poolReuseNoFencedProvider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	return p.fake.WaitForIdle(ctx, name, timeout)
 }
 
 type poolReuseListCountingStore struct {

@@ -474,20 +474,6 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 		}
 		return routedWorkPoolAllocationResult{}, nil
 	}
-	decision := decideRoutedWorkPoolAllocationShadow(readyRoutedWorkDemandContribution{
-		WorkID:              work.ID,
-		PoolTarget:          hint.PoolTarget,
-		SourceStore:         hint.SourceStore,
-		ContributionPresent: policy.contributionPresent,
-		AllocationPolicy:    policy,
-	}, cr.poolMembershipShadow.observe(hint.PoolTarget))
-	if decision.action != poolAllocationShadowStartOne || decision.poolSlot <= 0 {
-		return routedWorkPoolAllocationResult{}, nil
-	}
-	if !routedWorkPoolProviderHealthy(snapshot.CityPath, snapshot.Config, agent) {
-		return routedWorkPoolAllocationResult{}, nil
-	}
-
 	request := SessionRequest{
 		Template:       hint.PoolTarget,
 		BeadPriority:   beadPriority(work),
@@ -511,6 +497,25 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 		rigs:      snapshot.Config.Rigs,
 		beadStore: snapshot.Store,
 		stderr:    cr.sessionStartStderr(),
+	}
+	if policy.maxActiveSessions == 1 && agent.UsesCanonicalSingletonPoolIdentity() {
+		reused, reuseErr := cr.reuseIdleRoutedWorkPoolSingleton(ctx, snapshot, agent, work, hint, bp, request)
+		if reuseErr != nil || reused.Handled {
+			return reused, reuseErr
+		}
+	}
+	decision := decideRoutedWorkPoolAllocationShadow(readyRoutedWorkDemandContribution{
+		WorkID:              work.ID,
+		PoolTarget:          hint.PoolTarget,
+		SourceStore:         hint.SourceStore,
+		ContributionPresent: policy.contributionPresent,
+		AllocationPolicy:    policy,
+	}, cr.poolMembershipShadow.observe(hint.PoolTarget))
+	if decision.action != poolAllocationShadowStartOne || decision.poolSlot <= 0 {
+		return routedWorkPoolAllocationResult{}, nil
+	}
+	if !routedWorkPoolProviderHealthy(snapshot.CityPath, snapshot.Config, agent) {
+		return routedWorkPoolAllocationResult{}, nil
 	}
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(agent, decision.poolSlot)
 	metadata := poolTriggerMetadata(bp, agent, qualifiedInstance, request)

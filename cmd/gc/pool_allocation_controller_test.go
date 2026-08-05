@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -438,6 +439,346 @@ func TestRoutedWorkPoolAllocationStartsColdCanonicalSingletonAndFallsBackAtCap(t
 	if starts := fixture.provider.CountCalls("Start", first.Session.SessionName); starts != 1 {
 		t.Fatalf("singleton provider starts = %d, want 1", starts)
 	}
+}
+
+func TestRoutedWorkPoolAllocationReusesIdleCanonicalSingletonForNewWork(t *testing.T) {
+	opened, err := beads.OpenStoreAtForCity(t.Context(), beads.StoreOpenOptions{
+		Provider:          "file",
+		OpenFileStore:     func() (beads.Store, error) { return beads.NewMemStore(), nil },
+		ConditionalWrites: gate.Auto,
+	})
+	if err != nil {
+		t.Fatalf("open conditional-write singleton store: %v", err)
+	}
+	fixture := newRoutedWorkPoolAllocationFixture(t, opened.Store)
+	maximum := 1
+	fixture.cr.cfg.Agents[0].MaxActiveSessions = &maximum
+	fixture.cr.cfg.Agents[0].Provider = "claude"
+	fixture.cr.cfg.Agents[0].WorkDir = "worker-root"
+	fixture.cr.cfg.Agents[0].Nudge = "Run gc hook --claim --json now."
+
+	firstWork, err := fixture.store.Create(beads.Bead{
+		Title:    "first singleton work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create first singleton work: %v", err)
+	}
+	firstHint := routedWorkPoolAllocationHint{
+		WorkID:      firstWork.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+	}
+	first, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), firstHint)
+	if err != nil || !first.Handled || !first.Created {
+		t.Fatalf("allocate cold singleton = (%+v, %v), want one keyed create", first, err)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(first.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "cold canonical singleton to start")
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close first singleton work: %v", err)
+	}
+	active, err := sessionFrontDoor(fixture.store).Get(first.Session.ID)
+	if err != nil {
+		t.Fatalf("read active singleton: %v", err)
+	}
+	setRoutedWorkPoolRuntimeIdentity(t, fixture, active)
+	fixture.provider.WaitForIdleErrors[first.Session.SessionName] = nil
+	baselineNudges := fixture.provider.CountCalls("Nudge", first.Session.SessionName) +
+		fixture.provider.CountCalls("NudgeNow", first.Session.SessionName)
+
+	secondWork, err := fixture.store.Create(beads.Bead{
+		Title:  "second singleton work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":                    "worker",
+			beadmeta.PackMetadataKey:          "review-pack",
+			beadmeta.PackWorkspaceMetadataKey: "workspace-b",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create second singleton work: %v", err)
+	}
+	secondHint := routedWorkPoolAllocationHint{
+		WorkID:      secondWork.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+	}
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), secondHint)
+
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load singleton sessions after reuse: %v", err)
+	}
+	open := infos.OpenInfos()
+	if len(open) != 1 || open[0].ID != first.Session.ID {
+		t.Fatalf("open singleton sessions after reuse = %+v, want only %q", open, first.Session.ID)
+	}
+	stored, err := fixture.store.Get(first.Session.ID)
+	if err != nil {
+		t.Fatalf("read rebound singleton session: %v", err)
+	}
+	wantWorkDir := filepath.Join(fixture.cr.cityPath, "review-pack", "workspace-b")
+	if stored.Metadata[beadmeta.TriggerBeadIDMetadataKey] != secondWork.ID ||
+		stored.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] != secondHint.SourceStore ||
+		stored.Metadata[beadmeta.PackMetadataKey] != "review-pack" ||
+		stored.Metadata[beadmeta.PackWorkspaceMetadataKey] != "workspace-b" ||
+		stored.Metadata[beadmeta.WorkDirMetadataKey] != wantWorkDir ||
+		stored.Metadata[beadmeta.LegacyWorkDirMetadataKey] != wantWorkDir {
+		t.Fatalf("rebound singleton trigger metadata = %+v, want exact second-work provenance; fallback=(%t,%d) stderr=%q",
+			stored.Metadata, fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh), fixture.stderr.String())
+	}
+	if got := fixture.provider.CountCalls("Start", first.Session.SessionName); got != 1 {
+		t.Fatalf("provider Start calls after singleton reuse = %d, want 1", got)
+	}
+	if got := fixture.provider.CountCalls("Stop", first.Session.SessionName); got != 0 {
+		t.Fatalf("provider Stop calls after singleton reuse = %d, want 0", got)
+	}
+	if got := fixture.provider.CountCalls("Nudge", first.Session.SessionName) +
+		fixture.provider.CountCalls("NudgeNow", first.Session.SessionName); got != baselineNudges+1 {
+		t.Fatalf("claim nudge calls after singleton reuse = %d, want %d", got, baselineNudges+1)
+	}
+	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after singleton reuse = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	}
+
+	reboundRevision := stored.Revision
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), secondHint)
+	replayed, err := fixture.store.Get(first.Session.ID)
+	if err != nil {
+		t.Fatalf("read singleton session after replay: %v", err)
+	}
+	if replayed.Revision != reboundRevision {
+		t.Fatalf("singleton replay revision = %d, want unchanged %d", replayed.Revision, reboundRevision)
+	}
+	if got := fixture.provider.CountCalls("Nudge", first.Session.SessionName) +
+		fixture.provider.CountCalls("NudgeNow", first.Session.SessionName); got != baselineNudges+1 {
+		t.Fatalf("claim nudge calls after replay = %d, want %d", got, baselineNudges+1)
+	}
+	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after singleton replay = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	}
+}
+
+func TestRoutedWorkPoolSingletonReuseLeavesAmbiguousStatesLegacyOwned(t *testing.T) {
+	tests := []struct {
+		name             string
+		conditionalStore bool
+		keepPreviousOpen bool
+		mutate           func(testing.TB, routedWorkPoolAllocationFixture, sessionpkg.Info, beads.Bead)
+	}{
+		{
+			name:             "human attached",
+			conditionalStore: true,
+			mutate: func(_ testing.TB, fixture routedWorkPoolAllocationFixture, info sessionpkg.Info, _ beads.Bead) {
+				fixture.provider.SetAttached(info.SessionNameMetadata, true)
+			},
+		},
+		{
+			name:             "pending interaction",
+			conditionalStore: true,
+			mutate: func(_ testing.TB, fixture routedWorkPoolAllocationFixture, info sessionpkg.Info, _ beads.Bead) {
+				fixture.provider.SetPendingInteraction(info.SessionNameMetadata, &runtime.PendingInteraction{RequestID: "approval-1"})
+			},
+		},
+		{
+			name:             "actionable assigned work",
+			conditionalStore: true,
+			mutate: func(t testing.TB, fixture routedWorkPoolAllocationFixture, info sessionpkg.Info, _ beads.Bead) {
+				t.Helper()
+				if _, err := fixture.store.Create(beads.Bead{Title: "already assigned", Type: "task", Status: "open", Assignee: info.ID}); err != nil {
+					t.Fatalf("create assigned work: %v", err)
+				}
+			},
+		},
+		{
+			name:             "previous trigger still open",
+			conditionalStore: true,
+			keepPreviousOpen: true,
+		},
+		{
+			name:             "membership uncertified",
+			conditionalStore: true,
+			mutate: func(_ testing.TB, fixture routedWorkPoolAllocationFixture, _ sessionpkg.Info, _ beads.Bead) {
+				fixture.cr.poolMembershipShadow.invalidate(poolMembershipUncertifiedSnapshotGap)
+			},
+		},
+		{
+			name:             "membership no longer sole",
+			conditionalStore: true,
+			mutate: func(t testing.TB, fixture routedWorkPoolAllocationFixture, info sessionpkg.Info, _ beads.Bead) {
+				t.Helper()
+				duplicate := info
+				duplicate.ID = info.ID + "-duplicate"
+				duplicate.InstanceToken = info.InstanceToken + "-duplicate"
+				duplicate.SessionName = info.SessionName + "-duplicate"
+				duplicate.SessionNameMetadata = duplicate.SessionName
+				if err := fixture.cr.poolMembershipShadow.replace(fixture.cr.cfg, duplicate); err != nil {
+					t.Fatalf("publish duplicate membership: %v", err)
+				}
+			},
+		},
+		{
+			name:             "runtime instance token drift",
+			conditionalStore: true,
+			mutate: func(t testing.TB, fixture routedWorkPoolAllocationFixture, info sessionpkg.Info, _ beads.Bead) {
+				t.Helper()
+				if err := fixture.provider.SetMeta(info.SessionNameMetadata, "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
+					t.Fatalf("replace runtime instance token: %v", err)
+				}
+			},
+		},
+		{
+			name:             "new work route changed",
+			conditionalStore: true,
+			mutate: func(t testing.TB, fixture routedWorkPoolAllocationFixture, _ sessionpkg.Info, work beads.Bead) {
+				t.Helper()
+				if err := fixture.store.SetMetadata(work.ID, "gc.routed_to", "other"); err != nil {
+					t.Fatalf("change new work route: %v", err)
+				}
+			},
+		},
+		{
+			name: "conditional writes unavailable",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, firstWork, info := prepareIdleCanonicalSingletonForReuse(t, test.conditionalStore)
+			if !test.keepPreviousOpen {
+				if err := fixture.store.Close(firstWork.ID); err != nil {
+					t.Fatalf("close previous trigger work: %v", err)
+				}
+			}
+			secondWork, err := fixture.store.Create(beads.Bead{
+				Title:    "second singleton work",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			})
+			if err != nil {
+				t.Fatalf("create second singleton work: %v", err)
+			}
+			if test.mutate != nil {
+				test.mutate(t, fixture, info, secondWork)
+			}
+			before, err := fixture.store.Get(info.ID)
+			if err != nil {
+				t.Fatalf("read singleton before refused reuse: %v", err)
+			}
+			baselineNudges := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
+				fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata)
+
+			fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+				WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+			})
+
+			after, err := fixture.store.Get(info.ID)
+			if err != nil {
+				t.Fatalf("read singleton after refused reuse: %v", err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refused reuse changed durable session\n before=%+v\n  after=%+v", before, after)
+			}
+			if got := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
+				fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata); got != baselineNudges {
+				t.Fatalf("refused reuse nudge calls = %d, want unchanged %d", got, baselineNudges)
+			}
+			if got := fixture.provider.CountCalls("Start", info.SessionNameMetadata); got != 1 {
+				t.Fatalf("refused reuse Start calls = %d, want 1", got)
+			}
+			if got := fixture.provider.CountCalls("Stop", info.SessionNameMetadata); got != 0 {
+				t.Fatalf("refused reuse Stop calls = %d, want 0", got)
+			}
+			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		})
+	}
+}
+
+func TestRoutedWorkPoolSingletonReuseFallsBackAfterUnconfirmedIdleDelivery(t *testing.T) {
+	fixture, firstWork, info := prepareIdleCanonicalSingletonForReuse(t, true)
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close previous trigger work: %v", err)
+	}
+	fixture.provider.WaitForIdleErrors[info.SessionNameMetadata] = errors.New("not idle")
+	secondWork, err := fixture.store.Create(beads.Bead{
+		Title:    "second singleton work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create second singleton work: %v", err)
+	}
+	baselineNudges := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
+		fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata)
+
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+		WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+	})
+
+	stored, err := fixture.store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("read rebound singleton: %v", err)
+	}
+	if stored.Metadata[beadmeta.TriggerBeadIDMetadataKey] != secondWork.ID {
+		t.Fatalf("rebound trigger = %q, want durable %q despite unconfirmed delivery", stored.Metadata[beadmeta.TriggerBeadIDMetadataKey], secondWork.ID)
+	}
+	if got := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
+		fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata); got != baselineNudges {
+		t.Fatalf("unconfirmed delivery nudge calls = %d, want unchanged %d", got, baselineNudges)
+	}
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+}
+
+func TestRoutedWorkPoolSingletonReuseDoesNotStartAfterCommittedBindingLosesAuthorization(t *testing.T) {
+	fixture, firstWork, info := prepareIdleCanonicalSingletonForReuse(t, true)
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close previous trigger work: %v", err)
+	}
+	secondWork, err := fixture.store.Create(beads.Bead{
+		Title:    "second singleton work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create second singleton work: %v", err)
+	}
+	underlying := fixture.store
+	hooked := &postRebindGetStore{
+		Store:     underlying,
+		sessionID: info.ID,
+		workID:    secondWork.ID,
+		after: func() {
+			if err := underlying.Close(info.ID); err != nil {
+				t.Fatalf("retire singleton after committed rebind: %v", err)
+			}
+			fixture.cr.poolMembershipShadow.remove(info.ID)
+		},
+	}
+	fixture.store = hooked
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.cityBeadStore = hooked
+	fixture.cr.cs.mu.Unlock()
+
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+		WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+	})
+
+	snapshot, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load sessions after lost reuse authorization: %v", err)
+	}
+	if open := snapshot.OpenInfos(); len(open) != 0 {
+		t.Fatalf("open sessions after lost reuse authorization = %+v, want no replacement after %q retired", open, info.ID)
+	}
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
 }
 
 func TestRoutedWorkPoolAllocationCanonicalSingletonRetiresByExactDrainAck(t *testing.T) {
@@ -1948,6 +2289,26 @@ type routedWorkPoolAllocationFixture struct {
 	stderr   *bytes.Buffer
 }
 
+type postRebindGetStore struct {
+	beads.Store
+	sessionID string
+	workID    string
+	after     func()
+	once      sync.Once
+}
+
+func (s *postRebindGetStore) Get(id string) (beads.Bead, error) {
+	row, err := s.Store.Get(id)
+	if err == nil && id == s.sessionID && row.Metadata[beadmeta.TriggerBeadIDMetadataKey] == s.workID {
+		s.once.Do(s.after)
+	}
+	return row, err
+}
+
+func (s *postRebindGetStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.Store
+}
+
 func newRoutedWorkPoolAllocationFixture(t *testing.T, store beads.Store) routedWorkPoolAllocationFixture {
 	t.Helper()
 	unlimited := -1
@@ -1989,6 +2350,70 @@ func newRoutedWorkPoolAllocationFixture(t *testing.T, store beads.Store) routedW
 	}
 	t.Cleanup(cr.stopSessionStartController)
 	return routedWorkPoolAllocationFixture{cr: cr, store: store, provider: provider, stderr: stderr}
+}
+
+func prepareIdleCanonicalSingletonForReuse(t *testing.T, conditional bool) (routedWorkPoolAllocationFixture, beads.Bead, sessionpkg.Info) {
+	t.Helper()
+	var store beads.Store = beads.NewMemStore()
+	if conditional {
+		opened, err := beads.OpenStoreAtForCity(t.Context(), beads.StoreOpenOptions{
+			Provider:          "file",
+			OpenFileStore:     func() (beads.Store, error) { return beads.NewMemStore(), nil },
+			ConditionalWrites: gate.Auto,
+		})
+		if err != nil {
+			t.Fatalf("open conditional-write singleton store: %v", err)
+		}
+		store = opened.Store
+	}
+	fixture := newRoutedWorkPoolAllocationFixture(t, store)
+	maximum := 1
+	fixture.cr.cfg.Agents[0].MaxActiveSessions = &maximum
+	fixture.cr.cfg.Agents[0].Provider = "claude"
+	fixture.cr.cfg.Agents[0].Nudge = "Run gc hook --claim --json now."
+	firstWork, err := fixture.store.Create(beads.Bead{
+		Title:    "first singleton work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create first singleton work: %v", err)
+	}
+	first, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+		WorkID: firstWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+	})
+	if err != nil || !first.Handled || !first.Created {
+		t.Fatalf("allocate cold singleton = (%+v, %v), want one create", first, err)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(first.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "cold singleton to start before reuse refusal")
+	info, err := sessionFrontDoor(fixture.store).Get(first.Session.ID)
+	if err != nil {
+		t.Fatalf("read active singleton: %v", err)
+	}
+	setRoutedWorkPoolRuntimeIdentity(t, fixture, info)
+	fixture.provider.WaitForIdleErrors[info.SessionNameMetadata] = nil
+	return fixture, firstWork, info
+}
+
+func setRoutedWorkPoolRuntimeIdentity(t testing.TB, fixture routedWorkPoolAllocationFixture, info sessionpkg.Info) {
+	t.Helper()
+	// The wait-idle worker path resolves its provider family from the durable
+	// session record. Production rows have this after provider resolution; the
+	// direct keyed-start fixture bypasses that legacy metadata-refresh pass.
+	if err := fixture.store.SetMetadata(info.ID, "provider_kind", "claude"); err != nil {
+		t.Fatalf("stamp singleton provider family: %v", err)
+	}
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":     info.ID,
+		"GC_INSTANCE_TOKEN": info.InstanceToken,
+	} {
+		if err := fixture.provider.SetMeta(info.SessionNameMetadata, key, value); err != nil {
+			t.Fatalf("set singleton runtime metadata %s: %v", key, err)
+		}
+	}
 }
 
 func assertRoutedWorkPoolAllocationFallback(t *testing.T, cr *CityRuntime) {

@@ -32,6 +32,7 @@ type poolMembershipContribution struct {
 
 type poolMembershipState struct {
 	bySession map[string]poolMembershipContribution
+	memberIDs map[string]map[string]struct{}
 	members   map[string]int
 	occupied  map[string]int
 	slots     map[string]map[int]string
@@ -67,6 +68,7 @@ func newPoolMembershipIndex() *poolMembershipIndex {
 func newPoolMembershipState() poolMembershipState {
 	return poolMembershipState{
 		bySession: make(map[string]poolMembershipContribution),
+		memberIDs: make(map[string]map[string]struct{}),
 		members:   make(map[string]int),
 		occupied:  make(map[string]int),
 		slots:     make(map[string]map[int]string),
@@ -178,6 +180,12 @@ func (s *poolMembershipState) add(contribution poolMembershipContribution) error
 		slots[contribution.slot] = contribution.sessionID
 	}
 	s.bySession[contribution.sessionID] = contribution
+	ids := s.memberIDs[contribution.poolTarget]
+	if ids == nil {
+		ids = make(map[string]struct{})
+		s.memberIDs[contribution.poolTarget] = ids
+	}
+	ids[contribution.sessionID] = struct{}{}
 	s.members[contribution.poolTarget]++
 	if contribution.countsAgainstCap {
 		s.occupied[contribution.poolTarget]++
@@ -191,6 +199,12 @@ func (s *poolMembershipState) remove(sessionID string) {
 		return
 	}
 	delete(s.bySession, sessionID)
+	if ids := s.memberIDs[old.poolTarget]; ids != nil {
+		delete(ids, sessionID)
+		if len(ids) == 0 {
+			delete(s.memberIDs, old.poolTarget)
+		}
+	}
 	if old.slot > 0 {
 		if slots := s.slots[old.poolTarget]; slots != nil && slots[old.slot] == sessionID {
 			delete(slots, old.slot)
@@ -291,6 +305,37 @@ func (i *poolMembershipIndex) observe(poolTarget string) poolMembershipObservati
 		revision:     i.revision,
 		reason:       i.reason,
 	}
+}
+
+// observeSoleMember returns the certified observation and the only durable
+// member ID when the pool contains exactly one member. The per-pool ID set is
+// maintained with the existing counters, so this never scans the fleet.
+func (i *poolMembershipIndex) observeSoleMember(poolTarget string) (poolMembershipObservation, string, bool) {
+	if i == nil {
+		return poolMembershipObservation{reason: poolMembershipUncertifiedNotInitialized}, "", false
+	}
+	poolTarget = strings.TrimSpace(poolTarget)
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	observation := poolMembershipObservation{
+		members:      i.state.members[poolTarget],
+		occupied:     i.state.occupied[poolTarget],
+		nextFreeSlot: lowestFreePositivePoolSlot(i.state.slots[poolTarget]),
+		certified:    i.certified,
+		revision:     i.revision,
+		reason:       i.reason,
+	}
+	if !observation.certified || observation.members != 1 {
+		return observation, "", false
+	}
+	ids := i.state.memberIDs[poolTarget]
+	if len(ids) != 1 {
+		return observation, "", false
+	}
+	for id := range ids {
+		return observation, id, true
+	}
+	return observation, "", false
 }
 
 // observeOccupiedMember returns the same certified observation plus whether

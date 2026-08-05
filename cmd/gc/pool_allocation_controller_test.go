@@ -1138,6 +1138,15 @@ func TestRoutedWorkPoolAllocationRefusesReuseDriftAfterIdleWait(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "durable session revision",
+			mutate: func(t testing.TB, fixture routedWorkPoolAllocationFixture, selected, _ sessionpkg.Info, _ beads.Bead) {
+				t.Helper()
+				if err := fixture.store.SetMetadata(selected.ID, "state_reason", "concurrent-revision-only-write"); err != nil {
+					t.Fatalf("advance rebound session revision after idle wait: %v", err)
+				}
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1176,6 +1185,122 @@ func TestRoutedWorkPoolAllocationRefusesReuseDriftAfterIdleWait(t *testing.T) {
 			}
 			if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
 				t.Fatalf("stops after %s = %d, want 0", test.name, got)
+			}
+			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		})
+	}
+}
+
+func TestRoutedWorkPoolAllocationRefusesReboundRevisionDriftBeforeIdleWait(t *testing.T) {
+	fixture, firstWork, info := prepareIdleGenericPoolMemberForReuse(t, true, 2)
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close previous trigger work: %v", err)
+	}
+	work, err := fixture.store.Create(beads.Bead{
+		Title: "work racing rebound authorization", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create routed work: %v", err)
+	}
+	underlying := fixture.store
+	hooked := &poolReusePersistedReadHookStore{
+		Store: underlying, sessionID: info.ID, workID: work.ID,
+		beforeReturn: func() {
+			if err := underlying.SetMetadata(info.ID, "state_reason", "concurrent-revision-only-write"); err != nil {
+				t.Errorf("advance rebound session revision: %v", err)
+			}
+		},
+	}
+	fixture.store = hooked
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.cityBeadStore = hooked
+	fixture.cr.cs.mu.Unlock()
+	baselineNudges := providerAllNudgeCalls(fixture.provider)
+	baselineStarts := providerCallCount(fixture.provider, "Start")
+
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+		WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+	})
+
+	stored, err := underlying.Get(info.ID)
+	if err != nil {
+		t.Fatalf("read session after revision drift: %v", err)
+	}
+	if stored.Metadata[beadmeta.TriggerBeadIDMetadataKey] != work.ID || stored.Metadata["state_reason"] != "concurrent-revision-only-write" {
+		t.Fatalf("durable session after revision drift = %#v, want committed binding plus concurrent write", stored.Metadata)
+	}
+	if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
+		t.Fatalf("nudges after rebound revision drift = %d, want unchanged %d", got, baselineNudges)
+	}
+	if got := providerCallCount(fixture.provider, "Start"); got != baselineStarts {
+		t.Fatalf("starts after rebound revision drift = %d, want unchanged %d", got, baselineStarts)
+	}
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+}
+
+func TestRoutedWorkPoolAllocationRefusesUnavailableReboundRevision(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		afterIdle bool
+	}{
+		{name: "immediate reread"},
+		{name: "post-idle reread", afterIdle: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, firstWork, info := prepareIdleGenericPoolMemberForReuse(t, true, 2)
+			if err := fixture.store.Close(firstWork.ID); err != nil {
+				t.Fatalf("close previous trigger work: %v", err)
+			}
+			work, err := fixture.store.Create(beads.Bead{
+				Title: "work with unavailable rebound revision", Type: "task", Status: "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			})
+			if err != nil {
+				t.Fatalf("create routed work: %v", err)
+			}
+			underlying := fixture.store
+			zeroRevision := &atomic.Bool{}
+			hooked := &poolReusePersistedReadHookStore{
+				Store: underlying, sessionID: info.ID, workID: work.ID, zeroRevision: zeroRevision,
+			}
+			fixture.store = hooked
+			fixture.cr.cs.mu.Lock()
+			fixture.cr.cs.cityBeadStore = hooked
+			fixture.cr.cs.mu.Unlock()
+			baselineNudges := providerAllNudgeCalls(fixture.provider)
+			if !test.afterIdle {
+				zeroRevision.Store(true)
+				fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+					WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+				})
+			} else {
+				idleStarted := make(chan struct{})
+				idleGate := make(chan struct{})
+				fixture.provider.WaitForIdleStarted[info.SessionNameMetadata] = idleStarted
+				fixture.provider.WaitForIdleGates[info.SessionNameMetadata] = idleGate
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+						WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+					})
+				}()
+				awaitClose(t, idleStarted, "pool reuse idle wait before zero revision")
+				zeroRevision.Store(true)
+				close(idleGate)
+				awaitClose(t, done, "pool reuse after zero revision")
+			}
+
+			if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
+				t.Fatalf("nudges with unavailable %s = %d, want unchanged %d", test.name, got, baselineNudges)
+			}
+			stored, err := underlying.Get(info.ID)
+			if err != nil {
+				t.Fatalf("read durable session after unavailable revision: %v", err)
+			}
+			if stored.Revision <= 0 {
+				t.Fatalf("underlying durable revision = %d, want test seam only to hide it", stored.Revision)
 			}
 			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
 		})
@@ -3563,6 +3688,37 @@ func (s *triggerMatchingReadHookStore) Get(id string) (beads.Bead, error) {
 }
 
 func (s *triggerMatchingReadHookStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.Store
+}
+
+type poolReusePersistedReadHookStore struct {
+	beads.Store
+	sessionID    string
+	workID       string
+	beforeReturn func()
+	zeroRevision *atomic.Bool
+	once         sync.Once
+}
+
+func (s *poolReusePersistedReadHookStore) Get(id string) (beads.Bead, error) {
+	row, err := s.Store.Get(id)
+	if err != nil || id != s.sessionID || row.Metadata[beadmeta.TriggerBeadIDMetadataKey] != s.workID {
+		return row, err
+	}
+	if s.beforeReturn != nil {
+		s.once.Do(s.beforeReturn)
+		row, err = s.Store.Get(id)
+		if err != nil {
+			return row, err
+		}
+	}
+	if s.zeroRevision != nil && s.zeroRevision.Load() {
+		row.Revision = 0
+	}
+	return row, nil
+}
+
+func (s *poolReusePersistedReadHookStore) ConditionalWritesResolveTarget() beads.Store {
 	return s.Store
 }
 

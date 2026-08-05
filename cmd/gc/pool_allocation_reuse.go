@@ -160,16 +160,24 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 		if disposition != routedWorkPoolReuseReusable {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
 		}
-		_, err = sessionFrontDoor(snapshot.Store).RebindTriggerIfMatch(info, persistedByID[info.ID], lease.Binding)
+		preRebindPersisted := persistedByID[info.ID]
+		expectedReboundRevision := preRebindPersisted.Revision + 1
+		if expectedReboundRevision <= preRebindPersisted.Revision {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rebinding reusable pool member %q: persisted revision cannot advance", lease.SessionID)
+		}
+		_, err = sessionFrontDoor(snapshot.Store).RebindTriggerIfMatch(info, preRebindPersisted, lease.Binding)
 		if err != nil {
 			if beads.IsPreconditionFailed(err) {
 				return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rebinding reusable pool member %q lost its revision fence: %w", lease.SessionID, err)
 			}
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
 		}
-		current, _, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, lease.SessionID)
+		current, currentPersisted, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, lease.SessionID)
 		if err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: %w", lease.SessionID, err)
+		}
+		if currentPersisted.Revision <= 0 || currentPersisted.Revision != expectedReboundRevision {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: revision %d, want %d", lease.SessionID, currentPersisted.Revision, expectedReboundRevision)
 		}
 		currentAssignedBusy, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{current})
 		if err != nil {
@@ -199,9 +207,12 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 			if err := authorizeCtx.Err(); err != nil {
 				return err
 			}
-			latest, _, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, lease.SessionID)
+			latest, latestPersisted, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, lease.SessionID)
 			if err != nil {
 				return fmt.Errorf("rereading rebound pool member after idle wait: %w", err)
+			}
+			if latestPersisted.Revision <= 0 || latestPersisted.Revision != expectedReboundRevision {
+				return fmt.Errorf("rereading rebound pool member after idle wait: revision %d, want %d", latestPersisted.Revision, expectedReboundRevision)
 			}
 			assigned, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{latest})
 			if err != nil {

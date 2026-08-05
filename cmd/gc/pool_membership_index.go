@@ -253,12 +253,17 @@ func (i *poolMembershipIndex) replace(cfg *config.City, info sessionpkg.Info) er
 	contribution, present, err := poolMembershipContributionFromInfo(cfg, info)
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.revision++
 	if err != nil {
+		i.revision++
 		i.certified = false
 		i.reason = poolMembershipUncertifiedInvalidDelta
 		return err
 	}
+	old, oldPresent := i.state.bySession[info.ID]
+	if oldPresent == present && (!present || old == contribution) {
+		return nil
+	}
+	i.revision++
 	i.state.remove(info.ID)
 	if present {
 		if err := i.state.add(contribution); err != nil {

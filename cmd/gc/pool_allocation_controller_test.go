@@ -861,6 +861,85 @@ func TestRoutedWorkPoolAllocationReusesOldestIdleMemberOfMultiMemberPool(t *test
 	}
 }
 
+func TestRoutedWorkPoolAllocationRebindEventDoesNotInvalidateItsLease(t *testing.T) {
+	opened, err := beads.OpenStoreAtForCity(t.Context(), beads.StoreOpenOptions{
+		Provider:          "file",
+		OpenFileStore:     func() (beads.Store, error) { return beads.NewMemStore(), nil },
+		ConditionalWrites: gate.Auto,
+	})
+	if err != nil {
+		t.Fatalf("open conditional-write store: %v", err)
+	}
+	var cr *CityRuntime
+	var reboundSessionID string
+	var refreshes atomic.Int32
+	store := beads.NewCachingStoreForTest(opened.Store, func(eventType, beadID string, _ json.RawMessage) {
+		if cr == nil || eventType != "bead.updated" || beadID != reboundSessionID {
+			return
+		}
+		refreshes.Add(1)
+		cr.refreshPoolMembershipSession(beadID)
+	})
+	fixture := newRoutedWorkPoolAllocationFixture(t, store)
+	cr = fixture.cr
+	maximum := 1
+	fixture.cr.cfg.Agents[0].MaxActiveSessions = &maximum
+	fixture.cr.cfg.Agents[0].Provider = "claude"
+	fixture.cr.cfg.Agents[0].Nudge = "Run gc hook --claim --json now."
+
+	firstWork, err := store.Create(beads.Bead{
+		Title: "first work", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create first work: %v", err)
+	}
+	first, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+		WorkID: firstWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+	})
+	if err != nil || !first.Handled || !first.Created {
+		t.Fatalf("allocate first member = (%+v, %v), want created", first, err)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(first.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "first member to start")
+	info, err := sessionFrontDoor(store).Get(first.Session.ID)
+	if err != nil {
+		t.Fatalf("read first member: %v", err)
+	}
+	setRoutedWorkPoolRuntimeIdentity(t, fixture, info)
+	fixture.cr.refreshPoolMembershipSession(info.ID)
+	fixture.provider.WaitForIdleErrors[info.SessionNameMetadata] = nil
+	if err := store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close first work: %v", err)
+	}
+	secondWork, err := store.Create(beads.Bead{
+		Title: "second work", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create second work: %v", err)
+	}
+	reboundSessionID = info.ID
+	baselineNudges := providerAllNudgeCalls(fixture.provider)
+
+	result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+		WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
+	})
+	if err != nil || !result.Handled || result.Created || result.Session.ID != info.ID {
+		t.Fatalf("reuse with synchronous rebind event = (%+v, %v), want existing member %q", result, err, info.ID)
+	}
+	if refreshes.Load() != 1 {
+		t.Fatalf("synchronous membership refreshes = %d, want exactly 1 rebind event", refreshes.Load())
+	}
+	if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges+1 {
+		t.Fatalf("nudges after rebind event = %d, want %d", got, baselineNudges+1)
+	}
+	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after rebind event = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	}
+}
+
 func TestRoutedWorkPoolAllocationCanonicalReuseRequiresExactSoleMember(t *testing.T) {
 	fixture, firstWork, canonical := prepareIdleCanonicalSingletonForReuse(t, true)
 	if err := fixture.store.Close(firstWork.ID); err != nil {

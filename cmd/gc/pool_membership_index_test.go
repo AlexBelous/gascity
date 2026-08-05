@@ -143,6 +143,29 @@ func TestPoolMembershipIndexMovesOnlyTheChangedSession(t *testing.T) {
 	assertCertifiedPoolMembership(t, index.observe("worker"), 0, 0)
 }
 
+func TestPoolMembershipIndexKeepsRevisionForUnchangedContribution(t *testing.T) {
+	cfg := poolMembershipTestConfig("worker")
+	active := poolMembershipInfo(t, "session-1", "worker", "active", "", false)
+	index := rebuiltPoolMembershipIndex(t, cfg, []sessionpkg.Info{active})
+	before, memberIDs, exact := index.observeMemberIDs("worker")
+	if !exact {
+		t.Fatalf("initial membership = (%+v, %v, %t), want certified exact state", before, memberIDs, exact)
+	}
+
+	updated := active
+	updated.Title = "same membership, new provenance"
+	updated.LastNudgeDeliveredAt = time.Now().UTC()
+	if err := index.replace(cfg, updated); err != nil {
+		t.Fatalf("replace unchanged membership contribution: %v", err)
+	}
+
+	after, afterIDs, exact := index.observeMemberIDs("worker")
+	if !exact || after.revision != before.revision || !reflect.DeepEqual(afterIDs, memberIDs) ||
+		after.members != before.members || after.occupied != before.occupied {
+		t.Fatalf("membership after non-membership update = (%+v, %v, %t), want revision-stable (%+v, %v)", after, afterIDs, exact, before, memberIDs)
+	}
+}
+
 func TestPoolMembershipIndexObservesMemberIDsOnlyFromCertifiedExactState(t *testing.T) {
 	cfg := poolMembershipTestConfig("worker")
 	first := poolMembershipInfo(t, "session-1", "worker", "active", "", false)

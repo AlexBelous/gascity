@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1386,15 +1387,35 @@ func runExternal(t *testing.T, dir, name string, args ...string) {
 
 func runExternalOutput(t *testing.T, dir, name string, args ...string) []byte {
 	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Env = os.Environ()
-	if filepath.Base(name) == "bd" {
-		cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	isBd := filepath.Base(name) == "bd"
+	run := func() ([]byte, error) {
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		cmd.Env = os.Environ()
+		if isBd {
+			cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			// CombinedOutput's err is a bare "exit status N" -- the message
+			// text (including bd's workspace-gate-busy marker) lives only in
+			// out, so fold it into err for
+			// beads.RunWithGateBusyRetry/IsWorkspaceGateBusyError's
+			// err.Error()-based classifier to see.
+			err = fmt.Errorf("%w: %s", err, out)
+		}
+		return out, err
 	}
-	out, err := cmd.CombinedOutput()
+
+	var out []byte
+	var err error
+	if isBd {
+		out, err = beads.RunWithGateBusyRetry(run)
+	} else {
+		out, err = run()
+	}
 	if err != nil {
-		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
+		t.Fatalf("%s %s failed: %v", name, strings.Join(args, " "), err)
 	}
 	return out
 }

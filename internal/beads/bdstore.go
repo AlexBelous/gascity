@@ -76,41 +76,53 @@ func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string)
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
-		start := time.Now()
-		trace := newBDExecTrace(start, dir, name, args)
-		trace("start", nil)
+		attempt := func() ([]byte, error) {
+			start := time.Now()
+			trace := newBDExecTrace(start, dir, name, args)
+			trace("start", nil)
 
-		timeout := bdCommandTimeoutFor(name, args)
-		ctx, cancel := context.WithTimeout(parent, timeout)
-		defer cancel()
+			timeout := bdCommandTimeoutFor(name, args)
+			ctx, cancel := context.WithTimeout(parent, timeout)
+			defer cancel()
 
+			if name == "bd" {
+				bdArgs := append([]string(nil), args...)
+				agentID := bdTelemetryAgentID(env)
+				slowTimer := time.AfterFunc(bdSlowTelemetryThreshold, func() {
+					telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
+				})
+				defer slowTimer.Stop()
+			}
+
+			cmd := exec.CommandContext(ctx, name, args...)
+			cmd.WaitDelay = 2 * time.Second
+			prepareCommandForTimeout(cmd)
+			cmd.Dir = dir
+			cmd.Cancel = func() error {
+				return killCommandTree(cmd)
+			}
+			cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+
+			recordBDExecTelemetry(name, dir, args, start, out, stderr.String(), err)
+
+			status, traceErr, resultErr := classifyBDExecResult(
+				parent, ctx, name, timeout, start, out, stderr.String(), err)
+			trace(status, traceErr)
+			return out, resultErr
+		}
+
+		// Retry only bd's own workspace-gate contention (ga-20zoji Cause 1):
+		// a SHARED acquire fails fast when a maintenance operation (dolt
+		// migrate/restore) holds the gate EXCLUSIVE. Scoped to name=="bd" so
+		// non-bd commands invoked through this same runner (e.g. "dolt")
+		// never retry.
 		if name == "bd" {
-			bdArgs := append([]string(nil), args...)
-			agentID := bdTelemetryAgentID(env)
-			slowTimer := time.AfterFunc(bdSlowTelemetryThreshold, func() {
-				telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
-			})
-			defer slowTimer.Stop()
+			return RunWithGateBusyRetry(attempt)
 		}
-
-		cmd := exec.CommandContext(ctx, name, args...)
-		cmd.WaitDelay = 2 * time.Second
-		prepareCommandForTimeout(cmd)
-		cmd.Dir = dir
-		cmd.Cancel = func() error {
-			return killCommandTree(cmd)
-		}
-		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-
-		recordBDExecTelemetry(name, dir, args, start, out, stderr.String(), err)
-
-		status, traceErr, resultErr := classifyBDExecResult(
-			parent, ctx, name, timeout, start, out, stderr.String(), err)
-		trace(status, traceErr)
-		return out, resultErr
+		return attempt()
 	}
 }
 

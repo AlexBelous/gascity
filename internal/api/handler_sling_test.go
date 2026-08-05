@@ -100,6 +100,43 @@ func TestSlingWithBead(t *testing.T) {
 	}
 }
 
+func TestSlingUsesDistinctCityWorkStoreForHQBead(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cfg.Workspace.Prefix = "gc"
+	state.cityBeadStore = beads.NewMemStore()
+	cityWorkStore := beads.NewMemStore()
+	state.stores[state.cityName] = cityWorkStore
+	state.cfg.Agents = append(state.cfg.Agents, config.Agent{
+		Name:              "city-worker",
+		Provider:          "test-agent",
+		MaxActiveSessions: intPtr(1),
+	})
+	b, err := cityWorkStore.Create(beads.Bead{ID: "gc-work", Title: "city work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(state)
+	srv.SlingRunnerFunc = func(_ string, _ string, _ map[string]string) (string, error) { return "", nil }
+	h := newTestCityHandlerWith(t, state, srv)
+
+	body := `{"target":"city-worker","bead":"` + b.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	updated, err := cityWorkStore.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "city-worker" {
+		t.Fatalf("gc.routed_to = %q, want city-worker", got)
+	}
+	if _, err := state.cityBeadStore.Get(b.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("coordination store Get(%s) error = %v, want ErrNotFound", b.ID, err)
+	}
+}
+
 func TestSlingRefusesCityStoreBeadToRigTarget(t *testing.T) {
 	h, state := newSlingTestServer(t)
 	state.cfg.Workspace.Prefix = "gc"

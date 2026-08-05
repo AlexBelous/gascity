@@ -134,15 +134,16 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	return session.AssigneeIdentifier(info), nil
 }
 
-// findStore returns the bead store for the given rig. If rig is empty, returns
-// the sole store when exactly one exists (after deduplication), or nil when
+// findStore returns the work store for the given rig. If rig is empty, it
+// prefers the authoritative city work store, then returns the sole configured
+// work store when exactly one exists (after deduplication), or nil when
 // multiple distinct stores exist (caller should require explicit rig).
 func (s *Server) findStore(rig string) beads.Store {
 	if rig != "" {
 		return s.state.BeadStore(rig)
 	}
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		return cityStore
+	if cityWorkStore := s.cityWorkBeadStore(); cityWorkStore != nil {
+		return cityWorkStore
 	}
 	stores := s.state.BeadStores()
 	names := sortedRigNames(stores)

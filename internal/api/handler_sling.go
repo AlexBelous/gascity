@@ -299,7 +299,7 @@ func (s *Server) findSlingStore(rig string, agentCfg config.Agent, beadID string
 	// Match the CLI's bead-prefix-first resolution so existence checks consult
 	// the bead's home store before any cross-rig guard runs.
 	if resolvedRig, cityScope := s.slingStoreScopeForBead(beadID); cityScope {
-		return s.state.CityBeadStore()
+		return s.cityWorkBeadStore()
 	} else if resolvedRig != "" {
 		return s.state.BeadStore(resolvedRig)
 	}
@@ -313,7 +313,7 @@ func (s *Server) findSlingStore(rig string, agentCfg config.Agent, beadID string
 			return store
 		}
 	}
-	return s.state.CityBeadStore()
+	return s.cityWorkBeadStore()
 }
 
 // slingStoreRef returns a store ref string for the sling context.

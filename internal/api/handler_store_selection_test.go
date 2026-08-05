@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,6 +48,33 @@ func TestBeadCreateUsesCityStoreWhenAvailableWithoutRig(t *testing.T) {
 	}
 }
 
+func TestBeadCreateUsesDistinctCityWorkStoreWithoutRig(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	cityWorkStore := beads.NewMemStore()
+	state.stores[state.cityName] = cityWorkStore
+	state.stores["beta"] = beads.NewMemStore()
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "beta", Path: "/tmp/beta"})
+	h := newTestCityHandlerWith(t, state, New(state))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(`{"title":"city work","type":"task"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var created beads.Bead
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, err := cityWorkStore.Get(created.ID); err != nil {
+		t.Fatalf("city work store missing created bead %s: %v", created.ID, err)
+	}
+	if _, err := state.cityBeadStore.Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("coordination store Get(%s) error = %v, want ErrNotFound", created.ID, err)
+	}
+}
+
 func TestConvoyCreateUsesCityStoreWhenAvailableWithoutRig(t *testing.T) {
 	state := newFakeMutatorState(t)
 	state.cityBeadStore = beads.NewMemStore()
@@ -82,4 +110,37 @@ func TestConvoyCreateUsesCityStoreWhenAvailableWithoutRig(t *testing.T) {
 		t.Fatalf("city item parent = %q, want unchanged empty parent", updatedItem.ParentID)
 	}
 	requireAPITracksDep(t, state.cityBeadStore, convoy.ID, item.ID)
+}
+
+func TestConvoyCreateUsesDistinctCityWorkStoreWithoutRig(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	cityWorkStore := beads.NewMemStore()
+	state.stores[state.cityName] = cityWorkStore
+	state.stores["beta"] = beads.NewMemStore()
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "beta", Path: "/tmp/beta"})
+	h := newTestCityHandlerWith(t, state, New(state))
+
+	item, err := cityWorkStore.Create(beads.Bead{Title: "city item", Type: "task"})
+	if err != nil {
+		t.Fatalf("create city item: %v", err)
+	}
+	body := `{"title":"city convoy","items":["` + item.ID + `"]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/convoys"), strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var convoy beads.Bead
+	if err := json.NewDecoder(rec.Body).Decode(&convoy); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, err := cityWorkStore.Get(convoy.ID); err != nil {
+		t.Fatalf("city work store missing convoy %s: %v", convoy.ID, err)
+	}
+	if _, err := state.cityBeadStore.Get(convoy.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("coordination store Get(%s) error = %v, want ErrNotFound", convoy.ID, err)
+	}
+	requireAPITracksDep(t, cityWorkStore, convoy.ID, item.ID)
 }

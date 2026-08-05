@@ -171,6 +171,46 @@ func TestBeadListAllTrueRemainsBoundedWithSplitCityStores(t *testing.T) {
 	}
 }
 
+func TestBeadListAllTrueSplitStoreCursorWalkKeepsEqualKeyTwins(t *testing.T) {
+	const perStore = 30
+	fs := newFakeState(t)
+	_, workMem := seedMoleculeStore(perStore)
+	_, coordinationMem := seedMoleculeStore(perStore)
+	_, rigMem := seedMoleculeStore(perStore)
+	fs.cityWorkBeadStore = &countingListStore{Store: workMem}
+	fs.cityBeadStore = &countingListStore{Store: coordinationMem}
+	fs.stores = map[string]beads.Store{"myrig": &countingListStore{Store: rigMem}}
+
+	seen := map[string]int{}
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > perStore {
+			t.Fatal("cursor walk did not terminate")
+		}
+		query := "?type=molecule&all=true&limit=1"
+		if cursor != "" {
+			query += "&cursor=" + cursor
+		}
+		body := fetchBoundedBeads(t, fs, query)
+		for _, item := range body.Items {
+			seen[item.ID]++
+		}
+		if body.NextCursor == "" {
+			break
+		}
+		cursor = body.NextCursor
+	}
+
+	if len(seen) != perStore {
+		t.Fatalf("walk saw %d distinct IDs, want %d", len(seen), perStore)
+	}
+	for id, count := range seen {
+		if count != 3 {
+			t.Errorf("walk saw %s %d times, want once per store (3)", id, count)
+		}
+	}
+}
+
 // TestBeadListAllTrueNoCursorWhenAllFit verifies a page that covers the whole
 // result set carries no continuation cursor.
 func TestBeadListAllTrueNoCursorWhenAllFit(t *testing.T) {

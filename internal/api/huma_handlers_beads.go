@@ -267,11 +267,13 @@ func resolveBeadListPage(all []beads.Bead, seek *beads.SeekBoundary, limit int, 
 		for _, n := range boundedCounts {
 			total += n
 		}
-		if len(all) > limit {
-			hasMore = true
-			all = all[:limit]
+		end := limit
+		if end > len(all) {
+			end = len(all)
 		}
-		page = all
+		end = extendBeadPageThroughEqualKeys(all, end)
+		hasMore = end < len(all)
+		page = all[:end]
 		if partial && len(page) > 0 {
 			hasMore = true
 		}
@@ -295,20 +297,33 @@ func resolveBeadListPage(all []beads.Bead, seek *beads.SeekBoundary, limit int, 
 	if end > len(all) {
 		end = len(all)
 	}
+	end = extendBeadPageThroughEqualKeys(all, end)
 	return all[start:end], total, end < len(all)
+}
+
+// extendBeadPageThroughEqualKeys keeps every record sharing the boundary
+// (created_at, id) on the same page. The public cursor encodes exactly that
+// key, so splitting a tie would make the unseen twins indistinguishable from
+// the served boundary and the next request would skip them. A page may exceed
+// its requested limit only by the size of this cross-store tie group.
+func extendBeadPageThroughEqualKeys(all []beads.Bead, end int) int {
+	if end <= 0 || end >= len(all) {
+		return end
+	}
+	boundary := all[end-1]
+	for end < len(all) && all[end].ID == boundary.ID && all[end].CreatedAt.Equal(boundary.CreatedAt) {
+		end++
+	}
+	return end
 }
 
 // mintNextCursor returns the keyset continuation cursor for a truncated page:
 // the (created_at, id) boundary of the last row served. An exhausted or empty
 // page mints nothing, which the client reads as walk-complete.
 //
-// The resume key is (created_at, id) while the fan-out's identity key is
-// (rig, id): this assumes (created_at, id) is globally unique across the merged
-// rigs. That holds for distinct-store rigs; the only collision is the
-// documented legacy file-mode aliasing of the city and rig stores, where twins
-// would make the page boundary position-dependent (benign today — a true
-// duplicate). A future globally-non-unique ID scheme would need a wider resume
-// key here.
+// Equal (created_at, id) records from distinct stores are kept together by
+// resolveBeadListPage, so the narrower public cursor remains lossless without
+// exposing an internal store identity on the wire.
 func mintNextCursor(page []beads.Bead, hasMore bool) string {
 	if !hasMore || len(page) == 0 {
 		return ""

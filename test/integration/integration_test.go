@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -201,14 +202,9 @@ func TestMain(m *testing.M) {
 		realBDBinary = override
 	} else {
 		var err error
-		realBDBinary, err = exec.LookPath("bd")
+		realBDBinary, err = buildPinnedIntegrationBDBinary(tmpDir)
 		if err != nil {
-			// bd not available — skip all integration tests.
-			_ = os.RemoveAll(tmpDir)
-			if tmuxSocketParent != "" {
-				_ = os.RemoveAll(tmuxSocketParent)
-			}
-			os.Exit(0)
+			panic("integration: building pinned bd binary: " + err.Error())
 		}
 	}
 	bdBinary = filepath.Join(integrationToolBinDir, "bd")
@@ -389,6 +385,43 @@ func binaryOverride(envName string) (string, bool, error) {
 		return "", false, fmt.Errorf("%s=%q points to a directory", envName, raw)
 	}
 	return path, true, nil
+}
+
+// buildPinnedIntegrationBDBinary builds bd from the exact Beads module that
+// the integration test binary and gc both import. Resolving PATH here lets an
+// older host bd open the database after gc has migrated it, producing a schema
+// skew that obscures the workflow under test.
+func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
+	version, err := pinnedIntegrationBeadsModuleVersion()
+	if err != nil {
+		return "", err
+	}
+	binDir := filepath.Join(tmpDir, "pinned-bd")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return "", fmt.Errorf("create pinned bd directory: %w", err)
+	}
+	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOBIN="+binDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+	}
+	return filepath.Join(binDir, "bd"), nil
+}
+
+func pinnedIntegrationBeadsModuleVersion() (string, error) {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", errors.New("read build info: not available")
+	}
+	for _, dep := range bi.Deps {
+		if dep.Path == "github.com/steveyegge/beads" {
+			if dep.Replace != nil {
+				return dep.Replace.Version, nil
+			}
+			return dep.Version, nil
+		}
+	}
+	return "", errors.New("github.com/steveyegge/beads not found in build info deps")
 }
 
 func writeExecShim(path, target string) error {

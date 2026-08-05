@@ -530,6 +530,73 @@ func TestReleaseOrphanedPoolAssignments_ReopensBareTemplateAssigneeWithNoLiveSes
 	}
 }
 
+// TestReleaseOrphanedPoolAssignments_ReopensDeadSessionAssigneeDespiteOtherLiveSessionForTemplate
+// guards ga-x3ofe0's MAJOR finding: liveEphemeralSessionForTemplate must only
+// protect work whose assignee IS the bare template/route name (the ephemeral
+// pool-dispatch signature), not any work routed to a template that happens to
+// have SOME live session. Here the work is assigned to a concrete, dead named
+// session ("worker-mc-dead") that is not the template itself, while a
+// different live session ("worker-mc-live") for the same template is open.
+// The dead assignee must still be reclaimed — the other session's liveness is
+// irrelevant, since it was never assigned this work.
+func TestReleaseOrphanedPoolAssignments_ReopensDeadSessionAssigneeDespiteOtherLiveSessionForTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-mc-live",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "pool work assigned to a dead named session",
+		Assignee: "worker-mc-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{sessionBead},
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]: assignee %q names no live session; the other live session %q for template %q was never assigned this work", released, work.ID, "worker-mc-dead", "worker-mc-live", "worker")
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+}
+
 func TestIsRecoverableUnassignedInProgressPoolWorkUsesLegacyWorkflowRunTarget(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 	work := beads.Bead{

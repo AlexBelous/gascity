@@ -47,14 +47,25 @@ func emitDeadAssigneeReopenedEvents(rec events.Recorder, assignedWorkBeads []bea
 
 // formatDeadAssigneeReopenedMessage renders the operator-facing text for a
 // bead.dead_assignee_reopened event.
+//
+// When deadAssignee equals routedTo, the assignee was never a session
+// identity at all — it's the bare route/template name left by an ephemeral
+// pool dispatch that no live session ever claimed. Calling that a "dead
+// session" is factually wrong (no session with that identity ever existed to
+// die) and was the original source of confusion when this bug was diagnosed,
+// so that case gets its own wording.
 func formatDeadAssigneeReopenedMessage(beadID, deadAssignee, routedTo string) string {
-	assignee := deadAssignee
-	if assignee == "" {
-		assignee = "<unknown>"
-	}
 	route := routedTo
 	if route == "" {
 		route = "<unrouted>"
+	}
+	if deadAssignee != "" && deadAssignee == routedTo {
+		return "reopened routed work " + beadID + " routed to " + route +
+			" with no live session claiming it; assignee cleared so the pool can reclaim it"
+	}
+	assignee := deadAssignee
+	if assignee == "" {
+		assignee = "<unknown>"
 	}
 	return "reopened routed work " + beadID + " assigned to dead session " + assignee +
 		" (route " + route + "); assignee cleared so the pool can reclaim it"

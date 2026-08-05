@@ -540,6 +540,7 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 	}
 
 	seen := make(map[uintptr]struct{}, len(stores))
+	graphStores := make([]beads.GraphStore, 0, len(stores))
 	for _, store := range stores {
 		store = uncachedBeadStore(store)
 		if store == nil {
@@ -551,8 +552,9 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 			}
 			seen[key] = struct{}{}
 		}
-		executionevent.ReconcileCompleted(ep, beads.GraphStore{Store: store}, "execution-reconcile")
+		graphStores = append(graphStores, beads.GraphStore{Store: store})
 	}
+	executionevent.ReconcileCompletedStores(ep, graphStores, "execution-reconcile")
 }
 
 // uncachedBeadStore peels the controller's policy/cache read layers so a

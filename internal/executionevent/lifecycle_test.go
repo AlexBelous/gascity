@@ -2,6 +2,7 @@ package executionevent
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -103,6 +104,110 @@ func TestReconcileCompletedRepairsMissingFactAndRetainsConflictingHistory(t *tes
 	}
 	if len(completed) != 2 || completed[1].SessionID != "gcs-session" || completed[1].RunID != root.ID || completed[1].StepID != "build" {
 		t.Fatalf("completed facts = %#v, want stale history plus authoritative correction", completed)
+	}
+}
+
+func TestReconcileCompletedStoresPreloadsExactFactsOnceAndFailsClosed(t *testing.T) {
+	firstGraph := beads.NewMemStore()
+	firstRoot := mustCreateProjectionRoot(t, firstGraph, "")
+	nilTopologyStep := mustCreateProjectionStep(t, firstGraph, "gcg-nil-topology", firstRoot.ID, "build", "")
+	closed := "closed"
+	if err := firstGraph.Update(nilTopologyStep.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+		t.Fatal(err)
+	}
+	nilTopologyStep, err := firstGraph.Get(nilTopologyStep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nilTopologyFact, ok := LifecycleEvent(events.ExecutionStepCompleted, firstRoot, nilTopologyStep, "prior-reconcile")
+	if !ok || nilTopologyFact.DependsOnStepIDs != nil {
+		t.Fatalf("nil topology fact = %#v, ok=%v", nilTopologyFact, ok)
+	}
+
+	secondGraph := beads.NewMemStore()
+	secondRoot := mustCreateProjectionRoot(t, secondGraph, "")
+	emptyTopologyStep := mustCreateProjectionStep(t, secondGraph, "gcg-empty-topology", secondRoot.ID, "test", "[]")
+	if err := secondGraph.Update(emptyTopologyStep.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+		t.Fatal(err)
+	}
+	emptyTopologyStep, err = secondGraph.Get(emptyTopologyStep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyTopologyFact, ok := LifecycleEvent(events.ExecutionStepCompleted, secondRoot, emptyTopologyStep, "prior-reconcile")
+	if !ok || !reflect.DeepEqual(emptyTopologyFact.DependsOnStepIDs, lifecycleStrings([]string{})) {
+		t.Fatalf("empty topology fact = %#v, ok=%v", emptyTopologyFact, ok)
+	}
+
+	backing := events.NewFake()
+	backing.Record(nilTopologyFact) // Exact fact: must suppress this candidate.
+	emptyTopologyFact.DependsOnStepIDs = nil
+	backing.Record(emptyTopologyFact) // Same tuple except unknown, not known-empty, topology.
+	provider := &countingEventProvider{Provider: backing}
+	stores := []beads.GraphStore{{Store: firstGraph}, {Store: secondGraph}}
+	if got := ReconcileCompletedStores(provider, stores, "execution-reconcile"); got != 1 {
+		t.Fatalf("ReconcileCompletedStores = %d, want one topology correction", got)
+	}
+	if provider.listCalls != 1 {
+		t.Fatalf("completed fact List calls = %d, want one across both stores", provider.listCalls)
+	}
+	if got := ReconcileCompletedStores(provider, stores, "execution-reconcile"); got != 0 {
+		t.Fatalf("second ReconcileCompletedStores = %d, want exact-fact no-op", got)
+	}
+	if provider.listCalls != 2 {
+		t.Fatalf("completed fact List calls after second pass = %d, want one per pass", provider.listCalls)
+	}
+
+	before, err := backing.List(events.Filter{Type: events.ExecutionStepCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing := &countingEventProvider{Provider: backing, listErr: errors.New("journal unavailable")}
+	if got := ReconcileCompletedStores(failing, stores, "execution-reconcile"); got != 0 {
+		t.Fatalf("ReconcileCompletedStores with List error = %d, want fail-closed zero", got)
+	}
+	if failing.listCalls != 1 {
+		t.Fatalf("failed completed fact List calls = %d, want one", failing.listCalls)
+	}
+	after, err := backing.List(events.Filter{Type: events.ExecutionStepCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("List error recorded events: before=%#v after=%#v", before, after)
+	}
+}
+
+type countingEventProvider struct {
+	events.Provider
+	listCalls int
+	listErr   error
+}
+
+func (p *countingEventProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	return p.Provider.List(filter)
+}
+
+func TestCompletedFactKeyDistinguishesUnknownFromKnownEmptyTopology(t *testing.T) {
+	base := events.Event{Subject: "gcg-attempt", RunID: "gcg-run", SessionID: "gcs-session", StepID: "build"}
+	var nilSlice []string
+	emptySlice := []string{}
+	unknown := completedFactKeyFor(base)
+	presentNil := completedFactKeyFor(events.Event{
+		Subject: base.Subject, RunID: base.RunID, SessionID: base.SessionID, StepID: base.StepID, DependsOnStepIDs: &nilSlice,
+	})
+	presentEmpty := completedFactKeyFor(events.Event{
+		Subject: base.Subject, RunID: base.RunID, SessionID: base.SessionID, StepID: base.StepID, DependsOnStepIDs: &emptySlice,
+	})
+	if presentNil != presentEmpty {
+		t.Fatalf("present nil topology key = %#v, present empty topology key = %#v; want equality", presentNil, presentEmpty)
+	}
+	if unknown == presentEmpty {
+		t.Fatalf("unknown topology key = %#v, known empty topology key = %#v; want distinction", unknown, presentEmpty)
 	}
 }
 

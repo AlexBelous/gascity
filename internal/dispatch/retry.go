@@ -285,6 +285,7 @@ func typedDeliverableCloseFor(subject beads.Bead) bool {
 		RecordedBy      string  `json:"recorded_by"`
 		Reason          string  `json:"reason"`
 		Producer        *string `json:"producer"`
+		PassingVerdict  string  `json:"passing_verdict"`
 	}
 	if err := decoder.Decode(&envelope); err != nil {
 		return false
@@ -309,6 +310,17 @@ func typedDeliverableCloseFor(subject beads.Bead) bool {
 	}
 	if envelope.Producer == nil || strings.TrimSpace(*envelope.Producer) == "" {
 		return false
+	}
+	if envelope.PassingVerdict != "" {
+		switch envelope.PassingVerdict {
+		case beadmeta.CoordinatorPassingVerdictReview, beadmeta.CoordinatorPassingVerdictEvidence:
+		default:
+			return false
+		}
+		if subject.Metadata[beadmeta.ReviewGateMetadataKey] != "consumed" ||
+			subject.Metadata[envelope.PassingVerdict] != beadmeta.OutcomePass {
+			return false
+		}
 	}
 	return true
 }

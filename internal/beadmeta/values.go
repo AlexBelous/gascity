@@ -63,6 +63,8 @@ const (
 	CoordinatorOutcomeContractVersion    = 1
 	CoordinatorDispositionDeliverable    = "deliverable"
 	CoordinatorDispositionNonDeliverable = "non-deliverable"
+	CoordinatorPassingVerdictReview      = "review_verdict"
+	CoordinatorPassingVerdictEvidence    = "evidence.reviewer_verdict"
 )
 
 // Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record

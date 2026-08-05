@@ -240,6 +240,42 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 			want: retryEvalResult{Outcome: "pass"},
 		},
 		{
+			name: "valid deliverable close with passing verdict folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"evidence.reviewer_verdict"}`,
+				"gc.review_gate":            "consumed",
+				"evidence.reviewer_verdict": "pass",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "passing verdict requires consumed review gate",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"evidence.reviewer_verdict"}`,
+				"gc.review_gate":            "pass",
+				"evidence.reviewer_verdict": "pass",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "passing verdict requires published pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"review_verdict"}`,
+				"gc.review_gate": "consumed",
+				"review_verdict": "reject",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unsupported passing verdict stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"surprise"}`,
+				"gc.review_gate": "consumed",
+				"surprise":       "pass",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
 			name: "explicit gc.outcome takes precedence over typed close",
 			metadata: map[string]string{
 				"gc.outcome": "pass",

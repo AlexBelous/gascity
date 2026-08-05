@@ -19,8 +19,11 @@ const (
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	expectedCIExecutionHash      = "b16d700bb89ac6cee0d6d486afcfc121d6de9b12e6b2cdab88ad1f3116f07502"
+	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
+	// Re-pinned 2026-08-05 for the reviewed v59 contract-test change: the
+	// cmd/gc integration shard builds bd at deps.env's exact BD_CURRENT_REF
+	// and refuses to run that shard without the resulting pinned binary.
+	expectedCIExecutionHash      = "b19d9091e83cd21c4904b901219780b45c88617baf2faf0a17ddb12b42d1a11c"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "80575ca368f28ba9f8b14bf72ce5767a7877ffe4dcadc136854ab4b0b5f1377a"
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"

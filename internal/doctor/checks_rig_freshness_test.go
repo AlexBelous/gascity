@@ -55,12 +55,13 @@ func TestRigFreshnessCheck_Run(t *testing.T) {
 			wantInMsg:  "up to date",
 		},
 		{
-			name:        "behind warns and replaces push with pull",
+			name:        "behind warns with non-executable upstream guidance",
 			fresh:       git.Freshness{State: git.FreshnessBehind, Branch: "main", Upstream: "origin/main", Behind: 2139},
 			wantStatus:  StatusWarning,
 			wantInMsg:   "behind",
 			wantFixHint: true,
-			fixHintHas:  "pull --rebase",
+			fixHintHas:  "rebase this branch onto origin/main",
+			fixHintLack: []string{"git "},
 		},
 		{
 			name:        "diverged warns and warns against force",

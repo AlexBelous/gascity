@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -469,7 +470,17 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
-	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+	// ga-lmy6yj: pass every name this agent answers to, so the post-filter can
+	// tell its OWN routed work from another agent's. Same identity set the claim
+	// path assembles for its assignee; a missing one only ever means we keep a
+	// candidate we could have dropped, never that we drop the agent's own work.
+	return doHook(workQuery, workDir, false, runner, stdout, stderr,
+		strings.TrimSpace(overrides["GC_ALIAS"]),
+		agentForQuery,
+		resolvedAgentName,
+		strings.TrimSpace(sessionForQuery),
+		strings.TrimSpace(overrides["GC_TEMPLATE"]),
+	)
 }
 
 // hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
@@ -813,7 +824,7 @@ func workQueryEnvForDir(env []string, dir string) []string {
 // results based on mode. Without inject: prints normalized ready-only output,
 // returns 0 if work exists, 1 if empty. With inject: skips the work query and
 // returns 0.
-func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
+func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer, identities ...string) int {
 	if inject {
 		return 0
 	}
@@ -830,6 +841,10 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	trimmed := strings.TrimSpace(output)
 	normalized := normalizeWorkQueryOutput(trimmed)
 	normalized = filterUnreadyHookCandidates(normalized, time.Now())
+	// ga-lmy6yj: the store's routed_to predicate is not applied under the
+	// native-store fallback, so drop other agents' work here. See
+	// filterForeignRoutedHookCandidates for why this lives in gc.
+	normalized = filterForeignRoutedHookCandidates(normalized, identities)
 	hasWork := workQueryHasReadyWork(normalized)
 
 	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
@@ -911,6 +926,103 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		return output
 	}
 	return string(reencoded)
+}
+
+// filterForeignRoutedHookCandidates drops candidates whose gc.routed_to names a
+// DIFFERENT agent than the one asking.
+//
+// WHY THIS EXISTS AT ALL — the store is supposed to do it (ga-lmy6yj). The work
+// query filters on routed_to, but under the native-store fallback that predicate
+// is not applied, so `gc hook <agent>` is served other agents' — and other RIGS'
+// — work. Reproduced 2026-08-05 at the v62-db/v53-binary skew: `gc hook
+// gascity/builder` returned five beads and ONE belonged to it; one was routed to
+// beads/reviewer, a different rig entirely.
+//
+// The agent then wakes, correctly declines work that is not its own, and burns a
+// full turn with full cache-read to do it. That is the phantom-wake loop in
+// gm-ob7is, and it accelerates rather than settling. The skew is global, so every
+// rig over-serves at once.
+//
+// This is deliberately a POST-filter in gc rather than a store fix: it holds
+// whether or not the store honors the predicate, and it does not require the
+// gc/bd pin to move (operator ruling 2026-07-30 forbids moving it unilaterally,
+// and PR #5030's proposed pin reaches only v59 against a v62 database, so it
+// would NOT restore the predicate either). When the skew is eventually closed
+// this becomes redundant but stays correct.
+//
+// FAILS OPEN, in every direction that matters:
+//   - unparseable output, or a non-array shape -> returned unchanged
+//   - a candidate that is not an object -> kept
+//   - EMPTY routed_to -> KEPT. Unrouted work is legitimately claimable, and the
+//     legacy workflow-target path (routedToOrLegacyWorkflowTarget) depends on it.
+//     Only a routed_to that positively names someone else is dropped.
+//   - no identities resolved -> returned unchanged, never filter to nothing
+func filterForeignRoutedHookCandidates(output string, identities []string) string {
+	if output == "" || len(identities) == 0 {
+		return output
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		return output
+	}
+	arr, ok := decoded.([]any)
+	if !ok {
+		return output
+	}
+	filtered := make([]any, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		if isForeignRoutedHookCandidate(obj, identities) {
+			continue
+		}
+		filtered = append(filtered, obj)
+	}
+	reencoded, err := json.Marshal(filtered)
+	if err != nil {
+		return output
+	}
+	return string(reencoded)
+}
+
+// isForeignRoutedHookCandidate reports whether the candidate is positively
+// routed to somebody other than the asking agent.
+func isForeignRoutedHookCandidate(item map[string]any, identities []string) bool {
+	meta, ok := item["metadata"].(map[string]any)
+	if !ok {
+		return false
+	}
+	routed, _ := meta[beadmeta.RoutedToMetadataKey].(string)
+	routed = strings.TrimSpace(routed)
+	if routed == "" {
+		// Unrouted: claimable by whoever asks. Never dropped here.
+		return false
+	}
+	for _, id := range identities {
+		if hookIdentityMatchesRoute(routed, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// hookIdentityMatchesRoute compares a gc.routed_to value against one identity
+// the caller answers to. Routes are written in template form ("gascity/builder")
+// while session and assignee forms use "gascity--builder", so both spellings must
+// compare equal — otherwise this filter would drop an agent's OWN work, which is
+// far worse than the over-serving it exists to stop.
+func hookIdentityMatchesRoute(route, identity string) bool {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return false
+	}
+	norm := func(s string) string {
+		return strings.ToLower(strings.ReplaceAll(s, "--", "/"))
+	}
+	return norm(route) == norm(identity)
 }
 
 func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {

@@ -498,10 +498,16 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 		beadStore: snapshot.Store,
 		stderr:    cr.sessionStartStderr(),
 	}
-	if policy.maxActiveSessions == 1 && agent.UsesCanonicalSingletonPoolIdentity() {
-		reused, reuseErr := cr.reuseIdleRoutedWorkPoolSingleton(ctx, snapshot, agent, work, hint, bp, request)
-		if reuseErr != nil || reused.Handled {
-			return reused, reuseErr
+	if policy.maxActiveSessions != 0 {
+		reused, reuseDisposition, reuseErr := cr.reuseIdleRoutedWorkPoolSoleMember(ctx, snapshot, agent, work, hint, bp, request)
+		if reuseErr != nil {
+			return routedWorkPoolAllocationResult{}, reuseErr
+		}
+		switch reuseDisposition {
+		case routedWorkPoolReuseReusable:
+			return reused, nil
+		case routedWorkPoolReuseRefused:
+			return routedWorkPoolAllocationResult{}, nil
 		}
 	}
 	decision := decideRoutedWorkPoolAllocationShadow(readyRoutedWorkDemandContribution{

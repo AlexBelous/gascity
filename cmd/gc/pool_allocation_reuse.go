@@ -16,6 +16,15 @@ import (
 
 const routedWorkPoolReuseNudgeSource = "routed-work-pool-reuse"
 
+type routedWorkPoolReuseDisposition uint8
+
+const (
+	routedWorkPoolReuseNotApplicable routedWorkPoolReuseDisposition = iota
+	routedWorkPoolReuseReusable
+	routedWorkPoolReuseBusy
+	routedWorkPoolReuseRefused
+)
+
 type routedWorkPoolReuseLease struct {
 	SessionID            string
 	InstanceToken        string
@@ -27,7 +36,7 @@ type routedWorkPoolReuseLease struct {
 	Binding              sessionpkg.TriggerBinding
 }
 
-func (cr *CityRuntime) reuseIdleRoutedWorkPoolSingleton(
+func (cr *CityRuntime) reuseIdleRoutedWorkPoolSoleMember(
 	ctx context.Context,
 	snapshot controllerSessionStartSnapshot,
 	agent *config.Agent,
@@ -35,21 +44,27 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolSingleton(
 	hint routedWorkPoolAllocationHint,
 	bp *agentBuildParams,
 	request SessionRequest,
-) (routedWorkPoolAllocationResult, error) {
+) (routedWorkPoolAllocationResult, routedWorkPoolReuseDisposition, error) {
 	if strings.TrimSpace(agent.Nudge) == "" {
-		return routedWorkPoolAllocationResult{}, nil
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
 	}
 	observation, sessionID, sole := cr.poolMembershipShadow.observeSoleMember(hint.PoolTarget)
-	if !sole || observation.occupied != 1 {
-		return routedWorkPoolAllocationResult{}, nil
+	if !sole {
+		if !observation.certified {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("reusing sole pool member: membership is uncertified")
+		}
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
+	}
+	if observation.occupied != 1 {
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
 	}
 	info, persisted, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, sessionID)
 	if err != nil {
-		return routedWorkPoolAllocationResult{}, fmt.Errorf("reading reusable singleton %q: %w", sessionID, err)
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("reading reusable pool member %q: %w", sessionID, err)
 	}
 	workDir := poolTriggerWorkDir(bp, agent, hint.PoolTarget, request)
 	if strings.TrimSpace(workDir) == "" {
-		return routedWorkPoolAllocationResult{}, nil
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("reusing pool member %q: work directory is unavailable", sessionID)
 	}
 	lease := routedWorkPoolReuseLease{
 		SessionID:            info.ID,
@@ -69,33 +84,36 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolSingleton(
 		},
 	}
 	if err := validateRoutedWorkPoolReuseLease(lease); err != nil {
-		return routedWorkPoolAllocationResult{}, nil
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("validating reusable pool member %q: %w", sessionID, err)
 	}
-	authorized, err := cr.authorizeRoutedWorkPoolReuse(snapshot, info, lease, false)
-	if err != nil || !authorized {
-		return routedWorkPoolAllocationResult{}, err
+	disposition, err := cr.authorizeRoutedWorkPoolReuse(snapshot, info, lease, false)
+	if err != nil {
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
+	}
+	if disposition != routedWorkPoolReuseReusable {
+		return routedWorkPoolAllocationResult{}, disposition, nil
 	}
 	_, err = sessionFrontDoor(snapshot.Store).RebindTriggerIfMatch(info, persisted, lease.Binding)
 	if err != nil {
 		if beads.IsPreconditionFailed(err) {
-			return routedWorkPoolAllocationResult{}, nil
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rebinding reusable pool member %q lost its revision fence: %w", lease.SessionID, err)
 		}
-		return routedWorkPoolAllocationResult{}, err
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
 	}
 	current, _, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, lease.SessionID)
 	if err != nil {
-		return routedWorkPoolAllocationResult{}, fmt.Errorf("rereading rebound singleton %q: %w", lease.SessionID, err)
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: %w", lease.SessionID, err)
 	}
-	authorized, err = cr.authorizeRoutedWorkPoolReuse(snapshot, current, lease, true)
+	disposition, err = cr.authorizeRoutedWorkPoolReuse(snapshot, current, lease, true)
 	if err != nil {
-		return routedWorkPoolAllocationResult{}, err
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
 	}
-	if !authorized {
-		return routedWorkPoolAllocationResult{}, fmt.Errorf("rebound singleton %q lost authorization before nudge", lease.SessionID)
+	if disposition != routedWorkPoolReuseReusable {
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rebound pool member %q lost authorization before nudge", lease.SessionID)
 	}
 	handle, err := workerHandleForSessionWithConfig(snapshot.CityPath, snapshot.Store, snapshot.Provider, snapshot.Config, lease.SessionID)
 	if err != nil {
-		return routedWorkPoolAllocationResult{}, fmt.Errorf("opening rebound singleton %q: %w", lease.SessionID, err)
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("opening rebound pool member %q: %w", lease.SessionID, err)
 	}
 	nudge, err := handle.Nudge(ctx, worker.NudgeRequest{
 		Text:     strings.TrimSpace(agent.Nudge),
@@ -104,12 +122,12 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolSingleton(
 		Wake:     worker.NudgeWakeLiveOnly,
 	})
 	if err != nil {
-		return routedWorkPoolAllocationResult{}, fmt.Errorf("nudging rebound singleton %q: %w", lease.SessionID, err)
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("nudging rebound pool member %q: %w", lease.SessionID, err)
 	}
 	if !nudge.Delivered {
-		return routedWorkPoolAllocationResult{}, fmt.Errorf("nudging rebound singleton %q: live idle delivery was not confirmed", lease.SessionID)
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("nudging rebound pool member %q: live idle delivery was not confirmed", lease.SessionID)
 	}
-	return routedWorkPoolAllocationResult{Session: current, Handled: true}, nil
+	return routedWorkPoolAllocationResult{Session: current, Handled: true}, routedWorkPoolReuseReusable, nil
 }
 
 func validateRoutedWorkPoolReuseLease(lease routedWorkPoolReuseLease) error {
@@ -144,12 +162,12 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	info sessionpkg.Info,
 	lease routedWorkPoolReuseLease,
 	bound bool,
-) (bool, error) {
+) (routedWorkPoolReuseDisposition, error) {
 	if cr == nil || cr.cs == nil || cr.poolMembershipShadow == nil || snapshot.Config == nil || snapshot.Provider == nil || snapshot.Store == nil {
-		return false, fmt.Errorf("authorizing singleton reuse: keyed state is unavailable")
+		return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse: keyed state is unavailable")
 	}
 	if err := validateRoutedWorkPoolReuseLease(lease); err != nil {
-		return false, err
+		return routedWorkPoolReuseRefused, err
 	}
 	cr.serviceStateMu.RLock()
 	configCurrent := cr.cfg == snapshot.Config
@@ -157,25 +175,35 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	if !configCurrent || snapshot.Generation != lease.ControllerGeneration || info.ID != lease.SessionID || info.Closed ||
 		strings.TrimSpace(info.InstanceToken) != lease.InstanceToken ||
 		normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget ||
-		!isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget) || isNamedSessionInfo(info) {
-		return false, nil
+		!isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) {
+		return routedWorkPoolReuseRefused, nil
 	}
 	lifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
 	if lifecycle.BaseState != sessionpkg.BaseStateActive || lifecycle.Terminal || !lifecycle.CountsAgainstCap {
-		return false, nil
+		return routedWorkPoolReuseRefused, nil
 	}
 	if bound {
 		if !lease.Binding.Matches(info) {
-			return false, nil
+			return routedWorkPoolReuseRefused, nil
 		}
 	} else if strings.TrimSpace(info.TriggerBeadID) != lease.PreviousWorkID ||
 		strings.TrimSpace(info.TriggerBeadStoreRef) != lease.PreviousSourceStore {
-		return false, nil
+		return routedWorkPoolReuseRefused, nil
 	}
 	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
-	if agent == nil || !agent.UsesCanonicalSingletonPoolIdentity() || strings.TrimSpace(agent.Nudge) == "" ||
+	if agent == nil || strings.TrimSpace(agent.Nudge) == "" ||
 		isAgentEffectivelySuspendedWith(snapshot.Config, snapshot.CityPath, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
-		return false, nil
+		return routedWorkPoolReuseRefused, nil
+	}
+	if !isEphemeralSessionInfoForAgent(info, agent) {
+		return routedWorkPoolReuseRefused, nil
+	}
+	if agent.UsesCanonicalSingletonPoolIdentity() {
+		if !isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget) {
+			return routedWorkPoolReuseRefused, nil
+		}
+	} else if existingPoolSlotWithConfigInfo(snapshot.Config, agent, info) <= 0 {
+		return routedWorkPoolReuseRefused, nil
 	}
 	namedTemplates := make(map[string]struct{}, len(snapshot.Config.NamedSessions))
 	for i := range snapshot.Config.NamedSessions {
@@ -183,73 +211,80 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	}
 	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates).
 		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.Binding.StoreRef)
-	if !policy.supported() || policy.maxActiveSessions != 1 {
-		return false, nil
+	if !policy.supported() || policy.maxActiveSessions == 0 {
+		return routedWorkPoolReuseRefused, nil
 	}
 	observation, soleID, sole := cr.poolMembershipShadow.observeSoleMember(lease.PoolTarget)
 	if !sole || soleID != lease.SessionID || observation.occupied != 1 || observation.revision < lease.MembershipRevision {
-		return false, nil
+		return routedWorkPoolReuseRefused, nil
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
-	if name == "" || !snapshot.Provider.IsRunning(name) || snapshot.Provider.IsAttached(name) {
-		return false, nil
+	if name == "" || !snapshot.Provider.IsRunning(name) {
+		return routedWorkPoolReuseRefused, nil
 	}
+	busy := snapshot.Provider.IsAttached(name)
 	for _, check := range []struct{ key, want string }{
 		{"GC_SESSION_ID", lease.SessionID},
 		{"GC_INSTANCE_TOKEN", lease.InstanceToken},
 	} {
 		got, err := snapshot.Provider.GetMeta(name, check.key)
 		if err != nil {
-			return false, fmt.Errorf("authorizing singleton reuse for %q: reading %s: %w", lease.SessionID, check.key, err)
+			return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: reading %s: %w", lease.SessionID, check.key, err)
 		}
 		if got != check.want {
-			return false, nil
+			return routedWorkPoolReuseRefused, nil
 		}
 	}
 	interactionProvider, ok := snapshot.Provider.(runtime.InteractionProvider)
 	if !ok {
-		return false, fmt.Errorf("authorizing singleton reuse for %q: provider cannot prove pending-interaction state", lease.SessionID)
+		return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: provider cannot prove pending-interaction state", lease.SessionID)
 	}
 	pending, err := interactionProvider.Pending(name)
 	if err != nil {
-		return false, fmt.Errorf("authorizing singleton reuse for %q: checking pending interaction: %w", lease.SessionID, err)
+		return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: checking pending interaction: %w", lease.SessionID, err)
 	}
 	if pending != nil {
-		return false, nil
+		busy = true
 	}
 	hasAssigned, err := sessionHasAwakeAssignedWorkForReachableStore(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), info)
 	if err != nil {
-		return false, fmt.Errorf("authorizing singleton reuse for %q: checking assigned work: %w", lease.SessionID, err)
+		return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: checking assigned work: %w", lease.SessionID, err)
 	}
 	if hasAssigned {
-		return false, nil
+		busy = true
 	}
 	if lease.PreviousWorkID != "" {
 		previousStore, ok := cr.cs.routedWorkStore(snapshot.Config, lease.PreviousSourceStore)
 		if !ok || previousStore == nil {
-			return false, fmt.Errorf("authorizing singleton reuse for %q: previous source store %q is unavailable", lease.SessionID, lease.PreviousSourceStore)
+			return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: previous source store %q is unavailable", lease.SessionID, lease.PreviousSourceStore)
 		}
 		previous, err := beads.HandlesFor(previousStore).Live.Get(lease.PreviousWorkID)
 		if errors.Is(err, beads.ErrNotFound) {
-			return false, nil
+			return routedWorkPoolReuseRefused, nil
 		}
 		if err != nil {
-			return false, fmt.Errorf("authorizing singleton reuse for %q: reading previous work %q: %w", lease.SessionID, lease.PreviousWorkID, err)
+			return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: reading previous work %q: %w", lease.SessionID, lease.PreviousWorkID, err)
 		}
-		if previous.ID != lease.PreviousWorkID || previous.Status != "closed" {
-			return false, nil
+		if previous.ID != lease.PreviousWorkID {
+			return routedWorkPoolReuseRefused, nil
+		}
+		if previous.Status != "closed" {
+			busy = true
 		}
 	}
 	sourceStore, ok := cr.cs.routedWorkStore(snapshot.Config, lease.Binding.StoreRef)
 	if !ok || sourceStore == nil {
-		return false, fmt.Errorf("authorizing singleton reuse for %q: source store %q is unavailable", lease.SessionID, lease.Binding.StoreRef)
+		return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: source store %q is unavailable", lease.SessionID, lease.Binding.StoreRef)
 	}
 	work, ready, err := authoritativeReadyRoutedWorkByID(sourceStore, lease.Binding.WorkID, time.Now().UTC())
 	if err != nil {
-		return false, err
+		return routedWorkPoolReuseRefused, err
 	}
 	if !ready || controllerDemandRouteTarget(snapshot.Config, work, map[string]struct{}{lease.PoolTarget: {}}) != lease.PoolTarget {
-		return false, nil
+		return routedWorkPoolReuseRefused, nil
 	}
-	return true, nil
+	if busy {
+		return routedWorkPoolReuseBusy, nil
+	}
+	return routedWorkPoolReuseReusable, nil
 }

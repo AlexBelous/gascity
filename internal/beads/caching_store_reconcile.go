@@ -278,7 +278,11 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 
 	lastFullScanAt := c.stats.LastReconcileAt
 	if lastFullScanAt.IsZero() {
-		lastFullScanAt = c.lastFreshAt
+		// Applied events and local writes advance lastFreshAt. Before the first
+		// reconcile, use only the prime's full-scan stamp so traffic cannot keep
+		// moving the deadline. A zero stamp makes a PrimeActive-only cache due
+		// immediately and lets the reconcile promote it to live.
+		lastFullScanAt = c.lastFullScanFreshAt
 	}
 	dueAt := lastFullScanAt.Add(c.adaptiveIntervalLocked())
 	if !now.Before(dueAt) {
@@ -626,6 +630,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 	c.primePartialErr = nil
 	c.promoteLiveLocked()
 	c.stats.LastReconcileAt = now
+	c.lastFullScanFreshAt = now
 	c.stats.Adds += res.adds
 	c.stats.Removes += res.removes
 	c.stats.Updates += res.updates

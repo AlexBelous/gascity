@@ -2394,6 +2394,7 @@ func TestCachingStoreNextReconcileDelayUsesFreshnessWatchdog(t *testing.T) {
 	cache := NewCachingStoreForTest(NewMemStore(), nil)
 	cache.state = cacheLive
 	cache.lastFreshAt = time.Unix(100, 0)
+	cache.lastFullScanFreshAt = time.Unix(100, 0)
 
 	if got := cache.nextReconcileDelay(time.Unix(110, 0)); got != 20*time.Second {
 		t.Fatalf("nextReconcileDelay(fresh) = %s, want 20s", got)
@@ -2407,6 +2408,7 @@ func TestCachingStoreNextReconcileDelayUsesFreshnessWatchdog(t *testing.T) {
 
 	cache.stats.LastReconcileAt = time.Time{}
 	cache.lastFreshAt = time.Unix(70, 0)
+	cache.lastFullScanFreshAt = time.Unix(70, 0)
 	if got := cache.nextReconcileDelay(time.Unix(110, 0)); got != 0 {
 		t.Fatalf("nextReconcileDelay(stale) = %s, want immediate reconcile", got)
 	}
@@ -2415,6 +2417,15 @@ func TestCachingStoreNextReconcileDelayUsesFreshnessWatchdog(t *testing.T) {
 	cache.lastFreshAt = time.Unix(109, 0)
 	if got := cache.nextReconcileDelay(time.Unix(110, 0)); got != 0 {
 		t.Fatalf("nextReconcileDelay(degraded) = %s, want immediate reconcile", got)
+	}
+
+	cache.state = cacheLive
+	cache.stats.LastReconcileAt = time.Time{}
+	t0 := time.Unix(200, 0)
+	cache.lastFullScanFreshAt = t0
+	cache.lastFreshAt = t0.Add(50 * time.Second)
+	if got := cache.nextReconcileDelay(t0.Add(61 * time.Second)); got != 0 {
+		t.Fatalf("nextReconcileDelay(pre-first-scan under traffic) = %s, want immediate reconcile", got)
 	}
 }
 

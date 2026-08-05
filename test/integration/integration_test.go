@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -409,19 +408,28 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 }
 
 func pinnedIntegrationBeadsModuleVersion() (string, error) {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "", errors.New("read build info: not available")
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+	cmd.Dir = findModuleRoot()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
 	}
-	for _, dep := range bi.Deps {
-		if dep.Path == "github.com/steveyegge/beads" {
-			if dep.Replace != nil {
-				return dep.Replace.Version, nil
-			}
-			return dep.Version, nil
-		}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return "", errors.New("github.com/steveyegge/beads module version is empty")
 	}
-	return "", errors.New("github.com/steveyegge/beads not found in build info deps")
+	return version, nil
+}
+
+func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
+	version, err := pinnedIntegrationBeadsModuleVersion()
+	if err != nil {
+		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
+	}
+	const want = "v1.1.1-0.20260805093327-bf97b73749ac"
+	if version != want {
+		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+	}
 }
 
 func writeExecShim(path, target string) error {

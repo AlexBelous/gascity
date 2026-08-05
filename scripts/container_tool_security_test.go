@@ -128,21 +128,28 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 }
 
-func TestMCPMailImagePinsPatchedGitPythonAndPillow(t *testing.T) {
+func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.52",
+		"gitpython>=3.1.57",
+		"aiohttp>=3.14.3",
 		"pillow>=12.3.0",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
 		}
 	}
+	overrides := readFile(t, root, ".github/requirements/mcp-agent-mail.overrides.txt")
+	if !strings.Contains(overrides, "cryptography>=50.0.0") {
+		t.Error("mcp-agent-mail overrides missing cryptography security floor >=50.0.0")
+	}
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.54 \\",
+		"gitpython==3.1.58 \\",
+		"aiohttp==3.14.3 \\",
+		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
 	} {
 		if !strings.Contains(lock, want) {

@@ -90,9 +90,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 
 	var all []beads.Bead
-	_, hasCityWork := stores[cityWorkStoreKey]
-	_, hasCityCoordination := stores[cityCoordinationStoreKey]
-	dedupe := len(assigneeTerms) > 1 || hasCityWork && hasCityCoordination
+	dedupe := len(assigneeTerms) > 1
 
 	// all=true reads materialize closed history per rig, so the build is
 	// O(history) even though the caller only wants a recency-bounded page
@@ -181,11 +179,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				pa.success()
 			}
 			for _, b := range list {
-				dedupeScope := rigName
-				if rigName == cityWorkStoreKey || rigName == cityCoordinationStoreKey {
-					dedupeScope = "\x00city"
-				}
-				dedupeKey := dedupeScope + "\x00" + b.ID
+				dedupeKey := rigName + "\x00" + b.ID
 				if dedupe && seen[dedupeKey] {
 					continue
 				}

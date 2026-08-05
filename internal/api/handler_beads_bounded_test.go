@@ -140,6 +140,37 @@ func TestBeadListAllTrueBoundsCounterStore(t *testing.T) {
 	}
 }
 
+func TestBeadListAllTrueRemainsBoundedWithSplitCityStores(t *testing.T) {
+	const perStore = 30
+	const limit = 10
+	fs := newFakeState(t)
+	_, workMem := seedMoleculeStore(perStore)
+	_, coordinationMem := seedMoleculeStore(perStore)
+	_, rigMem := seedMoleculeStore(perStore)
+	workStore := &countingListStore{Store: workMem}
+	coordinationStore := &countingListStore{Store: coordinationMem}
+	rigStore := &countingListStore{Store: rigMem}
+	fs.cityWorkBeadStore = workStore
+	fs.cityBeadStore = coordinationStore
+	fs.stores = map[string]beads.Store{"myrig": rigStore}
+
+	body := fetchBoundedBeads(t, fs, fmt.Sprintf("?type=molecule&all=true&limit=%d", limit))
+
+	if body.Total != perStore*3 {
+		t.Errorf("Total = %d, want %d", body.Total, perStore*3)
+	}
+	for name, store := range map[string]*countingListStore{
+		"city work": workStore, "city coordination": coordinationStore, "rig": rigStore,
+	} {
+		if !store.countCalled {
+			t.Errorf("%s Count was not called; split-store bounding did not engage", name)
+		}
+		if store.maxListLim != limit+1 {
+			t.Errorf("%s max List limit = %d, want %d", name, store.maxListLim, limit+1)
+		}
+	}
+}
+
 // TestBeadListAllTrueNoCursorWhenAllFit verifies a page that covers the whole
 // result set carries no continuation cursor.
 func TestBeadListAllTrueNoCursorWhenAllFit(t *testing.T) {

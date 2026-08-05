@@ -780,8 +780,8 @@ func assertBeadEndpointFederatesCityAndSameNamedRig(t *testing.T, endpoint strin
 				duplicates++
 			}
 		}
-		if duplicates != 1 {
-			t.Fatalf("%s duplicate city ID count = %d, want 1", endpoint, duplicates)
+		if duplicates != 2 {
+			t.Fatalf("%s duplicate city ID count = %d, want 2 distinct store records", endpoint, duplicates)
 		}
 	}
 }

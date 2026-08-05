@@ -92,8 +92,9 @@ vulnerabilities:
     paths:
       - "usr/bin/gh"
       - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
-    statement: Rebuilt gh and Dolt sources still embed golang.org/x/text 0.38.0 and 0.36.0 respectively; remove each path when its upstream source bumps to x/text 0.39.0 or later.
+    statement: Rebuilt gh and Dolt sources embed golang.org/x/text 0.38.0 and 0.36.0, and external kubectl embeds 0.33.0; remove each path when its upstream source bumps to x/text 0.39.0 or later.
   - id: CVE-2026-25680
     paths:
       - "usr/local/bin/dolt"

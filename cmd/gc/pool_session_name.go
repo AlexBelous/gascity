@@ -183,6 +183,9 @@ func releaseOrphanedPoolAssignments(
 			if liveOpenSessionAssignmentExists(store, assignee) {
 				continue
 			}
+			if liveEphemeralSessionForTemplate(openSessionInfos, cfg, cityPath, agentCfg, template, workStoreRef, storeRefAware) {
+				continue
+			}
 		}
 
 		var ownerStore beads.Store
@@ -323,6 +326,39 @@ func openSessionOwnsWork(legacyIdentifiers map[string]struct{}, scopedIdentifier
 	}
 	_, ok := refs[workStoreRef]
 	return ok
+}
+
+// liveEphemeralSessionForTemplate reports whether a live (non-closed) open
+// session for the work's template already exists. This covers the case
+// where a work bead's assignee is the bare route/template name itself
+// (not a resolved session identity) — the gates above only match on
+// concrete session identities (ID, session_name, alias, ...), so a
+// template-as-assignee work item is otherwise indistinguishable from one
+// pointed at a genuinely dead session, causing it to be wrongly reopened
+// even while a live session for that template is actively working it.
+func liveEphemeralSessionForTemplate(openSessionInfos []session.Info, cfg *config.City, cityPath string, agentCfg *config.Agent, template, workStoreRef string, storeRefAware bool) bool {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return false
+	}
+	for _, info := range openSessionInfos {
+		if info.Closed {
+			continue
+		}
+		if strings.TrimSpace(info.Template) != template {
+			continue
+		}
+		if !storeRefAware {
+			return true
+		}
+		if agentIsCrossStoreEligible(agentCfg) {
+			return true
+		}
+		if assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg) == workStoreRef {
+			return true
+		}
+	}
+	return false
 }
 
 func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, wb beads.Bead) beads.Store {

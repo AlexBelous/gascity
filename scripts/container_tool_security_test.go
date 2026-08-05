@@ -65,9 +65,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "8e4e59d39f3459a43cf21a3236a13eca4dd874f7"
-		bdSourceSHA256 = "63597b6b368d7d26ba3fc570ae3b2fa4cd8a5155d4716cae13d178a560808d5a"
-		bdBuild        = "8e4e59d39"
+		bdSourceRef    = "bf97b73749ac3ef2fca2365b54537ac041ad4293"
+		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
+		bdBuild        = "bf97b73749"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.82.1"
 	)

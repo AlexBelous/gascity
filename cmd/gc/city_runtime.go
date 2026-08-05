@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -108,6 +109,13 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+
+	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
+	// resolved transcript path, whether discovery definitively found nothing, and
+	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
+	// process-lifetime cache is what keeps a per-tick live lane from repeating
+	// bounded discovery and transcript reads for every awake session.
+	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -1604,6 +1612,19 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
+// bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
+// deletions. Configurable via GC_BACKUP_MAX_AGE_FOR_BULK_DELETE (integer
+// seconds); defaults to 86400 s (24 h).
+func bulkDeleteMaxAge(_ *config.City) time.Duration {
+	if s := os.Getenv("GC_BACKUP_MAX_AGE_FOR_BULK_DELETE"); s != "" {
+		var secs int
+		if _, err := fmt.Sscanf(s, "%d", &secs); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 24 * time.Hour
+}
+
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
@@ -1617,6 +1638,17 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 		return
 	}
 	cr.orderTrackingRetentionWatchdogLast = now
+
+	// The cityPath guard is a test affordance: real controllers always set it,
+	// so the backup-age check below always runs in production.
+	if cr.cityPath != "" {
+		if safe, reason := doctor.BulkDeleteSafe(cr.cityPath, cr.cfg, bulkDeleteMaxAge(cr.cfg), now); !safe {
+			if cr.stderr != nil {
+				fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: skipping bulk delete — %s\n", cr.logPrefix, reason) //nolint:errcheck // best-effort stderr
+			}
+			return
+		}
+	}
 
 	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
 	defer closeOpened()
@@ -2304,7 +2336,9 @@ func (cr *CityRuntime) stopConfigWatcher() {
 // readiness quickly, so it skips the undesired-pool-session sweep (a heavy
 // candidate × store × status × identifier bd-read fan-out that, serialized on
 // the readiness path, can exceed the startup watchdog on a heavy-session city —
-// gastownhall/gascity#3288). The first steady-state tick performs the sweep.
+// gastownhall/gascity#3288) and the usage lane's live transcript sweep (bounded
+// per-session file discovery and reads across every awake session at once). The
+// first steady-state tick performs both.
 func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle, bootReconcile bool) {
 	desiredState := result.State
 	store := cr.cityBeadStore()
@@ -2330,8 +2364,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	}
 	// Emit any due compute usage facts by reusing the open-session snapshot this
-	// tick already loaded, rather than issuing a second redundant store scan.
-	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos())
+	// tick already loaded, rather than issuing a second redundant store scan. The
+	// boot pass covers the whole fleet at once on the readiness path, so it takes
+	// only the marker-gated terminal lane and leaves the fleet-proportional live
+	// lane to the first steady-state tick.
+	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos(), bootReconcile)
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs

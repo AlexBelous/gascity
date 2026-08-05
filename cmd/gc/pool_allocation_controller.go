@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -35,8 +36,12 @@ type routedWorkPoolAllocationResult struct {
 // routedWorkPoolStartLease binds one exact-start admission to the certified
 // allocation that created or rediscovered its durable session row.
 type routedWorkPoolStartLease struct {
-	SessionID            string
-	InstanceToken        string
+	SessionID     string
+	InstanceToken string
+	// RecoverActive limits this lease to re-starting the exact active pool row
+	// after its runtime has been observed absent. It never widens ownership of
+	// ordinary active members.
+	RecoverActive        bool
 	ControllerGeneration uint64
 	PoolTarget           string
 	WorkID               string
@@ -469,7 +474,24 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 			return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
 		}
 		_, occupied := cr.poolMembershipShadow.observeOccupiedMember(hint.PoolTarget, existing.ID)
-		if lifecycle.BaseState == sessionpkg.BaseStateActive && occupied && existing.SessionName != "" && snapshot.Provider.IsRunning(existing.SessionName) {
+		if lifecycle.BaseState == sessionpkg.BaseStateActive && !lifecycle.Terminal && occupied {
+			if existing.SessionName == "" {
+				if cr.sessionStartRolloutMode() == rollout.Require {
+					return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+				}
+				return routedWorkPoolAllocationResult{}, nil
+			}
+			if snapshot.Provider.IsRunning(existing.SessionName) {
+				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+			}
+			lease, leaseErr := cr.newRoutedWorkPoolStartLease(snapshot, existing, hint)
+			if leaseErr != nil {
+				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, leaseErr
+			}
+			lease.RecoverActive = true
+			if err := cr.admitRoutedWorkPoolSession(lease); err != nil {
+				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, err
+			}
 			return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
 		}
 		return routedWorkPoolAllocationResult{}, nil
@@ -550,7 +572,7 @@ func (cr *CityRuntime) newRoutedWorkPoolStartLease(
 ) (routedWorkPoolStartLease, error) {
 	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(hint.PoolTarget, info.ID)
 	if !occupied {
-		return routedWorkPoolStartLease{}, fmt.Errorf("certifying created session %q: pool membership does not contain an occupied member", info.ID)
+		return routedWorkPoolStartLease{}, fmt.Errorf("certifying pool session %q: pool membership does not contain an occupied member", info.ID)
 	}
 	lease := routedWorkPoolStartLease{
 		SessionID:            info.ID,
@@ -602,7 +624,15 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	lifecycleInput.CreatedAt = info.CreatedAt
 	lifecycleInput.StaleCreatingAfter = staleCreatingStateTimeout
 	lifecycle := sessionpkg.ProjectLifecycle(lifecycleInput)
-	if lifecycle.Terminal || !lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) {
+	if lifecycle.Terminal {
+		return false, nil
+	}
+	if lease.RecoverActive {
+		if lifecycle.BaseState != sessionpkg.BaseStateActive || lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) ||
+			lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) || info.SessionName == "" || snapshot.Provider.IsRunning(info.SessionName) {
+			return false, nil
+		}
+	} else if !lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) {
 		return false, nil
 	}
 	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
@@ -618,6 +648,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore)
 	if !policy.supported() ||
 		(policy.maxActiveSessions == 1 && !isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget)) ||
+		!isEphemeralSessionInfoForAgent(info, agent) || isManualSessionInfoForAgent(info, agent) || info.DependencyOnly ||
 		strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
 		strings.TrimSpace(info.TriggerBeadStoreRef) != lease.SourceStore {
 		return false, nil
@@ -716,16 +747,16 @@ func (cr *CityRuntime) admitRoutedWorkPoolSession(lease routedWorkPoolStartLease
 	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
 	cr.sessionStartMu.Unlock()
 	if !owned || controller == nil {
-		return fmt.Errorf("exact-start controller is unavailable after session creation")
+		return fmt.Errorf("exact-start controller is unavailable for pool session admission")
 	}
 	outcome, err := controller.AdmitPoolAllocation(lease)
 	if err != nil {
 		controller.RequestAudit()
-		return fmt.Errorf("admitting created session %q: %w", lease.SessionID, err)
+		return fmt.Errorf("admitting pool session %q: %w", lease.SessionID, err)
 	}
 	if outcome == sessionStartAdmissionOverflow {
 		controller.RequestAudit()
-		return fmt.Errorf("admitting created session %q: exact-start queue overflow", lease.SessionID)
+		return fmt.Errorf("admitting pool session %q: exact-start queue overflow", lease.SessionID)
 	}
 	return nil
 }
@@ -736,6 +767,15 @@ func (cr *CityRuntime) requestReadyRoutedWorkLegacyFallback() {
 	}
 	cr.readyRoutedWorkPokePending.Store(true)
 	cr.requestLegacySessionStartFallback()
+}
+
+func (cr *CityRuntime) sessionStartRolloutMode() rollout.Mode {
+	if cr == nil {
+		return rollout.Auto
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	return cr.sessionStartMode
 }
 
 func (cr *CityRuntime) recordRoutedWorkPoolAllocationMaterialized(hint routedWorkPoolAllocationHint, info sessionpkg.Info) {

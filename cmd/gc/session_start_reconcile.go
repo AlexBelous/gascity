@@ -898,7 +898,7 @@ func reconcileExactSessionStartWithOwner(
 	ownershipNow := clk.Now().UTC()
 	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, ownershipNow)
 	poolStartAuthorized := false
-	if owner == exactSessionStartLegacyOwner && admission.PoolAllocation != nil && params.AuthorizePoolStart != nil &&
+	if (owner == exactSessionStartLegacyOwner || owner == exactSessionStartUnowned) && admission.PoolAllocation != nil && params.AuthorizePoolStart != nil &&
 		isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) {
 		authorized, authorizeErr := params.AuthorizePoolStart(ctx, info, *admission.PoolAllocation)
 		if authorizeErr != nil {
@@ -1033,6 +1033,9 @@ func reconcileExactSessionStartWithOwner(
 				return sessionpkg.Info{}, authorizeErr
 			}
 			if !authorized {
+				if lease.RecoverActive && params.RolloutMode == rollout.Require {
+					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartUnowned}
+				}
 				return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
 			}
 			return current, nil

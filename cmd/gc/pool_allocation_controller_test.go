@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -204,6 +205,92 @@ func TestRoutedWorkPoolAllocationMaterializesOneDurableSessionAndUsesExactStart(
 			}
 		}
 		t.Fatalf("directly materialized pool session %q is not running; current=%+v snapshot=%v lease=%+v lease_err=%v authorized=%t authorize_err=%v membership=%+v fallback=%t controller stderr:\n%s\nruntime calls: %+v", first.Session.SessionName, current, snapshotErr, lease, leaseErr, authorized, authorizeErr, fixture.cr.poolMembershipShadow.observe("worker"), fixture.cr.readyRoutedWorkPokePending.Load(), fixture.stderr.String(), fixture.provider.SnapshotCalls())
+	}
+}
+
+func TestRoutedWorkPoolAllocationReplaysExactActiveBindingAfterRuntimeLoss(t *testing.T) {
+	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+	work, err := fixture.store.Create(beads.Bead{
+		Title:  "ready routed work survives pre-claim runtime loss",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":                    "worker",
+			beadmeta.PackMetadataKey:          "review-pack",
+			beadmeta.PackWorkspaceMetadataKey: "workspace-a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create ready routed work: %v", err)
+	}
+	hint := routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"}
+
+	first, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+	if err != nil || !first.Handled || !first.Created {
+		t.Fatalf("initial allocation = (%+v, %v), want created handled session", first, err)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(first.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "initial exact pool allocation to start")
+	before, err := sessionFrontDoor(fixture.store).Get(first.Session.ID)
+	if err != nil {
+		t.Fatalf("read initially active allocation: %v", err)
+	}
+	if err := fixture.provider.Stop(before.SessionName); err != nil {
+		t.Fatalf("remove only fake runtime before claim: %v", err)
+	}
+	if fixture.provider.IsRunning(before.SessionName) {
+		t.Fatal("precondition: fake runtime remains running after removal")
+	}
+	stopsBeforeReplay := providerCallCount(fixture.provider, "Stop")
+	nudgesBeforeReplay := providerNudgeCalls(fixture.provider, before.SessionName)
+
+	replay, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+	if err != nil || !replay.Handled || replay.Created || replay.Session.ID != before.ID {
+		t.Fatalf("exact allocation replay = (%+v, %v), want handled existing session %q", replay, err, before.ID)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(before.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "exact replay to restart the same active pool allocation")
+
+	after, err := sessionFrontDoor(fixture.store).Get(before.ID)
+	if err != nil {
+		t.Fatalf("read restarted allocation: %v", err)
+	}
+	if after.ID != before.ID || after.SessionName != before.SessionName || after.PoolSlot != before.PoolSlot {
+		t.Fatalf("restarted allocation identity = (%q, %q, %q), want (%q, %q, %q)", after.ID, after.SessionName, after.PoolSlot, before.ID, before.SessionName, before.PoolSlot)
+	}
+	if after.InstanceToken == before.InstanceToken {
+		t.Fatal("restarted allocation did not rotate its runtime identity")
+	}
+	if after.TriggerBeadID != before.TriggerBeadID || after.TriggerBeadStoreRef != before.TriggerBeadStoreRef ||
+		after.BrainParentSID != before.BrainParentSID || after.Pack != before.Pack || after.PackWorkspace != before.PackWorkspace ||
+		after.WorkDirCanonical != before.WorkDirCanonical || after.WorkDir != before.WorkDir {
+		t.Fatalf("restarted allocation binding/workdirs changed: before=%+v after=%+v", before, after)
+	}
+	if got := providerCallCount(fixture.provider, "Start"); got != 2 {
+		t.Fatalf("provider Start calls = %d, want exactly initial start plus replay restart", got)
+	}
+	if got := providerCallCount(fixture.provider, "Stop"); got != stopsBeforeReplay {
+		t.Fatalf("provider Stop calls after replay = %d, want no stop beyond pre-claim runtime removal %d", got, stopsBeforeReplay)
+	}
+	if got := providerNudgeCalls(fixture.provider, before.SessionName); got != nudgesBeforeReplay {
+		t.Fatalf("provider nudge calls after replay = %d, want unchanged %d", got, nudgesBeforeReplay)
+	}
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load durable sessions after replay: %v", err)
+	}
+	if got := len(infos.OpenInfos()); got != 1 {
+		t.Fatalf("open session rows after replay = %d, want the original row only", got)
+	}
+
+	idempotent, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+	if err != nil || !idempotent.Handled || idempotent.Created || idempotent.Session.ID != before.ID {
+		t.Fatalf("live replay = (%+v, %v), want handled idempotent existing session", idempotent, err)
+	}
+	if got := providerCallCount(fixture.provider, "Start"); got != 2 {
+		t.Fatalf("provider Start calls after live replay = %d, want exactly 2", got)
 	}
 }
 
@@ -2161,6 +2248,173 @@ func TestAuthorizeRoutedWorkPoolStartRejectsStaleLeaseAuthority(t *testing.T) {
 			}
 			if authorized {
 				t.Fatal("stale pool-allocation lease retained start authority")
+			}
+		})
+	}
+}
+
+func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRequiresExactAbsentRuntime(t *testing.T) {
+	fixture := newRoutedWorkPoolAuthorizationFixture(t)
+	if err := fixture.store.SetMetadataBatch(fixture.info.ID, map[string]string{
+		"state":                     string(sessionpkg.StateActive),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}); err != nil {
+		t.Fatalf("mark exact pool allocation active: %v", err)
+	}
+	info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read active exact pool allocation: %v", err)
+	}
+	if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, info); err != nil {
+		t.Fatalf("publish active exact pool allocation: %v", err)
+	}
+	fixture.lease.InstanceToken = info.InstanceToken
+	fixture.lease.RecoverActive = true
+
+	authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, info, fixture.lease)
+	if err != nil || !authorized {
+		t.Fatalf("authorize exact active recovery with absent runtime = (%t, %v), want true", authorized, err)
+	}
+
+	ordinary := fixture.lease
+	ordinary.RecoverActive = false
+	authorized, err = fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, info, ordinary)
+	if err != nil || authorized {
+		t.Fatalf("authorize ordinary active pool row = (%t, %v), want false without recovery lease", authorized, err)
+	}
+
+	if err := fixture.provider.Start(t.Context(), info.SessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start live replacement runtime: %v", err)
+	}
+	authorized, err = fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, info, fixture.lease)
+	if err != nil || authorized {
+		t.Fatalf("authorize active recovery with live replacement = (%t, %v), want false", authorized, err)
+	}
+}
+
+func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRejectsDriftWithoutEffects(t *testing.T) {
+	newActiveRecovery := func(t *testing.T) (routedWorkPoolAuthorizationFixture, routedWorkPoolStartLease) {
+		t.Helper()
+		fixture := newRoutedWorkPoolAuthorizationFixture(t)
+		if err := fixture.store.SetMetadataBatch(fixture.info.ID, map[string]string{
+			"state":                     string(sessionpkg.StateActive),
+			"pending_create_claim":      "",
+			"pending_create_started_at": "",
+		}); err != nil {
+			t.Fatalf("mark exact pool allocation active: %v", err)
+		}
+		info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+		if err != nil {
+			t.Fatalf("read active exact pool allocation: %v", err)
+		}
+		if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, info); err != nil {
+			t.Fatalf("publish active exact pool allocation: %v", err)
+		}
+		lease := fixture.lease
+		lease.InstanceToken = info.InstanceToken
+		lease.RecoverActive = true
+		return fixture, lease
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*routedWorkPoolAuthorizationFixture, *routedWorkPoolStartLease)
+	}{
+		{
+			name: "work claimed",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				assignee := "another-session"
+				if err := f.store.Update(f.work.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+					f.t.Fatalf("claim routed work: %v", err)
+				}
+			},
+		},
+		{
+			name: "work closed",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				if err := f.store.Close(f.work.ID); err != nil {
+					f.t.Fatalf("close routed work: %v", err)
+				}
+			},
+		},
+		{
+			name: "work rerouted",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				if err := f.store.SetMetadata(f.work.ID, "gc.routed_to", "other"); err != nil {
+					f.t.Fatalf("reroute work: %v", err)
+				}
+			},
+		},
+		{
+			name: "binding changed",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				if err := f.store.SetMetadata(f.info.ID, beadmeta.TriggerBeadIDMetadataKey, "gc-other-work"); err != nil {
+					f.t.Fatalf("change exact binding: %v", err)
+				}
+			},
+		},
+		{
+			name: "config generation changed",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				next := *f.snapshot.Config
+				f.cr.cfg = &next
+			},
+		},
+		{
+			name: "membership changed",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				f.cr.poolMembershipShadow.remove(f.info.ID)
+			},
+		},
+		{
+			name: "agent suspended",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				f.snapshot.Config.Agents[0].Suspended = true
+			},
+		},
+		{
+			name: "dependency policy changed",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				f.snapshot.Config.Agents[0].DependsOn = []string{"other"}
+			},
+		},
+		{
+			name: "provider unhealthy",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				f.snapshot.Config.Agents[0].Provider = "claude"
+				path := filepath.Join(f.snapshot.CityPath, providerHealthCacheRelPath)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					f.t.Fatalf("create provider health directory: %v", err)
+				}
+				body, err := json.Marshal(providerHealthFileFormat{Providers: []providerHealthRecord{{Provider: "claude", Status: "unhealthy", ProbedAt: float64(time.Now().UnixNano()) / float64(time.Second)}}})
+				if err != nil {
+					f.t.Fatalf("marshal provider health: %v", err)
+				}
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					f.t.Fatalf("write provider health: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, lease := newActiveRecovery(t)
+			test.mutate(&fixture, &lease)
+			info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+			if err != nil {
+				t.Fatalf("read mutated exact pool allocation: %v", err)
+			}
+			authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, info, lease)
+			if err != nil {
+				t.Fatalf("authorize drifted active recovery: %v", err)
+			}
+			if authorized {
+				t.Fatal("drifted active recovery retained start authority")
+			}
+			if starts, stops, nudges := providerCallCount(fixture.provider, "Start"), providerCallCount(fixture.provider, "Stop"), providerNudgeCalls(fixture.provider, info.SessionName); starts != 0 || stops != 0 || nudges != 0 {
+				t.Fatalf("drift authorization runtime effects = (starts=%d stops=%d nudges=%d), want none", starts, stops, nudges)
 			}
 		})
 	}

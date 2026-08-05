@@ -483,7 +483,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			return 1
 		}
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, nil, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -497,9 +497,11 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		return 1
 	}
 	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, func() error {
-		return completeCurrentRuntimeDrainAckTrigger(current)
-	}, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	if err := completeCurrentRuntimeDrainAckTrigger(current); err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: completing trigger bead: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
 }
 
 func completeCurrentRuntimeDrainAckTrigger(current sessionRuntimeTarget) error {
@@ -778,16 +780,10 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 // Tests that swap it MUST NOT call t.Parallel().
 var drainAckPokeController = pokeController
 
-// doRuntimeDrainAck completes the current trigger when requested, sets the
-// drain-ack flag, then pokes the controller so the reconciler observes the
-// drained state immediately instead of waiting for its next patrol tick.
-func doRuntimeDrainAck(dops drainOps, completeTrigger func() error, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
-	if completeTrigger != nil {
-		if err := completeTrigger(); err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-ack: completing trigger bead: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
+// doRuntimeDrainAck sets the drain-ack flag on the session, then pokes the
+// controller so the reconciler observes the drained state immediately instead
+// of waiting for its next patrol tick.
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

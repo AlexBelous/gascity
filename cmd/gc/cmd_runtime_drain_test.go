@@ -668,7 +668,7 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, nil, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -728,8 +728,10 @@ func TestCompleteRuntimeDrainAckTriggerAdvancesOnlyItsWorkflow(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	complete := func() error { return completeRuntimeDrainAckTrigger(store, drain.ID, []string{sessionName}) }
-	if code := doRuntimeDrainAck(dops, complete, "", sessionName, sessionName, false, &stdout, &stderr); code != 0 {
+	if err := completeRuntimeDrainAckTrigger(store, drain.ID, []string{sessionName}); err != nil {
+		t.Fatalf("completeRuntimeDrainAckTrigger(first): %v", err)
+	}
+	if code := doRuntimeDrainAck(dops, "", sessionName, sessionName, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("doRuntimeDrainAck(first) = %d; stderr=%s", code, stderr.String())
 	}
 	if !dops.acked[sessionName] {
@@ -761,7 +763,10 @@ func TestCompleteRuntimeDrainAckTriggerAdvancesOnlyItsWorkflow(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := doRuntimeDrainAck(dops, complete, "", sessionName, sessionName, false, &stdout, &stderr); code != 0 {
+	if err := completeRuntimeDrainAckTrigger(store, drain.ID, []string{sessionName}); err != nil {
+		t.Fatalf("completeRuntimeDrainAckTrigger(retry): %v", err)
+	}
+	if code := doRuntimeDrainAck(dops, "", sessionName, sessionName, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("doRuntimeDrainAck(retry) = %d; stderr=%s", code, stderr.String())
 	}
 	result, err = dispatch.ProcessControl(store, mustGetMemBead(t, store, finalizer.ID), dispatch.ProcessOptions{})
@@ -783,27 +788,12 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, nil, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime drain-ack: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
-	}
-}
-
-func TestDoRuntimeDrainAckCompletionFailureDoesNotAcknowledge(t *testing.T) {
-	dops := newFakeDrainOps()
-	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, func() error { return errors.New("store unavailable") }, "", "worker", "worker", false, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1", code)
-	}
-	if dops.acked["worker"] {
-		t.Fatal("drain ack was set even though trigger completion failed")
-	}
-	if got, want := stderr.String(), "gc runtime drain-ack: completing trigger bead: store unavailable\n"; got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
 
@@ -845,7 +835,7 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, nil, "", "worker", "worker", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -876,7 +866,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	// of the three adjacent string params in the new signature.
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, nil, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -903,7 +893,7 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, nil, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -919,7 +909,7 @@ func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, nil, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
 	}

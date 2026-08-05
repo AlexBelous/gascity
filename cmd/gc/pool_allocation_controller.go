@@ -238,7 +238,8 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 	}
 	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates).
 		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore)
-	if !policy.supported() || policy.maxActiveSessions == 1 {
+	if !policy.supported() ||
+		(policy.maxActiveSessions == 1 && !isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget)) {
 		return false, nil
 	}
 	for _, check := range []struct{ key, want string }{

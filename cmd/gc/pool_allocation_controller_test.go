@@ -440,6 +440,86 @@ func TestRoutedWorkPoolAllocationStartsColdCanonicalSingletonAndFallsBackAtCap(t
 	}
 }
 
+func TestRoutedWorkPoolAllocationCanonicalSingletonRetiresByExactDrainAck(t *testing.T) {
+	opened, err := beads.OpenStoreAtForCity(t.Context(), beads.StoreOpenOptions{
+		Provider:          "file",
+		OpenFileStore:     func() (beads.Store, error) { return beads.NewAtomicCloseMemStore(), nil },
+		ConditionalWrites: gate.Auto,
+	})
+	if err != nil {
+		t.Fatalf("open conditional-write singleton store: %v", err)
+	}
+	fixture := newRoutedWorkPoolAllocationFixture(t, opened.Store)
+	maximum := 1
+	fixture.cr.cfg.Agents[0].MaxActiveSessions = &maximum
+	work, err := fixture.store.Create(beads.Bead{
+		Title:    "singleton lifecycle work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create singleton lifecycle work: %v", err)
+	}
+	hint := routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"}
+	allocated, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+	if err != nil || !allocated.Handled || !allocated.Created {
+		t.Fatalf("allocate canonical singleton = (%+v, %v), want one keyed create", allocated, err)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(allocated.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "canonical singleton to start before drain acknowledgement")
+	if err := fixture.store.Close(work.ID); err != nil {
+		t.Fatalf("close singleton trigger work: %v", err)
+	}
+	info, err := sessionFrontDoor(fixture.store).Get(allocated.Session.ID)
+	if err != nil {
+		t.Fatalf("read active singleton session: %v", err)
+	}
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":                   info.ID,
+		"GC_INSTANCE_TOKEN":               info.InstanceToken,
+		reconcilerDrainAckSourceKey:       drainAckSourceAgentValue,
+		drainAckRequesterSessionIDKey:     info.ID,
+		drainAckRequesterInstanceTokenKey: info.InstanceToken,
+		"GC_DRAIN_ACK":                    "1",
+	} {
+		if err := fixture.provider.SetMeta(info.SessionName, key, value); err != nil {
+			t.Fatalf("set singleton runtime metadata %s: %v", key, err)
+		}
+	}
+
+	snapshot, release, err := fixture.cr.cs.acquireSessionStartSnapshot()
+	if err != nil {
+		t.Fatalf("acquire singleton stop snapshot: %v", err)
+	}
+	lease, agentAck, leaseErr := fixture.cr.newRoutedWorkPoolDrainAckLease(snapshot, info)
+	if leaseErr != nil || !agentAck {
+		release()
+		t.Fatalf("create singleton drain-ack lease = (%+v, %t, %v), want exact agent lease", lease, agentAck, leaseErr)
+	}
+	authorized, authorizeErr := fixture.cr.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
+	release()
+	if authorizeErr != nil || !authorized {
+		t.Fatalf("authorize canonical singleton drain acknowledgement = (%t, %v), want true", authorized, authorizeErr)
+	}
+	if reply := fixture.cr.admitSessionStartSocketKey(info.ID); reply != sessionStartSocketReplyOK {
+		t.Fatalf("singleton drain-ack socket reply = %q, want %q", reply, sessionStartSocketReplyOK)
+	}
+	awaitCond(t, func() bool {
+		row, getErr := fixture.store.Get(info.ID)
+		return getErr == nil && row.Status == "closed" && row.Metadata["state"] == string(sessionpkg.StateDrained) &&
+			row.Metadata["state_reason"] == "" && row.Metadata["close_reason"] == sessionpkg.CanonicalCloseReason("drained") &&
+			row.Metadata["closed_at"] != "" && !fixture.provider.IsRunning(info.SessionName)
+	}, "canonical singleton exact durable retirement")
+	if got := fixture.provider.CountCalls("Stop", info.SessionName); got != 1 {
+		t.Fatalf("canonical singleton provider Stop calls = %d, want 1", got)
+	}
+	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after canonical singleton retirement = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	}
+}
+
 func TestRoutedWorkPoolAllocationRediscoverPendingBindingFromStaleEmptyIndex(t *testing.T) {
 	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
 	work, err := fixture.store.Create(beads.Bead{
@@ -1334,7 +1414,7 @@ func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) 
 			},
 		},
 		{
-			name: "canonical singleton stop remains legacy owned",
+			name: "numbered singleton stop remains legacy owned",
 			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
 				maximum := 1
 				f.snapshot.Config.Agents[0].MaxActiveSessions = &maximum
@@ -1881,15 +1961,16 @@ func newRoutedWorkPoolAllocationFixture(t *testing.T, store beads.Store) routedW
 		}},
 	}
 	provider := runtime.NewFake()
+	sessionProvider := &sequenceGetMetaProvider{Fake: provider}
 	stderr := &bytes.Buffer{}
-	cs := coherentSessionStartControllerStateForTest(cfg, provider, store, rollout.Auto)
+	cs := coherentSessionStartControllerStateForTest(cfg, sessionProvider, store, rollout.Auto)
 	cs.cityPath = cityPath
 	cs.cityName = "test-city"
 	cr := &CityRuntime{
 		cityPath:             cityPath,
 		cityName:             "test-city",
 		cfg:                  cfg,
-		sp:                   provider,
+		sp:                   sessionProvider,
 		cs:                   cs,
 		rec:                  events.Discard,
 		poolMembershipShadow: newPoolMembershipIndex(),

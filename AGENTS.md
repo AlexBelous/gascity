@@ -519,30 +519,39 @@ bd close <id>         # Complete work
 
 ## Session Completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**When ending a work session**, you MUST complete ALL steps below. Commit code
+and documentation changes. When a usable Git remote is configured, work is not
+complete until the commits are pushed; otherwise, hand off the exact local
+branch and commit.
 
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
+4. **SYNC TO A USABLE GIT REMOTE WHEN CONFIGURED**:
    ```bash
-   git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
+   if git remote get-url --push origin >/dev/null 2>&1; then
+     git pull --rebase
+     git push
+     git status  # MUST show "up to date with origin"
+   else
+     echo "No usable Git remote is configured; skip pull/push and report the local branch and commit in handoff."
+     git status --short --branch
+   fi
    ```
    NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
    `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
-   a doomed `origin` remote (ga-9wsri). Use `git push` only.
+   a doomed `origin` remote (ga-9wsri). Use only the remote-aware Git step above.
 5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
+6. **Verify** - All changes committed and, when a usable remote exists, pushed
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
 
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
+- When a usable Git remote exists, work is NOT complete until `git push` succeeds
+- NEVER stop before pushing to a configured remote - that leaves work stranded locally
+- If no usable Git remote exists, do not invent one; report the local branch and commit in the handoff
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->

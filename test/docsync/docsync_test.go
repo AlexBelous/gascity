@@ -105,6 +105,45 @@ func TestSchemaDownloadLinksUseGitHubRaw(t *testing.T) {
 	}
 }
 
+func TestSessionCompletionGuidanceIsRemoteAware(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(), "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+
+	text := string(data)
+	start := strings.Index(text, "## Session Completion")
+	end := strings.Index(text, "<!-- END BEADS INTEGRATION -->")
+	if start < 0 || end < start {
+		t.Fatal("AGENTS.md is missing the generated session-completion block")
+	}
+	guidance := text[start:end]
+
+	predicate := "if git remote get-url --push origin >/dev/null 2>&1; then"
+	predicateAt := strings.Index(guidance, predicate)
+	elseAt := strings.Index(guidance, "\n   else\n")
+	if predicateAt < 0 || elseAt < predicateAt {
+		t.Fatalf("session-completion guidance must gate its remote and local-only flows with %q", predicate)
+	}
+	remoteFlow, localFlow := guidance[predicateAt:elseAt], guidance[elseAt:]
+	for _, command := range []string{"git pull --rebase", "git push", "git status"} {
+		if !strings.Contains(remoteFlow, command) {
+			t.Errorf("valid-remote guidance missing %q", command)
+		}
+	}
+	if !strings.Contains(localFlow, "No usable Git remote is configured; skip pull/push") {
+		t.Error("no-remote guidance must replace pull/push with an explicit local handoff")
+	}
+	for _, command := range []string{"\n     git pull", "\n     git push"} {
+		if strings.Contains(localFlow, command) {
+			t.Errorf("no-remote flow must not execute %q", strings.TrimSpace(command))
+		}
+	}
+	if strings.Contains(guidance, "Work is NOT complete until `git push` succeeds") {
+		t.Error("session-completion guidance still requires git push when no remote exists")
+	}
+}
+
 func allDocsMarkdownFiles(root string) ([]string, error) {
 	var files []string
 

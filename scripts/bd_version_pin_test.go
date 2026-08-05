@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -44,6 +45,9 @@ func TestBDVersionPins(t *testing.T) {
 	// irreproducible; require a full 40-char commit SHA.
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(bdCurrentRef) {
 		t.Fatalf("deps.env BD_CURRENT_REF = %q, want a full 40-char gastownhall/beads commit SHA", bdCurrentRef)
+	}
+	if err := validateBeadsPseudoVersionPin(bdCurrentRef, readFile(t, root, "go.mod")); err != nil {
+		t.Fatalf("beads source pin drift: %v", err)
 	}
 	if !regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrent) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
@@ -116,6 +120,43 @@ func TestBDVersionPins(t *testing.T) {
 	// assignment in both .yml and .yaml workflows: a file-level presence check
 	// would let a stale pin ride along beside a correct one.
 	assertWorkflowPins(t, root, "BD_VERSION", bdVersion)
+}
+
+func TestBeadsPseudoVersionMatchesCurrentRef(t *testing.T) {
+	const goMod = `module example.com/fixture
+
+require github.com/steveyegge/beads v1.1.1-0.20260729081659-0123456789ab
+`
+	const currentRef = "0123456789abcdef0123456789abcdef01234567"
+	if err := validateBeadsPseudoVersionPin(currentRef, goMod); err != nil {
+		t.Fatalf("validate matching beads pseudo-version pin: %v", err)
+	}
+}
+
+func TestBeadsPseudoVersionRejectsDifferentCurrentRef(t *testing.T) {
+	const goMod = `module example.com/fixture
+
+require github.com/steveyegge/beads v1.1.1-0.20260729081659-0123456789ab
+`
+	err := validateBeadsPseudoVersionPin("fedcba9876543210fedcba9876543210fedcba98", goMod)
+	if err == nil || !strings.Contains(err.Error(), "0123456789ab") {
+		t.Fatalf("validate mismatched beads pseudo-version pin error = %v, want embedded commit diagnostic", err)
+	}
+}
+
+// validateBeadsPseudoVersionPin verifies that the Go decoder and the current
+// real-bd matrix binary are built from the same beads commit. Go pseudo-versions
+// retain the first 12 characters of the source commit, while deps.env records
+// the reproducible full 40-character ref.
+func validateBeadsPseudoVersionPin(currentRef, goMod string) error {
+	match := regexp.MustCompile(`(?m)^\s*(?:require\s+)?github\.com/steveyegge/beads\s+v\d+\.\d+\.\d+-\d+\.\d{14}-([0-9a-f]{12})(?:\s|$)`).FindStringSubmatch(goMod)
+	if match == nil {
+		return fmt.Errorf("go.mod does not contain a github.com/steveyegge/beads pseudo-version with an embedded 12-character commit")
+	}
+	if !strings.HasPrefix(currentRef, match[1]) {
+		return fmt.Errorf("deps.env BD_CURRENT_REF %q does not match github.com/steveyegge/beads pseudo-version commit %q in go.mod", currentRef, match[1])
+	}
+	return nil
 }
 
 // TestScanPinAssignments proves the workflow pin scanner catches the partial

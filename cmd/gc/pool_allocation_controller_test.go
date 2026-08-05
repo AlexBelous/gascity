@@ -294,6 +294,61 @@ func TestRoutedWorkPoolAllocationReplaysExactActiveBindingAfterRuntimeLoss(t *te
 	}
 }
 
+func TestRoutedWorkPoolAllocationRecoveryParksOnIncompleteAbsence(t *testing.T) {
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		t.Run(string(mode), func(t *testing.T) {
+			fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+			work, err := fixture.store.Create(beads.Bead{
+				Title:    "ready routed work with uncertain runtime loss",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			})
+			if err != nil {
+				t.Fatalf("create ready routed work: %v", err)
+			}
+			hint := routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"}
+			first, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+			if err != nil || !first.Handled || !first.Created {
+				t.Fatalf("initial allocation = (%+v, %v), want created handled session", first, err)
+			}
+			awaitCond(t, func() bool {
+				return fixture.provider.IsRunning(first.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+			}, "initial exact pool allocation to start")
+			if err := fixture.provider.Stop(first.Session.SessionName); err != nil {
+				t.Fatalf("remove runtime before recovery admission: %v", err)
+			}
+
+			uncertain := &fixedFreshLivenessProvider{
+				Provider:    fixture.cr.sp,
+				observation: runtime.Liveness{},
+			}
+			fixture.cr.sp = uncertain
+			fixture.cr.cs.mu.Lock()
+			fixture.cr.cs.sp = uncertain
+			fixture.cr.cs.mu.Unlock()
+			fixture.cr.sessionStartMu.Lock()
+			fixture.cr.sessionStartMode = mode
+			fixture.cr.sessionStartMu.Unlock()
+
+			result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+			if err != nil {
+				t.Fatalf("reconcile incomplete runtime absence: %v", err)
+			}
+			if mode == rollout.Auto && result.Handled {
+				t.Error("auto mode handled incomplete runtime absence, want legacy fallback")
+			}
+			if mode == rollout.Require && !result.Handled {
+				t.Error("require mode released incomplete runtime absence to legacy, want parked ownership")
+			}
+			awaitCond(t, func() bool { return fixture.cr.sessionStartController.Pending() == 0 }, "incomplete recovery admission to settle")
+			if got := providerCallCount(fixture.provider, "Start"); got != 1 {
+				t.Fatalf("provider Start calls = %d, want only the initial start", got)
+			}
+		})
+	}
+}
+
 func TestRoutedWorkPoolAllocationGrowsOccupiedUnlimitedPoolForDistinctRoutedWork(t *testing.T) {
 	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
 
@@ -3785,6 +3840,15 @@ type routedWorkPoolAllocationFixture struct {
 	store    beads.Store
 	provider *runtime.Fake
 	stderr   *bytes.Buffer
+}
+
+type fixedFreshLivenessProvider struct {
+	runtime.Provider
+	observation runtime.Liveness
+}
+
+func (p *fixedFreshLivenessProvider) ObserveFreshLiveness(runtime.LivenessTarget) runtime.Liveness {
+	return p.observation
 }
 
 type triggerMatchingReadHookStore struct {

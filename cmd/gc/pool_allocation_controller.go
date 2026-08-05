@@ -491,8 +491,20 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 				}
 				return routedWorkPoolAllocationResult{}, nil
 			}
-			if snapshot.Provider.IsRunning(existing.SessionName) {
+			liveness := runtime.ObserveFreshLiveness(snapshot.Provider, runtime.LivenessTarget{
+				SessionID:            existing.ID,
+				SessionName:          existing.SessionName,
+				ProcessNames:         processHints(snapshot.Config, agent),
+				IncarnationStartedAt: drainAckIncarnationStartedAt(existing),
+			})
+			if liveness.Running || liveness.Alive {
 				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+			}
+			if !liveness.Complete {
+				if cr.sessionStartRolloutMode() == rollout.Require {
+					return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+				}
+				return routedWorkPoolAllocationResult{}, nil
 			}
 			lease, leaseErr := cr.newRoutedWorkPoolStartLease(snapshot, existing, hint)
 			if leaseErr != nil {

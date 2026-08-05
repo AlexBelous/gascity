@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	goversion "go/version"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"golang.org/x/mod/semver"
 )
 
 type waitErrorStore struct {
@@ -743,7 +743,7 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 		}
 	}
 	fields := strings.Fields(versionLine)
-	if len(fields) < 3 || !goversion.IsValid("v"+fields[2]) {
+	if len(fields) < 3 || !semver.IsValid("v"+fields[2]) {
 		t.Fatalf("%s version output %q does not report a declared Beads release version", bdPath, out)
 	}
 	metadata, err := exec.Command("go", "version", "-m", bdPath).CombinedOutput()

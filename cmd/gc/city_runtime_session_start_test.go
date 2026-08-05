@@ -1166,7 +1166,7 @@ func TestReconcileExactSessionStartDrainAckRetainsUncertainOrUnsupportedObservat
 }
 
 func TestReconcileExactSessionStartDrainAckFinalizationRetriesWithoutStop(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	store := &drainAckAtomicCloseStore{Store: env.store}
 	env.store = store
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
@@ -1305,7 +1305,7 @@ func TestCityRuntimeProviderReloadDefersForKeyedDrainAckStop(t *testing.T) {
 	fixture := newSessionStartProviderSwapFixture(t, provider, rollout.Auto)
 	cr := fixture.cr
 	oldConfig := cr.cfg
-	store := &drainAckAtomicCloseStore{Store: cr.cs.cityBeadStore}
+	store := &drainAckAtomicCloseStore{Store: beads.NewAtomicCloseMemStore()}
 	cr.cs.mu.Lock()
 	cr.cs.cityBeadStore = store
 	cr.cs.mu.Unlock()

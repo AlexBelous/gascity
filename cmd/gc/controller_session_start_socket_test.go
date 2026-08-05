@@ -103,6 +103,7 @@ func TestHandleControllerConnRoutesValidatedSessionStartKey(t *testing.T) {
 	go handleControllerConn(
 		server,
 		"/city",
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		&atomic.Bool{},
@@ -144,6 +145,7 @@ func TestHandleControllerConnRejectsInvalidSessionStartKey(t *testing.T) {
 	go handleControllerConn(
 		server,
 		"/city",
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		&atomic.Bool{},

@@ -288,7 +288,7 @@ func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil, nil)
+		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil, nil, nil)
 		close(done)
 	}()
 

@@ -745,15 +745,6 @@ func providerAcceptsHookStdinSessionID(family string) bool {
 	}
 }
 
-func providerAcceptsHookStdinSessionID(family string) bool {
-	switch family {
-	case "codex", "claude":
-		return true
-	default:
-		return false
-	}
-}
-
 // isPoolInstance reports whether a resolved agent (with Pool=nil) originated
 // from a pool template. Checks if the agent's base name (without -N suffix)
 // matches a configured pool agent in the same dir.

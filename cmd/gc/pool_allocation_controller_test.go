@@ -1103,7 +1103,7 @@ func TestRoutedWorkPoolAllocationRefusesReuseDriftAfterIdleWait(t *testing.T) {
 	}
 }
 
-func TestRoutedWorkPoolAllocationBatchesAssignedWorkReadsIndependentOfMemberCount(t *testing.T) {
+func TestRoutedWorkPoolAllocationBoundsAssignedWorkReadsToExactMemberKeys(t *testing.T) {
 	for _, members := range []int{2, 5} {
 		t.Run(fmt.Sprintf("members=%d", members), func(t *testing.T) {
 			fixture, _, _ := prepareIdleGenericPoolMemberForReuse(t, true, members)
@@ -1141,12 +1141,12 @@ func TestRoutedWorkPoolAllocationBatchesAssignedWorkReadsIndependentOfMemberCoun
 
 			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
 			queries := counted.snapshot()
-			if len(queries) != 2 {
-				t.Fatalf("assigned-work List calls for %d members = %d, want one classification and one revalidation per reachable store: %+v", members, len(queries), queries)
+			if len(queries) != 4*members {
+				t.Fatalf("assigned-work List calls for %d members = %d, want one exact query per canonical and compatibility identity for classification and revalidation: %+v", members, len(queries), queries)
 			}
 			for _, query := range queries {
-				if query.Assignee != "" || len(query.Assignees) == 0 || query.Status != "" || !query.Live || query.TierMode != beads.TierBoth {
-					t.Fatalf("batched assigned-work query = %+v, want plural assignees, all live nonclosed statuses, TierBoth", query)
+				if query.Assignee == "" || len(query.Assignees) != 0 || query.Status != "" || !query.Live || query.TierMode != beads.TierBoth {
+					t.Fatalf("assigned-work query = %+v, want one exact assignee, all live nonclosed statuses, TierBoth", query)
 				}
 			}
 		})

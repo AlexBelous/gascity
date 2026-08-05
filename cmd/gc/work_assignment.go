@@ -69,8 +69,10 @@ func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.T
 }
 
 // OpenAssignedToAny returns open or in-progress non-session work assigned to
-// any supplied identity using one live, both-tier store query. It is the
-// bounded pool-reuse form of repeated OpenAssignedTo probes.
+// any supplied identity using exact live, both-tier assignee queries. It is the
+// bounded pool-reuse form of repeated OpenAssignedTo probes. Keeping each read
+// singular is load-bearing: production stores push down Assignee, while their
+// plural-assignee compatibility paths may otherwise scan and filter the fleet.
 func (w workAssignment) OpenAssignedToAny(assignees []string) ([]beads.Bead, error) {
 	store := w.unwrapped()
 	if store == nil {
@@ -93,20 +95,21 @@ func (w workAssignment) OpenAssignedToAny(assignees []string) ([]beads.Bead, err
 		return nil, nil
 	}
 	sort.Strings(canonical)
-	items, err := store.List(beads.ListQuery{Assignees: canonical, Live: true, TierMode: beads.TierBoth})
-	if err != nil {
-		return nil, err
-	}
-	items = excludeMailMessageBeads(items)
-	result := items[:0:0]
-	for _, item := range items {
-		if item.Status != "open" && item.Status != "in_progress" {
-			continue
+	var result []beads.Bead
+	for _, assignee := range canonical {
+		items, err := w.OpenAssignedTo(assignee, "", beads.TierBoth, true)
+		if err != nil {
+			return nil, err
 		}
-		if sessionpkg.IsSessionBeadOrRepairable(item) {
-			continue
+		for _, item := range items {
+			if item.Status != "open" && item.Status != "in_progress" {
+				continue
+			}
+			if sessionpkg.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			result = append(result, item)
 		}
-		result = append(result, item)
 	}
 	return result, nil
 }

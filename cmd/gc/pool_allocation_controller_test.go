@@ -1507,7 +1507,7 @@ func (p poolDrainAckGetMetaErrorProvider) GetMeta(string, string) (string, error
 
 func newRoutedWorkPoolDrainAckAuthorizationFixture(t *testing.T) routedWorkPoolDrainAckAuthorizationFixture {
 	t.Helper()
-	base := newRoutedWorkPoolAuthorizationFixture(t)
+	base := newRoutedWorkPoolAuthorizationFixtureWithStore(t, beads.NewAtomicCloseMemStore())
 	if err := base.provider.Start(t.Context(), base.info.SessionName, runtime.Config{Command: "true"}); err != nil {
 		t.Fatalf("start pool runtime: %v", err)
 	}
@@ -1568,6 +1568,10 @@ func newRoutedWorkPoolDrainAckAuthorizationFixture(t *testing.T) routedWorkPoolD
 }
 
 func newRoutedWorkPoolAuthorizationFixture(t *testing.T) routedWorkPoolAuthorizationFixture {
+	return newRoutedWorkPoolAuthorizationFixtureWithStore(t, beads.NewMemStore())
+}
+
+func newRoutedWorkPoolAuthorizationFixtureWithStore(t *testing.T, store beads.Store) routedWorkPoolAuthorizationFixture {
 	t.Helper()
 	unlimited := -1
 	cityPath := t.TempDir()
@@ -1579,7 +1583,6 @@ func newRoutedWorkPoolAuthorizationFixture(t *testing.T) routedWorkPoolAuthoriza
 			MaxActiveSessions: &unlimited,
 		}},
 	}
-	store := beads.NewMemStore()
 	provider := runtime.NewFake()
 	cs := coherentSessionStartControllerStateForTest(cfg, provider, store, rollout.Auto)
 	cs.cityPath = cityPath

@@ -184,8 +184,7 @@ func TestReconcileExactSessionStartPoolDrainAckUsesNegativeRevisionToken(t *test
 	params := exactSessionStartTestParams(t, env)
 	params.RolloutMode = rollout.Auto
 	params.Store = &drainAckAtomicCloseStore{
-		Store:          negativeRevisionSessionStore{Store: env.store, revision: -17},
-		fallbackWriter: writer,
+		Store: negativeRevisionSessionStore{Store: env.store, revision: -17},
 	}
 	params.StatusWriter = writer
 	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
@@ -243,7 +242,7 @@ func TestDrainAckStopPendingFenceAcceptsNegativeRevisionToken(t *testing.T) {
 }
 
 func TestReconcileExactSessionStartRecoversDurableAgentDrainAckAfterRuntimeMetadataIsGone(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&bead, map[string]string{
@@ -369,7 +368,7 @@ func (p *freshUnattendedStopProvider) StopUnattendedSession(name, expectedToken 
 }
 
 func TestReconcileExactSessionStartPoolDrainAckRollbackRestoresDurableProvenanceAtPostCASFence(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&bead, map[string]string{
@@ -442,7 +441,7 @@ func TestReconcileExactSessionStartPoolDrainAckRollbackRestoresDurableProvenance
 func TestReconcileExactSessionStartPoolDrainAckPostCASAuthorizationHonorsRolloutMode(t *testing.T) {
 	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 		t.Run(string(mode), func(t *testing.T) {
-			env := newReconcilerTestEnv()
+			env := newDrainAckAtomicCloseTestEnv()
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 			bead := env.createSessionBead("worker", "worker")
 			env.setSessionMetadata(&bead, map[string]string{
@@ -514,7 +513,7 @@ func TestReconcileExactSessionStartPoolDrainAckPostCASAuthorizationHonorsRollout
 }
 
 func TestReconcileExactSessionStartPoolDrainAckAsyncAuthorizationChangeRollsBackBeforeStop(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&bead, map[string]string{
@@ -600,7 +599,7 @@ func TestReconcileExactSessionStartPoolDrainAckAsyncAuthorizationChangeRollsBack
 }
 
 func TestReconcileExactSessionStartPoolDrainAckAutoRollbackConflictParks(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token", "pool_managed": "true"})
@@ -653,7 +652,7 @@ func TestReconcileExactSessionStartPoolDrainAckAutoRollbackConflictParks(t *test
 }
 
 func TestReconcileExactSessionStartPoolDrainAckAmbiguousCASCommitRetainsKeyedOwnership(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token"})
@@ -1735,18 +1734,20 @@ func exactSessionStartTestParams(t *testing.T, env *reconcilerTestEnv) exactSess
 
 type drainAckAtomicCloseStore struct {
 	beads.Store
-	expected        []int64
-	beforeCAS       func()
-	fallbackWriter  beads.ConditionalWriter
-	closeErr        error
-	errorAfterClose error
+	expected          []int64
+	beforeCAS         func()
+	beforeAtomicClose func() error
+	closeErr          error
+	errorAfterClose   error
 }
 
-// enableDrainAckAtomicCloseForFixture equips only the routed drain-ack
-// controller fixture with the terminal capability that production native Dolt
-// supplies. MemStore intentionally lacks that capability, so broad fixtures
-// must not gain it globally.
+// enableDrainAckAtomicCloseForFixture exposes the routed drain-ack fixture's
+// truthful terminal capability. The fixture is constructed with the opt-in
+// atomic MemStore; broad fixtures remain plain MemStores.
 func enableDrainAckAtomicCloseForFixture(fixture *routedWorkPoolAuthorizationFixture) {
+	if _, ok := beads.AtomicConditionalCloserFor(fixture.store); !ok {
+		fixture.t.Fatal("drain-ack fixture lacks atomic terminal close capability")
+	}
 	store := &drainAckAtomicCloseStore{Store: fixture.store}
 	fixture.store = store
 	fixture.cr.cs.mu.Lock()
@@ -1763,24 +1764,16 @@ func (s *drainAckAtomicCloseStore) CloseWithMetadataIfMatch(id string, revision 
 	if s.closeErr != nil {
 		return beads.Bead{}, s.closeErr
 	}
-	writer, ok := beads.ConditionalWriterFor(s.Store)
-	if !ok && s.fallbackWriter != nil {
-		writer, ok = s.fallbackWriter, true
+	if s.beforeAtomicClose != nil {
+		if err := s.beforeAtomicClose(); err != nil {
+			return beads.Bead{}, err
+		}
 	}
+	closer, ok := beads.AtomicConditionalCloserFor(s.Store)
 	if !ok {
 		return beads.Bead{}, beads.ErrConditionalWriteUnsupported
 	}
-	if err := writer.UpdateIfMatch(id, revision, beads.UpdateOpts{Metadata: metadata}); err != nil {
-		return beads.Bead{}, err
-	}
-	updated, err := s.Get(id)
-	if err != nil {
-		return beads.Bead{}, err
-	}
-	if err := writer.CloseIfMatch(id, updated.Revision); err != nil {
-		return beads.Bead{}, err
-	}
-	closed, err := s.Get(id)
+	closed, err := closer.CloseWithMetadataIfMatch(id, revision, metadata)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1788,6 +1781,43 @@ func (s *drainAckAtomicCloseStore) CloseWithMetadataIfMatch(id string, revision 
 		return beads.Bead{}, s.errorAfterClose
 	}
 	return closed, nil
+}
+
+func newDrainAckAtomicCloseTestEnv() *reconcilerTestEnv {
+	env := newReconcilerTestEnv()
+	env.store = beads.NewAtomicCloseMemStore()
+	return env
+}
+
+func TestDrainAckAtomicCloseStoreDoesNotPersistTerminalMetadataBeforeClose(t *testing.T) {
+	env := newDrainAckAtomicCloseTestEnv()
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateDraining)})
+	bead, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read pre-close row: %v", err)
+	}
+	store := &drainAckAtomicCloseStore{
+		Store: env.store,
+		beforeAtomicClose: func() error {
+			return errors.New("simulated read interruption after metadata write")
+		},
+	}
+
+	_, err = store.CloseWithMetadataIfMatch(bead.ID, bead.Revision, map[string]string{
+		"state":        string(session.StateDrained),
+		"close_reason": session.CanonicalCloseReason("drained"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "simulated read interruption") {
+		t.Fatalf("CloseWithMetadataIfMatch error = %v, want injected interruption", err)
+	}
+	after, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read row after interrupted close: %v", err)
+	}
+	if after.Status != "open" || after.Metadata["state"] != string(session.StateDraining) || after.Metadata["close_reason"] != "" {
+		t.Fatalf("interrupted close persisted a partial terminal row: %#v", after)
+	}
 }
 
 func TestReconcileExactDrainAckRequiresAtomicCloseBeforeStop(t *testing.T) {
@@ -1826,7 +1856,7 @@ func TestReconcileExactDrainAckRequiresAtomicCloseBeforeStop(t *testing.T) {
 }
 
 func TestReconcileExactDrainAckAtomicTerminalCloseUsesFence(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token", "pool_managed": "true"})
@@ -1876,7 +1906,7 @@ func TestReconcileExactDrainAckAtomicTerminalCloseUsesFence(t *testing.T) {
 }
 
 func TestReconcileExactDrainAckAtomicCloseRejectsStaleFence(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&bead, session.AgentDrainAckStopPendingPatch(env.clk.Now().UTC(), bead.ID, "drain-token").Apply(map[string]string{"instance_token": "drain-token", "pool_managed": "true"}))
@@ -1929,7 +1959,7 @@ func TestReconcileExactDrainAckAtomicCloseRejectsStaleFence(t *testing.T) {
 }
 
 func TestFinalizeExactDrainAckCloseUsesAuthoritativeWitnessAfterAmbiguousError(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newDrainAckAtomicCloseTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&bead, session.AgentDrainAckStopPendingPatch(env.clk.Now().UTC(), bead.ID, "drain-token").Apply(map[string]string{

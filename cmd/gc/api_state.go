@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -513,9 +514,45 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 	if ep == nil {
 		return
 	}
-	graphStore := cs.GraphBeadStore()
-	graphStore.Store = uncachedBeadStore(graphStore.Store)
-	executionevent.ReconcileCompleted(ep, graphStore, "execution-reconcile")
+
+	// Graph coordination may be relocated from the city work store, while
+	// graph.v2 executions normally live in the individual rig work stores.
+	// Scan both surfaces in stable order, collapsing wrappers first so aliases
+	// are not scanned more than once.
+	cs.mu.RLock()
+	stores := []beads.Store{
+		resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
+		cs.cityBeadStore,
+	}
+	rigStores := make(map[string]beads.Store, len(cs.beadStores))
+	for name, store := range cs.beadStores {
+		rigStores[name] = store
+	}
+	cs.mu.RUnlock()
+
+	rigNames := make([]string, 0, len(rigStores))
+	for name := range rigStores {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+	for _, name := range rigNames {
+		stores = append(stores, rigStores[name])
+	}
+
+	seen := make(map[uintptr]struct{}, len(stores))
+	for _, store := range stores {
+		store = uncachedBeadStore(store)
+		if store == nil {
+			continue
+		}
+		if key, ok := storePointerKey(store); ok {
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		executionevent.ReconcileCompleted(ep, beads.GraphStore{Store: store}, "execution-reconcile")
+	}
 }
 
 // uncachedBeadStore peels the controller's policy/cache read layers so a

@@ -269,24 +269,8 @@ type retryEvalResult struct {
 	Reason  string
 }
 
-// typedDeliverableCloseFor reports whether the subject carries a valid, complete
-// gc-outcome-close *deliverable* typed close for itself. gc-outcome-close records the
-// terminal state under CoordinatorOutcomeProducerDispositionMetadataKey (a JSON
-// envelope) instead of gc.outcome, so a helper-closed attempt has an empty gc.outcome
-// and the controller must fold the typed close rather than misread it as a missing
-// outcome and mint a spurious retry (gc-e2xqk).
-//
-// Only a deliverable close is an explicit success: it names the producer that shipped
-// the step's deliverable, so it is equivalent to gc.outcome=pass and folds exactly
-// once. A non-deliverable close ("intentionally not a deliverable") is NOT synthesized
-// to pass — the retry contract requires an explicit gc.outcome and treats its absence
-// as invalid (engdocs/design/formula-v2-transient-retries.md) — so it falls through to
-// the missing_outcome path. The envelope is accepted only when it is complete and
-// self-referential: contract_version 1, work_id == subject.ID (so a propagated or
-// foreign record is ignored), non-empty recorded_by and reason, a present non-empty
-// producer (the actor kind is caller-supplied configuration, validated structurally,
-// never matched against a hardcoded set of role names), and no unknown fields, so a
-// truncated or schema-skewed record cannot forge a pass.
+// typedDeliverableCloseFor reports whether subject carries a complete, strict
+// gc-outcome-close deliverable envelope for itself. Producer names are open-world.
 func typedDeliverableCloseFor(subject beads.Bead) bool {
 	raw := strings.TrimSpace(subject.Metadata[beadmeta.CoordinatorOutcomeProducerDispositionMetadataKey])
 	if raw == "" {
@@ -311,14 +295,7 @@ func typedDeliverableCloseFor(subject beads.Bead) bool {
 	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
 		return false
 	}
-	switch envelope.Disposition {
-	case beadmeta.CoordinatorDispositionDeliverable:
-		// Validated below.
-	case beadmeta.CoordinatorDispositionNonDeliverable:
-		// A deliberate non-deliverable is terminal but not a success; leave it to the
-		// missing_outcome path rather than synthesizing a pass.
-		return false
-	default:
+	if envelope.Disposition != beadmeta.CoordinatorDispositionDeliverable {
 		return false
 	}
 	if envelope.ContractVersion != beadmeta.CoordinatorOutcomeContractVersion {
@@ -330,9 +307,6 @@ func typedDeliverableCloseFor(subject beads.Bead) bool {
 	if strings.TrimSpace(envelope.RecordedBy) == "" || strings.TrimSpace(envelope.Reason) == "" {
 		return false
 	}
-	// A deliverable names some producer, but the actor kind is caller-supplied
-	// configuration: require a present, non-empty value structurally rather than
-	// matching a hardcoded set of role names (ZFC / zero hardcoded roles).
 	if envelope.Producer == nil || strings.TrimSpace(*envelope.Producer) == "" {
 		return false
 	}
@@ -342,13 +316,6 @@ func typedDeliverableCloseFor(subject beads.Bead) bool {
 func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
 	if outcome == "" && typedDeliverableCloseFor(subject) {
-		// The attempt closed through the gc-outcome-close typed contract, which
-		// records a deliverable disposition under
-		// CoordinatorOutcomeProducerDispositionMetadataKey and leaves gc.outcome empty.
-		// Fold that validated deliverable close as a pass so it is consumed exactly
-		// once rather than misread as a missing outcome (gc-e2xqk). Normalizing to
-		// OutcomePass keeps the pass-path postconditions (failure metadata, required
-		// output/artifacts) applying uniformly below.
 		outcome = beadmeta.OutcomePass
 	}
 	switch outcome {

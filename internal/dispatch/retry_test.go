@@ -218,25 +218,12 @@ func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
 	}
 }
 
-// TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome pins the graph.v2
-// controller missing_outcome race (gc-e2xqk). An attempt closed through the
-// gc-outcome-close typed contract records its disposition under
-// gc.coordinator_outcome.producer_disposition, leaving gc.outcome empty, and the
-// controller misread that as a missing outcome and minted a spurious retry.
-//
-// Only a fully validated *deliverable* close (an explicit producer-named success)
-// folds to pass, exactly once. A non-deliverable close ("intentionally not a
-// deliverable") is NOT synthesized to pass: the retry contract requires an explicit
-// gc.outcome and treats its absence as invalid, so it stays missing_outcome. The
-// deliverable envelope is accepted only when it is complete and self-referential —
-// contract_version 1, work_id == subject.ID, non-empty recorded_by and reason, a
-// known deliverable producer, and no unknown fields — so a truncated or schema-skewed
-// record cannot forge a pass.
+// TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome pins strict validation
+// of the typed close that reproduces gc-e2xqk.
 func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 	t.Parallel()
 
 	const attemptID = "gc-attempt1"
-	// A complete, valid deliverable typed close for attemptID.
 	const validDeliverable = `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`
 
 	tests := []struct {
@@ -261,9 +248,6 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 			want: retryEvalResult{Outcome: "pass"},
 		},
 		{
-			// A deliberate non-deliverable (obsolete/no-op) close carries no producer
-			// and no gc.outcome. The retry contract requires an explicit gc.outcome, so
-			// this must NOT synthesize pass (gc-e2xqk P1); it stays missing_outcome.
 			name: "non-deliverable close stays missing_outcome",
 			metadata: map[string]string{
 				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"non-deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"obsolete"}`,
@@ -271,9 +255,6 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
 		},
 		{
-			// An arbitrary, novel producer string is accepted structurally: the actor
-			// kind is caller-supplied configuration, never matched against a hardcoded
-			// allowlist of role names (ZFC / zero hardcoded roles).
 			name: "deliverable with arbitrary producer folds as pass",
 			metadata: map[string]string{
 				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"novel-writer-42"}`,
@@ -316,9 +297,6 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
 		},
 		{
-			// A valid envelope followed by trailing JSON/garbage must fail closed:
-			// json.Decoder consumes only the first value and DisallowUnknownFields
-			// guards only that first object.
 			name: "deliverable with trailing data stays missing_outcome",
 			metadata: map[string]string{
 				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"} {"junk":1}`,
@@ -361,7 +339,6 @@ func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := classifyRetryAttempt(beads.Bead{ID: attemptID, Metadata: tt.metadata})

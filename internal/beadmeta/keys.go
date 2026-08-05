@@ -61,11 +61,8 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
-	// CoordinatorOutcomeProducerDispositionMetadataKey holds the JSON typed-close
-	// envelope written by the gc-outcome-close helper (contract_version, disposition,
-	// work_id, recorded_by, reason, [producer]). It is the authoritative typed
-	// step-close record; the controller folds it so a helper-closed attempt whose
-	// gc.outcome is empty is not misread as a missing outcome (gc-e2xqk).
+	// CoordinatorOutcomeProducerDispositionMetadataKey holds the typed-close JSON
+	// envelope written by gc-outcome-close.
 	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
 	CurrentRunIDMetadataKey                          = "gc.current_run_id"
 	CwdMetadataKey                                   = "gc.cwd"

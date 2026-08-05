@@ -713,14 +713,8 @@ func TestProcessRetryControlRetriesInvalidWorkerResultContract(t *testing.T) {
 	}
 }
 
-// TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry reproduces the
-// gc-e2xqk controller missing_outcome race end to end. Attempt 1 is closed through
-// the gc-outcome-close typed contract: its disposition lives under
-// gc.coordinator_outcome.producer_disposition (with gc.outcome.producer), and
-// gc.outcome is never set. Before the fix the controller read only gc.outcome, saw
-// it empty, recorded transient/missing_outcome, and minted a spurious attempt 2
-// (the gpk-u06l4 -> gpk-2d2p0 symptom). The controller must instead fold the typed
-// close as a pass and close the control exactly once with no retry.
+// TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry reproduces
+// gc-e2xqk end to end: a typed deliverable close must not mint attempt 2.
 func TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -763,9 +757,6 @@ func TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry(t *testing.
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
-	// A retry path yields Action "retry" with the control left open (see
-	// TestProcessRetryControlRetriesInvalidWorkerResultContract); folding the typed
-	// outcome yields Action "pass" with the control closed exactly once.
 	if !result.Processed || result.Action != "pass" {
 		t.Fatalf("result = %+v, want processed pass (no spurious retry)", result)
 	}

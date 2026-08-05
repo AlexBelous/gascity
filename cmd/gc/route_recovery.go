@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -25,20 +26,25 @@ import (
 func carriedPoolRoute(b beads.Bead) string {
 	// Legacy pre-ga-eld2x workflow root: gc.run_target is the root's pool route
 	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule.
-	if route := legacyWorkflowRunTarget(b); route != "" {
-		return route
+	route := legacyWorkflowRunTarget(b)
+	if route == "" {
+		// Broaden beyond workflow roots to plain standalone work beads. Any
+		// non-empty gc.kind reaching here is a control-dispatcher or
+		// workflow-topology construct (legacyWorkflowRunTarget already consumed
+		// the lone claimable kind, "workflow"), so its gc.run_target is not a
+		// recoverable pool route.
+		if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != "" {
+			return ""
+		}
+		if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
+			return ""
+		}
+		route = strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
 	}
-	// Broaden beyond workflow roots to plain standalone work beads. Any non-empty
-	// gc.kind reaching here is a control-dispatcher or workflow-topology construct
-	// (legacyWorkflowRunTarget already consumed the lone claimable kind,
-	// "workflow"), so its gc.run_target is not a recoverable pool route.
-	if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != "" {
+	if filepath.IsAbs(route) {
 		return ""
 	}
-	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
-		return ""
-	}
-	return strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
+	return route
 }
 
 // restoreCarriedWorkRoutes re-stamps gc.routed_to from the route a bead already
@@ -97,7 +103,7 @@ func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 	// every patrol tick — the blocked-routed-reaper's recurring offenders. The
 	// workflow-root spawn path selects on gc.routed_to without re-checking
 	// status, so each re-stamp respawns a worker that drains no-op.
-	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
+	items, err := store.List(beads.ListQuery{Status: "open", ExactStatus: true, AllowScan: true, Live: true})
 	if err != nil {
 		return 0, fmt.Errorf("listing open work: %w", err)
 	}

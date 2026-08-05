@@ -65,10 +65,16 @@ func TierModeFromOpts(opts []QueryOpt) TierMode {
 // Queries are conjunctive: every populated field must match. A zero-value query
 // is rejected unless AllowScan is true.
 type ListQuery struct {
-	Status   string
-	Type     string
-	Label    string
-	Assignee string
+	Status string
+	// ExactStatus requires backends with a richer raw status vocabulary to
+	// match Status exactly instead of matching every value that normalizes to
+	// it. A caller using CachingStore must also set Live so the query reaches the
+	// raw backing status. Backends whose stored and projected statuses are
+	// identical may ignore it.
+	ExactStatus bool
+	Type        string
+	Label       string
+	Assignee    string
 	// Assignees matches beads assigned to any listed assignee.
 	// It is mutually exclusive with Assignee; call Validate to enforce that contract.
 	Assignees []string

@@ -328,6 +328,37 @@ func (s collapsedBlockedStatusStore) List(q beads.ListQuery) ([]beads.Bead, erro
 	return append([]beads.Bead(nil), s.cachedSnapshot...), nil
 }
 
+type recordingRouteRecoveryStore struct {
+	beads.Store
+	query beads.ListQuery
+}
+
+func (s *recordingRouteRecoveryStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.query = q
+	return nil, nil
+}
+
+func TestRestoreCarriedWorkRoutesRequestsExactRawOpenStatus(t *testing.T) {
+	store := &recordingRouteRecoveryStore{Store: beads.NewMemStore()}
+	if _, err := restoreCarriedWorkRoutes(store); err != nil {
+		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+	}
+	if store.query.Status != "open" || !store.query.Live || !store.query.ExactStatus {
+		t.Fatalf("List query = %+v, want live exact raw status=open", store.query)
+	}
+}
+
+func TestCarriedPoolRouteRejectsAbsolutePathRunTarget(t *testing.T) {
+	for _, kind := range []string{"", "workflow"} {
+		b := beads.Bead{Status: "open", Metadata: map[string]string{
+			"gc.kind": kind, "gc.run_target": "/home/ds/gascity/polecat",
+		}}
+		if got := carriedPoolRoute(b); got != "" {
+			t.Errorf("kind=%q carriedPoolRoute = %q, want empty for path-shaped target", kind, got)
+		}
+	}
+}
+
 // TestRestoreCarriedWorkRoutesSkipsBlockedBead covers gc-4zb: restore must not
 // re-stamp gc.routed_to onto a bead that is blocked in the backing store.
 //
@@ -344,7 +375,7 @@ func (s collapsedBlockedStatusStore) List(q beads.ListQuery) ([]beads.Bead, erro
 // "open". Gating requires a read that filters on the raw status, which is what
 // the Live query delegates to bd.
 func TestRestoreCarriedWorkRoutesSkipsBlockedBead(t *testing.T) {
-	const pool = "/home/ds/projects/EnterpriseBench/enterprisebench-worker"
+	const pool = "EnterpriseBench/enterprisebench-worker"
 	// Backing bead: blocked in bd, but decoded as "open" by mapBdStatus, so a
 	// live Get cannot reveal the block either. The reaper has already cleared
 	// gc.routed_to, leaving exactly carriedPoolRoute's recoverable shape.

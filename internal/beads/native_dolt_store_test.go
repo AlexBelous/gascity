@@ -300,6 +300,28 @@ func TestNativeDoltStoreListStatusOpenMatchesOpenNormalizedUpstreamStatuses(t *t
 	}
 }
 
+func TestNativeDoltStoreListExactStatusOpenMatchesOnlyRawOpen(t *testing.T) {
+	issues := []*beadslib.Issue{
+		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
+		{ID: "gc-blocked", Title: "blocked", Status: beadslib.StatusBlocked, IssueType: beadslib.TypeTask, Priority: 2},
+		{ID: "gc-deferred", Title: "deferred", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2},
+	}
+	storage := &nativeDoltStorageSpy{
+		searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			return filterNativeIssuesForTest(issues, filter), nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{AllowScan: true, Status: "open", ExactStatus: true, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-open" {
+		t.Fatalf("List exact Status=open = %+v, want only gc-open", got)
+	}
+}
+
 // TestNativeDoltStoreListStatusOpenExcludesClosedBeadsFromUpstreamDrift guards
 // against Dolt status-index drift (gcy-1on) where SearchIssues returns a bead
 // with status="closed" even though the ExcludeStatus filter asked to exclude it.

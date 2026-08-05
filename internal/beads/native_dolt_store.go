@@ -2179,9 +2179,13 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 		filter.Ephemeral = &ephemeral
 	}
 	if query.Status != "" {
-		if query.Status == "open" {
+		switch {
+		case query.ExactStatus:
+			status := beadslib.Status(query.Status)
+			filter.Status = &status
+		case query.Status == "open":
 			filter.ExcludeStatus = []beadslib.Status{beadslib.StatusClosed, beadslib.StatusInProgress}
-		} else {
+		default:
 			status := beadslib.Status(query.Status)
 			filter.Status = &status
 		}

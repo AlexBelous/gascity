@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // ga-lmy6yj: `gc hook <agent>` is served work routed to OTHER agents — and other
@@ -180,5 +182,118 @@ func TestDoHook_NoIdentitiesUnchanged(t *testing.T) {
 	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doHook without identities = %d, want 0 (unfiltered, as before)", code)
+	}
+}
+
+// Tiers 1 and 2 of the default work query select on --assignee alone and never
+// consult routed_to, so an owned crash-recovery bead may carry a stale or
+// foreign route. Dropping it would exit "no work" while in_progress work sits
+// assigned to this very session — strictly worse than the over-serving.
+func TestFilterForeignRouted_KeepsAssignedRowsRegardlessOfRoute(t *testing.T) {
+	assigned := func(id, routedTo, assignee string) map[string]any {
+		c := hookCandidate(id, routedTo)
+		c["assignee"] = assignee
+		return c
+	}
+	in := hookCandidatesJSON(t,
+		assigned("ga-mine", "gascity/deployer", "gascity--builder"),
+		// The exemption is blanket, not identity-scoped: the store's own
+		// assignee matching is what selected the row, and this filter cannot
+		// reproduce that matching (session ids, per-store aliases).
+		assigned("ga-session-id", "beads/reviewer", "sess-7f3a91c"),
+		// Whitespace-only assignee is not an assignee: still filtered.
+		assigned("ga-blank", "gascity/deployer", "   "),
+	)
+	got := idsIn(t, filterForeignRoutedHookCandidates(in, []string{"gascity/builder"}))
+	want := map[string]bool{"ga-mine": true, "ga-session-id": true}
+	if len(got) != 2 {
+		t.Fatalf("kept %v, want exactly ga-mine and ga-session-id", got)
+	}
+	for _, id := range got {
+		if !want[id] {
+			t.Errorf("kept %s, which carries no assignee and a foreign route", id)
+		}
+	}
+}
+
+// A pool slot's own QualifiedName is slot-suffixed ("gascity/polecat-2"), but
+// the routed-pool tier matches on the BASE pool name (poolDemandTarget), so
+// demand work is written as "gascity/polecat". Threading the identity set
+// through hookClaimPrimaryRouteTarget (agentutil.RoutedToIdentity) is what
+// makes the slot recognize its own base route.
+func TestFilterForeignRouted_PoolBaseRouteMatchedViaRoutedToIdentity(t *testing.T) {
+	base := config.Agent{Dir: "gascity", Name: "polecat"}
+	slot := config.Agent{Dir: "gascity", Name: "polecat-2", PoolName: base.QualifiedName()}
+	in := hookCandidatesJSON(t, hookCandidate("ga-pool", base.QualifiedName()))
+
+	// The explicit-arg path blanks GC_TEMPLATE, so this is the full route-target
+	// set a slot agent gets.
+	identities := hookClaimRouteTargets(
+		hookClaimPrimaryRouteTarget(&slot),
+		slot.QualifiedName(),
+		"",
+	)
+	if got := idsIn(t, filterForeignRoutedHookCandidates(in, identities)); len(got) != 1 {
+		t.Fatalf("dropped the pool slot's own base-route work: identities=%v kept=%v",
+			identities, got)
+	}
+
+	// Negative control: it is RoutedToIdentity doing the work, not the
+	// slot-suffixed qualified name — which must NOT match on its own. If this
+	// stops failing, the test above has gone vacuous.
+	if got := idsIn(t, filterForeignRoutedHookCandidates(in,
+		[]string{slot.QualifiedName()})); len(got) != 0 {
+		t.Errorf("slot-suffixed name matched the base route on its own: kept %v", got)
+	}
+}
+
+// buildWorkQuery actively probes the legacy "<rig>/workflow-control" spelling
+// (legacyWorkflowControlQualifiedName), so a bead can carry that route. The raw
+// threaded strings never carried it; the hookClaimIdentityCandidates expansion
+// does.
+func TestFilterForeignRouted_LegacyWorkflowControlAliasMatched(t *testing.T) {
+	in := hookCandidatesJSON(t, hookCandidate("ga-legacy", "gascity/workflow-control"))
+
+	identities := hookClaimIdentityCandidates("gascity/control-dispatcher")
+	if got := idsIn(t, filterForeignRoutedHookCandidates(in, identities)); len(got) != 1 {
+		t.Fatalf("dropped legacy workflow-control work: identities=%v kept=%v",
+			identities, got)
+	}
+
+	// Negative control: the unexpanded name alone does not carry the alias.
+	if got := idsIn(t, filterForeignRoutedHookCandidates(in,
+		[]string{"gascity/control-dispatcher"})); len(got) != 0 {
+		t.Errorf("unexpanded identity matched the legacy alias: kept %v", got)
+	}
+}
+
+// A bound→unbound migration leaves routes written in the bound form
+// "dir/binding.name" (legacyBoundTemplateMatchesUnboundAgent). Both sides are
+// normalized identically, so the agent still recognizes its own work.
+func TestFilterForeignRouted_LegacyBoundTemplateSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		route    string
+		identity string
+	}{
+		{"bound route", "gascity/gastown.builder", "gascity/builder"},
+		{"bound identity", "gascity/builder", "gascity/gastown.builder"},
+		{"bound both", "gascity/gastown.builder", "gascity--gastown.builder"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := hookCandidatesJSON(t, hookCandidate("ga-mine", tc.route))
+			got := idsIn(t, filterForeignRoutedHookCandidates(in, []string{tc.identity}))
+			if len(got) != 1 || got[0] != "ga-mine" {
+				t.Fatalf("dropped the agent's OWN work: route=%q identity=%q kept=%v",
+					tc.route, tc.identity, got)
+			}
+		})
+	}
+
+	// The normalization must not collapse genuinely different agents.
+	in := hookCandidatesJSON(t, hookCandidate("ga-theirs", "gascity/gastown.deployer"))
+	if got := idsIn(t, filterForeignRoutedHookCandidates(in,
+		[]string{"gascity/builder"})); len(got) != 0 {
+		t.Errorf("kept another agent's bound-form work: %v", got)
 	}
 }

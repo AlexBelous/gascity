@@ -471,16 +471,27 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// ga-lmy6yj: pass every name this agent answers to, so the post-filter can
-	// tell its OWN routed work from another agent's. Same identity set the claim
-	// path assembles for its assignee; a missing one only ever means we keep a
-	// candidate we could have dropped, never that we drop the agent's own work.
-	return doHook(workQuery, workDir, false, runner, stdout, stderr,
-		strings.TrimSpace(overrides["GC_ALIAS"]),
-		agentForQuery,
-		resolvedAgentName,
-		strings.TrimSpace(sessionForQuery),
-		strings.TrimSpace(overrides["GC_TEMPLATE"]),
+	// tell its OWN routed work from another agent's. Routed through the same
+	// expansion the claim path uses (hookClaimRouteTargets / IdentityCandidates)
+	// so the base pool route (poolDemandTarget) and the legacy
+	// <rig>/workflow-control alias buildWorkQuery probes are both recognized.
+	// A missing name only ever means we keep a candidate we could have dropped,
+	// never that we drop the agent's own work.
+	identities := append(
+		hookClaimRouteTargets(
+			hookClaimPrimaryRouteTarget(&a),
+			resolvedAgentName,
+			strings.TrimSpace(overrides["GC_TEMPLATE"]),
+		),
+		hookClaimIdentityCandidates(
+			strings.TrimSpace(overrides["GC_ALIAS"]),
+			agentForQuery,
+			resolvedAgentName,
+			strings.TrimSpace(sessionForQuery),
+			strings.TrimSpace(overrides["GC_SESSION_ID"]),
+		)...,
 	)
+	return doHook(workQuery, workDir, false, runner, stdout, stderr, identities...)
 }
 
 // hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
@@ -956,7 +967,26 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 //   - EMPTY routed_to -> KEPT. Unrouted work is legitimately claimable, and the
 //     legacy workflow-target path (routedToOrLegacyWorkflowTarget) depends on it.
 //     Only a routed_to that positively names someone else is dropped.
+//   - ANY non-empty assignee -> KEPT, regardless of gc.routed_to. Tiers 1 and 2
+//     of the default work query (standardAssignedInProgressWorkQueryScript /
+//     standardAssignedReadyWorkQueryScript) select on --assignee alone and never
+//     consult routed_to, so an owned crash-recovery bead may legitimately carry
+//     a stale or foreign route. The exemption is blanket rather than scoped to
+//     the threaded identities on purpose: the store's own assignee matching is
+//     what selected the row, and this filter cannot reproduce that matching
+//     (assignee spellings include session ids and per-store aliases the hook
+//     never resolves). Scoping it would re-open the exact drop-own-work failure
+//     the filter exists to avoid.
 //   - no identities resolved -> returned unchanged, never filter to nothing
+//
+// Only gc.routed_to is consulted. gc.execution_routed_to is deliberately NOT:
+// it records where a bead's execution was dispatched, not who may claim it, and
+// treating it as ownership would drop work the store legitimately served.
+//
+// This filter runs on ALL work-query output, including a pack-supplied custom
+// work_query. A custom query that intentionally serves another agent's routed
+// beads will see them dropped; such a query should carry the routed rows'
+// assignee (exempt above) or leave gc.routed_to unset.
 func filterForeignRoutedHookCandidates(output string, identities []string) string {
 	if output == "" || len(identities) == 0 {
 		return output
@@ -991,6 +1021,15 @@ func filterForeignRoutedHookCandidates(output string, identities []string) strin
 // isForeignRoutedHookCandidate reports whether the candidate is positively
 // routed to somebody other than the asking agent.
 func isForeignRoutedHookCandidate(item map[string]any, identities []string) bool {
+	// Tiers 1 and 2 of the default work query (standardAssignedInProgress /
+	// ReadyWorkQueryScript) select on --assignee alone and never consult
+	// gc.routed_to, so an owned crash-recovery bead may legitimately carry a
+	// stale or foreign route. Any non-empty assignee is therefore kept — not
+	// only one matching the threaded identities — because the store's own
+	// assignee matching is what selected the row.
+	if assignee, _ := item["assignee"].(string); strings.TrimSpace(assignee) != "" {
+		return false
+	}
 	meta, ok := item["metadata"].(map[string]any)
 	if !ok {
 		return false
@@ -1014,15 +1053,34 @@ func isForeignRoutedHookCandidate(item map[string]any, identities []string) bool
 // while session and assignee forms use "gascity--builder", so both spellings must
 // compare equal — otherwise this filter would drop an agent's OWN work, which is
 // far worse than the over-serving it exists to stop.
+//
+// The legacy bound-template spelling left by a bound→unbound migration
+// ("dir/binding.name", per legacyBoundTemplateMatchesUnboundAgent in
+// session_reconcile.go) is normalized to its unbound form on BOTH sides, so a
+// route recorded under either spelling still matches the agent. Every
+// normalization here is applied identically to route and identity, so it can
+// only ever make MORE things match — it can over-keep, never over-drop — which
+// is why it needs no config lookup and keeps this filter pure.
 func hookIdentityMatchesRoute(route, identity string) bool {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
 		return false
 	}
-	norm := func(s string) string {
-		return strings.ToLower(strings.ReplaceAll(s, "--", "/"))
+	return normalizeHookRouteIdentity(route) == normalizeHookRouteIdentity(identity)
+}
+
+// normalizeHookRouteIdentity collapses the session ("--") and legacy
+// bound-template ("binding.") spellings of a qualified identity onto one form.
+func normalizeHookRouteIdentity(s string) string {
+	s = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), "--", "/"))
+	dir, local := config.ParseQualifiedName(s)
+	if binding, unbound, ok := strings.Cut(local, "."); ok && binding != "" && unbound != "" {
+		local = unbound
 	}
-	return norm(route) == norm(identity)
+	if dir == "" {
+		return local
+	}
+	return dir + "/" + local
 }
 
 func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {

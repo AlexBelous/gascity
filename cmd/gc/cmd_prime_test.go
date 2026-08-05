@@ -40,8 +40,8 @@ base = "builtin:claude"`)
 
 	var stderr bytes.Buffer
 	persistPrimeHookProviderSessionKeyAtCity("", cityPath, &stderr)
-	if stderr.Len() != 0 {
-		t.Fatalf("persist stderr = %q, want empty", stderr.String())
+	if !strings.Contains(stderr.String(), "persisted resume session_key for claude session") {
+		t.Fatalf("persist stderr = %q, want successful supplied-city diagnostic", stderr.String())
 	}
 
 	store, err := openCityStoreAt(cityPath)

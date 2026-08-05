@@ -649,6 +649,13 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 	if err != nil {
 		return nil, fmt.Errorf("creating drain-ack stop session: %w", err)
 	}
+	agentDrainAckPatch := sessionpkg.AgentDrainAckStopPendingPatch(time.Now().UTC(), info.ID, token)
+	if err := store.SetMetadataBatch(info.ID, agentDrainAckPatch); err != nil {
+		return nil, fmt.Errorf("recording agent drain-ack provenance: %w", err)
+	}
+	for key, value := range agentDrainAckPatch {
+		metadata[key] = value
+	}
 	recordLegacyCompareWrites(info.ID, "newReconcilerPerfStopFixture.create", metadata)
 	if err := provider.Start(context.Background(), sessionName, gcruntime.Config{Command: "true"}); err != nil {
 		return nil, fmt.Errorf("starting drain-ack stop runtime: %w", err)

@@ -7358,8 +7358,8 @@ base = "builtin:kimi"`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "claude-provider-session" {
-		t.Fatalf("session_key = %q, want Claude provider session id from hook stdin", got)
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
+		t.Fatalf("session_key = %q, want empty for hook stdin session id from an untrusted provider", got)
 	}
 }
 

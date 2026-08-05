@@ -30,6 +30,7 @@ func TestMeasureReconcilerPerfComparePairsAllProductionPaths(t *testing.T) {
 	}
 
 	if !strings.Contains(report.Provenance.Store, "MemStore") ||
+		!strings.Contains(report.Provenance.Store, "NewAtomicCloseMemStore(stop,atomic in-memory)") ||
 		!strings.Contains(report.Provenance.Store, "nudgequeue state file") ||
 		!strings.Contains(report.Provenance.Runtime, "synthetic") ||
 		!strings.Contains(report.Provenance.Workload, "workload=reconciler-synthetic-v2") ||

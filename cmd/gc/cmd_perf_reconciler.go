@@ -125,7 +125,7 @@ func measureReconcilerPerfCompare(
 	if strings.TrimSpace(cityPath) == "" {
 		return reconcilerPerfReport{}, fmt.Errorf("workspace path is empty")
 	}
-	provenance.Store = "synthetic:beads.MemStore+nudgequeue state file"
+	provenance.Store = "synthetic:beads.MemStore(start)+beads.NewAtomicCloseMemStore(stop,atomic in-memory)+nudgequeue state file(nudge)"
 	provenance.StoreSchema = "none"
 	provenance.Runtime = "synthetic:runtime.Fake"
 	provenance.Workload = "workload=reconciler-synthetic-v2; latency=action-needed-to-provider-entry; fresh-isolated-single-session-alternating-sequential-pairs; excludes=tmux,Dolt,wake-socket/IPC,contention"
@@ -603,7 +603,7 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 	const cityName = "reconciler-perf"
 	sessionName := "gc-reconciler-perf-stop-" + pairID
 	token := "perf-stop-token-" + pairID
-	store := beads.NewMemStore()
+	store := beads.NewAtomicCloseMemStore()
 	provider := &reconcilerPerfStopProvider{Fake: gcruntime.NewFake()}
 	unlimited := -1
 	cfg := &config.City{

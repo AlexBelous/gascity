@@ -7456,6 +7456,12 @@ func TestCheckCrossRigDifferentRig(t *testing.T) {
 	if !strings.Contains(msg, "--force") {
 		t.Errorf("message = %q, want --force hint", msg)
 	}
+	if !strings.Contains(msg, "refusing cross-rig route") {
+		t.Errorf("message = %q, want explicit refusal wording", msg)
+	}
+	if !strings.Contains(msg, "nothing was routed") {
+		t.Errorf("message = %q, want explicit no-op statement", msg)
+	}
 }
 
 func TestCheckCrossRigCityAgent(t *testing.T) {
@@ -7488,6 +7494,9 @@ func TestDoSlingCrossRigBlocks(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (should not route)", len(runner.calls))
@@ -7568,6 +7577,9 @@ func TestDoSlingBatchCrossRigBlocks(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (should not route)", len(runner.calls))
@@ -7725,6 +7737,9 @@ func TestDoSlingOnFormulaCrossRigBlocked(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0", len(runner.calls))

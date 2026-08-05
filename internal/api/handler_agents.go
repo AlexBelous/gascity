@@ -307,6 +307,8 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		if _, ok := stores[rig]; ok {
 			rigNames = []string{rig}
 		}
+	} else {
+		stores = federatedWorkBeadStores(stores, s.cityWorkBeadStore())
 	}
 	if rigNames == nil {
 		rigNames = sortedRigNames(stores)

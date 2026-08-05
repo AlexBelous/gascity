@@ -201,7 +201,7 @@ func (f Freshness) Guidance() []string {
 		}
 	case FreshnessBehind:
 		return []string{
-			fmt.Sprintf("catch up before working: git pull --rebase %s %s (review first; not applied automatically)", f.Remote, f.Branch),
+			fmt.Sprintf("catch up before working: git rebase %s (review first; not applied automatically)", f.upstreamLabel()),
 		}
 	case FreshnessDiverged:
 		return []string{

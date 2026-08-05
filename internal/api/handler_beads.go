@@ -23,6 +23,8 @@ import (
 // based aggregation code without exposing a synthetic scope on the wire.
 const cityWorkStoreKey = "\x00city-work"
 
+const cityCoordinationStoreKey = "\x00city-coordination"
+
 func federatedWorkBeadStores(rigStores map[string]beads.Store, cityWorkStore beads.Store) map[string]beads.Store {
 	stores := make(map[string]beads.Store, len(rigStores)+1)
 	cityAlreadyPresent := false
@@ -41,6 +43,9 @@ func federatedWorkBeadStores(rigStores map[string]beads.Store, cityWorkStore bea
 func workBeadStoreLabel(key string) string {
 	if key == cityWorkStoreKey {
 		return "city work"
+	}
+	if key == cityCoordinationStoreKey {
+		return "city coordination"
 	}
 	return "rig " + key
 }

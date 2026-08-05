@@ -865,10 +865,11 @@ func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
 		cfg:      cfg,
 		sp:       runtime.NewFake(),
 		cs: &controllerState{
-			cityName:      "test-city",
-			cityPath:      cityPath,
-			cityBeadStore: store,
-			eventProv:     events.NewFake(),
+			cityName:          "test-city",
+			cityPath:          cityPath,
+			cityBeadStore:     beads.NewMemStore(),
+			cityWorkBeadStore: store,
+			eventProv:         events.NewFake(),
 		},
 		stderr: io.Discard,
 	}
@@ -900,6 +901,24 @@ func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
 	}
 	if got := second.result.PoolDesiredCounts[template]; got != 1 {
 		t.Fatalf("PoolDesiredCounts[%s] = %d, want 1 for newly-ready routed work", template, got)
+	}
+}
+
+func TestCityRuntimeWaitDependencyStoresUsesDistinctCityWorkStore(t *testing.T) {
+	coordinationStore := beads.NewMemStore()
+	cityWorkStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cr := &CityRuntime{
+		cs: &controllerState{
+			cityBeadStore:     coordinationStore,
+			cityWorkBeadStore: cityWorkStore,
+			beadStores:        map[string]beads.Store{"rig": rigStore},
+		},
+	}
+
+	stores := cr.waitDependencyStores()
+	if len(stores) != 2 || stores[0] != cityWorkStore || stores[1] != rigStore {
+		t.Fatalf("wait dependency stores = %#v, want city work then rig", stores)
 	}
 }
 

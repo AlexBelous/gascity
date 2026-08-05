@@ -521,6 +521,25 @@ func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 	}
 }
 
+func TestFindActiveBeadFederatesAuthoritativeCityWork(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.cityWorkBeadStore = beads.NewMemStore()
+	work, err := state.cityWorkBeadStore.Create(beads.Bead{Title: "city work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := "city-session"
+	if err := state.cityWorkBeadStore.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	if got := New(state).findActiveBeadForAssignees("", assignee); got != work.ID {
+		t.Fatalf("active bead = %q, want authoritative city work bead %q", got, work.ID)
+	}
+}
+
 func TestAgentListActiveBeadUsesCachedLookup(t *testing.T) {
 	state := newFakeState(t)
 	sessionName := "myrig--worker"

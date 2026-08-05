@@ -200,7 +200,7 @@ func TestFreshness_GuidanceOmitsPushWhenNoRemote(t *testing.T) {
 	}
 }
 
-func TestFreshness_GuidanceReplacesPushWithPullWhenBehind(t *testing.T) {
+func TestFreshness_GuidanceRecommendsRebaseWhenBehind(t *testing.T) {
 	origin, work := newOriginAndClone(t)
 	advanceOrigin(t, origin, "c2")
 	runGit(t, work, "fetch", "origin")
@@ -210,8 +210,34 @@ func TestFreshness_GuidanceReplacesPushWithPullWhenBehind(t *testing.T) {
 		t.Fatalf("Freshness: %v", err)
 	}
 	guidance := strings.Join(f.Guidance(), "\n")
-	if !strings.Contains(guidance, "pull --rebase") {
-		t.Errorf("behind guidance = %q, want a pull --rebase step", guidance)
+	if !strings.Contains(guidance, "git rebase origin/main") {
+		t.Errorf("behind guidance = %q, want a rebase of the compared upstream", guidance)
+	}
+}
+
+func TestFreshness_GuidanceNamesComparedUpstream(t *testing.T) {
+	origin, work := newOriginAndClone(t)
+	upstream := t.TempDir()
+	runGit(t, upstream, "clone", origin, ".")
+	runGit(t, upstream, "config", "user.email", "test@test.com")
+	runGit(t, upstream, "config", "user.name", "Test")
+	runGit(t, upstream, "checkout", "-b", "release")
+	runGit(t, upstream, "commit", "--allow-empty", "-m", "release")
+	runGit(t, upstream, "push", "-u", "origin", "release")
+	runGit(t, work, "remote", "add", "upstream", origin)
+	runGit(t, work, "fetch", "upstream")
+	runGit(t, work, "branch", "--set-upstream-to=upstream/release", "main")
+
+	f, err := New(work).Freshness("origin")
+	if err != nil {
+		t.Fatalf("Freshness: %v", err)
+	}
+	guidance := strings.Join(f.Guidance(), "\n")
+	if !strings.Contains(guidance, "upstream/release") {
+		t.Fatalf("Guidance() = %q, want compared upstream", guidance)
+	}
+	if strings.Contains(guidance, "origin main") {
+		t.Fatalf("Guidance() = %q, must not name unrelated origin/main", guidance)
 	}
 }
 

@@ -263,7 +263,8 @@ func TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead(t *testing.T) {
 // sweeps both the city store and every rig store, and recovers both carried-route
 // shapes (workflow root and plain work bead).
 func TestCityRuntimeRecoverUnroutedWorkRoutes(t *testing.T) {
-	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+	coordinationStore := beads.NewMemStore()
+	cityWorkStore := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "CW-1", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
 			"gc.kind": "workflow", "gc.run_target": "city/gastown.polecat",
 		}},
@@ -275,15 +276,18 @@ func TestCityRuntimeRecoverUnroutedWorkRoutes(t *testing.T) {
 		}},
 	}, nil)
 	cr := &CityRuntime{
-		cityName:            "city",
-		standaloneCityStore: cityStore,
-		standaloneRigStores: map[string]beads.Store{"gascity": rigStore},
-		stderr:              io.Discard,
+		cityName: "city",
+		cs: &controllerState{
+			cityBeadStore:     coordinationStore,
+			cityWorkBeadStore: cityWorkStore,
+			beadStores:        map[string]beads.Store{"gascity": rigStore},
+		},
+		stderr: io.Discard,
 	}
 
 	cr.recoverUnroutedWorkRoutes()
 
-	if got := mustRoutedTo(t, cityStore, "CW-1"); got != "city/gastown.polecat" {
+	if got := mustRoutedTo(t, cityWorkStore, "CW-1"); got != "city/gastown.polecat" {
 		t.Errorf("CW-1 gc.routed_to = %q, want city/gastown.polecat", got)
 	}
 	if got := mustRoutedTo(t, rigStore, "RW-1"); got != "gascity/gastown.polecat" {

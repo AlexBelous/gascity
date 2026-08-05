@@ -75,11 +75,24 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		}
 	} else {
 		stores = federatedWorkBeadStores(stores, s.cityWorkBeadStore())
+		coordinationStore := s.state.CityBeadStore()
+		coordinationPresent := false
+		for _, store := range stores {
+			if store == coordinationStore {
+				coordinationPresent = true
+				break
+			}
+		}
+		if coordinationStore != nil && !coordinationPresent {
+			stores[cityCoordinationStoreKey] = coordinationStore
+		}
 		rigNames = sortedRigNames(stores)
 	}
 
 	var all []beads.Bead
-	dedupe := len(assigneeTerms) > 1
+	_, hasCityWork := stores[cityWorkStoreKey]
+	_, hasCityCoordination := stores[cityCoordinationStoreKey]
+	dedupe := len(assigneeTerms) > 1 || hasCityWork && hasCityCoordination
 
 	// all=true reads materialize closed history per rig, so the build is
 	// O(history) even though the caller only wants a recency-bounded page
@@ -168,7 +181,11 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				pa.success()
 			}
 			for _, b := range list {
-				dedupeKey := rigName + "\x00" + b.ID
+				dedupeScope := rigName
+				if rigName == cityWorkStoreKey || rigName == cityCoordinationStoreKey {
+					dedupeScope = "\x00city"
+				}
+				dedupeKey := dedupeScope + "\x00" + b.ID
 				if dedupe && seen[dedupeKey] {
 					continue
 				}

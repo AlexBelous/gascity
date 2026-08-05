@@ -711,12 +711,21 @@ func assertBeadEndpointFederatesCityAndSameNamedRig(t *testing.T, endpoint strin
 	t.Helper()
 	state := newFakeState(t)
 	cityWorkStore := beads.NewMemStore()
+	coordinationBead := beads.Bead{
+		ID:        "gc-session",
+		Title:     "coordination",
+		Type:      "session",
+		Status:    "open",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	coordinationStore := beads.NewMemStoreFrom(1, []beads.Bead{coordinationBead}, nil)
 	rigStore := beads.NewMemStoreFrom(100, nil, nil)
 	state.cityName = "shared"
 	state.cfg.Workspace.Name = state.cityName
 	state.cfg.Rigs = []config.Rig{{Name: state.cityName, Path: "/tmp/shared"}}
 	state.cityWorkBeadStore = cityWorkStore
-	state.cityBeadStore = cityWorkStore
+	state.cityBeadStore = coordinationStore
 	state.stores = map[string]beads.Store{state.cityName: rigStore}
 
 	cityBead, err := cityWorkStore.Create(beads.Bead{ID: "gc-city", Title: "city work"})
@@ -726,6 +735,20 @@ func assertBeadEndpointFederatesCityAndSameNamedRig(t *testing.T, endpoint strin
 	rigBead, err := rigStore.Create(beads.Bead{ID: "shared-rig", Title: "rig work"})
 	if err != nil {
 		t.Fatalf("Create(rig work): %v", err)
+	}
+	duplicateID := ""
+	if endpoint == "/beads" {
+		for name, store := range map[string]beads.Store{"work": cityWorkStore, "coordination": coordinationStore} {
+			duplicate, err := store.Create(beads.Bead{Title: name + " duplicate"})
+			if err != nil {
+				t.Fatalf("Create(%s duplicate): %v", name, err)
+			}
+			if duplicateID == "" {
+				duplicateID = duplicate.ID
+			} else if duplicate.ID != duplicateID {
+				t.Fatalf("duplicate IDs differ: got %q, want %q", duplicate.ID, duplicateID)
+			}
+		}
 	}
 
 	h := newTestCityHandler(t, state)
@@ -740,11 +763,26 @@ func assertBeadEndpointFederatesCityAndSameNamedRig(t *testing.T, endpoint strin
 		t.Fatalf("Decode response: %v", err)
 	}
 	want := map[string]bool{cityBead.ID: true, rigBead.ID: true}
+	if endpoint == "/beads" {
+		want[coordinationBead.ID] = true
+		want[duplicateID] = true
+	}
 	for _, item := range resp.Items {
 		delete(want, item.ID)
 	}
 	if len(want) != 0 {
 		t.Fatalf("%s Items = %+v, missing same-name federation IDs %v", endpoint, resp.Items, want)
+	}
+	if endpoint == "/beads" {
+		duplicates := 0
+		for _, item := range resp.Items {
+			if strings.HasSuffix(item.Title, " duplicate") {
+				duplicates++
+			}
+		}
+		if duplicates != 1 {
+			t.Fatalf("%s duplicate city ID count = %d, want 1", endpoint, duplicates)
+		}
 	}
 }
 

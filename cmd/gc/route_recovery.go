@@ -165,7 +165,7 @@ type routeRecoveryScope struct {
 // (ga-n2d.4). Best-effort: a per-store failure is logged and the remaining
 // stores still run.
 func (cr *CityRuntime) recoverUnroutedWorkRoutes() {
-	scopes := []routeRecoveryScope{{label: "city", store: cr.cityBeadStore()}}
+	scopes := []routeRecoveryScope{{label: "city", store: cr.cityWorkStore().Store}}
 	for name, store := range cr.rigBeadStores() {
 		scopes = append(scopes, routeRecoveryScope{label: "rig " + name, store: store})
 	}

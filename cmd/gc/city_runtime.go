@@ -2254,7 +2254,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
 	phaseStart := time.Now()
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(cr.cityWorkStore().Store, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})
@@ -2355,7 +2355,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), cr.nudgesBeadStore(), time.Now(), sessionBeads)
+	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), cr.waitDependencyStores(), cr.nudgesBeadStore(), time.Now(), sessionBeads)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil
@@ -3229,6 +3229,10 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 	return cr.standaloneRigStores
 }
 
+func (cr *CityRuntime) waitDependencyStores() waitDependencyStoreSet {
+	return newWaitDependencyStoreSet(cr.cityWorkStore().Store, cr.rigBeadStores())
+}
+
 func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {
 	sessionBeads, _ := cr.loadSessionBeadSnapshotWithPartial()
 	return sessionBeads
@@ -3403,7 +3407,7 @@ func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
 	stores := []struct {
 		ref   string
 		store beads.Store
-	}{{ref: cr.cityName, store: cr.cityBeadStore()}}
+	}{{ref: cr.cityName, store: cr.cityWorkStore().Store}}
 	rigStores := cr.rigBeadStores()
 	refs := make([]string, 0, len(rigStores))
 	for ref := range rigStores {

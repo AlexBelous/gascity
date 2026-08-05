@@ -373,6 +373,73 @@ func TestRoutedWorkPoolAllocationStartsBelowBoundedAgentCapAndFallsBackAtCap(t *
 	}
 }
 
+func TestRoutedWorkPoolAllocationStartsColdCanonicalSingletonAndFallsBackAtCap(t *testing.T) {
+	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+	maximum := 1
+	fixture.cr.cfg.Agents[0].MaxActiveSessions = &maximum
+
+	firstWork, err := fixture.store.Create(beads.Bead{
+		Title:    "first singleton work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create first singleton work: %v", err)
+	}
+	firstHint := routedWorkPoolAllocationHint{
+		WorkID:      firstWork.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+		EventAt:     time.Now().UTC().Add(-time.Second),
+		EnqueuedAt:  time.Now().UTC(),
+	}
+	first, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), firstHint)
+	if err != nil {
+		t.Fatalf("allocate cold singleton work: %v", err)
+	}
+	if !first.Handled || !first.Created || first.Session.PoolSlot != "" {
+		t.Fatalf("cold singleton allocation = %+v, want one canonical slotless session", first)
+	}
+	stored, err := fixture.store.Get(first.Session.ID)
+	if err != nil {
+		t.Fatalf("read canonical singleton session: %v", err)
+	}
+	if stored.Metadata["agent_name"] != "worker" || stored.Metadata["alias"] != "worker" || stored.Metadata["pool_slot"] != "" {
+		t.Fatalf("singleton identity metadata = %+v, want canonical unsuffixed worker", stored.Metadata)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(first.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "cold canonical singleton to start")
+
+	secondWork, err := fixture.store.Create(beads.Bead{
+		Title:    "second singleton work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create second singleton work: %v", err)
+	}
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+		WorkID:      secondWork.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+	})
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load singleton sessions: %v", err)
+	}
+	if open := infos.OpenInfos(); len(open) != maximum {
+		t.Fatalf("open singleton sessions = %d, want cap %d: %+v", len(open), maximum, open)
+	}
+	if starts := fixture.provider.CountCalls("Start", first.Session.SessionName); starts != 1 {
+		t.Fatalf("singleton provider starts = %d, want 1", starts)
+	}
+}
+
 func TestRoutedWorkPoolAllocationRediscoverPendingBindingFromStaleEmptyIndex(t *testing.T) {
 	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
 	work, err := fixture.store.Create(beads.Bead{
@@ -1010,6 +1077,13 @@ func TestAuthorizeRoutedWorkPoolStartRejectsStaleLeaseAuthority(t *testing.T) {
 				f.cr.cfg = &next
 			},
 		},
+		{
+			name: "canonical singleton rejects numbered allocation",
+			mutate: func(f *routedWorkPoolAuthorizationFixture) {
+				maximum := 1
+				f.snapshot.Config.Agents[0].MaxActiveSessions = &maximum
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -1063,43 +1137,58 @@ func TestAuthorizeRoutedWorkPoolStartRetainsExactMemberAuthorityAfterPoolGrowth(
 }
 
 func TestAuthorizeRoutedWorkPoolStartRejectsBoundedPoolGrowthPastCap(t *testing.T) {
-	fixture := newRoutedWorkPoolAuthorizationFixture(t)
-	for slot := 2; slot <= 3; slot++ {
-		other, err := createPoolSessionBeadWithAlias(fixture.store, "worker", fixture.snapshot.Config, nil, time.Now().UTC(), poolSessionCreateIdentity{
-			AgentName: fmt.Sprintf("worker-%d", slot),
-			Slot:      slot,
-			Metadata: map[string]string{
-				beadmeta.TriggerBeadIDMetadataKey:       fmt.Sprintf("gc-other-work-%d", slot),
-				beadmeta.TriggerBeadStoreRefMetadataKey: fixture.lease.SourceStore,
-			},
-		}, "")
-		if err != nil {
-			t.Fatalf("create occupied pool session %d: %v", slot, err)
-		}
-		if err := fixture.store.SetMetadata(other.ID, "state", string(sessionpkg.StateActive)); err != nil {
-			t.Fatalf("make pool session %d active: %v", slot, err)
-		}
-		other, err = sessionFrontDoor(fixture.store).Get(other.ID)
-		if err != nil {
-			t.Fatalf("read occupied pool session %d: %v", slot, err)
-		}
-		if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, other); err != nil {
-			t.Fatalf("publish occupied pool session %d: %v", slot, err)
-		}
+	tests := []struct {
+		name      string
+		maximum   int
+		occupancy int
+	}{
+		{name: "multi-session pool", maximum: 2, occupancy: 3},
+		{name: "canonical singleton", maximum: 1, occupancy: 2},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRoutedWorkPoolAuthorizationFixture(t)
+			for slot := 2; slot <= test.occupancy; slot++ {
+				other, err := createPoolSessionBeadWithAlias(fixture.store, "worker", fixture.snapshot.Config, nil, time.Now().UTC(), poolSessionCreateIdentity{
+					AgentName: fmt.Sprintf("worker-%d", slot),
+					Slot:      slot,
+					Metadata: map[string]string{
+						beadmeta.TriggerBeadIDMetadataKey:       fmt.Sprintf("gc-other-work-%d", slot),
+						beadmeta.TriggerBeadStoreRefMetadataKey: fixture.lease.SourceStore,
+					},
+				}, "")
+				if err != nil {
+					t.Fatalf("create occupied pool session %d: %v", slot, err)
+				}
+				if err := fixture.store.SetMetadata(other.ID, "state", string(sessionpkg.StateActive)); err != nil {
+					t.Fatalf("make pool session %d active: %v", slot, err)
+				}
+				other, err = sessionFrontDoor(fixture.store).Get(other.ID)
+				if err != nil {
+					t.Fatalf("read occupied pool session %d: %v", slot, err)
+				}
+				if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, other); err != nil {
+					t.Fatalf("publish occupied pool session %d: %v", slot, err)
+				}
+			}
 
-	observation := fixture.cr.poolMembershipShadow.observe("worker")
-	if !observation.certified || observation.occupied != 3 {
-		t.Fatalf("grown bounded membership = %+v, want three certified occupied members", observation)
-	}
-	maximum := 2
-	fixture.snapshot.Config.Agents[0].MaxActiveSessions = &maximum
-	authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, fixture.info, fixture.lease)
-	if err != nil {
-		t.Fatalf("authorize over-cap pool start: %v", err)
-	}
-	if authorized {
-		t.Fatal("over-cap bounded pool retained exact start authority")
+			observation := fixture.cr.poolMembershipShadow.observe("worker")
+			if !observation.certified || observation.occupied != test.occupancy {
+				t.Fatalf("grown bounded membership = %+v, want %d certified occupied members", observation, test.occupancy)
+			}
+			fixture.snapshot.Config.Agents[0].MaxActiveSessions = &test.maximum
+			policy := newPoolAllocationShadowPolicy(fixture.snapshot.Config, &fixture.snapshot.Config.Agents[0], nil)
+			if !policy.supported() {
+				t.Fatalf("bounded policy = %+v, want supported start policy", policy)
+			}
+			authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, fixture.info, fixture.lease)
+			if err != nil {
+				t.Fatalf("authorize over-cap pool start: %v", err)
+			}
+			if authorized {
+				t.Fatal("over-cap bounded pool retained exact start authority")
+			}
+		})
 	}
 }
 
@@ -1242,6 +1331,13 @@ func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) 
 			name: "unsupported pool policy",
 			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
 				f.snapshot.Config.Agents[0].DependsOn = []string{"database"}
+			},
+		},
+		{
+			name: "canonical singleton stop remains legacy owned",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				maximum := 1
+				f.snapshot.Config.Agents[0].MaxActiveSessions = &maximum
 			},
 		},
 		{

@@ -236,8 +236,9 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 	for i := range snapshot.Config.NamedSessions {
 		namedTemplates[snapshot.Config.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
 	}
-	if !newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates).
-		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore).supported() {
+	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates).
+		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore)
+	if !policy.supported() || policy.maxActiveSessions == 1 {
 		return false, nil
 	}
 	for _, check := range []struct{ key, want string }{
@@ -603,7 +604,9 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	}
 	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates).
 		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore)
-	if !policy.supported() || strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
+	if !policy.supported() ||
+		(policy.maxActiveSessions == 1 && !isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget)) ||
+		strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
 		strings.TrimSpace(info.TriggerBeadStoreRef) != lease.SourceStore {
 		return false, nil
 	}
@@ -620,7 +623,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	}
 	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)
 	if !occupied || observation.revision < lease.MembershipRevision ||
-		(policy.maxActiveSessions > 1 && observation.occupied > policy.maxActiveSessions) ||
+		(policy.maxActiveSessions > 0 && observation.occupied > policy.maxActiveSessions) ||
 		!routedWorkPoolProviderHealthy(snapshot.CityPath, snapshot.Config, agent) {
 		return false, nil
 	}

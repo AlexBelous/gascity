@@ -64,7 +64,7 @@ func TestPoolAllocationShadowPolicyClassifiesPoolShapes(t *testing.T) {
 			maximum := 1
 			agent.MaxActiveSessions = &maximum
 			return nil
-		}, want: poolAllocationShadowSingletonIdentity},
+		}, want: poolAllocationShadowEligibleAgentCap},
 		{name: "bounded agent cap", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
 			maximum := 2
 			agent.MaxActiveSessions = &maximum
@@ -178,6 +178,35 @@ func TestDecideRoutedWorkPoolAllocationShadow(t *testing.T) {
 			wantAction:   poolAllocationShadowStartOne,
 			wantReason:   poolAllocationShadowOccupiedGrowth,
 			wantStarts:   1,
+		},
+		{
+			name: "cold canonical singleton starts one",
+			contribution: func() readyRoutedWorkDemandContribution {
+				value := baseContribution
+				value.AllocationPolicy = poolAllocationShadowPolicy{
+					reason:            poolAllocationShadowEligibleAgentCap,
+					maxActiveSessions: 1,
+				}
+				return value
+			}(),
+			membership: baseMembership,
+			wantAction: poolAllocationShadowStartOne,
+			wantReason: poolAllocationShadowColdFromZero,
+			wantStarts: 1,
+		},
+		{
+			name: "occupied canonical singleton remains legacy owned",
+			contribution: func() readyRoutedWorkDemandContribution {
+				value := baseContribution
+				value.AllocationPolicy = poolAllocationShadowPolicy{
+					reason:            poolAllocationShadowEligibleAgentCap,
+					maxActiveSessions: 1,
+				}
+				return value
+			}(),
+			membership: poolMembershipObservation{members: 1, occupied: 1, nextFreeSlot: 1, certified: true, revision: 10},
+			wantAction: poolAllocationShadowLegacy,
+			wantReason: poolAllocationShadowAgentCap,
 		},
 		{
 			name: "bounded pool below cap starts one",

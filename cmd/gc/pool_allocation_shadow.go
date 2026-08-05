@@ -30,7 +30,6 @@ const (
 	poolAllocationShadowWorkspaceCap          poolAllocationShadowReason = "workspace_cap"
 	poolAllocationShadowRigCap                poolAllocationShadowReason = "rig_cap"
 	poolAllocationShadowNamepool              poolAllocationShadowReason = "namepool"
-	poolAllocationShadowSingletonIdentity     poolAllocationShadowReason = "singleton_identity"
 	poolAllocationShadowAgentCap              poolAllocationShadowReason = "agent_cap"
 	poolAllocationShadowSourceStore           poolAllocationShadowReason = "source_store"
 	poolAllocationShadowDemandUnsupported     poolAllocationShadowReason = "demand_unsupported"
@@ -108,10 +107,6 @@ func newPoolAllocationShadowPolicy(
 		policy.reason = poolAllocationShadowNamepool
 		return policy
 	}
-	if agent.UsesCanonicalSingletonPoolIdentity() {
-		policy.reason = poolAllocationShadowSingletonIdentity
-		return policy
-	}
 	if maximum := agent.EffectiveMaxActiveSessions(); poolAllocationShadowHasCap(maximum) {
 		policy.reason = poolAllocationShadowEligibleAgentCap
 		policy.maxActiveSessions = *maximum
@@ -180,7 +175,7 @@ func decideRoutedWorkPoolAllocationShadow(
 		decision.reason = poolAllocationShadowInvalidMembership
 		return decision
 	}
-	if contribution.AllocationPolicy.maxActiveSessions > 1 &&
+	if contribution.AllocationPolicy.maxActiveSessions > 0 &&
 		membership.occupied >= contribution.AllocationPolicy.maxActiveSessions {
 		decision.reason = poolAllocationShadowAgentCap
 		return decision

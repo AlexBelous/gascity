@@ -299,6 +299,80 @@ func TestRoutedWorkPoolAllocationGrowsOccupiedUnlimitedPoolForDistinctRoutedWork
 	}
 }
 
+func TestRoutedWorkPoolAllocationStartsBelowBoundedAgentCapAndFallsBackAtCap(t *testing.T) {
+	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+	maximum := 2
+	fixture.cr.cfg.Agents[0].MaxActiveSessions = &maximum
+
+	allocate := func(title string) routedWorkPoolAllocationResult {
+		t.Helper()
+		work, err := fixture.store.Create(beads.Bead{
+			Title:    title,
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": "worker"},
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		hint := routedWorkPoolAllocationHint{
+			WorkID:      work.ID,
+			PoolTarget:  "worker",
+			SourceStore: "city:test-city",
+			EventAt:     time.Now().UTC().Add(-time.Second),
+			EnqueuedAt:  time.Now().UTC(),
+		}
+		result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), hint)
+		if err != nil {
+			t.Fatalf("allocate %s: %v", title, err)
+		}
+		return result
+	}
+
+	first := allocate("first bounded-pool work")
+	if !first.Handled || !first.Created || first.Session.PoolSlot != "1" {
+		t.Fatalf("first bounded allocation = %+v, want created slot-1 session", first)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(first.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "first bounded-pool session to start")
+
+	second := allocate("second bounded-pool work")
+	if !second.Handled || !second.Created || second.Session.PoolSlot != "2" {
+		t.Fatalf("second bounded allocation = %+v, want created slot-2 session", second)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(second.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "second bounded-pool session to start")
+
+	thirdWork, err := fixture.store.Create(beads.Bead{
+		Title:    "third bounded-pool work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create third bounded-pool work: %v", err)
+	}
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
+		WorkID:      thirdWork.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+	})
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load bounded pool sessions: %v", err)
+	}
+	if open := infos.OpenInfos(); len(open) != maximum {
+		t.Fatalf("open bounded pool sessions = %d, want cap %d: %+v", len(open), maximum, open)
+	}
+	if starts := fixture.provider.CountCalls("Start", first.Session.SessionName) + fixture.provider.CountCalls("Start", second.Session.SessionName); starts != maximum {
+		t.Fatalf("bounded pool provider starts = %d, want %d", starts, maximum)
+	}
+}
+
 func TestRoutedWorkPoolAllocationRediscoverPendingBindingFromStaleEmptyIndex(t *testing.T) {
 	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
 	work, err := fixture.store.Create(beads.Bead{
@@ -985,6 +1059,47 @@ func TestAuthorizeRoutedWorkPoolStartRetainsExactMemberAuthorityAfterPoolGrowth(
 	authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, fixture.info, fixture.lease)
 	if err != nil || !authorized {
 		t.Fatalf("authorize original exact member after pool growth = (%t, %v), want true", authorized, err)
+	}
+}
+
+func TestAuthorizeRoutedWorkPoolStartRejectsBoundedPoolGrowthPastCap(t *testing.T) {
+	fixture := newRoutedWorkPoolAuthorizationFixture(t)
+	for slot := 2; slot <= 3; slot++ {
+		other, err := createPoolSessionBeadWithAlias(fixture.store, "worker", fixture.snapshot.Config, nil, time.Now().UTC(), poolSessionCreateIdentity{
+			AgentName: fmt.Sprintf("worker-%d", slot),
+			Slot:      slot,
+			Metadata: map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey:       fmt.Sprintf("gc-other-work-%d", slot),
+				beadmeta.TriggerBeadStoreRefMetadataKey: fixture.lease.SourceStore,
+			},
+		}, "")
+		if err != nil {
+			t.Fatalf("create occupied pool session %d: %v", slot, err)
+		}
+		if err := fixture.store.SetMetadata(other.ID, "state", string(sessionpkg.StateActive)); err != nil {
+			t.Fatalf("make pool session %d active: %v", slot, err)
+		}
+		other, err = sessionFrontDoor(fixture.store).Get(other.ID)
+		if err != nil {
+			t.Fatalf("read occupied pool session %d: %v", slot, err)
+		}
+		if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, other); err != nil {
+			t.Fatalf("publish occupied pool session %d: %v", slot, err)
+		}
+	}
+
+	observation := fixture.cr.poolMembershipShadow.observe("worker")
+	if !observation.certified || observation.occupied != 3 {
+		t.Fatalf("grown bounded membership = %+v, want three certified occupied members", observation)
+	}
+	maximum := 2
+	fixture.snapshot.Config.Agents[0].MaxActiveSessions = &maximum
+	authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, fixture.info, fixture.lease)
+	if err != nil {
+		t.Fatalf("authorize over-cap pool start: %v", err)
+	}
+	if authorized {
+		t.Fatal("over-cap bounded pool retained exact start authority")
 	}
 }
 

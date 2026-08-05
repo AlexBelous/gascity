@@ -18,6 +18,7 @@ type poolAllocationShadowReason string
 
 const (
 	poolAllocationShadowEligible              poolAllocationShadowReason = "eligible_default_pool"
+	poolAllocationShadowEligibleAgentCap      poolAllocationShadowReason = "eligible_agent_cap"
 	poolAllocationShadowColdFromZero          poolAllocationShadowReason = "cold_from_zero"
 	poolAllocationShadowInvalidConfig         poolAllocationShadowReason = "invalid_config"
 	poolAllocationShadowSuspended             poolAllocationShadowReason = "suspended"
@@ -42,10 +43,11 @@ const (
 type poolAllocationShadowPolicy struct {
 	reason              poolAllocationShadowReason
 	contributionPresent bool
+	maxActiveSessions   int
 }
 
 func (p poolAllocationShadowPolicy) supported() bool {
-	return p.reason == poolAllocationShadowEligible
+	return p.reason == poolAllocationShadowEligible || p.reason == poolAllocationShadowEligibleAgentCap
 }
 
 func newPoolAllocationShadowPolicy(
@@ -56,6 +58,7 @@ func newPoolAllocationShadowPolicy(
 	policy := poolAllocationShadowPolicy{
 		reason:              poolAllocationShadowEligible,
 		contributionPresent: true,
+		maxActiveSessions:   -1,
 	}
 	if cfg == nil || agent == nil {
 		policy.reason = poolAllocationShadowInvalidConfig
@@ -109,8 +112,9 @@ func newPoolAllocationShadowPolicy(
 		policy.reason = poolAllocationShadowSingletonIdentity
 		return policy
 	}
-	if poolAllocationShadowHasCap(agent.EffectiveMaxActiveSessions()) {
-		policy.reason = poolAllocationShadowAgentCap
+	if maximum := agent.EffectiveMaxActiveSessions(); poolAllocationShadowHasCap(maximum) {
+		policy.reason = poolAllocationShadowEligibleAgentCap
+		policy.maxActiveSessions = *maximum
 		return policy
 	}
 	return policy
@@ -174,6 +178,11 @@ func decideRoutedWorkPoolAllocationShadow(
 	}
 	if membership.members < 0 || membership.occupied < 0 || membership.occupied > membership.members {
 		decision.reason = poolAllocationShadowInvalidMembership
+		return decision
+	}
+	if contribution.AllocationPolicy.maxActiveSessions > 1 &&
+		membership.occupied >= contribution.AllocationPolicy.maxActiveSessions {
+		decision.reason = poolAllocationShadowAgentCap
 		return decision
 	}
 	if membership.members != 0 {

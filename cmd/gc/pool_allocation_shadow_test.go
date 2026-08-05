@@ -7,7 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-func TestPoolAllocationShadowPolicyKeepsNontrivialClassesLegacyOwned(t *testing.T) {
+func TestPoolAllocationShadowPolicyClassifiesPoolShapes(t *testing.T) {
 	base := func() (*config.City, *config.Agent) {
 		cfg := &config.City{
 			Workspace: config.Workspace{Name: "test-city"},
@@ -69,7 +69,7 @@ func TestPoolAllocationShadowPolicyKeepsNontrivialClassesLegacyOwned(t *testing.
 			maximum := 2
 			agent.MaxActiveSessions = &maximum
 			return nil
-		}, want: poolAllocationShadowAgentCap},
+		}, want: poolAllocationShadowEligibleAgentCap},
 		{name: "disabled", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
 			maximum := 0
 			agent.MaxActiveSessions = &maximum
@@ -92,7 +92,8 @@ func TestPoolAllocationShadowPolicyKeepsNontrivialClassesLegacyOwned(t *testing.
 			if policy.reason != test.want {
 				t.Fatalf("policy reason = %q, want %q", policy.reason, test.want)
 			}
-			if got := policy.supported(); got != (test.want == poolAllocationShadowEligible) {
+			wantSupported := test.want == poolAllocationShadowEligible || test.want == poolAllocationShadowEligibleAgentCap
+			if got := policy.supported(); got != wantSupported {
 				t.Fatalf("policy supported = %t for reason %q", got, policy.reason)
 			}
 		})
@@ -177,6 +178,35 @@ func TestDecideRoutedWorkPoolAllocationShadow(t *testing.T) {
 			wantAction:   poolAllocationShadowStartOne,
 			wantReason:   poolAllocationShadowOccupiedGrowth,
 			wantStarts:   1,
+		},
+		{
+			name: "bounded pool below cap starts one",
+			contribution: func() readyRoutedWorkDemandContribution {
+				value := baseContribution
+				value.AllocationPolicy = poolAllocationShadowPolicy{
+					reason:            poolAllocationShadowEligibleAgentCap,
+					maxActiveSessions: 2,
+				}
+				return value
+			}(),
+			membership: poolMembershipObservation{members: 1, occupied: 1, nextFreeSlot: 2, certified: true, revision: 10},
+			wantAction: poolAllocationShadowStartOne,
+			wantReason: poolAllocationShadowOccupiedGrowth,
+			wantStarts: 1,
+		},
+		{
+			name: "bounded pool at cap remains legacy owned",
+			contribution: func() readyRoutedWorkDemandContribution {
+				value := baseContribution
+				value.AllocationPolicy = poolAllocationShadowPolicy{
+					reason:            poolAllocationShadowEligibleAgentCap,
+					maxActiveSessions: 2,
+				}
+				return value
+			}(),
+			membership: poolMembershipObservation{members: 2, occupied: 2, nextFreeSlot: 3, certified: true, revision: 10},
+			wantAction: poolAllocationShadowLegacy,
+			wantReason: poolAllocationShadowAgentCap,
 		},
 		{
 			name:         "mixed occupied and asleep members remain legacy owned",

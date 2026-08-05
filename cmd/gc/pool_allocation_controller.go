@@ -619,7 +619,9 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 		return false, nil
 	}
 	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)
-	if !occupied || observation.revision < lease.MembershipRevision || !routedWorkPoolProviderHealthy(snapshot.CityPath, snapshot.Config, agent) {
+	if !occupied || observation.revision < lease.MembershipRevision ||
+		(policy.maxActiveSessions > 1 && observation.occupied > policy.maxActiveSessions) ||
+		!routedWorkPoolProviderHealthy(snapshot.CityPath, snapshot.Config, agent) {
 		return false, nil
 	}
 	return true, nil

@@ -112,15 +112,41 @@ func TestNudgeSessionBoundFencedGuardsExpectedTokenBeforeAndAfterYield(t *testin
 	}
 }
 
-func TestProviderNudgeFencedReportsSessionGone(t *testing.T) {
-	fe := &fakeExecutor{err: ErrSessionNotFound}
+func TestProviderNudgeFencedReportsSessionGoneAtEffectBoundary(t *testing.T) {
+	fe := &fakeExecutor{
+		outs: []string{
+			"$7\tworker\t@3\t%9\t0\t0\t0", // whole-session input census
+			"41",                          // named socket server witness
+			"$7\tworker\t@3\t%9\t123",     // agent-pane scan
+			"$7\tworker\t@3\t%9",          // exact target identity
+			"",                            // load-buffer
+			"GC_PROVIDER=codex",           // submit debounce family
+			"123",                         // pre-effect activity snapshot
+			"",                            // final effect disappears
+			"",                            // deferred buffer cleanup
+		},
+		errs: []error{nil, nil, nil, nil, nil, nil, nil, ErrSessionNotFound, nil},
+	}
 	p := NewProviderWithConfig(Config{SocketName: "city-socket"})
 	p.tm.exec = fe
 	p.tm.namedSocketLstat = stableNamedSocketLstat(t)
 
-	err := p.NudgeFenced("missing", "expected-token", runtime.TextContent("do not inject"))
+	err := p.NudgeFenced("worker", "expected-token", runtime.TextContent("do not inject"))
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("NudgeFenced missing session = %v, want ErrSessionNotFound", err)
+	}
+	if got, want := len(fe.calls), 9; got != want {
+		t.Fatalf("tmux calls = %d, want %d through final effect and cleanup: %#v", got, want, fe.calls)
+	}
+	effect := strings.Join(fe.calls[7], " ")
+	if !strings.Contains(effect, "if-shell") || !strings.Contains(effect, "send-keys") {
+		t.Fatalf("final effect command = %q, want guarded input command", effect)
+	}
+	for _, call := range append(append([][]string(nil), fe.calls[:7]...), fe.calls[8]) {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "send-keys") || strings.Contains(joined, "paste-buffer") {
+			t.Fatalf("input escaped the failed final effect boundary: %#v", fe.calls)
+		}
 	}
 }
 

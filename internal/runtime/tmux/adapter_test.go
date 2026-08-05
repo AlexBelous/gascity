@@ -287,7 +287,7 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	}
 }
 
-func TestProviderNudgeFencesCopyModeAcrossNamedSessionPanes(t *testing.T) {
+func TestProviderNudgeFencesCopyModeAndTokenAcrossRealNamedSocket(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -312,8 +312,13 @@ func TestProviderNudgeFencesCopyModeAcrossNamedSessionPanes(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "nudge-marker")
 	message := fmt.Sprintf("copy-fence-marker-%d", time.Now().UnixNano())
 	signal := fmt.Sprintf("gc-nudge-copy-fence-%d", time.Now().UnixNano())
+	const instanceToken = "original-instance-token"
 	command := "while IFS= read -r line; do printf '%s\\n' \"$line\" >> " + shellquote.Quote(marker) + "; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(signal) + "; done"
-	if err := p.Start(context.Background(), name, runtime.Config{Command: command, ProviderName: "codex"}); err != nil {
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command:      command,
+		ProviderName: "codex",
+		Env:          map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
+	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	secondPane, err := p.tm.run("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "="+name, "sleep 300")
@@ -378,6 +383,24 @@ func TestProviderNudgeFencesCopyModeAcrossNamedSessionPanes(t *testing.T) {
 	if _, err := p.tm.run("send-keys", "-t", inputPane, "-X", "cancel"); err != nil {
 		t.Fatalf("clear resize-race copy mode: %v", err)
 	}
+	if _, err := p.tm.run("set-hook", "-t", name, "window-resized", "set-environment -t ="+name+" GC_INSTANCE_TOKEN replacement-instance-token"); err != nil {
+		t.Fatalf("arm resize-to-token-change race: %v", err)
+	}
+	tokenRaceErr := p.NudgeFenced(name, instanceToken, runtime.TextContent(message+"-token-race"))
+	if _, err := p.tm.run("set-hook", "-u", "-t", name, "window-resized"); err != nil {
+		t.Fatalf("disarm resize-to-token-change race: %v", err)
+	}
+	if !errors.Is(tokenRaceErr, runtime.ErrInputFenced) {
+		t.Fatalf("NudgeFenced when token changes during guarded delay = %v, want ErrInputFenced", tokenRaceErr)
+	}
+	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read nudge marker after token race: %v", err)
+	} else if len(data) != 0 {
+		t.Fatalf("nudge marker = %q after token race, want zero input", data)
+	}
+	if err := p.SetMeta(name, "GC_INSTANCE_TOKEN", instanceToken); err != nil {
+		t.Fatalf("restore exact instance token: %v", err)
+	}
 	// A second provider's hidden PTY is intentionally opaque to p, exactly as a
 	// human client is. The provider's final if-shell fence, not the earlier
 	// census, must prevent this nudge from reaching stdin.
@@ -423,8 +446,8 @@ func TestProviderNudgeFencesCopyModeAcrossNamedSessionPanes(t *testing.T) {
 	if _, err := p.tm.run("kill-session", "-t", "="+linkedName); err != nil {
 		t.Fatalf("remove linked witness session: %v", err)
 	}
-	if err := p.NudgeNow(name, runtime.TextContent(message)); err != nil {
-		t.Fatalf("NudgeNow after fences clear: %v", err)
+	if err := p.NudgeFenced(name, instanceToken, runtime.TextContent(message)); err != nil {
+		t.Fatalf("NudgeFenced with matching token after fences clear: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
 	defer cancel()

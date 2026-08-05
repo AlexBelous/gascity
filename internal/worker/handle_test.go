@@ -29,6 +29,15 @@ type unattendedStopTestProvider struct {
 	calls []unattendedStopTestCall
 }
 
+type idleOnlyNudgeProvider struct {
+	runtime.Provider
+	fake *runtime.Fake
+}
+
+func (p *idleOnlyNudgeProvider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	return p.fake.WaitForIdle(ctx, name, timeout)
+}
+
 func (p *unattendedStopTestProvider) StopUnattendedSession(name, expectedToken string) error {
 	p.calls = append(p.calls, unattendedStopTestCall{name: name, token: expectedToken})
 	return p.Stop(name)
@@ -480,6 +489,155 @@ func TestSessionHandleStopUnattendedUsesBoundWorkerBoundary(t *testing.T) {
 	}
 	if got, want := bead.Metadata["state"], string(sessionpkg.StateActive); got != want {
 		t.Fatalf("bead state = %q, want %q after bound stop", got, want)
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleAuthorizedOrdersAuthorizationBeforeFencedDelivery(t *testing.T) {
+	handle, _, provider, manager := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err := handle.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if err := provider.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", "launch-1"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	provider.WaitForIdleErrors[info.SessionName] = nil
+
+	var order []string
+	result, err := handle.NudgeWaitIdleAuthorized(t.Context(), NudgeRequest{
+		Text:     "continue",
+		Delivery: NudgeDeliveryWaitIdle,
+		Wake:     NudgeWakeLiveOnly,
+	}, "launch-1", func(context.Context) error {
+		order = append(order, "authorize")
+		if got := provider.CountCalls("WaitForIdle", info.SessionName); got != 1 {
+			t.Fatalf("idle waits during authorization = %d, want 1", got)
+		}
+		if got := provider.CountCalls("NudgeFenced", info.SessionName); got != 0 {
+			t.Fatalf("fenced delivery calls during authorization = %d, want 0", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("NudgeWaitIdleAuthorized: %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("NudgeWaitIdleAuthorized Delivered = false, want true")
+	}
+	if got := provider.CountCalls("WaitForIdle", info.SessionName); got != 1 {
+		t.Fatalf("WaitForIdle calls = %d, want 1", got)
+	}
+	if got := provider.CountCalls("NudgeFenced", info.SessionName); got != 1 {
+		t.Fatalf("NudgeFenced calls = %d, want 1", got)
+	}
+	if !reflect.DeepEqual(order, []string{"authorize"}) {
+		t.Fatalf("authorization order = %#v, want one authorization after idle wait", order)
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleAuthorizedFailsClosedForUnsupportedProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	fake := runtime.NewFake()
+	provider := &idleOnlyNudgeProvider{Provider: fake, fake: fake}
+	manager := sessionpkg.NewManagerWithOptions(store, provider)
+	handle, err := NewSessionHandle(SessionHandleConfig{Manager: manager, Session: SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	}})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := handle.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+
+	result, err := handle.NudgeWaitIdleAuthorized(t.Context(), NudgeRequest{
+		Text:     "continue",
+		Delivery: NudgeDeliveryWaitIdle,
+		Wake:     NudgeWakeLiveOnly,
+	}, "launch-1", func(context.Context) error {
+		t.Fatal("authorization called for an unsupported provider")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("NudgeWaitIdleAuthorized: %v", err)
+	}
+	if result.Delivered {
+		t.Fatal("NudgeWaitIdleAuthorized Delivered = true, want false")
+	}
+	for _, method := range []string{"WaitForIdle", "Nudge", "NudgeNow", "NudgeFenced"} {
+		if got := fake.CountCalls(method, info.SessionName); got != 0 {
+			t.Fatalf("%s calls = %d, want 0 for unsupported provider", method, got)
+		}
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleAuthorizedDenialAndErrorHaveZeroDeliveryEffect(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		authorize func(context.Context) error
+		wantErr   error
+	}{
+		{name: "denied", authorize: func(context.Context) error { return errors.New("denied") }},
+		{name: "error", authorize: func(context.Context) error { return context.Canceled }, wantErr: context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handle, _, provider, manager := newTestSessionHandle(t, SessionSpec{
+				Profile:  ProfileClaudeTmuxCLI,
+				Template: "probe",
+				Title:    "Probe",
+				Command:  "claude",
+				WorkDir:  t.TempDir(),
+				Provider: "claude",
+			})
+			if err := handle.Start(t.Context()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			info, err := manager.Get(handle.sessionID)
+			if err != nil {
+				t.Fatalf("manager.Get: %v", err)
+			}
+			if err := provider.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", "launch-1"); err != nil {
+				t.Fatalf("SetMeta: %v", err)
+			}
+			provider.WaitForIdleErrors[info.SessionName] = nil
+
+			result, err := handle.NudgeWaitIdleAuthorized(t.Context(), NudgeRequest{
+				Text:     "continue",
+				Delivery: NudgeDeliveryWaitIdle,
+				Wake:     NudgeWakeLiveOnly,
+			}, "launch-1", test.authorize)
+			if err == nil {
+				t.Fatal("NudgeWaitIdleAuthorized error = nil, want authorization failure")
+			}
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+				t.Fatalf("NudgeWaitIdleAuthorized error = %v, want %v", err, test.wantErr)
+			}
+			if result.Delivered {
+				t.Fatal("NudgeWaitIdleAuthorized Delivered = true, want false")
+			}
+			if got := provider.CountCalls("NudgeFenced", info.SessionName); got != 0 {
+				t.Fatalf("NudgeFenced calls = %d, want 0 after authorization failure", got)
+			}
+		})
 	}
 }
 

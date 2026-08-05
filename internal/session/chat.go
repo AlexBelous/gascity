@@ -899,6 +899,63 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 	return delivered, err
 }
 
+// NudgeWaitIdleAuthorized delivers a live-only nudge only after the provider
+// reports an idle boundary and authorize succeeds. The final delivery remains
+// fenced to expectedInstanceToken by the runtime provider, so a replacement
+// cannot receive input after authorization.
+func (m *Manager) NudgeWaitIdleAuthorized(ctx context.Context, id, source, message, expectedInstanceToken string, authorize func(context.Context) error) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateAuthorizedIdleNudge(message, expectedInstanceToken, authorize); err != nil {
+		return false, err
+	}
+	var delivered bool
+	err := withSessionMutationLock(id, func() error {
+		_, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		if !m.sp.IsRunning(sessName) {
+			return nil
+		}
+		waiter, ok := m.sp.(runtime.IdleWaitProvider)
+		if !ok {
+			return nil
+		}
+		fenced, ok := m.sp.(runtime.FencedNudgeProvider)
+		if !ok {
+			return nil
+		}
+		content := runtime.TextContent(formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message))
+		if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
+			return err
+		}
+		if err := authorize(ctx); err != nil {
+			return err
+		}
+		if err := fenced.NudgeFenced(sessName, expectedInstanceToken, content); err != nil {
+			return err
+		}
+		delivered = true
+		return nil
+	})
+	return delivered, err
+}
+
+func validateAuthorizedIdleNudge(message, expectedInstanceToken string, authorize func(context.Context) error) error {
+	if strings.TrimSpace(message) == "" {
+		return fmt.Errorf("authorized nudge message is required")
+	}
+	if strings.TrimSpace(expectedInstanceToken) == "" || strings.TrimSpace(expectedInstanceToken) != expectedInstanceToken {
+		return fmt.Errorf("authorized nudge expected instance token is required")
+	}
+	if authorize == nil {
+		return fmt.Errorf("authorized nudge callback is required")
+	}
+	return nil
+}
+
 // StopTurn issues a provider-appropriate interrupt for the currently running
 // turn. For providers that need post-interrupt idle settlement (e.g. Claude),
 // it waits for the session to return to an idle prompt before returning.

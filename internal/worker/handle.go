@@ -49,6 +49,13 @@ type UnattendedStopHandle interface {
 	StopUnattended(context.Context, string) error
 }
 
+// AuthorizedIdleNudgeHandle exposes the optional, live-only idle nudge path
+// for callers that must reauthorize immediately before a token-fenced input
+// effect.
+type AuthorizedIdleNudgeHandle interface {
+	NudgeWaitIdleAuthorized(context.Context, NudgeRequest, string, func(context.Context) error) (NudgeResult, error)
+}
+
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
 	Message(context.Context, MessageRequest) (MessageResult, error)
@@ -287,14 +294,15 @@ type SessionHandle struct {
 }
 
 var (
-	_ Handle                = (*SessionHandle)(nil)
-	_ LifecycleHandle       = (*SessionHandle)(nil)
-	_ MessagingHandle       = (*SessionHandle)(nil)
-	_ TranscriptHandle      = (*SessionHandle)(nil)
-	_ HistoryHandle         = (*SessionHandle)(nil)
-	_ InteractionHandle     = (*SessionHandle)(nil)
-	_ PeekHandle            = (*SessionHandle)(nil)
-	_ LiveObservationHandle = (*SessionHandle)(nil)
+	_ Handle                    = (*SessionHandle)(nil)
+	_ AuthorizedIdleNudgeHandle = (*SessionHandle)(nil)
+	_ LifecycleHandle           = (*SessionHandle)(nil)
+	_ MessagingHandle           = (*SessionHandle)(nil)
+	_ TranscriptHandle          = (*SessionHandle)(nil)
+	_ HistoryHandle             = (*SessionHandle)(nil)
+	_ InteractionHandle         = (*SessionHandle)(nil)
+	_ PeekHandle                = (*SessionHandle)(nil)
+	_ LiveObservationHandle     = (*SessionHandle)(nil)
 )
 
 type historyGeneration struct {

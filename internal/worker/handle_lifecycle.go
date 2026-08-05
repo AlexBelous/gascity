@@ -382,6 +382,42 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 }
 
+// NudgeWaitIdleAuthorized waits for a live session's idle boundary, calls
+// authorize, and performs only a provider-token-fenced input delivery. It
+// accepts no fallback delivery mode or wake policy.
+func (h *SessionHandle) NudgeWaitIdleAuthorized(ctx context.Context, req NudgeRequest, expectedInstanceToken string, authorize func(context.Context) error) (result NudgeResult, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationNudge)
+	defer func() {
+		event.payload.Delivered = boolPointer(result.Delivered)
+		event.finish(err)
+		if err == nil {
+			h.recordInvocationTelemetry(ctx)
+		}
+	}()
+
+	if strings.TrimSpace(req.Text) == "" {
+		return NudgeResult{}, fmt.Errorf("nudge text is required")
+	}
+	if req.Delivery != NudgeDeliveryWaitIdle || req.Wake != NudgeWakeLiveOnly {
+		return NudgeResult{}, fmt.Errorf("authorized nudge requires wait-idle live-only delivery")
+	}
+	if strings.TrimSpace(expectedInstanceToken) == "" || strings.TrimSpace(expectedInstanceToken) != expectedInstanceToken {
+		return NudgeResult{}, fmt.Errorf("authorized nudge expected instance token is required")
+	}
+	if authorize == nil {
+		return NudgeResult{}, fmt.Errorf("authorized nudge callback is required")
+	}
+	id := h.currentSessionID()
+	if id == "" {
+		return NudgeResult{Delivered: false}, nil
+	}
+	delivered, err := h.manager.NudgeWaitIdleAuthorized(ctx, id, req.Source, req.Text, expectedInstanceToken, authorize)
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	return NudgeResult{Delivered: delivered}, nil
+}
+
 func (h *SessionHandle) ensureSessionID() (string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

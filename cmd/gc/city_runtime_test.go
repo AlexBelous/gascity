@@ -873,9 +873,9 @@ func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
 		stderr: io.Discard,
 	}
 	buildCalls := 0
-	cr.buildFnWithSessionBeads = func(cfg *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
+	cr.buildFnWithSessionBeads = func(cfg *config.City, sp runtime.Provider, store, cityWorkStore beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
 		buildCalls++
-		return buildDesiredStateWithSessionBeads("test-city", cityPath, time.Now(), cfg, sp, store, rigStores, sessionBeads, trace, io.Discard)
+		return buildDesiredStateWithSessionBeads("test-city", cityPath, time.Now(), cfg, sp, store, rigStores, sessionBeads, trace, io.Discard, cityWorkStore)
 	}
 	sessionBeads := newSessionBeadSnapshot(nil)
 
@@ -2342,7 +2342,7 @@ func TestCityRuntimeDemandSnapshotPokeDoesNotScanReadyFingerprint(t *testing.T) 
 		},
 		stderr: io.Discard,
 	}
-	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 		buildCalls++
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}

@@ -153,14 +153,12 @@ func (s *Server) findStore(rig string) beads.Store {
 	return nil
 }
 
-// cityWorkBeadStore returns the authoritative HQ work store. Controller state
-// exposes it under the city-name entry in BeadStores; single-store and seeded
-// states fall back to the coordination store.
+// cityWorkBeadStore returns the authoritative HQ work store through the typed
+// class accessor. It deliberately does not infer ownership from BeadStores:
+// that work-projection map is keyed by names a rig may legally share with the
+// city.
 func (s *Server) cityWorkBeadStore() beads.Store {
-	if store := s.state.BeadStores()[s.state.CityName()]; store != nil {
-		return store
-	}
-	return s.state.CityBeadStore()
+	return s.state.WorkBeadStore().Store
 }
 
 // beadStoresForID resolves the authoritative store for a bead ID using its

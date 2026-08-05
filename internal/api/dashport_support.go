@@ -238,6 +238,7 @@ func (s *seededState) StartedAt() time.Time           { return s.startedAt }
 func (s *seededState) IsQuarantined(string) bool      { return false }
 func (s *seededState) ClearCrashHistory(string)       {}
 func (s *seededState) CityBeadStore() beads.Store     { return s.cityStore }
+func (s *seededState) WorkBeadStore() beads.WorkStore { return beads.WorkStore{Store: s.cityStore} }
 
 // ScopedStoreLike returns (nil, nil): the seeded stores are in-memory, so there
 // is no bd-CLI subprocess to scope. Callers keep reading through the existing

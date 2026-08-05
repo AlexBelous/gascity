@@ -76,12 +76,7 @@ func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
 // configured file provider while its persisted work ledger remains bd/Dolt;
 // cityWorkBeadStore owns that explicit split.
 func (cs *controllerState) cityWorkStore() beads.WorkStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	if cs.cityWorkBeadStore != nil {
-		return beads.WorkStore{Store: cs.cityWorkBeadStore}
-	}
-	return beads.WorkStore{Store: cs.cityBeadStore}
+	return cs.WorkBeadStore()
 }
 
 // workBeadStores returns all rig WORK-class stores keyed by rig name, including

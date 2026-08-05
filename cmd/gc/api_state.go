@@ -1522,6 +1522,17 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 	return cs.cityBeadStore
 }
 
+// WorkBeadStore returns the authoritative city-level work store without
+// routing through the name-keyed BeadStores projection.
+func (cs *controllerState) WorkBeadStore() beads.WorkStore {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.cityWorkBeadStore != nil {
+		return beads.WorkStore{Store: cs.cityWorkBeadStore}
+	}
+	return beads.WorkStore{Store: cs.cityBeadStore}
+}
+
 // ScopedStoreLike implements api.State. See the interface doc comment for
 // the contract; scopedStoreLike (cmd/gc/scoped_store.go) does the actual
 // unwrap-and-rebuild work, reusing the same credential/env resolution as

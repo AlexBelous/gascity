@@ -42,6 +42,7 @@ type fakeState struct {
 	sessionProvider   runtime.Provider // optional override for SessionProvider
 	stores            map[string]beads.Store
 	cityBeadStore     beads.Store // city-level store for session beads
+	cityWorkBeadStore beads.Store // optional authoritative city work store
 	nudgesBeadStore   beads.Store // relocated nudges store; nil falls back to cityBeadStore (default backend)
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
@@ -128,6 +129,16 @@ func (f *fakeState) StartedAt() time.Time                  { return f.startedAt 
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
+func (f *fakeState) WorkBeadStore() beads.WorkStore {
+	if f.cityWorkBeadStore != nil {
+		return beads.WorkStore{Store: f.cityWorkBeadStore}
+	}
+	if store := f.stores[f.cityName]; store != nil {
+		return beads.WorkStore{Store: store}
+	}
+	return beads.WorkStore{Store: f.cityBeadStore}
+}
+
 func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
 	if f.scopedStoreFn == nil {
 		return nil, nil

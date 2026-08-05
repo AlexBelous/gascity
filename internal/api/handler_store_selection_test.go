@@ -75,6 +75,35 @@ func TestBeadCreateUsesDistinctCityWorkStoreWithoutRig(t *testing.T) {
 	}
 }
 
+func TestBeadCreateUsesCityWorkStoreWhenRigNameMatchesCity(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "same-name"
+	state.cfg.Workspace.Name = state.cityName
+	state.cityBeadStore = beads.NewMemStore()
+	state.cityWorkBeadStore = beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	state.stores[state.cityName] = rigStore
+	state.cfg.Rigs = []config.Rig{{Name: state.cityName, Path: "/tmp/same-name", Prefix: "rig"}}
+	h := newTestCityHandlerWith(t, state, New(state))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(`{"title":"city work","type":"task"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var created beads.Bead
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, err := state.cityWorkBeadStore.Get(created.ID); err != nil {
+		t.Fatalf("city work store missing created bead %s: %v", created.ID, err)
+	}
+	if _, err := rigStore.Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("same-named rig store Get(%s) error = %v, want ErrNotFound", created.ID, err)
+	}
+}
+
 func TestConvoyCreateUsesCityStoreWhenAvailableWithoutRig(t *testing.T) {
 	state := newFakeMutatorState(t)
 	state.cityBeadStore = beads.NewMemStore()

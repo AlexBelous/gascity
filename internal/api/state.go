@@ -51,8 +51,8 @@ type MaintenanceProvider interface {
 // State provides read access to controller-managed state.
 // The controller implements this with RWMutex-protected hot-reload.
 //
-// The per-coordination-class store seam is exposed as named accessors
-// (GraphBeadStore / SessionsBeadStore / NudgesBeadStore) so a future per-class
+// The per-class store seam is exposed as named accessors
+// (WorkBeadStore / GraphBeadStore / SessionsBeadStore / NudgesBeadStore) so a future per-class
 // backend becomes a change in the implementation rather than at every call
 // site. Callers that need the store for a specific bead class route through
 // those accessors; on a single-store city every one collapses to the same
@@ -108,6 +108,12 @@ type State interface {
 	// CityBeadStore returns the city-level bead store for session beads.
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
+
+	// WorkBeadStore returns the authoritative city-level store for ordinary
+	// work beads. It is distinct from CityBeadStore when coordination classes
+	// use a different backend, and unlike BeadStores it cannot collide with a
+	// rig whose name matches the city name.
+	WorkBeadStore() beads.WorkStore
 
 	// ScopedStoreLike returns a throwaway, ctx-bound clone of existing when
 	// existing is (or wraps) a bd-CLI-shell-backed store: cancellation kills

@@ -581,6 +581,7 @@ func finalizeDrainAckStoppedSession(
 	clk clock.Clock,
 	rec events.Recorder,
 	stderr io.Writer,
+	exactCloseFence *drainAckStopPendingFence,
 ) drainAckFinalizeResult {
 	if store == nil || info.ID == "" {
 		return drainAckFinalizeResult{}
@@ -626,6 +627,73 @@ func finalizeDrainAckStoppedSession(
 		hasAssignedWork = true
 	}
 	if closeIfUnassigned && !hasAssignedWork {
+		if exactCloseFence != nil {
+			closer, ok := beads.AtomicConditionalCloserFor(store)
+			if !ok || exactCloseFence.revision == 0 {
+				return drainAckFinalizeResult{}
+			}
+			// Preserve the live work recheck from the generic close helper before
+			// attempting the fenced terminal write.
+			assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(cityPath, cfg, store, rigStores, info)
+			if closeGateAssignedErr != nil || assignedAfterCloseGate {
+				return drainAckFinalizeResult{}
+			}
+			now := clk.Now().UTC()
+			closePatch := sessionpkg.ClosePatch(now, "drained")
+			terminalMatches := func(id, status string, metadata map[string]string) bool {
+				if id != info.ID || status != "closed" || metadata["instance_token"] != info.InstanceToken ||
+					metadata[sessionpkg.DrainAckSourceMetadataKey] != sessionpkg.DrainAckSourceAgentValue ||
+					metadata[sessionpkg.DrainAckRequesterSessionIDMetadataKey] != info.ID ||
+					metadata[sessionpkg.DrainAckRequesterInstanceTokenMetadataKey] != info.InstanceToken {
+					return false
+				}
+				for key, value := range closePatch {
+					if metadata[key] != value {
+						return false
+					}
+				}
+				return true
+			}
+			closedBead, closeErr := closer.CloseWithMetadataIfMatch(info.ID, exactCloseFence.revision, closePatch)
+			performedClose := closeErr == nil && terminalMatches(closedBead.ID, closedBead.Status, closedBead.Metadata)
+			var witnessInfo *sessionpkg.Info
+			if !performedClose {
+				// A conditional close can be ambiguous when a backend commits the row
+				// but loses its response. A malformed success is equally unsafe to
+				// treat as success without an authoritative witness. In either case,
+				// only the exact terminal row permits cleanup; a newer/open row stays
+				// parked for the keyed owner to retry.
+				if closeErr != nil {
+					fmt.Fprintf(stderr, "session reconciler: exact drain-ack terminal close %s: %v; checking authoritative witness\n", info.ID, closeErr) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "session reconciler: exact drain-ack terminal close %s returned malformed row; checking authoritative witness\n", info.ID) //nolint:errcheck
+				}
+				witness, response, witnessErr := getAuthoritativeSessionStartPersistedRecord(store, info.ID)
+				if witnessErr != nil || !terminalMatches(witness.ID, response.Status, response.Metadata) {
+					fmt.Fprintf(stderr, "session reconciler: exact drain-ack terminal close %s has no authoritative terminal witness; parking\n", info.ID) //nolint:errcheck
+					return drainAckFinalizeResult{}
+				}
+				closedBead = beads.Bead{ID: witness.ID, Status: response.Status, Metadata: response.Metadata}
+				witnessInfo = &witness
+			}
+			if closedBead.ID == "" {
+				return drainAckFinalizeResult{}
+			}
+			if dops != nil {
+				_ = dops.clearDrain(name)
+			}
+			if dt != nil {
+				dt.clearIdleProbe(info.ID)
+				dt.remove(info.ID)
+			}
+			cancelStateAssignedToRetiredSessionBead(store, info.ID, now, stderr)
+			releaseWorkFromClosedSessionBead(store, closedBead, stderr)
+			recordStopped(performedClose)
+			if witnessInfo != nil {
+				return drainAckFinalizeResult{witnessInfo: witnessInfo}
+			}
+			return drainAckFinalizeResult{batch: closePatch, closed: true}
+		}
 		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, info, "drained", clk.Now().UTC(), stderr, true) {
 			closePatch := sessionpkg.ClosePatch(clk.Now().UTC(), "drained")
 			if dops != nil {
@@ -753,7 +821,7 @@ func reconcileDrainAckStopPending(
 	return true, finalizeDrainAckStoppedSession(
 		cityPath, cfg, store, rigStores, info, tp.TemplateName,
 		!desired || isPoolManagedSessionInfo(info),
-		dops, dt, clk, rec, stderr,
+		dops, dt, clk, rec, stderr, nil,
 	)
 }
 
@@ -831,7 +899,7 @@ func finalizeDrainAckStopPendingSessions(
 			cityPath, cfg, store, rigStores, info,
 			normalizedSessionTemplateInfo(info, cfg),
 			isPoolManagedSessionInfo(info),
-			dops, dt, clk, rec, stderr,
+			dops, dt, clk, rec, stderr, nil,
 		)
 		finalized++
 	}
@@ -2096,7 +2164,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						result := finalizeDrainAckStoppedSession(
 							cityPath, cfg, store, rigStores, infoByID[id], template,
-							true, dops, dt, clk, rec, stderr,
+							true, dops, dt, clk, rec, stderr, nil,
 						)
 						// finalizeDrainAckStoppedSession may close the bead in memory; fold
 						// that close onto the snapshot so the cross-session min-floor scan
@@ -2468,7 +2536,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						cityPath, cfg, store, rigStores, infoByID[id], tp.TemplateName,
 						isPoolManagedSessionInfo(infoByID[id]),
 						dops, finalizeDT,
-						clk, rec, stderr,
+						clk, rec, stderr, nil,
 					)
 					// finalizeDrainAckStoppedSession may close the bead in memory; fold
 					// that close onto the snapshot so the cross-session min-floor scan

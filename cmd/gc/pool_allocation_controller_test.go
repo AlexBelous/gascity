@@ -1560,6 +1560,7 @@ func newRoutedWorkPoolDrainAckAuthorizationFixture(t *testing.T) routedWorkPoolD
 	if err != nil || !authorized {
 		t.Fatalf("baseline drain acknowledgement authorization = (%t, %v), want true", authorized, err)
 	}
+	enableDrainAckAtomicCloseForFixture(&base)
 	return routedWorkPoolDrainAckAuthorizationFixture{
 		routedWorkPoolAuthorizationFixture: &base,
 		lease:                              lease,

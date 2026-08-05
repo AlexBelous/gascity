@@ -114,6 +114,7 @@ func TestReconcileExactSessionStartPoolDrainAckTransitionFailureHonorsRolloutMod
 
 					writer := &recordingExactStatusWriter{store: env.store, err: test.writerCommitErr}
 					params := exactSessionStartTestParams(t, env)
+					params.Store = &drainAckAtomicCloseStore{Store: env.store}
 					params.RolloutMode = mode
 					if test.withWriter {
 						params.StatusWriter = writer
@@ -182,7 +183,10 @@ func TestReconcileExactSessionStartPoolDrainAckUsesNegativeRevisionToken(t *test
 	}
 	params := exactSessionStartTestParams(t, env)
 	params.RolloutMode = rollout.Auto
-	params.Store = negativeRevisionSessionStore{Store: env.store, revision: -17}
+	params.Store = &drainAckAtomicCloseStore{
+		Store:          negativeRevisionSessionStore{Store: env.store, revision: -17},
+		fallbackWriter: writer,
+	}
 	params.StatusWriter = writer
 	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
 		return true, nil
@@ -267,7 +271,9 @@ func TestReconcileExactSessionStartRecoversDurableAgentDrainAckAfterRuntimeMetad
 		{Running: true, Alive: true, Complete: true},
 		{Complete: true},
 	}}}
+	store := &drainAckAtomicCloseStore{Store: env.store}
 	params := exactSessionStartTestParams(t, env)
+	params.Store = store
 	params.Provider = provider
 	params.StatusWriter = writer
 	params.AsyncStopTracker = &asyncStartTracker{}
@@ -323,6 +329,7 @@ func TestReconcileExactSessionStartRecoversDurableAgentDrainAckAfterRuntimeMetad
 
 	recoveryProvider := &freshLivenessProvider{Fake: env.sp, fresh: runtime.Liveness{Complete: true}}
 	recoveryParams := exactSessionStartTestParams(t, env)
+	recoveryParams.Store = store
 	recoveryParams.Provider = recoveryProvider
 	recoveryParams.StatusWriter = writer
 	owner, reconcileErr = reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
@@ -339,8 +346,12 @@ func TestReconcileExactSessionStartRecoversDurableAgentDrainAckAfterRuntimeMetad
 	if err != nil {
 		t.Fatalf("read recovered row: %v", err)
 	}
-	if after.Status != "closed" {
-		t.Fatalf("recovered stop-pending row status = %q, want closed", after.Status)
+	if after.Status != "closed" || after.Metadata["state"] != "drained" ||
+		after.Metadata["state_reason"] != "" || after.Metadata["close_reason"] != session.CanonicalCloseReason("drained") || after.Metadata["closed_at"] == "" {
+		t.Fatalf("recovered terminal row = %#v, want closed/drained canonical metadata", after)
+	}
+	if got := len(store.expected); got != 1 {
+		t.Fatalf("atomic terminal close calls = %d, want 1 after restart recovery", got)
 	}
 }
 
@@ -378,6 +389,7 @@ func TestReconcileExactSessionStartPoolDrainAckRollbackRestoresDurableProvenance
 	}
 	writer := &recordingExactStatusWriter{ConditionalWriter: conditional, store: env.store, forward: true}
 	params := exactSessionStartTestParams(t, env)
+	params.Store = &drainAckAtomicCloseStore{Store: env.store}
 	params.RolloutMode = rollout.Auto
 	params.StatusWriter = writer
 	var authorizations int
@@ -450,6 +462,7 @@ func TestReconcileExactSessionStartPoolDrainAckPostCASAuthorizationHonorsRollout
 				t.Fatal("test store does not implement conditional writer")
 			}
 			params := exactSessionStartTestParams(t, env)
+			params.Store = &drainAckAtomicCloseStore{Store: env.store}
 			params.RolloutMode = mode
 			params.StatusWriter = writer
 			var authorizations int
@@ -525,6 +538,7 @@ func TestReconcileExactSessionStartPoolDrainAckAsyncAuthorizationChangeRollsBack
 	releasePreStopAuthorization := make(chan struct{})
 	completion := make(chan drainAckAsyncStopCompletion, 1)
 	params := exactSessionStartTestParams(t, env)
+	params.Store = &drainAckAtomicCloseStore{Store: env.store}
 	params.Provider = provider
 	params.RolloutMode = rollout.Auto
 	params.StatusWriter = writer
@@ -589,12 +603,13 @@ func TestReconcileExactSessionStartPoolDrainAckAutoRollbackConflictParks(t *test
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	bead := env.createSessionBead("worker", "worker")
-	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token"})
+	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token", "pool_managed": "true"})
 	writer, ok := env.store.(beads.ConditionalWriter)
 	if !ok {
 		t.Fatal("test store does not implement conditional writer")
 	}
 	params := exactSessionStartTestParams(t, env)
+	params.Store = &drainAckAtomicCloseStore{Store: env.store}
 	params.RolloutMode = rollout.Auto
 	params.StatusWriter = &failSecondConditionalWriter{ConditionalWriter: writer}
 	var authorizations int
@@ -647,6 +662,7 @@ func TestReconcileExactSessionStartPoolDrainAckAmbiguousCASCommitRetainsKeyedOwn
 		t.Fatal("test store does not implement conditional writer")
 	}
 	params := exactSessionStartTestParams(t, env)
+	params.Store = &drainAckAtomicCloseStore{Store: env.store}
 	params.RolloutMode = rollout.Auto
 	params.Provider = &freshLivenessProvider{Fake: env.sp, fresh: runtime.Liveness{Running: true, Alive: true, Complete: true}}
 	params.StatusWriter = &ambiguousCommitConditionalWriter{ConditionalWriter: writer}
@@ -849,6 +865,7 @@ type recordingExactStatusWriter struct {
 	beads.ConditionalWriter
 	store    beads.Store
 	err      error
+	onUpdate func()
 	expected []int64
 	updates  []beads.UpdateOpts
 	forward  bool
@@ -857,6 +874,9 @@ type recordingExactStatusWriter struct {
 func (w *recordingExactStatusWriter) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
 	w.expected = append(w.expected, revision)
 	w.updates = append(w.updates, opts)
+	if w.onUpdate != nil {
+		w.onUpdate()
+	}
 	if w.err != nil {
 		return w.err
 	}
@@ -1710,5 +1730,242 @@ func exactSessionStartTestParams(t *testing.T, env *reconcilerTestEnv) exactSess
 			withStartStabilityWaiter(immediateStartStabilityWaiter),
 			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 		},
+	}
+}
+
+type drainAckAtomicCloseStore struct {
+	beads.Store
+	expected        []int64
+	beforeCAS       func()
+	fallbackWriter  beads.ConditionalWriter
+	closeErr        error
+	errorAfterClose error
+}
+
+// enableDrainAckAtomicCloseForFixture equips only the routed drain-ack
+// controller fixture with the terminal capability that production native Dolt
+// supplies. MemStore intentionally lacks that capability, so broad fixtures
+// must not gain it globally.
+func enableDrainAckAtomicCloseForFixture(fixture *routedWorkPoolAuthorizationFixture) {
+	store := &drainAckAtomicCloseStore{Store: fixture.store}
+	fixture.store = store
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.cityBeadStore = store
+	fixture.cr.cs.mu.Unlock()
+}
+
+func (s *drainAckAtomicCloseStore) CloseWithMetadataIfMatch(id string, revision int64, metadata map[string]string) (beads.Bead, error) {
+	s.expected = append(s.expected, revision)
+	if s.beforeCAS != nil {
+		s.beforeCAS()
+		s.beforeCAS = nil
+	}
+	if s.closeErr != nil {
+		return beads.Bead{}, s.closeErr
+	}
+	writer, ok := beads.ConditionalWriterFor(s.Store)
+	if !ok && s.fallbackWriter != nil {
+		writer, ok = s.fallbackWriter, true
+	}
+	if !ok {
+		return beads.Bead{}, beads.ErrConditionalWriteUnsupported
+	}
+	if err := writer.UpdateIfMatch(id, revision, beads.UpdateOpts{Metadata: metadata}); err != nil {
+		return beads.Bead{}, err
+	}
+	updated, err := s.Get(id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if err := writer.CloseIfMatch(id, updated.Revision); err != nil {
+		return beads.Bead{}, err
+	}
+	closed, err := s.Get(id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if s.errorAfterClose != nil {
+		return beads.Bead{}, s.errorAfterClose
+	}
+	return closed, nil
+}
+
+func TestReconcileExactDrainAckRequiresAtomicCloseBeforeStop(t *testing.T) {
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		t.Run(string(mode), func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+			bead := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token"})
+			writer, ok := beads.ConditionalWriterFor(env.store)
+			if !ok {
+				t.Fatal("test store lacks conditional writer")
+			}
+			params := exactSessionStartTestParams(t, env)
+			params.RolloutMode = mode
+			params.StatusWriter = writer
+			params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) { return true, nil }
+			owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+				SessionID: bead.ID, Source: sessionStartAdmissionInProcess,
+				PoolDrainAck: &routedWorkPoolDrainAckLease{SessionID: bead.ID, InstanceToken: "drain-token", RequesterSessionID: bead.ID, RequesterInstanceToken: "drain-token"},
+			}, params)
+			if mode == rollout.Auto && (owner != exactSessionStartLegacyOwner || !errors.Is(err, errSessionStartLegacyFallbackRequired)) {
+				t.Fatalf("auto result = (%v, %v), want legacy fallback before STOP", owner, err)
+			}
+			if mode == rollout.Require && (owner != exactSessionStartKeyedOwner || err == nil) {
+				t.Fatalf("require result = (%v, %v), want keyed refusal before STOP", owner, err)
+			}
+			if got := env.sessionInfo(bead.ID); got.MetadataState != string(session.StateActive) {
+				t.Fatalf("state = %q, want unchanged active without atomic close", got.MetadataState)
+			}
+			if got := env.sp.CountCalls("Stop", "worker"); got != 0 {
+				t.Fatalf("provider Stop calls = %d, want 0 without atomic close", got)
+			}
+		})
+	}
+}
+
+func TestReconcileExactDrainAckAtomicTerminalCloseUsesFence(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"state": string(session.StateActive), "instance_token": "drain-token", "pool_managed": "true"})
+	store := &drainAckAtomicCloseStore{Store: env.store}
+	writer, ok := beads.ConditionalWriterFor(env.store)
+	if !ok {
+		t.Fatal("test store lacks conditional writer")
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.Store = store
+	params.Provider = &reconcilerPerfStopProvider{Fake: env.sp}
+	params.StatusWriter = writer
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) { return true, nil }
+	dops := newFakeDrainOps()
+	params.DrainOps = dops
+	var capturedStopPendingRevision int64
+	store.beforeCAS = func() {
+		current, err := env.store.Get(bead.ID)
+		if err != nil {
+			t.Fatalf("read stop-pending row at close barrier: %v", err)
+		}
+		capturedStopPendingRevision = current.Revision
+	}
+	if err := reconcileExactSessionStart(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID, Source: sessionStartAdmissionInProcess,
+		PoolDrainAck: &routedWorkPoolDrainAckLease{SessionID: bead.ID, InstanceToken: "drain-token", RequesterSessionID: bead.ID, RequesterInstanceToken: "drain-token"},
+	}, params); err != nil {
+		t.Fatalf("reconcile exact drain acknowledgement: %v", err)
+	}
+	if len(store.expected) != 1 {
+		t.Fatalf("atomic close calls = %d, want 1", len(store.expected))
+	}
+	if got := store.expected[0]; got != capturedStopPendingRevision {
+		t.Fatalf("atomic close revision = %d, want captured stop-pending revision %d", got, capturedStopPendingRevision)
+	}
+	closed, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" || closed.Metadata["state"] != "drained" || closed.Metadata["state_reason"] != "" ||
+		closed.Metadata["close_reason"] != session.CanonicalCloseReason("drained") || closed.Metadata["closed_at"] == "" {
+		t.Fatalf("terminal row = %#v, want closed/drained canonical close metadata", closed)
+	}
+	if got := len(dops.clearDrainCalls); got != 1 {
+		t.Fatalf("drain cleanup calls = %d, want 1 after terminal close", got)
+	}
+}
+
+func TestReconcileExactDrainAckAtomicCloseRejectsStaleFence(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, session.AgentDrainAckStopPendingPatch(env.clk.Now().UTC(), bead.ID, "drain-token").Apply(map[string]string{"instance_token": "drain-token", "pool_managed": "true"}))
+	store := &drainAckAtomicCloseStore{Store: env.store}
+	var postRacer beads.Bead
+	store.beforeCAS = func() {
+		if err := env.store.SetMetadata(bead.ID, "racer", "newer-row"); err != nil {
+			t.Fatalf("mutating row at close barrier: %v", err)
+		}
+		var err error
+		postRacer, err = env.store.Get(bead.ID)
+		if err != nil {
+			t.Fatalf("snapshot newer row at close barrier: %v", err)
+		}
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.Store = store
+	params.Provider = &reconcilerPerfStopProvider{Fake: env.sp}
+	dops := newFakeDrainOps()
+	params.DrainOps = dops
+	recorder := events.NewFake()
+	params.Recorder = recorder
+	owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionInProcess}, params)
+	if owner != exactSessionStartKeyedOwner || !errors.Is(err, errSessionStartPoolDrainAckPending) {
+		t.Fatalf("result = (%v, %v), want keyed parked stale close", owner, err)
+	}
+	after, getErr := env.store.Get(bead.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if !reflect.DeepEqual(after, postRacer) {
+		t.Fatalf("stale close changed newer row:\n got: %#v\nwant: %#v", after, postRacer)
+	}
+	if after.Status != "open" || after.Metadata["racer"] != "newer-row" {
+		t.Fatalf("stale close mutated newer row: %#v", after)
+	}
+	if len(store.expected) != 1 {
+		t.Fatalf("atomic close calls = %d, want 1", len(store.expected))
+	}
+	if got := len(dops.clearDrainCalls); got != 0 {
+		t.Fatalf("drain cleanup calls = %d, want 0 after stale fence", got)
+	}
+	stopped, listErr := recorder.List(events.Filter{Type: events.SessionStopped})
+	if listErr != nil {
+		t.Fatalf("list stopped events: %v", listErr)
+	}
+	if len(stopped) != 0 {
+		t.Fatalf("SessionStopped events = %#v, want none after stale fence", stopped)
+	}
+}
+
+func TestFinalizeExactDrainAckCloseUsesAuthoritativeWitnessAfterAmbiguousError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, session.AgentDrainAckStopPendingPatch(env.clk.Now().UTC(), bead.ID, "drain-token").Apply(map[string]string{
+		"instance_token": "drain-token",
+		"pool_managed":   "true",
+	}))
+	info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("read canonical stop-pending row: %v", err)
+	}
+	fence := newDrainAckStopPendingFence(response)
+	store := &drainAckAtomicCloseStore{Store: env.store, errorAfterClose: errors.New("response lost after commit")}
+	dops := newFakeDrainOps()
+	recorder := events.NewFake()
+
+	result := finalizeDrainAckStoppedSession(
+		"", env.cfg, store, nil, info, "worker", true,
+		dops, env.dt, env.clk, recorder, &env.stderr, &fence,
+	)
+	if result.witnessInfo == nil || !result.witnessInfo.Closed {
+		t.Fatalf("result = %#v, want authoritative closed witness", result)
+	}
+	if result.closed || result.batch != nil {
+		t.Fatalf("ambiguous close result = %#v, want witness-only fold", result)
+	}
+	if !result.applyTo(info).Closed {
+		t.Fatal("authoritative witness did not fold the caller snapshot closed")
+	}
+	if got := len(dops.clearDrainCalls); got != 1 {
+		t.Fatalf("drain cleanup calls = %d, want 1 after authoritative witness", got)
+	}
+	stopped, listErr := recorder.List(events.Filter{Type: events.SessionStopped})
+	if listErr != nil {
+		t.Fatalf("list stopped events: %v", listErr)
+	}
+	if len(stopped) != 1 {
+		t.Fatalf("SessionStopped events = %#v, want one witness event", stopped)
 	}
 }

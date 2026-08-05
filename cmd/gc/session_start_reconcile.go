@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
 	"strings"
 	"time"
@@ -618,6 +619,9 @@ func reconcileExactSessionStartWithOwner(
 			}
 			return exactSessionStartLegacyOwner, fmt.Errorf("%w: %w", errSessionStartLegacyFallbackRequired, cause)
 		}
+		if _, ok := beads.AtomicConditionalCloserFor(params.Store); !ok {
+			return transitionFailure(errors.New("drain acknowledgement atomic terminal closer is unavailable"))
+		}
 		if params.AuthorizePoolDrainAck == nil {
 			return transitionFailure(errors.New("drain acknowledgement authorization is unavailable"))
 		}
@@ -715,11 +719,18 @@ func reconcileExactSessionStartWithOwner(
 			drainAckLease = &recoveredLease
 			return exactSessionStartKeyedOwner, nil
 		}
-		if !drainAckStopPendingFence.hasAgentProvenance(info.ID, strings.TrimSpace(info.InstanceToken)) {
+		durableAgentProvenance := drainAckStopPendingFence.hasAgentProvenance(info.ID, strings.TrimSpace(info.InstanceToken))
+		if !durableAgentProvenance {
 			owner, recoverErr := recoverDrainAckLease()
 			if recoverErr != nil || owner != exactSessionStartKeyedOwner {
 				return owner, recoverErr
 			}
+		}
+		// A durable legacy marker is still owned by legacy reconciliation in auto
+		// mode. Only agent-proven exact STOP ownership must prove it can finish
+		// with the fenced terminal close before liveness observation or STOP.
+		if _, ok := beads.AtomicConditionalCloserFor(params.Store); !ok {
+			return park(errors.New("drain acknowledgement atomic terminal closer is unavailable"))
 		}
 		if _, ok := params.Provider.(runtime.FreshLivenessObserver); !ok {
 			switch params.RolloutMode {
@@ -752,10 +763,13 @@ func reconcileExactSessionStartWithOwner(
 			if !liveness.Complete {
 				return park(errors.New("drain acknowledgement liveness observation is incomplete"))
 			}
+			if !durableAgentProvenance {
+				return park(errors.New("drain acknowledgement stopped runtime lacks durable agent provenance"))
+			}
 			result := finalizeDrainAckStoppedSession(
 				params.CityPath, params.Config, params.Store, params.RigStores, info,
 				normalizedSessionTemplateInfo(info, params.Config), isPoolManagedSessionInfo(info),
-				params.DrainOps, params.DrainTracker, clk, recorder, stderr,
+				params.DrainOps, params.DrainTracker, clk, recorder, stderr, drainAckStopPendingFence,
 			)
 			if result.batch == nil && !result.closed && result.folded == nil && result.witnessInfo == nil {
 				return park(fmt.Errorf("reconciling exact drain-ack stop %q: durable finalization made no progress", info.ID))
@@ -771,11 +785,59 @@ func reconcileExactSessionStartWithOwner(
 				return owner, recoverErr
 			}
 		}
-		if params.AsyncStopTracker == nil {
-			return park(errors.New("drain acknowledgement async stop tracker is unavailable"))
-		}
 		if params.AuthorizePoolDrainAck == nil {
 			return park(errors.New("drain acknowledgement authorization is unavailable"))
+		}
+		if !durableAgentProvenance {
+			if params.StatusWriterError != nil {
+				return park(fmt.Errorf("resolving drain acknowledgement provenance writer: %w", params.StatusWriterError))
+			}
+			if params.StatusWriter == nil {
+				return park(errors.New("drain acknowledgement provenance writer is unavailable"))
+			}
+			authorized, authorizeErr := params.AuthorizePoolDrainAck(info, *drainAckLease)
+			if authorizeErr != nil || !authorized {
+				if authorizeErr != nil {
+					return park(fmt.Errorf("authorizing recovered drain acknowledgement before provenance write: %w", authorizeErr))
+				}
+				return park(errors.New("recovered drain acknowledgement authorization no longer holds before provenance write"))
+			}
+			provenance := sessionpkg.MetadataPatch{
+				sessionpkg.DrainAckSourceMetadataKey:                 sessionpkg.DrainAckSourceAgentValue,
+				sessionpkg.DrainAckRequesterSessionIDMetadataKey:     info.ID,
+				sessionpkg.DrainAckRequesterInstanceTokenMetadataKey: info.InstanceToken,
+			}
+			expectedMetadata := maps.Clone(initialResponse.Metadata)
+			for key, value := range provenance {
+				expectedMetadata[key] = value
+			}
+			writeErr := params.StatusWriter.UpdateIfMatch(info.ID, drainAckStopPendingFence.revision, beads.UpdateOpts{Metadata: provenance})
+			upgradedInfo, upgradedResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, info.ID)
+			if readErr != nil {
+				return park(fmt.Errorf("re-reading recovered drain acknowledgement provenance: %w", readErr))
+			}
+			upgradedFence := newDrainAckStopPendingFence(upgradedResponse)
+			if upgradedResponse.Revision == 0 || upgradedResponse.Revision == drainAckStopPendingFence.revision ||
+				upgradedResponse.Status != initialResponse.Status || !maps.Equal(upgradedResponse.Metadata, expectedMetadata) ||
+				!upgradedFence.matches(upgradedInfo, upgradedResponse, info.ID, info.InstanceToken) ||
+				!upgradedFence.hasAgentProvenance(info.ID, info.InstanceToken) {
+				if writeErr != nil {
+					return park(fmt.Errorf("recording recovered drain acknowledgement provenance: %w", writeErr))
+				}
+				return park(errors.New("recovered drain acknowledgement provenance did not persist exactly"))
+			}
+			authorized, authorizeErr = params.AuthorizePoolDrainAck(upgradedInfo, *drainAckLease)
+			if authorizeErr != nil || !authorized {
+				if authorizeErr != nil {
+					return park(fmt.Errorf("authorizing recovered drain acknowledgement after provenance write: %w", authorizeErr))
+				}
+				return park(errors.New("recovered drain acknowledgement authorization no longer holds after provenance write"))
+			}
+			info = upgradedInfo
+			drainAckStopPendingFence = &upgradedFence
+		}
+		if params.AsyncStopTracker == nil {
+			return park(errors.New("drain acknowledgement async stop tracker is unavailable"))
 		}
 		beforeStop := func() error {
 			current, response, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, info.ID)

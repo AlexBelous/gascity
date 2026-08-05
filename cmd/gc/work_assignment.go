@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -65,6 +66,49 @@ func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.T
 		return nil, err
 	}
 	return excludeMailMessageBeads(items), nil
+}
+
+// OpenAssignedToAny returns open or in-progress non-session work assigned to
+// any supplied identity using one live, both-tier store query. It is the
+// bounded pool-reuse form of repeated OpenAssignedTo probes.
+func (w workAssignment) OpenAssignedToAny(assignees []string) ([]beads.Bead, error) {
+	store := w.unwrapped()
+	if store == nil {
+		return nil, nil
+	}
+	canonical := make([]string, 0, len(assignees))
+	seen := make(map[string]struct{}, len(assignees))
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" {
+			continue
+		}
+		if _, duplicate := seen[assignee]; duplicate {
+			continue
+		}
+		seen[assignee] = struct{}{}
+		canonical = append(canonical, assignee)
+	}
+	if len(canonical) == 0 {
+		return nil, nil
+	}
+	sort.Strings(canonical)
+	items, err := store.List(beads.ListQuery{Assignees: canonical, Live: true, TierMode: beads.TierBoth})
+	if err != nil {
+		return nil, err
+	}
+	items = excludeMailMessageBeads(items)
+	result := items[:0:0]
+	for _, item := range items {
+		if item.Status != "open" && item.Status != "in_progress" {
+			continue
+		}
+		if sessionpkg.IsSessionBeadOrRepairable(item) {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result, nil
 }
 
 // CachedOpenAssignedWisps returns cached open-assigned wisp-tier WORK beads when

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,7 +35,14 @@ type routedWorkPoolReuseLease struct {
 	PreviousSourceStore  string
 	ControllerGeneration uint64
 	MembershipRevision   uint64
+	MemberIDs            []string
 	Binding              sessionpkg.TriggerBinding
+}
+
+type routedWorkPoolSkippedBusyCandidate struct {
+	info      sessionpkg.Info
+	persisted sessionpkg.PersistedResponse
+	lease     routedWorkPoolReuseLease
 }
 
 func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
@@ -53,13 +62,22 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 		if !observation.certified {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("reusing pool member: membership is uncertified")
 		}
-		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
+		if observation.members == 0 {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
+		}
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
 	}
-	if observation.members == 1 && observation.occupied != 1 {
-		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
-	}
-	if observation.members > 1 && observation.occupied < 2 {
-		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
+	if agent.UsesCanonicalSingletonPoolIdentity() {
+		if observation.members != 1 || observation.occupied != 1 || len(memberIDs) != 1 {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
+		}
+	} else {
+		if observation.members == 1 && observation.occupied != 1 {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
+		}
+		if observation.members > 1 && observation.occupied < 2 {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseNotApplicable, nil
+		}
 	}
 	candidates := make([]sessionpkg.Info, 0, len(memberIDs))
 	persistedByID := make(map[string]sessionpkg.PersistedResponse, len(memberIDs))
@@ -75,8 +93,12 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 		persistedByID[info.ID] = persisted
 	}
 	sortSessionInfosByCreatedAtThenID(candidates)
+	assignedBusy, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, candidates)
+	if err != nil {
+		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
+	}
 
-	sawBusy := false
+	skippedBusy := make([]routedWorkPoolSkippedBusyCandidate, 0, len(candidates))
 	for _, info := range candidates {
 		workDir := poolTriggerWorkDir(bp, agent, sessionBeadQualifiedNameInfo(snapshot.CityPath, agent, snapshot.Config.Rigs, info), request)
 		if strings.TrimSpace(workDir) == "" {
@@ -90,6 +112,7 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 			PreviousSourceStore:  strings.TrimSpace(info.TriggerBeadStoreRef),
 			ControllerGeneration: snapshot.Generation,
 			MembershipRevision:   observation.revision,
+			MemberIDs:            slices.Clone(memberIDs),
 			Binding: sessionpkg.TriggerBinding{
 				WorkID:         strings.TrimSpace(work.ID),
 				StoreRef:       strings.TrimSpace(hint.SourceStore),
@@ -102,13 +125,37 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 		if err := validateRoutedWorkPoolReuseLease(lease); err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("validating reusable pool member %q: %w", info.ID, err)
 		}
-		disposition, err := cr.authorizeRoutedWorkPoolReuse(snapshot, info, lease, false)
+		disposition, err := cr.authorizeRoutedWorkPoolReuse(snapshot, info, lease, false, assignedBusy[info.ID])
 		if err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
 		}
 		if disposition == routedWorkPoolReuseBusy {
-			sawBusy = true
+			skippedBusy = append(skippedBusy, routedWorkPoolSkippedBusyCandidate{
+				info:      info,
+				persisted: persistedByID[info.ID],
+				lease:     lease,
+			})
 			continue
+		}
+		if disposition != routedWorkPoolReuseReusable {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
+		}
+		if len(skippedBusy) > 0 {
+			valid, validateErr := cr.revalidateRoutedWorkPoolSkippedBusy(snapshot, agent, skippedBusy)
+			if validateErr != nil {
+				return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, validateErr
+			}
+			if !valid {
+				return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
+			}
+		}
+		preWriteAssignedBusy, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{info})
+		if err != nil {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
+		}
+		disposition, err = cr.authorizeRoutedWorkPoolReuse(snapshot, info, lease, false, preWriteAssignedBusy[info.ID])
+		if err != nil {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
 		}
 		if disposition != routedWorkPoolReuseReusable {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
@@ -124,7 +171,11 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 		if err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: %w", lease.SessionID, err)
 		}
-		disposition, err = cr.authorizeRoutedWorkPoolReuse(snapshot, current, lease, true)
+		currentAssignedBusy, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{current})
+		if err != nil {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
+		}
+		disposition, err = cr.authorizeRoutedWorkPoolReuse(snapshot, current, lease, true, currentAssignedBusy[current.ID])
 		if err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
 		}
@@ -135,11 +186,35 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 		if err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("opening rebound pool member %q: %w", lease.SessionID, err)
 		}
-		nudge, err := handle.Nudge(ctx, worker.NudgeRequest{
+		authorizedHandle, ok := handle.(worker.AuthorizedIdleNudgeHandle)
+		if !ok {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("opening rebound pool member %q: authorized idle nudge is unsupported", lease.SessionID)
+		}
+		nudge, err := authorizedHandle.NudgeWaitIdleAuthorized(ctx, worker.NudgeRequest{
 			Text:     strings.TrimSpace(agent.Nudge),
 			Delivery: worker.NudgeDeliveryWaitIdle,
 			Source:   routedWorkPoolReuseNudgeSource,
 			Wake:     worker.NudgeWakeLiveOnly,
+		}, lease.InstanceToken, func(authorizeCtx context.Context) error {
+			if err := authorizeCtx.Err(); err != nil {
+				return err
+			}
+			latest, _, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, lease.SessionID)
+			if err != nil {
+				return fmt.Errorf("rereading rebound pool member after idle wait: %w", err)
+			}
+			assigned, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{latest})
+			if err != nil {
+				return err
+			}
+			disposition, err := cr.authorizeRoutedWorkPoolReuse(snapshot, latest, lease, true, assigned[latest.ID])
+			if err != nil {
+				return err
+			}
+			if disposition != routedWorkPoolReuseReusable {
+				return fmt.Errorf("rebound pool member lost authorization after idle wait")
+			}
+			return nil
 		})
 		if err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("nudging rebound pool member %q: %w", lease.SessionID, err)
@@ -149,10 +224,103 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 		}
 		return routedWorkPoolAllocationResult{Session: current, Handled: true}, routedWorkPoolReuseReusable, nil
 	}
-	if sawBusy {
+	if len(skippedBusy) > 0 {
+		valid, err := cr.revalidateRoutedWorkPoolSkippedBusy(snapshot, agent, skippedBusy)
+		if err != nil {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
+		}
+		if !valid {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
+		}
 		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseBusy, nil
 	}
 	return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
+}
+
+func (cr *CityRuntime) routedWorkPoolReuseAssignedWork(
+	snapshot controllerSessionStartSnapshot,
+	agent *config.Agent,
+	candidates []sessionpkg.Info,
+) (map[string]bool, error) {
+	busyBySession := make(map[string]bool, len(candidates))
+	if len(candidates) == 0 {
+		return busyBySession, nil
+	}
+	if agent == nil || snapshot.Config == nil {
+		return nil, fmt.Errorf("checking reusable pool assignments: agent config is unavailable")
+	}
+	ownersByAssignee := make(map[string][]string)
+	assignees := make([]string, 0, len(candidates)*2)
+	for _, info := range candidates {
+		candidateAgent := sessionAgentConfigInfo(snapshot.Config, info)
+		if candidateAgent == nil || candidateAgent.QualifiedName() != agent.QualifiedName() {
+			return nil, fmt.Errorf("checking reusable pool assignments for %q: candidate template is not the selected pool", info.ID)
+		}
+		identifiers := sessionAssignmentIdentifiersForConfigInfo(info, snapshot.Config)
+		if len(identifiers) == 0 {
+			return nil, fmt.Errorf("checking reusable pool assignments for %q: assignment identity is unavailable", info.ID)
+		}
+		busyBySession[info.ID] = false
+		for _, identifier := range identifiers {
+			identifier = strings.TrimSpace(identifier)
+			if identifier == "" {
+				continue
+			}
+			if _, first := ownersByAssignee[identifier]; !first {
+				assignees = append(assignees, identifier)
+			}
+			ownersByAssignee[identifier] = append(ownersByAssignee[identifier], info.ID)
+		}
+	}
+	stores, err := reachableStoresForSessionInfo(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), candidates[0])
+	if err != nil {
+		return nil, fmt.Errorf("checking reusable pool assignments: resolving reachable stores: %w", err)
+	}
+	for _, store := range stores {
+		items, err := workAssignmentForStore(beads.WorkStore{Store: store}).OpenAssignedToAny(assignees)
+		if err != nil {
+			return nil, fmt.Errorf("checking reusable pool assignments: %w", err)
+		}
+		for _, item := range items {
+			for _, sessionID := range ownersByAssignee[strings.TrimSpace(item.Assignee)] {
+				busyBySession[sessionID] = true
+			}
+		}
+	}
+	return busyBySession, nil
+}
+
+func (cr *CityRuntime) revalidateRoutedWorkPoolSkippedBusy(
+	snapshot controllerSessionStartSnapshot,
+	agent *config.Agent,
+	skipped []routedWorkPoolSkippedBusyCandidate,
+) (bool, error) {
+	current := make([]sessionpkg.Info, 0, len(skipped))
+	for _, candidate := range skipped {
+		info, persisted, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, candidate.info.ID)
+		if err != nil {
+			return false, fmt.Errorf("rereading skipped busy pool member %q: %w", candidate.info.ID, err)
+		}
+		if candidate.persisted.Revision <= 0 || persisted.Revision != candidate.persisted.Revision ||
+			persisted.Status != candidate.persisted.Status || !maps.Equal(persisted.Metadata, candidate.persisted.Metadata) {
+			return false, nil
+		}
+		current = append(current, info)
+	}
+	assignedBusy, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, current)
+	if err != nil {
+		return false, err
+	}
+	for i, info := range current {
+		disposition, err := cr.authorizeRoutedWorkPoolReuse(snapshot, info, skipped[i].lease, false, assignedBusy[info.ID])
+		if err != nil {
+			return false, err
+		}
+		if disposition != routedWorkPoolReuseBusy {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func validateRoutedWorkPoolReuseLease(lease routedWorkPoolReuseLease) error {
@@ -177,6 +345,17 @@ func validateRoutedWorkPoolReuseLease(lease routedWorkPoolReuseLease) error {
 	if (lease.PreviousWorkID == "") != (lease.PreviousSourceStore == "") {
 		return fmt.Errorf("previous work ID and source store must both be set or empty")
 	}
+	if len(lease.MemberIDs) == 0 || !slices.IsSorted(lease.MemberIDs) {
+		return fmt.Errorf("reuse member IDs must be nonempty and sorted")
+	}
+	for i, id := range lease.MemberIDs {
+		if id == "" || strings.TrimSpace(id) != id || (i > 0 && lease.MemberIDs[i-1] == id) {
+			return fmt.Errorf("reuse member IDs must be canonical and unique")
+		}
+	}
+	if _, present := slices.BinarySearch(lease.MemberIDs, lease.SessionID); !present {
+		return fmt.Errorf("reuse member IDs do not contain session ID")
+	}
 	return nil
 }
 
@@ -187,6 +366,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	info sessionpkg.Info,
 	lease routedWorkPoolReuseLease,
 	bound bool,
+	assignedBusy bool,
 ) (routedWorkPoolReuseDisposition, error) {
 	if cr == nil || cr.cs == nil || cr.poolMembershipShadow == nil || snapshot.Config == nil || snapshot.Provider == nil || snapshot.Store == nil {
 		return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse: keyed state is unavailable")
@@ -239,8 +419,20 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	if !policy.supported() || policy.maxActiveSessions == 0 {
 		return routedWorkPoolReuseRefused, nil
 	}
-	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)
-	if !occupied || observation.revision < lease.MembershipRevision {
+	observation, memberIDs, exact := cr.poolMembershipShadow.observeMemberIDs(lease.PoolTarget)
+	if !exact || observation.revision != lease.MembershipRevision || !slices.Equal(memberIDs, lease.MemberIDs) {
+		return routedWorkPoolReuseRefused, nil
+	}
+	occupiedObservation, occupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)
+	if !occupied || occupiedObservation.revision != lease.MembershipRevision {
+		return routedWorkPoolReuseRefused, nil
+	}
+	if agent.UsesCanonicalSingletonPoolIdentity() {
+		if observation.members != 1 || observation.occupied != 1 || len(memberIDs) != 1 || memberIDs[0] != lease.SessionID {
+			return routedWorkPoolReuseRefused, nil
+		}
+	}
+	if policy.maxActiveSessions > 0 && observation.occupied > policy.maxActiveSessions {
 		return routedWorkPoolReuseRefused, nil
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
@@ -271,11 +463,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	if pending != nil {
 		busy = true
 	}
-	hasAssigned, err := sessionHasOpenAssignedWorkForReachableStore(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), info)
-	if err != nil {
-		return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: checking assigned work: %w", lease.SessionID, err)
-	}
-	if hasAssigned {
+	if assignedBusy {
 		busy = true
 	}
 	if lease.PreviousWorkID != "" {

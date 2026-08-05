@@ -574,8 +574,7 @@ func TestRoutedWorkPoolAllocationReusesIdleCanonicalSingletonForNewWork(t *testi
 	}
 	setRoutedWorkPoolRuntimeIdentity(t, fixture, active)
 	fixture.provider.WaitForIdleErrors[first.Session.SessionName] = nil
-	baselineNudges := fixture.provider.CountCalls("Nudge", first.Session.SessionName) +
-		fixture.provider.CountCalls("NudgeNow", first.Session.SessionName)
+	baselineNudges := providerNudgeCalls(fixture.provider, first.Session.SessionName)
 
 	secondWork, err := fixture.store.Create(beads.Bead{
 		Title:  "second singleton work",
@@ -625,8 +624,7 @@ func TestRoutedWorkPoolAllocationReusesIdleCanonicalSingletonForNewWork(t *testi
 	if got := fixture.provider.CountCalls("Stop", first.Session.SessionName); got != 0 {
 		t.Fatalf("provider Stop calls after singleton reuse = %d, want 0", got)
 	}
-	if got := fixture.provider.CountCalls("Nudge", first.Session.SessionName) +
-		fixture.provider.CountCalls("NudgeNow", first.Session.SessionName); got != baselineNudges+1 {
+	if got := providerNudgeCalls(fixture.provider, first.Session.SessionName); got != baselineNudges+1 {
 		t.Fatalf("claim nudge calls after singleton reuse = %d, want %d", got, baselineNudges+1)
 	}
 	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
@@ -642,8 +640,7 @@ func TestRoutedWorkPoolAllocationReusesIdleCanonicalSingletonForNewWork(t *testi
 	if replayed.Revision != reboundRevision {
 		t.Fatalf("singleton replay revision = %d, want unchanged %d", replayed.Revision, reboundRevision)
 	}
-	if got := fixture.provider.CountCalls("Nudge", first.Session.SessionName) +
-		fixture.provider.CountCalls("NudgeNow", first.Session.SessionName); got != baselineNudges+1 {
+	if got := providerNudgeCalls(fixture.provider, first.Session.SessionName); got != baselineNudges+1 {
 		t.Fatalf("claim nudge calls after replay = %d, want %d", got, baselineNudges+1)
 	}
 	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
@@ -864,6 +861,298 @@ func TestRoutedWorkPoolAllocationReusesOldestIdleMemberOfMultiMemberPool(t *test
 	}
 }
 
+func TestRoutedWorkPoolAllocationCanonicalReuseRequiresExactSoleMember(t *testing.T) {
+	fixture, firstWork, canonical := prepareIdleCanonicalSingletonForReuse(t, true)
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close canonical trigger work: %v", err)
+	}
+	extra, err := createPoolSessionBeadWithAlias(fixture.store, "worker", fixture.cr.cfg, nil, time.Now().UTC(), poolSessionCreateIdentity{
+		AgentName: "worker-2",
+		Slot:      2,
+	}, "")
+	if err != nil {
+		t.Fatalf("create conflicting certified member: %v", err)
+	}
+	if err := fixture.store.SetMetadataBatch(extra.ID, map[string]string{
+		"state":                     string(sessionpkg.StateActive),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}); err != nil {
+		t.Fatalf("mark conflicting member active: %v", err)
+	}
+	extra, err = sessionFrontDoor(fixture.store).Get(extra.ID)
+	if err != nil {
+		t.Fatalf("read conflicting member: %v", err)
+	}
+	if err := fixture.cr.poolMembershipShadow.replace(fixture.cr.cfg, extra); err != nil {
+		t.Fatalf("publish conflicting certified member: %v", err)
+	}
+	before, err := fixture.store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("read canonical member before refusal: %v", err)
+	}
+	baselineNudges := providerNudgeCalls(fixture.provider, canonical.SessionNameMetadata)
+	work, err := fixture.store.Create(beads.Bead{Title: "new canonical work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create new canonical work: %v", err)
+	}
+
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+
+	after, err := fixture.store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("read canonical member after refusal: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("non-sole canonical reuse changed the durable member\n before=%+v\n  after=%+v", before, after)
+	}
+	if got := providerNudgeCalls(fixture.provider, canonical.SessionNameMetadata); got != baselineNudges {
+		t.Fatalf("canonical nudges with conflicting member = %d, want unchanged %d", got, baselineNudges)
+	}
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+}
+
+func TestRoutedWorkPoolAllocationRefusesMemberSetAdditionDuringSelection(t *testing.T) {
+	fixture, firstWork, older, secondWork, newer := prepareTwoMemberGenericPoolForReuse(t, 4)
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close older trigger work: %v", err)
+	}
+	if err := fixture.store.Close(secondWork.ID); err != nil {
+		t.Fatalf("close newer trigger work: %v", err)
+	}
+	extra, err := createPoolSessionBeadWithAlias(fixture.store, "worker", fixture.cr.cfg, nil, time.Now().UTC(), poolSessionCreateIdentity{
+		AgentName: "worker-3",
+		Slot:      3,
+	}, "")
+	if err != nil {
+		t.Fatalf("create unobserved third member: %v", err)
+	}
+	if err := fixture.store.SetMetadataBatch(extra.ID, map[string]string{
+		"state":                     string(sessionpkg.StateActive),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}); err != nil {
+		t.Fatalf("mark unobserved third member active: %v", err)
+	}
+	extra, err = sessionFrontDoor(fixture.store).Get(extra.ID)
+	if err != nil {
+		t.Fatalf("read unobserved third member: %v", err)
+	}
+	provider := &poolReuseGetMetaHookProvider{
+		sequenceGetMetaProvider: fixture.cr.cs.sp.(*sequenceGetMetaProvider),
+		after: func() {
+			if replaceErr := fixture.cr.poolMembershipShadow.replace(fixture.cr.cfg, extra); replaceErr != nil {
+				t.Errorf("publish third member during selection: %v", replaceErr)
+			}
+		},
+	}
+	fixture.cr.sp = provider
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.sp = provider
+	fixture.cr.cs.mu.Unlock()
+	beforeOlder, err := fixture.store.Get(older.ID)
+	if err != nil {
+		t.Fatalf("read older member before set drift: %v", err)
+	}
+	beforeNewer, err := fixture.store.Get(newer.ID)
+	if err != nil {
+		t.Fatalf("read newer member before set drift: %v", err)
+	}
+	baselineNudges := providerAllNudgeCalls(fixture.provider)
+	work, err := fixture.store.Create(beads.Bead{Title: "work racing membership growth", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create work racing membership growth: %v", err)
+	}
+
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+
+	for id, before := range map[string]beads.Bead{older.ID: beforeOlder, newer.ID: beforeNewer} {
+		after, getErr := fixture.store.Get(id)
+		if getErr != nil {
+			t.Fatalf("read member %q after set drift: %v", id, getErr)
+		}
+		if !reflect.DeepEqual(after, before) {
+			t.Fatalf("member-set drift changed candidate %q\n before=%+v\n  after=%+v", id, before, after)
+		}
+	}
+	if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
+		t.Fatalf("nudges after member-set drift = %d, want unchanged %d", got, baselineNudges)
+	}
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+}
+
+func TestRoutedWorkPoolAllocationRefusesLaterReuseAfterBusyCandidateDrifts(t *testing.T) {
+	fixture, firstWork, older, secondWork, newer := prepareTwoMemberGenericPoolForReuse(t, 3)
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close older trigger work: %v", err)
+	}
+	if err := fixture.store.Close(secondWork.ID); err != nil {
+		t.Fatalf("close newer trigger work: %v", err)
+	}
+	if _, err := fixture.store.Create(beads.Bead{Title: "older assigned work", Type: "task", Status: "open", Assignee: older.ID}); err != nil {
+		t.Fatalf("create older assigned work: %v", err)
+	}
+	underlying := fixture.store
+	hooked := &poolReuseAssignedListHookStore{
+		Store: underlying,
+		after: func() {
+			if err := underlying.SetMetadata(older.ID, "state_reason", "busy-candidate-drift"); err != nil {
+				t.Errorf("mutate busy candidate after classification: %v", err)
+			}
+		},
+	}
+	fixture.store = hooked
+	fixture.cr.cs.mu.Lock()
+	fixture.cr.cs.cityBeadStore = hooked
+	fixture.cr.cs.mu.Unlock()
+	beforeNewer, err := underlying.Get(newer.ID)
+	if err != nil {
+		t.Fatalf("read later member before busy drift: %v", err)
+	}
+	baselineNudges := providerNudgeCalls(fixture.provider, newer.SessionNameMetadata)
+	work, err := underlying.Create(beads.Bead{Title: "work after drifting busy member", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create later routed work: %v", err)
+	}
+
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+
+	afterNewer, err := underlying.Get(newer.ID)
+	if err != nil {
+		t.Fatalf("read later member after busy drift: %v", err)
+	}
+	if !reflect.DeepEqual(afterNewer, beforeNewer) {
+		t.Fatalf("busy-candidate drift changed later member\n before=%+v\n  after=%+v", beforeNewer, afterNewer)
+	}
+	if got := providerNudgeCalls(fixture.provider, newer.SessionNameMetadata); got != baselineNudges {
+		t.Fatalf("later-member nudges after busy drift = %d, want unchanged %d", got, baselineNudges)
+	}
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+}
+
+func TestRoutedWorkPoolAllocationRefusesReuseDriftAfterIdleWait(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(testing.TB, routedWorkPoolAllocationFixture, sessionpkg.Info, sessionpkg.Info, beads.Bead)
+	}{
+		{
+			name: "routed work drift",
+			mutate: func(t testing.TB, fixture routedWorkPoolAllocationFixture, _, _ sessionpkg.Info, work beads.Bead) {
+				t.Helper()
+				if err := fixture.store.SetMetadata(work.ID, "gc.routed_to", "other"); err != nil {
+					t.Fatalf("change routed work after idle wait: %v", err)
+				}
+			},
+		},
+		{
+			name: "membership set drift",
+			mutate: func(_ testing.TB, fixture routedWorkPoolAllocationFixture, _, other sessionpkg.Info, _ beads.Bead) {
+				fixture.cr.poolMembershipShadow.remove(other.ID)
+			},
+		},
+		{
+			name: "runtime token replacement",
+			mutate: func(t testing.TB, fixture routedWorkPoolAllocationFixture, selected, _ sessionpkg.Info, _ beads.Bead) {
+				t.Helper()
+				if err := fixture.provider.SetMeta(selected.SessionNameMetadata, "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
+					t.Fatalf("replace runtime token after idle wait: %v", err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, firstWork, selected, secondWork, other := prepareTwoMemberGenericPoolForReuse(t, 3)
+			if err := fixture.store.Close(firstWork.ID); err != nil {
+				t.Fatalf("close selected member's prior work: %v", err)
+			}
+			if err := fixture.store.Close(secondWork.ID); err != nil {
+				t.Fatalf("close other member's prior work: %v", err)
+			}
+			work, err := fixture.store.Create(beads.Bead{Title: "work racing idle reuse", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+			if err != nil {
+				t.Fatalf("create routed work: %v", err)
+			}
+			idleStarted := make(chan struct{})
+			idleGate := make(chan struct{})
+			fixture.provider.WaitForIdleStarted[selected.SessionNameMetadata] = idleStarted
+			fixture.provider.WaitForIdleGates[selected.SessionNameMetadata] = idleGate
+			baselineNudges := providerAllNudgeCalls(fixture.provider)
+			baselineStarts := providerCallCount(fixture.provider, "Start")
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+			}()
+			awaitClose(t, idleStarted, "pool reuse idle wait")
+			test.mutate(t, fixture, selected, other, work)
+			close(idleGate)
+			awaitClose(t, done, "pool reuse after post-wait drift")
+
+			if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
+				t.Fatalf("nudges after %s = %d, want unchanged %d", test.name, got, baselineNudges)
+			}
+			if got := providerCallCount(fixture.provider, "Start"); got != baselineStarts {
+				t.Fatalf("starts after %s = %d, want unchanged %d", test.name, got, baselineStarts)
+			}
+			if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
+				t.Fatalf("stops after %s = %d, want 0", test.name, got)
+			}
+			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		})
+	}
+}
+
+func TestRoutedWorkPoolAllocationBatchesAssignedWorkReadsIndependentOfMemberCount(t *testing.T) {
+	for _, members := range []int{2, 5} {
+		t.Run(fmt.Sprintf("members=%d", members), func(t *testing.T) {
+			fixture, _, _ := prepareIdleGenericPoolMemberForReuse(t, true, members)
+			for slot := 2; slot <= members; slot++ {
+				work, err := fixture.store.Create(beads.Bead{Title: fmt.Sprintf("busy pool work %d", slot), Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+				if err != nil {
+					t.Fatalf("create pool work %d: %v", slot, err)
+				}
+				result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+				if err != nil || !result.Handled || !result.Created || result.Session.PoolSlot != fmt.Sprint(slot) {
+					t.Fatalf("grow pool slot %d = (%+v, %v), want created", slot, result, err)
+				}
+				awaitCond(t, func() bool {
+					return fixture.provider.IsRunning(result.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+				}, fmt.Sprintf("pool slot %d to start", slot))
+				info, err := sessionFrontDoor(fixture.store).Get(result.Session.ID)
+				if err != nil {
+					t.Fatalf("read pool slot %d: %v", slot, err)
+				}
+				setRoutedWorkPoolRuntimeIdentity(t, fixture, info)
+				fixture.provider.WaitForIdleErrors[info.SessionNameMetadata] = nil
+			}
+			underlying := fixture.store
+			counted := &poolReuseListCountingStore{Store: underlying}
+			fixture.store = counted
+			fixture.cr.cs.mu.Lock()
+			fixture.cr.cs.cityBeadStore = counted
+			fixture.cr.cs.mu.Unlock()
+			work, err := underlying.Create(beads.Bead{Title: "work at full busy pool", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+			if err != nil {
+				t.Fatalf("create work at full pool: %v", err)
+			}
+
+			fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+
+			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+			queries := counted.snapshot()
+			if len(queries) != 2 {
+				t.Fatalf("assigned-work List calls for %d members = %d, want one classification and one revalidation per reachable store: %+v", members, len(queries), queries)
+			}
+			for _, query := range queries {
+				if query.Assignee != "" || len(query.Assignees) == 0 || query.Status != "" || !query.Live || query.TierMode != beads.TierBoth {
+					t.Fatalf("batched assigned-work query = %+v, want plural assignees, all live nonclosed statuses, TierBoth", query)
+				}
+			}
+		})
+	}
+}
+
 func TestRoutedWorkPoolAllocationAllBusyMultiMemberPoolKeepsExistingGrowthAndFallback(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -877,7 +1166,7 @@ func TestRoutedWorkPoolAllocationAllBusyMultiMemberPoolKeepsExistingGrowthAndFal
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, _, _, _, _ := prepareTwoMemberGenericPoolForReuse(t, test.maximum)
-			baselineNudges := providerCallCount(fixture.provider, "Nudge") + providerCallCount(fixture.provider, "NudgeNow")
+			baselineNudges := providerAllNudgeCalls(fixture.provider)
 			thirdWork, err := fixture.store.Create(beads.Bead{Title: "third routed work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
 			if err != nil {
 				t.Fatalf("create third routed work: %v", err)
@@ -892,7 +1181,7 @@ func TestRoutedWorkPoolAllocationAllBusyMultiMemberPoolKeepsExistingGrowthAndFal
 				if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
 					t.Fatalf("global provider Stop calls after all-busy cap fallback = %d, want 0", got)
 				}
-				if got := providerCallCount(fixture.provider, "Nudge") + providerCallCount(fixture.provider, "NudgeNow"); got != baselineNudges {
+				if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
 					t.Fatalf("global provider nudge calls after all-busy cap fallback = %d, want unchanged %d", got, baselineNudges)
 				}
 			} else {
@@ -931,7 +1220,7 @@ func TestRoutedWorkPoolAllocationUncertainEarlierMemberDoesNotRouteAroundToLater
 	if err != nil {
 		t.Fatalf("read idle newer member: %v", err)
 	}
-	baselineNudges := providerCallCount(fixture.provider, "Nudge") + providerCallCount(fixture.provider, "NudgeNow")
+	baselineNudges := providerAllNudgeCalls(fixture.provider)
 	thirdWork, err := fixture.store.Create(beads.Bead{Title: "third routed work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
 	if err != nil {
 		t.Fatalf("create third routed work: %v", err)
@@ -955,7 +1244,7 @@ func TestRoutedWorkPoolAllocationUncertainEarlierMemberDoesNotRouteAroundToLater
 	if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
 		t.Fatalf("global provider Stop calls after uncertain selection = %d, want 0", got)
 	}
-	if got := providerCallCount(fixture.provider, "Nudge") + providerCallCount(fixture.provider, "NudgeNow"); got != baselineNudges {
+	if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
 		t.Fatalf("global provider nudge calls after uncertain selection = %d, want unchanged %d", got, baselineNudges)
 	}
 	infos, err := loadSessionBeadSnapshot(fixture.store)
@@ -1201,7 +1490,7 @@ func TestRoutedWorkPoolAllocationRefusedGenericReuseFallsBackWithoutGrowth(t *te
 			if err != nil {
 				t.Fatalf("read generic member before refusal: %v", err)
 			}
-			baselineNudges := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) + fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata)
+			baselineNudges := providerNudgeCalls(fixture.provider, info.SessionNameMetadata)
 
 			fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
 
@@ -1222,7 +1511,7 @@ func TestRoutedWorkPoolAllocationRefusedGenericReuseFallsBackWithoutGrowth(t *te
 			if got := fixture.provider.CountCalls("Start", info.SessionNameMetadata); got != 1 {
 				t.Fatalf("refused generic reuse Start calls = %d, want 1", got)
 			}
-			if got := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) + fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata); got != baselineNudges {
+			if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 				t.Fatalf("refused generic reuse nudge calls = %d, want %d", got, baselineNudges)
 			}
 			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
@@ -1259,8 +1548,7 @@ func TestRoutedWorkPoolAllocationStaleGenericReuseRevisionFallsBackWithoutGrowth
 	fixture.cr.cs.mu.Lock()
 	fixture.cr.cs.cityBeadStore = hooked
 	fixture.cr.cs.mu.Unlock()
-	baselineNudges := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
-		fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata)
+	baselineNudges := providerNudgeCalls(fixture.provider, info.SessionNameMetadata)
 
 	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
 		WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
@@ -1281,8 +1569,7 @@ func TestRoutedWorkPoolAllocationStaleGenericReuseRevisionFallsBackWithoutGrowth
 	if open := infos.OpenInfos(); len(open) != 1 || open[0].ID != info.ID {
 		t.Fatalf("stale generic reuse open sessions = %+v, want only %q", open, info.ID)
 	}
-	if got := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
-		fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata); got != baselineNudges {
+	if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 		t.Fatalf("stale generic reuse nudge calls = %d, want unchanged %d", got, baselineNudges)
 	}
 	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
@@ -1395,8 +1682,7 @@ func TestRoutedWorkPoolSingletonReuseLeavesAmbiguousStatesLegacyOwned(t *testing
 			if err != nil {
 				t.Fatalf("read singleton before refused reuse: %v", err)
 			}
-			baselineNudges := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
-				fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata)
+			baselineNudges := providerNudgeCalls(fixture.provider, info.SessionNameMetadata)
 
 			fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
 				WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
@@ -1409,8 +1695,7 @@ func TestRoutedWorkPoolSingletonReuseLeavesAmbiguousStatesLegacyOwned(t *testing
 			if !reflect.DeepEqual(after, before) {
 				t.Fatalf("refused reuse changed durable session\n before=%+v\n  after=%+v", before, after)
 			}
-			if got := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
-				fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata); got != baselineNudges {
+			if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 				t.Fatalf("refused reuse nudge calls = %d, want unchanged %d", got, baselineNudges)
 			}
 			if got := fixture.provider.CountCalls("Start", info.SessionNameMetadata); got != 1 {
@@ -1439,8 +1724,7 @@ func TestRoutedWorkPoolSingletonReuseFallsBackAfterUnconfirmedIdleDelivery(t *te
 	if err != nil {
 		t.Fatalf("create second singleton work: %v", err)
 	}
-	baselineNudges := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
-		fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata)
+	baselineNudges := providerNudgeCalls(fixture.provider, info.SessionNameMetadata)
 
 	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
 		WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
@@ -1453,8 +1737,7 @@ func TestRoutedWorkPoolSingletonReuseFallsBackAfterUnconfirmedIdleDelivery(t *te
 	if stored.Metadata[beadmeta.TriggerBeadIDMetadataKey] != secondWork.ID {
 		t.Fatalf("rebound trigger = %q, want durable %q despite unconfirmed delivery", stored.Metadata[beadmeta.TriggerBeadIDMetadataKey], secondWork.ID)
 	}
-	if got := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
-		fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata); got != baselineNudges {
+	if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 		t.Fatalf("unconfirmed delivery nudge calls = %d, want unchanged %d", got, baselineNudges)
 	}
 	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
@@ -1490,8 +1773,7 @@ func TestRoutedWorkPoolGenericReuseDoesNotStartAfterCommittedBindingLosesAuthori
 	fixture.cr.cs.mu.Lock()
 	fixture.cr.cs.cityBeadStore = hooked
 	fixture.cr.cs.mu.Unlock()
-	baselineNudges := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
-		fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata)
+	baselineNudges := providerNudgeCalls(fixture.provider, info.SessionNameMetadata)
 
 	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{
 		WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city",
@@ -1504,8 +1786,7 @@ func TestRoutedWorkPoolGenericReuseDoesNotStartAfterCommittedBindingLosesAuthori
 	if open := snapshot.OpenInfos(); len(open) != 0 {
 		t.Fatalf("open sessions after lost reuse authorization = %+v, want no replacement after %q retired", open, info.ID)
 	}
-	if got := fixture.provider.CountCalls("Nudge", info.SessionNameMetadata) +
-		fixture.provider.CountCalls("NudgeNow", info.SessionNameMetadata); got != baselineNudges {
+	if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 		t.Fatalf("nudges after lost reuse authorization = %d, want unchanged %d", got, baselineNudges)
 	}
 	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
@@ -3206,6 +3487,63 @@ func (s *triggerMatchingReadHookStore) ConditionalWritesResolveTarget() beads.St
 	return s.Store
 }
 
+type poolReuseGetMetaHookProvider struct {
+	*sequenceGetMetaProvider
+	after func()
+	once  sync.Once
+}
+
+func (p *poolReuseGetMetaHookProvider) GetMeta(name, key string) (string, error) {
+	value, err := p.sequenceGetMetaProvider.GetMeta(name, key)
+	if err == nil && key == "GC_INSTANCE_TOKEN" && p.after != nil {
+		p.once.Do(p.after)
+	}
+	return value, err
+}
+
+type poolReuseAssignedListHookStore struct {
+	beads.Store
+	after func()
+	once  sync.Once
+}
+
+func (s *poolReuseAssignedListHookStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(query)
+	if err == nil && len(rows) > 0 && (query.Assignee != "" || len(query.Assignees) > 0) && s.after != nil {
+		s.once.Do(s.after)
+	}
+	return rows, err
+}
+
+func (s *poolReuseAssignedListHookStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.Store
+}
+
+type poolReuseListCountingStore struct {
+	beads.Store
+	mu      sync.Mutex
+	queries []beads.ListQuery
+}
+
+func (s *poolReuseListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Assignee != "" || len(query.Assignees) > 0 {
+		s.mu.Lock()
+		s.queries = append(s.queries, query)
+		s.mu.Unlock()
+	}
+	return s.Store.List(query)
+}
+
+func (s *poolReuseListCountingStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.Store
+}
+
+func (s *poolReuseListCountingStore) snapshot() []beads.ListQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]beads.ListQuery(nil), s.queries...)
+}
+
 func newRoutedWorkPoolAllocationFixture(t *testing.T, store beads.Store) routedWorkPoolAllocationFixture {
 	t.Helper()
 	unlimited := -1
@@ -3357,7 +3695,11 @@ func providerCallCount(provider *runtime.Fake, method string) int {
 }
 
 func providerNudgeCalls(provider *runtime.Fake, name string) int {
-	return provider.CountCalls("Nudge", name) + provider.CountCalls("NudgeNow", name)
+	return provider.CountCalls("Nudge", name) + provider.CountCalls("NudgeNow", name) + provider.CountCalls("NudgeFenced", name)
+}
+
+func providerAllNudgeCalls(provider *runtime.Fake) int {
+	return providerCallCount(provider, "Nudge") + providerCallCount(provider, "NudgeNow") + providerCallCount(provider, "NudgeFenced")
 }
 
 func assertExactProviderNudgeSince(t *testing.T, provider *runtime.Fake, baseline int, name, message string) {
@@ -3368,7 +3710,7 @@ func assertExactProviderNudgeSince(t *testing.T, provider *runtime.Fake, baselin
 	}
 	var nudges []runtime.Call
 	for _, call := range calls[baseline:] {
-		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" || call.Method == "NudgeFenced" {
 			nudges = append(nudges, call)
 		}
 	}

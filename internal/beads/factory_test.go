@@ -230,6 +230,143 @@ func TestOpenStoreAtForCityNativeOpenFailureFallsBackWithDiagnostic(t *testing.T
 	}
 }
 
+func TestOpenStoreAtForCityNativeOpenMigrationRaceRetriesAndSucceeds(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := "/city"
+	native := NewMemStore()
+	var calls int
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("OpenBdStore called despite native open eventually succeeding after retry")
+			return nil, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			calls++
+			if calls < nativeOpenMigrationRaceMaxAttempts {
+				return nil, errors.New(nativeOpenMigrationRaceSignature + ": config")
+			}
+			return native, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if calls != nativeOpenMigrationRaceMaxAttempts {
+		t.Fatalf("OpenNativeStore called %d times, want %d (retries exhausted on the last attempt before success)", calls, nativeOpenMigrationRaceMaxAttempts)
+	}
+	if result.Store != native {
+		t.Fatalf("Store = %T, want injected native store once the retry recovers", result.Store)
+	}
+	if result.Diagnostic.Store != storeNameNativeDoltStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameNativeDoltStore)
+	}
+	if !result.Diagnostic.NativeStoreEligible {
+		t.Fatal("diagnostic native_store_eligible = false, want true after retry recovers")
+	}
+}
+
+func TestOpenStoreAtForCityNativeOpenMigrationRaceExhaustsRetriesAndFallsBack(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := "/city"
+	fallback := NewMemStore()
+	var calls int
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			return fallback, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			calls++
+			return nil, errors.New(nativeOpenMigrationRaceSignature + ": config")
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if calls != nativeOpenMigrationRaceMaxAttempts {
+		t.Fatalf("OpenNativeStore called %d times, want the bounded attempt count %d (must not retry forever)", calls, nativeOpenMigrationRaceMaxAttempts)
+	}
+	if result.Store != fallback {
+		t.Fatalf("Store = %T, want fallback store once retries are exhausted", result.Store)
+	}
+	if result.Diagnostic.Store != storeNameBdStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameBdStore)
+	}
+	if !strings.Contains(result.Diagnostic.PreflightReason, nativeOpenMigrationRaceSignature) {
+		t.Fatalf("diagnostic preflight_reason = %q, want the migration-race reason preserved", result.Diagnostic.PreflightReason)
+	}
+}
+
+func TestOpenStoreAtForCityNativeOpenNonMigrationRaceErrorDoesNotRetry(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := "/city"
+	fallback := NewMemStore()
+	var calls int
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			return fallback, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			calls++
+			return nil, errors.New("dial native: connection refused")
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("OpenNativeStore called %d times, want exactly 1 (a non-migration-race error must not retry)", calls)
+	}
+	if result.Store != fallback {
+		t.Fatalf("Store = %T, want fallback store", result.Store)
+	}
+}
+
+func TestOpenStoreAtForCityNativeOpenMigrationRaceRetryRespectsContextCancellation(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := "/city"
+	fallback := NewMemStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls int
+
+	result, err := OpenStoreAtForCity(ctx, StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			return fallback, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			calls++
+			cancel()
+			return nil, errors.New(nativeOpenMigrationRaceSignature + ": config")
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v, want a graceful bd fallback even when ctx is canceled mid-retry", err)
+	}
+	if calls != 1 {
+		t.Fatalf("OpenNativeStore called %d times, want exactly 1 (cancellation must short-circuit the retry backoff, not spin)", calls)
+	}
+	if result.Store != fallback {
+		t.Fatalf("Store = %T, want fallback store", result.Store)
+	}
+	if !strings.Contains(result.Diagnostic.PreflightReason, "context canceled") {
+		t.Fatalf("diagnostic preflight_reason = %q, want the context-cancellation reason", result.Diagnostic.PreflightReason)
+	}
+}
+
 func TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"

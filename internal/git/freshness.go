@@ -197,11 +197,11 @@ func (f Freshness) Guidance() []string {
 		}
 	case FreshnessNoUpstream:
 		return []string{
-			fmt.Sprintf("branch %s has no upstream — `git branch --set-upstream-to=%s/%s` before relying on push", f.Branch, f.Remote, f.Branch),
+			fmt.Sprintf("branch %s has no upstream — configure it to track %s/%s before relying on push", f.Branch, f.Remote, f.Branch),
 		}
 	case FreshnessBehind:
 		return []string{
-			fmt.Sprintf("catch up before working: git rebase %s (review first; not applied automatically)", f.upstreamLabel()),
+			fmt.Sprintf("catch up before working: rebase this branch onto %s (review first; not applied automatically)", f.upstreamLabel()),
 		}
 	case FreshnessDiverged:
 		return []string{

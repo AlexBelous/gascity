@@ -210,7 +210,7 @@ func TestFreshness_GuidanceRecommendsRebaseWhenBehind(t *testing.T) {
 		t.Fatalf("Freshness: %v", err)
 	}
 	guidance := strings.Join(f.Guidance(), "\n")
-	if !strings.Contains(guidance, "git rebase origin/main") {
+	if !strings.Contains(guidance, "rebase this branch onto origin/main") {
 		t.Errorf("behind guidance = %q, want a rebase of the compared upstream", guidance)
 	}
 }
@@ -238,6 +238,19 @@ func TestFreshness_GuidanceNamesComparedUpstream(t *testing.T) {
 	}
 	if strings.Contains(guidance, "origin main") {
 		t.Fatalf("Guidance() = %q, must not name unrelated origin/main", guidance)
+	}
+}
+
+func TestFreshness_GuidanceDoesNotRenderDynamicShellCommands(t *testing.T) {
+	tests := []Freshness{
+		{State: FreshnessNoUpstream, Branch: "topic;echo pwned", Remote: "origin"},
+		{State: FreshnessBehind, Upstream: "origin/topic;echo pwned"},
+	}
+	for _, freshness := range tests {
+		guidance := strings.Join(freshness.Guidance(), "\n")
+		if strings.Contains(guidance, "git ") || strings.Contains(guidance, "`") {
+			t.Errorf("Guidance() = %q, must describe the action without a copy/paste shell command", guidance)
+		}
 	}
 }
 

@@ -80,7 +80,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		return nil, err
 	}
 
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 	rigNames := sortedRigNames(stores)
 	var convoys []beads.Bead
 	var pa partialAggregator
@@ -92,7 +92,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		// total order (#3208 — the same fix the bead list carries).
 		list, err := store.List(beads.ListQuery{Type: "convoy", Sort: beads.SortCreatedDesc})
 		if err != nil {
-			pa.record("rig "+rigName, err)
+			pa.record(workBeadStoreLabel(rigName), err)
 			continue
 		}
 		pa.success()
@@ -159,7 +159,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 		}, nil
 	}
 
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)
@@ -260,7 +260,7 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 // previously-applied links so the convoy never ends up half-added.
 func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (*OKResponse, error) {
 	id := input.ID
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)
@@ -297,7 +297,7 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 // humaHandleConvoyRemove is the Huma-typed handler for POST /v0/convoy/{id}/remove.
 func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveInput) (*OKResponse, error) {
 	id := input.ID
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)
@@ -405,7 +405,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		return nil, err
 	}
 
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
@@ -451,7 +451,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 // humaHandleConvoyClose is the Huma-typed handler for POST /v0/convoy/{id}/close.
 func (s *Server) humaHandleConvoyClose(_ context.Context, input *ConvoyCloseInput) (*OKResponse, error) {
 	id := input.ID
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
@@ -485,7 +485,7 @@ func (s *Server) humaHandleConvoyDelete(_ context.Context, input *ConvoyDeleteIn
 		return s.humaDeleteWorkflow(id)
 	}
 
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)

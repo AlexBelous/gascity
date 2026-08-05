@@ -1361,21 +1361,14 @@ func (cs *controllerState) BeadStore(rig string) beads.Store {
 	return cs.beadStores[rig]
 }
 
-// BeadStores returns all rig names and their stores, including the HQ city store.
+// BeadStores returns all rig names and their stores. The city work store is
+// exposed separately through WorkBeadStore so a same-named rig cannot collide
+// with it in this name-keyed projection.
 func (cs *controllerState) BeadStores() map[string]beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	// Return a copy to avoid races.
-	m := make(map[string]beads.Store, len(cs.beadStores)+1)
-	// Include the HQ work store so work projections such as /v0/beads read the
-	// authoritative city ledger, not a split coordination-class store.
-	cityWorkStore := cs.cityWorkBeadStore
-	if cityWorkStore == nil {
-		cityWorkStore = cs.cityBeadStore
-	}
-	if cityWorkStore != nil {
-		m[cs.cityName] = cityWorkStore
-	}
+	m := make(map[string]beads.Store, len(cs.beadStores))
 	for k, v := range cs.beadStores {
 		m[k] = v
 	}

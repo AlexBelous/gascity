@@ -11,7 +11,7 @@ func isGraphConvoyID(s *Server, id string) bool {
 			return isGraphConvoyBead(b)
 		}
 	}
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)

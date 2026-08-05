@@ -74,6 +74,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			rigNames = []string{input.Rig}
 		}
 	} else {
+		stores = federatedWorkBeadStores(stores, s.cityWorkBeadStore())
 		rigNames = sortedRigNames(stores)
 	}
 
@@ -148,10 +149,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 					// loss), strictly worse than the count's slight possible
 					// over-advertisement. Only a hard List failure (zero
 					// reachable rows, below) drops its count (gascity#3253).
-					pa.record("rig "+rigName, err)
+					pa.record(workBeadStoreLabel(rigName), err)
 					pa.success()
 				} else {
-					pa.record("rig "+rigName, err)
+					pa.record(workBeadStoreLabel(rigName), err)
 					if boundedMode {
 						// This rig's exact Count was baked into boundedCounts
 						// upfront, but its List failed so its rows never reach
@@ -391,20 +392,14 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			all = append(all, b)
 		}
 	}
-	cityName := s.state.CityName()
 	cityWorkStore := s.cityWorkBeadStore()
-	// City work and coordination normally alias. Split-store cities keep ready
-	// backlog work in the city entry returned by BeadStores while graph/session
-	// coordination remains in CityBeadStore, so federate both distinct stores.
+	// City work and coordination normally alias. Split-store cities keep them
+	// separate, so federate both distinct stores before the per-rig stores.
 	federate("city work", cityWorkStore)
 	if coordinationStore := s.state.CityBeadStore(); coordinationStore != cityWorkStore {
 		federate("city coordination", coordinationStore)
 	}
 	for _, rigName := range rigNames {
-		if rigName == cityName {
-			continue // city store already federated explicitly above; production
-			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
-		}
 		federate("rig "+rigName, stores[rigName])
 	}
 	if pa.totalOutage() {

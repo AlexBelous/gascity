@@ -206,14 +206,10 @@ func (s *seededState) Config() *config.City              { return s.cfg }
 func (s *seededState) SessionProvider() runtime.Provider { return s.sp }
 func (s *seededState) BeadStore(rig string) beads.Store  { return s.rigStores[rig] }
 
-// BeadStores returns the rig stores plus the city (HQ) store keyed by city name,
-// so /beads federates the city root alongside every rig — the same shape
-// controllerState.BeadStores exposes.
+// BeadStores returns only rig stores. WorkBeadStore exposes the city work store
+// separately so a same-named rig cannot collide with it.
 func (s *seededState) BeadStores() map[string]beads.Store {
-	m := make(map[string]beads.Store, len(s.rigStores)+1)
-	if s.cityStore != nil {
-		m[s.cityName] = s.cityStore
-	}
+	m := make(map[string]beads.Store, len(s.rigStores))
 	for k, v := range s.rigStores {
 		m[k] = v
 	}

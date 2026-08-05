@@ -133,9 +133,6 @@ func (f *fakeState) WorkBeadStore() beads.WorkStore {
 	if f.cityWorkBeadStore != nil {
 		return beads.WorkStore{Store: f.cityWorkBeadStore}
 	}
-	if store := f.stores[f.cityName]; store != nil {
-		return beads.WorkStore{Store: store}
-	}
 	return beads.WorkStore{Store: f.cityBeadStore}
 }
 

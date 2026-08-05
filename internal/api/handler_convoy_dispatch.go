@@ -593,9 +593,6 @@ func workflowStores(state State) []workflowStoreInfo {
 	}
 
 	for _, rigName := range sortedRigNames(beadStores) {
-		if rigName == cityName {
-			continue
-		}
 		store := state.BeadStore(rigName)
 		if store == nil {
 			continue

@@ -3223,9 +3223,7 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 
 func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 	if cr.cs != nil {
-		stores := cr.cs.BeadStores()
-		delete(stores, cr.cityName)
-		return stores
+		return cr.cs.BeadStores()
 	}
 	return cr.standaloneRigStores
 }

@@ -647,6 +647,7 @@ func seedStatusBodyState(t *testing.T) *fakeState {
 		t.Fatalf("Create work bead: %v", err)
 	}
 	state.stores["myrig"] = rigStore
+	state.cityWorkBeadStore = rigStore
 
 	cityStore := beads.NewMemStore()
 	if _, err := cityStore.Create(beads.Bead{

@@ -105,7 +105,7 @@ func TestSlingUsesDistinctCityWorkStoreForHQBead(t *testing.T) {
 	state.cfg.Workspace.Prefix = "gc"
 	state.cityBeadStore = beads.NewMemStore()
 	cityWorkStore := beads.NewMemStore()
-	state.stores[state.cityName] = cityWorkStore
+	state.cityWorkBeadStore = cityWorkStore
 	state.cfg.Agents = append(state.cfg.Agents, config.Agent{
 		Name:              "city-worker",
 		Provider:          "test-agent",

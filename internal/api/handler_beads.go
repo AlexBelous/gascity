@@ -18,6 +18,33 @@ import (
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
+// cityWorkStoreKey is internal to work-store federation and cannot be a valid
+// rig name. It lets the city work store coexist with a same-named rig in map-
+// based aggregation code without exposing a synthetic scope on the wire.
+const cityWorkStoreKey = "\x00city-work"
+
+func federatedWorkBeadStores(rigStores map[string]beads.Store, cityWorkStore beads.Store) map[string]beads.Store {
+	stores := make(map[string]beads.Store, len(rigStores)+1)
+	cityAlreadyPresent := false
+	for name, store := range rigStores {
+		stores[name] = store
+		if store == cityWorkStore {
+			cityAlreadyPresent = true
+		}
+	}
+	if cityWorkStore != nil && !cityAlreadyPresent {
+		stores[cityWorkStoreKey] = cityWorkStore
+	}
+	return stores
+}
+
+func workBeadStoreLabel(key string) string {
+	if key == cityWorkStoreKey {
+		return "city work"
+	}
+	return "rig " + key
+}
+
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
 	if store == nil {
 		return children
@@ -207,14 +234,14 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 		}
 	}
 
-	stores := s.state.BeadStores()
+	stores := federatedWorkBeadStores(s.state.BeadStores(), s.cityWorkBeadStore())
 	rigNames := sortedRigNames(stores)
 	candidates := make([]beads.Store, 0, len(rigNames)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		candidates = append(candidates, cityStore)
-	}
 	for _, rigName := range rigNames {
 		candidates = append(candidates, stores[rigName])
+	}
+	if coordinationStore := s.state.CityBeadStore(); coordinationStore != nil && coordinationStore != s.cityWorkBeadStore() {
+		candidates = append(candidates, coordinationStore)
 	}
 	return candidates
 }

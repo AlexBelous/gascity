@@ -580,9 +580,9 @@ type statusWorkResult struct {
 	errs     []string
 }
 
-// statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work exactly like GET /beads/ready: the city
-// store first, then BeadStores excluding the CityName alias. Stores exposing
+// statusWorkCounts tallies persisted open/in_progress work across the explicit
+// city work store and the rig-only BeadStores projection. It federates Ready
+// work from those stores plus a distinct city coordination store. Stores exposing
 // beads.Counter answer persisted counts without hydrating rows — the caching
 // layer counts matches in memory when its cache is clean (#1896). Stores are
 // queried concurrently; results aggregate in deterministic city/rig order.
@@ -604,22 +604,37 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 		includeStored bool
 		includeReady  bool
 	}
-	queries := make([]workQuery, 0, len(rigNames)+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+	queries := make([]workQuery, 0, len(rigNames)+2)
+	seenStores := make(map[beads.Store]bool, len(rigNames)+2)
+	cityWorkStore := s.cityWorkBeadStore()
+	if cityWorkStore != nil {
 		queries = append(queries, workQuery{
-			label:        "city",
-			store:        cityStore,
+			label:         "city work",
+			store:         cityWorkStore,
+			includeStored: true,
+			includeReady:  true,
+		})
+		seenStores[cityWorkStore] = true
+	}
+	if coordinationStore := s.state.CityBeadStore(); coordinationStore != nil && coordinationStore != cityWorkStore {
+		queries = append(queries, workQuery{
+			label:        "city coordination",
+			store:        coordinationStore,
 			includeReady: true,
 		})
+		seenStores[coordinationStore] = true
 	}
-	cityName := s.state.CityName()
 	for _, rigName := range rigNames {
+		if seenStores[stores[rigName]] {
+			continue
+		}
 		queries = append(queries, workQuery{
 			label:         "rig " + rigName,
 			store:         stores[rigName],
 			includeStored: true,
-			includeReady:  rigName != cityName && !cacheColdRigs[rigName],
+			includeReady:  !cacheColdRigs[rigName],
 		})
+		seenStores[stores[rigName]] = true
 	}
 
 	results := make([]statusWorkResult, len(queries))

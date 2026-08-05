@@ -405,7 +405,7 @@ func TestBeadStoresForIDUsesDistinctCityWorkStoreForHQPrefix(t *testing.T) {
 	coordinationStore := beads.NewMemStore()
 	workStore := beads.NewMemStore()
 	state.cityBeadStore = coordinationStore
-	state.stores[state.cityName] = workStore
+	state.cityWorkBeadStore = workStore
 	state.cfg.Workspace.Prefix = "gc"
 
 	stores := New(state).beadStoresForID("gc-work")
@@ -703,6 +703,51 @@ func TestBeadListCrossRig(t *testing.T) {
 	}
 }
 
+func TestBeadListFederatesCityAndSameNamedRig(t *testing.T) {
+	assertBeadEndpointFederatesCityAndSameNamedRig(t, "/beads")
+}
+
+func assertBeadEndpointFederatesCityAndSameNamedRig(t *testing.T, endpoint string) {
+	t.Helper()
+	state := newFakeState(t)
+	cityWorkStore := beads.NewMemStore()
+	rigStore := beads.NewMemStoreFrom(100, nil, nil)
+	state.cityName = "shared"
+	state.cfg.Workspace.Name = state.cityName
+	state.cfg.Rigs = []config.Rig{{Name: state.cityName, Path: "/tmp/shared"}}
+	state.cityWorkBeadStore = cityWorkStore
+	state.cityBeadStore = cityWorkStore
+	state.stores = map[string]beads.Store{state.cityName: rigStore}
+
+	cityBead, err := cityWorkStore.Create(beads.Bead{ID: "gc-city", Title: "city work"})
+	if err != nil {
+		t.Fatalf("Create(city work): %v", err)
+	}
+	rigBead, err := rigStore.Create(beads.Bead{ID: "shared-rig", Title: "rig work"})
+	if err != nil {
+		t.Fatalf("Create(rig work): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest("GET", cityURL(state, endpoint), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items []beads.Bead `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode response: %v", err)
+	}
+	want := map[string]bool{cityBead.ID: true, rigBead.ID: true}
+	for _, item := range resp.Items {
+		delete(want, item.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("%s Items = %+v, missing same-name federation IDs %v", endpoint, resp.Items, want)
+	}
+}
+
 func TestBeadGetNotFound(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
@@ -830,8 +875,7 @@ func TestBeadReady(t *testing.T) {
 }
 
 // TestBeadReadyFederatesCityStore asserts that city-scope ready work surfaces
-// through GET /beads/ready. The pre-fix handler queried only the per-rig
-// BeadStores() and dropped beads that live in the city store.
+// through GET /beads/ready alongside the per-rig BeadStores projection.
 func TestBeadReadyFederatesCityStore(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
@@ -865,7 +909,7 @@ func TestBeadReadyFederatesDistinctCityWorkStore(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
 	cityWorkStore := beads.NewMemStore()
-	state.stores[state.cityName] = cityWorkStore
+	state.cityWorkBeadStore = cityWorkStore
 	work, err := cityWorkStore.Create(beads.Bead{ID: "gc-work", Title: "city work"})
 	if err != nil {
 		t.Fatalf("Create(city work): %v", err)
@@ -890,10 +934,13 @@ func TestBeadReadyFederatesDistinctCityWorkStore(t *testing.T) {
 	t.Fatalf("ready Items = %+v, want authoritative city work bead %s", resp.Items, work.ID)
 }
 
-// TestBeadReadyDedupesCityAliasedStore mirrors the production wiring where
-// BeadStores() also returns the city store keyed by CityName(). The handler
-// must surface a city-scope ready bead exactly once and must not record a
-// duplicate partial error for the doubly-federated city store.
+func TestBeadReadyFederatesCityAndSameNamedRig(t *testing.T) {
+	assertBeadEndpointFederatesCityAndSameNamedRig(t, "/beads/ready")
+}
+
+// TestBeadReadyDedupesCityAliasedStore covers legacy State implementations that
+// still alias the city store in BeadStores. The handler must surface the bead
+// exactly once and avoid a duplicate partial error.
 func TestBeadReadyDedupesCityAliasedStore(t *testing.T) {
 	state := newFakeState(t)
 	store := beads.NewMemStore()

@@ -79,11 +79,9 @@ func (cs *controllerState) cityWorkStore() beads.WorkStore {
 	return cs.WorkBeadStore()
 }
 
-// workBeadStores returns all rig WORK-class stores keyed by rig name, including
-// the HQ city store, as strongly-typed beads.WorkStore values. Each wrapper
-// carries the exact same underlying store value BeadStores() returns today, so it
-// is byte-identical; pass the embedded .Store field to any generic beads.Store
-// helper shared across classes.
+// workBeadStores returns all rig WORK-class stores keyed by rig name as
+// strongly-typed beads.WorkStore values. City work is exposed separately by
+// cityWorkStore so a same-named rig cannot collide with it.
 func (cs *controllerState) workBeadStores() map[string]beads.WorkStore {
 	return toWorkStores(cs.BeadStores())
 }

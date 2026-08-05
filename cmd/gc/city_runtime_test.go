@@ -4378,6 +4378,32 @@ func TestCityRuntimeBuildDesiredState_ControllerUsesDistinctCityWorkStore(t *tes
 	}
 }
 
+func TestCityRuntimeBuildDesiredState_ControllerIncludesSameNamedRigStore(t *testing.T) {
+	cityWorkStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cs := &controllerState{
+		cityName:          "shared",
+		cityBeadStore:     cityWorkStore,
+		cityWorkBeadStore: cityWorkStore,
+		beadStores:        map[string]beads.Store{"shared": rigStore},
+	}
+	cr := &CityRuntime{
+		cityPath: t.TempDir(),
+		cityName: "shared",
+		cfg:      &config.City{Rigs: []config.Rig{{Name: "shared"}}},
+		sp:       runtime.NewFake(),
+		cs:       cs,
+		buildFnWithSessionBeads: func(_ *config.City, _ runtime.Provider, _ beads.Store, _ beads.Store, rigStores map[string]beads.Store, _ *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+			if got := rigStores["shared"]; got != rigStore {
+				t.Fatalf("rigStores[shared] = %v, want same-named rig store %v", got, rigStore)
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+	}
+
+	cr.buildDesiredState(nil, nil)
+}
+
 func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")

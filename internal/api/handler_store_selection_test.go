@@ -52,7 +52,7 @@ func TestBeadCreateUsesDistinctCityWorkStoreWithoutRig(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
 	cityWorkStore := beads.NewMemStore()
-	state.stores[state.cityName] = cityWorkStore
+	state.cityWorkBeadStore = cityWorkStore
 	state.stores["beta"] = beads.NewMemStore()
 	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "beta", Path: "/tmp/beta"})
 	h := newTestCityHandlerWith(t, state, New(state))
@@ -145,7 +145,7 @@ func TestConvoyCreateUsesDistinctCityWorkStoreWithoutRig(t *testing.T) {
 	state := newFakeMutatorState(t)
 	state.cityBeadStore = beads.NewMemStore()
 	cityWorkStore := beads.NewMemStore()
-	state.stores[state.cityName] = cityWorkStore
+	state.cityWorkBeadStore = cityWorkStore
 	state.stores["beta"] = beads.NewMemStore()
 	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "beta", Path: "/tmp/beta"})
 	h := newTestCityHandlerWith(t, state, New(state))

@@ -649,7 +649,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	}
 }
 
-func TestWorkflowStoresSkipsCityStoreEntriesFromBeadStoreMap(t *testing.T) {
+func TestWorkflowStoresUsesRigOnlyBeadStoreProjection(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "bright-lights"
 	cityStore := beads.NewMemStore()
@@ -658,8 +658,7 @@ func TestWorkflowStoresSkipsCityStoreEntriesFromBeadStoreMap(t *testing.T) {
 		{Name: "alpha", Path: t.TempDir()},
 	}
 	state.stores = map[string]beads.Store{
-		"bright-lights": cityStore,
-		"alpha":         beads.NewMemStore(),
+		"alpha": beads.NewMemStore(),
 	}
 
 	stores := workflowStores(state)

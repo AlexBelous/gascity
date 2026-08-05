@@ -1290,6 +1290,14 @@ func (cr *CityRuntime) tick(
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
+	// Graph stores intentionally do not emit bead.closed. Reconcile their
+	// closed graph.v2 steps only at the authoritative patrol cadence, not on
+	// event-driven ticks, so lifecycle recovery remains bounded and idempotent.
+	if trigger == "patrol" && cr.cs != nil {
+		phaseStart = time.Now()
+		cr.cs.reconcileExecutionCompletions()
+		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, nil)
+	}
 
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
 	// arm routes through the typed graph-class store; the read-message retention

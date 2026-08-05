@@ -451,11 +451,8 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	// A controller can crash after the durable bead.closed journal append but
 	// before its best-effort lifecycle append. The normal watcher intentionally
 	// begins at the boot-time journal head, so reconcile closed graph.v2 steps
-	// before tailing to repair that otherwise permanent gap. ReconcileCompleted
-	// reads exact facts from the same journal to make restart passes idempotent.
-	graphStore := cs.GraphBeadStore()
-	graphStore.Store = uncachedBeadStore(graphStore.Store)
-	executionevent.ReconcileCompleted(ep, graphStore, "execution-reconcile")
+	// before tailing to repair that otherwise permanent gap.
+	cs.reconcileExecutionCompletions()
 	seq := cs.beadEventStartSeq
 	// A captured seq of 0 with OK=true means the log was genuinely empty at
 	// construction — Watch(0) then replays exactly the prime-window events and
@@ -505,6 +502,20 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// reconcileExecutionCompletions repairs graph.v2 completion facts from the
+// authoritative graph store. It is safe to call at startup and on patrol ticks:
+// ReconcileCompleted uses the event journal's exact fact as its idempotency
+// record, so repeated passes do not duplicate lifecycle events.
+func (cs *controllerState) reconcileExecutionCompletions() {
+	ep := cs.EventProvider()
+	if ep == nil {
+		return
+	}
+	graphStore := cs.GraphBeadStore()
+	graphStore.Store = uncachedBeadStore(graphStore.Store)
+	executionevent.ReconcileCompleted(ep, graphStore, "execution-reconcile")
 }
 
 // uncachedBeadStore peels the controller's policy/cache read layers so a

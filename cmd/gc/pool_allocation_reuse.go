@@ -62,7 +62,7 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolSoleMember(
 	if err != nil {
 		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("reading reusable pool member %q: %w", sessionID, err)
 	}
-	workDir := poolTriggerWorkDir(bp, agent, hint.PoolTarget, request)
+	workDir := poolTriggerWorkDir(bp, agent, sessionBeadQualifiedNameInfo(snapshot.CityPath, agent, snapshot.Config.Rigs, info), request)
 	if strings.TrimSpace(workDir) == "" {
 		return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("reusing pool member %q: work directory is unavailable", sessionID)
 	}
@@ -172,10 +172,11 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	cr.serviceStateMu.RLock()
 	configCurrent := cr.cfg == snapshot.Config
 	cr.serviceStateMu.RUnlock()
-	if !configCurrent || snapshot.Generation != lease.ControllerGeneration || info.ID != lease.SessionID || info.Closed ||
+	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
+	if !configCurrent || agent == nil || snapshot.Generation != lease.ControllerGeneration || info.ID != lease.SessionID || info.Closed ||
 		strings.TrimSpace(info.InstanceToken) != lease.InstanceToken ||
 		normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget ||
-		!isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) {
+		!isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) || isManualSessionInfoForAgent(info, agent) || info.DependencyOnly {
 		return routedWorkPoolReuseRefused, nil
 	}
 	lifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
@@ -190,8 +191,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 		strings.TrimSpace(info.TriggerBeadStoreRef) != lease.PreviousSourceStore {
 		return routedWorkPoolReuseRefused, nil
 	}
-	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
-	if agent == nil || strings.TrimSpace(agent.Nudge) == "" ||
+	if strings.TrimSpace(agent.Nudge) == "" ||
 		isAgentEffectivelySuspendedWith(snapshot.Config, snapshot.CityPath, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
 		return routedWorkPoolReuseRefused, nil
 	}
@@ -246,7 +246,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	if pending != nil {
 		busy = true
 	}
-	hasAssigned, err := sessionHasAwakeAssignedWorkForReachableStore(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), info)
+	hasAssigned, err := sessionHasOpenAssignedWorkForReachableStore(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), info)
 	if err != nil {
 		return routedWorkPoolReuseRefused, fmt.Errorf("authorizing pool reuse for %q: checking assigned work: %w", lease.SessionID, err)
 	}

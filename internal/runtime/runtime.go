@@ -277,6 +277,16 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// FencedNudgeProvider is an optional extension for runtimes that can inject
+// input only when the live target still has the expected GC_INSTANCE_TOKEN at
+// the provider's native effect boundary.
+//
+// Implementations must fail closed without injecting input when the expected
+// token is empty, malformed, or no longer identifies the live target.
+type FencedNudgeProvider interface {
+	NudgeFenced(name, expectedInstanceToken string, content []ContentBlock) error
+}
+
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard
 // output and exit code. It is the op a [Carrier] drives the session-interaction

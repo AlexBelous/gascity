@@ -14,6 +14,67 @@ import (
 
 func isRemote(name string) bool { return strings.Contains(name, "remote-agent") }
 
+type noFencedNudgeProvider struct{ runtime.Provider }
+
+func TestProviderNudgeFencedRoutesOnlySelectedBackend(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		session string
+	}{
+		{name: "local", session: "local-agent"},
+		{name: "remote", session: "remote-agent-1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			local := runtime.NewFake()
+			remote := runtime.NewFake()
+			provider := New(local, remote, isRemote)
+			for _, backend := range []*runtime.Fake{local, remote} {
+				if err := backend.Start(t.Context(), test.session, runtime.Config{}); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				if err := backend.SetMeta(test.session, "GC_INSTANCE_TOKEN", "launch-1"); err != nil {
+					t.Fatalf("SetMeta: %v", err)
+				}
+			}
+
+			if err := provider.NudgeFenced(test.session, "launch-1", runtime.TextContent("continue")); err != nil {
+				t.Fatalf("NudgeFenced: %v", err)
+			}
+			selected, other := local, remote
+			if isRemote(test.session) {
+				selected, other = remote, local
+			}
+			if got := selected.CountCalls("NudgeFenced", test.session); got != 1 {
+				t.Fatalf("selected fenced nudge calls = %d, want 1", got)
+			}
+			if got := other.CountCalls("NudgeFenced", test.session); got != 0 {
+				t.Fatalf("other fenced nudge calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestProviderNudgeFencedFailsClosedForUnsupportedSelectedBackend(t *testing.T) {
+	local := runtime.NewFake()
+	remote := runtime.NewFake()
+	session := "remote-agent-1"
+	if err := remote.Start(t.Context(), session, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	provider := New(local, &noFencedNudgeProvider{Provider: remote}, isRemote)
+
+	err := provider.NudgeFenced(session, "launch-1", runtime.TextContent("continue"))
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("NudgeFenced = %v, want ErrInteractionUnsupported", err)
+	}
+	if got := local.CountCalls("NudgeFenced", session); got != 0 {
+		t.Fatalf("local fenced nudge calls = %d, want 0", got)
+	}
+	if got := remote.CountCalls("NudgeFenced", session); got != 0 {
+		t.Fatalf("remote fenced nudge calls = %d, want 0", got)
+	}
+}
+
 type unattendedStopCall struct {
 	name          string
 	expectedToken string

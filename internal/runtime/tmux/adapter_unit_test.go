@@ -85,6 +85,45 @@ func TestNudgeSessionBoundFencesAtSingleTmuxEffectCommand(t *testing.T) {
 	}
 }
 
+func TestNudgeSessionBoundFencedGuardsExpectedTokenBeforeAndAfterYield(t *testing.T) {
+	fe := &fakeExecutor{outs: []string{
+		"41",
+		"$7\tworker\t@3\t%9\t123",
+		"$7\tworker\t@3\t%9",
+		"",
+		"GC_PROVIDER=codex",
+		"123",
+		boundInputFenceMarker,
+	}}
+	tm := NewTmuxWithConfig(Config{SocketName: "city-socket"})
+	tm.exec = fe
+	tm.namedSocketLstat = stableNamedSocketLstat(t)
+
+	err := tm.NudgeSessionBoundFenced("worker", "expected-token", "do not inject")
+	if !errors.Is(err, runtime.ErrInputFenced) {
+		t.Fatalf("NudgeSessionBoundFenced = %v, want ErrInputFenced", err)
+	}
+	effect := strings.Join(fe.calls[len(fe.calls)-1], " ")
+	if got := strings.Count(effect, "#{==:#{E:GC_INSTANCE_TOKEN},expected-token}"); got != 2 {
+		t.Fatalf("token guard count = %d, want outer and post-yield guards in %q", got, effect)
+	}
+	if !strings.Contains(effect, "if-shell") || !strings.Contains(effect, "send-keys") {
+		t.Fatalf("effect command = %q, want one guarded input command", effect)
+	}
+}
+
+func TestProviderNudgeFencedReportsSessionGone(t *testing.T) {
+	fe := &fakeExecutor{err: ErrSessionNotFound}
+	p := NewProviderWithConfig(Config{SocketName: "city-socket"})
+	p.tm.exec = fe
+	p.tm.namedSocketLstat = stableNamedSocketLstat(t)
+
+	err := p.NudgeFenced("missing", "expected-token", runtime.TextContent("do not inject"))
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("NudgeFenced missing session = %v, want ErrSessionNotFound", err)
+	}
+}
+
 func TestNudgeSessionBoundRestoresDetachedSubmissionInsideGuard(t *testing.T) {
 	fe := &fakeExecutor{outs: []string{
 		"41",

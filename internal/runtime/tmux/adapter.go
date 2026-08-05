@@ -44,6 +44,7 @@ var (
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
+	_ runtime.FencedNudgeProvider           = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -570,12 +571,28 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	return p.nudgeNow(name, "", content)
+}
+
+// NudgeFenced sends a message only if the live tmux target still carries the
+// expected GC_INSTANCE_TOKEN at its final input effect boundary.
+func (p *Provider) NudgeFenced(name, expectedInstanceToken string, content []runtime.ContentBlock) error {
+	if !validExpectedInstanceToken(expectedInstanceToken) {
+		return fmt.Errorf("%w: expected instance token is empty or malformed", runtime.ErrInputFenced)
+	}
+	return p.nudgeNow(name, expectedInstanceToken, content)
+}
+
+func (p *Provider) nudgeNow(name, expectedInstanceToken string, content []runtime.ContentBlock) error {
 	// Keep the whole-session census as the broad guard: a user can be in copy
 	// mode on a non-target pane. NudgeSessionBound repeats the target's state in
 	// the server-queued effect command so this preflight cannot open a race.
 	if err := p.nudgeInputFence(name); err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return nil
+			if expectedInstanceToken == "" {
+				return nil
+			}
+			return err
 		}
 		return err
 	}
@@ -603,9 +620,17 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	if message == "" {
 		return nil
 	}
-	err := p.tm.NudgeSessionBound(name, message)
+	var err error
+	if expectedInstanceToken == "" {
+		err = p.tm.NudgeSessionBound(name, message)
+	} else {
+		err = p.tm.NudgeSessionBoundFenced(name, expectedInstanceToken, message)
+	}
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
-		return nil
+		if expectedInstanceToken == "" {
+			return nil
+		}
+		return err
 	}
 	return err
 }

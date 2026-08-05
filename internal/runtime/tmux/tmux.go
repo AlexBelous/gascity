@@ -1749,6 +1749,20 @@ type boundInputTarget struct {
 // pane are still the observed ones and no client has attached or entered copy
 // mode. The false branch has no input effect and reports runtime.ErrInputFenced.
 func (t *Tmux) NudgeSessionBound(session, message string) error {
+	return t.nudgeSessionBound(session, "", message)
+}
+
+// NudgeSessionBoundFenced sends a nudge only when the exact target remains
+// safe for input and its GC_INSTANCE_TOKEN still matches expectedInstanceToken
+// at the server-queued effect boundary.
+func (t *Tmux) NudgeSessionBoundFenced(session, expectedInstanceToken, message string) error {
+	if !validExpectedInstanceToken(expectedInstanceToken) {
+		return fmt.Errorf("%w: expected instance token is empty or malformed", runtime.ErrInputFenced)
+	}
+	return t.nudgeSessionBound(session, expectedInstanceToken, message)
+}
+
+func (t *Tmux) nudgeSessionBound(session, expectedInstanceToken, message string) error {
 	if message == "" {
 		return nil
 	}
@@ -1791,7 +1805,7 @@ func (t *Tmux) NudgeSessionBound(session, message string) error {
 
 	debounce := t.nudgeSubmitDebounce(target.paneID)
 	commitPoke := t.beginPoke(session)
-	condition := boundInputCondition(target, witness)
+	condition := boundInputCondition(target, witness, expectedInstanceToken)
 	elseCommand := fmt.Sprintf("delete-buffer -b %s ; display-message -p %s", bufferName, boundInputFenceMarker)
 	thenCommand := boundInputThenCommand(condition, target.windowID, target.paneID, bufferName, debounce+50*time.Millisecond, elseCommand)
 	out, err := t.runForAttachWitness(witness, "if-shell", "-t", target.paneID, "-F", condition, thenCommand, elseCommand)
@@ -1836,7 +1850,7 @@ func (t *Tmux) boundInputTarget(session string, witness namedSocketWitness) (bou
 	return boundInputTarget{sessionID: fields[0], windowID: fields[2], paneID: fields[3]}, nil
 }
 
-func boundInputCondition(target boundInputTarget, witness namedSocketWitness) string {
+func boundInputCondition(target boundInputTarget, witness namedSocketWitness, expectedInstanceToken string) string {
 	checks := []string{
 		fmt.Sprintf("#{==:#{session_id},%s}", target.sessionID),
 		fmt.Sprintf("#{==:#{window_id},%s}", target.windowID),
@@ -1848,11 +1862,26 @@ func boundInputCondition(target boundInputTarget, witness namedSocketWitness) st
 	if witness.serverPID > 0 {
 		checks = append([]string{fmt.Sprintf("#{==:#{pid},%d}", witness.serverPID)}, checks...)
 	}
+	if expectedInstanceToken != "" {
+		checks = append(checks, fmt.Sprintf("#{==:#{E:GC_INSTANCE_TOKEN},%s}", expectedInstanceToken))
+	}
 	condition := checks[len(checks)-1]
 	for index := len(checks) - 2; index >= 0; index-- {
 		condition = fmt.Sprintf("#{&&:%s,%s}", checks[index], condition)
 	}
 	return condition
+}
+
+func validExpectedInstanceToken(value string) bool {
+	if value == "" || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func nextPasteBufferName() string {

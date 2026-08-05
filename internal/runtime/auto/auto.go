@@ -31,6 +31,7 @@ var (
 	_ runtime.InteractionProvider           = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.FencedNudgeProvider           = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessInvalidator           = (*Provider)(nil)
@@ -318,6 +319,16 @@ func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.L
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
+}
+
+// NudgeFenced delegates only to the backend selected for name. It never
+// falls back to another backend or to unfenced input delivery.
+func (p *Provider) NudgeFenced(name, expectedInstanceToken string, content []runtime.ContentBlock) error {
+	provider, ok := p.route(name).(runtime.FencedNudgeProvider)
+	if !ok {
+		return runtime.ErrInteractionUnsupported
+	}
+	return provider.NudgeFenced(name, expectedInstanceToken, content)
 }
 
 // WaitForIdle delegates to the routed backend when it supports explicit

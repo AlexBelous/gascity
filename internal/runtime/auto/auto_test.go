@@ -15,6 +15,72 @@ import (
 
 var _ runtime.Provider = (*Provider)(nil)
 
+type noFencedNudgeProvider struct{ runtime.Provider }
+
+func TestProviderNudgeFencedRoutesOnlySelectedBackend(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		session  string
+		routeACP bool
+	}{
+		{name: "default", session: "default-worker"},
+		{name: "acp", session: "acp-worker", routeACP: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			defaultProvider := runtime.NewFake()
+			acpProvider := runtime.NewFake()
+			provider := New(defaultProvider, acpProvider)
+			if test.routeACP {
+				provider.RouteACP(test.session)
+			}
+			for _, backend := range []*runtime.Fake{defaultProvider, acpProvider} {
+				if err := backend.Start(t.Context(), test.session, runtime.Config{}); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				if err := backend.SetMeta(test.session, "GC_INSTANCE_TOKEN", "launch-1"); err != nil {
+					t.Fatalf("SetMeta: %v", err)
+				}
+			}
+
+			if err := provider.NudgeFenced(test.session, "launch-1", runtime.TextContent("continue")); err != nil {
+				t.Fatalf("NudgeFenced: %v", err)
+			}
+			selected, other := defaultProvider, acpProvider
+			if test.routeACP {
+				selected, other = acpProvider, defaultProvider
+			}
+			if got := selected.CountCalls("NudgeFenced", test.session); got != 1 {
+				t.Fatalf("selected fenced nudge calls = %d, want 1", got)
+			}
+			if got := other.CountCalls("NudgeFenced", test.session); got != 0 {
+				t.Fatalf("other fenced nudge calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestProviderNudgeFencedFailsClosedForUnsupportedSelectedBackend(t *testing.T) {
+	defaultFake := runtime.NewFake()
+	acpFake := runtime.NewFake()
+	session := "acp-worker"
+	if err := acpFake.Start(t.Context(), session, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	provider := New(defaultFake, &noFencedNudgeProvider{Provider: acpFake})
+	provider.RouteACP(session)
+
+	err := provider.NudgeFenced(session, "launch-1", runtime.TextContent("continue"))
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("NudgeFenced = %v, want ErrInteractionUnsupported", err)
+	}
+	if got := defaultFake.CountCalls("NudgeFenced", session); got != 0 {
+		t.Fatalf("default fenced nudge calls = %d, want 0", got)
+	}
+	if got := acpFake.CountCalls("NudgeFenced", session); got != 0 {
+		t.Fatalf("ACP fenced nudge calls = %d, want 0", got)
+	}
+}
+
 type unattendedStopCall struct {
 	name          string
 	expectedToken string

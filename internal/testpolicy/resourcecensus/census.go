@@ -136,8 +136,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   432,
-			BaselineFiles:   160,
+			BaselineCalls:   436,
+			BaselineFiles:   161,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",

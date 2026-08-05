@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -307,12 +308,12 @@ func (i *poolMembershipIndex) observe(poolTarget string) poolMembershipObservati
 	}
 }
 
-// observeSoleMember returns the certified observation and the only durable
-// member ID when the pool contains exactly one member. The per-pool ID set is
-// maintained with the existing counters, so this never scans the fleet.
-func (i *poolMembershipIndex) observeSoleMember(poolTarget string) (poolMembershipObservation, string, bool) {
+// observeMemberIDs returns a stable copy of the exact certified member IDs for
+// one pool. Callers must load each returned row through the store; this index
+// is only the bounded candidate set, never an authority for session contents.
+func (i *poolMembershipIndex) observeMemberIDs(poolTarget string) (poolMembershipObservation, []string, bool) {
 	if i == nil {
-		return poolMembershipObservation{reason: poolMembershipUncertifiedNotInitialized}, "", false
+		return poolMembershipObservation{reason: poolMembershipUncertifiedNotInitialized}, nil, false
 	}
 	poolTarget = strings.TrimSpace(poolTarget)
 	i.mu.RLock()
@@ -325,17 +326,16 @@ func (i *poolMembershipIndex) observeSoleMember(poolTarget string) (poolMembersh
 		revision:     i.revision,
 		reason:       i.reason,
 	}
-	if !observation.certified || observation.members != 1 {
-		return observation, "", false
-	}
 	ids := i.state.memberIDs[poolTarget]
-	if len(ids) != 1 {
-		return observation, "", false
+	if !observation.certified || observation.members == 0 || len(ids) != observation.members {
+		return observation, nil, false
 	}
+	result := make([]string, 0, len(ids))
 	for id := range ids {
-		return observation, id, true
+		result = append(result, id)
 	}
-	return observation, "", false
+	sort.Strings(result)
+	return observation, result, true
 }
 
 // observeOccupiedMember returns the same certified observation plus whether

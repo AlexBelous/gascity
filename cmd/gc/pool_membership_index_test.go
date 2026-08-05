@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -142,29 +143,35 @@ func TestPoolMembershipIndexMovesOnlyTheChangedSession(t *testing.T) {
 	assertCertifiedPoolMembership(t, index.observe("worker"), 0, 0)
 }
 
-func TestPoolMembershipIndexObservesSoleMemberOnlyFromCertifiedExactState(t *testing.T) {
+func TestPoolMembershipIndexObservesMemberIDsOnlyFromCertifiedExactState(t *testing.T) {
 	cfg := poolMembershipTestConfig("worker")
 	first := poolMembershipInfo(t, "session-1", "worker", "active", "", false)
 	second := poolMembershipInfo(t, "session-2", "worker", "active", "", false)
 	second.PoolSlot = "2"
 
 	index := rebuiltPoolMembershipIndex(t, cfg, []sessionpkg.Info{first})
-	observation, id, ok := index.observeSoleMember("worker")
-	if !ok || id != first.ID || !observation.certified || observation.members != 1 || observation.occupied != 1 {
-		t.Fatalf("sole member observation = (%+v, %q, %t), want certified %q", observation, id, ok, first.ID)
+	observation, ids, ok := index.observeMemberIDs("worker")
+	if !ok || !reflect.DeepEqual(ids, []string{first.ID}) || !observation.certified || observation.members != 1 || observation.occupied != 1 {
+		t.Fatalf("member observation = (%+v, %v, %t), want certified [%q]", observation, ids, ok, first.ID)
 	}
 
 	if err := index.replace(cfg, second); err != nil {
 		t.Fatalf("add second member: %v", err)
 	}
-	if observation, id, ok := index.observeSoleMember("worker"); ok || id != "" || observation.members != 2 {
-		t.Fatalf("duplicate member observation = (%+v, %q, %t), want no sole member", observation, id, ok)
+	observation, ids, ok = index.observeMemberIDs("worker")
+	if !ok || !reflect.DeepEqual(ids, []string{first.ID, second.ID}) || observation.members != 2 || observation.occupied != 2 {
+		t.Fatalf("two-member observation = (%+v, %v, %t), want both exact member IDs", observation, ids, ok)
+	}
+	ids[0] = "mutated-copy"
+	_, ids, ok = index.observeMemberIDs("worker")
+	if !ok || !reflect.DeepEqual(ids, []string{first.ID, second.ID}) {
+		t.Fatalf("member observation after caller mutation = (%v, %t), want unchanged exact member IDs", ids, ok)
 	}
 
 	index.remove(second.ID)
 	index.invalidate(poolMembershipUncertifiedSnapshotGap)
-	if observation, id, ok := index.observeSoleMember("worker"); ok || id != "" || observation.certified {
-		t.Fatalf("uncertified sole observation = (%+v, %q, %t), want refusal", observation, id, ok)
+	if observation, ids, ok := index.observeMemberIDs("worker"); ok || ids != nil || observation.certified {
+		t.Fatalf("uncertified member observation = (%+v, %v, %t), want refusal", observation, ids, ok)
 	}
 }
 

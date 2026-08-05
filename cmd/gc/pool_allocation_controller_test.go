@@ -651,6 +651,235 @@ func TestRoutedWorkPoolAllocationReusesSoleIdleGenericMemberForNewWork(t *testin
 	}
 }
 
+func TestRoutedWorkPoolAllocationReusesLaterIdleMemberOfMultiMemberPool(t *testing.T) {
+	for _, maximum := range []int{3, -1} {
+		t.Run(fmt.Sprintf("max_active_sessions=%d", maximum), func(t *testing.T) {
+			fixture, firstWork, older, secondWork, newer := prepareTwoMemberGenericPoolForReuse(t, maximum)
+			if err := fixture.store.Close(firstWork.ID); err != nil {
+				t.Fatalf("close older trigger work: %v", err)
+			}
+			if err := fixture.store.Close(secondWork.ID); err != nil {
+				t.Fatalf("close newer trigger work: %v", err)
+			}
+			if _, err := fixture.store.Create(beads.Bead{Title: "older assigned work", Type: "task", Status: "open", Assignee: older.ID}); err != nil {
+				t.Fatalf("create older assigned work: %v", err)
+			}
+			beforeOlder, err := fixture.store.Get(older.ID)
+			if err != nil {
+				t.Fatalf("read older member before reuse: %v", err)
+			}
+			baselineCalls := len(fixture.provider.SnapshotCalls())
+			thirdWork, err := fixture.store.Create(beads.Bead{Title: "third routed work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+			if err != nil {
+				t.Fatalf("create third routed work: %v", err)
+			}
+
+			result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: thirdWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+			if err != nil || !result.Handled || result.Created || result.Session.ID != newer.ID || result.Session.PoolSlot != newer.PoolSlot {
+				t.Fatalf("reuse later idle member = (%+v, %v), want existing newer slot-2 member %q", result, err, newer.ID)
+			}
+			afterOlder, err := fixture.store.Get(older.ID)
+			if err != nil {
+				t.Fatalf("read older member after reuse: %v", err)
+			}
+			if !reflect.DeepEqual(afterOlder, beforeOlder) {
+				t.Fatalf("reuse changed older busy member\n before=%+v\n  after=%+v", beforeOlder, afterOlder)
+			}
+			stored, err := fixture.store.Get(newer.ID)
+			if err != nil {
+				t.Fatalf("read rebound newer member: %v", err)
+			}
+			if stored.Metadata[beadmeta.TriggerBeadIDMetadataKey] != thirdWork.ID || stored.Metadata["pool_slot"] != newer.PoolSlot {
+				t.Fatalf("rebound newer member = %#v, want third-work trigger and unchanged slot %q", stored.Metadata, newer.PoolSlot)
+			}
+			if got := providerCallCount(fixture.provider, "Start"); got != 2 {
+				t.Fatalf("global provider Start calls after multi-member reuse = %d, want 2", got)
+			}
+			if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
+				t.Fatalf("global provider Stop calls after multi-member reuse = %d, want 0", got)
+			}
+			assertExactProviderNudgeSince(t, fixture.provider, baselineCalls, newer.SessionNameMetadata, "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [routed-work-pool-reuse] Run gc hook --claim --json now.\n\nHandle them after this turn.\n</system-reminder>\n")
+			if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+				t.Fatalf("legacy fallback after multi-member reuse = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+			}
+		})
+	}
+}
+
+func TestRoutedWorkPoolAllocationReusesOldestIdleMemberOfMultiMemberPool(t *testing.T) {
+	fixture, firstWork, older, secondWork, newer := prepareTwoMemberGenericPoolForReuse(t, 3)
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close older trigger work: %v", err)
+	}
+	if err := fixture.store.Close(secondWork.ID); err != nil {
+		t.Fatalf("close newer trigger work: %v", err)
+	}
+	beforeNewer, err := fixture.store.Get(newer.ID)
+	if err != nil {
+		t.Fatalf("read newer member before reuse: %v", err)
+	}
+	baselineCalls := len(fixture.provider.SnapshotCalls())
+	thirdWork, err := fixture.store.Create(beads.Bead{Title: "third routed work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create third routed work: %v", err)
+	}
+
+	result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: thirdWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+	if err != nil || !result.Handled || result.Created || result.Session.ID != older.ID || result.Session.PoolSlot != older.PoolSlot {
+		t.Fatalf("reuse oldest idle member = (%+v, %v), want existing older slot-1 member %q", result, err, older.ID)
+	}
+	storedOlder, err := fixture.store.Get(older.ID)
+	if err != nil {
+		t.Fatalf("read rebound older member: %v", err)
+	}
+	if storedOlder.Metadata[beadmeta.TriggerBeadIDMetadataKey] != thirdWork.ID || storedOlder.Metadata["pool_slot"] != older.PoolSlot {
+		t.Fatalf("rebound older member = %#v, want third-work trigger and unchanged slot %q", storedOlder.Metadata, older.PoolSlot)
+	}
+	afterNewer, err := fixture.store.Get(newer.ID)
+	if err != nil {
+		t.Fatalf("read newer member after reuse: %v", err)
+	}
+	if !reflect.DeepEqual(afterNewer, beforeNewer) {
+		t.Fatalf("reuse changed newer idle member\n before=%+v\n  after=%+v", beforeNewer, afterNewer)
+	}
+	if got := providerCallCount(fixture.provider, "Start"); got != 2 {
+		t.Fatalf("global provider Start calls after deterministic multi-member reuse = %d, want 2", got)
+	}
+	if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
+		t.Fatalf("global provider Stop calls after deterministic multi-member reuse = %d, want 0", got)
+	}
+	assertExactProviderNudgeSince(t, fixture.provider, baselineCalls, older.SessionNameMetadata, "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [routed-work-pool-reuse] Run gc hook --claim --json now.\n\nHandle them after this turn.\n</system-reminder>\n")
+	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after deterministic multi-member reuse = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	}
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load sessions after deterministic multi-member reuse: %v", err)
+	}
+	if open := infos.OpenInfos(); len(open) != 2 {
+		t.Fatalf("open sessions after deterministic multi-member reuse = %+v, want original two", open)
+	}
+	reboundRevision := storedOlder.Revision
+	reboundNudges := providerNudgeCalls(fixture.provider, older.SessionNameMetadata)
+	replay, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: thirdWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+	if err != nil || !replay.Handled || replay.Created || replay.Session.ID != older.ID {
+		t.Fatalf("replay deterministic multi-member reuse = (%+v, %v), want existing older member", replay, err)
+	}
+	afterReplay, err := fixture.store.Get(older.ID)
+	if err != nil {
+		t.Fatalf("read older member after replay: %v", err)
+	}
+	if afterReplay.Revision != reboundRevision {
+		t.Fatalf("older member revision after replay = %d, want unchanged %d", afterReplay.Revision, reboundRevision)
+	}
+	if got := providerNudgeCalls(fixture.provider, older.SessionNameMetadata); got != reboundNudges {
+		t.Fatalf("older member nudges after replay = %d, want unchanged %d", got, reboundNudges)
+	}
+}
+
+func TestRoutedWorkPoolAllocationAllBusyMultiMemberPoolKeepsExistingGrowthAndFallback(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		maximum       int
+		wantCreated   bool
+		wantFallback  bool
+		wantPoolCount int
+	}{
+		{name: "below cap grows", maximum: 3, wantCreated: true, wantPoolCount: 3},
+		{name: "at cap falls back", maximum: 2, wantFallback: true, wantPoolCount: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, _, _, _, _ := prepareTwoMemberGenericPoolForReuse(t, test.maximum)
+			baselineNudges := providerCallCount(fixture.provider, "Nudge") + providerCallCount(fixture.provider, "NudgeNow")
+			thirdWork, err := fixture.store.Create(beads.Bead{Title: "third routed work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+			if err != nil {
+				t.Fatalf("create third routed work: %v", err)
+			}
+
+			if test.wantFallback {
+				fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: thirdWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+				assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+				if got := providerCallCount(fixture.provider, "Start"); got != 2 {
+					t.Fatalf("global provider Start calls after all-busy cap fallback = %d, want 2", got)
+				}
+				if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
+					t.Fatalf("global provider Stop calls after all-busy cap fallback = %d, want 0", got)
+				}
+				if got := providerCallCount(fixture.provider, "Nudge") + providerCallCount(fixture.provider, "NudgeNow"); got != baselineNudges {
+					t.Fatalf("global provider nudge calls after all-busy cap fallback = %d, want unchanged %d", got, baselineNudges)
+				}
+			} else {
+				result, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: thirdWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+				if err != nil || !result.Handled || result.Created != test.wantCreated || result.Session.PoolSlot != "3" {
+					t.Fatalf("all-busy multi-member allocation = (%+v, %v), want created slot 3", result, err)
+				}
+			}
+			infos, err := loadSessionBeadSnapshot(fixture.store)
+			if err != nil {
+				t.Fatalf("load pool sessions: %v", err)
+			}
+			if open := len(infos.OpenInfos()); open != test.wantPoolCount {
+				t.Fatalf("open pool sessions after all-busy allocation = %d, want %d", open, test.wantPoolCount)
+			}
+		})
+	}
+}
+
+func TestRoutedWorkPoolAllocationUncertainEarlierMemberDoesNotRouteAroundToLaterIdle(t *testing.T) {
+	fixture, firstWork, older, secondWork, newer := prepareTwoMemberGenericPoolForReuse(t, 3)
+	if err := fixture.store.Close(firstWork.ID); err != nil {
+		t.Fatalf("close older trigger work: %v", err)
+	}
+	if err := fixture.store.Close(secondWork.ID); err != nil {
+		t.Fatalf("close newer trigger work: %v", err)
+	}
+	if err := fixture.provider.SetMeta(older.SessionNameMetadata, "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
+		t.Fatalf("replace older runtime token: %v", err)
+	}
+	beforeOlder, err := fixture.store.Get(older.ID)
+	if err != nil {
+		t.Fatalf("read uncertain older member: %v", err)
+	}
+	beforeNewer, err := fixture.store.Get(newer.ID)
+	if err != nil {
+		t.Fatalf("read idle newer member: %v", err)
+	}
+	baselineNudges := providerCallCount(fixture.provider, "Nudge") + providerCallCount(fixture.provider, "NudgeNow")
+	thirdWork, err := fixture.store.Create(beads.Bead{Title: "third routed work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create third routed work: %v", err)
+	}
+
+	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: thirdWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+
+	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	for _, before := range []beads.Bead{beforeOlder, beforeNewer} {
+		after, err := fixture.store.Get(before.ID)
+		if err != nil {
+			t.Fatalf("read protected member %q: %v", before.ID, err)
+		}
+		if !reflect.DeepEqual(after, before) {
+			t.Fatalf("uncertain selection changed protected member %q\n before=%+v\n  after=%+v", before.ID, before, after)
+		}
+	}
+	if got := providerCallCount(fixture.provider, "Start"); got != 2 {
+		t.Fatalf("global provider Start calls after uncertain selection = %d, want 2", got)
+	}
+	if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
+		t.Fatalf("global provider Stop calls after uncertain selection = %d, want 0", got)
+	}
+	if got := providerCallCount(fixture.provider, "Nudge") + providerCallCount(fixture.provider, "NudgeNow"); got != baselineNudges {
+		t.Fatalf("global provider nudge calls after uncertain selection = %d, want unchanged %d", got, baselineNudges)
+	}
+	infos, err := loadSessionBeadSnapshot(fixture.store)
+	if err != nil {
+		t.Fatalf("load sessions after uncertain selection: %v", err)
+	}
+	if open := infos.OpenInfos(); len(open) != 2 {
+		t.Fatalf("open sessions after uncertain selection = %+v, want original two", open)
+	}
+}
+
 func TestRoutedWorkPoolAllocationBusyGenericReuseGrowsWithoutRebinding(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -2813,6 +3042,29 @@ func prepareIdleGenericPoolMemberForReuse(t *testing.T, conditional bool, maximu
 	setRoutedWorkPoolRuntimeIdentity(t, fixture, info)
 	fixture.provider.WaitForIdleErrors[info.SessionNameMetadata] = nil
 	return fixture, firstWork, info
+}
+
+func prepareTwoMemberGenericPoolForReuse(t *testing.T, maximum int) (routedWorkPoolAllocationFixture, beads.Bead, sessionpkg.Info, beads.Bead, sessionpkg.Info) {
+	t.Helper()
+	fixture, firstWork, first := prepareIdleGenericPoolMemberForReuse(t, true, maximum)
+	secondWork, err := fixture.store.Create(beads.Bead{Title: "second pool work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatalf("create second pool work: %v", err)
+	}
+	second, err := fixture.cr.reconcileRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: secondWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
+	if err != nil || !second.Handled || !second.Created || second.Session.PoolSlot != "2" {
+		t.Fatalf("grow second pool member = (%+v, %v), want created slot 2", second, err)
+	}
+	awaitCond(t, func() bool {
+		return fixture.provider.IsRunning(second.Session.SessionName) && fixture.cr.sessionStartController.Pending() == 0
+	}, "second pool member to start")
+	secondInfo, err := sessionFrontDoor(fixture.store).Get(second.Session.ID)
+	if err != nil {
+		t.Fatalf("read second pool member: %v", err)
+	}
+	setRoutedWorkPoolRuntimeIdentity(t, fixture, secondInfo)
+	fixture.provider.WaitForIdleErrors[secondInfo.SessionNameMetadata] = nil
+	return fixture, firstWork, first, secondWork, secondInfo
 }
 
 func setRoutedWorkPoolRuntimeIdentity(t testing.TB, fixture routedWorkPoolAllocationFixture, info sessionpkg.Info) {

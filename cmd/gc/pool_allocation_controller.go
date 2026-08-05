@@ -499,7 +499,7 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 		stderr:    cr.sessionStartStderr(),
 	}
 	if policy.maxActiveSessions != 0 {
-		reused, reuseDisposition, reuseErr := cr.reuseIdleRoutedWorkPoolSoleMember(ctx, snapshot, agent, work, hint, bp, request)
+		reused, reuseDisposition, reuseErr := cr.reuseIdleRoutedWorkPoolMember(ctx, snapshot, agent, work, hint, bp, request)
 		if reuseErr != nil {
 			return routedWorkPoolAllocationResult{}, reuseErr
 		}

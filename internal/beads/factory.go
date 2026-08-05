@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -151,7 +152,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 
-	native, err := opts.openNativeStore(ctx)
+	native, err := opts.openNativeStoreWithMigrationRaceRetry(ctx)
 	if err != nil {
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
@@ -261,6 +262,58 @@ func (opts StoreOpenOptions) openNativeStore(ctx context.Context) (Store, error)
 		return opts.OpenNativeStore()
 	}
 	return newNativeDoltStoreAt(ctx, opts.ScopeRoot, nil)
+}
+
+const (
+	// nativeOpenMigrationRaceMaxAttempts bounds how many times a native
+	// store open is attempted in total (1 initial attempt + retries) when
+	// each failure carries nativeOpenMigrationRaceSignature. Bounded so a
+	// persistently racing store still degrades to the bd fallback rather
+	// than retrying forever.
+	nativeOpenMigrationRaceMaxAttempts = 3
+	// nativeOpenMigrationRaceBackoff is the pause between retry attempts,
+	// giving the concurrent writer that caused the race time to finish.
+	nativeOpenMigrationRaceBackoff = 25 * time.Millisecond
+	// nativeOpenMigrationRaceSignature is the exact error text the vendored
+	// github.com/steveyegge/beads schema migration emits
+	// (internal/storage/schema/schema.go's changedDirtyTableSignatures
+	// guard) when it detects, just before staging/committing, that a table
+	// it saw as dirty before migration started has changed underneath it —
+	// i.e. another process wrote to the shared dolt working set
+	// concurrently while this open was migrating. That guard fires and
+	// returns before DOLT_COMMIT runs, so no partial migration is ever
+	// committed: retrying the open from a clean state is safe, and is the
+	// correct response to what is, by construction, a transient
+	// concurrent-writer race rather than a genuine store failure (ga-grtg98).
+	nativeOpenMigrationRaceSignature = "pre-existing dirty tables changed during schema migration"
+)
+
+// openNativeStoreWithMigrationRaceRetry retries the native store open when
+// it fails with nativeOpenMigrationRaceSignature, up to
+// nativeOpenMigrationRaceMaxAttempts total attempts. Any other error, or
+// context cancellation between attempts, returns immediately — the caller
+// falls back to the bd store exactly as it does for any native-open error.
+func (opts StoreOpenOptions) openNativeStoreWithMigrationRaceRetry(ctx context.Context) (Store, error) {
+	var err error
+	for attempt := 1; attempt <= nativeOpenMigrationRaceMaxAttempts; attempt++ {
+		var store Store
+		store, err = opts.openNativeStore(ctx)
+		if err == nil {
+			return store, nil
+		}
+		if !strings.Contains(err.Error(), nativeOpenMigrationRaceSignature) {
+			return nil, err
+		}
+		if attempt == nativeOpenMigrationRaceMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(nativeOpenMigrationRaceBackoff):
+		}
+	}
+	return nil, err
 }
 
 func callStoreOpen(name string, open func() (Store, error)) (Store, error) {

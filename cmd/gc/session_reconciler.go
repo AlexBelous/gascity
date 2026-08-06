@@ -1358,6 +1358,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
 	}
+	// Index this tick's assigned-work snapshot by bead ID once, and build the
+	// bd-history-backed note-author lookup once, for the declined-bead
+	// re-wake diagnostic (gm-6a5dt) fired per wake decision below.
+	assignedWorkBeadsByID := make(map[string]beads.Bead, len(assignedWorkBeads))
+	for _, b := range assignedWorkBeads {
+		assignedWorkBeadsByID[b.ID] = b
+	}
+	declinedBeadRewakeLookup := newBDHistoryNoteAuthorLookup(cityPath)
 	if startupTimeout <= 0 && cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
@@ -3575,6 +3583,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
+			checkDeclinedBeadRewakeOnWake(assignedWorkBeadsByID, decision.AssignedWorkBeadID, declinedBeadRewakeLookup, func(format string, args ...any) {
+				fmt.Fprintf(stderr, format, args...) //nolint:errcheck // best-effort stderr, matches sibling logging in this block
+			})
 			// Capture-at-append: the recordCurrentBeadIDOnWake fold above lands on
 			// infoByID BEFORE this append, so the captured twin carries this tick's
 			// currently_processing_bead_id. It is the start-execution feed's only

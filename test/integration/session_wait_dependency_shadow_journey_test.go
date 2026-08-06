@@ -105,61 +105,76 @@ start_command = "sleep 3600"
 max_active_sessions = 1
 
 [[agent]]
+name = "cache"
+start_command = "sleep 3600"
+max_active_sessions = 1
+
+[[agent]]
 name = "worker"
 start_command = "sleep 3600"
-depends_on = ["database"]
+depends_on = ["database", "cache"]
 `, `patrol_interval = "1h"
-tick_debounce = "100ms"
+tick_debounce = "30s"
 `, `conditional_writes = "auto"`)
 
-	session, _, err := sessionWaitDependencyShadowJourneyWaitForWorkerSession(
-		t.Context(), cityDir, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
-	)
-	if err != nil {
-		t.Fatalf("wait for canonical named session: %v", err)
-	}
-	if _, _, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
-		t.Context(), cityDir, session.SessionName, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
-	); err != nil {
-		t.Fatalf("canonical named session was not live before wait: %v", err)
-	}
-	dependencySessions, err := gc(cityDir, "session", "list", "--state", "all", "--template", "database", "--json")
-	if err != nil {
-		t.Fatalf("list configured singleton dependency: %v\n%s", err, dependencySessions)
-	}
-	var dependencyList sessionWaitDependencyShadowJourneySessionList
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(dependencySessions))), &dependencyList); err != nil {
-		t.Fatalf("decode configured singleton dependency: %v\n%s", err, dependencySessions)
-	}
-	var liveDependency sessionWaitDependencyShadowJourneySessionItem
-	for _, candidate := range dependencyList.Sessions {
-		if candidate.Template == "database" && !candidate.Closed && candidate.State == "active" {
-			liveDependency = candidate
-			break
+	dependencyTmux := make(map[string]sessionWaitDependencyShadowJourneyTmuxSession, 2)
+	for _, template := range []string{"database", "cache"} {
+		dependencySessions, err := gc(cityDir, "session", "list", "--state", "all", "--template", template, "--json")
+		if err != nil {
+			t.Fatalf("list configured singleton %s: %v\n%s", template, err, dependencySessions)
 		}
-	}
-	if liveDependency.ID == "" || liveDependency.SessionName == "" {
-		t.Fatalf("configured singleton dependency before wait = %+v, want one active session", dependencyList.Sessions)
-	}
-	if _, _, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
-		t.Context(), cityDir, liveDependency.SessionName, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
-	); err != nil {
-		t.Fatalf("configured singleton dependency was not live before target wait: %v", err)
-	}
-	configPath := filepath.Join(cityDir, "city.toml")
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read initial debounce config: %v", err)
-	}
-	if strings.Count(string(configData), `tick_debounce = "100ms"`) != 1 {
-		t.Fatalf("initial debounce config did not contain exactly one short tick: %s", configData)
-	}
-	writeFileAtomic(t, configPath, []byte(strings.Replace(string(configData), `tick_debounce = "100ms"`, `tick_debounce = "10m"`, 1)))
-	if out, err := gcDolt(cityDir, "reload", "--timeout", "45s"); err != nil {
-		t.Fatalf("reload held debounce before durable wait: %v\n%s", err, out)
+		var dependencyList sessionWaitDependencyShadowJourneySessionList
+		if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(dependencySessions))), &dependencyList); err != nil {
+			t.Fatalf("decode configured singleton %s: %v\n%s", template, err, dependencySessions)
+		}
+		var liveDependency sessionWaitDependencyShadowJourneySessionItem
+		for _, candidate := range dependencyList.Sessions {
+			if candidate.Template == template && !candidate.Closed && candidate.ID != "" && candidate.SessionName != "" {
+				liveDependency = candidate
+				break
+			}
+		}
+		if liveDependency.ID == "" || liveDependency.SessionName == "" {
+			t.Fatalf("configured singleton %s before wait = %+v, want one nonclosed named session", template, dependencyList.Sessions)
+		}
+		if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
+			t.Context(), cityDir, liveDependency.ID, "active", integrationGCCommandTimeout,
+		); err != nil {
+			t.Fatalf("configured singleton %s was not durably active before target wait: %v", template, err)
+		}
+		tmuxSession, _, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+			t.Context(), cityDir, liveDependency.SessionName, time.Now(), integrationGCCommandTimeout,
+		)
+		if err != nil {
+			t.Fatalf("configured singleton %s was not live before target wait: %v", template, err)
+		}
+		dependencyTmux[template] = tmuxSession
 	}
 
-	out, err := bdDolt(cityDir, "create", "keyed start dependency", "--json")
+	out, err := gc(cityDir, "session", "new", "worker", "--alias", "manual-waiter", "--no-attach", "--json")
+	if err != nil {
+		t.Fatalf("create manual waiting session: %v\n%s", err, out)
+	}
+	var created sessionLifecycleStatusShadowJourneyNew
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &created); err != nil {
+		t.Fatalf("decode manual waiting session: %v\n%s", err, out)
+	}
+	if created.SessionID == "" || created.SessionName == "" {
+		t.Fatalf("manual waiting session = %+v, want ID and name", created)
+	}
+	session := sessionWaitDependencyShadowJourneySessionItem{ID: created.SessionID, Template: "worker", SessionName: created.SessionName}
+	if _, _, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+		t.Context(), cityDir, session.SessionName, time.Now(), integrationGCCommandTimeout,
+	); err != nil {
+		t.Fatalf("manual waiting session was not live before wait: %v", err)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
+		t.Context(), cityDir, session.ID, "active", integrationGCCommandTimeout,
+	); err != nil {
+		t.Fatalf("manual waiting session was not durably active before wait: %v", err)
+	}
+
+	out, err = bdDolt(cityDir, "create", "keyed start dependency", "--json")
 	if err != nil {
 		t.Fatalf("create durable dependency: %v\n%s", err, out)
 	}
@@ -276,22 +291,33 @@ tick_debounce = "100ms"
 	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
 		t.Context(), cityDir, session.ID, "active", sessionWaitDependencyShadowJourneyWitnessTimeout,
 	); err != nil {
-		t.Fatalf("named session %s did not become active: %v", session.ID, err)
+		t.Fatalf("manual session %s did not become active: %v", session.ID, err)
+	}
+	for _, template := range []string{"database", "cache"} {
+		live, _, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+			t.Context(), cityDir, dependencyTmux[template].Name, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
+		)
+		if err != nil {
+			t.Fatalf("configured singleton %s was not live after target keyed commit: %v", template, err)
+		}
+		if live != dependencyTmux[template] {
+			t.Fatalf("configured singleton %s changed during target keyed commit: got %+v, want %+v", template, live, dependencyTmux[template])
+		}
 	}
 	out, err = bdDolt(cityDir, "show", session.ID, "--json")
 	if err != nil {
-		t.Fatalf("show named session after keyed start: %v\n%s", err, out)
+		t.Fatalf("show manual session after keyed start: %v\n%s", err, out)
 	}
-	var namedSessions []sessionLifecycleStatusShadowJourneyBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &namedSessions); err != nil {
-		t.Fatalf("decode named session after keyed start: %v\n%s", err, out)
+	var manualSessions []sessionLifecycleStatusShadowJourneyBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &manualSessions); err != nil {
+		t.Fatalf("decode manual session after keyed start: %v\n%s", err, out)
 	}
-	if len(namedSessions) != 1 {
-		t.Fatalf("named session lookup after keyed start returned %d rows, want 1: %s", len(namedSessions), out)
+	if len(manualSessions) != 1 {
+		t.Fatalf("manual session lookup after keyed start returned %d rows, want 1: %s", len(manualSessions), out)
 	}
-	namedSession := namedSessions[0]
-	if namedSession.Metadata["configured_named_session"] != "true" || namedSession.Metadata["configured_named_identity"] == "" || namedSession.Metadata["configured_named_mode"] == "" || namedSession.Metadata["session_name"] != session.SessionName {
-		t.Fatalf("named session after keyed start metadata = %+v, want preserved canonical identity", namedSession.Metadata)
+	manualSession := manualSessions[0]
+	if manualSession.Metadata["session_origin"] != "manual" {
+		t.Fatalf("manual session after keyed start metadata = %+v, want preserved session_origin=manual", manualSession.Metadata)
 	}
 	durableWait, err := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
 	if err != nil {
@@ -300,7 +326,7 @@ tick_debounce = "100ms"
 	if durableWait.Wait.ID != waitID || durableWait.Wait.State != "ready" || durableWait.Wait.Status != "open" {
 		t.Fatalf("durable wait after keyed start = %+v, want id=%q state=ready status=open", durableWait.Wait, waitID)
 	}
-	t.Logf("dependency close started named %s through keyed reconciliation in %s and committed in %s (%s|%s|%s)", session.ID, liveLatency, commitLatency, tmuxSession.ID, tmuxSession.Name, tmuxSession.SocketPath)
+	t.Logf("dependency close started manual %s through keyed reconciliation in %s and committed in %s (%s|%s|%s)", session.ID, liveLatency, commitLatency, tmuxSession.ID, tmuxSession.Name, tmuxSession.SocketPath)
 }
 
 // TestReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce proves
@@ -519,7 +545,7 @@ func sessionWaitDependencyShadowJourneyRequireOmittedDependenciesEvent(cityDir, 
 }
 
 func sessionWaitDependencyShadowJourneyListSessions(cityDir string) (sessionWaitDependencyShadowJourneySessionList, error) {
-	out, err := gc(cityDir, "session", "list", "--state", "all", "--template", "worker", "--json")
+	out, err := gc(cityDir, "session", "list", "--state", "all", "--json")
 	if err != nil {
 		return sessionWaitDependencyShadowJourneySessionList{}, fmt.Errorf("gc session list: %w: %s", err, out)
 	}

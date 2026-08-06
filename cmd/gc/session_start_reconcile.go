@@ -187,8 +187,8 @@ func certifySessionWaitDependencyStartLease(
 }
 
 // waitDependencyConfiguredTemplateEligible admits ordinary configured sessions
-// and the one unambiguous configured dependency shape supported by exact wait
-// ownership: one currently-live canonical singleton dependency.
+// and configured dependencies only when every dependency is a currently-live
+// canonical singleton.
 func waitDependencyConfiguredTemplateEligible(
 	info sessionpkg.Info,
 	cfg *config.City,
@@ -205,12 +205,11 @@ func waitDependencyConfiguredTemplateEligible(
 	if len(cfgAgent.DependsOn) == 0 {
 		return true
 	}
-	if len(cfgAgent.DependsOn) != 1 {
-		return false
-	}
-	dependency := findAgentByTemplate(cfg, cfgAgent.DependsOn[0])
-	if dependency == nil || isMultiSessionCfgAgent(dependency) {
-		return false
+	for _, dependencyTemplate := range cfgAgent.DependsOn {
+		dependency := findAgentByTemplate(cfg, dependencyTemplate)
+		if dependency == nil || isMultiSessionCfgAgent(dependency) {
+			return false
+		}
 	}
 	return allDependenciesAliveForTemplateWithClock(template, cfg, nil, provider, cityName, store, &clock.Fake{Time: now})
 }

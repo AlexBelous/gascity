@@ -548,12 +548,14 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 		manual                 bool
 		named                  bool
 		liveSingletonDependsOn bool
+		twoLiveSingletons      bool
 	}{
 		{name: "all", depMode: "all"},
 		{name: "any", depMode: "any"},
 		{name: "manual-all", depMode: "all", manual: true},
 		{name: "named-all", depMode: "all", named: true},
 		{name: "live-singleton-depends-on", depMode: "all", liveSingletonDependsOn: true},
+		{name: "two-live-singleton-depends-on", depMode: "all", twoLiveSingletons: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
@@ -564,15 +566,22 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 					if test.liveSingletonDependsOn {
 						worker.DependsOn = []string{"database"}
 					}
+					if test.twoLiveSingletons {
+						worker.DependsOn = []string{"database", "cache"}
+					}
 					env.cfg = &config.City{
 						Workspace: config.Workspace{Name: "test-city"},
 						Agents: []config.Agent{
 							{Name: "database", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+							{Name: "cache", StartCommand: "true", MaxActiveSessions: intPtr(1)},
 							worker,
 						},
 					}
-					if test.liveSingletonDependsOn {
+					if test.liveSingletonDependsOn || test.twoLiveSingletons {
 						env.addDesired("database", "database", true)
+					}
+					if test.twoLiveSingletons {
+						env.addDesired("cache", "cache", true)
 					}
 					if test.named {
 						env.cfg.NamedSessions = []config.NamedSession{{Template: "worker", Mode: "always"}}
@@ -751,7 +760,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 					if got := unrelatedGets.Load(); got != 0 {
 						t.Fatalf("unrelated authoritative Gets = %d, want 0", got)
 					}
-					if got := audited.listCalls.Load(); got != 0 && !test.liveSingletonDependsOn {
+					if got := audited.listCalls.Load(); got != 0 && !test.liveSingletonDependsOn && !test.twoLiveSingletons {
 						t.Fatalf("fleet List calls = %d, want 0", got)
 					}
 					if cr.sessionWaitDependencyReadyPokePending.Load() {
@@ -803,6 +812,8 @@ func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *t
 			dependsOn      []string
 			dependencyMax  *int
 			dependencyLive bool
+			cacheMax       *int
+			cacheLive      bool
 			wantOwned      bool
 		}{
 			{name: "ordinary", wantOwned: true},
@@ -811,6 +822,8 @@ func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *t
 			{name: "not live singleton configured dependency", dependsOn: []string{"database"}, dependencyMax: intPtr(1)},
 			{name: "multiple configured dependencies", dependsOn: []string{"database", "cache"}},
 			{name: "live singleton configured dependency", dependsOn: []string{"database"}, dependencyMax: intPtr(1), dependencyLive: true, wantOwned: true},
+			{name: "two singleton dependencies with cold cache", dependsOn: []string{"database", "cache"}, dependencyMax: intPtr(1), dependencyLive: true, cacheMax: intPtr(1)},
+			{name: "two dependencies with non-singleton cache", dependsOn: []string{"database", "cache"}, dependencyMax: intPtr(1), dependencyLive: true, cacheLive: true},
 		} {
 			t.Run(string(mode)+"/"+test.name, func(t *testing.T) {
 				env := newReconcilerTestEnv()
@@ -818,12 +831,15 @@ func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *t
 					Workspace: config.Workspace{Name: "test-city"},
 					Agents: []config.Agent{
 						{Name: "database", StartCommand: "true", MaxActiveSessions: test.dependencyMax},
-						{Name: "cache", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+						{Name: "cache", StartCommand: "true", MaxActiveSessions: test.cacheMax},
 						{Name: "worker", StartCommand: "true", DependsOn: test.dependsOn},
 					},
 				}
 				if test.dependencyLive {
 					env.addDesired("database", "database", true)
+				}
+				if test.cacheLive {
+					env.addDesired("cache", "cache", true)
 				}
 				dependency, err := env.store.Create(beads.Bead{Title: "dependency"})
 				if err != nil {

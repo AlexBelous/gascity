@@ -534,7 +534,17 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 	}
 
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	// 5s, not 1s: this test races the real runStopWithWallClockCap goroutine
+	// spawn against a real timer with no deterministic gating (unlike
+	// TestCmdStopWallClockTimeoutBoundsSupervisorManagedInvalidConfigStop,
+	// which blocks its hook open explicitly). Under fleet scheduler
+	// contention a 1s cap measurably fires before the (fully mocked,
+	// otherwise-instant) stop sequence gets scheduled — reproduced locally
+	// with GOMAXPROCS=1 -count=20, 2 failures, observed elapsed up to 2.57s.
+	// This test isn't exercising the timeout boundary (that's the sibling
+	// test above), so it should use the same generous margin as the other
+	// non-boundary cmdStop tests in this file (5s/10s at lines ~289/365/720).
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 5*time.Second, false)
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}

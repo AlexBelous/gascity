@@ -641,6 +641,101 @@ func TestSessionHandleNudgeWaitIdleAuthorizedDenialAndErrorHaveZeroDeliveryEffec
 	}
 }
 
+func TestSessionHandleStartResolvedAuthorizedOrdersAuthorizationBeforeStart(t *testing.T) {
+	handle, _, provider, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(t.Context(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	provider.Calls = nil
+
+	authorized := 0
+	err = handle.StartResolvedAuthorized(t.Context(), "claude", runtime.Config{Command: "claude"}, func(context.Context) error {
+		authorized++
+		if got := provider.CountCalls("Start", info.SessionName); got != 0 {
+			t.Fatalf("provider Start calls during authorization = %d, want 0", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StartResolvedAuthorized: %v", err)
+	}
+	if authorized != 1 {
+		t.Fatalf("authorization calls = %d, want 1", authorized)
+	}
+	if got := provider.CountCalls("Start", info.SessionName); got != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", got)
+	}
+}
+
+func TestSessionHandleStartResolvedAuthorizedDenialHasZeroRuntimeEffect(t *testing.T) {
+	handle, _, provider, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(t.Context(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	provider.Calls = nil
+	denied := errors.New("recovery authority lost")
+
+	err = handle.StartResolvedAuthorized(t.Context(), "claude", runtime.Config{Command: "claude"}, func(context.Context) error {
+		return denied
+	})
+	if !errors.Is(err, denied) {
+		t.Fatalf("StartResolvedAuthorized error = %v, want %v", err, denied)
+	}
+	for _, method := range []string{"Start", "Stop"} {
+		if got := provider.CountCalls(method, info.SessionName); got != 0 {
+			t.Fatalf("provider %s calls = %d, want 0 after authorization refusal", method, got)
+		}
+	}
+}
+
+func TestSessionHandleStartResolvedAuthorizedNeverAcceptsOrRecyclesExistingRuntime(t *testing.T) {
+	handle, _, provider, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	info, err := handle.Create(t.Context(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if err := provider.Start(t.Context(), info.SessionName, runtime.Config{Command: "replacement"}); err != nil {
+		t.Fatalf("start replacement runtime: %v", err)
+	}
+	provider.Calls = nil
+
+	err = handle.StartResolvedAuthorized(t.Context(), "claude", runtime.Config{Command: "claude"}, func(context.Context) error {
+		return nil
+	})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("StartResolvedAuthorized error = %v, want session-exists refusal", err)
+	}
+	if got := provider.CountCalls("Start", info.SessionName); got != 1 {
+		t.Fatalf("provider Start calls = %d, want one refused start attempt", got)
+	}
+	if got := provider.CountCalls("Stop", info.SessionName); got != 0 {
+		t.Fatalf("provider Stop calls = %d, want no replacement recycling", got)
+	}
+}
+
 func TestSessionHandleCloseUsesWorkerBoundary(t *testing.T) {
 	handle, store, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Template: "probe",

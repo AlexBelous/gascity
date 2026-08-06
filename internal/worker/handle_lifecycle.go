@@ -53,6 +53,36 @@ func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, 
 	return err
 }
 
+// StartResolvedAuthorized starts the runtime only after authorize succeeds at
+// the provider-effect boundary. Unlike ordinary convergence, it never accepts
+// an already-running replacement or recycles a zombie runtime.
+func (h *SessionHandle) StartResolvedAuthorized(
+	ctx context.Context,
+	startCommand string,
+	hints runtime.Config,
+	authorize func(context.Context) error,
+) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
+	defer func() { event.finish(err) }()
+
+	id, err := h.ensureSessionID()
+	if err != nil {
+		return err
+	}
+	command := strings.TrimSpace(startCommand)
+	if command == "" {
+		command, err = h.startCommand(id)
+		if err != nil {
+			return err
+		}
+	}
+	startHints := hints
+	if strings.TrimSpace(startHints.Command) == "" {
+		startHints = h.runtimeHints()
+	}
+	return h.manager.StartRuntimeOnlyAuthorized(ctx, id, command, startHints, authorize)
+}
+
 // Attach ensures the worker runtime is live and then attaches the caller's
 // terminal using the underlying session transport.
 func (h *SessionHandle) Attach(ctx context.Context) (err error) {

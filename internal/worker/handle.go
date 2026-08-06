@@ -56,6 +56,13 @@ type AuthorizedIdleNudgeHandle interface {
 	NudgeWaitIdleAuthorized(context.Context, NudgeRequest, string, func(context.Context) error) (NudgeResult, error)
 }
 
+// AuthorizedStartHandle exposes the exact start path used when a caller must
+// reauthorize immediately before provider START. It deliberately does not
+// treat an existing runtime as success or recycle it.
+type AuthorizedStartHandle interface {
+	StartResolvedAuthorized(context.Context, string, runtime.Config, func(context.Context) error) error
+}
+
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
 	Message(context.Context, MessageRequest) (MessageResult, error)
@@ -295,6 +302,7 @@ type SessionHandle struct {
 
 var (
 	_ Handle                    = (*SessionHandle)(nil)
+	_ AuthorizedStartHandle     = (*SessionHandle)(nil)
 	_ AuthorizedIdleNudgeHandle = (*SessionHandle)(nil)
 	_ LifecycleHandle           = (*SessionHandle)(nil)
 	_ MessagingHandle           = (*SessionHandle)(nil)

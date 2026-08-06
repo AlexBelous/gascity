@@ -839,6 +839,64 @@ func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string
 	})
 }
 
+// StartRuntimeOnlyAuthorized performs one caller-resolved runtime start after
+// an authorization callback succeeds immediately before the provider effect.
+// It intentionally bypasses ordinary already-running convergence, orphan
+// cleanup, and stale-key retry so a replacement runtime is never accepted,
+// stopped, or recycled by this exact-effect path.
+func (m *Manager) StartRuntimeOnlyAuthorized(
+	ctx context.Context,
+	id string,
+	resumeCommand string,
+	hints runtime.Config,
+	authorize func(context.Context) error,
+) error {
+	if authorize == nil {
+		return fmt.Errorf("authorized runtime start requires an authorization callback")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		command := strings.TrimSpace(resumeCommand)
+		if command == "" {
+			return fmt.Errorf("%w: %s", ErrResumeRequired, id)
+		}
+		cfg := hints
+		cfg.Command = command
+		if cfg.WorkDir == "" {
+			cfg.WorkDir = b.Metadata["work_dir"]
+		}
+		cfg = runtime.SyncWorkDirEnv(cfg)
+
+		if err := authorize(ctx); err != nil {
+			return fmt.Errorf("authorizing runtime start: %w", err)
+		}
+
+		transport, _ := m.transportForBead(b, sessName)
+		unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+		failStart := func(cause error) error {
+			if unroute != nil {
+				unroute()
+			}
+			return cause
+		}
+		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+			// A same-name replacement may have appeared after authorization.
+			// Preserve its route and return the collision; never accept or unwind it.
+			if errors.Is(err, runtime.ErrSessionExists) {
+				return fmt.Errorf("resuming session: %w", err)
+			}
+			return failStart(fmt.Errorf("resuming session: %w", err))
+		}
+		return nil
+	})
+}
+
 // Send resumes a suspended session if needed, then nudges the runtime with a
 // new user message.
 func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) error {

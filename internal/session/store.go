@@ -274,30 +274,65 @@ func (s *Store) GetState(id string) (state State, closed bool, err error) {
 	return info.State, info.Closed, nil
 }
 
-// Close closes the session bead with terminal close metadata via ClosePatch,
-// then sets status closed. It is the front door for closeBead /
-// closeFailedCreateBead. stateCode is the canonical short state code recorded
-// before close; ClosePatch expands it to a validator-safe close_reason.
+const terminalCloseMaxAttempts = 3
+
+// Close closes the session bead with terminal close metadata via ClosePatch.
+// Stores with atomic terminal-close support commit the metadata and closed
+// status together behind the row revision; a concurrent writer causes a
+// bounded reread and retry. Other stores retain the historical ClosePatch then
+// Close sequence. It is the front door for closeBead / closeFailedCreateBead.
+// stateCode is the canonical short state code recorded before close;
+// ClosePatch expands it to a validator-safe close_reason.
 //
 // Reports whether the bead was actually closed (false when it was already
 // closed). PHASE 0: the work-reassignment side effect that closeBead performs
 // (releaseWorkFromClosedSessionBead) is intentionally NOT part of this method —
 // that is a cross-class WORK op owned by the Phase 6 work/assignment API.
 func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
-	info, err := s.Get(id)
+	bead, err := s.validatedBead(id)
 	if err != nil {
 		return false, err
 	}
-	if info.Closed {
+	if bead.Status == "closed" {
 		return false, nil
 	}
-	if err := s.ApplyPatch(id, ClosePatch(now, stateCode)); err != nil {
-		return false, err
+	patch := ClosePatch(now, stateCode)
+	closer, atomic := beads.AtomicConditionalCloserFor(s.store)
+	if !atomic {
+		if err := s.ApplyPatch(id, patch); err != nil {
+			return false, err
+		}
+		if err := s.store.Close(id); err != nil {
+			return false, fmt.Errorf("closing session %q: %w", id, err)
+		}
+		return true, nil
 	}
-	if err := s.store.Close(id); err != nil {
-		return false, fmt.Errorf("closing session %q: %w", id, err)
+
+	var conflict error
+	for attempt := 1; attempt <= terminalCloseMaxAttempts; attempt++ {
+		if bead.Revision == 0 {
+			return false, fmt.Errorf("closing session %q atomically: persisted revision is unavailable", id)
+		}
+		_, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch))
+		if err == nil {
+			return true, nil
+		}
+		if !beads.IsPreconditionFailed(err) {
+			return false, fmt.Errorf("closing session %q atomically: %w", id, err)
+		}
+		conflict = err
+		if attempt == terminalCloseMaxAttempts {
+			break
+		}
+		bead, err = s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		if bead.Status == "closed" {
+			return false, nil
+		}
 	}
-	return true, nil
+	return false, fmt.Errorf("closing session %q atomically after %d revision conflicts: %w", id, terminalCloseMaxAttempts, conflict)
 }
 
 // SetStatusOpen sets the session bead status to "open". It is the front door

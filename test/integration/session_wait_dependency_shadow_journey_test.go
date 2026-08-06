@@ -23,6 +23,7 @@ type sessionWaitDependencyShadowJourneySessionItem struct {
 	ID          string `json:"id"`
 	Template    string `json:"template"`
 	SessionName string `json:"session_name"`
+	State       string `json:"state"`
 	Closed      bool   `json:"closed"`
 }
 
@@ -91,41 +92,46 @@ type sessionWaitDependencyShadowJourneyTmuxSession struct {
 	SocketPath string
 }
 
-func TestSessionWaitDependencyShadowExactBinaryJourney(t *testing.T) {
+func TestSessionWaitDependencyCloseStartsSleepingSessionThroughKeyedController(t *testing.T) {
 	if usingSubprocess() {
-		t.Skip("exact wait-dependency shadow journey requires tmux")
+		t.Skip("exact wait-dependency start journey requires tmux")
 	}
 
-	cityDir := setupReconcilerCityWithDaemon(t, `session_reconciler = "auto"
+	cityDir := setupReconcilerCityWithManagedDolt(t, `session_reconciler = "auto"
 
 [[agent]]
 name = "worker"
 start_command = "sleep 3600"
 `, `patrol_interval = "1h"
 tick_debounce = "10m"
-`, "")
+`, `conditional_writes = "auto"`)
 	waitForExpectedTmuxSessions(t, cityDir, []string{"worker"})
 
-	session := sessionWaitDependencyShadowJourneySession(t, cityDir)
-	beforeIdentity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, session.SessionName)
+	session, _, err := sessionWaitDependencyShadowJourneyWaitForWorkerSession(
+		t.Context(), cityDir, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
+	if err != nil {
+		t.Fatalf("wait for durable worker session: %v", err)
+	}
 
-	out, err := bd(cityDir, "create", "shadow dependency", "--json")
+	out, err := bdDolt(cityDir, "create", "keyed start dependency", "--json")
 	if err != nil {
 		t.Fatalf("create durable dependency: %v\n%s", err, out)
 	}
 	dependencyID := sessionWaitDependencyShadowJourneyBeadID(t, out)
 
-	out, err = gc(cityDir, "session", "wait", session.ID,
+	out, err = gcDolt(cityDir, "session", "wait", session.ID,
 		"--on-beads", dependencyID,
-		"--note", "shadow dependency closed")
+		"--note", "keyed dependency closed",
+		"--sleep")
 	if err != nil {
 		t.Fatalf("register exact durable wait: %v\n%s", err, out)
 	}
 	waitID := sessionWaitDependencyShadowJourneyWaitID(t, out)
 
-	// The file-store bd shim persists the wait but does not run the production
-	// bd hook. Emit the typed hook event through the checkout-built gc surface.
-	out, err = gc(cityDir, "event", "emit", "bead.created",
+	// The integration bd invocation does not run the production hook. Emit its
+	// typed event through the same checkout-built gc binary.
+	out, err = gcDolt(cityDir, "event", "emit", "bead.created",
 		"--subject", waitID,
 		"--bead-payload", waitID,
 		"--actor", "bd-hook",
@@ -140,7 +146,6 @@ tick_debounce = "10m"
 	if !waitCreated.HasPayload || !waitCreated.Submitted {
 		t.Fatalf("durable wait creation event = %+v, want typed payload submitted", waitCreated)
 	}
-
 	pendingWait, err := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
 	if err != nil {
 		t.Fatalf("inspect pending wait %s: %v", waitID, err)
@@ -148,24 +153,70 @@ tick_debounce = "10m"
 	if pendingWait.Wait.ID != waitID || pendingWait.Wait.State != "pending" || pendingWait.Wait.Status != "open" {
 		t.Fatalf("wait while dependency is open = %+v, want id=%q state=pending status=open", pendingWait.Wait, waitID)
 	}
-	openTrace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+	// Put the fixture at this slice's public precondition: an open, asleep
+	// session held by the pending dependency wait. The STOP path has its own
+	// real-tmux journey; this test exercises only dependency-ready START.
+	out, err = runCommand("", commandEnvForDir(cityDir, false), integrationGCCommandTimeout,
+		"tmux", "-L", filepath.Base(cityDir), "kill-session", "-t", session.SessionName)
 	if err != nil {
-		t.Fatalf("read trace while dependency is open: %v", err)
+		t.Fatalf("stop waiting-session fixture runtime: %v\n%s", err, out)
 	}
-	for _, record := range sessionWaitDependencyShadowJourneyExactRecords(openTrace, waitID, session.ID) {
-		if record.Fields.WaitOutcome == "ready" {
-			t.Fatalf("ready exact shadow witness while dependency was open: %+v", record)
-		}
+	out, err = bdDolt(cityDir, "update", session.ID,
+		"--set-metadata", "state=asleep",
+		"--set-metadata", "sleep_reason=wait-hold",
+		"--set-metadata", "sleep_intent=wait-hold",
+		"--set-metadata", "wait_hold=true")
+	if err != nil {
+		t.Fatalf("persist waiting-session fixture state: %v\n%s", err, out)
+	}
+	out, err = gcDolt(cityDir, "event", "emit", "bead.updated",
+		"--subject", session.ID,
+		"--bead-payload", session.ID,
+		"--actor", "bd-hook",
+		"--json")
+	if err != nil {
+		t.Fatalf("emit waiting-session update event: %v\n%s", err, out)
+	}
+	if out, err = gcDolt(cityDir, "trace", "start", "--template", "worker", "--for", "2m", "--level", "detail"); err != nil {
+		t.Fatalf("arm dependency start trace: %v\n%s", err, out)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
+		t.Context(), cityDir, session.ID, "asleep", sessionWaitDependencyShadowJourneyWitnessTimeout,
+	); err != nil {
+		t.Fatalf("waiting-session fixture did not become observable: %v", err)
 	}
 
-	out, err = bd(cityDir, "close", dependencyID)
+	if err := sessionWaitDependencyShadowJourneyWaitForExactTmuxAbsence(
+		t.Context(), cityDir, session.SessionName, sessionWaitDependencyShadowJourneyWitnessTimeout,
+	); err != nil {
+		t.Fatalf("waiting session runtime remained live: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID))
+	}
+	// The shared reconciler fixture auto-declares configured named sessions.
+	// This slice owns ordinary legacy session rows, so remove only those origin
+	// markers after the fixture is asleep and immediately exercise the close.
+	out, err = bdDolt(cityDir, "update", session.ID,
+		"--unset-metadata", "configured_named_session",
+		"--unset-metadata", "configured_named_identity",
+		"--unset-metadata", "configured_named_mode",
+		"--unset-metadata", "session_origin")
+	if err != nil {
+		t.Fatalf("prepare ordinary waiting-session fixture: %v\n%s", err, out)
+	}
+	out, err = gcDolt(cityDir, "event", "emit", "bead.updated",
+		"--subject", session.ID,
+		"--bead-payload", session.ID,
+		"--actor", "cache-reconcile",
+		"--json")
+	if err != nil {
+		t.Fatalf("publish ordinary waiting-session fixture: %v\n%s", err, out)
+	}
+
+	out, err = bdDolt(cityDir, "close", dependencyID)
 	if err != nil {
 		t.Fatalf("close durable dependency: %v\n%s", err, out)
 	}
-	// The integration file-store bd shim persists the close but does not run
-	// the production bd hook. Invoke that hook's checkout-built gc surface so
-	// the controller receives the same typed bead snapshot as a real bd close.
-	out, err = gc(cityDir, "event", "emit", "bead.closed",
+	started := time.Now()
+	out, err = gcDolt(cityDir, "event", "emit", "bead.closed",
 		"--subject", dependencyID,
 		"--bead-payload", dependencyID,
 		"--actor", "bd-hook",
@@ -181,47 +232,29 @@ tick_debounce = "10m"
 		t.Fatalf("durable dependency close event = %+v, want typed payload submitted", emitted)
 	}
 
-	finalTrace, observedLatency, err := sessionWaitDependencyShadowJourneyWaitForDependencyCommit(
-		t.Context(),
-		cityDir,
-		waitID,
-		session.ID,
-		sessionWaitDependencyShadowJourneyWitnessTimeout,
+	tmuxSession, liveLatency, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+		t.Context(), cityDir, session.SessionName, started, sessionWaitDependencyShadowJourneyWitnessTimeout,
 	)
 	if err != nil {
-		t.Fatalf(
-			"exact dependency-commit shadow witness did not converge: %v\n%s",
-			err,
-			sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID),
-		)
+		t.Fatalf("dependency-ready session did not start: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID))
 	}
-	t.Logf("dependency-commit shadow witness observed after %s", observedLatency)
-
-	exactRecords := sessionWaitDependencyShadowJourneyExactRecords(finalTrace, waitID, session.ID)
-	for _, record := range exactRecords {
-		if record.RecordType != "operation" || record.Fields.EffectApplied == nil || *record.Fields.EffectApplied {
-			t.Fatalf("exact shadow record = %+v, want committed operation with no effect", record)
-		}
+	commit, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
+		t.Context(), cityDir, session, started, sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
+	if err != nil {
+		t.Fatalf("dependency-ready keyed start did not commit: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID))
 	}
-	dependencyRecords := sessionWaitDependencyShadowJourneyDependencyCommitRecords(finalTrace, waitID, session.ID)
-	if len(dependencyRecords) != 1 {
-		t.Fatalf("dependency-commit ready/noop/already-running shadow records = %d, want 1: %+v", len(dependencyRecords), dependencyRecords)
-	}
-	if record := dependencyRecords[0]; record.Seq == 0 || record.RecordID == "" {
-		t.Fatalf("dependency-commit shadow record = %+v, want committed record identity", record)
+	if commit.Fields.Admission != "wait_dependency" || commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
+		t.Fatalf("dependency start commit = %+v, want applied wait_dependency admission", commit)
 	}
 	durableWait, err := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
 	if err != nil {
 		t.Fatalf("inspect durable wait after shadow witness: %v", err)
 	}
 	if durableWait.Wait.ID != waitID || durableWait.Wait.State != "ready" || durableWait.Wait.Status != "open" {
-		t.Fatalf("durable wait after shadow witness = %+v, want id=%q state=ready status=open", durableWait.Wait, waitID)
+		t.Fatalf("durable wait after keyed start = %+v, want id=%q state=ready status=open", durableWait.Wait, waitID)
 	}
-
-	afterIdentity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, session.SessionName)
-	if afterIdentity != beforeIdentity {
-		t.Fatalf("tmux identity changed across dependency wake: before=%q after=%q", beforeIdentity, afterIdentity)
-	}
+	t.Logf("dependency close started %s through keyed reconciliation in %s and committed in %s (%s|%s|%s)", session.ID, liveLatency, commitLatency, tmuxSession.ID, tmuxSession.Name, tmuxSession.SocketPath)
 }
 
 // TestReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce proves
@@ -545,6 +578,112 @@ func sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
 				lastErr,
 				lastOutput,
 			)
+		case <-ticker.C:
+		}
+	}
+}
+
+func sessionWaitDependencyShadowJourneyWaitForExactTmuxAbsence(
+	ctx context.Context,
+	cityDir string,
+	sessionName string,
+	timeout time.Duration,
+) error {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastOutput string
+	for {
+		out, err := runCommand("", commandEnvForDir(cityDir, false), integrationGCCommandTimeout,
+			"tmux", "-L", filepath.Base(cityDir), "list-sessions", "-F", "#{session_name}")
+		lastOutput = out
+		if err != nil || !slicesContainLine(out, sessionName) {
+			return nil
+		}
+		select {
+		case <-deadline.Done():
+			return fmt.Errorf("waiting for exact tmux session %q to disappear: %w; last sessions: %q", sessionName, deadline.Err(), lastOutput)
+		case <-ticker.C:
+		}
+	}
+}
+
+func sessionWaitDependencyShadowJourneyWaitForSessionState(
+	ctx context.Context,
+	cityDir string,
+	sessionID string,
+	wantState string,
+	timeout time.Duration,
+) error {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	var last sessionWaitDependencyShadowJourneySessionList
+	var lastErr error
+	for {
+		current, err := sessionWaitDependencyShadowJourneyListSessions(cityDir)
+		if err != nil {
+			lastErr = err
+		} else {
+			last, lastErr = current, nil
+			for _, session := range current.Sessions {
+				if session.ID == sessionID && session.State == wantState {
+					return nil
+				}
+			}
+		}
+		select {
+		case <-deadline.Done():
+			return fmt.Errorf("waiting for session %s state %s: %w; last error: %v; last sessions: %+v", sessionID, wantState, deadline.Err(), lastErr, last.Sessions)
+		case <-ticker.C:
+		}
+	}
+}
+
+func slicesContainLine(output, want string) bool {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
+	ctx context.Context,
+	cityDir string,
+	session sessionWaitDependencyShadowJourneySessionItem,
+	started time.Time,
+	timeout time.Duration,
+) (sessionWaitDependencyShadowJourneyTraceRecord, time.Duration, error) {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		trace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+		if err != nil {
+			lastErr = err
+		} else {
+			matches := sessionWaitDependencyShadowJourneyPoolStartCommitRecords(trace, session)
+			switch len(matches) {
+			case 1:
+				return matches[0], time.Since(started), nil
+			case 0:
+				lastErr = fmt.Errorf("no exact start commit for %s", session.ID)
+			default:
+				return sessionWaitDependencyShadowJourneyTraceRecord{}, time.Since(started), fmt.Errorf("exact start commits for %s = %d, want 1: %+v", session.ID, len(matches), matches)
+			}
+		}
+		select {
+		case <-deadline.Done():
+			return sessionWaitDependencyShadowJourneyTraceRecord{}, time.Since(started), fmt.Errorf("waiting for exact dependency start commit: %w; last error: %v", deadline.Err(), lastErr)
 		case <-ticker.C:
 		}
 	}

@@ -152,7 +152,7 @@ func TestClaimPendingWaitReady_PreservesNewerReadyClaim(t *testing.T) {
 	}
 }
 
-func TestClassifyWaitReadyClaim_ConfirmsOwnClaimAfterLostWriteResponse(t *testing.T) {
+func TestClassifyWaitReadyClaim_ConfirmsOwnClaimWithNegativeOpaqueRevisions(t *testing.T) {
 	candidate := waitClaimInfo()
 	after := candidate
 	after.State = waitStateReady
@@ -160,7 +160,7 @@ func TestClassifyWaitReadyClaim_ConfirmsOwnClaimAfterLostWriteResponse(t *testin
 	after.ReadyOwner = string(WaitReadyOwnerDependency)
 	after.ReadyOperation = "dependency-ready/w-1/1"
 
-	got := classifyWaitReadyClaim(after, WaitPersistedResponse{Revision: 2}, candidate, WaitPersistedResponse{Revision: 1}, waitStoreNow.UTC().Format(time.RFC3339), WaitReadyOwnerDependency, "dependency-ready/w-1/1", errors.New("lost response"))
+	got := classifyWaitReadyClaim(after, WaitPersistedResponse{Revision: -2}, candidate, WaitPersistedResponse{Revision: -1}, waitStoreNow.UTC().Format(time.RFC3339), WaitReadyOwnerDependency, "dependency-ready/w-1/1", errors.New("lost response"))
 	if got != WaitReadyClaimCommitted {
 		t.Fatalf("outcome = %q, want committed", got)
 	}

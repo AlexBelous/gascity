@@ -132,7 +132,7 @@ func (s *Store) ClaimPendingWaitReady(candidate WaitInfo, persisted WaitPersiste
 	if operation == "" || strings.TrimSpace(operation) != operation || strings.ContainsAny(operation, " \t\r\n") {
 		return result, fmt.Errorf("claiming pending wait: ready operation must be non-empty and canonical")
 	}
-	if candidate.ID == "" || persisted.Revision <= 0 {
+	if candidate.ID == "" || persisted.Revision == 0 {
 		return result, fmt.Errorf("claiming pending wait: exact wait ID and revision are required")
 	}
 	if candidate.Status != "open" || candidate.State != waitStatePending {
@@ -209,7 +209,7 @@ func classifyWaitReadyClaimReadFailure(writeErr error) WaitReadyClaimOutcome {
 }
 
 func waitReadyClaimMatches(after WaitInfo, afterPersisted WaitPersistedResponse, candidate WaitInfo, persisted WaitPersistedResponse, readyAt string, owner WaitReadyOwner, operation string) bool {
-	return afterPersisted.Revision > 0 && afterPersisted.Revision != persisted.Revision &&
+	return afterPersisted.Revision != 0 && afterPersisted.Revision != persisted.Revision &&
 		waitRegistrationMatches(after, candidate) &&
 		after.Status == "open" &&
 		after.State == waitStateReady &&

@@ -88,7 +88,7 @@ func validateSessionWaitDependencyStartLease(lease sessionWaitDependencyStartLea
 	if lease.DepMode != "all" || len(lease.DepIDs) != 1 || lease.DepIDs[0] == "" || strings.TrimSpace(lease.DepIDs[0]) != lease.DepIDs[0] {
 		return errors.New("dependency wait lease is outside the exact deps/all cohort")
 	}
-	if lease.WaitRevision <= 0 || lease.SessionRevision <= 0 || lease.IndexGeneration == 0 || lease.ControllerGeneration == 0 {
+	if lease.WaitRevision == 0 || lease.SessionRevision == 0 || lease.IndexGeneration == 0 || lease.ControllerGeneration == 0 {
 		return errors.New("dependency wait lease lacks revision or generation provenance")
 	}
 	if lease.RegisteredEpoch == "" || strings.TrimSpace(lease.RegisteredEpoch) != lease.RegisteredEpoch {
@@ -133,7 +133,7 @@ func certifySessionWaitDependencyStartLease(
 	if wait.ID != target.WaitID || wait.SessionID != target.SessionID || wait.Kind != "deps" || wait.DepMode != "all" || len(wait.DepIDs) != 1 || wait.DepIDs[0] != target.DepIDs[0] || wait.Status != "open" || wait.State != waitStatePending {
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, nil
 	}
-	if info.ID != target.SessionID || info.Closed || persistedWait.Revision <= 0 || persistedSession.Revision <= 0 {
+	if info.ID != target.SessionID || info.Closed || persistedWait.Revision == 0 || persistedSession.Revision == 0 {
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, nil
 	}
 	_, cfgAgent, _ := classifyExactSessionStartOwnership(info, cfg, now)

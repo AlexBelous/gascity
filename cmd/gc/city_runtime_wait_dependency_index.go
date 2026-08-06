@@ -484,8 +484,12 @@ func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hin
 		return
 	}
 	if !cr.sessionWaitDependencyTargetCertified(hint.Target) {
-		cr.releaseSessionWaitDependencyReservation(hint.Target)
-		return
+		latest, ok := cr.sessionWaitDependencyTarget(hint.Target.WaitID)
+		if !ok || !sameSessionWaitDependencyTarget(latest, hint.Target) {
+			cr.releaseSessionWaitDependencyReservation(hint.Target)
+			return
+		}
+		hint.Target = latest
 	}
 	snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
 	if err != nil {

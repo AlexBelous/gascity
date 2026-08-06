@@ -639,6 +639,11 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 			if err != nil {
 				t.Fatalf("enqueue closed dependency target: %v", err)
 			}
+			// The close event also refreshes the wait index before the runtime loop
+			// drains this hint. An unchanged target must survive that generation bump.
+			cr.sessionWaitDependencyMu.Lock()
+			cr.sessionWaitDependencyIndexGeneration++
+			cr.sessionWaitDependencyMu.Unlock()
 			cr.handleSessionWaitDependencyStart(t.Context(), <-cr.sessionWaitDependencyStartCh)
 			select {
 			case result := <-results:

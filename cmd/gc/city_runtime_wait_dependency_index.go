@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -137,10 +138,7 @@ func (cr *CityRuntime) startSessionWaitDependencyShadowWithContext(ctx context.C
 					return
 				}
 				for _, target := range cr.reserveSessionWaitDependencyTargets(ctx, evt.Subject) {
-					if cr.waitDependencyEnqueue == nil {
-						continue
-					}
-					if _, enqueueErr := cr.waitDependencyEnqueue(target, sessionWaitDependencyCauseDependency); enqueueErr != nil {
+					if enqueueErr := cr.enqueueSessionWaitDependencyStartHint(ctx, target, sessionWaitDependencyCauseDependency); enqueueErr != nil {
 						cr.handleReservedSessionWaitDependencyEnqueueFailure(target, enqueueErr)
 					}
 				}
@@ -356,19 +354,95 @@ func (cr *CityRuntime) enableSessionWaitDependencyLifecycleShadowSink(ctx contex
 	}
 	release()
 	cr.waitDependencyEnqueue = func(target sessionWaitDependencyTarget, cause sessionWaitDependencyCause) (bool, error) {
-		if ctx == nil || ctx.Err() != nil || cr.sessionWaitDependencyStartCh == nil {
+		if ctx == nil || ctx.Err() != nil {
 			return false, nil
 		}
-		if err := validateSessionWaitDependencyTarget(target); err != nil {
+		cr.sessionStartMu.Lock()
+		defer cr.sessionStartMu.Unlock()
+		if cr.sessionStartOwnership != sessionStartOwnershipKeyed {
+			return false, nil
+		}
+		snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+		if err != nil {
+			return false, fmt.Errorf("%w: %w", errSessionWaitDependencySnapshotUnavailable, err)
+		}
+		defer release()
+		started := time.Now()
+		waitOutcome := sessionWaitDependencyEvaluationParkReadError
+		startOutcome, startReason := "", ""
+		traceFailed := false
+		trace := cr.trace
+		cycle := trace.BeginCycle(TraceTickTriggerControl, string(cause), started, snapshot.Config)
+		defer func() {
+			if cycle == nil {
+				return
+			}
+			outcome := TraceOutcomeNoChange
+			switch {
+			case traceFailed:
+				outcome = TraceOutcomeFailed
+			case waitOutcome == sessionWaitDependencyEvaluationReady && startOutcome == "prepare":
+				outcome = TraceOutcomeStartCandidate
+			}
+			cycle.RecordControllerOperation(TraceSiteWaitDependencyShadow, TraceReasonRetained, outcome, "wait_dependency_shadow", time.Since(started), map[string]any{
+				"wait_outcome":   string(waitOutcome),
+				"start_outcome":  startOutcome,
+				"start_reason":   startReason,
+				"cause":          string(cause),
+				"wait_id":        target.WaitID,
+				"session_id":     target.SessionID,
+				"effect_applied": false,
+			})
+			if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: wait dependency trace: %v\\n", cr.logPrefix, err) //nolint:errcheck
+			}
+		}()
+		validation, err := validateExactSessionWaitDependencyShadow(
+			snapshot.Store,
+			target,
+			newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()),
+			clock.Real{}.Now(),
+		)
+		waitOutcome = validation
+		if err != nil || waitOutcome != sessionWaitDependencyEvaluationReady {
+			traceFailed = err != nil
 			return false, err
 		}
-		hint := sessionWaitDependencyStartHint{Target: cloneSessionWaitDependencyTarget(target), Cause: cause}
-		select {
-		case cr.sessionWaitDependencyStartCh <- hint:
+		if ctx == nil || ctx.Err() != nil {
 			return false, nil
-		default:
-			return false, fmt.Errorf("admitting dependency wait %q: bounded runtime hint queue is full", target.WaitID)
 		}
+		cr.sessionWaitDependencyReadyPokePending.Store(true)
+		cr.requestLegacySessionStartFallback()
+		plan, err := planExactSessionWaitDependencyStartShadow(ctx, target.SessionID, exactSessionStartParams{
+			Generation: snapshot.Generation,
+			CityPath:   snapshot.CityPath,
+			CityName:   snapshot.CityName,
+			Config:     snapshot.Config,
+			Provider:   snapshot.Provider,
+			Store:      snapshot.Store,
+		})
+		startOutcome, startReason = sessionLifecycleStartSelectionTraceOutcome(plan.Outcome), string(plan.Reason)
+		traceFailed = err != nil
+		return false, err
+	}
+}
+
+// enqueueSessionWaitDependencyStartHint sends only an already-reserved exact
+// target to the keyed controller. Generic shadow observations must remain
+// read/observe-only and use waitDependencyEnqueue above.
+func (cr *CityRuntime) enqueueSessionWaitDependencyStartHint(ctx context.Context, target sessionWaitDependencyTarget, cause sessionWaitDependencyCause) error {
+	if cr == nil || ctx == nil || ctx.Err() != nil || cr.sessionWaitDependencyStartCh == nil {
+		return nil
+	}
+	if err := validateSessionWaitDependencyTarget(target); err != nil {
+		return err
+	}
+	hint := sessionWaitDependencyStartHint{Target: cloneSessionWaitDependencyTarget(target), Cause: cause}
+	select {
+	case cr.sessionWaitDependencyStartCh <- hint:
+		return nil
+	default:
+		return fmt.Errorf("admitting dependency wait %q: bounded runtime hint queue is full", target.WaitID)
 	}
 }
 

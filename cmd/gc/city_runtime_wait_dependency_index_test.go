@@ -399,10 +399,11 @@ func testSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarge
 		t.Fatal(err)
 	}
 	readA := make(chan struct{}, 1)
+	var eventApplied atomic.Bool
 	recording := beadstest.NewRecordingStore(env.store)
 	var unrelatedGets atomic.Int64
 	audited := &sessionWaitShadowReadAuditStore{Store: recording, onGet: func(id string) {
-		if id == a.ID {
+		if id == a.ID && eventApplied.Load() {
 			select {
 			case readA <- struct{}{}:
 			default:
@@ -472,6 +473,7 @@ func testSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarge
 	}
 	event := beadSnapshotEvent(t, events.BeadClosed, closed)
 	cache.ApplyEvent(event.Type, event.Payload)
+	eventApplied.Store(true)
 	cs.admitSessionWaitDependencyShadowEvent(event)
 	awaitClose(t, readA, "installed dependency sink exact target read")
 	cr.stopSessionWaitDependencyProducer()
@@ -631,7 +633,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 			if closed.Status != "closed" {
 				t.Fatalf("dependency status = %q, want closed", closed.Status)
 			}
-			_, err = cr.waitDependencyEnqueue(sessionWaitDependencyTarget{
+			err = cr.enqueueSessionWaitDependencyStartHint(t.Context(), sessionWaitDependencyTarget{
 				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all", generation: 1,
 			}, sessionWaitDependencyCauseDependency)
 			if err != nil {
@@ -1086,7 +1088,7 @@ func TestSessionWaitDependencyRevokedBeforePreWakeYieldsOrParks(t *testing.T) {
 				t.Fatal("keyed dependency-ready production sink was not installed")
 			}
 
-			_, err = cr.waitDependencyEnqueue(sessionWaitDependencyTarget{
+			err = cr.enqueueSessionWaitDependencyStartHint(t.Context(), sessionWaitDependencyTarget{
 				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all", generation: 1,
 			}, sessionWaitDependencyCauseDependency)
 			if err != nil {

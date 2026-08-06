@@ -243,6 +243,9 @@ func (p *sessionWaitDependencyProducer) process(id string) {
 		p.forgetOrRebase(entry)
 		return
 	}
+	// This is only an untrusted readiness filter that keeps ordinary pending
+	// events off the serialized runtime loop. Certification and every effect
+	// remain exclusively in CityRuntime.run.
 	plan := planSessionWaitDependencyTarget(p.dependencies(), target)
 	if plan.Disposition != sessionWaitDependencyPlanReady {
 		if plan.Err != nil {

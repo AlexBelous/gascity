@@ -116,7 +116,7 @@ type CityRuntime struct {
 	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
 	// process-lifetime cache is what keeps a per-tick live lane from repeating
 	// bounded discovery and transcript reads for every awake session.
-	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
+	liveSweepMemos        sync.Map // session bead id -> liveSweepMemo
 	lifecycleShadowWorker *sessionLifecycleShadowWorker
 	// waitDependencyEnqueue is an opt-in private shadow sink. It stays nil
 	// until the lifecycle adapter owns a real downstream consumer.
@@ -176,6 +176,9 @@ type CityRuntime struct {
 	// Stable exact-key hints enter the serialized runtime loop through this
 	// bounded channel. Overflow remains legacy-owned.
 	routedWorkPoolAllocationCh chan routedWorkPoolAllocationHint
+	// Dependency-wait producers only publish an exact, bounded hint. Durable
+	// certification and keyed admission happen on run's serialized boundary.
+	sessionWaitDependencyStartCh chan sessionWaitDependencyStartHint
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
@@ -415,17 +418,18 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		nudgeWakeCh:                make(chan struct{}, 1),
-		routedWorkPoolAllocationCh: make(chan routedWorkPoolAllocationHint, routedWorkPoolAllocationQueueSize),
-		nudgeShadowSelection:       p.NudgeShadowSelection,
-		onStarted:                  p.OnStarted,
-		onStatus:                   p.OnStatus,
-		managedDoltHealth:          managedDoltHealth,
-		managedDoltOwned:           managedDoltOwned,
-		managedDoltPort:            managedDoltPort,
-		logPrefix:                  logPrefix,
-		stdout:                     p.Stdout,
-		stderr:                     p.Stderr,
+		nudgeWakeCh:                  make(chan struct{}, 1),
+		routedWorkPoolAllocationCh:   make(chan routedWorkPoolAllocationHint, routedWorkPoolAllocationQueueSize),
+		sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, routedWorkPoolAllocationQueueSize),
+		nudgeShadowSelection:         p.NudgeShadowSelection,
+		onStarted:                    p.OnStarted,
+		onStatus:                     p.OnStatus,
+		managedDoltHealth:            managedDoltHealth,
+		managedDoltOwned:             managedDoltOwned,
+		managedDoltPort:              managedDoltPort,
+		logPrefix:                    logPrefix,
+		stdout:                       p.Stdout,
+		stderr:                       p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if cr.lifecycleShadowWorker == nil {
@@ -1082,6 +1086,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.safeTick(func() {
 				cr.handleRoutedWorkPoolAllocation(ctx, hint)
 			}, "pool-allocation")
+		case hint := <-cr.sessionWaitDependencyStartCh:
+			cr.safeTick(func() {
+				cr.handleSessionWaitDependencyStart(ctx, hint)
+			}, "wait-dependency")
 		case <-cr.controlDispatcherCh:
 			ctrlDB.arm(debounce)
 		case <-ctrlDB.fired():
@@ -2797,7 +2805,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), cr.nudgesBeadStore(), time.Now(), sessionBeads)
+	var keyedWaitOwned func(sessionpkg.WaitInfo) bool
+	cr.sessionStartMu.Lock()
+	if cr.sessionStartController != nil {
+		keyedWaitOwned = cr.sessionStartController.ownsWaitDependencyWait
+	}
+	cr.sessionStartMu.Unlock()
+	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), cr.nudgesBeadStore(), time.Now(), sessionBeads, keyedWaitOwned)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil

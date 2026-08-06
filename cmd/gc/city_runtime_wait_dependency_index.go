@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -18,6 +17,14 @@ var (
 	errSessionWaitDependencySnapshotUnavailable   = errors.New("wait dependency session snapshot is unavailable")
 	errSessionWaitDependencyTargetReadUnavailable = errors.New("wait dependency target read is unavailable")
 )
+
+// sessionWaitDependencyStartHint is an untrusted, bounded routing hint. It
+// contains no authority: the runtime loop certifies the current index and the
+// durable wait/session pair before admitting a keyed start.
+type sessionWaitDependencyStartHint struct {
+	Target sessionWaitDependencyTarget
+	Cause  sessionWaitDependencyCause
+}
 
 // buildObservedSessionWaitDependencyIndex builds a private candidate from one
 // observed census without changing runtime state.
@@ -160,77 +167,89 @@ func (cr *CityRuntime) enableSessionWaitDependencyLifecycleShadowSink(ctx contex
 	}
 	release()
 	cr.waitDependencyEnqueue = func(target sessionWaitDependencyTarget, cause sessionWaitDependencyCause) (bool, error) {
-		if ctx == nil || ctx.Err() != nil {
+		if ctx == nil || ctx.Err() != nil || cr.sessionWaitDependencyStartCh == nil {
 			return false, nil
 		}
-		cr.sessionStartMu.Lock()
-		defer cr.sessionStartMu.Unlock()
-		if cr.sessionStartOwnership != sessionStartOwnershipKeyed {
-			return false, nil
-		}
-		snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
-		if err != nil {
-			return false, fmt.Errorf("%w: %w", errSessionWaitDependencySnapshotUnavailable, err)
-		}
-		defer release()
-		started := time.Now()
-		waitOutcome := sessionWaitDependencyEvaluationParkReadError
-		startOutcome, startReason := "", ""
-		traceFailed := false
-		trace := cr.trace
-		cycle := trace.BeginCycle(TraceTickTriggerControl, string(cause), started, snapshot.Config)
-		defer func() {
-			if cycle == nil {
-				return
-			}
-			outcome := TraceOutcomeNoChange
-			switch {
-			case traceFailed:
-				outcome = TraceOutcomeFailed
-			case waitOutcome == sessionWaitDependencyEvaluationReady && startOutcome == "prepare":
-				outcome = TraceOutcomeStartCandidate
-			}
-			cycle.RecordControllerOperation(TraceSiteWaitDependencyShadow, TraceReasonRetained, outcome, "wait_dependency_shadow", time.Since(started), map[string]any{
-				"wait_outcome":   string(waitOutcome),
-				"start_outcome":  startOutcome,
-				"start_reason":   startReason,
-				"cause":          string(cause),
-				"wait_id":        target.WaitID,
-				"session_id":     target.SessionID,
-				"effect_applied": false,
-			})
-			if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
-				fmt.Fprintf(cr.stderr, "%s: wait dependency trace: %v\n", cr.logPrefix, err) //nolint:errcheck
-			}
-		}()
-		validation, err := validateExactSessionWaitDependencyShadow(
-			snapshot.Store,
-			target,
-			newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()),
-			clock.Real{}.Now(),
-		)
-		waitOutcome = validation
-		if err != nil || waitOutcome != sessionWaitDependencyEvaluationReady {
-			traceFailed = err != nil
+		if err := validateSessionWaitDependencyTarget(target); err != nil {
 			return false, err
 		}
-		if ctx == nil || ctx.Err() != nil {
+		hint := sessionWaitDependencyStartHint{Target: cloneSessionWaitDependencyTarget(target), Cause: cause}
+		select {
+		case cr.sessionWaitDependencyStartCh <- hint:
 			return false, nil
+		default:
+			return false, fmt.Errorf("admitting dependency wait %q: bounded runtime hint queue is full", target.WaitID)
 		}
+	}
+}
+
+// handleSessionWaitDependencyStart turns one producer hint into a certified
+// lease. This must run only on CityRuntime.run: producers are intentionally
+// unable to mutate, classify lifecycle ownership, or admit starts directly.
+func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hint sessionWaitDependencyStartHint) {
+	if cr == nil || ctx == nil || ctx.Err() != nil || validateSessionWaitDependencyTarget(hint.Target) != nil || causePrecedence(hint.Cause) == 0 {
+		return
+	}
+	cr.sessionStartMu.Lock()
+	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	mode := cr.sessionStartMode
+	controller := cr.sessionStartController
+	cr.sessionStartMu.Unlock()
+	if !owned {
+		return
+	}
+	if !cr.sessionWaitDependencyTargetCertified(hint.Target) {
+		return
+	}
+	snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+	if err != nil {
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, err)
+		return
+	}
+	defer release()
+	lease, owner, err := certifySessionWaitDependencyStartLease(snapshot.Store, hint.Target,
+		newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()), snapshot.Config, snapshot.Generation, clock.Real{}.Now())
+	if err != nil || owner != exactSessionStartKeyedOwner {
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, err)
+		return
+	}
+	if controller == nil {
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, errors.New("exact-start controller is unavailable"))
+		return
+	}
+	// Certification is not authority by itself: the current generation and
+	// exact index target must still match at the admission effect boundary.
+	if lease.IndexGeneration == 0 || lease.IndexGeneration != hint.Target.generation || !cr.sessionWaitDependencyTargetCertified(hint.Target) {
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, errors.New("dependency wait index certification changed before admission"))
+		return
+	}
+	outcome, err := controller.AdmitWaitDependency(lease)
+	if err != nil || outcome == sessionStartAdmissionOverflow {
+		if outcome == sessionStartAdmissionOverflow && err == nil {
+			err = errors.New("exact-start admission is full")
+		}
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, err)
+	}
+}
+
+func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionWaitDependencyStartHint, mode rollout.Mode, controller *sessionStartController, err error) {
+	if mode == rollout.Auto {
 		cr.sessionWaitDependencyReadyPokePending.Store(true)
 		cr.requestLegacySessionStartFallback()
-		plan, err := planExactSessionWaitDependencyStartShadow(ctx, target.SessionID, exactSessionStartParams{
-			Generation: snapshot.Generation,
-			CityPath:   snapshot.CityPath,
-			CityName:   snapshot.CityName,
-			Config:     snapshot.Config,
-			Provider:   snapshot.Provider,
-			Store:      snapshot.Store,
-		})
-		startOutcome, startReason = sessionLifecycleStartSelectionTraceOutcome(plan.Outcome), string(plan.Reason)
-		traceFailed = err != nil
-		return false, err
+		return
 	}
+	if controller != nil {
+		controller.RequestAudit()
+	}
+	if err != nil {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: dependency wait %s parked: %v\n", cr.sessionStartLogPrefix(), hint.Target.WaitID, err) //nolint:errcheck
+	}
+}
+
+func (cr *CityRuntime) sessionWaitDependencyTargetCertified(target sessionWaitDependencyTarget) bool {
+	cr.sessionWaitDependencyMu.RLock()
+	defer cr.sessionWaitDependencyMu.RUnlock()
+	return cr.sessionWaitDependencyTargetCertifiedLocked(target) && target.generation > 0
 }
 
 func (cr *CityRuntime) submitSessionWaitDependencyStartupCensus() {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -59,6 +60,114 @@ type exactSessionStartParams struct {
 	AuthorizePoolStart    func(context.Context, sessionpkg.Info, routedWorkPoolStartLease) (bool, error)
 	AuthorizePoolDrainAck func(sessionpkg.Info, routedWorkPoolDrainAckLease) (bool, error)
 	RecoverPoolDrainAck   func(sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error)
+}
+
+// sessionWaitDependencyStartLease binds one dependency-ready wait to the exact
+// session row and controller generation that certified it. It is deliberately
+// small: the durable wait and session rows remain the source of truth.
+type sessionWaitDependencyStartLease struct {
+	WaitID               string
+	SessionID            string
+	DepIDs               []string
+	DepMode              string
+	RegisteredEpoch      string
+	WaitRevision         int64
+	SessionRevision      int64
+	IndexGeneration      uint64
+	ControllerGeneration uint64
+	Operation            string
+}
+
+func validateSessionWaitDependencyStartLease(lease sessionWaitDependencyStartLease) error {
+	if lease.WaitID == "" || strings.TrimSpace(lease.WaitID) != lease.WaitID {
+		return errors.New("dependency wait lease has invalid wait id")
+	}
+	if lease.SessionID == "" || strings.TrimSpace(lease.SessionID) != lease.SessionID {
+		return errors.New("dependency wait lease has invalid session id")
+	}
+	if lease.DepMode != "all" || len(lease.DepIDs) != 1 || lease.DepIDs[0] == "" || strings.TrimSpace(lease.DepIDs[0]) != lease.DepIDs[0] {
+		return errors.New("dependency wait lease is outside the exact deps/all cohort")
+	}
+	if lease.WaitRevision <= 0 || lease.SessionRevision <= 0 || lease.IndexGeneration == 0 || lease.ControllerGeneration == 0 {
+		return errors.New("dependency wait lease lacks revision or generation provenance")
+	}
+	if lease.RegisteredEpoch == "" || strings.TrimSpace(lease.RegisteredEpoch) != lease.RegisteredEpoch {
+		return errors.New("dependency wait lease lacks an exact registered epoch")
+	}
+	if lease.Operation == "" || strings.TrimSpace(lease.Operation) != lease.Operation {
+		return errors.New("dependency wait lease has invalid operation")
+	}
+	return nil
+}
+
+// certifySessionWaitDependencyStartLease rereads the two durable rows that a
+// dependency-ready hint names. The producer index is only routing state; this
+// certificate is the authority retained by the keyed worker before it mutates
+// either row.
+func certifySessionWaitDependencyStartLease(
+	store beads.Store,
+	target sessionWaitDependencyTarget,
+	dependencies waitDependencyReader,
+	cfg *config.City,
+	generation uint64,
+	now time.Time,
+) (sessionWaitDependencyStartLease, exactSessionStartOwner, error) {
+	if store == nil || cfg == nil || generation == 0 {
+		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, errors.New("dependency wait start prerequisites are unavailable")
+	}
+	if outcome, err := validateExactSessionWaitDependencyShadow(store, target, dependencies, now); err != nil || outcome != sessionWaitDependencyEvaluationReady {
+		if err != nil {
+			return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, err
+		}
+		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, nil
+	}
+	readStore := authoritativeSessionStartReadStore{Store: store, live: beads.HandlesFor(store).Live}
+	wait, persistedWait, err := sessionFrontDoor(readStore).GetWaitPersistedResponse(target.WaitID)
+	if err != nil {
+		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, fmt.Errorf("reading certified dependency wait %q: %w", target.WaitID, err)
+	}
+	info, persistedSession, err := getAuthoritativeSessionStartPersistedRecord(store, target.SessionID)
+	if err != nil {
+		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, fmt.Errorf("reading certified dependency session %q: %w", target.SessionID, err)
+	}
+	if wait.ID != target.WaitID || wait.SessionID != target.SessionID || wait.Kind != "deps" || wait.DepMode != "all" || len(wait.DepIDs) != 1 || wait.DepIDs[0] != target.DepIDs[0] || wait.Status != "open" || wait.State != waitStatePending {
+		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, nil
+	}
+	if info.ID != target.SessionID || info.Closed || persistedWait.Revision <= 0 || persistedSession.Revision <= 0 {
+		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, nil
+	}
+	_, cfgAgent, _ := classifyExactSessionStartOwnership(info, cfg, now)
+	if cfgAgent == nil {
+		template := resolvedSessionTemplateInfo(info, cfg)
+		cfgAgent = findAgentByTemplate(cfg, template)
+	}
+	// This is the intentionally narrow cohort that normal ownership leaves to
+	// legacy while it is asleep: a durable deps/all wait attached to a regular
+	// configured session. The wait itself supplies the ownership proof; it is
+	// distinct from configuration-level agent dependencies.
+	if cfgAgent == nil || len(cfgAgent.DependsOn) != 0 || info.DependencyOnly || isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) || isManualSessionInfoForAgent(info, cfgAgent) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
+		return sessionWaitDependencyStartLease{}, exactSessionStartLegacyOwner, nil
+	}
+	if info.MetadataState != string(sessionpkg.StateAsleep) || info.PendingCreateClaim ||
+		info.WaitHold == "" || info.SleepIntent != string(sessionpkg.SleepReasonWaitHold) || info.SleepReason != string(sessionpkg.SleepReasonWaitHold) {
+		return sessionWaitDependencyStartLease{}, exactSessionStartLegacyOwner, nil
+	}
+	lease := sessionWaitDependencyStartLease{
+		WaitID:               wait.ID,
+		SessionID:            info.ID,
+		DepIDs:               append([]string(nil), wait.DepIDs...),
+		DepMode:              wait.DepMode,
+		RegisteredEpoch:      wait.RegisteredEpoch,
+		WaitRevision:         persistedWait.Revision,
+		SessionRevision:      persistedSession.Revision,
+		IndexGeneration:      target.generation,
+		ControllerGeneration: generation,
+		Operation:            sessionpkg.NewInstanceToken(),
+	}
+	if err := validateSessionWaitDependencyStartLease(lease); err != nil {
+		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, err
+	}
+	return lease, exactSessionStartKeyedOwner, nil
 }
 
 // planExactSessionWaitDependencyStartShadow reads one dependency-ready session
@@ -899,6 +1008,15 @@ func reconcileExactSessionStartWithOwner(
 
 	ownershipNow := clk.Now().UTC()
 	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, ownershipNow)
+	if admission.WaitDependency != nil && cfgAgent == nil {
+		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
+	}
+	if admission.WaitDependency != nil && cfgAgent != nil && len(cfgAgent.DependsOn) == 0 &&
+		!info.DependencyOnly && !isNamedSessionInfo(info) && !isPoolManagedSessionInfo(info) && !isManualSessionInfoForAgent(info, cfgAgent) {
+		// A retained dependency-wait lease is the narrow proof that this otherwise
+		// legacy sleeping session belongs to the keyed handoff.
+		owner = exactSessionStartKeyedOwner
+	}
 	poolStartAuthorized := false
 	if (owner == exactSessionStartLegacyOwner || owner == exactSessionStartUnowned) && admission.PoolAllocation != nil && params.AuthorizePoolStart != nil &&
 		isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) {
@@ -1007,6 +1125,15 @@ func reconcileExactSessionStartWithOwner(
 		healthy, present := loadProviderHealthSnapshot(params.CityPath).check(tp.ResolvedProvider.Name)
 		providerUnavailable = present && !healthy
 	}
+	// A retained exact dependency lease precedes generic lifecycle selection.
+	// Its durable wait-hold intentionally makes the ordinary planner park a
+	// sleeping session; treating that park as a return would strand the exact
+	// dependency handoff forever.
+	if admission.WaitDependency != nil {
+		return reconcileExactWaitDependencyStart(
+			ctx, admission, params, info, initialResponse, startCandidate{info: info, tp: tp}, clk, recorder, stdout, stderr, startupTimeout, startOpts,
+		)
+	}
 	plan := planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
 		Info:                 info,
 		WakeDecisionObserved: true,
@@ -1105,6 +1232,163 @@ func reconcileExactSessionStartWithOwner(
 	}
 	recordExactSessionStartCommit(params, admission, result)
 	return owner, nil
+}
+
+// reconcileExactWaitDependencyStart owns the short, durable handoff from one
+// satisfied wait to one provider start. Before the wait claim Auto may yield;
+// once the claim commits every later uncertainty remains keyed.
+func reconcileExactWaitDependencyStart(
+	ctx context.Context,
+	admission sessionStartAdmission,
+	params exactSessionStartParams,
+	info sessionpkg.Info,
+	initial sessionpkg.PersistedResponse,
+	candidate startCandidate,
+	clk clock.Clock,
+	recorder events.Recorder,
+	stdout, stderr io.Writer,
+	startupTimeout time.Duration,
+	startOpts startExecutionOptions,
+) (exactSessionStartOwner, error) {
+	lease := *admission.WaitDependency
+	if err := validateSessionWaitDependencyStartLease(lease); err != nil {
+		return exactSessionStartKeyedOwner, fmt.Errorf("dependency wait start lease is invalid: %w", err)
+	}
+	if lease.ControllerGeneration != params.Generation {
+		return exactSessionStartKeyedOwner, errors.New("dependency wait start lease belongs to a different controller generation")
+	}
+	preClaimFailure := func(cause error) (exactSessionStartOwner, error) {
+		if params.RolloutMode == rollout.Auto {
+			return exactSessionStartLegacyOwner, nil
+		}
+		return exactSessionStartKeyedOwner, cause
+	}
+	readStore := authoritativeSessionStartReadStore{Store: params.Store, live: beads.HandlesFor(params.Store).Live}
+	wait, waitPersisted, err := sessionFrontDoor(readStore).GetWaitPersistedResponse(lease.WaitID)
+	if err != nil {
+		return preClaimFailure(fmt.Errorf("reading dependency wait before claim: %w", err))
+	}
+	if wait.ID != lease.WaitID || wait.SessionID != lease.SessionID || wait.Kind != "deps" || wait.DepMode != "all" || len(wait.DepIDs) != 1 || wait.DepIDs[0] != lease.DepIDs[0] || wait.RegisteredEpoch != lease.RegisteredEpoch || wait.Status != "open" {
+		return preClaimFailure(errors.New("dependency wait no longer matches leased pending revision"))
+	}
+	alreadyClaimed := wait.State == waitStateReady && wait.ReadyOwner == string(sessionpkg.WaitReadyOwnerDependency) && wait.ReadyOperation == lease.Operation
+	if info.ID != lease.SessionID || info.Closed || initial.Revision != lease.SessionRevision {
+		if alreadyClaimed {
+			return exactSessionStartKeyedOwner, errors.New("dependency session changed after this operation claimed the wait")
+		}
+		return preClaimFailure(errors.New("dependency wait session no longer matches leased revision"))
+	}
+	if wait.ExpiresAt != "" {
+		expiresAt, parseErr := time.Parse(time.RFC3339, wait.ExpiresAt)
+		if parseErr != nil || !expiresAt.After(clk.Now().UTC()) {
+			if alreadyClaimed {
+				return exactSessionStartKeyedOwner, errors.New("dependency wait expired after this operation claimed it")
+			}
+			return preClaimFailure(errors.New("dependency wait expired before claim"))
+		}
+	}
+	if !alreadyClaimed && (wait.State != waitStatePending || waitPersisted.Revision != lease.WaitRevision) {
+		return preClaimFailure(errors.New("dependency wait no longer matches leased pending revision"))
+	}
+	ready, err := depsWaitReadyDetailedFrom(newAuthoritativeWaitDependencyStoreSet(params.Store, params.RigStores), wait)
+	if err != nil || !ready {
+		if alreadyClaimed {
+			if err != nil {
+				return exactSessionStartKeyedOwner, fmt.Errorf("rechecking dependency readiness after wait claim: %w", err)
+			}
+			return exactSessionStartKeyedOwner, errors.New("dependency readiness changed after wait claim")
+		}
+		if err != nil {
+			return preClaimFailure(fmt.Errorf("rechecking dependency readiness: %w", err))
+		}
+		return preClaimFailure(errors.New("dependency wait is no longer ready"))
+	}
+	waitFront := sessionFrontDoor(params.Store) // retain the original front door so its conditional writer remains reachable.
+	if !alreadyClaimed {
+		claim, claimErr := waitFront.ClaimPendingWaitReady(wait, waitPersisted, clk.Now().UTC(), sessionpkg.WaitReadyOwnerDependency, lease.Operation)
+		if claim.Outcome == sessionpkg.WaitReadyClaimNotApplied {
+			return preClaimFailure(claimErr)
+		}
+		if claimErr != nil || claim.Outcome != sessionpkg.WaitReadyClaimCommitted {
+			if claimErr != nil {
+				return exactSessionStartKeyedOwner, fmt.Errorf("claiming dependency wait %q: %w", lease.WaitID, claimErr)
+			}
+			return exactSessionStartKeyedOwner, fmt.Errorf("claiming dependency wait %q did not commit", lease.WaitID)
+		}
+	}
+	if params.StatusWriterError != nil || params.StatusWriter == nil {
+		if params.StatusWriterError != nil {
+			return exactSessionStartKeyedOwner, fmt.Errorf("resolving dependency start conditional writer: %w", params.StatusWriterError)
+		}
+		return exactSessionStartKeyedOwner, errors.New("dependency start conditional writer is unavailable")
+	}
+	current, persisted, err := getAuthoritativeSessionStartPersistedRecord(params.Store, lease.SessionID)
+	if err != nil {
+		return exactSessionStartKeyedOwner, fmt.Errorf("reading dependency session before pre-wake: %w", err)
+	}
+	if current.ID != lease.SessionID || current.Closed || persisted.Status != "open" {
+		return exactSessionStartKeyedOwner, errors.New("dependency session no longer matches leased revision after wait claim")
+	}
+	preWakeRecovered := alreadyClaimed && current.InstanceToken == lease.Operation && persisted.Metadata["pending_create_claim"] == "true"
+	if !preWakeRecovered && persisted.Revision != lease.SessionRevision {
+		return exactSessionStartKeyedOwner, errors.New("dependency session no longer matches leased revision after wait claim")
+	}
+	committed, committedPersisted := current, persisted
+	if !preWakeRecovered {
+		_, token, patch, err := buildPreWakePatchWithToken(current, clk, lease.Operation)
+		if err != nil {
+			return exactSessionStartKeyedOwner, fmt.Errorf("building dependency start pre-wake patch: %w", err)
+		}
+		if token != lease.Operation {
+			return exactSessionStartKeyedOwner, errors.New("dependency start pre-wake token differs from durable wait operation")
+		}
+		patch["pending_create_claim"] = "true"
+		expected := patch.Apply(persisted.Metadata)
+		writeErr := params.StatusWriter.UpdateIfMatch(current.ID, persisted.Revision, beads.UpdateOpts{Metadata: patch})
+		var readErr error
+		committed, committedPersisted, readErr = getAuthoritativeSessionStartPersistedRecord(params.Store, current.ID)
+		if readErr != nil {
+			return exactSessionStartKeyedOwner, fmt.Errorf("re-reading dependency start pre-wake: %w", readErr)
+		}
+		if writeErr != nil || committed.ID != current.ID || committed.Closed || committedPersisted.Revision == persisted.Revision || !maps.Equal(committedPersisted.Metadata, expected) {
+			if writeErr != nil {
+				return exactSessionStartKeyedOwner, fmt.Errorf("committing dependency start pre-wake: %w", writeErr)
+			}
+			return exactSessionStartKeyedOwner, errors.New("dependency start pre-wake did not persist exactly")
+		}
+	}
+	prepared, _, err := buildPreparedStartWithWorkDirResolver(startCandidate{info: committed, tp: candidate.tp}, params.CityPath, params.Config, params.Store, startOpts.workDirResolver)
+	if err != nil {
+		return exactSessionStartKeyedOwner, fmt.Errorf("preparing dependency start: %w", err)
+	}
+	authorize := func(context.Context) error {
+		latest, latestPersisted, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, lease.SessionID)
+		if readErr != nil || latest.ID != lease.SessionID || latest.Closed || latestPersisted.Revision != committedPersisted.Revision || latest.InstanceToken != lease.Operation {
+			return errors.New("dependency start session changed before provider start")
+		}
+		liveWait, _, waitErr := waitFront.GetWaitPersistedResponse(lease.WaitID)
+		if waitErr != nil || liveWait.ID != lease.WaitID || liveWait.SessionID != lease.SessionID || liveWait.Kind != "deps" || liveWait.DepMode != lease.DepMode || !slices.Equal(liveWait.DepIDs, lease.DepIDs) || liveWait.Status != "open" || liveWait.State != waitStateReady || liveWait.ReadyOwner != string(sessionpkg.WaitReadyOwnerDependency) || liveWait.ReadyOperation != lease.Operation || liveWait.RegisteredEpoch != lease.RegisteredEpoch {
+			return errors.New("dependency wait changed before provider start")
+		}
+		ready, depErr := depsWaitReadyDetailedFrom(newAuthoritativeWaitDependencyStoreSet(params.Store, params.RigStores), liveWait)
+		if depErr != nil || !ready {
+			return errors.New("dependency readiness changed before provider start")
+		}
+		return nil
+	}
+	result := runPreparedStartCandidateAuthorized(ctx, *prepared, params.CityPath, params.Provider, params.Store, params.Config, startupTimeout, resolveStartStabilityWaiter(startOpts.stabilityWaiter), startOpts.sessionStaleKeyDetectionWaiter, authorize)
+	disposition := commitStartResultWithFreshness(ctx, result, params.Provider, params.Store, clk, recorder, 0, stdout, stderr, nil)
+	if disposition == startCommitSuperseded {
+		return exactSessionStartKeyedOwner, nil
+	}
+	if disposition != startCommitCommitted {
+		if result.err != nil {
+			return exactSessionStartKeyedOwner, fmt.Errorf("reconciling dependency wait start %q: %w", lease.SessionID, result.err)
+		}
+		return exactSessionStartKeyedOwner, fmt.Errorf("reconciling dependency wait start %q: start result did not commit", lease.SessionID)
+	}
+	recordExactSessionStartCommit(params, admission, result)
+	return exactSessionStartKeyedOwner, nil
 }
 
 func reconcileExactPoolRecoveryStart(

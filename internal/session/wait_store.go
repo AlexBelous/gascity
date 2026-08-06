@@ -209,7 +209,7 @@ func classifyWaitReadyClaimReadFailure(writeErr error) WaitReadyClaimOutcome {
 }
 
 func waitReadyClaimMatches(after WaitInfo, afterPersisted WaitPersistedResponse, candidate WaitInfo, persisted WaitPersistedResponse, readyAt string, owner WaitReadyOwner, operation string) bool {
-	return afterPersisted.Revision != persisted.Revision &&
+	return afterPersisted.Revision > 0 && afterPersisted.Revision != persisted.Revision &&
 		waitRegistrationMatches(after, candidate) &&
 		after.Status == "open" &&
 		after.State == waitStateReady &&

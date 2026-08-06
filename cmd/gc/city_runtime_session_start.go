@@ -653,6 +653,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 		if validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) != nil {
 			return false
 		}
+		if controller != nil && controller.ownsWaitDependencyStart(info.ID) {
+			return true
+		}
 		if controller != nil && controller.ownsPoolDrainAckStop(info.ID, info.InstanceToken) {
 			return true
 		}

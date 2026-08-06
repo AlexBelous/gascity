@@ -58,6 +58,16 @@ func buildPreWakePatch(
 	info sessions.Info,
 	clk clock.Clock,
 ) (newGen int, token string, patch sessions.MetadataPatch, err error) {
+	return buildPreWakePatchWithToken(info, clk, "")
+}
+
+// buildPreWakePatchWithToken is buildPreWakePatch for an exact owner that has
+// already minted and durably recorded its operation token.
+func buildPreWakePatchWithToken(
+	info sessions.Info,
+	clk clock.Clock,
+	token string,
+) (newGen int, nextToken string, patch sessions.MetadataPatch, err error) {
 	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
@@ -65,7 +75,9 @@ func buildPreWakePatch(
 
 	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
-	token = sessions.NewInstanceToken()
+	if token == "" {
+		token = sessions.NewInstanceToken()
+	}
 	continuationEpoch, _ := strconv.Atoi(info.ContinuationEpoch)
 	if continuationEpoch <= 0 {
 		continuationEpoch = sessions.DefaultContinuationEpoch

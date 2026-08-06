@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"k8s.io/client-go/util/workqueue"
 )
 
@@ -22,11 +24,12 @@ var errSessionStartPoolDrainAckPending = errors.New("pool drain acknowledgement 
 type sessionStartAdmissionSource string
 
 const (
-	sessionStartAdmissionPendingCreate sessionStartAdmissionSource = "pending_create"
-	sessionStartAdmissionExplicitWake  sessionStartAdmissionSource = "explicit_wake"
-	sessionStartAdmissionInProcess     sessionStartAdmissionSource = "in_process"
-	sessionStartAdmissionSocket        sessionStartAdmissionSource = "socket"
-	sessionStartAdmissionAntiEntropy   sessionStartAdmissionSource = "anti_entropy"
+	sessionStartAdmissionPendingCreate  sessionStartAdmissionSource = "pending_create"
+	sessionStartAdmissionExplicitWake   sessionStartAdmissionSource = "explicit_wake"
+	sessionStartAdmissionInProcess      sessionStartAdmissionSource = "in_process"
+	sessionStartAdmissionSocket         sessionStartAdmissionSource = "socket"
+	sessionStartAdmissionAntiEntropy    sessionStartAdmissionSource = "anti_entropy"
+	sessionStartAdmissionWaitDependency sessionStartAdmissionSource = "wait_dependency"
 )
 
 type sessionStartAdmission struct {
@@ -35,6 +38,7 @@ type sessionStartAdmission struct {
 	Version        uint64
 	PoolAllocation *routedWorkPoolStartLease
 	PoolDrainAck   *routedWorkPoolDrainAckLease
+	WaitDependency *sessionWaitDependencyStartLease
 	// PoolDrainAckUncertain retains a durable stop-pending row when an
 	// anti-entropy seed cannot reconstruct its agent acknowledgement lease.
 	// It is a retry fence, never destructive-stop authority.
@@ -199,7 +203,7 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 		return "", err
 	}
 
-	outcome, _, err := c.admit(id, source, false, 0, nil, nil, false)
+	outcome, _, err := c.admit(id, source, false, 0, nil, nil, false, nil)
 	return outcome, err
 }
 
@@ -210,7 +214,7 @@ func (c *sessionStartController) AdmitPoolAllocation(lease routedWorkPoolStartLe
 	if err := validateRoutedWorkPoolStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease, nil, false)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease, nil, false, nil)
 	return outcome, err
 }
 
@@ -223,7 +227,22 @@ func (c *sessionStartController) AdmitPoolDrainAck(lease routedWorkPoolDrainAckL
 	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, nil, &lease, false)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, nil, &lease, false, nil)
+	return outcome, err
+}
+
+// AdmitWaitDependency retains a certified durable wait/session pair until the
+// keyed worker has either committed its ready/start handoff or observed that
+// the pair no longer matches. The queue remains keyed by the session because a
+// provider start is the exclusive effect boundary.
+func (c *sessionStartController) AdmitWaitDependency(lease sessionWaitDependencyStartLease) (sessionStartAdmissionOutcome, error) {
+	if c == nil {
+		return "", fmt.Errorf("admitting dependency wait start: controller is nil")
+	}
+	if err := validateSessionWaitDependencyStartLease(lease); err != nil {
+		return "", err
+	}
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionWaitDependency, false, 0, nil, nil, false, &lease)
 	return outcome, err
 }
 
@@ -244,10 +263,10 @@ func poolDrainAckSupersedesPoolStart(start routedWorkPoolStartLease, drain route
 }
 
 func (c *sessionStartController) admitAuthoritative(id string, censusGeneration uint64, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
-	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil, poolDrainAck, poolDrainAckUncertain)
+	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil, poolDrainAck, poolDrainAckUncertain, nil)
 }
 
-func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
+func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool, waitDependency *sessionWaitDependencyStartLease) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
 	if err := validateSessionStartAdmission(id, source); err != nil {
 		return "", sessionStartAdmission{}, err
 	}
@@ -280,12 +299,18 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		source = previous.Source
 		admittedAt = previous.AdmittedAt
 	}
-	if poolAllocation != nil && poolDrainAck != nil {
-		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: pool start and drain acknowledgement leases conflict", id)
+	if (poolAllocation != nil && poolDrainAck != nil) || (waitDependency != nil && (poolAllocation != nil || poolDrainAck != nil)) {
+		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: conflicting exact-start leases", id)
 	}
 	supersedesPoolStart := false
 	if existed && poolAllocation != nil && previous.PoolDrainAck != nil {
 		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained pool lease conflicts with new admission", id)
+	}
+	if existed && waitDependency != nil && (previous.PoolAllocation != nil || previous.PoolDrainAck != nil) {
+		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained pool lease conflicts with dependency wait", id)
+	}
+	if existed && (poolAllocation != nil || poolDrainAck != nil) && previous.WaitDependency != nil {
+		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained dependency wait conflicts with pool lease", id)
 	}
 	if existed && poolDrainAck != nil && previous.PoolAllocation != nil {
 		if !previous.PoolStartEntered || !poolDrainAckSupersedesPoolStart(*previous.PoolAllocation, *poolDrainAck) {
@@ -314,6 +339,20 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		copied := *poolDrainAck
 		poolDrainAck = &copied
 	}
+	if waitDependency == nil && existed {
+		waitDependency = previous.WaitDependency
+	}
+	if waitDependency != nil && existed && previous.WaitDependency != nil && sameWaitDependencyCertificate(*previous.WaitDependency, *waitDependency) {
+		// Duplicate hints for the same durable observation keep the first minted
+		// operation. A changed revision is a new durable observation and replaces
+		// the parked lease so relevant events can make progress.
+		waitDependency = previous.WaitDependency
+	}
+	if waitDependency != nil {
+		copied := *waitDependency
+		copied.DepIDs = append([]string(nil), waitDependency.DepIDs...)
+		waitDependency = &copied
+	}
 	admission := sessionStartAdmission{
 		SessionID:             id,
 		Source:                source,
@@ -321,6 +360,7 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		PoolAllocation:        poolAllocation,
 		PoolDrainAck:          poolDrainAck,
 		PoolDrainAckUncertain: poolDrainAckUncertain,
+		WaitDependency:        waitDependency,
 		PoolStartEntered:      poolStartEntered,
 		AdmittedAt:            admittedAt,
 	}
@@ -336,6 +376,12 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		return sessionStartAdmissionCoalesced, admission, nil
 	}
 	return sessionStartAdmissionAccepted, admission, nil
+}
+
+func sameWaitDependencyCertificate(a, b sessionWaitDependencyStartLease) bool {
+	return a.WaitID == b.WaitID && a.SessionID == b.SessionID && a.DepMode == b.DepMode &&
+		a.RegisteredEpoch == b.RegisteredEpoch && a.WaitRevision == b.WaitRevision && a.SessionRevision == b.SessionRevision &&
+		a.IndexGeneration == b.IndexGeneration && a.ControllerGeneration == b.ControllerGeneration && slices.Equal(a.DepIDs, b.DepIDs)
 }
 
 // StartAuthoritativeSeed starts at most one bounded producer. next distinguishes
@@ -512,7 +558,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionExplicitWake,
 		sessionStartAdmissionInProcess,
 		sessionStartAdmissionSocket,
-		sessionStartAdmissionAntiEntropy:
+		sessionStartAdmissionAntiEntropy,
+		sessionStartAdmissionWaitDependency:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -569,6 +616,38 @@ func (c *sessionStartController) ownsPoolAllocationStart(sessionID, instanceToke
 	lease := admission.PoolAllocation
 	return lease.SessionID == sessionID &&
 		(admission.PoolStartEntered || (instanceToken != "" && lease.InstanceToken == instanceToken))
+}
+
+// ownsWaitDependencyStart reports whether a retained exact wait lease owns the
+// session's start boundary. It intentionally ignores a caller-supplied token:
+// the durable wait operation, not a legacy session projection, is the proof.
+func (c *sessionStartController) ownsWaitDependencyStart(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.WaitDependency != nil
+}
+
+// ownsWaitDependencyWait verifies the full durable wait identity retained by
+// a keyed admission. A matching session alone is insufficient because a later
+// wait registration must not inherit an earlier operation's exclusion.
+func (c *sessionStartController) ownsWaitDependencyWait(wait sessionpkg.WaitInfo) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[wait.SessionID]
+	if !ok || admission.WaitDependency == nil {
+		return false
+	}
+	lease := admission.WaitDependency
+	return wait.ID == lease.WaitID && wait.SessionID == lease.SessionID && wait.Kind == "deps" && wait.DepMode == lease.DepMode &&
+		slices.Equal(wait.DepIDs, lease.DepIDs) && wait.RegisteredEpoch == lease.RegisteredEpoch &&
+		(wait.State == waitStatePending || wait.State == waitStateReady && wait.ReadyOwner == string(sessionpkg.WaitReadyOwnerDependency) && wait.ReadyOperation == lease.Operation)
 }
 
 // ownsPoolDrainAckStop keeps legacy from entering a stop only while the exact
@@ -723,6 +802,15 @@ func (c *sessionStartController) reconcileKey(key string) {
 		c.queue.Forget(key)
 		c.deleteAdmissionIfVersion(key, admission.Version)
 		result.Outcome = sessionStartReconcileSucceeded
+		c.observe(result)
+		return
+	}
+	if admission.WaitDependency != nil {
+		// A durable wait handoff is never exhausted. Forget this queued attempt
+		// while retaining the lease; the next exact event or audit admission
+		// redrives it without deleting its only ownership proof.
+		c.queue.Forget(key)
+		result.Outcome = sessionStartReconcileRetrying
 		c.observe(result)
 		return
 	}

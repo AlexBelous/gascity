@@ -522,13 +522,18 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 			}
 			target := env.createSessionBead("worker", "worker")
 			env.setSessionMetadata(&target, map[string]string{
-				"state":                     string(sessionpkg.StateCreating),
-				"pending_create_claim":      "true",
-				"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+				"state":              string(sessionpkg.StateAsleep),
+				"continuation_epoch": "7",
+				"wait_hold":          "true",
+				"sleep_intent":       string(sessionpkg.SleepReasonWaitHold),
+				"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
 			})
 			unrelated := env.createSessionBead("unrelated", "worker")
 			wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := env.store.SetMetadata(wait.ID, "registered_epoch", "7"); err != nil {
 				t.Fatal(err)
 			}
 
@@ -571,7 +576,13 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 			cr := &CityRuntime{
 				cs: cs, cfg: env.cfg, pokeCh: pokeCh, stderr: io.Discard,
 				sessionStartOwnership: sessionStartOwnershipKeyed, sessionStartController: controller,
+				sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, 1),
 			}
+			cr.sessionWaitDependencyIndex = newSessionWaitDependencyIndex()
+			if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open", State: waitStatePending, DepIDs: []string{dependency.ID}, DepMode: "all"}}); err != nil {
+				t.Fatal(err)
+			}
+			cr.sessionWaitDependencyIndexGeneration = 1
 			cr.enableSessionWaitDependencyLifecycleShadowSink(t.Context())
 			if cr.waitDependencyEnqueue == nil {
 				t.Fatal("keyed dependency-ready production sink was not installed")
@@ -588,11 +599,13 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				t.Fatalf("dependency status = %q, want closed", closed.Status)
 			}
 			_, err = cr.waitDependencyEnqueue(sessionWaitDependencyTarget{
-				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all",
+				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all", generation: 1,
 			}, sessionWaitDependencyCauseDependency)
 			if err != nil {
 				t.Fatalf("enqueue closed dependency target: %v", err)
 			}
+			cr.handleSessionWaitDependencyStart(t.Context(), <-cr.sessionWaitDependencyStartCh)
+			awaitCond(t, func() bool { return controller.Pending() == 0 }, "keyed dependency-ready start to drain")
 
 			if got := env.sp.CountCalls("Start", "worker"); got != 1 {
 				t.Fatalf("target provider Starts = %d, want 1", got)
@@ -647,12 +660,17 @@ func TestSessionWaitDependencyRevokedBeforePreWakeYieldsOrParks(t *testing.T) {
 			}
 			target := env.createSessionBead("worker", "worker")
 			env.setSessionMetadata(&target, map[string]string{
-				"state":                     string(sessionpkg.StateCreating),
-				"pending_create_claim":      "true",
-				"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+				"state":              string(sessionpkg.StateAsleep),
+				"continuation_epoch": "7",
+				"wait_hold":          "true",
+				"sleep_intent":       string(sessionpkg.SleepReasonWaitHold),
+				"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
 			})
 			wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := env.store.SetMetadata(wait.ID, "registered_epoch", "7"); err != nil {
 				t.Fatal(err)
 			}
 
@@ -682,17 +700,24 @@ func TestSessionWaitDependencyRevokedBeforePreWakeYieldsOrParks(t *testing.T) {
 				t.Fatalf("ensure keyed session-start controller: %v", err)
 			}
 			t.Cleanup(cr.stopSessionStartController)
+			cr.sessionWaitDependencyStartCh = make(chan sessionWaitDependencyStartHint, 1)
+			cr.sessionWaitDependencyIndex = newSessionWaitDependencyIndex()
+			if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open", State: waitStatePending, DepIDs: []string{dependency.ID}, DepMode: "all"}}); err != nil {
+				t.Fatal(err)
+			}
+			cr.sessionWaitDependencyIndexGeneration = 1
 			cr.enableSessionWaitDependencyLifecycleShadowSink(t.Context())
 			if cr.waitDependencyEnqueue == nil {
 				t.Fatal("keyed dependency-ready production sink was not installed")
 			}
 
 			_, err = cr.waitDependencyEnqueue(sessionWaitDependencyTarget{
-				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all",
+				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all", generation: 1,
 			}, sessionWaitDependencyCauseDependency)
 			if err != nil {
 				t.Fatalf("enqueue certified wait target: %v", err)
 			}
+			cr.handleSessionWaitDependencyStart(t.Context(), <-cr.sessionWaitDependencyStartCh)
 			if got := dependencyReads.Load(); got != 1 {
 				t.Fatalf("dependency reads = %d, want initial certification read", got)
 			}

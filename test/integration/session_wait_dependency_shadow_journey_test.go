@@ -28,7 +28,8 @@ type sessionWaitDependencyShadowJourneySessionItem struct {
 }
 
 type sessionWaitDependencyShadowJourneyBead struct {
-	ID string `json:"id"`
+	ID     string `json:"id"`
+	Status string `json:"status"`
 }
 
 type sessionWaitDependencyShadowJourneyWaitInspect struct {
@@ -128,6 +129,7 @@ tick_debounce = "10m"
 	out, err = gcDolt(cityDir, "session", "wait", session.ID,
 		"--on-beads", firstDependencyID,
 		"--on-beads", secondDependencyID,
+		"--any",
 		"--note", "keyed dependency closed",
 		"--sleep")
 	if err != nil {
@@ -221,6 +223,7 @@ tick_debounce = "10m"
 	if err != nil {
 		t.Fatalf("close first durable dependency: %v\n%s", err, out)
 	}
+	started := time.Now()
 	out, err = gcDolt(cityDir, "event", "emit", "bead.closed",
 		"--subject", firstDependencyID,
 		"--bead-payload", firstDependencyID,
@@ -236,50 +239,33 @@ tick_debounce = "10m"
 	if !emitted.HasPayload || !emitted.Submitted {
 		t.Fatalf("first durable dependency close event = %+v, want typed payload submitted", emitted)
 	}
-	pendingWait, err = sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
+	out, err = bdDolt(cityDir, "show", secondDependencyID, "--json")
 	if err != nil {
-		t.Fatalf("inspect wait after first dependency close: %v", err)
+		t.Fatalf("show second dependency after first close: %v\n%s", err, out)
 	}
-	if pendingWait.Wait.State != "pending" || pendingWait.Wait.Status != "open" {
-		t.Fatalf("wait after first dependency close = %+v, want pending open", pendingWait.Wait)
+	var secondDependencies []sessionWaitDependencyShadowJourneyBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &secondDependencies); err != nil {
+		t.Fatalf("decode second dependency after first close: %v\n%s", err, out)
 	}
-	if err := sessionWaitDependencyShadowJourneyWaitForExactTmuxAbsence(
-		t.Context(), cityDir, session.SessionName, sessionWaitDependencyShadowJourneyWitnessTimeout,
-	); err != nil {
-		t.Fatalf("first dependency close started waiting session: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, firstDependencyID))
+	if len(secondDependencies) != 1 {
+		t.Fatalf("second dependency lookup after first close returned %d rows, want 1: %s", len(secondDependencies), out)
 	}
-
-	out, err = bdDolt(cityDir, "close", secondDependencyID)
-	if err != nil {
-		t.Fatalf("close second durable dependency: %v\n%s", err, out)
-	}
-	started := time.Now()
-	out, err = gcDolt(cityDir, "event", "emit", "bead.closed",
-		"--subject", secondDependencyID,
-		"--bead-payload", secondDependencyID,
-		"--actor", "bd-hook",
-		"--json")
-	if err != nil {
-		t.Fatalf("emit second durable dependency close: %v\n%s", err, out)
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &emitted); err != nil {
-		t.Fatalf("decode second durable dependency close event: %v\n%s", err, out)
-	}
-	if !emitted.HasPayload || !emitted.Submitted {
-		t.Fatalf("second durable dependency close event = %+v, want typed payload submitted", emitted)
+	secondDependency := secondDependencies[0]
+	if secondDependency.ID != secondDependencyID || secondDependency.Status != "open" {
+		t.Fatalf("second dependency after first close = %+v, want id=%q status=open", secondDependency, secondDependencyID)
 	}
 
 	tmuxSession, liveLatency, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
 		t.Context(), cityDir, session.SessionName, started, sessionWaitDependencyShadowJourneyWitnessTimeout,
 	)
 	if err != nil {
-		t.Fatalf("dependency-ready session did not start: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, secondDependencyID))
+		t.Fatalf("dependency-ready session did not start: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, firstDependencyID))
 	}
 	commit, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
 		t.Context(), cityDir, session, started, sessionWaitDependencyShadowJourneyWitnessTimeout,
 	)
 	if err != nil {
-		t.Fatalf("dependency-ready keyed start did not commit: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, secondDependencyID))
+		t.Fatalf("dependency-ready keyed start did not commit: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, firstDependencyID))
 	}
 	if commit.Fields.Admission != "wait_dependency" || commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
 		t.Fatalf("dependency start commit = %+v, want applied wait_dependency admission", commit)
@@ -291,7 +277,7 @@ tick_debounce = "10m"
 	if durableWait.Wait.ID != waitID || durableWait.Wait.State != "ready" || durableWait.Wait.Status != "open" {
 		t.Fatalf("durable wait after keyed start = %+v, want id=%q state=ready status=open", durableWait.Wait, waitID)
 	}
-	t.Logf("second dependency close started %s through keyed reconciliation in %s and committed in %s (%s|%s|%s)", session.ID, liveLatency, commitLatency, tmuxSession.ID, tmuxSession.Name, tmuxSession.SocketPath)
+	t.Logf("first dependency close started %s through keyed reconciliation in %s and committed in %s (%s|%s|%s)", session.ID, liveLatency, commitLatency, tmuxSession.ID, tmuxSession.Name, tmuxSession.SocketPath)
 }
 
 // TestReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce proves

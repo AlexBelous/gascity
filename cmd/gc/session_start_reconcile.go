@@ -85,12 +85,12 @@ func validateSessionWaitDependencyStartLease(lease sessionWaitDependencyStartLea
 	if lease.SessionID == "" || strings.TrimSpace(lease.SessionID) != lease.SessionID {
 		return errors.New("dependency wait lease has invalid session id")
 	}
-	if lease.DepMode != "all" || len(lease.DepIDs) == 0 {
-		return errors.New("dependency wait lease is outside the exact deps/all cohort")
+	if (lease.DepMode != "all" && lease.DepMode != "any") || len(lease.DepIDs) == 0 {
+		return errors.New("dependency wait lease is outside the exact deps cohort")
 	}
 	for _, dependencyID := range lease.DepIDs {
 		if dependencyID == "" || strings.TrimSpace(dependencyID) != dependencyID {
-			return errors.New("dependency wait lease is outside the exact deps/all cohort")
+			return errors.New("dependency wait lease is outside the exact deps cohort")
 		}
 	}
 	if lease.WaitRevision == 0 || lease.SessionRevision == 0 || lease.IndexGeneration == 0 || lease.ControllerGeneration == 0 {
@@ -139,7 +139,7 @@ func certifySessionWaitDependencyStartLease(
 	if err != nil {
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, fmt.Errorf("canonicalizing certified dependency wait %q: %w", target.WaitID, err)
 	}
-	if wait.ID != target.WaitID || !indexable || registration.sessionID != target.SessionID || registration.depMode != "all" || !slices.Equal(registration.depIDs, target.DepIDs) {
+	if wait.ID != target.WaitID || !indexable || registration.sessionID != target.SessionID || registration.depMode != target.DepMode || !slices.Equal(registration.depIDs, target.DepIDs) {
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, nil
 	}
 	if info.ID != target.SessionID || info.Closed || persistedWait.Revision == 0 || persistedSession.Revision == 0 {
@@ -151,7 +151,7 @@ func certifySessionWaitDependencyStartLease(
 		cfgAgent = findAgentByTemplate(cfg, template)
 	}
 	// This is the intentionally narrow cohort that normal ownership leaves to
-	// legacy while it is asleep: a durable deps/all wait attached to a regular
+	// legacy while it is asleep: a durable dependency wait attached to a regular
 	// configured session. The wait itself supplies the ownership proof; it is
 	// distinct from configuration-level agent dependencies.
 	if cfgAgent == nil || len(cfgAgent.DependsOn) != 0 || info.DependencyOnly || isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) || isManualSessionInfoForAgent(info, cfgAgent) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
@@ -1282,7 +1282,7 @@ func reconcileExactWaitDependencyStart(
 	if err != nil {
 		return preClaimFailure(fmt.Errorf("canonicalizing dependency wait before claim: %w", err))
 	}
-	if wait.ID != lease.WaitID || !indexable || registration.sessionID != lease.SessionID || registration.depMode != "all" || !slices.Equal(registration.depIDs, lease.DepIDs) || wait.RegisteredEpoch != lease.RegisteredEpoch {
+	if wait.ID != lease.WaitID || !indexable || registration.sessionID != lease.SessionID || registration.depMode != lease.DepMode || !slices.Equal(registration.depIDs, lease.DepIDs) || wait.RegisteredEpoch != lease.RegisteredEpoch {
 		return preClaimFailure(errors.New("dependency wait no longer matches leased pending revision"))
 	}
 	alreadyClaimed := wait.State == waitStateReady && wait.ReadyOwner == string(sessionpkg.WaitReadyOwnerDependency) && wait.ReadyOperation == lease.Operation

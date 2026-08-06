@@ -85,8 +85,13 @@ func validateSessionWaitDependencyStartLease(lease sessionWaitDependencyStartLea
 	if lease.SessionID == "" || strings.TrimSpace(lease.SessionID) != lease.SessionID {
 		return errors.New("dependency wait lease has invalid session id")
 	}
-	if lease.DepMode != "all" || len(lease.DepIDs) != 1 || lease.DepIDs[0] == "" || strings.TrimSpace(lease.DepIDs[0]) != lease.DepIDs[0] {
+	if lease.DepMode != "all" || len(lease.DepIDs) == 0 {
 		return errors.New("dependency wait lease is outside the exact deps/all cohort")
+	}
+	for _, dependencyID := range lease.DepIDs {
+		if dependencyID == "" || strings.TrimSpace(dependencyID) != dependencyID {
+			return errors.New("dependency wait lease is outside the exact deps/all cohort")
+		}
 	}
 	if lease.WaitRevision == 0 || lease.SessionRevision == 0 || lease.IndexGeneration == 0 || lease.ControllerGeneration == 0 {
 		return errors.New("dependency wait lease lacks revision or generation provenance")
@@ -130,7 +135,11 @@ func certifySessionWaitDependencyStartLease(
 	if err != nil {
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, fmt.Errorf("reading certified dependency session %q: %w", target.SessionID, err)
 	}
-	if wait.ID != target.WaitID || wait.SessionID != target.SessionID || wait.Kind != "deps" || wait.DepMode != "all" || len(wait.DepIDs) != 1 || wait.DepIDs[0] != target.DepIDs[0] || wait.Status != "open" || wait.State != waitStatePending {
+	registration, indexable, err := waitDependencyRegistrationFrom(wait)
+	if err != nil {
+		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, fmt.Errorf("canonicalizing certified dependency wait %q: %w", target.WaitID, err)
+	}
+	if wait.ID != target.WaitID || !indexable || registration.sessionID != target.SessionID || registration.depMode != "all" || !slices.Equal(registration.depIDs, target.DepIDs) {
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, nil
 	}
 	if info.ID != target.SessionID || info.Closed || persistedWait.Revision == 0 || persistedSession.Revision == 0 {
@@ -155,8 +164,8 @@ func certifySessionWaitDependencyStartLease(
 	lease := sessionWaitDependencyStartLease{
 		WaitID:               wait.ID,
 		SessionID:            info.ID,
-		DepIDs:               append([]string(nil), wait.DepIDs...),
-		DepMode:              wait.DepMode,
+		DepIDs:               append([]string(nil), registration.depIDs...),
+		DepMode:              registration.depMode,
 		RegisteredEpoch:      wait.RegisteredEpoch,
 		WaitRevision:         persistedWait.Revision,
 		SessionRevision:      persistedSession.Revision,
@@ -1267,7 +1276,13 @@ func reconcileExactWaitDependencyStart(
 	if err != nil {
 		return preClaimFailure(fmt.Errorf("reading dependency wait before claim: %w", err))
 	}
-	if wait.ID != lease.WaitID || wait.SessionID != lease.SessionID || wait.Kind != "deps" || wait.DepMode != "all" || len(wait.DepIDs) != 1 || wait.DepIDs[0] != lease.DepIDs[0] || wait.RegisteredEpoch != lease.RegisteredEpoch || wait.Status != "open" {
+	registeredWait := wait
+	registeredWait.State = waitStatePending
+	registration, indexable, err := waitDependencyRegistrationFrom(registeredWait)
+	if err != nil {
+		return preClaimFailure(fmt.Errorf("canonicalizing dependency wait before claim: %w", err))
+	}
+	if wait.ID != lease.WaitID || !indexable || registration.sessionID != lease.SessionID || registration.depMode != "all" || !slices.Equal(registration.depIDs, lease.DepIDs) || wait.RegisteredEpoch != lease.RegisteredEpoch {
 		return preClaimFailure(errors.New("dependency wait no longer matches leased pending revision"))
 	}
 	alreadyClaimed := wait.State == waitStateReady && wait.ReadyOwner == string(sessionpkg.WaitReadyOwnerDependency) && wait.ReadyOperation == lease.Operation
@@ -1366,7 +1381,10 @@ func reconcileExactWaitDependencyStart(
 			return errors.New("dependency start session changed before provider start")
 		}
 		liveWait, _, waitErr := waitFront.GetWaitPersistedResponse(lease.WaitID)
-		if waitErr != nil || liveWait.ID != lease.WaitID || liveWait.SessionID != lease.SessionID || liveWait.Kind != "deps" || liveWait.DepMode != lease.DepMode || !slices.Equal(liveWait.DepIDs, lease.DepIDs) || liveWait.Status != "open" || liveWait.State != waitStateReady || liveWait.ReadyOwner != string(sessionpkg.WaitReadyOwnerDependency) || liveWait.ReadyOperation != lease.Operation || liveWait.RegisteredEpoch != lease.RegisteredEpoch {
+		registeredLiveWait := liveWait
+		registeredLiveWait.State = waitStatePending
+		registration, indexable, registrationErr := waitDependencyRegistrationFrom(registeredLiveWait)
+		if waitErr != nil || registrationErr != nil || liveWait.ID != lease.WaitID || !indexable || registration.sessionID != lease.SessionID || registration.depMode != lease.DepMode || !slices.Equal(registration.depIDs, lease.DepIDs) || liveWait.State != waitStateReady || liveWait.ReadyOwner != string(sessionpkg.WaitReadyOwnerDependency) || liveWait.ReadyOperation != lease.Operation || liveWait.RegisteredEpoch != lease.RegisteredEpoch {
 			return errors.New("dependency wait changed before provider start")
 		}
 		ready, depErr := depsWaitReadyDetailedFrom(newAuthoritativeWaitDependencyStoreSet(params.Store, params.RigStores), liveWait)

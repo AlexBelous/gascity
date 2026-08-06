@@ -14,7 +14,7 @@ import (
 
 // TestSessionWaitDependencyPrePokeUnsupportedEligibilityFallsBackToLegacy
 // protects the deliberately narrow exact-start cohort. Every row here is a
-// valid legacy dependency wait, but is outside the keyed deps/all/single,
+// valid legacy dependency wait, but is outside the keyed deps/all,
 // ordinary-session contract. It must stay free of keyed ownership and still
 // be advanced by the existing legacy wait preparation in both rollout modes.
 func TestSessionWaitDependencyPrePokeUnsupportedEligibilityFallsBackToLegacy(t *testing.T) {
@@ -31,7 +31,6 @@ func TestSessionWaitDependencyPrePokeUnsupportedEligibilityFallsBackToLegacy(t *
 			{name: "manual", sessionMetadata: map[string]string{"manual_session": "true", "session_origin": "manual"}, dependencyCount: 1, depMode: "all"},
 			{name: "dependency-only", sessionMetadata: map[string]string{"dependency_only": "true"}, dependencyCount: 1, depMode: "all"},
 			{name: "configured-agent-depends-on", agentDependsOn: []string{"database"}, dependencyCount: 1, depMode: "all"},
-			{name: "deps-all-multiple", dependencyCount: 2, depMode: "all"},
 			{name: "deps-any", dependencyCount: 2, depMode: "any"},
 		} {
 			t.Run(string(mode)+"/"+test.name, func(t *testing.T) {

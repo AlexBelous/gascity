@@ -535,9 +535,9 @@ func testSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarge
 
 // TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController
 // pins the first production ownership transfer out of the dependency-wait
-// shadow: one durable deps/all wait with one closed dependency must wake only
-// its ordinary existing session through the keyed controller.  In particular,
-// this must not wait for, or wake, the fleet reconciler.
+// shadow: one durable deps/all wait with every dependency closed must wake
+// only its ordinary existing session through the keyed controller. In
+// particular, this must not wait for, or wake, the fleet reconciler.
 func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController(t *testing.T) {
 	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -547,7 +547,11 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				Workspace: config.Workspace{Name: "test-city"},
 				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
 			}
-			dependency, err := env.store.Create(beads.Bead{Title: "dependency"})
+			firstDependency, err := env.store.Create(beads.Bead{ID: "dependency-z", Title: "first dependency"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondDependency, err := env.store.Create(beads.Bead{ID: "dependency-a", Title: "second dependency"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -560,8 +564,12 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
 			})
 			unrelated := env.createSessionBead("unrelated", "worker")
-			wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+			wait, err := env.store.Create(sessionWaitShadowBead(target.ID, firstDependency.ID))
 			if err != nil {
+				t.Fatal(err)
+			}
+			durableDependencyIDs := []string{firstDependency.ID, secondDependency.ID}
+			if err := env.store.SetMetadata(wait.ID, "dep_ids", strings.Join(durableDependencyIDs, ",")); err != nil {
 				t.Fatal(err)
 			}
 			if err := env.store.SetMetadata(wait.ID, "registered_epoch", "7"); err != nil {
@@ -610,11 +618,11 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 			t.Cleanup(controller.Stop)
 			cr := &CityRuntime{
 				cs: cs, cfg: env.cfg, pokeCh: pokeCh, stderr: io.Discard,
-				sessionStartOwnership: sessionStartOwnershipKeyed, sessionStartController: controller,
+				sessionStartOwnership: sessionStartOwnershipKeyed, sessionStartMode: mode, sessionStartController: controller,
 				sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, 1),
 			}
 			cr.sessionWaitDependencyIndex = newSessionWaitDependencyIndex()
-			if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open", State: waitStatePending, DepIDs: []string{dependency.ID}, DepMode: "all"}}); err != nil {
+			if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open", State: waitStatePending, DepIDs: durableDependencyIDs, DepMode: "all"}}); err != nil {
 				t.Fatal(err)
 			}
 			cr.sessionWaitDependencyIndexGeneration = 1
@@ -623,19 +631,38 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				t.Fatal("keyed dependency-ready production sink was not installed")
 			}
 
-			if err := env.store.Close(dependency.ID); err != nil {
+			if err := env.store.Close(firstDependency.ID); err != nil {
 				t.Fatal(err)
 			}
-			closed, err := env.store.Get(dependency.ID)
+			if reserved := cr.reserveSessionWaitDependencyTargets(t.Context(), firstDependency.ID); len(reserved) != 0 {
+				t.Fatalf("first dependency reserved %d starts, want 0", len(reserved))
+			}
+			storedWait, err := env.store.Get(wait.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if storedWait.Metadata["state"] != waitStatePending {
+				t.Fatalf("wait after first dependency close = %q, want %q", storedWait.Metadata["state"], waitStatePending)
+			}
+			if got := env.sp.CountCalls("Start", "worker"); got != 0 {
+				t.Fatalf("provider Starts after first dependency close = %d, want 0", got)
+			}
+
+			if err := env.store.Close(secondDependency.ID); err != nil {
+				t.Fatal(err)
+			}
+			reserved := cr.reserveSessionWaitDependencyTargets(t.Context(), secondDependency.ID)
+			if len(reserved) != 1 {
+				t.Fatalf("second dependency reserved %d starts, want 1", len(reserved))
+			}
+			closed, err := env.store.Get(secondDependency.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if closed.Status != "closed" {
 				t.Fatalf("dependency status = %q, want closed", closed.Status)
 			}
-			err = cr.enqueueSessionWaitDependencyStartHint(t.Context(), sessionWaitDependencyTarget{
-				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all", generation: 1,
-			}, sessionWaitDependencyCauseDependency)
+			err = cr.enqueueSessionWaitDependencyStartHint(t.Context(), reserved[0], sessionWaitDependencyCauseDependency)
 			if err != nil {
 				t.Fatalf("enqueue closed dependency target: %v", err)
 			}
@@ -674,7 +701,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				t.Fatal("keyed dependency start poked legacy reconciliation")
 			default:
 			}
-			storedWait, err := env.store.Get(wait.ID)
+			storedWait, err = env.store.Get(wait.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -159,10 +159,12 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 
-	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
-	bdInit.Dir = dir
-	bdInit.Env = env
-	out, err := bdInit.CombinedOutput()
+	out, err := runWithBDInitMigrationRaceRetry(ctx, func() ([]byte, error) {
+		bdInit := exec.CommandContext(ctx, bdBinary, "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
+		bdInit.Dir = dir
+		bdInit.Env = env
+		return bdInit.CombinedOutput()
+	})
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
 	}

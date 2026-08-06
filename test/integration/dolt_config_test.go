@@ -142,12 +142,14 @@ func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
-		"--server-host", "127.0.0.1", "--server-port", port,
-		"-p", prefix, "--skip-hooks")
-	cmd.Dir = dir
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	out, err := runWithBDInitMigrationRaceRetry(ctx, func() ([]byte, error) {
+		cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
+			"--server-host", "127.0.0.1", "--server-port", port,
+			"-p", prefix, "--skip-hooks")
+		cmd.Dir = dir
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	})
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd init timed out: %s", out)
 	}

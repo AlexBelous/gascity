@@ -151,10 +151,10 @@ func certifySessionWaitDependencyStartLease(
 		cfgAgent = findAgentByTemplate(cfg, template)
 	}
 	// This is the intentionally narrow cohort that normal ownership leaves to
-	// legacy while it is asleep: a durable dependency wait attached to a regular
-	// configured session. The wait itself supplies the ownership proof; it is
-	// distinct from configuration-level agent dependencies.
-	if cfgAgent == nil || len(cfgAgent.DependsOn) != 0 || info.DependencyOnly || isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) || isManualSessionInfoForAgent(info, cfgAgent) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
+	// legacy while it is asleep: a durable dependency wait attached to a
+	// configured-template session. The wait itself supplies the ownership proof;
+	// it is distinct from configuration-level agent dependencies.
+	if cfgAgent == nil || len(cfgAgent.DependsOn) != 0 || info.DependencyOnly || isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
 		return sessionWaitDependencyStartLease{}, exactSessionStartLegacyOwner, nil
 	}
 	if info.MetadataState != string(sessionpkg.StateAsleep) || info.PendingCreateClaim ||
@@ -1021,7 +1021,7 @@ func reconcileExactSessionStartWithOwner(
 		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
 	}
 	if admission.WaitDependency != nil && cfgAgent != nil && len(cfgAgent.DependsOn) == 0 &&
-		!info.DependencyOnly && !isNamedSessionInfo(info) && !isPoolManagedSessionInfo(info) && !isManualSessionInfoForAgent(info, cfgAgent) {
+		!info.DependencyOnly && !isNamedSessionInfo(info) && !isPoolManagedSessionInfo(info) {
 		// A retained dependency-wait lease is the narrow proof that this otherwise
 		// legacy sleeping session belongs to the keyed handoff.
 		owner = exactSessionStartKeyedOwner

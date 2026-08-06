@@ -28,7 +28,6 @@ func TestSessionWaitDependencyPrePokeUnsupportedEligibilityFallsBackToLegacy(t *
 		}{
 			{name: "named", sessionMetadata: map[string]string{"configured_named_session": "true", "configured_named_identity": "worker"}, dependencyCount: 1, depMode: "all"},
 			{name: "pool-managed", sessionMetadata: map[string]string{"pool_managed": "true"}, dependencyCount: 1, depMode: "all"},
-			{name: "manual", sessionMetadata: map[string]string{"manual_session": "true", "session_origin": "manual"}, dependencyCount: 1, depMode: "all"},
 			{name: "dependency-only", sessionMetadata: map[string]string{"dependency_only": "true"}, dependencyCount: 1, depMode: "all"},
 			{name: "configured-agent-depends-on", agentDependsOn: []string{"database"}, dependencyCount: 1, depMode: "all"},
 		} {

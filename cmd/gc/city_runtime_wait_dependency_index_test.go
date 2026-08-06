@@ -535,14 +535,22 @@ func testSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarge
 
 // TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController
 // pins the first production ownership transfer out of the dependency-wait
-// shadow: a durable deps/all wait with every dependency closed, or a deps/any
-// wait with one closed dependency, must wake only its ordinary existing
-// session through the keyed controller. In
+// shadow: a durable deps/all wait with every dependency closed, a deps/any
+// wait with one closed dependency, or a manual deps/all wait must wake only
+// its exact existing session through the keyed controller. In
 // particular, this must not wait for, or wake, the fleet reconciler.
 
 func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController(t *testing.T) {
-	for _, depMode := range []string{"all", "any"} {
-		t.Run(depMode, func(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		depMode string
+		manual  bool
+	}{
+		{name: "all", depMode: "all"},
+		{name: "any", depMode: "any"},
+		{name: "manual-all", depMode: "all", manual: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 				t.Run(string(mode), func(t *testing.T) {
 					env := newReconcilerTestEnv()
@@ -567,6 +575,12 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						"sleep_intent":       string(sessionpkg.SleepReasonWaitHold),
 						"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
 					})
+					if test.manual {
+						env.setSessionMetadata(&target, map[string]string{
+							"manual_session": "true",
+							"session_origin": "manual",
+						})
+					}
 					unrelated := env.createSessionBead("unrelated", "worker")
 					wait, err := env.store.Create(sessionWaitShadowBead(target.ID, firstDependency.ID))
 					if err != nil {
@@ -576,7 +590,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 					if err := env.store.SetMetadata(wait.ID, "dep_ids", strings.Join(durableDependencyIDs, ",")); err != nil {
 						t.Fatal(err)
 					}
-					if err := env.store.SetMetadata(wait.ID, "dep_mode", depMode); err != nil {
+					if err := env.store.SetMetadata(wait.ID, "dep_mode", test.depMode); err != nil {
 						t.Fatal(err)
 					}
 					if err := env.store.SetMetadata(wait.ID, "registered_epoch", "7"); err != nil {
@@ -629,7 +643,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, 1),
 					}
 					cr.sessionWaitDependencyIndex = newSessionWaitDependencyIndex()
-					if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open", State: waitStatePending, DepIDs: durableDependencyIDs, DepMode: depMode}}); err != nil {
+					if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open", State: waitStatePending, DepIDs: durableDependencyIDs, DepMode: test.depMode}}); err != nil {
 						t.Fatal(err)
 					}
 					cr.sessionWaitDependencyIndexGeneration = 1
@@ -642,7 +656,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						t.Fatal(err)
 					}
 					triggerDependencyID := firstDependency.ID
-					if depMode == "all" {
+					if test.depMode == "all" {
 						if reserved := cr.reserveSessionWaitDependencyTargets(t.Context(), firstDependency.ID); len(reserved) != 0 {
 							t.Fatalf("first dependency reserved %d starts, want 0", len(reserved))
 						}
@@ -677,7 +691,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						t.Fatal(err)
 					}
 					wantSecondStatus := "open"
-					if depMode == "all" {
+					if test.depMode == "all" {
 						wantSecondStatus = "closed"
 					}
 					if open.Status != wantSecondStatus {
@@ -731,6 +745,15 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 					}
 					if got := env.sessionInfo(target.ID).MetadataState; got != string(sessionpkg.StateActive) {
 						t.Fatalf("target state after keyed start = %q, want %q", got, sessionpkg.StateActive)
+					}
+					if test.manual {
+						storedTarget, err := env.store.Get(target.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if storedTarget.Metadata["manual_session"] != "true" || storedTarget.Metadata["session_origin"] != "manual" {
+							t.Fatalf("manual identity after keyed start = %v", storedTarget.Metadata)
+						}
 					}
 				})
 			}

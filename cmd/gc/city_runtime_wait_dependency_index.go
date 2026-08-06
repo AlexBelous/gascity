@@ -194,7 +194,7 @@ func (cr *CityRuntime) reserveSessionWaitDependencyTargets(ctx context.Context, 
 	now := clock.Real{}.Now()
 	reserved := make([]sessionWaitDependencyTarget, 0, len(targets))
 	for _, target := range targets {
-		lease, owner, certifyErr := certifySessionWaitDependencyStartLease(snapshot.Store, target, dependencies, snapshot.Config, snapshot.Generation, now)
+		lease, owner, certifyErr := certifySessionWaitDependencyStartLease(snapshot.Store, target, dependencies, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Generation, now)
 		if certifyErr != nil {
 			fmt.Fprintf(cr.sessionStartStderr(), "%s: reserving dependency wait %s: %v\n", cr.sessionStartLogPrefix(), target.WaitID, certifyErr) //nolint:errcheck
 			continue
@@ -498,7 +498,7 @@ func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hin
 	}
 	defer release()
 	lease, owner, err := certifySessionWaitDependencyStartLease(snapshot.Store, hint.Target,
-		newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()), snapshot.Config, snapshot.Generation, clock.Real{}.Now())
+		newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()), snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Generation, clock.Real{}.Now())
 	if err != nil {
 		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, err)
 		return

@@ -543,24 +543,36 @@ func testSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarge
 
 func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		depMode string
-		manual  bool
-		named   bool
+		name                   string
+		depMode                string
+		manual                 bool
+		named                  bool
+		liveSingletonDependsOn bool
 	}{
 		{name: "all", depMode: "all"},
 		{name: "any", depMode: "any"},
 		{name: "manual-all", depMode: "all", manual: true},
 		{name: "named-all", depMode: "all", named: true},
+		{name: "live-singleton-depends-on", depMode: "all", liveSingletonDependsOn: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 				t.Run(string(mode), func(t *testing.T) {
 					env := newReconcilerTestEnv()
 					env.store = openSessionWaitDependencyConditionalStore(t, mode)
+					worker := config.Agent{Name: "worker", StartCommand: "true"}
+					if test.liveSingletonDependsOn {
+						worker.DependsOn = []string{"database"}
+					}
 					env.cfg = &config.City{
 						Workspace: config.Workspace{Name: "test-city"},
-						Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+						Agents: []config.Agent{
+							{Name: "database", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+							worker,
+						},
+					}
+					if test.liveSingletonDependsOn {
+						env.addDesired("database", "database", true)
 					}
 					if test.named {
 						env.cfg.NamedSessions = []config.NamedSession{{Template: "worker", Mode: "always"}}
@@ -739,7 +751,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 					if got := unrelatedGets.Load(); got != 0 {
 						t.Fatalf("unrelated authoritative Gets = %d, want 0", got)
 					}
-					if got := audited.listCalls.Load(); got != 0 {
+					if got := audited.listCalls.Load(); got != 0 && !test.liveSingletonDependsOn {
 						t.Fatalf("fleet List calls = %d, want 0", got)
 					}
 					if cr.sessionWaitDependencyReadyPokePending.Load() {
@@ -787,21 +799,31 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *testing.T) {
 	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 		for _, test := range []struct {
-			name      string
-			dependsOn []string
-			wantOwned bool
+			name           string
+			dependsOn      []string
+			dependencyMax  *int
+			dependencyLive bool
+			wantOwned      bool
 		}{
 			{name: "ordinary", wantOwned: true},
 			{name: "configured-dependency", dependsOn: []string{"database"}},
+			{name: "missing configured dependency", dependsOn: []string{"missing"}},
+			{name: "not live singleton configured dependency", dependsOn: []string{"database"}, dependencyMax: intPtr(1)},
+			{name: "multiple configured dependencies", dependsOn: []string{"database", "cache"}},
+			{name: "live singleton configured dependency", dependsOn: []string{"database"}, dependencyMax: intPtr(1), dependencyLive: true, wantOwned: true},
 		} {
 			t.Run(string(mode)+"/"+test.name, func(t *testing.T) {
 				env := newReconcilerTestEnv()
 				env.cfg = &config.City{
 					Workspace: config.Workspace{Name: "test-city"},
 					Agents: []config.Agent{
-						{Name: "database", StartCommand: "true"},
+						{Name: "database", StartCommand: "true", MaxActiveSessions: test.dependencyMax},
+						{Name: "cache", StartCommand: "true", MaxActiveSessions: intPtr(1)},
 						{Name: "worker", StartCommand: "true", DependsOn: test.dependsOn},
 					},
+				}
+				if test.dependencyLive {
+					env.addDesired("database", "database", true)
 				}
 				dependency, err := env.store.Create(beads.Bead{Title: "dependency"})
 				if err != nil {

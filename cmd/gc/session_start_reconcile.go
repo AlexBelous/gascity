@@ -123,10 +123,12 @@ func certifySessionWaitDependencyStartLease(
 	target sessionWaitDependencyTarget,
 	dependencies waitDependencyReader,
 	cfg *config.City,
+	provider runtime.Provider,
+	cityName string,
 	generation uint64,
 	now time.Time,
 ) (sessionWaitDependencyStartLease, exactSessionStartOwner, error) {
-	if store == nil || cfg == nil || generation == 0 {
+	if store == nil || cfg == nil || provider == nil || generation == 0 {
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, errors.New("dependency wait start prerequisites are unavailable")
 	}
 	if outcome, err := validateExactSessionWaitDependencyShadow(store, target, dependencies, now); err != nil || outcome != sessionWaitDependencyEvaluationReady {
@@ -159,11 +161,7 @@ func certifySessionWaitDependencyStartLease(
 		template := resolvedSessionTemplateInfo(info, cfg)
 		cfgAgent = findAgentByTemplate(cfg, template)
 	}
-	// This is the intentionally narrow cohort that normal ownership leaves to
-	// legacy while it is asleep: a durable dependency wait attached to a
-	// configured-template session. The wait itself supplies the ownership proof;
-	// it is distinct from configuration-level agent dependencies.
-	if cfgAgent == nil || len(cfgAgent.DependsOn) != 0 || info.DependencyOnly || (isNamedSessionInfo(info) && !isCanonicalConfiguredNamedSessionForStart(info, cfg)) || isPoolManagedSessionInfo(info) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
+	if cfgAgent == nil || !waitDependencyConfiguredTemplateEligible(info, cfg, provider, cityName, store, now) || info.DependencyOnly || (isNamedSessionInfo(info) && !isCanonicalConfiguredNamedSessionForStart(info, cfg)) || isPoolManagedSessionInfo(info) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
 		return sessionWaitDependencyStartLease{}, exactSessionStartLegacyOwner, nil
 	}
 	if info.MetadataState != string(sessionpkg.StateAsleep) || info.PendingCreateClaim ||
@@ -186,6 +184,35 @@ func certifySessionWaitDependencyStartLease(
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, err
 	}
 	return lease, exactSessionStartKeyedOwner, nil
+}
+
+// waitDependencyConfiguredTemplateEligible admits ordinary configured sessions
+// and the one unambiguous configured dependency shape supported by exact wait
+// ownership: one currently-live canonical singleton dependency.
+func waitDependencyConfiguredTemplateEligible(
+	info sessionpkg.Info,
+	cfg *config.City,
+	provider runtime.Provider,
+	cityName string,
+	store beads.Store,
+	now time.Time,
+) bool {
+	template := resolvedSessionTemplateInfo(info, cfg)
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil {
+		return false
+	}
+	if len(cfgAgent.DependsOn) == 0 {
+		return true
+	}
+	if len(cfgAgent.DependsOn) != 1 {
+		return false
+	}
+	dependency := findAgentByTemplate(cfg, cfgAgent.DependsOn[0])
+	if dependency == nil || isMultiSessionCfgAgent(dependency) {
+		return false
+	}
+	return allDependenciesAliveForTemplateWithClock(template, cfg, nil, provider, cityName, store, &clock.Fake{Time: now})
 }
 
 // planExactSessionWaitDependencyStartShadow reads one dependency-ready session
@@ -1029,7 +1056,7 @@ func reconcileExactSessionStartWithOwner(
 	if admission.WaitDependency != nil && cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
 	}
-	if admission.WaitDependency != nil && cfgAgent != nil && len(cfgAgent.DependsOn) == 0 &&
+	if admission.WaitDependency != nil && cfgAgent != nil && waitDependencyConfiguredTemplateEligible(info, params.Config, params.Provider, params.CityName, params.Store, ownershipNow) &&
 		!info.DependencyOnly && (!isNamedSessionInfo(info) || isCanonicalConfiguredNamedSessionForStart(info, params.Config)) && !isPoolManagedSessionInfo(info) {
 		// A retained dependency-wait lease is the narrow proof that this otherwise
 		// legacy sleeping session belongs to the keyed handoff.
@@ -1388,6 +1415,9 @@ func reconcileExactWaitDependencyStart(
 		latest, latestPersisted, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, lease.SessionID)
 		if readErr != nil || latest.ID != lease.SessionID || latest.Closed || latestPersisted.Revision != committedPersisted.Revision || latest.InstanceToken != lease.Operation {
 			return errors.New("dependency start session changed before provider start")
+		}
+		if !waitDependencyConfiguredTemplateEligible(latest, params.Config, params.Provider, params.CityName, params.Store, clk.Now().UTC()) {
+			return errors.New("configured dependency liveness changed before provider start")
 		}
 		liveWait, _, waitErr := waitFront.GetWaitPersistedResponse(lease.WaitID)
 		registeredLiveWait := liveWait

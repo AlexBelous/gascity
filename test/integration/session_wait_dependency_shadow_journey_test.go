@@ -100,10 +100,16 @@ func TestSessionWaitDependencyCloseStartsSleepingSessionThroughKeyedController(t
 	cityDir := setupReconcilerCityWithManagedDolt(t, `session_reconciler = "auto"
 
 [[agent]]
+name = "database"
+start_command = "sleep 3600"
+max_active_sessions = 1
+
+[[agent]]
 name = "worker"
 start_command = "sleep 3600"
+depends_on = ["database"]
 `, `patrol_interval = "1h"
-tick_debounce = "10m"
+tick_debounce = "100ms"
 `, `conditional_writes = "auto"`)
 
 	session, _, err := sessionWaitDependencyShadowJourneyWaitForWorkerSession(
@@ -116,6 +122,41 @@ tick_debounce = "10m"
 		t.Context(), cityDir, session.SessionName, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
 	); err != nil {
 		t.Fatalf("canonical named session was not live before wait: %v", err)
+	}
+	dependencySessions, err := gc(cityDir, "session", "list", "--state", "all", "--template", "database", "--json")
+	if err != nil {
+		t.Fatalf("list configured singleton dependency: %v\n%s", err, dependencySessions)
+	}
+	var dependencyList sessionWaitDependencyShadowJourneySessionList
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(dependencySessions))), &dependencyList); err != nil {
+		t.Fatalf("decode configured singleton dependency: %v\n%s", err, dependencySessions)
+	}
+	var liveDependency sessionWaitDependencyShadowJourneySessionItem
+	for _, candidate := range dependencyList.Sessions {
+		if candidate.Template == "database" && !candidate.Closed && candidate.State == "active" {
+			liveDependency = candidate
+			break
+		}
+	}
+	if liveDependency.ID == "" || liveDependency.SessionName == "" {
+		t.Fatalf("configured singleton dependency before wait = %+v, want one active session", dependencyList.Sessions)
+	}
+	if _, _, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+		t.Context(), cityDir, liveDependency.SessionName, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
+	); err != nil {
+		t.Fatalf("configured singleton dependency was not live before target wait: %v", err)
+	}
+	configPath := filepath.Join(cityDir, "city.toml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read initial debounce config: %v", err)
+	}
+	if strings.Count(string(configData), `tick_debounce = "100ms"`) != 1 {
+		t.Fatalf("initial debounce config did not contain exactly one short tick: %s", configData)
+	}
+	writeFileAtomic(t, configPath, []byte(strings.Replace(string(configData), `tick_debounce = "100ms"`, `tick_debounce = "10m"`, 1)))
+	if out, err := gcDolt(cityDir, "reload", "--timeout", "45s"); err != nil {
+		t.Fatalf("reload held debounce before durable wait: %v\n%s", err, out)
 	}
 
 	out, err := bdDolt(cityDir, "create", "keyed start dependency", "--json")

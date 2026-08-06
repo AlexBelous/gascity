@@ -16,6 +16,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/executionevent"
 )
 
 // graphHookClaimStore resolves the routed graph store when beadID is
@@ -80,6 +82,23 @@ func graphRoutedHookClaimOps(cityPath string, cfg *config.City) hookClaimOps {
 				return st.Update(beadID, beads.UpdateOpts{Metadata: patch})
 			}
 			return hookStampWorkMetaWithBdStore(ctx, dir, env, beadID, assignee, patch)
+		},
+		ReadWorkMeta: func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
+			if st, ok := graphHookClaimStore(cityPath, cfg, beadID); ok {
+				return st.Get(beadID)
+			}
+			return hookReadClaimedBeadWithBdStore(ctx, dir, env, beadID, assignee)
+		},
+		EmitExecutionStepStarted: func(step beads.Bead, dir string, env []string, assignee string) {
+			if st, ok := graphHookClaimStore(cityPath, cfg, step.ID); ok {
+				rec := openCityRecorderAt(cityPath, io.Discard)
+				if closer, ok := rec.(io.Closer); ok {
+					defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
+				}
+				_ = executionevent.EmitLifecycle(rec, st, events.ExecutionStepStarted, step, eventActor())
+				return
+			}
+			hookEmitExecutionStepStarted(step, dir, env, assignee)
 		},
 	}
 }

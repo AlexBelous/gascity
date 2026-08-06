@@ -38,6 +38,9 @@ type routedWorkPoolAllocationResult struct {
 type routedWorkPoolStartLease struct {
 	SessionID     string
 	InstanceToken string
+	// SessionRevision is the exact durable row revision that authorized an
+	// active-runtime recovery. Ordinary pending-create leases leave it zero.
+	SessionRevision int64
 	// RecoverActive limits this lease to re-starting the exact active pool row
 	// after its runtime has been observed absent. It never widens ownership of
 	// ordinary active members.
@@ -71,6 +74,9 @@ func validateRoutedWorkPoolStartLease(lease routedWorkPoolStartLease) error {
 	}
 	if lease.ControllerGeneration == 0 || lease.MembershipRevision == 0 {
 		return fmt.Errorf("admitting pool allocation %q: generation and membership revision must be positive", lease.SessionID)
+	}
+	if lease.RecoverActive && lease.SessionRevision <= 0 {
+		return fmt.Errorf("admitting pool allocation %q: recovery session revision must be positive", lease.SessionID)
 	}
 	fields := []struct {
 		name  string
@@ -485,36 +491,50 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 		}
 		_, occupied := cr.poolMembershipShadow.observeOccupiedMember(hint.PoolTarget, existing.ID)
 		if lifecycle.BaseState == sessionpkg.BaseStateActive && !lifecycle.Terminal && occupied {
-			if existing.SessionName == "" {
+			recoveryInfo, recoveryPersisted, readErr := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, existing.ID)
+			if readErr != nil {
+				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, fmt.Errorf("reading exact pool recovery row: %w", readErr)
+			}
+			if recoveryInfo.ID != existing.ID {
+				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, fmt.Errorf("reading exact pool recovery row %q returned %q", existing.ID, recoveryInfo.ID)
+			}
+			if err := cr.poolMembershipShadow.replace(snapshot.Config, recoveryInfo); err != nil {
+				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, fmt.Errorf("publishing exact pool recovery membership: %w", err)
+			}
+			recoveryLifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(recoveryInfo))
+			_, recoveryOccupied := cr.poolMembershipShadow.observeOccupiedMember(hint.PoolTarget, recoveryInfo.ID)
+			if recoveryLifecycle.BaseState != sessionpkg.BaseStateActive || recoveryLifecycle.Terminal || !recoveryOccupied {
+				return routedWorkPoolAllocationResult{}, nil
+			}
+			if recoveryInfo.SessionName == "" {
 				if cr.sessionStartRolloutMode() == rollout.Require {
-					return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+					return routedWorkPoolAllocationResult{Session: recoveryInfo, Handled: true}, nil
 				}
 				return routedWorkPoolAllocationResult{}, nil
 			}
 			liveness := runtime.ObserveFreshLiveness(snapshot.Provider, runtime.LivenessTarget{
-				SessionID:            existing.ID,
-				SessionName:          existing.SessionName,
+				SessionID:            recoveryInfo.ID,
+				SessionName:          recoveryInfo.SessionName,
 				ProcessNames:         processHints(snapshot.Config, agent),
-				IncarnationStartedAt: drainAckIncarnationStartedAt(existing),
+				IncarnationStartedAt: drainAckIncarnationStartedAt(recoveryInfo),
 			})
 			if liveness.Running || liveness.Alive {
-				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+				return routedWorkPoolAllocationResult{Session: recoveryInfo, Handled: true}, nil
 			}
 			if !liveness.Complete {
 				if cr.sessionStartRolloutMode() == rollout.Require {
-					return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+					return routedWorkPoolAllocationResult{Session: recoveryInfo, Handled: true}, nil
 				}
 				return routedWorkPoolAllocationResult{}, nil
 			}
-			lease, leaseErr := cr.newRoutedWorkPoolStartLease(snapshot, existing, hint)
+			lease, leaseErr := cr.newRoutedWorkPoolRecoveryLease(snapshot, recoveryInfo, recoveryPersisted, hint)
 			if leaseErr != nil {
-				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, leaseErr
+				return routedWorkPoolAllocationResult{Session: recoveryInfo, Handled: true}, leaseErr
 			}
-			lease.RecoverActive = true
 			if err := cr.admitRoutedWorkPoolSession(lease); err != nil {
-				return routedWorkPoolAllocationResult{Session: existing, Handled: true}, err
+				return routedWorkPoolAllocationResult{Session: recoveryInfo, Handled: true}, err
 			}
-			return routedWorkPoolAllocationResult{Session: existing, Handled: true}, nil
+			return routedWorkPoolAllocationResult{Session: recoveryInfo, Handled: true}, nil
 		}
 		return routedWorkPoolAllocationResult{}, nil
 	}
@@ -611,6 +631,24 @@ func (cr *CityRuntime) newRoutedWorkPoolStartLease(
 	return lease, nil
 }
 
+func (cr *CityRuntime) newRoutedWorkPoolRecoveryLease(
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+	persisted sessionpkg.PersistedResponse,
+	hint routedWorkPoolAllocationHint,
+) (routedWorkPoolStartLease, error) {
+	lease, err := cr.newRoutedWorkPoolStartLease(snapshot, info, hint)
+	if err != nil {
+		return routedWorkPoolStartLease{}, err
+	}
+	lease.RecoverActive = true
+	lease.SessionRevision = persisted.Revision
+	if err := validateRoutedWorkPoolStartLease(lease); err != nil {
+		return routedWorkPoolStartLease{}, err
+	}
+	return lease, nil
+}
+
 func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	ctx context.Context,
 	snapshot controllerSessionStartSnapshot,
@@ -628,6 +666,16 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	}
 	if err := validateRoutedWorkPoolStartLease(lease); err != nil {
 		return false, err
+	}
+	if lease.RecoverActive {
+		current, persisted, readErr := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, lease.SessionID)
+		if readErr != nil {
+			return false, readErr
+		}
+		if persisted.Revision != lease.SessionRevision {
+			return false, nil
+		}
+		info = current
 	}
 	if snapshot.Generation != lease.ControllerGeneration || info.ID != lease.SessionID ||
 		strings.TrimSpace(info.InstanceToken) != lease.InstanceToken || info.Closed ||
@@ -651,7 +699,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	}
 	if lease.RecoverActive {
 		if lifecycle.BaseState != sessionpkg.BaseStateActive || lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) ||
-			lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) || info.SessionName == "" || snapshot.Provider.IsRunning(info.SessionName) {
+			lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) || info.SessionName == "" {
 			return false, nil
 		}
 	} else if !lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) {
@@ -674,6 +722,17 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 		strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
 		strings.TrimSpace(info.TriggerBeadStoreRef) != lease.SourceStore {
 		return false, nil
+	}
+	if lease.RecoverActive {
+		liveness := runtime.ObserveFreshLiveness(snapshot.Provider, runtime.LivenessTarget{
+			SessionID:            info.ID,
+			SessionName:          info.SessionName,
+			ProcessNames:         processHints(snapshot.Config, agent),
+			IncarnationStartedAt: drainAckIncarnationStartedAt(info),
+		})
+		if !liveness.Complete || liveness.Running || liveness.Alive {
+			return false, nil
+		}
 	}
 	sourceStore, ok := cr.cs.routedWorkStore(snapshot.Config, lease.SourceStore)
 	if !ok || sourceStore == nil {

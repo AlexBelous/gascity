@@ -2911,6 +2911,11 @@ func TestAuthorizeRoutedWorkPoolStartRejectsStaleLeaseAuthority(t *testing.T) {
 
 func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRequiresExactAbsentRuntime(t *testing.T) {
 	fixture := newRoutedWorkPoolAuthorizationFixture(t)
+	fresh := &fixedFreshLivenessProvider{
+		Provider:    fixture.snapshot.Provider,
+		observation: runtime.Liveness{Complete: true},
+	}
+	fixture.snapshot.Provider = fresh
 	if err := fixture.store.SetMetadataBatch(fixture.info.ID, map[string]string{
 		"state":                     string(sessionpkg.StateActive),
 		"pending_create_claim":      "",
@@ -2927,6 +2932,11 @@ func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRequiresExactAbsentRuntime(t 
 	}
 	fixture.lease.InstanceToken = info.InstanceToken
 	fixture.lease.RecoverActive = true
+	_, persisted, err := getAuthoritativeSessionStartPersistedRecord(fixture.store, info.ID)
+	if err != nil {
+		t.Fatalf("read exact active recovery revision: %v", err)
+	}
+	fixture.lease.SessionRevision = persisted.Revision
 
 	authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, info, fixture.lease)
 	if err != nil || !authorized {
@@ -2940,9 +2950,16 @@ func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRequiresExactAbsentRuntime(t 
 		t.Fatalf("authorize ordinary active pool row = (%t, %v), want false without recovery lease", authorized, err)
 	}
 
+	fresh.observation = runtime.Liveness{}
+	authorized, err = fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, info, fixture.lease)
+	if err != nil || authorized {
+		t.Fatalf("authorize active recovery with incomplete absence = (%t, %v), want false", authorized, err)
+	}
+
 	if err := fixture.provider.Start(t.Context(), info.SessionName, runtime.Config{Command: "true"}); err != nil {
 		t.Fatalf("start live replacement runtime: %v", err)
 	}
+	fresh.observation = runtime.Liveness{Running: true, Alive: true, Complete: true}
 	authorized, err = fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, info, fixture.lease)
 	if err != nil || authorized {
 		t.Fatalf("authorize active recovery with live replacement = (%t, %v), want false", authorized, err)
@@ -2953,6 +2970,10 @@ func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRejectsDriftWithoutEffects(t 
 	newActiveRecovery := func(t *testing.T) (routedWorkPoolAuthorizationFixture, routedWorkPoolStartLease) {
 		t.Helper()
 		fixture := newRoutedWorkPoolAuthorizationFixture(t)
+		fixture.snapshot.Provider = &fixedFreshLivenessProvider{
+			Provider:    fixture.snapshot.Provider,
+			observation: runtime.Liveness{Complete: true},
+		}
 		if err := fixture.store.SetMetadataBatch(fixture.info.ID, map[string]string{
 			"state":                     string(sessionpkg.StateActive),
 			"pending_create_claim":      "",
@@ -2960,7 +2981,7 @@ func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRejectsDriftWithoutEffects(t 
 		}); err != nil {
 			t.Fatalf("mark exact pool allocation active: %v", err)
 		}
-		info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+		info, persisted, err := getAuthoritativeSessionStartPersistedRecord(fixture.store, fixture.info.ID)
 		if err != nil {
 			t.Fatalf("read active exact pool allocation: %v", err)
 		}
@@ -2970,6 +2991,7 @@ func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRejectsDriftWithoutEffects(t 
 		lease := fixture.lease
 		lease.InstanceToken = info.InstanceToken
 		lease.RecoverActive = true
+		lease.SessionRevision = persisted.Revision
 		return fixture, lease
 	}
 
@@ -3007,6 +3029,14 @@ func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRejectsDriftWithoutEffects(t 
 			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
 				if err := f.store.SetMetadata(f.info.ID, beadmeta.TriggerBeadIDMetadataKey, "gc-other-work"); err != nil {
 					f.t.Fatalf("change exact binding: %v", err)
+				}
+			},
+		},
+		{
+			name: "same semantics durable revision changed",
+			mutate: func(f *routedWorkPoolAuthorizationFixture, _ *routedWorkPoolStartLease) {
+				if err := f.store.SetMetadata(f.info.ID, "diagnostic_note", "concurrent writer"); err != nil {
+					f.t.Fatalf("change unrelated durable metadata: %v", err)
 				}
 			},
 		},
@@ -3073,6 +3103,31 @@ func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRejectsDriftWithoutEffects(t 
 				t.Fatalf("drift authorization runtime effects = (starts=%d stops=%d nudges=%d), want none", starts, stops, nudges)
 			}
 		})
+	}
+}
+
+func TestNewRoutedWorkPoolRecoveryLeaseCapturesExactDurableRevision(t *testing.T) {
+	fixture := newRoutedWorkPoolAuthorizationFixture(t)
+	info, persisted, err := getAuthoritativeSessionStartPersistedRecord(fixture.store, fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read exact pool row: %v", err)
+	}
+	hint := routedWorkPoolAllocationHint{
+		WorkID:      fixture.work.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+	}
+	lease, err := fixture.cr.newRoutedWorkPoolRecoveryLease(fixture.snapshot, info, persisted, hint)
+	if err != nil {
+		t.Fatalf("create exact recovery lease: %v", err)
+	}
+	if !lease.RecoverActive || lease.SessionRevision <= 0 || lease.SessionRevision != persisted.Revision {
+		t.Fatalf("recovery lease = %+v, want active recovery at exact revision %d", lease, persisted.Revision)
+	}
+
+	persisted.Revision = 0
+	if _, err := fixture.cr.newRoutedWorkPoolRecoveryLease(fixture.snapshot, info, persisted, hint); err == nil {
+		t.Fatal("zero-revision recovery lease was accepted")
 	}
 }
 

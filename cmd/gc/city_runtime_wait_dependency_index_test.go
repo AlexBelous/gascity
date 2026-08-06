@@ -76,6 +76,25 @@ func (s *sessionWaitShadowReadAuditStore) UpdateIfMatch(id string, revision int6
 	return writer.UpdateIfMatch(id, revision, opts)
 }
 
+// ConditionalWritesResolveTarget preserves the conditional-write capability
+// contract while this fixture audits its read surface.
+func (s *sessionWaitShadowReadAuditStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.Store
+}
+
+func openSessionWaitDependencyConditionalStore(t *testing.T, mode rollout.Mode) beads.Store {
+	t.Helper()
+	opened, err := beads.OpenStoreAtForCity(t.Context(), beads.StoreOpenOptions{
+		Provider:          "file",
+		ConditionalWrites: mode,
+		OpenFileStore:     func() (beads.Store, error) { return beads.NewMemStore(), nil },
+	})
+	if err != nil {
+		t.Fatalf("open conditional dependency-wait store: %v", err)
+	}
+	return opened.Store
+}
+
 func sessionWaitShadowBead(sessionID, dependencyID string) beads.Bead {
 	return beads.Bead{
 		Type:   sessionpkg.WaitBeadType,
@@ -521,6 +540,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 		t.Run(string(mode), func(t *testing.T) {
 			env := newReconcilerTestEnv()
+			env.store = openSessionWaitDependencyConditionalStore(t, mode)
 			env.cfg = &config.City{
 				Workspace: config.Workspace{Name: "test-city"},
 				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
@@ -565,10 +585,9 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				sessionStartStoreGeneration: 1,
 			}
 			params := exactSessionStartTestParams(t, env)
-			params.Store = audited
 			params.Generation = 1
 			params.RolloutMode = mode
-			params.StatusWriter, _, params.StatusWriterError = beads.ResolveConditionalWriter(audited)
+			params.StatusWriter, _, params.StatusWriterError = beads.ResolveConditionalWriter(env.store)
 			results := make(chan sessionStartReconcileResult, 2)
 			controller, err := newSessionStartController(sessionStartControllerOptions{
 				Workers:     1,
@@ -1002,6 +1021,7 @@ func TestSessionWaitDependencyRevokedBeforePreWakeYieldsOrParks(t *testing.T) {
 	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 		t.Run(string(mode), func(t *testing.T) {
 			env := newReconcilerTestEnv()
+			env.store = openSessionWaitDependencyConditionalStore(t, mode)
 			env.cfg = &config.City{
 				Workspace: config.Workspace{Name: "test-city"},
 				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},

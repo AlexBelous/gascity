@@ -506,6 +506,64 @@ func TestEventWireBuildersOmitEmptyCorrelationFields(t *testing.T) {
 	assertJSONOmitsCorrelation(t, taggedEnv)
 }
 
+func TestEventWireBuildersPreserveStepTopologyPresence(t *testing.T) {
+	root := []string{}
+	dependencies := []string{"prepare", "review"}
+	for _, tc := range []struct {
+		name         string
+		dependencies *[]string
+		wantPresent  bool
+		want         []string
+	}{
+		{name: "unknown"},
+		{name: "root", dependencies: &root, wantPresent: true, want: []string{}},
+		{name: "dependencies", dependencies: &dependencies, wantPresent: true, want: dependencies},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := events.Event{
+				Seq:              9,
+				Type:             events.ExecutionStepStarted,
+				Ts:               time.Unix(1711300000, 0).UTC(),
+				Actor:            "worker",
+				Subject:          "gcg-step",
+				RunID:            testEventRunID,
+				SessionID:        testEventSessionID,
+				StepID:           testEventStepID,
+				DependsOnStepIDs: tc.dependencies,
+			}
+			tagged := events.TaggedEvent{Event: event, City: "gascity"}
+
+			wire, ok := toWireEvent(event)
+			if !ok {
+				t.Fatal("toWireEvent ok = false, want true")
+			}
+			taggedWire, ok := toWireTaggedEvent(tagged)
+			if !ok {
+				t.Fatal("toWireTaggedEvent ok = false, want true")
+			}
+			envelope, err := wireEventFrom(event, nil)
+			if err != nil {
+				t.Fatalf("wireEventFrom: %v", err)
+			}
+			taggedEnvelope, err := wireTaggedEventFrom(tagged, nil)
+			if err != nil {
+				t.Fatalf("wireTaggedEventFrom: %v", err)
+			}
+
+			for name, value := range map[string]any{
+				"toWireEvent":         wire,
+				"toWireTaggedEvent":   taggedWire,
+				"wireEventFrom":       envelope,
+				"wireTaggedEventFrom": taggedEnvelope,
+			} {
+				t.Run(name, func(t *testing.T) {
+					assertJSONStepTopology(t, value, tc.wantPresent, tc.want)
+				})
+			}
+		})
+	}
+}
+
 func assertCorrelationFields(t *testing.T, gotRun, gotSession, gotStep string) {
 	t.Helper()
 	if gotRun != testEventRunID {
@@ -547,6 +605,34 @@ func assertJSONOmitsCorrelation(t *testing.T, v any) {
 			t.Errorf("JSON carries %q for an empty value; want omitempty", key)
 		}
 	}
+}
+
+func assertJSONStepTopology(t *testing.T, v any, wantPresent bool, want []string) {
+	t.Helper()
+	fields := marshalToJSONFields(t, v)
+	raw, present := fields["depends_on_step_ids"]
+	if present != wantPresent {
+		t.Fatalf("depends_on_step_ids present = %v, want %v; JSON=%s", present, wantPresent, mustMarshalJSON(t, v))
+	}
+	if !present {
+		return
+	}
+	var got []string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal depends_on_step_ids: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("depends_on_step_ids = %#v, want %#v", got, want)
+	}
+}
+
+func mustMarshalJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return data
 }
 
 func marshalToJSONFields(t *testing.T, v any) map[string]json.RawMessage {

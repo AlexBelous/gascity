@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -268,6 +269,61 @@ func TestEventStream(t *testing.T) {
 	// Check SSE headers.
 	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
+	}
+}
+
+func TestEventStreamPreservesStepTopologyPresence(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	h := newTestCityHandler(t, state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	root := []string{}
+	dependencies := []string{"prepare", "review"}
+	for _, event := range []events.Event{
+		{Type: events.ExecutionStepStarted, Actor: "worker", Subject: "gcg-unknown", RunID: "gcg-run", SessionID: "mc-unknown", StepID: "unknown"},
+		{Type: events.ExecutionStepStarted, Actor: "worker", Subject: "gcg-root", RunID: "gcg-run", SessionID: "mc-root", StepID: "root", DependsOnStepIDs: &root},
+		{Type: events.ExecutionStepStarted, Actor: "worker", Subject: "gcg-dependent", RunID: "gcg-run", SessionID: "mc-dependent", StepID: "dependent", DependsOnStepIDs: &dependencies},
+	} {
+		ep.Record(event)
+	}
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	type frame struct {
+		Subject          string    `json:"subject"`
+		DependsOnStepIDs *[]string `json:"depends_on_step_ids"`
+	}
+	frames := map[string]frame{}
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var got frame
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &got); err != nil || got.Subject == "" {
+			continue
+		}
+		frames[got.Subject] = got
+	}
+	if got := frames["gcg-unknown"].DependsOnStepIDs; got != nil {
+		t.Fatalf("unknown topology = %#v, want omitted", got)
+	}
+	if got := frames["gcg-root"].DependsOnStepIDs; got == nil || len(*got) != 0 {
+		t.Fatalf("root topology = %#v, want explicit []", got)
+	}
+	if got := frames["gcg-dependent"].DependsOnStepIDs; got == nil || !reflect.DeepEqual(*got, dependencies) {
+		t.Fatalf("dependent topology = %#v, want %#v", got, dependencies)
 	}
 }
 

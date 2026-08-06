@@ -194,7 +194,7 @@ func (cr *CityRuntime) reserveSessionWaitDependencyTargets(ctx context.Context, 
 	now := clock.Real{}.Now()
 	reserved := make([]sessionWaitDependencyTarget, 0, len(targets))
 	for _, target := range targets {
-		lease, owner, certifyErr := certifySessionWaitDependencyStartLease(snapshot.Store, target, dependencies, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Generation, now)
+		lease, owner, certifyErr := certifySessionWaitDependencyStartLease(snapshot.Store, target, dependencies, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Generation, cr.poolMembershipShadow, now)
 		if certifyErr != nil {
 			fmt.Fprintf(cr.sessionStartStderr(), "%s: reserving dependency wait %s: %v\n", cr.sessionStartLogPrefix(), target.WaitID, certifyErr) //nolint:errcheck
 			continue
@@ -224,7 +224,8 @@ func (cr *CityRuntime) reserveSessionWaitDependencyTargets(ctx context.Context, 
 func sameDurableWaitDependencyCertificate(a, b sessionWaitDependencyStartLease) bool {
 	return a.WaitID == b.WaitID && a.SessionID == b.SessionID && a.DepMode == b.DepMode &&
 		a.RegisteredEpoch == b.RegisteredEpoch && a.WaitRevision == b.WaitRevision && a.SessionRevision == b.SessionRevision &&
-		a.ControllerGeneration == b.ControllerGeneration && slices.Equal(a.DepIDs, b.DepIDs)
+		a.ControllerGeneration == b.ControllerGeneration && a.PoolTarget == b.PoolTarget &&
+		a.PoolMembershipRevision == b.PoolMembershipRevision && slices.Equal(a.DepIDs, b.DepIDs)
 }
 
 func (cr *CityRuntime) ownsReservedSessionWaitDependencyStart(sessionID string) bool {
@@ -466,7 +467,7 @@ func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hin
 	}
 	defer release()
 	lease, owner, err := certifySessionWaitDependencyStartLease(snapshot.Store, hint.Target,
-		newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()), snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Generation, clock.Real{}.Now())
+		newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()), snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Generation, cr.poolMembershipShadow, clock.Real{}.Now())
 	if err != nil {
 		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, err)
 		return
@@ -494,6 +495,35 @@ func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hin
 		}
 		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, err)
 	}
+}
+
+func (cr *CityRuntime) sessionWaitDependencyPoolWitnessCurrent(snapshot controllerSessionStartSnapshot, info sessionpkg.Info, lease sessionWaitDependencyStartLease) bool {
+	if lease.PoolTarget == "" || lease.PoolMembershipRevision == 0 || cr == nil || cr.poolMembershipShadow == nil {
+		return false
+	}
+	cr.serviceStateMu.RLock()
+	configCurrent := cr.cfg == snapshot.Config
+	cr.serviceStateMu.RUnlock()
+	if !configCurrent || snapshot.Generation != lease.ControllerGeneration || info.ID != lease.SessionID ||
+		!waitDependencyConfiguredTemplateEligible(info, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Store, time.Time{}) ||
+		normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget {
+		return false
+	}
+	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
+	if agent == nil {
+		return false
+	}
+	namedTemplates := make(map[string]struct{}, len(snapshot.Config.NamedSessions))
+	for i := range snapshot.Config.NamedSessions {
+		namedTemplates[snapshot.Config.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
+	}
+	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates)
+	if policy.reason != poolAllocationShadowEligibleAgentCap || policy.maxActiveSessions <= 1 || agent.EffectiveMinActiveSessions() != 0 {
+		return false
+	}
+	observation, memberIDs, exact := cr.poolMembershipShadow.observeMemberIDs(lease.PoolTarget)
+	return exact && observation.certified && observation.revision == lease.PoolMembershipRevision &&
+		observation.members == 1 && observation.occupied == 0 && len(memberIDs) == 1 && memberIDs[0] == lease.SessionID
 }
 
 func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionWaitDependencyStartHint, mode rollout.Mode, err error) {

@@ -334,18 +334,32 @@ tick_debounce = "30s"
 // and starts one cold ephemeral session through the keyed controller without
 // waiting for the fleet-global legacy builder or its debounce.
 func TestReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		maxActiveSessions int
+	}{
+		{name: "unlimited", maxActiveSessions: -1},
+		{name: "sole-bounded-member", maxActiveSessions: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce(t, test.maxActiveSessions)
+		})
+	}
+}
+
+func testReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce(t *testing.T, maxActiveSessions int) {
 	if usingSubprocess() {
 		t.Skip("exact ready routed-work journey requires tmux")
 	}
 
-	cityDir := setupReconcilerCityWithManagedDolt(t, `session_reconciler = "auto"
+	cityDir := setupReconcilerCityWithManagedDolt(t, fmt.Sprintf(`session_reconciler = "auto"
 
 [[agent]]
 name = "worker"
 start_command = "sleep 3600"
 min_active_sessions = 0
-max_active_sessions = -1
-`, `patrol_interval = "1h"
+max_active_sessions = %d
+`, maxActiveSessions), `patrol_interval = "1h"
 tick_debounce = "10m"
 `, `conditional_writes = "auto"`)
 	schemaStatus, err := bdDolt(cityDir, "migrate", "schema", "--json")
@@ -538,6 +552,14 @@ tick_debounce = "10m"
 		"--set-metadata", "wait_hold=true")
 	if err != nil {
 		t.Fatalf("persist waiting pool member state: %v\n%s", err, out)
+	}
+	out, err = gcDolt(cityDir, "event", "emit", "bead.updated",
+		"--subject", session.ID,
+		"--bead-payload", session.ID,
+		"--actor", "bd-hook",
+		"--json")
+	if err != nil {
+		t.Fatalf("emit waiting pool member update event: %v\n%s", err, out)
 	}
 	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
 		t.Context(), cityDir, session.ID, "asleep", sessionWaitDependencyShadowJourneyWitnessTimeout,

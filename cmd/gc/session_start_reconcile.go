@@ -36,47 +36,50 @@ type exactLoadedSessionObserver func(
 // start reconciliation. Callers must capture Generation, Config, Provider,
 // and Store together before invoking reconcileExactSessionStart.
 type exactSessionStartParams struct {
-	Generation            uint64
-	CityPath              string
-	CityName              string
-	Config                *config.City
-	Provider              runtime.Provider
-	Store                 beads.Store
-	StatusWriter          beads.ConditionalWriter
-	StatusWriterError     error
-	Clock                 clock.Clock
-	Recorder              events.Recorder
-	Stdout                io.Writer
-	Stderr                io.Writer
-	ObserveLoadedSession  exactLoadedSessionObserver
-	StartOptions          []startExecutionOption
-	AsyncStopTracker      *asyncStartTracker
-	AsyncStopCompletion   func(drainAckAsyncStopCompletion)
-	AsyncStopQueued       func()
-	RolloutMode           rollout.Mode
-	RigStores             map[string]beads.Store
-	DrainOps              drainOps
-	DrainTracker          *drainTracker
-	Trace                 *SessionReconcilerTracer
-	AuthorizePoolStart    func(context.Context, sessionpkg.Info, routedWorkPoolStartLease) (bool, error)
-	AuthorizePoolDrainAck func(sessionpkg.Info, routedWorkPoolDrainAckLease) (bool, error)
-	RecoverPoolDrainAck   func(sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error)
+	Generation                        uint64
+	CityPath                          string
+	CityName                          string
+	Config                            *config.City
+	Provider                          runtime.Provider
+	Store                             beads.Store
+	StatusWriter                      beads.ConditionalWriter
+	StatusWriterError                 error
+	Clock                             clock.Clock
+	Recorder                          events.Recorder
+	Stdout                            io.Writer
+	Stderr                            io.Writer
+	ObserveLoadedSession              exactLoadedSessionObserver
+	StartOptions                      []startExecutionOption
+	AsyncStopTracker                  *asyncStartTracker
+	AsyncStopCompletion               func(drainAckAsyncStopCompletion)
+	AsyncStopQueued                   func()
+	RolloutMode                       rollout.Mode
+	RigStores                         map[string]beads.Store
+	DrainOps                          drainOps
+	DrainTracker                      *drainTracker
+	Trace                             *SessionReconcilerTracer
+	AuthorizePoolStart                func(context.Context, sessionpkg.Info, routedWorkPoolStartLease) (bool, error)
+	AuthorizePoolDrainAck             func(sessionpkg.Info, routedWorkPoolDrainAckLease) (bool, error)
+	RecoverPoolDrainAck               func(sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error)
+	ValidateWaitDependencyPoolWitness func(sessionpkg.Info, sessionWaitDependencyStartLease) bool
 }
 
 // sessionWaitDependencyStartLease binds one dependency-ready wait to the exact
 // session row and controller generation that certified it. It is deliberately
 // small: the durable wait and session rows remain the source of truth.
 type sessionWaitDependencyStartLease struct {
-	WaitID               string
-	SessionID            string
-	DepIDs               []string
-	DepMode              string
-	RegisteredEpoch      string
-	WaitRevision         int64
-	SessionRevision      int64
-	IndexGeneration      uint64
-	ControllerGeneration uint64
-	Operation            string
+	WaitID                 string
+	SessionID              string
+	DepIDs                 []string
+	DepMode                string
+	RegisteredEpoch        string
+	WaitRevision           int64
+	SessionRevision        int64
+	IndexGeneration        uint64
+	ControllerGeneration   uint64
+	PoolTarget             string
+	PoolMembershipRevision uint64
+	Operation              string
 }
 
 func isCanonicalConfiguredNamedSessionForStart(info sessionpkg.Info, cfg *config.City) bool {
@@ -112,6 +115,10 @@ func validateSessionWaitDependencyStartLease(lease sessionWaitDependencyStartLea
 	if lease.Operation == "" || strings.TrimSpace(lease.Operation) != lease.Operation {
 		return errors.New("dependency wait lease has invalid operation")
 	}
+	if (lease.PoolTarget == "") != (lease.PoolMembershipRevision == 0) ||
+		lease.PoolTarget != strings.TrimSpace(lease.PoolTarget) {
+		return errors.New("dependency wait lease has an incomplete bounded-pool witness")
+	}
 	return nil
 }
 
@@ -127,6 +134,7 @@ func certifySessionWaitDependencyStartLease(
 	provider runtime.Provider,
 	cityName string,
 	generation uint64,
+	membership *poolMembershipIndex,
 	now time.Time,
 ) (sessionWaitDependencyStartLease, exactSessionStartOwner, error) {
 	if store == nil || cfg == nil || provider == nil || generation == 0 {
@@ -169,22 +177,52 @@ func certifySessionWaitDependencyStartLease(
 		info.WaitHold == "" || info.SleepIntent != string(sessionpkg.SleepReasonWaitHold) || info.SleepReason != string(sessionpkg.SleepReasonWaitHold) {
 		return sessionWaitDependencyStartLease{}, exactSessionStartLegacyOwner, nil
 	}
+	poolTarget := ""
+	poolMembershipRevision := uint64(0)
+	if boundedTarget, bounded := waitDependencyBoundedPoolTarget(info, cfg); bounded {
+		observation, memberIDs, exact := membership.observeMemberIDs(boundedTarget)
+		if !exact || observation.revision == 0 || !observation.certified || observation.members != 1 || observation.occupied != 0 ||
+			len(memberIDs) != 1 || memberIDs[0] != info.ID {
+			return sessionWaitDependencyStartLease{}, exactSessionStartLegacyOwner, nil
+		}
+		poolTarget = boundedTarget
+		poolMembershipRevision = observation.revision
+	}
 	lease := sessionWaitDependencyStartLease{
-		WaitID:               wait.ID,
-		SessionID:            info.ID,
-		DepIDs:               append([]string(nil), registration.depIDs...),
-		DepMode:              registration.depMode,
-		RegisteredEpoch:      wait.RegisteredEpoch,
-		WaitRevision:         persistedWait.Revision,
-		SessionRevision:      persistedSession.Revision,
-		IndexGeneration:      target.generation,
-		ControllerGeneration: generation,
-		Operation:            sessionpkg.NewInstanceToken(),
+		WaitID:                 wait.ID,
+		SessionID:              info.ID,
+		DepIDs:                 append([]string(nil), registration.depIDs...),
+		DepMode:                registration.depMode,
+		RegisteredEpoch:        wait.RegisteredEpoch,
+		WaitRevision:           persistedWait.Revision,
+		SessionRevision:        persistedSession.Revision,
+		IndexGeneration:        target.generation,
+		ControllerGeneration:   generation,
+		PoolTarget:             poolTarget,
+		PoolMembershipRevision: poolMembershipRevision,
+		Operation:              sessionpkg.NewInstanceToken(),
 	}
 	if err := validateSessionWaitDependencyStartLease(lease); err != nil {
 		return sessionWaitDependencyStartLease{}, exactSessionStartUnowned, err
 	}
 	return lease, exactSessionStartKeyedOwner, nil
+}
+
+func waitDependencyBoundedPoolTarget(info sessionpkg.Info, cfg *config.City) (string, bool) {
+	if cfg == nil || !isPoolManagedSessionInfo(info) {
+		return "", false
+	}
+	agent := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	if agent == nil {
+		return "", false
+	}
+	namedTemplates := make(map[string]struct{}, len(cfg.NamedSessions))
+	for i := range cfg.NamedSessions {
+		namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
+	}
+	policy := newPoolAllocationShadowPolicy(cfg, agent, namedTemplates)
+	return agent.QualifiedName(), policy.reason == poolAllocationShadowEligibleAgentCap &&
+		policy.maxActiveSessions > 1 && agent.EffectiveMinActiveSessions() == 0
 }
 
 // waitDependencyConfiguredTemplateEligible admits ordinary configured sessions
@@ -217,7 +255,9 @@ func waitDependencyConfiguredTemplateEligible(
 		for i := range cfg.NamedSessions {
 			namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
 		}
-		return newPoolAllocationShadowPolicy(cfg, cfgAgent, namedTemplates).reason == poolAllocationShadowEligible
+		policy := newPoolAllocationShadowPolicy(cfg, cfgAgent, namedTemplates)
+		return policy.reason == poolAllocationShadowEligible ||
+			policy.reason == poolAllocationShadowEligibleAgentCap && policy.maxActiveSessions > 1 && cfgAgent.EffectiveMinActiveSessions() == 0
 	}
 	if len(cfgAgent.DependsOn) == 0 {
 		return true
@@ -1369,6 +1409,14 @@ func reconcileExactWaitDependencyStart(
 		}
 		return preClaimFailure(errors.New("dependency wait is no longer ready"))
 	}
+	boundedPoolTarget, boundedPool := waitDependencyBoundedPoolTarget(info, params.Config)
+	if boundedPool && (lease.PoolTarget != boundedPoolTarget || lease.PoolMembershipRevision == 0 ||
+		params.ValidateWaitDependencyPoolWitness == nil || !params.ValidateWaitDependencyPoolWitness(info, lease)) {
+		return preClaimFailure(errors.New("bounded-pool dependency wait witness changed before claim"))
+	}
+	if !boundedPool && lease.PoolTarget != "" {
+		return preClaimFailure(errors.New("dependency wait retained a bounded-pool witness outside that cohort"))
+	}
 	waitFront := sessionFrontDoor(params.Store) // retain the original front door so its conditional writer remains reachable.
 	if !alreadyClaimed {
 		claim, claimErr := waitFront.ClaimPendingWaitReady(wait, waitPersisted, clk.Now().UTC(), sessionpkg.WaitReadyOwnerDependency, lease.Operation)
@@ -1434,6 +1482,14 @@ func reconcileExactWaitDependencyStart(
 		}
 		if !waitDependencyConfiguredTemplateEligible(latest, params.Config, params.Provider, params.CityName, params.Store, clk.Now().UTC()) {
 			return errors.New("configured dependency liveness changed before provider start")
+		}
+		boundedPoolTarget, boundedPool := waitDependencyBoundedPoolTarget(latest, params.Config)
+		if boundedPool && (lease.PoolTarget != boundedPoolTarget || lease.PoolMembershipRevision == 0 ||
+			params.ValidateWaitDependencyPoolWitness == nil || !params.ValidateWaitDependencyPoolWitness(latest, lease)) {
+			return errors.New("bounded-pool dependency wait witness changed before provider start")
+		}
+		if !boundedPool && lease.PoolTarget != "" {
+			return errors.New("dependency wait retained a bounded-pool witness outside that cohort")
 		}
 		liveWait, _, waitErr := waitFront.GetWaitPersistedResponse(lease.WaitID)
 		registeredLiveWait := liveWait

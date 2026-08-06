@@ -363,6 +363,9 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 		liveSingletonDependsOn bool
 		twoLiveSingletons      bool
 		strictDefaultPool      bool
+		boundedSolePool        bool
+		driftBeforeClaim       bool
+		driftMembership        bool
 	}{
 		{name: "all", depMode: "all"},
 		{name: "any", depMode: "any"},
@@ -371,6 +374,9 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 		{name: "live-singleton-depends-on", depMode: "all", liveSingletonDependsOn: true},
 		{name: "two-live-singleton-depends-on", depMode: "all", twoLiveSingletons: true},
 		{name: "strict-default-pool-member", depMode: "all", strictDefaultPool: true},
+		{name: "sole-bounded-pool-member", depMode: "all", boundedSolePool: true},
+		{name: "sole-bounded-pool-member-pre-claim-config-drift", depMode: "all", boundedSolePool: true, driftBeforeClaim: true},
+		{name: "sole-bounded-pool-member-membership-drift", depMode: "all", boundedSolePool: true, driftMembership: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
@@ -384,9 +390,12 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 					if test.twoLiveSingletons {
 						worker.DependsOn = []string{"database", "cache"}
 					}
-					if test.strictDefaultPool {
+					if test.strictDefaultPool || test.boundedSolePool {
 						worker.MinActiveSessions = intPtr(0)
 						worker.MaxActiveSessions = intPtr(-1)
+						if test.boundedSolePool {
+							worker.MaxActiveSessions = intPtr(2)
+						}
 					}
 					env.cfg = &config.City{
 						Workspace: config.Workspace{Name: "test-city"},
@@ -414,12 +423,12 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						t.Fatal(err)
 					}
 					targetName := "worker"
-					if test.strictDefaultPool {
+					if test.strictDefaultPool || test.boundedSolePool {
 						targetName = "worker-1"
 					}
 					target := env.createSessionBead(targetName, "worker")
 					targetRuntimeName := targetName
-					if test.strictDefaultPool {
+					if test.strictDefaultPool || test.boundedSolePool {
 						targetRuntimeName = "worker-" + target.ID
 					}
 					env.setSessionMetadata(&target, map[string]string{
@@ -429,7 +438,7 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						"sleep_intent":       string(sessionpkg.SleepReasonWaitHold),
 						"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
 					})
-					if test.strictDefaultPool {
+					if test.strictDefaultPool || test.boundedSolePool {
 						env.setSessionMetadata(&target, map[string]string{
 							"agent_name":                      targetName,
 							"alias":                           targetName,
@@ -505,7 +514,11 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						MaxDistinct: 8,
 						MaxRetries:  0,
 						Reconcile: func(ctx context.Context, admission sessionStartAdmission) error {
-							return reconcileExactSessionStart(ctx, admission, params)
+							owner, reconcileErr := reconcileExactSessionStartWithOwner(ctx, admission, params)
+							if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
+								return errSessionStartLegacyFallbackRequired
+							}
+							return reconcileErr
 						},
 						Observer: func(result sessionStartReconcileResult) { results <- result },
 						Stderr:   io.Discard,
@@ -521,6 +534,42 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						cs: cs, cfg: env.cfg, pokeCh: pokeCh, stderr: io.Discard,
 						sessionStartOwnership: sessionStartOwnershipKeyed, sessionStartMode: mode, sessionStartController: controller,
 						sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, 1),
+					}
+					if test.boundedSolePool {
+						state, err := buildPoolMembershipState(env.cfg, []sessionpkg.Info{env.sessionInfo(target.ID)})
+						if err != nil {
+							t.Fatalf("build sole bounded membership: %v", err)
+						}
+						cr.poolMembershipShadow = newPoolMembershipIndex()
+						if !cr.poolMembershipShadow.publishRebuild(0, state) {
+							t.Fatal("publish sole bounded membership")
+						}
+						var driftConfigOnce sync.Once
+						params.ValidateWaitDependencyPoolWitness = func(info sessionpkg.Info, lease sessionWaitDependencyStartLease) bool {
+							if test.driftBeforeClaim {
+								driftConfigOnce.Do(func() {
+									driftedConfig := *env.cfg
+									cr.serviceStateMu.Lock()
+									cr.cfg = &driftedConfig
+									cr.serviceStateMu.Unlock()
+								})
+							}
+							snapshot, err := cs.sessionStartSnapshot()
+							return err == nil && cr.sessionWaitDependencyPoolWitnessCurrent(snapshot, info, lease)
+						}
+						if test.driftMembership {
+							second := env.sessionInfo(target.ID)
+							second.ID = "second-member"
+							second.AgentName = "worker-2"
+							second.PoolSlot = "2"
+							second.SessionNameMetadata = PoolSessionName("worker", second.ID)
+							params.StartOptions = append(params.StartOptions, withTaskWorkDirResolver(func(startCandidate, *config.City) string {
+								if err := cr.poolMembershipShadow.replace(env.cfg, second); err != nil {
+									t.Errorf("drift bounded membership: %v", err)
+								}
+								return ""
+							}))
+						}
 					}
 					cr.sessionWaitDependencyIndex = newSessionWaitDependencyIndex()
 					if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open", State: waitStatePending, DepIDs: durableDependencyIDs, DepMode: test.depMode}}); err != nil {
@@ -589,15 +638,53 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 					cr.handleSessionWaitDependencyStart(t.Context(), <-cr.sessionWaitDependencyStartCh)
 					select {
 					case result := <-results:
-						if result.Err != nil || result.Outcome != sessionStartReconcileSucceeded {
-							t.Fatalf("keyed dependency start = outcome=%s err=%v", result.Outcome, result.Err)
+						switch {
+						case test.driftBeforeClaim && mode == rollout.Auto:
+							if result.Outcome != sessionStartReconcileSucceeded || !result.LegacyFallback {
+								t.Fatalf("pre-claim config drift = outcome=%s err=%v fallback=%t, want legacy fallback", result.Outcome, result.Err, result.LegacyFallback)
+							}
+						case test.driftBeforeClaim:
+							if result.Outcome != sessionStartReconcileRetrying || result.Err == nil || result.LegacyFallback {
+								t.Fatalf("required pre-claim config drift = outcome=%s err=%v fallback=%t, want parked keyed error", result.Outcome, result.Err, result.LegacyFallback)
+							}
+							if cr.sessionWaitDependencyReadyPokePending.Load() {
+								t.Fatal("required pre-claim config drift poked legacy reconciliation")
+							}
+						case test.driftMembership:
+							if result.Err == nil || result.LegacyFallback {
+								t.Fatalf("drifted keyed dependency start = outcome=%s err=%v fallback=%t, want keyed failure", result.Outcome, result.Err, result.LegacyFallback)
+							}
+						default:
+							if result.Err != nil || result.Outcome != sessionStartReconcileSucceeded {
+								t.Fatalf("keyed dependency start = outcome=%s err=%v", result.Outcome, result.Err)
+							}
 						}
 					case <-time.After(5 * time.Second):
 						t.Fatal("timed out waiting for keyed dependency start")
 					}
 
-					if got := env.sp.CountCalls("Start", targetRuntimeName); got != 1 {
-						t.Fatalf("target provider Starts = %d, want 1", got)
+					wantStarts := 1
+					if test.driftBeforeClaim || test.driftMembership {
+						wantStarts = 0
+					}
+					if got := env.sp.CountCalls("Start", targetRuntimeName); got != wantStarts {
+						t.Fatalf("target provider Starts = %d, want %d", got, wantStarts)
+					}
+					if test.driftBeforeClaim {
+						parkedWait, err := sessionFrontDoor(env.store).GetWait(wait.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if parkedWait.State != waitStatePending || parkedWait.ReadyOwner != "" || parkedWait.ReadyOperation != "" {
+							t.Fatalf("pre-claim config drift wait = %+v, want unclaimed pending wait", parkedWait)
+						}
+						return
+					}
+					if test.driftMembership {
+						if cr.sessionWaitDependencyReadyPokePending.Load() {
+							t.Fatal("post-claim membership drift yielded to legacy")
+						}
+						return
 					}
 					if livenessInvalidator != nil && !slices.Equal(livenessInvalidator.snapshotInvalidations(), []string{targetRuntimeName}) {
 						t.Fatalf("wait-dependency liveness invalidations = %v, want exact session %q", livenessInvalidator.snapshotInvalidations(), targetRuntimeName)
@@ -664,6 +751,7 @@ func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *t
 			cacheLive      bool
 			poolMax        *int
 			poolSlot       string
+			secondMember   bool
 			wantOwned      bool
 		}{
 			{name: "ordinary", wantOwned: true},
@@ -675,9 +763,12 @@ func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *t
 			{name: "two singleton dependencies with cold cache", dependsOn: []string{"database", "cache"}, dependencyMax: intPtr(1), dependencyLive: true, cacheMax: intPtr(1)},
 			{name: "two dependencies with non-singleton cache", dependsOn: []string{"database", "cache"}, dependencyMax: intPtr(1), dependencyLive: true, cacheLive: true},
 			{name: "bounded pool member", poolMax: intPtr(1), poolSlot: "1"},
+			{name: "sole bounded pool member", poolMax: intPtr(2), poolSlot: "1", wantOwned: true},
+			{name: "second bounded pool member", poolMax: intPtr(2), poolSlot: "1", secondMember: true},
 			{name: "malformed pool slot", poolMax: intPtr(-1), poolSlot: "bad"},
 		} {
 			t.Run(string(mode)+"/"+test.name, func(t *testing.T) {
+				boundedPoolWitness := test.poolMax != nil && *test.poolMax == 2
 				env := newReconcilerTestEnv()
 				env.cfg = &config.City{
 					Workspace: config.Workspace{Name: "test-city"},
@@ -710,14 +801,35 @@ func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *t
 					"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
 				})
 				if test.poolSlot != "" {
+					sessionName := targetName
+					if boundedPoolWitness {
+						sessionName = PoolSessionName("worker", target.ID)
+					}
 					env.setSessionMetadata(&target, map[string]string{
 						"agent_name":                      targetName,
-						"session_name":                    targetName,
+						"session_name":                    sessionName,
 						"pool_managed":                    "true",
 						"session_origin":                  "ephemeral",
 						"pool_slot":                       test.poolSlot,
 						beadmeta.TriggerBeadIDMetadataKey: "gc-routed-work",
 					})
+				}
+				var poolInfos []sessionpkg.Info
+				if boundedPoolWitness {
+					poolInfos = append(poolInfos, env.sessionInfo(target.ID))
+				}
+				if test.secondMember {
+					second := env.createSessionBead("worker-2", "worker")
+					env.setSessionMetadata(&second, map[string]string{
+						"state":                           string(sessionpkg.StateAsleep),
+						"agent_name":                      "worker-2",
+						"session_name":                    PoolSessionName("worker", second.ID),
+						"pool_managed":                    "true",
+						"session_origin":                  "ephemeral",
+						"pool_slot":                       "2",
+						beadmeta.TriggerBeadIDMetadataKey: "gc-other-work",
+					})
+					poolInfos = append(poolInfos, env.sessionInfo(second.ID))
 				}
 				wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
 				if err != nil {
@@ -744,6 +856,16 @@ func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *t
 					cs: cs, cfg: env.cfg, stderr: io.Discard,
 					sessionStartOwnership: sessionStartOwnershipKeyed,
 					sessionStartMode:      mode,
+				}
+				if boundedPoolWitness {
+					state, err := buildPoolMembershipState(env.cfg, poolInfos)
+					if err != nil {
+						t.Fatalf("build pool membership: %v", err)
+					}
+					cr.poolMembershipShadow = newPoolMembershipIndex()
+					if !cr.poolMembershipShadow.publishRebuild(0, state) {
+						t.Fatal("publish pool membership")
+					}
 				}
 				cr.sessionWaitDependencyIndex = newSessionWaitDependencyIndex()
 				if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{
@@ -804,6 +926,34 @@ func TestWaitDependencyConfiguredTemplateEligible_RejectsUncertifiedPoolIdentity
 			got := waitDependencyConfiguredTemplateEligible(info, cfg, runtime.NewFake(), "test-city", beads.NewMemStore(), time.Time{})
 			if got != tc.want {
 				t.Fatalf("waitDependencyConfiguredTemplateEligible() = %v, want %v for %+v", got, tc.want, info)
+			}
+		})
+	}
+}
+
+func TestSessionWaitDependencyStartLease_BoundedPoolWitnessIsAllOrNothing(t *testing.T) {
+	base := sessionWaitDependencyStartLease{
+		WaitID: "wait-a", SessionID: "session-a", DepIDs: []string{"dep-a"}, DepMode: "all",
+		RegisteredEpoch: "epoch-a", WaitRevision: 1, SessionRevision: 1,
+		IndexGeneration: 1, ControllerGeneration: 1, Operation: "operation-a",
+	}
+	for _, test := range []struct {
+		name     string
+		target   string
+		revision uint64
+		wantErr  bool
+	}{
+		{name: "absent"},
+		{name: "complete", target: "worker", revision: 2},
+		{name: "target only", target: "worker", wantErr: true},
+		{name: "revision only", revision: 2, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lease := base
+			lease.PoolTarget = test.target
+			lease.PoolMembershipRevision = test.revision
+			if err := validateSessionWaitDependencyStartLease(lease); (err != nil) != test.wantErr {
+				t.Fatalf("validateSessionWaitDependencyStartLease() error = %v, wantErr %t", err, test.wantErr)
 			}
 		})
 	}

@@ -167,6 +167,9 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				RecoverPoolDrainAck: func(info sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error) {
 					return cr.recoverRoutedWorkPoolDrainAckLease(snapshot, info)
 				},
+				ValidateWaitDependencyPoolWitness: func(info sessionpkg.Info, lease sessionWaitDependencyStartLease) bool {
+					return cr.sessionWaitDependencyPoolWitnessCurrent(snapshot, info, lease)
+				},
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				return errSessionStartLegacyFallbackRequired

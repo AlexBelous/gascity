@@ -207,6 +207,8 @@ type exactSessionStartPreWakeSkip struct {
 	owner exactSessionStartOwner
 }
 
+var errExactPoolRecoveryAuthorityLost = errors.New("exact pool recovery authority lost")
+
 func (e *exactSessionStartPreWakeSkip) Error() string {
 	return "exact session start became ineligible before pre-wake commit"
 }
@@ -1019,6 +1021,20 @@ func reconcileExactSessionStartWithOwner(
 	if plan.Outcome != sessionLifecycleStartSelectionPrepare {
 		return owner, nil
 	}
+	if poolStartAuthorized && admission.PoolAllocation.RecoverActive {
+		return reconcileExactPoolRecoveryStart(
+			ctx,
+			admission,
+			params,
+			startCandidate{info: info, tp: tp},
+			clk,
+			recorder,
+			stdout,
+			stderr,
+			startupTimeout,
+			startOpts,
+		)
+	}
 
 	var preWakeRead func(beads.Store, string) (sessionpkg.Info, error)
 	if poolStartAuthorized {
@@ -1089,6 +1105,138 @@ func reconcileExactSessionStartWithOwner(
 	}
 	recordExactSessionStartCommit(params, admission, result)
 	return owner, nil
+}
+
+func reconcileExactPoolRecoveryStart(
+	ctx context.Context,
+	admission sessionStartAdmission,
+	params exactSessionStartParams,
+	candidate startCandidate,
+	clk clock.Clock,
+	recorder events.Recorder,
+	stdout, stderr io.Writer,
+	startupTimeout time.Duration,
+	startOpts startExecutionOptions,
+) (exactSessionStartOwner, error) {
+	lease := *admission.PoolAllocation
+	fail := func(cause error) (exactSessionStartOwner, error) {
+		if params.RolloutMode == rollout.Require {
+			return exactSessionStartKeyedOwner, fmt.Errorf("required exact pool recovery parked: %w", cause)
+		}
+		return exactSessionStartLegacyOwner, fmt.Errorf("%w: exact pool recovery yielded: %w", errSessionStartLegacyFallbackRequired, cause)
+	}
+	if params.StatusWriterError != nil {
+		return fail(fmt.Errorf("resolving recovery conditional writer: %w", params.StatusWriterError))
+	}
+	if params.StatusWriter == nil {
+		return fail(errors.New("recovery conditional writer is unavailable"))
+	}
+
+	current, before, err := getAuthoritativeSessionStartPersistedRecord(params.Store, candidate.info.ID)
+	if err != nil {
+		return fail(fmt.Errorf("reading exact recovery row before pre-wake: %w", err))
+	}
+	if current.ID != lease.SessionID || before.Status != "open" || before.Revision != lease.SessionRevision {
+		return fail(errors.New("exact recovery row no longer matches its leased revision"))
+	}
+	authorized, err := params.AuthorizePoolStart(ctx, current, lease)
+	if err != nil {
+		return fail(fmt.Errorf("authorizing exact recovery before pre-wake: %w", err))
+	}
+	if !authorized {
+		return fail(errors.New("exact recovery authority no longer holds before pre-wake"))
+	}
+
+	_, token, patch, err := buildPreWakePatch(current, clk)
+	if err != nil {
+		return fail(fmt.Errorf("building exact recovery pre-wake patch: %w", err))
+	}
+	rollbackPatch := make(sessionpkg.MetadataPatch, len(patch))
+	for key := range patch {
+		rollbackPatch[key] = before.Metadata[key]
+	}
+	expectedMetadata := patch.Apply(before.Metadata)
+	writeErr := params.StatusWriter.UpdateIfMatch(current.ID, before.Revision, beads.UpdateOpts{Metadata: patch})
+	committedInfo, committed, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, current.ID)
+	if readErr != nil {
+		cause := fmt.Errorf("re-reading exact recovery pre-wake commit: %w", readErr)
+		if writeErr != nil {
+			cause = fmt.Errorf("%w; conditional write: %w", cause, writeErr)
+		}
+		return fail(cause)
+	}
+	if committedInfo.ID != current.ID || committedInfo.Closed || committed.Status != before.Status ||
+		committed.Revision == 0 || committed.Revision == before.Revision || !maps.Equal(committed.Metadata, expectedMetadata) {
+		if writeErr != nil {
+			return fail(fmt.Errorf("committing exact recovery pre-wake metadata: %w", writeErr))
+		}
+		return fail(errors.New("exact recovery pre-wake metadata did not persist exactly"))
+	}
+	freshWake := current.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(current)
+	traceFreshWakeMetadataReset(current.SessionNameMetadata, freshWakeResetPriorValues(current), patch, freshWake)
+
+	rollback := func(cause error) (exactSessionStartOwner, error) {
+		if rollbackErr := params.StatusWriter.UpdateIfMatch(current.ID, committed.Revision, beads.UpdateOpts{Metadata: rollbackPatch}); rollbackErr != nil {
+			cause = fmt.Errorf("%w; fenced pre-wake restore: %w", cause, rollbackErr)
+		}
+		return fail(cause)
+	}
+	prepared, _, err := buildPreparedStartWithWorkDirResolver(
+		startCandidate{info: committedInfo, tp: candidate.tp}, params.CityPath, params.Config, params.Store, startOpts.workDirResolver,
+	)
+	if err != nil {
+		return rollback(fmt.Errorf("preparing exact recovery start: %w", err))
+	}
+
+	lease.InstanceToken = token
+	lease.SessionRevision = committed.Revision
+	lease.RecoveryPreWakeCommitted = true
+	authorizeAtStart := func(effectCtx context.Context) error {
+		latest, persisted, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, current.ID)
+		if readErr != nil {
+			return fmt.Errorf("%w: reading effect-boundary row: %w", errExactPoolRecoveryAuthorityLost, readErr)
+		}
+		if persisted.Revision != lease.SessionRevision || latest.ID != lease.SessionID || strings.TrimSpace(latest.InstanceToken) != lease.InstanceToken {
+			return fmt.Errorf("%w: effect-boundary row no longer matches the post-CAS lease", errExactPoolRecoveryAuthorityLost)
+		}
+		authorized, authorizeErr := params.AuthorizePoolStart(effectCtx, latest, lease)
+		if authorizeErr != nil {
+			return fmt.Errorf("%w: effect-boundary authorization: %w", errExactPoolRecoveryAuthorityLost, authorizeErr)
+		}
+		if !authorized {
+			return fmt.Errorf("%w: effect-boundary authorization no longer holds", errExactPoolRecoveryAuthorityLost)
+		}
+		return nil
+	}
+	result := runPreparedStartCandidateAuthorized(
+		ctx,
+		*prepared,
+		params.CityPath,
+		params.Provider,
+		params.Store,
+		params.Config,
+		startupTimeout,
+		resolveStartStabilityWaiter(startOpts.stabilityWaiter),
+		startOpts.sessionStaleKeyDetectionWaiter,
+		authorizeAtStart,
+	)
+	if errors.Is(result.err, errExactPoolRecoveryAuthorityLost) {
+		return rollback(result.err)
+	}
+	disposition := commitStartResultWithFreshness(
+		ctx, result, params.Provider, params.Store, clk, recorder, 0, stdout, stderr, nil,
+	)
+	if disposition == startCommitSuperseded {
+		return exactSessionStartKeyedOwner, nil
+	}
+	if disposition != startCommitCommitted {
+		if result.err != nil {
+			return exactSessionStartKeyedOwner, fmt.Errorf("reconciling exact pool recovery %q: %w", current.ID, result.err)
+		}
+		return exactSessionStartKeyedOwner, fmt.Errorf("reconciling exact pool recovery %q: start result did not commit", current.ID)
+	}
+	recordExactSessionStartCommit(params, admission, result)
+	return exactSessionStartKeyedOwner, nil
 }
 
 func recordExactSessionStartCommit(params exactSessionStartParams, admission sessionStartAdmission, result startResult) {

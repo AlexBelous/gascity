@@ -1532,6 +1532,46 @@ func runPreparedStartCandidate(
 	stabilityWaiter startStabilityWaiter,
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
 ) (result startResult) {
+	return runPreparedStartCandidateWith(
+		ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, true,
+		func(startCtx context.Context, phases *startPhaseTimings) (bool, error) {
+			return startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, phases, sessionStaleKeyDetectionWaiter)
+		},
+	)
+}
+
+func runPreparedStartCandidateAuthorized(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+	startupTimeout time.Duration,
+	stabilityWaiter startStabilityWaiter,
+	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	authorize func(context.Context) error,
+) startResult {
+	return runPreparedStartCandidateWith(
+		ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, false,
+		func(startCtx context.Context, _ *startPhaseTimings) (bool, error) {
+			return startPreparedStartCandidateAuthorized(startCtx, item, cityPath, store, sp, cfg, sessionStaleKeyDetectionWaiter, authorize)
+		},
+	)
+}
+
+func runPreparedStartCandidateWith(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+	startupTimeout time.Duration,
+	stabilityWaiter startStabilityWaiter,
+	allowRuntimeConvergence bool,
+	startCall func(context.Context, *startPhaseTimings) (bool, error),
+) (result startResult) {
 	started := time.Now()
 	result = startResult{
 		prepared: item,
@@ -1559,14 +1599,14 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter)
+	startedFresh, err := startCall(startCtx, &phases)
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
 	// API which can dominate start_call when the runtime is wedged.
 	// state_sync_recovery only fires when err==ErrStateSync, so it stays
 	// zero on the happy path.
-	if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
+	if allowRuntimeConvergence && err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
 		recoveryBegin := time.Now()
 		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		phases.StateSyncRecovery = time.Since(recoveryBegin)
@@ -1602,7 +1642,7 @@ func runPreparedStartCandidate(
 	finished := time.Now()
 	rollbackPending := err != nil && shouldRollbackPendingCreateInfo(item.candidate.info)
 	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
-	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
+	if allowRuntimeConvergence && err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
 			prepared:        item,
 			err:             nil,
@@ -1631,6 +1671,10 @@ func runPreparedStartCandidate(
 	case err == nil:
 		outcome = TraceOutcomeSuccess
 	case errors.Is(err, runtime.ErrSessionExists):
+		if !allowRuntimeConvergence {
+			outcome = TraceOutcomeSessionExists
+			break
+		}
 		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		switch {
 		case runningErr != nil || !runtimeObservationLive(obs):
@@ -2063,6 +2107,32 @@ func startPreparedStartCandidate(
 		return true, err
 	}
 	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+}
+
+func startPreparedStartCandidateAuthorized(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	authorize func(context.Context) error,
+) (bool, error) {
+	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
+		return false, errors.New("authorized exact start requires a persisted session")
+	}
+	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(
+		cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter,
+	)
+	if err != nil {
+		return false, err
+	}
+	authorized, ok := handle.(worker.AuthorizedStartHandle)
+	if !ok {
+		return false, errors.New("worker handle does not support authorized exact start")
+	}
+	return true, authorized.StartResolvedAuthorized(ctx, item.cfg.Command, item.cfg, authorize)
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {

@@ -44,12 +44,15 @@ type routedWorkPoolStartLease struct {
 	// RecoverActive limits this lease to re-starting the exact active pool row
 	// after its runtime has been observed absent. It never widens ownership of
 	// ordinary active members.
-	RecoverActive        bool
-	ControllerGeneration uint64
-	PoolTarget           string
-	WorkID               string
-	SourceStore          string
-	MembershipRevision   uint64
+	RecoverActive bool
+	// RecoveryPreWakeCommitted narrows a recovery lease to the exact creating
+	// revision produced by this controller's fenced pre-wake transition.
+	RecoveryPreWakeCommitted bool
+	ControllerGeneration     uint64
+	PoolTarget               string
+	WorkID                   string
+	SourceStore              string
+	MembershipRevision       uint64
 }
 
 // routedWorkPoolDrainAckLease binds one exact drain acknowledgement to the
@@ -77,6 +80,9 @@ func validateRoutedWorkPoolStartLease(lease routedWorkPoolStartLease) error {
 	}
 	if lease.RecoverActive && lease.SessionRevision <= 0 {
 		return fmt.Errorf("admitting pool allocation %q: recovery session revision must be positive", lease.SessionID)
+	}
+	if lease.RecoveryPreWakeCommitted && !lease.RecoverActive {
+		return fmt.Errorf("admitting pool allocation %q: committed recovery pre-wake requires active recovery", lease.SessionID)
 	}
 	fields := []struct {
 		name  string
@@ -698,7 +704,12 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 		return false, nil
 	}
 	if lease.RecoverActive {
-		if lifecycle.BaseState != sessionpkg.BaseStateActive || lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) ||
+		if lease.RecoveryPreWakeCommitted {
+			if lifecycle.BaseState != sessionpkg.BaseStateCreating || info.PendingCreateClaim || info.LastWokeAt == "" || info.PendingCreateStartedAt == "" ||
+				lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) || info.SessionName == "" {
+				return false, nil
+			}
+		} else if lifecycle.BaseState != sessionpkg.BaseStateActive || lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) ||
 			lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) || info.SessionName == "" {
 			return false, nil
 		}

@@ -209,7 +209,15 @@ func TestRoutedWorkPoolAllocationMaterializesOneDurableSessionAndUsesExactStart(
 }
 
 func TestRoutedWorkPoolAllocationReplaysExactActiveBindingAfterRuntimeLoss(t *testing.T) {
-	fixture := newRoutedWorkPoolAllocationFixture(t, beads.NewMemStore())
+	opened, err := beads.OpenStoreAtForCity(t.Context(), beads.StoreOpenOptions{
+		Provider:          "file",
+		OpenFileStore:     func() (beads.Store, error) { return beads.NewMemStore(), nil },
+		ConditionalWrites: gate.Auto,
+	})
+	if err != nil {
+		t.Fatalf("open conditional recovery store: %v", err)
+	}
+	fixture := newRoutedWorkPoolAllocationFixture(t, opened.Store)
 	work, err := fixture.store.Create(beads.Bead{
 		Title:  "ready routed work survives pre-claim runtime loss",
 		Type:   "task",
@@ -3106,6 +3114,183 @@ func TestAuthorizeRoutedWorkPoolStartActiveRecoveryRejectsDriftWithoutEffects(t 
 	}
 }
 
+func TestReconcileExactPoolRecoveryCASRefusalHasZeroRuntimeEffect(t *testing.T) {
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		t.Run(string(mode), func(t *testing.T) {
+			fixture, admission, params, before := newExactPoolRecoveryReconcileFixture(t, mode)
+			conditional, ok := beads.ConditionalWriterFor(fixture.store)
+			if !ok {
+				t.Fatal("test store lacks conditional writer")
+			}
+			writer := &recordingExactStatusWriter{
+				ConditionalWriter: conditional,
+				err: &beads.PreconditionFailedError{
+					ID:       admission.SessionID,
+					Expected: before.Revision,
+					Current:  before.Revision + 1,
+				},
+				forward: true,
+			}
+			params.StatusWriter = writer
+
+			owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), admission, params)
+			switch mode {
+			case rollout.Auto:
+				if owner != exactSessionStartLegacyOwner || !errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+					t.Fatalf("Auto owner/error = %v/%v, want visible legacy fallback", owner, reconcileErr)
+				}
+			case rollout.Require:
+				if owner != exactSessionStartKeyedOwner || reconcileErr == nil || errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+					t.Fatalf("Require owner/error = %v/%v, want keyed park", owner, reconcileErr)
+				}
+			}
+			if len(writer.expected) != 1 || writer.expected[0] != before.Revision {
+				t.Fatalf("conditional revisions = %v, want only exact recovery revision %d", writer.expected, before.Revision)
+			}
+			if starts, stops, nudges := providerCallCount(fixture.provider, "Start"), providerCallCount(fixture.provider, "Stop"), providerNudgeCalls(fixture.provider, fixture.info.SessionName); starts != 0 || stops != 0 || nudges != 0 {
+				t.Fatalf("CAS-refused runtime effects = (starts=%d stops=%d nudges=%d), want none", starts, stops, nudges)
+			}
+			after, err := fixture.store.Get(admission.SessionID)
+			if err != nil {
+				t.Fatalf("read CAS-refused recovery row: %v", err)
+			}
+			if after.Metadata["instance_token"] != before.Metadata["instance_token"] ||
+				after.Metadata["generation"] != before.Metadata["generation"] ||
+				after.Metadata["last_woke_at"] != before.Metadata["last_woke_at"] {
+				t.Fatalf("CAS-refused incarnation changed: before=%+v after=%+v", before.Metadata, after.Metadata)
+			}
+		})
+	}
+}
+
+func TestReconcileExactPoolRecoveryReplacementAfterPreWakeRestoresIncarnationWithoutEffects(t *testing.T) {
+	fixture, admission, params, before := newExactPoolRecoveryReconcileFixture(t, rollout.Auto)
+	hooked := &exactPoolRecoveryPostPreWakeHookStore{
+		Store:         fixture.store,
+		sessionID:     admission.SessionID,
+		originalToken: before.Metadata["instance_token"],
+		after: func(beads.Bead) {
+			if err := fixture.provider.Start(t.Context(), fixture.info.SessionName, runtime.Config{Command: "replacement"}); err != nil {
+				t.Fatalf("start same-name replacement: %v", err)
+			}
+		},
+	}
+	fixture.snapshot.Store = hooked
+	params.Store = hooked
+	params.AuthorizePoolStart = func(ctx context.Context, current sessionpkg.Info, candidate routedWorkPoolStartLease) (bool, error) {
+		return fixture.cr.authorizeRoutedWorkPoolStart(ctx, fixture.snapshot, current, candidate)
+	}
+	conditional, ok := beads.ConditionalWriterFor(fixture.store)
+	if !ok {
+		t.Fatal("test store lacks conditional writer")
+	}
+	writer := &recordingExactStatusWriter{ConditionalWriter: conditional, forward: true}
+	params.StatusWriter = writer
+
+	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), admission, params)
+	if owner != exactSessionStartLegacyOwner || !errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+		t.Fatalf("owner/error = %v/%v, want visible fallback after replacement", owner, reconcileErr)
+	}
+	if len(writer.expected) != 2 || writer.expected[0] != before.Revision || writer.expected[1] == writer.expected[0] {
+		t.Fatalf("conditional revisions = %v, want pre-wake CAS then fenced restore", writer.expected)
+	}
+	if starts, stops, nudges := providerCallCount(fixture.provider, "Start"), providerCallCount(fixture.provider, "Stop"), providerNudgeCalls(fixture.provider, fixture.info.SessionName); starts != 1 || stops != 0 || nudges != 0 {
+		t.Fatalf("replacement race runtime effects = (starts=%d stops=%d nudges=%d), want only the injected replacement START", starts, stops, nudges)
+	}
+	after, err := fixture.store.Get(admission.SessionID)
+	if err != nil {
+		t.Fatalf("read replacement-race recovery row: %v", err)
+	}
+	if after.Metadata["instance_token"] != before.Metadata["instance_token"] ||
+		after.Metadata["generation"] != before.Metadata["generation"] ||
+		after.Metadata["last_woke_at"] != before.Metadata["last_woke_at"] {
+		t.Fatalf("replacement race did not restore the prior incarnation: before=%+v after=%+v", before.Metadata, after.Metadata)
+	}
+}
+
+func TestReconcileExactPoolRecoveryRevisionDriftBeforeStartDoesNotOverwriteConcurrentMutation(t *testing.T) {
+	fixture, admission, params, before := newExactPoolRecoveryReconcileFixture(t, rollout.Auto)
+	hooked := &exactPoolRecoveryPostPreWakeHookStore{
+		Store:         fixture.store,
+		sessionID:     admission.SessionID,
+		originalToken: before.Metadata["instance_token"],
+		after: func(bead beads.Bead) {
+			if err := fixture.store.SetMetadataBatch(bead.ID, map[string]string{
+				"diagnostic_note": "concurrent writer",
+				"generation":      "999",
+			}); err != nil {
+				t.Fatalf("apply concurrent recovery mutation: %v", err)
+			}
+		},
+	}
+	fixture.snapshot.Store = hooked
+	params.Store = hooked
+	params.AuthorizePoolStart = func(ctx context.Context, current sessionpkg.Info, candidate routedWorkPoolStartLease) (bool, error) {
+		return fixture.cr.authorizeRoutedWorkPoolStart(ctx, fixture.snapshot, current, candidate)
+	}
+	conditional, ok := beads.ConditionalWriterFor(fixture.store)
+	if !ok {
+		t.Fatal("test store lacks conditional writer")
+	}
+	writer := &recordingExactStatusWriter{ConditionalWriter: conditional, forward: true}
+	params.StatusWriter = writer
+
+	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), admission, params)
+	if owner != exactSessionStartLegacyOwner || !errors.Is(reconcileErr, errSessionStartLegacyFallbackRequired) {
+		t.Fatalf("owner/error = %v/%v, want visible fallback after revision drift", owner, reconcileErr)
+	}
+	if len(writer.expected) != 2 || writer.expected[0] != before.Revision || writer.expected[1] == writer.expected[0] {
+		t.Fatalf("conditional revisions = %v, want pre-wake CAS then stale fenced restore", writer.expected)
+	}
+	if starts, stops, nudges := providerCallCount(fixture.provider, "Start"), providerCallCount(fixture.provider, "Stop"), providerNudgeCalls(fixture.provider, fixture.info.SessionName); starts != 0 || stops != 0 || nudges != 0 {
+		t.Fatalf("revision-drift runtime effects = (starts=%d stops=%d nudges=%d), want none", starts, stops, nudges)
+	}
+	after, err := fixture.store.Get(admission.SessionID)
+	if err != nil {
+		t.Fatalf("read revision-drift recovery row: %v", err)
+	}
+	if after.Metadata["diagnostic_note"] != "concurrent writer" || after.Metadata["generation"] != "999" {
+		t.Fatalf("fenced rollback overwrote concurrent mutation: %+v", after.Metadata)
+	}
+}
+
+func TestReconcileExactPoolRecoveryStartsThroughFinalAuthorizationFence(t *testing.T) {
+	fixture, admission, params, before := newExactPoolRecoveryReconcileFixture(t, rollout.Auto)
+	conditional, ok := beads.ConditionalWriterFor(fixture.store)
+	if !ok {
+		t.Fatal("test store lacks conditional writer")
+	}
+	writer := &recordingExactStatusWriter{ConditionalWriter: conditional, forward: true}
+	params.StatusWriter = writer
+	delegate := params.AuthorizePoolStart
+	var authorizations atomic.Int32
+	params.AuthorizePoolStart = func(ctx context.Context, current sessionpkg.Info, candidate routedWorkPoolStartLease) (bool, error) {
+		authorizations.Add(1)
+		return delegate(ctx, current, candidate)
+	}
+
+	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), admission, params)
+	if owner != exactSessionStartKeyedOwner || reconcileErr != nil {
+		t.Fatalf("owner/error = %v/%v, want committed keyed recovery", owner, reconcileErr)
+	}
+	if got := authorizations.Load(); got != 3 {
+		t.Fatalf("authorization calls = %d, want admission, pre-CAS, and provider-boundary checks", got)
+	}
+	if len(writer.expected) != 1 || writer.expected[0] != before.Revision {
+		t.Fatalf("conditional revisions = %v, want one exact pre-wake CAS at %d", writer.expected, before.Revision)
+	}
+	if starts, stops, nudges := providerCallCount(fixture.provider, "Start"), providerCallCount(fixture.provider, "Stop"), providerNudgeCalls(fixture.provider, fixture.info.SessionName); starts != 1 || stops != 0 || nudges != 0 {
+		t.Fatalf("successful recovery runtime effects = (starts=%d stops=%d nudges=%d), want one START only", starts, stops, nudges)
+	}
+	after, err := sessionFrontDoor(fixture.store).Get(admission.SessionID)
+	if err != nil {
+		t.Fatalf("read recovered exact pool row: %v", err)
+	}
+	if after.InstanceToken == before.Metadata["instance_token"] || after.MetadataState != string(sessionpkg.StateActive) || after.ID != fixture.info.ID || after.SessionName != fixture.info.SessionName {
+		t.Fatalf("recovered row = %+v, want same active row with rotated token", after)
+	}
+}
+
 func TestNewRoutedWorkPoolRecoveryLeaseCapturesExactDurableRevision(t *testing.T) {
 	fixture := newRoutedWorkPoolAuthorizationFixture(t)
 	info, persisted, err := getAuthoritativeSessionStartPersistedRecord(fixture.store, fixture.info.ID)
@@ -3696,6 +3881,90 @@ type routedWorkPoolAuthorizationFixture struct {
 	work     beads.Bead
 	info     sessionpkg.Info
 	lease    routedWorkPoolStartLease
+}
+
+type exactPoolRecoveryPostPreWakeHookStore struct {
+	beads.Store
+	sessionID     string
+	originalToken string
+	after         func(beads.Bead)
+	once          sync.Once
+}
+
+func (s *exactPoolRecoveryPostPreWakeHookStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.Store.Get(id)
+	if err == nil && id == s.sessionID && bead.Metadata["instance_token"] != "" &&
+		bead.Metadata["instance_token"] != s.originalToken && bead.Metadata["last_woke_at"] != "" && s.after != nil {
+		s.once.Do(func() { s.after(bead) })
+	}
+	return bead, err
+}
+
+func (s *exactPoolRecoveryPostPreWakeHookStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.Store
+}
+
+func newExactPoolRecoveryReconcileFixture(
+	t *testing.T,
+	mode rollout.Mode,
+) (routedWorkPoolAuthorizationFixture, sessionStartAdmission, exactSessionStartParams, sessionpkg.PersistedResponse) {
+	t.Helper()
+	fixture := newRoutedWorkPoolAuthorizationFixture(t)
+	fixture.snapshot.Config.Agents[0].WorkDir = fixture.snapshot.CityPath
+	if err := fixture.store.SetMetadataBatch(fixture.info.ID, map[string]string{
+		"state":                     string(sessionpkg.StateActive),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}); err != nil {
+		t.Fatalf("mark exact pool allocation active: %v", err)
+	}
+	info, persisted, err := getAuthoritativeSessionStartPersistedRecord(fixture.store, fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read exact active recovery row: %v", err)
+	}
+	fixture.info = info
+	if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, info); err != nil {
+		t.Fatalf("publish exact active recovery membership: %v", err)
+	}
+	provider := &sequenceGetMetaProvider{Fake: fixture.provider}
+	fixture.snapshot.Provider = provider
+	lease, err := fixture.cr.newRoutedWorkPoolRecoveryLease(fixture.snapshot, info, persisted, routedWorkPoolAllocationHint{
+		WorkID:      fixture.work.ID,
+		PoolTarget:  "worker",
+		SourceStore: "city:test-city",
+	})
+	if err != nil {
+		t.Fatalf("create exact pool recovery lease: %v", err)
+	}
+	writer, ok := beads.ConditionalWriterFor(fixture.store)
+	if !ok {
+		t.Fatal("test store lacks conditional writer")
+	}
+	params := exactSessionStartParams{
+		Generation:   fixture.snapshot.Generation,
+		CityPath:     fixture.snapshot.CityPath,
+		CityName:     fixture.snapshot.CityName,
+		Config:       fixture.snapshot.Config,
+		Provider:     provider,
+		Store:        fixture.snapshot.Store,
+		StatusWriter: writer,
+		Recorder:     events.Discard,
+		Stdout:       io.Discard,
+		Stderr:       io.Discard,
+		RolloutMode:  mode,
+		AuthorizePoolStart: func(ctx context.Context, current sessionpkg.Info, candidate routedWorkPoolStartLease) (bool, error) {
+			return fixture.cr.authorizeRoutedWorkPoolStart(ctx, fixture.snapshot, current, candidate)
+		},
+		StartOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+		},
+	}
+	return fixture, sessionStartAdmission{
+		SessionID:      info.ID,
+		Source:         sessionStartAdmissionInProcess,
+		PoolAllocation: &lease,
+	}, params, persisted
 }
 
 type routedWorkPoolDrainAckAuthorizationFixture struct {

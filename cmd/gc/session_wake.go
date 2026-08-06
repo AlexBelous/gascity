@@ -38,6 +38,26 @@ func preWakeCommit(
 	sessFront *sessions.Store,
 	clk clock.Clock,
 ) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	newGen, token, batch, err := buildPreWakePatch(info, clk)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
+		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
+	}
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
+	traceFreshWakeMetadataReset(info.SessionNameMetadata, freshWakeResetPriorValues(info), batch, freshWake)
+
+	return newGen, token, batch, nil
+}
+
+// buildPreWakePatch computes one new runtime incarnation without persisting it.
+// Ordinary lifecycle starts commit the returned patch through preWakeCommit;
+// exact recovery starts use it with their existing whole-row CAS fence.
+func buildPreWakePatch(
+	info sessions.Info,
+	clk clock.Clock,
+) (newGen int, token string, patch sessions.MetadataPatch, err error) {
 	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
@@ -62,7 +82,7 @@ func preWakeCommit(
 	}
 
 	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
-	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+	patch = sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
@@ -70,12 +90,7 @@ func preWakeCommit(
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
 	})
-	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
-		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
-	}
-	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
-
-	return newGen, token, batch, nil
+	return newGen, token, patch, nil
 }
 
 // freshWakeResetPriorValues reconstructs the pre-reset values of the fresh-wake

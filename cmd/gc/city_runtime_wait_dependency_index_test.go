@@ -67,6 +67,14 @@ func (s *sessionWaitShadowReadAuditStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
+func (s *sessionWaitShadowReadAuditStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	writer, ok := s.Store.(beads.ConditionalWriter)
+	if !ok {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return writer.UpdateIfMatch(id, revision, opts)
+}
+
 func sessionWaitShadowBead(sessionID, dependencyID string) beads.Bead {
 	return beads.Bead{
 		Type:   sessionpkg.WaitBeadType,
@@ -557,6 +565,10 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 			}
 			params := exactSessionStartTestParams(t, env)
 			params.Store = audited
+			params.Generation = 1
+			params.RolloutMode = mode
+			params.StatusWriter, _, params.StatusWriterError = beads.ResolveConditionalWriter(audited)
+			results := make(chan sessionStartReconcileResult, 2)
 			controller, err := newSessionStartController(sessionStartControllerOptions{
 				Workers:     1,
 				MaxDistinct: 8,
@@ -564,7 +576,8 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				Reconcile: func(ctx context.Context, admission sessionStartAdmission) error {
 					return reconcileExactSessionStart(ctx, admission, params)
 				},
-				Stderr: io.Discard,
+				Observer: func(result sessionStartReconcileResult) { results <- result },
+				Stderr:   io.Discard,
 			})
 			if err != nil {
 				t.Fatalf("new keyed session-start controller: %v", err)
@@ -605,7 +618,14 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				t.Fatalf("enqueue closed dependency target: %v", err)
 			}
 			cr.handleSessionWaitDependencyStart(t.Context(), <-cr.sessionWaitDependencyStartCh)
-			awaitCond(t, func() bool { return controller.Pending() == 0 }, "keyed dependency-ready start to drain")
+			select {
+			case result := <-results:
+				if result.Err != nil || result.Outcome != sessionStartReconcileSucceeded {
+					t.Fatalf("keyed dependency start = outcome=%s err=%v", result.Outcome, result.Err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for keyed dependency start")
+			}
 
 			if got := env.sp.CountCalls("Start", "worker"); got != 1 {
 				t.Fatalf("target provider Starts = %d, want 1", got)

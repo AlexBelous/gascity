@@ -1083,6 +1083,9 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				}
 				continue
 			}
+			if wait.ReadyOwner == string(sessionpkg.WaitReadyOwnerDependency) && strings.TrimSpace(wait.ReadyOperation) == wait.ReadyOperation && wait.ReadyOperation != "" {
+				continue
+			}
 			// Finalization above remains shared, but an exact dependency-owned
 			// wait must not become generic legacy wake demand afterwards.
 			if owned != nil && owned(wait) {

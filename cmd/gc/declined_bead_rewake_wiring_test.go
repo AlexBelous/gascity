@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -83,5 +85,58 @@ func TestCheckDeclinedBeadRewakeOnWake(t *testing.T) {
 				t.Fatalf("expected no log line, got %v", logged)
 			}
 		})
+	}
+}
+
+// TestDispatchDeclinedBeadRewakeCheckDoesNotBlock pins the round-1 review
+// fix (ga-t7ux9m): the wake path must never wait on the bd-history
+// subprocess behind noteAuthorLookup, since noteAuthorLookupWithRunner's
+// call carries no bounded context of its own and falls through to the
+// default 120s bdCommandTimeoutFor ceiling, inline in a sequential loop over
+// every wake target (session_reconciler.go:3586). A blocked lookup must
+// delay nothing but its own log line.
+func TestDispatchDeclinedBeadRewakeCheckDoesNotBlock(t *testing.T) {
+	release := make(chan struct{})
+	logged := make(chan string, 1)
+
+	lookup := func(_ string) (string, error) { //nolint:unparam // noteAuthorLookup's error return; this test only exercises the non-blocking path, error handling is covered by TestCheckDeclinedBeadRewakeOnWake
+		<-release // stays blocked until the test explicitly releases it
+		return "gascity/builder", nil
+	}
+	logf := func(format string, args ...any) {
+		logged <- fmt.Sprintf(format, args...)
+	}
+
+	assignedByID := map[string]beads.Bead{
+		"ga-assigned1": {ID: "ga-assigned1", Metadata: beads.StringMap{beadmeta.RoutedToMetadataKey: "gascity/builder"}},
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		dispatchDeclinedBeadRewakeCheck(assignedByID, "ga-assigned1", lookup, logf)
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(1 * time.Second):
+		t.Fatal("dispatchDeclinedBeadRewakeCheck blocked on the lookup instead of returning immediately")
+	}
+
+	select {
+	case <-logged:
+		t.Fatal("log line fired before the lookup was released -- lookup should still be blocked")
+	default:
+	}
+
+	close(release)
+
+	select {
+	case msg := <-logged:
+		if !strings.Contains(msg, "ga-assigned1") {
+			t.Fatalf("expected the deferred log line to reference the bead ID, got: %s", msg)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected the deferred log line after releasing the lookup, got none")
 	}
 }

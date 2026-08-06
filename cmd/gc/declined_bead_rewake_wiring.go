@@ -17,3 +17,10 @@ func checkDeclinedBeadRewakeOnWake(assignedByID map[string]beads.Bead, beadID st
 	}
 	logDeclinedBeadRewakeIfDetected(b, lookup, logf)
 }
+
+// dispatchDeclinedBeadRewakeCheck is not yet correct: it should run the
+// check without blocking its caller on lookup, but currently just calls it
+// inline.
+func dispatchDeclinedBeadRewakeCheck(assignedByID map[string]beads.Bead, beadID string, lookup noteAuthorLookup, logf func(format string, args ...any)) {
+	checkDeclinedBeadRewakeOnWake(assignedByID, beadID, lookup, logf)
+}

@@ -363,6 +363,18 @@ func ReconcileCompleted(recorder events.Provider, graphStore beads.Store, actor 
 	if recorder == nil || graphStore == nil {
 		return 0
 	}
+	existing, err := completedFacts(recorder)
+	if err != nil {
+		// If the journal cannot be read, avoid generating duplicate recovery
+		// facts. A later reconciliation pass can safely retry.
+		return 0
+	}
+	completed := make(map[completedFactKey]struct{}, len(existing))
+	for _, event := range existing {
+		if event.Type == events.ExecutionStepCompleted {
+			completed[completedFactKeyFor(event)] = struct{}{}
+		}
+	}
 	roots, err := graphStore.ListByMetadata(
 		map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
 		0,
@@ -388,47 +400,57 @@ func ReconcileCompleted(recorder events.Provider, graphStore beads.Store, actor 
 				continue
 			}
 			event, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, actor)
-			if !ok || completedFactExists(recorder, event) {
+			if !ok {
+				continue
+			}
+			key := completedFactKeyFor(event)
+			if _, exists := completed[key]; exists {
 				continue
 			}
 			recorder.Record(event)
+			completed[key] = struct{}{}
 			emitted++
 		}
 	}
 	return emitted
 }
 
-func completedFactExists(provider events.Provider, want events.Event) bool {
-	existing, err := provider.List(events.Filter{
-		Type: events.ExecutionStepCompleted, Subject: want.Subject,
-	})
-	if err != nil {
-		// If the journal cannot be read, avoid generating duplicate recovery
-		// facts. A later reconciliation pass can safely retry.
-		return true
+// completedFacts returns the retained completion journal, including a
+// FileRecorder segment that is temporarily awaiting archive compression. A
+// reconciliation pass must see that segment before deciding a close needs a
+// recovery fact; otherwise an event rotation can create a duplicate fact.
+func completedFacts(recorder events.Provider) ([]events.Event, error) {
+	filter := events.Filter{Type: events.ExecutionStepCompleted}
+	if inFlight, ok := recorder.(events.InFlightProvider); ok {
+		return inFlight.ListInFlight(filter)
 	}
-	for _, event := range existing {
-		if event.RunID == want.RunID &&
-			event.SessionID == want.SessionID &&
-			event.StepID == want.StepID &&
-			sameTopology(event.DependsOnStepIDs, want.DependsOnStepIDs) {
-			return true
-		}
-	}
-	return false
+	return recorder.List(filter)
 }
 
-func sameTopology(left, right *[]string) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
+type completedFactKey struct {
+	subject           string
+	runID             string
+	sessionID         string
+	stepID            string
+	topologyKnown     bool
+	topologyCanonical string
+}
+
+func completedFactKeyFor(event events.Event) completedFactKey {
+	key := completedFactKey{
+		subject:   event.Subject,
+		runID:     event.RunID,
+		sessionID: event.SessionID,
+		stepID:    event.StepID,
 	}
-	if len(*left) != len(*right) {
-		return false
-	}
-	for i := range *left {
-		if (*left)[i] != (*right)[i] {
-			return false
+	if event.DependsOnStepIDs != nil {
+		key.topologyKnown = true
+		if len(*event.DependsOnStepIDs) == 0 {
+			key.topologyCanonical = "[]"
+			return key
 		}
+		topology, _ := json.Marshal(*event.DependsOnStepIDs)
+		key.topologyCanonical = string(topology)
 	}
-	return true
+	return key
 }

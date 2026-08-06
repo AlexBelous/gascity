@@ -106,6 +106,35 @@ func TestReconcileCompletedRepairsMissingFactAndRetainsConflictingHistory(t *tes
 	}
 }
 
+func TestReconcileCompletedReadsCompletionJournalOncePerPass(t *testing.T) {
+	graph := beads.NewMemStore()
+	root := mustCreateLifecycleRoot(t, graph)
+	closed := "closed"
+	for _, id := range []string{"gcg-attempt-a", "gcg-attempt-b"} {
+		step := mustCreateLifecycleStep(t, graph, id, root.ID, id, "[]")
+		if err := graph.Update(step.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := &countingLifecycleProvider{Provider: events.NewFake()}
+	if got := ReconcileCompleted(provider, graph, "execution-reconcile"); got != 2 {
+		t.Fatalf("ReconcileCompleted = %d, want 2", got)
+	}
+	if provider.listCalls != 1 {
+		t.Fatalf("completion journal List calls = %d, want one per pass", provider.listCalls)
+	}
+}
+
+type countingLifecycleProvider struct {
+	events.Provider
+	listCalls int
+}
+
+func (p *countingLifecycleProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	return p.Provider.List(filter)
+}
+
 func TestLifecycleEventRetainsUnknownAndRejectsNonNativeOrInvalidFacts(t *testing.T) {
 	root := beads.Bead{ID: "gcg-run", Metadata: map[string]string{beadmeta.KindMetadataKey: "workflow", beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2}}
 	base := beads.Bead{ID: "gcg-attempt", Status: "in_progress", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID, beadmeta.StepIDMetadataKey: "build", beadmeta.SessionIDMetadataKey: "gcs-session"}}

@@ -5,9 +5,58 @@ package integration
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
+
+const (
+	// bdInitMigrationRaceMaxAttempts bounds how many times an external
+	// `bd init` subprocess is retried after losing the dolt
+	// schema-migration race described below. Matches the bound used by
+	// the equivalent in-process retry in internal/beads/factory.go
+	// (openNativeStoreWithMigrationRaceRetry).
+	bdInitMigrationRaceMaxAttempts = 3
+	// bdInitMigrationRaceBackoff is the delay between retry attempts.
+	bdInitMigrationRaceBackoff = 25 * time.Millisecond
+	// bdInitMigrationRaceSignature is the dolt schema-migration race
+	// signature this retries, here on the external `bd` CLI subprocess
+	// path rather than the in-process Go store-open path:
+	// startSharedDoltServer and startDoltServerOnAllInterfaces only
+	// probe TCP readiness, not Dolt's internal migration completion, so
+	// the immediately-following `bd init` can start against a server
+	// that is up but still mid-migration. Must stay in sync with
+	// internal/beads's nativeOpenMigrationRaceSignature.
+	bdInitMigrationRaceSignature = "pre-existing dirty tables changed during schema migration"
+)
+
+// runWithBDInitMigrationRaceRetry runs an external `bd init` subprocess via
+// run, retrying when its combined output matches
+// bdInitMigrationRaceSignature, up to bdInitMigrationRaceMaxAttempts total
+// attempts. A success, a non-matching failure, or context cancellation all
+// return immediately without retrying.
+func runWithBDInitMigrationRaceRetry(ctx context.Context, run func() ([]byte, error)) ([]byte, error) {
+	var out []byte
+	var err error
+	for attempt := 1; attempt <= bdInitMigrationRaceMaxAttempts; attempt++ {
+		out, err = run()
+		if err == nil {
+			return out, nil
+		}
+		if !strings.Contains(string(out), bdInitMigrationRaceSignature) {
+			return out, err
+		}
+		if attempt == bdInitMigrationRaceMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return out, err
+		case <-time.After(bdInitMigrationRaceBackoff):
+		}
+	}
+	return out, err
+}
 
 // These tests exercise runWithBDInitMigrationRaceRetry directly through an
 // injected fake, rather than a real dolt server, because the migration race

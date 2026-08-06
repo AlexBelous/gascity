@@ -5,9 +5,60 @@ package integration
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
+
+const (
+	// bdPostInitDatabaseNotReadyMaxAttempts bounds how many times the first
+	// external `bd` subprocess issued against a freshly-initialized
+	// workspace is retried after losing the success-without-ready-database
+	// race described below. Matches the bound used by the sibling
+	// bdInitMigrationRaceMaxAttempts retry for consistency across the two
+	// external-bd CLI races.
+	bdPostInitDatabaseNotReadyMaxAttempts = 3
+	// bdPostInitDatabaseNotReadyBackoff is the delay between retry attempts.
+	bdPostInitDatabaseNotReadyBackoff = 25 * time.Millisecond
+	// bdPostInitDatabaseNotReadySignature is the success-without-ready-
+	// database race signature this retries: `bd init --server ...` returns
+	// exit 0 before the database it just created is visible to a fresh
+	// connection, so the next `bd` command against that workspace fails
+	// with "database \"<prefix>\" not found on Dolt server at <host:port>".
+	// Matched on the host:port suffix only, so it applies regardless of
+	// which prefix (mc/bd/dc) the caller initialized.
+	bdPostInitDatabaseNotReadySignature = "not found on Dolt server at"
+)
+
+// runWithBDPostInitDatabaseNotReadyRetry runs an external `bd` subprocess
+// (the first one issued against a freshly-initialized workspace) via run,
+// retrying when its combined output matches
+// bdPostInitDatabaseNotReadySignature, up to
+// bdPostInitDatabaseNotReadyMaxAttempts total attempts. A success, a
+// non-matching failure, or context cancellation all return immediately
+// without retrying.
+func runWithBDPostInitDatabaseNotReadyRetry(ctx context.Context, run func() ([]byte, error)) ([]byte, error) {
+	var out []byte
+	var err error
+	for attempt := 1; attempt <= bdPostInitDatabaseNotReadyMaxAttempts; attempt++ {
+		out, err = run()
+		if err == nil {
+			return out, nil
+		}
+		if !strings.Contains(string(out), bdPostInitDatabaseNotReadySignature) {
+			return out, err
+		}
+		if attempt == bdPostInitDatabaseNotReadyMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return out, err
+		case <-time.After(bdPostInitDatabaseNotReadyBackoff):
+		}
+	}
+	return out, err
+}
 
 // These tests exercise runWithBDPostInitDatabaseNotReadyRetry directly
 // through an injected fake, rather than a real dolt server, because the

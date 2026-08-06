@@ -632,15 +632,13 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}
 	cs.admitReadyRoutedWorkEvent(evt, stores)
 	cs.admitSessionStartEvent(evt)
-	// Give the dependency-wait path its synchronous admission opportunity
-	// before publishing the generic legacy poke for the same mutation.
-	cs.admitSessionWaitDependencyShadowEvent(evt)
 	if evt.Actor != "cache-reconcile" {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		cs.runBeadCloseAutoclose(evt.Subject, stores[0].store, stores[0].ref)
 	}
+	cs.admitSessionWaitDependencyShadowEvent(evt)
 }
 
 type readyRoutedWorkDemandContribution struct {

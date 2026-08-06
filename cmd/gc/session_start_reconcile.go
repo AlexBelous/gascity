@@ -1125,15 +1125,6 @@ func reconcileExactSessionStartWithOwner(
 		healthy, present := loadProviderHealthSnapshot(params.CityPath).check(tp.ResolvedProvider.Name)
 		providerUnavailable = present && !healthy
 	}
-	// A retained exact dependency lease precedes generic lifecycle selection.
-	// Its durable wait-hold intentionally makes the ordinary planner park a
-	// sleeping session; treating that park as a return would strand the exact
-	// dependency handoff forever.
-	if admission.WaitDependency != nil {
-		return reconcileExactWaitDependencyStart(
-			ctx, admission, params, info, initialResponse, startCandidate{info: info, tp: tp}, clk, recorder, stdout, stderr, startupTimeout, startOpts,
-		)
-	}
 	plan := planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
 		Info:                 info,
 		WakeDecisionObserved: true,
@@ -1147,6 +1138,14 @@ func reconcileExactSessionStartWithOwner(
 	})
 	if plan.Outcome != sessionLifecycleStartSelectionPrepare {
 		return owner, nil
+	}
+	// The dependency wait itself is the wake reason, so the selection input
+	// intentionally says ShouldWake even while wait_hold remains durable. Every
+	// other ordinary start gate above still applies before the wait is claimed.
+	if admission.WaitDependency != nil {
+		return reconcileExactWaitDependencyStart(
+			ctx, admission, params, info, initialResponse, startCandidate{info: info, tp: tp}, clk, recorder, stdout, stderr, startupTimeout, startOpts,
+		)
 	}
 	if poolStartAuthorized && admission.PoolAllocation.RecoverActive {
 		return reconcileExactPoolRecoveryStart(

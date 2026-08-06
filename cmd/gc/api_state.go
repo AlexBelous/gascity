@@ -47,6 +47,8 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
+var errBeadEventIdentityMismatch = errors.New("bead event subject does not match payload identity")
+
 // controllerState implements api.State, api.StateMutator, and
 // api.PackConfigMutationTransaction.
 // Protected by an RWMutex for hot-reload: readers take RLock,
@@ -626,6 +628,12 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if len(evt.Payload) == 0 {
 		return
 	}
+	canonicalEvent, err := canonicalBeadEventIdentity(evt)
+	if err != nil {
+		log.Printf("dropping bead event type=%s subject=%q: %v", evt.Type, evt.Subject, err)
+		return
+	}
+	evt = canonicalEvent
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(evt)
 	cs.mu.RUnlock()
@@ -897,16 +905,29 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 }
 
 func beadEventID(evt events.Event) string {
-	id := strings.TrimSpace(evt.Subject)
-	if id == "" {
-		var payload struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(evt.Payload, &payload); err == nil {
-			id = strings.TrimSpace(payload.ID)
-		}
+	return strings.TrimSpace(evt.Subject)
+}
+
+// canonicalBeadEventIdentity reconciles the event envelope subject with the
+// typed bead snapshot at the controller's bead-event edge. A valid snapshot
+// supplies a missing subject, while conflicting non-empty identities are
+// unsafe to route and must be dropped. Events without a valid bead snapshot
+// retain their legacy envelope-driven behavior.
+func canonicalBeadEventIdentity(evt events.Event) (events.Event, error) {
+	if !isBeadMutationEvent(evt.Type) {
+		return evt, nil
 	}
-	return id
+	bead, ok := beads.DecodeBeadEventPayload(evt.Payload)
+	if !ok {
+		return evt, nil
+	}
+	payloadID := strings.TrimSpace(bead.ID)
+	subject := strings.TrimSpace(evt.Subject)
+	if subject != "" && subject != payloadID {
+		return events.Event{}, fmt.Errorf("%w: subject=%q payload_id=%q", errBeadEventIdentityMismatch, subject, payloadID)
+	}
+	evt.Subject = payloadID
+	return evt, nil
 }
 
 // update replaces the config, session provider, and reopens stores.

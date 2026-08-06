@@ -281,14 +281,36 @@ func (cr *CityRuntime) releaseSessionWaitDependencyReservation(target sessionWai
 	cr.sessionWaitDependencyMu.Unlock()
 }
 
+// releaseAndRetireCertifiedSessionWaitDependencyTarget returns an exact
+// reservation to legacy ownership and retires its certified index target. It
+// reports whether this caller retired the target that authorizes legacy work.
+func (cr *CityRuntime) releaseAndRetireCertifiedSessionWaitDependencyTarget(target sessionWaitDependencyTarget) bool {
+	if cr == nil {
+		return false
+	}
+	cr.sessionWaitDependencyMu.Lock()
+	defer cr.sessionWaitDependencyMu.Unlock()
+
+	certified := cr.sessionWaitDependencyTargetCertifiedLocked(target)
+	if lease, ok := cr.sessionWaitDependencyReservations[target.SessionID]; ok &&
+		lease.WaitID == target.WaitID && lease.IndexGeneration == target.generation {
+		delete(cr.sessionWaitDependencyReservations, target.SessionID)
+	}
+	if certified {
+		cr.sessionWaitDependencyIndex.Remove(target.WaitID)
+	}
+	return certified
+}
+
 func (cr *CityRuntime) handleReservedSessionWaitDependencyEnqueueFailure(target sessionWaitDependencyTarget, err error) {
 	cr.sessionStartMu.Lock()
 	mode := cr.sessionStartMode
 	cr.sessionStartMu.Unlock()
 	if mode == rollout.Auto {
-		cr.releaseSessionWaitDependencyReservation(target)
-		cr.sessionWaitDependencyReadyPokePending.Store(true)
-		cr.requestLegacySessionStartFallback()
+		if cr.releaseAndRetireCertifiedSessionWaitDependencyTarget(target) {
+			cr.sessionWaitDependencyReadyPokePending.Store(true)
+			cr.requestLegacySessionStartFallback()
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(cr.sessionStartStderr(), "%s: dependency wait %s reservation enqueue: %v\n", cr.sessionStartLogPrefix(), target.WaitID, err) //nolint:errcheck
@@ -504,10 +526,10 @@ func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hin
 
 func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionWaitDependencyStartHint, mode rollout.Mode, err error) {
 	if mode == rollout.Auto {
-		cr.releaseSessionWaitDependencyReservation(hint.Target)
-		cr.retireCertifiedSessionWaitDependencyTarget(hint.Target)
-		cr.sessionWaitDependencyReadyPokePending.Store(true)
-		cr.requestLegacySessionStartFallback()
+		if cr.releaseAndRetireCertifiedSessionWaitDependencyTarget(hint.Target) {
+			cr.sessionWaitDependencyReadyPokePending.Store(true)
+			cr.requestLegacySessionStartFallback()
+		}
 		return
 	}
 	cr.sessionWaitDependencyMu.Lock()

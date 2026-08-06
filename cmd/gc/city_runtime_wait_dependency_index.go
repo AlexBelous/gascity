@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -130,6 +132,26 @@ func (cr *CityRuntime) startSessionWaitDependencyShadowWithContext(ctx context.C
 			}
 			fmt.Fprintf(cr.stderr, "%s: session-wait shadow admission: %v\n", cr.logPrefix, err) //nolint:errcheck
 		} else {
+			if err := cr.cs.installSessionWaitDependencyPrePokeAdmission(func(evt events.Event) {
+				if evt.Type != events.BeadClosed || evt.Subject == "" {
+					return
+				}
+				for _, target := range cr.reserveSessionWaitDependencyTargets(ctx, evt.Subject) {
+					if cr.waitDependencyEnqueue == nil {
+						continue
+					}
+					if _, enqueueErr := cr.waitDependencyEnqueue(target, sessionWaitDependencyCauseDependency); enqueueErr != nil {
+						cr.handleReservedSessionWaitDependencyEnqueueFailure(target, enqueueErr)
+					}
+				}
+			}); err != nil {
+				cr.cs.stopSessionWaitDependencyShadowAdmission()
+				if producerStarted {
+					cr.stopSessionWaitDependencyProducer()
+				}
+				fmt.Fprintf(cr.stderr, "%s: session-wait pre-poke admission: %v\n", cr.logPrefix, err) //nolint:errcheck
+				return
+			}
 			armed = true
 			cr.submitSessionWaitDependencyProducerRequests(cr.cs.requestSessionWaitDependencyShadowRefreshForBead(beads.Bead{}, true))
 		}
@@ -143,6 +165,173 @@ func (cr *CityRuntime) startSessionWaitDependencyShadowWithContext(ctx context.C
 		if installed {
 			cr.submitSessionWaitDependencyStartupCensus()
 		}
+	}
+}
+
+// reserveSessionWaitDependencyTargets synchronously certifies only the narrow
+// cohort owned by this slice. The reservation is installed before the event's
+// generic legacy poke, but performs no durable mutation or provider effect.
+func (cr *CityRuntime) reserveSessionWaitDependencyTargets(ctx context.Context, dependencyID string) []sessionWaitDependencyTarget {
+	if cr == nil || ctx == nil || ctx.Err() != nil || dependencyID == "" {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	mode := cr.sessionStartMode
+	cr.sessionStartMu.Unlock()
+	if !owned || mode != rollout.Auto && mode != rollout.Require || cr.cs == nil {
+		return nil
+	}
+	targets := cr.sessionWaitDependencyTargetsForDependency(dependencyID)
+	if len(targets) == 0 {
+		return nil
+	}
+	snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+	if err != nil {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: reserving dependency wait for %s: %v\n", cr.sessionStartLogPrefix(), dependencyID, err) //nolint:errcheck
+		return nil
+	}
+	defer release()
+	dependencies := newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores())
+	now := clock.Real{}.Now()
+	reserved := make([]sessionWaitDependencyTarget, 0, len(targets))
+	for _, target := range targets {
+		lease, owner, certifyErr := certifySessionWaitDependencyStartLease(snapshot.Store, target, dependencies, snapshot.Config, snapshot.Generation, now)
+		if certifyErr != nil {
+			fmt.Fprintf(cr.sessionStartStderr(), "%s: reserving dependency wait %s: %v\n", cr.sessionStartLogPrefix(), target.WaitID, certifyErr) //nolint:errcheck
+			continue
+		}
+		if owner != exactSessionStartKeyedOwner {
+			continue
+		}
+		cr.sessionWaitDependencyMu.Lock()
+		if !cr.sessionWaitDependencyTargetCertifiedLocked(target) {
+			cr.sessionWaitDependencyMu.Unlock()
+			continue
+		}
+		if cr.sessionWaitDependencyReservations == nil {
+			cr.sessionWaitDependencyReservations = make(map[string]sessionWaitDependencyStartLease)
+		}
+		if previous, ok := cr.sessionWaitDependencyReservations[lease.SessionID]; ok && sameDurableWaitDependencyCertificate(previous, lease) {
+			lease.Operation = previous.Operation
+		}
+		lease.DepIDs = append([]string(nil), lease.DepIDs...)
+		cr.sessionWaitDependencyReservations[lease.SessionID] = lease
+		cr.sessionWaitDependencyMu.Unlock()
+		reserved = append(reserved, cloneSessionWaitDependencyTarget(target))
+	}
+	return reserved
+}
+
+func sameDurableWaitDependencyCertificate(a, b sessionWaitDependencyStartLease) bool {
+	return a.WaitID == b.WaitID && a.SessionID == b.SessionID && a.DepMode == b.DepMode &&
+		a.RegisteredEpoch == b.RegisteredEpoch && a.WaitRevision == b.WaitRevision && a.SessionRevision == b.SessionRevision &&
+		a.ControllerGeneration == b.ControllerGeneration && slices.Equal(a.DepIDs, b.DepIDs)
+}
+
+func (cr *CityRuntime) ownsReservedSessionWaitDependencyStart(sessionID string) bool {
+	if cr == nil || sessionID == "" {
+		return false
+	}
+	cr.sessionWaitDependencyMu.RLock()
+	_, ok := cr.sessionWaitDependencyReservations[sessionID]
+	cr.sessionWaitDependencyMu.RUnlock()
+	return ok
+}
+
+func (cr *CityRuntime) ownsReservedSessionWaitDependencyWait(wait sessionpkg.WaitInfo) bool {
+	if cr == nil || wait.SessionID == "" {
+		return false
+	}
+	cr.sessionWaitDependencyMu.RLock()
+	lease, ok := cr.sessionWaitDependencyReservations[wait.SessionID]
+	cr.sessionWaitDependencyMu.RUnlock()
+	return ok && wait.ID == lease.WaitID && wait.SessionID == lease.SessionID && wait.Status == "open" &&
+		wait.Kind == "deps" && wait.State == waitStatePending && wait.DepMode == lease.DepMode &&
+		wait.RegisteredEpoch == lease.RegisteredEpoch && slices.Equal(wait.DepIDs, lease.DepIDs)
+}
+
+func (cr *CityRuntime) ownsSessionWaitDependencyStart(sessionID string) bool {
+	if cr.ownsReservedSessionWaitDependencyStart(sessionID) {
+		return true
+	}
+	cr.sessionStartMu.Lock()
+	controller := cr.sessionStartController
+	cr.sessionStartMu.Unlock()
+	return controller != nil && controller.ownsWaitDependencyStart(sessionID)
+}
+
+func (cr *CityRuntime) ownsSessionWaitDependencyWait(wait sessionpkg.WaitInfo) bool {
+	if cr.ownsReservedSessionWaitDependencyWait(wait) {
+		return true
+	}
+	cr.sessionStartMu.Lock()
+	controller := cr.sessionStartController
+	cr.sessionStartMu.Unlock()
+	return controller != nil && controller.ownsWaitDependencyWait(wait)
+}
+
+func (cr *CityRuntime) releaseSessionWaitDependencyReservation(target sessionWaitDependencyTarget) {
+	if cr == nil {
+		return
+	}
+	cr.sessionWaitDependencyMu.Lock()
+	if lease, ok := cr.sessionWaitDependencyReservations[target.SessionID]; ok &&
+		lease.WaitID == target.WaitID && lease.IndexGeneration == target.generation {
+		delete(cr.sessionWaitDependencyReservations, target.SessionID)
+	}
+	cr.sessionWaitDependencyMu.Unlock()
+}
+
+func (cr *CityRuntime) handleReservedSessionWaitDependencyEnqueueFailure(target sessionWaitDependencyTarget, err error) {
+	cr.sessionStartMu.Lock()
+	mode := cr.sessionStartMode
+	cr.sessionStartMu.Unlock()
+	if mode == rollout.Auto {
+		cr.releaseSessionWaitDependencyReservation(target)
+		cr.sessionWaitDependencyReadyPokePending.Store(true)
+		cr.requestLegacySessionStartFallback()
+	}
+	if err != nil {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: dependency wait %s reservation enqueue: %v\n", cr.sessionStartLogPrefix(), target.WaitID, err) //nolint:errcheck
+	}
+}
+
+func (cr *CityRuntime) drainSessionWaitDependencyStartHints(ctx context.Context) {
+	if cr == nil || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	for {
+		select {
+		case hint := <-cr.sessionWaitDependencyStartCh:
+			cr.handleSessionWaitDependencyStart(ctx, hint)
+		default:
+			return
+		}
+	}
+}
+
+func (cr *CityRuntime) redriveSessionWaitDependencyReservations(ctx context.Context) {
+	if cr == nil || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	cr.sessionWaitDependencyMu.RLock()
+	targets := make([]sessionWaitDependencyTarget, 0, len(cr.sessionWaitDependencyReservations))
+	for _, lease := range cr.sessionWaitDependencyReservations {
+		targets = append(targets, sessionWaitDependencyTarget{
+			WaitID: lease.WaitID, SessionID: lease.SessionID, DepIDs: append([]string(nil), lease.DepIDs...),
+			DepMode: lease.DepMode, generation: lease.IndexGeneration,
+		})
+	}
+	cr.sessionWaitDependencyMu.RUnlock()
+	slices.SortFunc(targets, func(a, b sessionWaitDependencyTarget) int {
+		return strings.Compare(a.WaitID, b.WaitID)
+	})
+	for _, target := range targets {
+		cr.handleSessionWaitDependencyStart(ctx, sessionWaitDependencyStartHint{
+			Target: target,
+			Cause:  sessionWaitDependencyCauseRegistration,
+		})
 	}
 }
 
@@ -199,48 +388,53 @@ func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hin
 		return
 	}
 	if !cr.sessionWaitDependencyTargetCertified(hint.Target) {
+		cr.releaseSessionWaitDependencyReservation(hint.Target)
 		return
 	}
 	snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
 	if err != nil {
-		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, err)
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, err)
 		return
 	}
 	defer release()
 	lease, owner, err := certifySessionWaitDependencyStartLease(snapshot.Store, hint.Target,
 		newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()), snapshot.Config, snapshot.Generation, clock.Real{}.Now())
-	if err != nil || owner != exactSessionStartKeyedOwner {
-		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, err)
+	if err != nil {
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, err)
+		return
+	}
+	if owner != exactSessionStartKeyedOwner {
+		cr.releaseSessionWaitDependencyReservation(hint.Target)
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, errSessionWaitDependencyStaleCertification)
 		return
 	}
 	if controller == nil {
-		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, errors.New("exact-start controller is unavailable"))
+		cr.retainSessionWaitDependencyReservation(hint.Target, lease)
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, errors.New("exact-start controller is unavailable"))
 		return
 	}
 	// Certification is not authority by itself: the current generation and
 	// exact index target must still match at the admission effect boundary.
 	if lease.IndexGeneration == 0 || lease.IndexGeneration != hint.Target.generation || !cr.sessionWaitDependencyTargetCertified(hint.Target) {
-		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, errors.New("dependency wait index certification changed before admission"))
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, errors.New("dependency wait index certification changed before admission"))
 		return
 	}
-	outcome, err := controller.AdmitWaitDependency(lease)
+	outcome, err := cr.transferSessionWaitDependencyReservation(hint.Target, lease, controller)
 	if err != nil || outcome == sessionStartAdmissionOverflow {
 		if outcome == sessionStartAdmissionOverflow && err == nil {
 			err = errors.New("exact-start admission is full")
 		}
-		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, controller, err)
+		cr.handleSessionWaitDependencyAdmissionFailure(hint, mode, err)
 	}
 }
 
-func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionWaitDependencyStartHint, mode rollout.Mode, controller *sessionStartController, err error) {
+func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionWaitDependencyStartHint, mode rollout.Mode, err error) {
 	if mode == rollout.Auto {
+		cr.releaseSessionWaitDependencyReservation(hint.Target)
 		cr.retireCertifiedSessionWaitDependencyTarget(hint.Target)
 		cr.sessionWaitDependencyReadyPokePending.Store(true)
 		cr.requestLegacySessionStartFallback()
 		return
-	}
-	if controller != nil {
-		controller.RequestAudit()
 	}
 	cr.sessionWaitDependencyMu.Lock()
 	cr.sessionWaitDependencyStartupCensusOwed = true
@@ -248,6 +442,53 @@ func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionW
 	if err != nil {
 		fmt.Fprintf(cr.sessionStartStderr(), "%s: dependency wait %s parked: %v\n", cr.sessionStartLogPrefix(), hint.Target.WaitID, err) //nolint:errcheck
 	}
+}
+
+func (cr *CityRuntime) retainSessionWaitDependencyReservation(target sessionWaitDependencyTarget, lease sessionWaitDependencyStartLease) bool {
+	if cr == nil {
+		return false
+	}
+	cr.sessionWaitDependencyMu.Lock()
+	defer cr.sessionWaitDependencyMu.Unlock()
+	if !cr.sessionWaitDependencyTargetCertifiedLocked(target) {
+		return false
+	}
+	if cr.sessionWaitDependencyReservations == nil {
+		cr.sessionWaitDependencyReservations = make(map[string]sessionWaitDependencyStartLease)
+	}
+	if previous, ok := cr.sessionWaitDependencyReservations[lease.SessionID]; ok && sameDurableWaitDependencyCertificate(previous, lease) {
+		lease.Operation = previous.Operation
+	}
+	lease.DepIDs = append([]string(nil), lease.DepIDs...)
+	cr.sessionWaitDependencyReservations[lease.SessionID] = lease
+	return true
+}
+
+func (cr *CityRuntime) transferSessionWaitDependencyReservation(target sessionWaitDependencyTarget, lease sessionWaitDependencyStartLease, controller *sessionStartController) (sessionStartAdmissionOutcome, error) {
+	if cr == nil || controller == nil {
+		return "", errors.New("transferring dependency wait reservation: controller is unavailable")
+	}
+	cr.sessionWaitDependencyMu.Lock()
+	defer cr.sessionWaitDependencyMu.Unlock()
+	if !cr.sessionWaitDependencyTargetCertifiedLocked(target) {
+		return "", errors.New("dependency wait index certification changed before admission")
+	}
+	if cr.sessionWaitDependencyReservations == nil {
+		cr.sessionWaitDependencyReservations = make(map[string]sessionWaitDependencyStartLease)
+	}
+	if previous, ok := cr.sessionWaitDependencyReservations[lease.SessionID]; ok {
+		if !sameDurableWaitDependencyCertificate(previous, lease) {
+			return "", errors.New("dependency wait reservation changed before admission")
+		}
+		lease.Operation = previous.Operation
+	}
+	lease.DepIDs = append([]string(nil), lease.DepIDs...)
+	cr.sessionWaitDependencyReservations[lease.SessionID] = lease
+	outcome, err := controller.AdmitWaitDependency(lease)
+	if err == nil && outcome != sessionStartAdmissionOverflow {
+		delete(cr.sessionWaitDependencyReservations, lease.SessionID)
+	}
+	return outcome, err
 }
 
 func (cr *CityRuntime) sessionWaitDependencyTargetCertified(target sessionWaitDependencyTarget) bool {

@@ -45,6 +45,73 @@ func (cs *controllerState) installSessionWaitDependencyShadowAdmissionWithProduc
 	return nil
 }
 
+func (cs *controllerState) installSessionWaitDependencyPrePokeAdmission(admit func(events.Event)) error {
+	if cs == nil {
+		return fmt.Errorf("installing session-wait pre-poke admission: controller state is nil")
+	}
+	if admit == nil {
+		return fmt.Errorf("installing session-wait pre-poke admission: callback is nil")
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.sessionWaitPrePokeAdmission != nil || cs.sessionWaitShadowAdmissionStopping {
+		return fmt.Errorf("installing session-wait pre-poke admission: admission unavailable")
+	}
+	cs.sessionWaitPrePokeAdmission = admit
+	return nil
+}
+
+func (cs *controllerState) admitSessionWaitDependencyPrePokeEvent(evt events.Event) {
+	if cs == nil {
+		return
+	}
+	cs.mu.Lock()
+	admit := cs.sessionWaitPrePokeAdmission
+	stopping := cs.sessionWaitShadowAdmissionStopping
+	if admit != nil && !stopping {
+		cs.sessionWaitShadowAdmissionWG.Add(1)
+	}
+	cs.mu.Unlock()
+	if admit == nil || stopping {
+		return
+	}
+	defer cs.sessionWaitShadowAdmissionWG.Done()
+	admit(evt)
+}
+
+func (cs *controllerState) sessionWaitDependencyPrePokeArmed() bool {
+	if cs == nil {
+		return false
+	}
+	cs.mu.RLock()
+	armed := cs.sessionWaitPrePokeAdmission != nil && !cs.sessionWaitShadowAdmissionStopping
+	cs.mu.RUnlock()
+	return armed
+}
+
+// acquireSessionWaitDependencyEventVisibility starts the writer side only for
+// dependency-close candidates while keyed pre-poke admission is armed. A
+// no-op release keeps the event path flat in Off and during shutdown.
+func (cs *controllerState) acquireSessionWaitDependencyEventVisibility(evt events.Event) func() {
+	if cs == nil || evt.Type != events.BeadClosed || evt.Subject == "" || !cs.sessionWaitDependencyPrePokeArmed() {
+		return func() {}
+	}
+	cs.sessionWaitDependencyVisibilityMu.Lock()
+	return cs.sessionWaitDependencyVisibilityMu.Unlock
+}
+
+// acquireSessionWaitDependencyLegacyVisibility prevents legacy wait
+// preparation from observing a dependency-close cache mutation before the
+// same event has completed exact reservation. It is inert outside keyed
+// pre-poke admission.
+func (cs *controllerState) acquireSessionWaitDependencyLegacyVisibility() func() {
+	if cs == nil || !cs.sessionWaitDependencyPrePokeArmed() {
+		return func() {}
+	}
+	cs.sessionWaitDependencyVisibilityMu.RLock()
+	return cs.sessionWaitDependencyVisibilityMu.RUnlock
+}
+
 func (cs *controllerState) stopSessionWaitDependencyShadowAdmission() {
 	if cs == nil {
 		return
@@ -52,6 +119,7 @@ func (cs *controllerState) stopSessionWaitDependencyShadowAdmission() {
 	cs.mu.Lock()
 	cs.sessionWaitShadowAdmissionStopping = true
 	cs.sessionWaitShadowAdmission = nil
+	cs.sessionWaitPrePokeAdmission = nil
 	cs.sessionWaitShadowMayContain = nil
 	cs.sessionWaitShadowProducerAdmission = nil
 	cs.mu.Unlock()

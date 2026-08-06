@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -446,4 +447,83 @@ func TestSessionWaitDependencyShadowAdmissionRunsAfterExistingEventEffects(t *te
 	if refreshCalls != 1 {
 		t.Fatalf("refresh calls = %d, want one post-event refresh", refreshCalls)
 	}
+}
+
+func TestSessionWaitDependencyPrePokeAdmissionDoesNotReorderShadowRefresh(t *testing.T) {
+	cs := &controllerState{
+		cityBeadStore: beads.NewMemStore(),
+		pokeCh:        make(chan struct{}, 1),
+	}
+	previousDispatch := beadCloseAutocloseDispatch
+	var order []string
+	beadCloseAutocloseDispatch = func(func()) {
+		select {
+		case <-cs.pokeCh:
+			order = append(order, "autoclose")
+		default:
+			t.Error("bead-close autoclose ran before the existing controller poke")
+		}
+	}
+	t.Cleanup(func() { beadCloseAutocloseDispatch = previousDispatch })
+
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
+		order = append(order, "refresh")
+		return sessionWaitShadowConverged
+	}, func(string) bool { return true }); err != nil {
+		t.Fatalf("install shadow admission: %v", err)
+	}
+	if err := cs.installSessionWaitDependencyPrePokeAdmission(func(events.Event) {
+		select {
+		case <-cs.pokeCh:
+			t.Error("pre-poke admission ran after the controller poke")
+		default:
+		}
+		order = append(order, "reserve")
+	}); err != nil {
+		t.Fatalf("install pre-poke admission: %v", err)
+	}
+	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
+
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadClosed, beads.Bead{
+		ID:     "dependency-a",
+		Type:   "task",
+		Status: "closed",
+	}))
+	if want := []string{"reserve", "autoclose", "refresh"}; !slices.Equal(order, want) {
+		t.Fatalf("event effect order = %v, want %v", order, want)
+	}
+}
+
+func TestSessionWaitDependencyVisibilityFenceIsInertOutsideDependencyCloseAdmission(t *testing.T) {
+	t.Run("off", func(t *testing.T) {
+		cs := &controllerState{}
+		releaseLegacy := cs.acquireSessionWaitDependencyLegacyVisibility()
+		defer releaseLegacy()
+		releaseEvent := cs.acquireSessionWaitDependencyEventVisibility(events.Event{
+			Type:    events.BeadClosed,
+			Subject: "dependency-a",
+		})
+		defer releaseEvent()
+		if !cs.sessionWaitDependencyVisibilityMu.TryLock() {
+			t.Fatal("disabled dependency-wait admission retained a visibility fence")
+		}
+		cs.sessionWaitDependencyVisibilityMu.Unlock()
+	})
+
+	t.Run("unrelated-mutation", func(t *testing.T) {
+		cs := &controllerState{}
+		if err := cs.installSessionWaitDependencyPrePokeAdmission(func(events.Event) {}); err != nil {
+			t.Fatalf("install pre-poke admission: %v", err)
+		}
+		defer cs.stopSessionWaitDependencyShadowAdmission()
+		releaseEvent := cs.acquireSessionWaitDependencyEventVisibility(events.Event{
+			Type:    events.BeadUpdated,
+			Subject: "dependency-a",
+		})
+		defer releaseEvent()
+		if !cs.sessionWaitDependencyVisibilityMu.TryLock() {
+			t.Fatal("non-close bead mutation retained a dependency-wait visibility fence")
+		}
+		cs.sessionWaitDependencyVisibilityMu.Unlock()
+	})
 }

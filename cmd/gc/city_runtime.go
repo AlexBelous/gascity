@@ -130,6 +130,10 @@ type CityRuntime struct {
 	// Rejected-census IDs come from the bounded lookup census and let a
 	// wait that repairs itself by losing wait identity re-arm convergence.
 	sessionWaitDependencyRejectedCensusIDs map[string]struct{}
+	// sessionWaitDependencyReservations is the bounded pre-claim bridge between
+	// a dependency-close event and the keyed controller admission. It is keyed
+	// by exact session ID; the retained lease also binds the wait identity.
+	sessionWaitDependencyReservations map[string]sessionWaitDependencyStartLease
 
 	sessionStartMu         sync.Mutex
 	sessionStartController *sessionStartController
@@ -984,6 +988,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// A dependency-close event reserves its exact supported target before
+		// publishing the generic poke. Transfer every queued reservation to the
+		// keyed controller before the legacy tick can inspect the same rows.
+		if trigger == "patrol" {
+			cr.redriveSessionWaitDependencyReservations(ctx)
+		}
+		cr.drainSessionWaitDependencyStartHints(ctx)
 		// Record the tick reason for any bd subprocess spawned during
 		// this tick — TraceBDCall reads it to attribute calls to
 		// patrol vs poke. Single-tenant best-effort: restore the
@@ -2805,13 +2816,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	var keyedWaitOwned func(sessionpkg.WaitInfo) bool
-	cr.sessionStartMu.Lock()
-	if cr.sessionStartController != nil {
-		keyedWaitOwned = cr.sessionStartController.ownsWaitDependencyWait
-	}
-	cr.sessionStartMu.Unlock()
-	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), cr.nudgesBeadStore(), time.Now(), sessionBeads, keyedWaitOwned)
+	keyedWaitOwned := cr.ownsSessionWaitDependencyWait
+	readyWaitSet, err := func() (map[string]bool, error) {
+		releaseWaitDependencyVisibility := cr.cs.acquireSessionWaitDependencyLegacyVisibility()
+		defer releaseWaitDependencyVisibility()
+		return prepareWaitWakeStateWithSnapshot(sessionpkg.NewStore(sessStore), newWaitDependencyStoreSet(store, rigStores), cr.nudgesBeadStore(), time.Now(), sessionBeads, keyedWaitOwned)
+	}()
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil

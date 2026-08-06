@@ -155,14 +155,20 @@ type controllerState struct {
 	// the private dependency-wait index. Events only mark the projection
 	// pending; the callback rebuilds from the observed cache.
 	sessionWaitShadowAdmission         func() sessionWaitShadowRefreshResult
+	sessionWaitPrePokeAdmission        func(events.Event)
 	sessionWaitShadowMayContain        func(string) bool
 	sessionWaitShadowProducerAdmission func(sessionWaitDependencyProducerRequest)
 	sessionWaitShadowAdmissionStopping bool
 	sessionWaitShadowAdmissionWG       sync.WaitGroup
-	sessionWaitShadowPending           bool
-	sessionWaitShadowGeneration        uint64
-	sessionWaitShadowPendingRequests   map[string]sessionWaitDependencyProducerRequest
-	sessionWaitShadowPendingOverflow   bool
+	// sessionWaitDependencyVisibilityMu makes a bead-event cache mutation and
+	// its exact dependency-wait reservation one visibility boundary for legacy
+	// reconciliation. Event application takes the writer side; a legacy session
+	// reconcile retains the reader side through planning and admission.
+	sessionWaitDependencyVisibilityMu sync.RWMutex
+	sessionWaitShadowPending          bool
+	sessionWaitShadowGeneration       uint64
+	sessionWaitShadowPendingRequests  map[string]sessionWaitDependencyProducerRequest
+	sessionWaitShadowPendingOverflow  bool
 
 	// sessionStartLeaseMu fences state swaps against exact-start work that has
 	// captured the previous generation. New leases fail fast while a swap is
@@ -624,12 +630,20 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	stores := cs.beadEventStoresLocked(evt)
 	cs.mu.RUnlock()
 
-	for _, candidate := range stores {
-		inner, _, _ := unwrapBeadPolicyStore(candidate.store)
-		if cached, ok := inner.(*beads.CachingStore); ok {
-			cached.ApplyEvent(evt.Type, evt.Payload)
+	// Do not expose a dependency-close cache mutation to legacy wait preparation
+	// until exact ownership has either been reserved or deliberately left with
+	// legacy. The fence is inert when keyed pre-poke admission is not armed.
+	releaseWaitDependencyVisibility := cs.acquireSessionWaitDependencyEventVisibility(evt)
+	func() {
+		defer releaseWaitDependencyVisibility()
+		for _, candidate := range stores {
+			inner, _, _ := unwrapBeadPolicyStore(candidate.store)
+			if cached, ok := inner.(*beads.CachingStore); ok {
+				cached.ApplyEvent(evt.Type, evt.Payload)
+			}
 		}
-	}
+		cs.admitSessionWaitDependencyPrePokeEvent(evt)
+	}()
 	cs.admitReadyRoutedWorkEvent(evt, stores)
 	cs.admitSessionStartEvent(evt)
 	if evt.Actor != "cache-reconcile" {

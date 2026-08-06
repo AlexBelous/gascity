@@ -9,6 +9,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -655,6 +656,340 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 				t.Fatalf("durable wait after keyed start = status=%q metadata=%v, want open ready with ready_at", storedWait.Status, storedWait.Metadata)
 			}
 		})
+	}
+}
+
+func TestSessionWaitDependencyPrePokeReservationExcludesOnlySupportedCohort(t *testing.T) {
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		for _, test := range []struct {
+			name      string
+			dependsOn []string
+			wantOwned bool
+		}{
+			{name: "ordinary", wantOwned: true},
+			{name: "configured-dependency", dependsOn: []string{"database"}},
+		} {
+			t.Run(string(mode)+"/"+test.name, func(t *testing.T) {
+				env := newReconcilerTestEnv()
+				env.cfg = &config.City{
+					Workspace: config.Workspace{Name: "test-city"},
+					Agents: []config.Agent{
+						{Name: "database", StartCommand: "true"},
+						{Name: "worker", StartCommand: "true", DependsOn: test.dependsOn},
+					},
+				}
+				dependency, err := env.store.Create(beads.Bead{Title: "dependency"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				target := env.createSessionBead("worker", "worker")
+				env.setSessionMetadata(&target, map[string]string{
+					"state":              string(sessionpkg.StateAsleep),
+					"continuation_epoch": "7",
+					"wait_hold":          "true",
+					"sleep_intent":       string(sessionpkg.SleepReasonWaitHold),
+					"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
+				})
+				wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := env.store.SetMetadata(wait.ID, "registered_epoch", "7"); err != nil {
+					t.Fatal(err)
+				}
+				if err := env.store.Close(dependency.ID); err != nil {
+					t.Fatal(err)
+				}
+
+				cs := &controllerState{
+					cfg:                         env.cfg,
+					sp:                          env.sp,
+					cityPath:                    t.TempDir(),
+					cityBeadStore:               env.store,
+					eventProv:                   events.NewFake(),
+					rolloutFlags:                rollout.ForTest(rollout.WithSessionReconciler(mode)),
+					sessionStartGeneration:      1,
+					sessionStartStoreGeneration: 1,
+				}
+				cr := &CityRuntime{
+					cs: cs, cfg: env.cfg, stderr: io.Discard,
+					sessionStartOwnership: sessionStartOwnershipKeyed,
+					sessionStartMode:      mode,
+				}
+				cr.sessionWaitDependencyIndex = newSessionWaitDependencyIndex()
+				if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{
+					ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open",
+					State: waitStatePending, DepIDs: []string{dependency.ID}, DepMode: "all",
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				cr.sessionWaitDependencyIndexGeneration = 1
+
+				cr.reserveSessionWaitDependencyTargets(t.Context(), dependency.ID)
+				waitInfo, err := sessionFrontDoor(env.store).GetWait(wait.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := cr.ownsReservedSessionWaitDependencyWait(waitInfo); got != test.wantOwned {
+					t.Fatalf("reserved wait ownership = %v, want %v", got, test.wantOwned)
+				}
+				if got := cr.ownsReservedSessionWaitDependencyStart(target.ID); got != test.wantOwned {
+					t.Fatalf("reserved start ownership = %v, want %v", got, test.wantOwned)
+				}
+			})
+		}
+	}
+}
+
+func TestSessionWaitDependencyPrePokeReservationBlocksLegacyWaitPreparation(t *testing.T) {
+	previousDispatch := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(func()) {}
+	t.Cleanup(func() { beadCloseAutocloseDispatch = previousDispatch })
+
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	dependency, err := env.store.Create(beads.Bead{Title: "dependency"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&target, map[string]string{
+		"state":              string(sessionpkg.StateAsleep),
+		"continuation_epoch": "7",
+		"wait_hold":          "true",
+		"sleep_intent":       string(sessionpkg.SleepReasonWaitHold),
+		"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
+	})
+	wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.SetMetadata(wait.ID, "registered_epoch", "7"); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStoreForTest(env.store, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	pokeCh := make(chan struct{}, 2)
+	cs := &controllerState{
+		cfg: env.cfg, sp: env.sp, cityPath: t.TempDir(), cityBeadStore: cache,
+		eventProv: events.NewFake(), pokeCh: pokeCh,
+		rolloutFlags:                rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+		sessionStartGeneration:      1,
+		sessionStartStoreGeneration: 1,
+	}
+	cr := &CityRuntime{
+		cs: cs, cfg: env.cfg, stderr: io.Discard,
+		sessionStartOwnership:        sessionStartOwnershipKeyed,
+		sessionStartMode:             rollout.Auto,
+		sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, 4),
+	}
+	cr.startSessionWaitDependencyShadowWithContext(t.Context())
+	t.Cleanup(func() {
+		cs.stopSessionWaitDependencyShadowAdmission()
+		cr.stopSessionWaitDependencyProducer()
+	})
+
+	if err := env.store.Close(dependency.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := env.store.Get(dependency.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(beadSnapshotEvent(t, events.BeadClosed, closed))
+
+	waitInfo, err := sessionFrontDoor(env.store).GetWait(wait.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cr.ownsReservedSessionWaitDependencyWait(waitInfo) {
+		t.Fatal("dependency-close event published its poke without an exact reservation")
+	}
+	select {
+	case <-pokeCh:
+	default:
+		t.Fatal("dependency-close event did not publish the existing legacy poke")
+	}
+
+	ready, err := prepareWaitWakeStateWithSnapshot(
+		sessionFrontDoor(env.store),
+		newWaitDependencyStoreSet(env.store, nil),
+		beads.NudgesStore{Store: env.store},
+		env.clk.Now(),
+		nil,
+		cr.ownsSessionWaitDependencyWait,
+	)
+	if err != nil {
+		t.Fatalf("prepare legacy wait state: %v", err)
+	}
+	if ready[target.ID] {
+		t.Fatal("legacy wait preparation entered an exactly reserved dependency wait")
+	}
+	storedWait, err := sessionFrontDoor(env.store).GetWait(wait.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedWait.State != waitStatePending {
+		t.Fatalf("durable wait state = %q, want pending until keyed claim", storedWait.State)
+	}
+}
+
+// TestSessionWaitDependencyEventFenceBlocksLegacyWaitPreparation proves that
+// the dependency-close cache update and its exact reservation are one legacy
+// ownership boundary. A patrol that observes the closed dependency after the
+// cache accepts its event must not advance the still-pending wait before the
+// event goroutine has installed the reservation.
+func TestSessionWaitDependencyEventFenceBlocksLegacyWaitPreparation(t *testing.T) {
+	previousDispatch := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(func()) {}
+	t.Cleanup(func() { beadCloseAutocloseDispatch = previousDispatch })
+
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	dependency, err := env.store.Create(beads.Bead{Title: "dependency"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&target, map[string]string{
+		"state":              string(sessionpkg.StateAsleep),
+		"continuation_epoch": "7",
+		"wait_hold":          "true",
+		"sleep_intent":       string(sessionpkg.SleepReasonWaitHold),
+		"sleep_reason":       string(sessionpkg.SleepReasonWaitHold),
+	})
+	wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.SetMetadata(wait.ID, "registered_epoch", "7"); err != nil {
+		t.Fatal(err)
+	}
+
+	reservationReadEntered := make(chan struct{}, 1)
+	releaseReservationRead := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseReservationRead) }) }
+	audited := &sessionWaitShadowReadAuditStore{
+		Store:   env.store,
+		blockID: wait.ID,
+		entered: reservationReadEntered,
+		release: releaseReservationRead,
+	}
+	cache := beads.NewCachingStoreForTest(audited, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := &controllerState{
+		cfg:                         env.cfg,
+		sp:                          env.sp,
+		cityPath:                    t.TempDir(),
+		cityBeadStore:               cache,
+		eventProv:                   events.NewFake(),
+		pokeCh:                      make(chan struct{}, 1),
+		rolloutFlags:                rollout.ForTest(rollout.WithSessionReconciler(rollout.Auto)),
+		sessionStartGeneration:      1,
+		sessionStartStoreGeneration: 1,
+	}
+	cr := &CityRuntime{
+		cs:                    cs,
+		cfg:                   env.cfg,
+		stderr:                io.Discard,
+		sessionStartOwnership: sessionStartOwnershipKeyed,
+		sessionStartMode:      rollout.Auto,
+	}
+	cr.sessionWaitDependencyIndex = newSessionWaitDependencyIndex()
+	if err := cr.sessionWaitDependencyIndex.Rebuild([]sessionpkg.WaitInfo{{
+		ID: wait.ID, SessionID: target.ID, Kind: "deps", Status: "open",
+		State: waitStatePending, DepIDs: []string{dependency.ID}, DepMode: "all",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	cr.sessionWaitDependencyIndexGeneration = 1
+	ctx := t.Context()
+	if err := cs.installSessionWaitDependencyPrePokeAdmission(func(evt events.Event) {
+		if evt.Type != events.BeadClosed || evt.Subject == "" {
+			return
+		}
+		cr.reserveSessionWaitDependencyTargets(ctx, evt.Subject)
+	}); err != nil {
+		t.Fatalf("install pre-poke admission: %v", err)
+	}
+	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
+
+	if err := env.store.Close(dependency.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := env.store.Get(dependency.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := beadSnapshotEvent(t, events.BeadClosed, closed)
+	eventDone := make(chan struct{})
+	go func() {
+		cs.applyBeadEventToStores(event)
+		close(eventDone)
+	}()
+	t.Cleanup(func() {
+		release()
+		<-eventDone
+	})
+	awaitClose(t, reservationReadEntered, "reservation certification after cache event")
+	if _, err := beads.HandlesFor(cache).Cached.Get(dependency.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("dependency remained cache-visible as active after close event: %v", err)
+	}
+	if cs.sessionWaitDependencyVisibilityMu.TryRLock() {
+		cs.sessionWaitDependencyVisibilityMu.RUnlock()
+		t.Fatal("event-refreshed cache became visible before reservation completed")
+	}
+
+	type legacyResult struct {
+		ready map[string]bool
+		err   error
+	}
+	legacyStarted := make(chan struct{})
+	legacyDone := make(chan legacyResult, 1)
+	go func() {
+		close(legacyStarted)
+		releaseVisibility := cs.acquireSessionWaitDependencyLegacyVisibility()
+		defer releaseVisibility()
+		ready, prepareErr := prepareWaitWakeStateWithSnapshot(
+			sessionFrontDoor(env.store),
+			newWaitDependencyStoreSet(env.store, nil),
+			beads.NudgesStore{Store: env.store},
+			env.clk.Now(),
+			nil,
+			cr.ownsSessionWaitDependencyWait,
+		)
+		legacyDone <- legacyResult{ready: ready, err: prepareErr}
+	}()
+	awaitClose(t, legacyStarted, "concurrent legacy patrol")
+	release()
+	result := <-legacyDone
+	if result.err != nil {
+		t.Fatalf("prepare concurrent legacy wait state: %v", result.err)
+	}
+	if result.ready[target.ID] {
+		t.Fatal("legacy patrol marked the dependency wait ready while cache visibility preceded reservation")
+	}
+	storedWait, err := sessionFrontDoor(env.store).GetWait(wait.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedWait.State != waitStatePending {
+		t.Fatalf("durable wait state = %q, want pending until keyed claim", storedWait.State)
+	}
+	if !cr.ownsReservedSessionWaitDependencyWait(storedWait) {
+		t.Fatal("legacy patrol resumed before the event installed exact wait ownership")
 	}
 }
 

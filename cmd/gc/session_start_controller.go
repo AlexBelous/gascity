@@ -344,9 +344,11 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 	}
 	if waitDependency != nil && existed && previous.WaitDependency != nil && sameWaitDependencyCertificate(*previous.WaitDependency, *waitDependency) {
 		// Duplicate hints for the same durable observation keep the first minted
-		// operation. A changed revision is a new durable observation and replaces
-		// the parked lease so relevant events can make progress.
-		waitDependency = previous.WaitDependency
+		// operation even when an in-memory index rebuild changes only routing
+		// generation. A changed durable revision replaces the parked lease.
+		copied := *waitDependency
+		copied.Operation = previous.WaitDependency.Operation
+		waitDependency = &copied
 	}
 	if waitDependency != nil {
 		copied := *waitDependency
@@ -379,9 +381,7 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 }
 
 func sameWaitDependencyCertificate(a, b sessionWaitDependencyStartLease) bool {
-	return a.WaitID == b.WaitID && a.SessionID == b.SessionID && a.DepMode == b.DepMode &&
-		a.RegisteredEpoch == b.RegisteredEpoch && a.WaitRevision == b.WaitRevision && a.SessionRevision == b.SessionRevision &&
-		a.IndexGeneration == b.IndexGeneration && a.ControllerGeneration == b.ControllerGeneration && slices.Equal(a.DepIDs, b.DepIDs)
+	return sameDurableWaitDependencyCertificate(a, b)
 }
 
 // StartAuthoritativeSeed starts at most one bounded producer. next distinguishes

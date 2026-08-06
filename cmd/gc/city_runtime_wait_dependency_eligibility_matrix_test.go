@@ -25,8 +25,9 @@ func TestSessionWaitDependencyPrePokeUnsupportedEligibilityFallsBackToLegacy(t *
 			agentDependsOn  []string
 			depMode         string
 			dependencyCount int
+			namedSpec       bool
 		}{
-			{name: "named", sessionMetadata: map[string]string{"configured_named_session": "true", "configured_named_identity": "worker"}, dependencyCount: 1, depMode: "all"},
+			{name: "named-mismatched", sessionMetadata: map[string]string{"configured_named_session": "true", "configured_named_identity": "worker", "configured_named_mode": "always", "session_name": "stale-worker"}, dependencyCount: 1, depMode: "all", namedSpec: true},
 			{name: "pool-managed", sessionMetadata: map[string]string{"pool_managed": "true"}, dependencyCount: 1, depMode: "all"},
 			{name: "dependency-only", sessionMetadata: map[string]string{"dependency_only": "true"}, dependencyCount: 1, depMode: "all"},
 			{name: "configured-agent-depends-on", agentDependsOn: []string{"database"}, dependencyCount: 1, depMode: "all"},
@@ -39,6 +40,9 @@ func TestSessionWaitDependencyPrePokeUnsupportedEligibilityFallsBackToLegacy(t *
 						{Name: "database", StartCommand: "true"},
 						{Name: "worker", StartCommand: "true", DependsOn: test.agentDependsOn},
 					},
+				}
+				if test.namedSpec {
+					env.cfg.NamedSessions = []config.NamedSession{{Template: "worker", Mode: "always"}}
 				}
 
 				dependencies := make([]beads.Bead, 0, test.dependencyCount)

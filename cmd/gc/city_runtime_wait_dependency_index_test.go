@@ -536,8 +536,9 @@ func testSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarge
 // TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController
 // pins the first production ownership transfer out of the dependency-wait
 // shadow: a durable deps/all wait with every dependency closed, a deps/any
-// wait with one closed dependency, or a manual deps/all wait must wake only
-// its exact existing session through the keyed controller. In
+// wait with one closed dependency, a manual deps/all wait, or a canonical
+// named deps/all wait must wake only its exact existing session through the
+// keyed controller. In
 // particular, this must not wait for, or wake, the fleet reconciler.
 
 func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController(t *testing.T) {
@@ -545,10 +546,12 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 		name    string
 		depMode string
 		manual  bool
+		named   bool
 	}{
 		{name: "all", depMode: "all"},
 		{name: "any", depMode: "any"},
 		{name: "manual-all", depMode: "all", manual: true},
+		{name: "named-all", depMode: "all", named: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
@@ -558,6 +561,9 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 					env.cfg = &config.City{
 						Workspace: config.Workspace{Name: "test-city"},
 						Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+					}
+					if test.named {
+						env.cfg.NamedSessions = []config.NamedSession{{Template: "worker", Mode: "always"}}
 					}
 					firstDependency, err := env.store.Create(beads.Bead{ID: "dependency-z", Title: "first dependency"})
 					if err != nil {
@@ -579,6 +585,14 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						env.setSessionMetadata(&target, map[string]string{
 							"manual_session": "true",
 							"session_origin": "manual",
+						})
+					}
+					if test.named {
+						env.setSessionMetadata(&target, map[string]string{
+							"configured_named_session":  "true",
+							"configured_named_identity": "worker",
+							"configured_named_mode":     "always",
+							"session_name":              config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker"),
 						})
 					}
 					unrelated := env.createSessionBead("unrelated", "worker")
@@ -753,6 +767,15 @@ func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedControl
 						}
 						if storedTarget.Metadata["manual_session"] != "true" || storedTarget.Metadata["session_origin"] != "manual" {
 							t.Fatalf("manual identity after keyed start = %v", storedTarget.Metadata)
+						}
+					}
+					if test.named {
+						storedTarget, err := env.store.Get(target.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if storedTarget.Metadata["configured_named_session"] != "true" || storedTarget.Metadata["configured_named_identity"] != "worker" || storedTarget.Metadata["configured_named_mode"] != "always" || storedTarget.Metadata["session_name"] != config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker") {
+							t.Fatalf("named identity after keyed start = %v", storedTarget.Metadata)
 						}
 					}
 				})

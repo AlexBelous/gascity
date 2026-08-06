@@ -105,23 +105,20 @@ start_command = "sleep 3600"
 `, `patrol_interval = "1h"
 tick_debounce = "10m"
 `, `conditional_writes = "auto"`)
-	waitForExpectedTmuxSessions(t, cityDir, []string{"worker"})
 
-	out, err := gc(cityDir, "session", "new", "worker", "--alias", "manual-waiter", "--no-attach", "--json")
+	session, _, err := sessionWaitDependencyShadowJourneyWaitForWorkerSession(
+		t.Context(), cityDir, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
 	if err != nil {
-		t.Fatalf("create manual waiting session: %v\n%s", err, out)
+		t.Fatalf("wait for canonical named session: %v", err)
 	}
-	var created sessionLifecycleStatusShadowJourneyNew
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &created); err != nil {
-		t.Fatalf("decode manual waiting session: %v\n%s", err, out)
+	if _, _, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+		t.Context(), cityDir, session.SessionName, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
+	); err != nil {
+		t.Fatalf("canonical named session was not live before wait: %v", err)
 	}
-	if created.SessionID == "" || created.SessionName == "" {
-		t.Fatalf("manual waiting session = %+v, want ID and name", created)
-	}
-	session := sessionWaitDependencyShadowJourneySessionItem{ID: created.SessionID, Template: "worker", SessionName: created.SessionName}
-	waitForExpectedTmuxSessions(t, cityDir, []string{"worker", session.SessionName})
 
-	out, err = bdDolt(cityDir, "create", "keyed start dependency", "--json")
+	out, err := bdDolt(cityDir, "create", "keyed start dependency", "--json")
 	if err != nil {
 		t.Fatalf("create durable dependency: %v\n%s", err, out)
 	}
@@ -238,22 +235,22 @@ tick_debounce = "10m"
 	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
 		t.Context(), cityDir, session.ID, "active", sessionWaitDependencyShadowJourneyWitnessTimeout,
 	); err != nil {
-		t.Fatalf("manual session %s did not become active: %v", session.ID, err)
+		t.Fatalf("named session %s did not become active: %v", session.ID, err)
 	}
 	out, err = bdDolt(cityDir, "show", session.ID, "--json")
 	if err != nil {
-		t.Fatalf("show manual session after keyed start: %v\n%s", err, out)
+		t.Fatalf("show named session after keyed start: %v\n%s", err, out)
 	}
-	var manualSessions []sessionLifecycleStatusShadowJourneyBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &manualSessions); err != nil {
-		t.Fatalf("decode manual session after keyed start: %v\n%s", err, out)
+	var namedSessions []sessionLifecycleStatusShadowJourneyBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &namedSessions); err != nil {
+		t.Fatalf("decode named session after keyed start: %v\n%s", err, out)
 	}
-	if len(manualSessions) != 1 {
-		t.Fatalf("manual session lookup after keyed start returned %d rows, want 1: %s", len(manualSessions), out)
+	if len(namedSessions) != 1 {
+		t.Fatalf("named session lookup after keyed start returned %d rows, want 1: %s", len(namedSessions), out)
 	}
-	manualSession := manualSessions[0]
-	if manualSession.Metadata["session_origin"] != "manual" {
-		t.Fatalf("manual session after keyed start metadata = %+v, want preserved session_origin=manual", manualSession.Metadata)
+	namedSession := namedSessions[0]
+	if namedSession.Metadata["configured_named_session"] != "true" || namedSession.Metadata["configured_named_identity"] == "" || namedSession.Metadata["configured_named_mode"] == "" || namedSession.Metadata["session_name"] != session.SessionName {
+		t.Fatalf("named session after keyed start metadata = %+v, want preserved canonical identity", namedSession.Metadata)
 	}
 	durableWait, err := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
 	if err != nil {
@@ -262,7 +259,7 @@ tick_debounce = "10m"
 	if durableWait.Wait.ID != waitID || durableWait.Wait.State != "ready" || durableWait.Wait.Status != "open" {
 		t.Fatalf("durable wait after keyed start = %+v, want id=%q state=ready status=open", durableWait.Wait, waitID)
 	}
-	t.Logf("dependency close started manual %s through keyed reconciliation in %s and committed in %s (%s|%s|%s)", session.ID, liveLatency, commitLatency, tmuxSession.ID, tmuxSession.Name, tmuxSession.SocketPath)
+	t.Logf("dependency close started named %s through keyed reconciliation in %s and committed in %s (%s|%s|%s)", session.ID, liveLatency, commitLatency, tmuxSession.ID, tmuxSession.Name, tmuxSession.SocketPath)
 }
 
 // TestReadyRoutedWorkKeyedMaterializesLiveEphemeralSessionBeforeDebounce proves

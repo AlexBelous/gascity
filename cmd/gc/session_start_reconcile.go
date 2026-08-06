@@ -78,6 +78,15 @@ type sessionWaitDependencyStartLease struct {
 	Operation            string
 }
 
+func isCanonicalConfiguredNamedSessionForStart(info sessionpkg.Info, cfg *config.City) bool {
+	identity := strings.TrimSpace(info.ConfiguredNamedIdentity)
+	if !isNamedSessionInfo(info) || identity == "" || cfg == nil {
+		return false
+	}
+	spec, ok := findNamedSessionSpec(cfg, cfg.EffectiveCityName(), identity)
+	return ok && info.SessionName == spec.SessionName
+}
+
 func validateSessionWaitDependencyStartLease(lease sessionWaitDependencyStartLease) error {
 	if lease.WaitID == "" || strings.TrimSpace(lease.WaitID) != lease.WaitID {
 		return errors.New("dependency wait lease has invalid wait id")
@@ -154,7 +163,7 @@ func certifySessionWaitDependencyStartLease(
 	// legacy while it is asleep: a durable dependency wait attached to a
 	// configured-template session. The wait itself supplies the ownership proof;
 	// it is distinct from configuration-level agent dependencies.
-	if cfgAgent == nil || len(cfgAgent.DependsOn) != 0 || info.DependencyOnly || isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
+	if cfgAgent == nil || len(cfgAgent.DependsOn) != 0 || info.DependencyOnly || (isNamedSessionInfo(info) && !isCanonicalConfiguredNamedSessionForStart(info, cfg)) || isPoolManagedSessionInfo(info) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
 		return sessionWaitDependencyStartLease{}, exactSessionStartLegacyOwner, nil
 	}
 	if info.MetadataState != string(sessionpkg.StateAsleep) || info.PendingCreateClaim ||
@@ -1021,7 +1030,7 @@ func reconcileExactSessionStartWithOwner(
 		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
 	}
 	if admission.WaitDependency != nil && cfgAgent != nil && len(cfgAgent.DependsOn) == 0 &&
-		!info.DependencyOnly && !isNamedSessionInfo(info) && !isPoolManagedSessionInfo(info) {
+		!info.DependencyOnly && (!isNamedSessionInfo(info) || isCanonicalConfiguredNamedSessionForStart(info, params.Config)) && !isPoolManagedSessionInfo(info) {
 		// A retained dependency-wait lease is the narrow proof that this otherwise
 		// legacy sleeping session belongs to the keyed handoff.
 		owner = exactSessionStartKeyedOwner

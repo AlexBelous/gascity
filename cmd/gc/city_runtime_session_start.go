@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -89,7 +90,9 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 	}
 
 	workers := maxParallelStartsPerTick(stateSnapshot.Config)
-	controller, err := newCitySessionStartController(sessionStartControllerOptions{
+	var controller *sessionStartController
+	var err error
+	controller, err = newCitySessionStartController(sessionStartControllerOptions{
 		Workers:     workers,
 		MaxDistinct: sessionStartControllerMaxDistinct,
 		MaxRetries:  sessionStartControllerMaxRetries,
@@ -169,6 +172,12 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				},
 				ValidateWaitDependencyPoolWitness: func(info sessionpkg.Info, lease sessionWaitDependencyStartLease) bool {
 					return cr.sessionWaitDependencyPoolWitnessCurrent(snapshot, info, lease)
+				},
+				ValidateConfiguredDependencyStart: func(info sessionpkg.Info, lease configuredDependencyStartLease) bool {
+					return cr.configuredDependencyStartWitnessCurrent(snapshot, info, lease)
+				},
+				EnterConfiguredDependencyStart: func(lease configuredDependencyStartLease) bool {
+					return controller.enterConfiguredDependencyStart(lease)
 				},
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
@@ -508,6 +517,26 @@ func (cr *CityRuntime) sessionStartSocketFallback(sessionID, reason string) sess
 	return sessionStartSocketReplyFallback
 }
 
+func (cr *CityRuntime) configuredDependencyStartWitnessCurrent(
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+	lease configuredDependencyStartLease,
+) bool {
+	if cr == nil || snapshot.Config == nil || snapshot.Provider == nil || snapshot.Store == nil ||
+		validateConfiguredDependencyStartLease(lease) != nil {
+		return false
+	}
+	cr.serviceStateMu.RLock()
+	configCurrent := cr.cfg == snapshot.Config
+	cr.serviceStateMu.RUnlock()
+	return configCurrent && snapshot.Generation == lease.ControllerGeneration &&
+		configuredDependencyStartTargetMatches(info, snapshot.Config, lease) &&
+		configuredDependencyStartDependencyMatches(snapshot.Store, snapshot.Config, snapshot.CityName, lease) &&
+		allDependenciesAliveForTemplateWithClock(
+			lease.TargetTemplate, snapshot.Config, nil, snapshot.Provider, snapshot.CityName, snapshot.Store, clock.Real{},
+		)
+}
+
 func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStartSocketReply {
 	if cr == nil {
 		return cr.sessionStartSocketFallback(sessionID, "controller runtime is nil")
@@ -565,6 +594,16 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 	}
 	_, _, owner := classifyExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
 	if owner != exactSessionStartKeyedOwner {
+		if lease, certified := certifyConfiguredDependencyStartLease(info, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Store, snapshot.Generation, time.Now().UTC()); certified {
+			outcome, admitErr := controller.AdmitConfiguredDependency(lease)
+			if admitErr == nil && outcome != sessionStartAdmissionOverflow {
+				return sessionStartSocketReplyOK
+			}
+			if mode == rollout.Require {
+				return sessionStartSocketReplyBlocked
+			}
+			return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("configured-dependency admission rejected (outcome=%s err=%v)", outcome, admitErr))
+		}
 		if mode == rollout.Require {
 			return sessionStartSocketReplyBlocked
 		}
@@ -621,7 +660,8 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 	statusOption := withLegacyStatusHealExclusion(func(info sessionpkg.Info) bool {
 		return validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) == nil &&
 			(resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC()) ||
-				(controller != nil && controller.ownsPoolAllocationStart(info.ID, info.InstanceToken)))
+				(controller != nil && (controller.ownsPoolAllocationStart(info.ID, info.InstanceToken) ||
+					controller.ownsConfiguredDependencyStart(info.ID))))
 	})
 	return func(opts *startExecutionOptions) {
 		startOption(opts)
@@ -657,6 +697,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 			return false
 		}
 		if cr.ownsSessionWaitDependencyStart(info.ID) {
+			return true
+		}
+		if controller != nil && controller.ownsConfiguredDependencyStart(info.ID) {
 			return true
 		}
 		if controller != nil && controller.ownsPoolDrainAckStop(info.ID, info.InstanceToken) {

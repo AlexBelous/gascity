@@ -62,6 +62,189 @@ type exactSessionStartParams struct {
 	AuthorizePoolDrainAck             func(sessionpkg.Info, routedWorkPoolDrainAckLease) (bool, error)
 	RecoverPoolDrainAck               func(sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error)
 	ValidateWaitDependencyPoolWitness func(sessionpkg.Info, sessionWaitDependencyStartLease) bool
+	ValidateConfiguredDependencyStart func(sessionpkg.Info, configuredDependencyStartLease) bool
+	EnterConfiguredDependencyStart    func(configuredDependencyStartLease) bool
+}
+
+type configuredDependencyStartLease struct {
+	SessionID               string
+	TargetTemplate          string
+	DependencyTemplate      string
+	DependencySessionID     string
+	DependencySessionName   string
+	DependencyInstanceToken string
+	ControllerGeneration    uint64
+}
+
+type configuredDependencyStartPreWakeStore struct {
+	beads.Store
+	sessionID string
+	enter     func() bool
+	entered   bool
+}
+
+func (s *configuredDependencyStartPreWakeStore) Handles() beads.StoreHandles {
+	handles := beads.HandlesFor(s.Store)
+	handles.Writer = s
+	return handles
+}
+
+func (s *configuredDependencyStartPreWakeStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.Store.SetMetadataBatch(id, kvs); err != nil {
+		return err
+	}
+	if s.entered || id != s.sessionID || kvs["state"] != string(sessionpkg.StateCreating) ||
+		kvs["last_woke_at"] == "" || kvs["instance_token"] == "" {
+		return nil
+	}
+	if s.enter == nil || !s.enter() {
+		return errors.New("configured-dependency admission changed after pre-wake commit")
+	}
+	s.entered = true
+	return nil
+}
+
+func validateConfiguredDependencyStartLease(lease configuredDependencyStartLease) error {
+	if lease.SessionID == "" || strings.TrimSpace(lease.SessionID) != lease.SessionID {
+		return errors.New("configured-dependency start lease has invalid session id")
+	}
+	if lease.TargetTemplate == "" || strings.TrimSpace(lease.TargetTemplate) != lease.TargetTemplate {
+		return errors.New("configured-dependency start lease has invalid target template")
+	}
+	if lease.DependencyTemplate == "" || strings.TrimSpace(lease.DependencyTemplate) != lease.DependencyTemplate {
+		return errors.New("configured-dependency start lease has invalid dependency template")
+	}
+	if lease.DependencySessionID == "" || strings.TrimSpace(lease.DependencySessionID) != lease.DependencySessionID {
+		return errors.New("configured-dependency start lease has invalid dependency session id")
+	}
+	if lease.DependencySessionName == "" || strings.TrimSpace(lease.DependencySessionName) != lease.DependencySessionName {
+		return errors.New("configured-dependency start lease has invalid dependency session name")
+	}
+	if lease.DependencyInstanceToken == "" || strings.TrimSpace(lease.DependencyInstanceToken) != lease.DependencyInstanceToken {
+		return errors.New("configured-dependency start lease has invalid dependency instance token")
+	}
+	if lease.ControllerGeneration == 0 {
+		return errors.New("configured-dependency start lease lacks controller generation")
+	}
+	return nil
+}
+
+func configuredDependencyStartTargetMatches(info sessionpkg.Info, cfg *config.City, lease configuredDependencyStartLease) bool {
+	if cfg == nil || info.ID != lease.SessionID || info.Closed || info.PendingCreateClaim || info.DependencyOnly ||
+		isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) {
+		return false
+	}
+	target := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	if target == nil || target.QualifiedName() != lease.TargetTemplate || isManualSessionInfoForAgent(info, target) || len(target.DependsOn) != 1 {
+		return false
+	}
+	dependency := findAgentByTemplate(cfg, target.DependsOn[0])
+	return dependency != nil && dependency.QualifiedName() == lease.DependencyTemplate && !isMultiSessionCfgAgent(dependency)
+}
+
+func configuredDependencyStartDependencyIdentity(
+	store beads.Store,
+	cfg *config.City,
+	cityName, dependencyTemplate string,
+) (sessionpkg.Info, bool) {
+	if store == nil || cfg == nil || dependencyTemplate == "" {
+		return sessionpkg.Info{}, false
+	}
+	sessionName := lookupSessionNameOrLegacy(store, cityName, dependencyTemplate, cfg.Workspace.SessionTemplate)
+	if sessionName == "" {
+		return sessionpkg.Info{}, false
+	}
+	candidates, err := sessionpkg.ExactMetadataSessionCandidatesInfo(store, false, map[string]string{"session_name": sessionName})
+	if err != nil {
+		return sessionpkg.Info{}, false
+	}
+	candidateID := ""
+	for _, candidate := range candidates {
+		if candidate.Closed || strings.TrimSpace(candidate.SessionNameMetadata) != sessionName ||
+			normalizedSessionTemplateInfo(candidate, cfg) != dependencyTemplate {
+			continue
+		}
+		if candidateID != "" {
+			return sessionpkg.Info{}, false
+		}
+		candidateID = candidate.ID
+	}
+	if candidateID == "" {
+		return sessionpkg.Info{}, false
+	}
+	current, _, err := getAuthoritativeSessionStartRecord(store, candidateID)
+	if err != nil || current.Closed || strings.TrimSpace(current.SessionNameMetadata) != sessionName ||
+		normalizedSessionTemplateInfo(current, cfg) != dependencyTemplate || strings.TrimSpace(current.InstanceToken) == "" {
+		return sessionpkg.Info{}, false
+	}
+	return current, true
+}
+
+func configuredDependencyStartDependencyMatches(
+	store beads.Store,
+	cfg *config.City,
+	cityName string,
+	lease configuredDependencyStartLease,
+) bool {
+	if store == nil || cfg == nil ||
+		lookupSessionNameOrLegacy(store, cityName, lease.DependencyTemplate, cfg.Workspace.SessionTemplate) != lease.DependencySessionName {
+		return false
+	}
+	current, _, err := getAuthoritativeSessionStartRecord(store, lease.DependencySessionID)
+	return err == nil && !current.Closed && current.ID == lease.DependencySessionID &&
+		strings.TrimSpace(current.SessionNameMetadata) == lease.DependencySessionName &&
+		strings.TrimSpace(current.InstanceToken) == lease.DependencyInstanceToken &&
+		normalizedSessionTemplateInfo(current, cfg) == lease.DependencyTemplate
+}
+
+func configuredDependencyExplicitWakeCurrent(info sessionpkg.Info, now time.Time) bool {
+	input := sessionpkg.LifecycleInputFromInfo(info)
+	input.Now = now
+	input.CreatedAt = info.CreatedAt
+	input.StaleCreatingAfter = staleCreatingStateTimeout
+	lifecycle := sessionpkg.ProjectLifecycle(input)
+	return lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) &&
+		!lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) && !lifecycle.Terminal
+}
+
+func certifyConfiguredDependencyStartLease(
+	info sessionpkg.Info,
+	cfg *config.City,
+	provider runtime.Provider,
+	cityName string,
+	store beads.Store,
+	generation uint64,
+	now time.Time,
+) (configuredDependencyStartLease, bool) {
+	if cfg == nil || provider == nil || store == nil || generation == 0 || !configuredDependencyExplicitWakeCurrent(info, now) {
+		return configuredDependencyStartLease{}, false
+	}
+	target := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	if target == nil || len(target.DependsOn) != 1 {
+		return configuredDependencyStartLease{}, false
+	}
+	dependency := findAgentByTemplate(cfg, target.DependsOn[0])
+	if dependency == nil {
+		return configuredDependencyStartLease{}, false
+	}
+	dependencyInfo, identified := configuredDependencyStartDependencyIdentity(store, cfg, cityName, dependency.QualifiedName())
+	if !identified {
+		return configuredDependencyStartLease{}, false
+	}
+	lease := configuredDependencyStartLease{
+		SessionID:               info.ID,
+		TargetTemplate:          target.QualifiedName(),
+		DependencyTemplate:      dependency.QualifiedName(),
+		DependencySessionID:     dependencyInfo.ID,
+		DependencySessionName:   strings.TrimSpace(dependencyInfo.SessionNameMetadata),
+		DependencyInstanceToken: strings.TrimSpace(dependencyInfo.InstanceToken),
+		ControllerGeneration:    generation,
+	}
+	if validateConfiguredDependencyStartLease(lease) != nil || !configuredDependencyStartTargetMatches(info, cfg, lease) ||
+		!allDependenciesAliveForTemplateWithClock(lease.TargetTemplate, cfg, nil, provider, cityName, store, &clock.Fake{Time: now}) {
+		return configuredDependencyStartLease{}, false
+	}
+	return lease, true
 }
 
 // sessionWaitDependencyStartLease binds one dependency-ready wait to the exact
@@ -1109,6 +1292,34 @@ func reconcileExactSessionStartWithOwner(
 
 	ownershipNow := clk.Now().UTC()
 	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, ownershipNow)
+	var configuredDependencyLease *configuredDependencyStartLease
+	configuredDependencyCurrent := func(sessionpkg.Info, bool) bool { return false }
+	configuredDependencyFailure := func(cause error) (exactSessionStartOwner, error) {
+		if params.RolloutMode == rollout.Auto && !admission.ConfiguredDependencyEntered {
+			return exactSessionStartLegacyOwner, nil
+		}
+		return exactSessionStartKeyedOwner, fmt.Errorf("required configured-dependency start parked: %w", cause)
+	}
+	if admission.ConfiguredDependency != nil {
+		lease := *admission.ConfiguredDependency
+		configuredDependencyLease = &lease
+		configuredDependencyCurrent = func(current sessionpkg.Info, requireExplicitWake bool) bool {
+			return validateConfiguredDependencyStartLease(lease) == nil &&
+				lease.ControllerGeneration == params.Generation &&
+				configuredDependencyStartTargetMatches(current, params.Config, lease) &&
+				(!requireExplicitWake || configuredDependencyExplicitWakeCurrent(current, clk.Now().UTC())) &&
+				params.ValidateConfiguredDependencyStart != nil &&
+				params.ValidateConfiguredDependencyStart(current, lease)
+		}
+		if !configuredDependencyCurrent(info, !admission.ConfiguredDependencyEntered) {
+			return configuredDependencyFailure(errors.New("configured-dependency witness changed before reconciliation"))
+		}
+		cfgAgent = findAgentByTemplate(params.Config, lease.TargetTemplate)
+		if cfgAgent == nil {
+			return configuredDependencyFailure(errors.New("configured-dependency target is unavailable"))
+		}
+		owner = exactSessionStartKeyedOwner
+	}
 	if admission.WaitDependency != nil && cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
 	}
@@ -1264,7 +1475,21 @@ func reconcileExactSessionStartWithOwner(
 	}
 
 	var preWakeRead func(beads.Store, string) (sessionpkg.Info, error)
-	if poolStartAuthorized {
+	if configuredDependencyLease != nil && !admission.ConfiguredDependencyEntered {
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
+			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
+			if readErr != nil {
+				return sessionpkg.Info{}, readErr
+			}
+			if !configuredDependencyCurrent(current, true) {
+				if params.RolloutMode == rollout.Auto {
+					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
+				}
+				return sessionpkg.Info{}, errors.New("required configured-dependency witness changed before pre-wake")
+			}
+			return current, nil
+		}
+	} else if poolStartAuthorized {
 		lease := *admission.PoolAllocation
 		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
 			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
@@ -1284,18 +1509,36 @@ func reconcileExactSessionStartWithOwner(
 			return current, nil
 		}
 	}
-	prepared, err := prepareExactStartCandidateForCity(
-		startCandidate{info: info, tp: tp},
-		params.CityPath,
-		params.CityName,
-		params.Config,
-		params.Provider,
-		params.Store,
-		clk,
-		stderr,
-		startOpts.workDirResolver,
-		preWakeRead,
-	)
+	var prepared *preparedStart
+	if configuredDependencyLease != nil && admission.ConfiguredDependencyEntered {
+		prepared, _, err = buildPreparedStartWithWorkDirResolver(
+			startCandidate{info: info, tp: tp}, params.CityPath, params.Config, params.Store, startOpts.workDirResolver,
+		)
+	} else {
+		prepareStore := params.Store
+		if configuredDependencyLease != nil {
+			lease := *configuredDependencyLease
+			prepareStore = &configuredDependencyStartPreWakeStore{
+				Store:     params.Store,
+				sessionID: lease.SessionID,
+				enter: func() bool {
+					return params.EnterConfiguredDependencyStart != nil && params.EnterConfiguredDependencyStart(lease)
+				},
+			}
+		}
+		prepared, err = prepareExactStartCandidateForCity(
+			startCandidate{info: info, tp: tp},
+			params.CityPath,
+			params.CityName,
+			params.Config,
+			params.Provider,
+			prepareStore,
+			clk,
+			stderr,
+			startOpts.workDirResolver,
+			preWakeRead,
+		)
+	}
 	if err != nil {
 		var skip *exactSessionStartPreWakeSkip
 		if errors.As(err, &skip) {
@@ -1303,21 +1546,50 @@ func reconcileExactSessionStartWithOwner(
 		}
 		return owner, fmt.Errorf("reconciling exact session start %q: preparing start: %w", info.ID, err)
 	}
-	results := executePreparedStartWaveForCity(
-		ctx,
-		[]preparedStart{*prepared},
-		params.CityPath,
-		params.Provider,
-		params.Store,
-		params.Config,
-		startupTimeout,
-		1,
-		params.StartOptions...,
-	)
-	if len(results) != 1 {
-		return owner, fmt.Errorf("reconciling exact session start %q: start returned %d results", info.ID, len(results))
+	var result startResult
+	if configuredDependencyLease != nil {
+		authorize := func(context.Context) error {
+			latest, _, readErr := getAuthoritativeSessionStartRecord(params.Store, configuredDependencyLease.SessionID)
+			if readErr != nil {
+				return fmt.Errorf("reading configured-dependency target before provider start: %w", readErr)
+			}
+			if !asyncStartIdentityMatchesInfo(prepared.candidate.info, latest) {
+				return errors.New("configured-dependency target identity changed before provider start")
+			}
+			if !configuredDependencyCurrent(latest, false) {
+				return errors.New("configured-dependency witness changed before provider start")
+			}
+			return nil
+		}
+		result = runPreparedStartCandidateAuthorized(
+			ctx,
+			*prepared,
+			params.CityPath,
+			params.Provider,
+			params.Store,
+			params.Config,
+			startupTimeout,
+			resolveStartStabilityWaiter(startOpts.stabilityWaiter),
+			startOpts.sessionStaleKeyDetectionWaiter,
+			authorize,
+		)
+	} else {
+		results := executePreparedStartWaveForCity(
+			ctx,
+			[]preparedStart{*prepared},
+			params.CityPath,
+			params.Provider,
+			params.Store,
+			params.Config,
+			startupTimeout,
+			1,
+			params.StartOptions...,
+		)
+		if len(results) != 1 {
+			return owner, fmt.Errorf("reconciling exact session start %q: start returned %d results", info.ID, len(results))
+		}
+		result = results[0]
 	}
-	result := results[0]
 	disposition := commitStartResultWithFreshness(
 		ctx, result, params.Provider, params.Store, clk, recorder, 0, stdout, stderr, nil,
 	)

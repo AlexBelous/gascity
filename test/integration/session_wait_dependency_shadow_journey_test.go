@@ -347,7 +347,14 @@ min_active_sessions = 0
 max_active_sessions = -1
 `, `patrol_interval = "1h"
 tick_debounce = "10m"
-`, "")
+`, `conditional_writes = "auto"`)
+	schemaStatus, err := bdDolt(cityDir, "migrate", "schema", "--json")
+	if err != nil {
+		t.Fatalf("read bd schema status: %v\n%s", err, schemaStatus)
+	}
+	if !strings.Contains(schemaStatus, "v59") {
+		t.Fatalf("bd schema status = %q, want v59", schemaStatus)
+	}
 	if out, err := gcDolt("", "stop", cityDir); err != nil {
 		t.Fatalf("stop empty city before priming routed work: %v\n%s", err, out)
 	}
@@ -480,16 +487,150 @@ tick_debounce = "10m"
 		commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
 		t.Fatalf("routed-work pool start commit record = %+v, want one applied in-process exact start", commit)
 	}
+	materializedBead := sessionWaitDependencyShadowJourneyReadBead(t, cityDir, session.ID)
+	if materializedBead.Metadata["pool_managed"] != "true" ||
+		materializedBead.Metadata["session_origin"] != "ephemeral" ||
+		materializedBead.Metadata["pool_slot"] != "1" ||
+		materializedBead.Metadata["agent_name"] != "worker-1" ||
+		materializedBead.Metadata["session_name"] != session.SessionName ||
+		materializedBead.Metadata["gc.trigger_bead_id"] != workID {
+		t.Fatalf("materialized pool metadata = %+v, want strict-default slot 1 bound to work %s", materializedBead.Metadata, workID)
+	}
+
+	out, err = bdDolt(cityDir, "create", "pool wait dependency", "--json")
+	if err != nil {
+		t.Fatalf("create pool wait dependency: %v\n%s", err, out)
+	}
+	dependencyID := sessionWaitDependencyShadowJourneyBeadID(t, out)
+	out, err = gcDolt(cityDir, "session", "wait", session.ID,
+		"--on-beads", dependencyID,
+		"--note", "resume exact routed worker",
+		"--sleep")
+	if err != nil {
+		t.Fatalf("register pool member wait: %v\n%s", err, out)
+	}
+	waitID := sessionWaitDependencyShadowJourneyWaitID(t, out)
+	out, err = gcDolt(cityDir, "event", "emit", "bead.created",
+		"--subject", waitID,
+		"--bead-payload", waitID,
+		"--actor", "bd-hook",
+		"--json")
+	if err != nil {
+		t.Fatalf("emit pool member wait creation: %v\n%s", err, out)
+	}
+	pendingWait, err := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
+	if err != nil {
+		t.Fatalf("inspect pool member wait: %v", err)
+	}
+	if pendingWait.Wait.ID != waitID || pendingWait.Wait.State != "pending" || pendingWait.Wait.Status != "open" {
+		t.Fatalf("pool member wait before dependency close = %+v, want id=%q state=pending status=open", pendingWait.Wait, waitID)
+	}
+
+	out, err = runCommand("", commandEnvForDir(cityDir, false), integrationGCCommandTimeout,
+		"tmux", "-L", filepath.Base(cityDir), "kill-session", "-t", session.SessionName)
+	if err != nil {
+		t.Fatalf("stop waiting pool member runtime: %v\n%s", err, out)
+	}
+	out, err = bdDolt(cityDir, "update", session.ID,
+		"--set-metadata", "state=asleep",
+		"--set-metadata", "sleep_reason=wait-hold",
+		"--set-metadata", "sleep_intent=wait-hold",
+		"--set-metadata", "wait_hold=true")
+	if err != nil {
+		t.Fatalf("persist waiting pool member state: %v\n%s", err, out)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
+		t.Context(), cityDir, session.ID, "asleep", sessionWaitDependencyShadowJourneyWitnessTimeout,
+	); err != nil {
+		t.Fatalf("pool member did not become durably asleep: %v", err)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForExactTmuxAbsence(
+		t.Context(), cityDir, session.SessionName, sessionWaitDependencyShadowJourneyWitnessTimeout,
+	); err != nil {
+		t.Fatalf("waiting pool member runtime remained live: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID))
+	}
+
+	out, err = bdDolt(cityDir, "close", dependencyID)
+	if err != nil {
+		t.Fatalf("close pool wait dependency: %v\n%s", err, out)
+	}
+	resumedAt := time.Now()
+	out, err = gcDolt(cityDir, "event", "emit", "bead.closed",
+		"--subject", dependencyID,
+		"--bead-payload", dependencyID,
+		"--actor", "bd-hook",
+		"--json")
+	if err != nil {
+		t.Fatalf("emit pool wait dependency close: %v\n%s", err, out)
+	}
+	resumedTmux, resumeLatency, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+		t.Context(), cityDir, session.SessionName, resumedAt, sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
+	if err != nil {
+		t.Fatalf("pool member did not resume before the ten-minute debounce: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID))
+	}
+	resumeCommit, resumeCommitLatency, err := sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
+		t.Context(), cityDir, session, resumedAt, sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
+	if err != nil {
+		t.Fatalf("pool member keyed resume did not commit: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID))
+	}
+	if resumeCommit.Fields.Admission != "wait_dependency" || resumeCommit.Fields.EffectApplied == nil || !*resumeCommit.Fields.EffectApplied {
+		t.Fatalf("pool member resume commit = %+v, want one applied wait_dependency admission", resumeCommit)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
+		t.Context(), cityDir, session.ID, "active", sessionWaitDependencyShadowJourneyWitnessTimeout,
+	); err != nil {
+		t.Fatalf("resumed pool member did not become durably active: %v", err)
+	}
+	afterResume := sessionWaitDependencyShadowJourneyReadBead(t, cityDir, session.ID)
+	for _, key := range []string{"pool_managed", "session_origin", "pool_slot", "agent_name", "session_name", "gc.trigger_bead_id"} {
+		if afterResume.Metadata[key] != materializedBead.Metadata[key] {
+			t.Fatalf("resumed pool metadata %s = %q, want preserved %q", key, afterResume.Metadata[key], materializedBead.Metadata[key])
+		}
+	}
+	afterSessions, err := sessionWaitDependencyShadowJourneyListSessions(cityDir)
+	if err != nil {
+		t.Fatalf("list worker sessions after pool resume: %v", err)
+	}
+	var openWorkers []sessionWaitDependencyShadowJourneySessionItem
+	for _, candidate := range afterSessions.Sessions {
+		if candidate.Template == "worker" && !candidate.Closed {
+			openWorkers = append(openWorkers, candidate)
+		}
+	}
+	if len(openWorkers) != 1 || openWorkers[0].ID != session.ID || openWorkers[0].SessionName != session.SessionName {
+		t.Fatalf("open worker sessions after resume = %+v, want only original %+v", openWorkers, session)
+	}
+	afterTrace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+	if err != nil {
+		t.Fatalf("read trace after pool resume: %v", err)
+	}
+	if got := len(sessionWaitDependencyShadowJourneyPoolMaterializationRecords(afterTrace, workID)); got != 1 {
+		t.Fatalf("pool materializations after resume = %d, want original one only", got)
+	}
+	durableWait, err := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
+	if err != nil {
+		t.Fatalf("inspect pool member wait after resume: %v", err)
+	}
+	if durableWait.Wait.ID != waitID || durableWait.Wait.State != "ready" || durableWait.Wait.Status != "open" {
+		t.Fatalf("pool member wait after resume = %+v, want id=%q state=ready status=open", durableWait.Wait, waitID)
+	}
 	t.Logf(
-		"ready routed-work event materialized keyed session %s in %s, projected it in %s, reached live tmux in %s, and committed its exact start in %s (%s|%s|%s)",
+		"ready routed-work event materialized keyed session %s in %s, projected it in %s, reached live tmux in %s, committed in %s, then resumed the same member through keyed wait_dependency in %s and committed in %s (initial %s|%s|%s; resumed %s|%s|%s)",
 		session.ID,
 		time.Duration(materialized.Fields.EventToMaterializationNS),
 		projectionLatency,
 		liveLatency,
 		commitLatency,
+		resumeLatency,
+		resumeCommitLatency,
 		tmuxSession.ID,
 		tmuxSession.Name,
 		tmuxSession.SocketPath,
+		resumedTmux.ID,
+		resumedTmux.Name,
+		resumedTmux.SocketPath,
 	)
 }
 
@@ -743,7 +884,7 @@ func sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
 		if err != nil {
 			lastErr = err
 		} else {
-			matches := sessionWaitDependencyShadowJourneyPoolStartCommitRecords(trace, session)
+			matches := sessionWaitDependencyShadowJourneyWaitDependencyStartCommitRecords(trace, session)
 			switch len(matches) {
 			case 1:
 				return matches[0], time.Since(started), nil
@@ -759,6 +900,19 @@ func sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
 		case <-ticker.C:
 		}
 	}
+}
+
+func sessionWaitDependencyShadowJourneyWaitDependencyStartCommitRecords(
+	trace sessionWaitDependencyShadowJourneyTraceShow,
+	session sessionWaitDependencyShadowJourneySessionItem,
+) []sessionWaitDependencyShadowJourneyTraceRecord {
+	var matches []sessionWaitDependencyShadowJourneyTraceRecord
+	for _, record := range sessionWaitDependencyShadowJourneyPoolStartCommitRecords(trace, session) {
+		if record.Fields.Admission == "wait_dependency" {
+			matches = append(matches, record)
+		}
+	}
+	return matches
 }
 
 func sessionWaitDependencyShadowJourneyWaitForPoolStartCommit(
@@ -861,6 +1015,22 @@ func sessionWaitDependencyShadowJourneyBeadID(t *testing.T, output string) strin
 	}
 	t.Fatalf("decode created dependency ID from %q", output)
 	return ""
+}
+
+func sessionWaitDependencyShadowJourneyReadBead(t *testing.T, cityDir, beadID string) sessionLifecycleStatusShadowJourneyBead {
+	t.Helper()
+	out, err := bdDolt(cityDir, "show", beadID, "--json")
+	if err != nil {
+		t.Fatalf("show durable session bead %s: %v\n%s", beadID, err, out)
+	}
+	var rows []sessionLifecycleStatusShadowJourneyBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &rows); err != nil {
+		t.Fatalf("decode durable session bead %s: %v\n%s", beadID, err, out)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("durable session bead %s returned %d rows, want 1\n%s", beadID, len(rows), out)
+	}
+	return rows[0]
 }
 
 func sessionWaitDependencyShadowJourneyWaitID(t *testing.T, output string) string {

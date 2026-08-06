@@ -355,10 +355,8 @@ func (cr *CityRuntime) redriveSessionWaitDependencyReservations(ctx context.Cont
 	}
 }
 
-// enableSessionWaitDependencyLifecycleShadowSink connects certified
-// dependency-ready waits to a read/observe/plan-only shadow evaluation. The
-// rollout gate is boot-latched, and legacy reconciliation remains the sole
-// owner of every session, provider, and store mutation.
+// enableSessionWaitDependencyLifecycleShadowSink connects index-certified
+// dependency-ready waits to the keyed controller's untrusted hint queue.
 func (cr *CityRuntime) enableSessionWaitDependencyLifecycleShadowSink(ctx context.Context) {
 	if cr == nil || cr.waitDependencyEnqueue != nil || cr.cs == nil {
 		return
@@ -380,36 +378,31 @@ func (cr *CityRuntime) enableSessionWaitDependencyLifecycleShadowSink(ctx contex
 			return false, nil
 		}
 		cr.sessionStartMu.Lock()
-		defer cr.sessionStartMu.Unlock()
-		if cr.sessionStartOwnership != sessionStartOwnershipKeyed {
+		owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+		mode := cr.sessionStartMode
+		cr.sessionStartMu.Unlock()
+		if !owned || mode != rollout.Auto && mode != rollout.Require {
 			return false, nil
 		}
-		snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
-		if err != nil {
-			return false, fmt.Errorf("%w: %w", errSessionWaitDependencySnapshotUnavailable, err)
-		}
-		defer release()
 		started := time.Now()
-		waitOutcome := sessionWaitDependencyEvaluationParkReadError
-		startOutcome, startReason := "", ""
-		traceFailed := false
+		queueErr := error(nil)
 		trace := cr.trace
-		cycle := trace.BeginCycle(TraceTickTriggerControl, string(cause), started, snapshot.Config)
+		cr.serviceStateMu.RLock()
+		cfg := cr.cfg
+		cr.serviceStateMu.RUnlock()
+		cycle := trace.BeginCycle(TraceTickTriggerControl, string(cause), started, cfg)
 		defer func() {
 			if cycle == nil {
 				return
 			}
-			outcome := TraceOutcomeNoChange
-			switch {
-			case traceFailed:
+			outcome := TraceOutcomeStartCandidate
+			if queueErr != nil {
 				outcome = TraceOutcomeFailed
-			case waitOutcome == sessionWaitDependencyEvaluationReady && startOutcome == "prepare":
-				outcome = TraceOutcomeStartCandidate
 			}
 			cycle.RecordControllerOperation(TraceSiteWaitDependencyShadow, TraceReasonRetained, outcome, "wait_dependency_shadow", time.Since(started), map[string]any{
-				"wait_outcome":   string(waitOutcome),
-				"start_outcome":  startOutcome,
-				"start_reason":   startReason,
+				"wait_outcome":   string(sessionWaitDependencyEvaluationReady),
+				"start_outcome":  "queued",
+				"start_reason":   "index_certified",
 				"cause":          string(cause),
 				"wait_id":        target.WaitID,
 				"session_id":     target.SessionID,
@@ -419,39 +412,14 @@ func (cr *CityRuntime) enableSessionWaitDependencyLifecycleShadowSink(ctx contex
 				fmt.Fprintf(cr.stderr, "%s: wait dependency trace: %v\\n", cr.logPrefix, err) //nolint:errcheck
 			}
 		}()
-		validation, err := validateExactSessionWaitDependencyShadow(
-			snapshot.Store,
-			target,
-			newAuthoritativeWaitDependencyStoreSet(cr.cityBeadStore(), cr.rigBeadStores()),
-			clock.Real{}.Now(),
-		)
-		waitOutcome = validation
-		if err != nil || waitOutcome != sessionWaitDependencyEvaluationReady {
-			traceFailed = err != nil
-			return false, err
-		}
-		if ctx == nil || ctx.Err() != nil {
-			return false, nil
-		}
-		cr.sessionWaitDependencyReadyPokePending.Store(true)
-		cr.requestLegacySessionStartFallback()
-		plan, err := planExactSessionWaitDependencyStartShadow(ctx, target.SessionID, exactSessionStartParams{
-			Generation: snapshot.Generation,
-			CityPath:   snapshot.CityPath,
-			CityName:   snapshot.CityName,
-			Config:     snapshot.Config,
-			Provider:   snapshot.Provider,
-			Store:      snapshot.Store,
-		})
-		startOutcome, startReason = sessionLifecycleStartSelectionTraceOutcome(plan.Outcome), string(plan.Reason)
-		traceFailed = err != nil
-		return false, err
+		queueErr = cr.enqueueSessionWaitDependencyStartHint(ctx, target, cause)
+		return false, queueErr
 	}
 }
 
-// enqueueSessionWaitDependencyStartHint sends only an already-reserved exact
-// target to the keyed controller. Generic shadow observations must remain
-// read/observe-only and use waitDependencyEnqueue above.
+// enqueueSessionWaitDependencyStartHint sends an index-certified but untrusted
+// exact target to the keyed controller, whose run loop remains the sole
+// certifier and effect owner.
 func (cr *CityRuntime) enqueueSessionWaitDependencyStartHint(ctx context.Context, target sessionWaitDependencyTarget, cause sessionWaitDependencyCause) error {
 	if cr == nil || ctx == nil || ctx.Err() != nil || cr.sessionWaitDependencyStartCh == nil {
 		return nil
@@ -647,6 +615,10 @@ func (cr *CityRuntime) startSessionWaitDependencyProducer() bool {
 				return err
 			}
 			if err != nil {
+				cr.sessionStartMu.Lock()
+				mode := cr.sessionStartMode
+				cr.sessionStartMu.Unlock()
+				cr.handleSessionWaitDependencyAdmissionFailure(sessionWaitDependencyStartHint{Target: plan.Target, Cause: cause}, mode, err)
 				return err
 			}
 			if retire {

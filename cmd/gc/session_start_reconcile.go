@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -161,7 +162,7 @@ func certifySessionWaitDependencyStartLease(
 		template := resolvedSessionTemplateInfo(info, cfg)
 		cfgAgent = findAgentByTemplate(cfg, template)
 	}
-	if cfgAgent == nil || !waitDependencyConfiguredTemplateEligible(info, cfg, provider, cityName, store, now) || info.DependencyOnly || (isNamedSessionInfo(info) && !isCanonicalConfiguredNamedSessionForStart(info, cfg)) || isPoolManagedSessionInfo(info) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
+	if cfgAgent == nil || !waitDependencyConfiguredTemplateEligible(info, cfg, provider, cityName, store, now) || info.DependencyOnly || (isNamedSessionInfo(info) && !isCanonicalConfiguredNamedSessionForStart(info, cfg)) || wait.RegisteredEpoch == "" || info.ContinuationEpoch == "" || wait.RegisteredEpoch != info.ContinuationEpoch || target.generation == 0 {
 		return sessionWaitDependencyStartLease{}, exactSessionStartLegacyOwner, nil
 	}
 	if info.MetadataState != string(sessionpkg.StateAsleep) || info.PendingCreateClaim ||
@@ -201,6 +202,22 @@ func waitDependencyConfiguredTemplateEligible(
 	cfgAgent := findAgentByTemplate(cfg, template)
 	if cfgAgent == nil {
 		return false
+	}
+	if isPoolManagedSessionInfo(info) {
+		poolSlot, err := strconv.Atoi(strings.TrimSpace(info.PoolSlot))
+		if info.SessionOrigin != "ephemeral" || info.TriggerBeadID == "" || info.DependencyOnly ||
+			isNamedSessionInfo(info) || isManualSessionInfoForAgent(info, cfgAgent) ||
+			!isEphemeralSessionInfoForAgent(info, cfgAgent) || err != nil || poolSlot <= 0 ||
+			existingPoolSlotWithConfigInfo(cfg, cfgAgent, info) != poolSlot ||
+			info.AgentName != cfgAgent.QualifiedInstanceName(poolInstanceName(cfgAgent.Name, poolSlot, cfgAgent)) ||
+			info.SessionNameMetadata != PoolSessionName(cfgAgent.QualifiedName(), info.ID) {
+			return false
+		}
+		namedTemplates := make(map[string]struct{}, len(cfg.NamedSessions))
+		for i := range cfg.NamedSessions {
+			namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
+		}
+		return newPoolAllocationShadowPolicy(cfg, cfgAgent, namedTemplates).reason == poolAllocationShadowEligible
 	}
 	if len(cfgAgent.DependsOn) == 0 {
 		return true
@@ -1056,7 +1073,7 @@ func reconcileExactSessionStartWithOwner(
 		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
 	}
 	if admission.WaitDependency != nil && cfgAgent != nil && waitDependencyConfiguredTemplateEligible(info, params.Config, params.Provider, params.CityName, params.Store, ownershipNow) &&
-		!info.DependencyOnly && (!isNamedSessionInfo(info) || isCanonicalConfiguredNamedSessionForStart(info, params.Config)) && !isPoolManagedSessionInfo(info) {
+		!info.DependencyOnly && (!isNamedSessionInfo(info) || isCanonicalConfiguredNamedSessionForStart(info, params.Config)) {
 		// A retained dependency-wait lease is the narrow proof that this otherwise
 		// legacy sleeping session belongs to the keyed handoff.
 		owner = exactSessionStartKeyedOwner
@@ -1117,7 +1134,7 @@ func reconcileExactSessionStartWithOwner(
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: err.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
 	}
-	if admission.Source == sessionStartAdmissionInProcess {
+	if admission.Source == sessionStartAdmissionInProcess || admission.Source == sessionStartAdmissionWaitDependency {
 		if invalidator, ok := params.Provider.(runtime.LivenessInvalidator); ok {
 			invalidator.InvalidateLiveness(info.SessionName)
 		}

@@ -234,6 +234,7 @@ func (cr *CityRuntime) handleSessionWaitDependencyStart(ctx context.Context, hin
 
 func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionWaitDependencyStartHint, mode rollout.Mode, controller *sessionStartController, err error) {
 	if mode == rollout.Auto {
+		cr.retireCertifiedSessionWaitDependencyTarget(hint.Target)
 		cr.sessionWaitDependencyReadyPokePending.Store(true)
 		cr.requestLegacySessionStartFallback()
 		return
@@ -241,6 +242,9 @@ func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionW
 	if controller != nil {
 		controller.RequestAudit()
 	}
+	cr.sessionWaitDependencyMu.Lock()
+	cr.sessionWaitDependencyStartupCensusOwed = true
+	cr.sessionWaitDependencyMu.Unlock()
 	if err != nil {
 		fmt.Fprintf(cr.sessionStartStderr(), "%s: dependency wait %s parked: %v\n", cr.sessionStartLogPrefix(), hint.Target.WaitID, err) //nolint:errcheck
 	}

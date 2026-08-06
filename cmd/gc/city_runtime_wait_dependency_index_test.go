@@ -503,6 +503,234 @@ func testSessionWaitDependencyEventUsesInstalledLifecycleShadowSinkForExactTarge
 	}
 }
 
+// TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController
+// pins the first production ownership transfer out of the dependency-wait
+// shadow: one durable deps/all wait with one closed dependency must wake only
+// its ordinary existing session through the keyed controller.  In particular,
+// this must not wait for, or wake, the fleet reconciler.
+func TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController(t *testing.T) {
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		t.Run(string(mode), func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+			}
+			dependency, err := env.store.Create(beads.Bead{Title: "dependency"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&target, map[string]string{
+				"state":                     string(sessionpkg.StateCreating),
+				"pending_create_claim":      "true",
+				"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+			})
+			unrelated := env.createSessionBead("unrelated", "worker")
+			wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var unrelatedGets atomic.Int64
+			audited := &sessionWaitShadowReadAuditStore{Store: env.store, onGet: func(id string) {
+				if id == unrelated.ID {
+					unrelatedGets.Add(1)
+				}
+			}}
+			pokeCh := make(chan struct{}, 2)
+			cs := &controllerState{
+				cfg:                         env.cfg,
+				sp:                          env.sp,
+				cityPath:                    t.TempDir(),
+				cityBeadStore:               audited,
+				eventProv:                   events.NewFake(),
+				pokeCh:                      pokeCh,
+				rolloutFlags:                rollout.ForTest(rollout.WithSessionReconciler(mode)),
+				sessionStartGeneration:      1,
+				sessionStartStoreGeneration: 1,
+			}
+			params := exactSessionStartTestParams(t, env)
+			params.Store = audited
+			controller, err := newSessionStartController(sessionStartControllerOptions{
+				Workers:     1,
+				MaxDistinct: 8,
+				MaxRetries:  0,
+				Reconcile: func(ctx context.Context, admission sessionStartAdmission) error {
+					return reconcileExactSessionStart(ctx, admission, params)
+				},
+				Stderr: io.Discard,
+			})
+			if err != nil {
+				t.Fatalf("new keyed session-start controller: %v", err)
+			}
+			if err := controller.Start(t.Context()); err != nil {
+				t.Fatalf("start keyed session-start controller: %v", err)
+			}
+			t.Cleanup(controller.Stop)
+			cr := &CityRuntime{
+				cs: cs, cfg: env.cfg, pokeCh: pokeCh, stderr: io.Discard,
+				sessionStartOwnership: sessionStartOwnershipKeyed, sessionStartController: controller,
+			}
+			cr.enableSessionWaitDependencyLifecycleShadowSink(t.Context())
+			if cr.waitDependencyEnqueue == nil {
+				t.Fatal("keyed dependency-ready production sink was not installed")
+			}
+
+			if err := env.store.Close(dependency.ID); err != nil {
+				t.Fatal(err)
+			}
+			closed, err := env.store.Get(dependency.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if closed.Status != "closed" {
+				t.Fatalf("dependency status = %q, want closed", closed.Status)
+			}
+			_, err = cr.waitDependencyEnqueue(sessionWaitDependencyTarget{
+				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all",
+			}, sessionWaitDependencyCauseDependency)
+			if err != nil {
+				t.Fatalf("enqueue closed dependency target: %v", err)
+			}
+
+			if got := env.sp.CountCalls("Start", "worker"); got != 1 {
+				t.Fatalf("target provider Starts = %d, want 1", got)
+			}
+			if got := env.sp.CountCalls("Start", "unrelated"); got != 0 {
+				t.Fatalf("unrelated provider Starts = %d, want 0", got)
+			}
+			if got := unrelatedGets.Load(); got != 0 {
+				t.Fatalf("unrelated authoritative Gets = %d, want 0", got)
+			}
+			if got := audited.listCalls.Load(); got != 0 {
+				t.Fatalf("fleet List calls = %d, want 0", got)
+			}
+			if cr.sessionWaitDependencyReadyPokePending.Load() {
+				t.Fatal("keyed dependency start left a legacy priority poke pending")
+			}
+			select {
+			case <-pokeCh:
+				t.Fatal("keyed dependency start poked legacy reconciliation")
+			default:
+			}
+			storedWait, err := env.store.Get(wait.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if storedWait.Status != "open" || storedWait.Metadata["state"] != waitStateReady || storedWait.Metadata["ready_at"] == "" {
+				t.Fatalf("durable wait after keyed start = status=%q metadata=%v, want open ready with ready_at", storedWait.Status, storedWait.Metadata)
+			}
+		})
+	}
+}
+
+// TestSessionWaitDependencyRevokedBeforePreWakeYieldsOrParks exercises the
+// durable race which the controller must close at its effect boundary.  The
+// wait is canceled only after its first authoritative validation read; a
+// later pre-wake revalidation must therefore stop the keyed start.  Auto
+// yields once to the legacy owner, while Require parks without a poke.
+func TestSessionWaitDependencyRevokedBeforePreWakeYieldsOrParks(t *testing.T) {
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		t.Run(string(mode), func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+			}
+			dependency, err := env.store.Create(beads.Bead{Title: "dependency"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := env.store.Close(dependency.ID); err != nil {
+				t.Fatal(err)
+			}
+			target := env.createSessionBead("worker", "worker")
+			env.setSessionMetadata(&target, map[string]string{
+				"state":                     string(sessionpkg.StateCreating),
+				"pending_create_claim":      "true",
+				"pending_create_started_at": env.clk.Now().UTC().Format(time.RFC3339),
+			})
+			wait, err := env.store.Create(sessionWaitShadowBead(target.ID, dependency.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var dependencyReads atomic.Int64
+			audited := &sessionWaitShadowReadAuditStore{Store: env.store, onGet: func(id string) {
+				if id != dependency.ID || dependencyReads.Add(1) != 1 {
+					return
+				}
+				if err := env.store.SetMetadata(wait.ID, "state", waitStateCanceled); err != nil {
+					t.Errorf("cancel wait after certification: %v", err)
+				}
+			}}
+			pokeCh := make(chan struct{}, 2)
+			cs := &controllerState{
+				cfg:                         env.cfg,
+				sp:                          env.sp,
+				cityPath:                    t.TempDir(),
+				cityBeadStore:               audited,
+				eventProv:                   events.NewFake(),
+				pokeCh:                      pokeCh,
+				rolloutFlags:                rollout.ForTest(rollout.WithSessionReconciler(mode)),
+				sessionStartGeneration:      1,
+				sessionStartStoreGeneration: 1,
+			}
+			cr := &CityRuntime{cs: cs, cfg: env.cfg, pokeCh: pokeCh, stderr: io.Discard}
+			if err := cr.ensureSessionStartController(t.Context(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+				t.Fatalf("ensure keyed session-start controller: %v", err)
+			}
+			t.Cleanup(cr.stopSessionStartController)
+			cr.enableSessionWaitDependencyLifecycleShadowSink(t.Context())
+			if cr.waitDependencyEnqueue == nil {
+				t.Fatal("keyed dependency-ready production sink was not installed")
+			}
+
+			_, err = cr.waitDependencyEnqueue(sessionWaitDependencyTarget{
+				WaitID: wait.ID, SessionID: target.ID, DepIDs: []string{dependency.ID}, DepMode: "all",
+			}, sessionWaitDependencyCauseDependency)
+			if err != nil {
+				t.Fatalf("enqueue certified wait target: %v", err)
+			}
+			if got := dependencyReads.Load(); got != 1 {
+				t.Fatalf("dependency reads = %d, want initial certification read", got)
+			}
+			if got := env.sp.CountCalls("Start", "worker"); got != 0 {
+				t.Fatalf("provider Starts after revoked certification = %d, want 0", got)
+			}
+			storedWait, err := env.store.Get(wait.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := storedWait.Metadata["state"]; got != waitStateCanceled {
+				t.Fatalf("revoked wait state = %q, want %q", got, waitStateCanceled)
+			}
+
+			wantPokes := 1
+			if mode == rollout.Require {
+				wantPokes = 0
+			}
+			gotPokes := 0
+			for {
+				select {
+				case <-pokeCh:
+					gotPokes++
+				default:
+					goto drained
+				}
+			}
+		drained:
+			if gotPokes != wantPokes {
+				t.Fatalf("legacy pokes after revoked pre-wake certification = %d, want %d for %s", gotPokes, wantPokes, mode)
+			}
+			if mode == rollout.Require && cr.sessionWaitDependencyReadyPokePending.Load() {
+				t.Fatal("require mode retained a legacy dependency-ready poke")
+			}
+		})
+	}
+}
+
 func TestSessionWaitDependencyShadowDoesNotObserveCanceledWaitAfterIndexCertification(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

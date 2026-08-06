@@ -3583,7 +3583,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
-			checkDeclinedBeadRewakeOnWake(assignedWorkBeadsByID, decision.AssignedWorkBeadID, declinedBeadRewakeLookup, func(format string, args ...any) {
+			dispatchDeclinedBeadRewakeCheck(assignedWorkBeadsByID, decision.AssignedWorkBeadID, declinedBeadRewakeLookup, func(format string, args ...any) {
 				fmt.Fprintf(stderr, format, args...) //nolint:errcheck // best-effort stderr, matches sibling logging in this block
 			})
 			// Capture-at-append: the recordCurrentBeadIDOnWake fold above lands on

@@ -18,9 +18,12 @@ func checkDeclinedBeadRewakeOnWake(assignedByID map[string]beads.Bead, beadID st
 	logDeclinedBeadRewakeIfDetected(b, lookup, logf)
 }
 
-// dispatchDeclinedBeadRewakeCheck is not yet correct: it should run the
-// check without blocking its caller on lookup, but currently just calls it
-// inline.
+// dispatchDeclinedBeadRewakeCheck runs the declined-bead re-wake check
+// without blocking its caller on lookup. lookup is typically backed by a `bd
+// history` subprocess (noteAuthorLookupWithRunner) with no bounded context
+// of its own, so a slow or hung subprocess must delay only this check's own
+// deferred log line -- never the sequential wake loop that calls this
+// per-target (session_reconciler.go).
 func dispatchDeclinedBeadRewakeCheck(assignedByID map[string]beads.Bead, beadID string, lookup noteAuthorLookup, logf func(format string, args ...any)) {
-	checkDeclinedBeadRewakeOnWake(assignedByID, beadID, lookup, logf)
+	go checkDeclinedBeadRewakeOnWake(assignedByID, beadID, lookup, logf)
 }

@@ -47,15 +47,25 @@ func TestValidateEnvelopeExecutionFactsFailClosed(t *testing.T) {
 	if err := ValidateEnvelope(validStep); err != nil {
 		t.Fatalf("valid root step rejected: %v", err)
 	}
+	for _, env := range []Envelope{
+		{Seq: 3, Type: "execution.step_started", TS: rfc(t), Ref: "gcg-attempt", RunID: "gcg-root", SessionID: "gcs-session", StepID: "build", DependsOnStepIDs: &[]string{"root"}},
+		{Seq: 4, Type: "execution.step_completed", TS: rfc(t), Ref: "gcg-attempt", RunID: "gcg-root", SessionID: "gcs-session", StepID: "build", DependsOnStepIDs: &[]string{"root"}},
+	} {
+		if err := ValidateEnvelope(env); err != nil {
+			t.Fatalf("valid lifecycle fact rejected: %v", err)
+		}
+	}
 	for name, env := range map[string]Envelope{
-		"work missing ref": {Seq: 3, Type: "execution.work_associated", TS: rfc(t), RunID: "gcg-root"},
-		"work missing run": {Seq: 4, Type: "execution.work_associated", TS: rfc(t), Ref: "mc-work"},
-		"work session":     {Seq: 5, Type: "execution.work_associated", TS: rfc(t), Ref: "mc-work", RunID: "gcg-root", SessionID: "gcs-1"},
-		"work step":        {Seq: 6, Type: "execution.work_associated", TS: rfc(t), Ref: "mc-work", RunID: "gcg-root", StepID: "step"},
-		"step missing ref": {Seq: 7, Type: "execution.step_defined", TS: rfc(t), RunID: "gcg-root", StepID: "step"},
-		"step missing run": {Seq: 8, Type: "execution.step_defined", TS: rfc(t), Ref: "gcg-step", StepID: "step"},
-		"step missing id":  {Seq: 9, Type: "execution.step_defined", TS: rfc(t), Ref: "gcg-step", RunID: "gcg-root"},
-		"step session":     {Seq: 10, Type: "execution.step_defined", TS: rfc(t), Ref: "gcg-step", RunID: "gcg-root", SessionID: "gcs-1", StepID: "step"},
+		"work missing ref":        {Seq: 5, Type: "execution.work_associated", TS: rfc(t), RunID: "gcg-root"},
+		"work missing run":        {Seq: 6, Type: "execution.work_associated", TS: rfc(t), Ref: "mc-work"},
+		"work session":            {Seq: 7, Type: "execution.work_associated", TS: rfc(t), Ref: "mc-work", RunID: "gcg-root", SessionID: "gcs-1"},
+		"work step":               {Seq: 8, Type: "execution.work_associated", TS: rfc(t), Ref: "mc-work", RunID: "gcg-root", StepID: "step"},
+		"step missing ref":        {Seq: 9, Type: "execution.step_defined", TS: rfc(t), RunID: "gcg-root", StepID: "step"},
+		"step missing run":        {Seq: 10, Type: "execution.step_defined", TS: rfc(t), Ref: "gcg-step", StepID: "step"},
+		"step missing id":         {Seq: 11, Type: "execution.step_defined", TS: rfc(t), Ref: "gcg-step", RunID: "gcg-root"},
+		"step session":            {Seq: 12, Type: "execution.step_defined", TS: rfc(t), Ref: "gcg-step", RunID: "gcg-root", SessionID: "gcs-1", StepID: "step"},
+		"started missing session": {Seq: 13, Type: "execution.step_started", TS: rfc(t), Ref: "gcg-step", RunID: "gcg-root", StepID: "step"},
+		"completed missing step":  {Seq: 14, Type: "execution.step_completed", TS: rfc(t), Ref: "gcg-step", RunID: "gcg-root", SessionID: "gcs-session"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := ValidateEnvelope(env); err == nil {

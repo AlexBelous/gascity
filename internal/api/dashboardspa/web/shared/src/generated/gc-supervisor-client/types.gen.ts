@@ -5156,8 +5156,12 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.step_completed';
+} & TypedEventStreamEnvelopeExecutionStepCompleted) | ({
     type: 'execution.step_defined';
 } & TypedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.step_started';
+} & TypedEventStreamEnvelopeExecutionStepStarted) | ({
     type: 'execution.work_associated';
 } & TypedEventStreamEnvelopeExecutionWorkAssociated) | ({
     type: 'extmsg.adapter_added';
@@ -5641,6 +5645,23 @@ export type TypedEventStreamEnvelopeEventsRotated = {
 };
 
 /**
+ * TypedEventStreamEnvelope execution.step_completed
+ */
+export type TypedEventStreamEnvelopeExecutionStepCompleted = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_completed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope execution.step_defined
  */
 export type TypedEventStreamEnvelopeExecutionStepDefined = {
@@ -5654,6 +5675,23 @@ export type TypedEventStreamEnvelopeExecutionStepDefined = {
     subject?: string;
     ts: string;
     type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.step_started
+ */
+export type TypedEventStreamEnvelopeExecutionStepStarted = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_started';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6740,8 +6778,12 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.step_completed';
+} & TypedTaggedEventStreamEnvelopeExecutionStepCompleted) | ({
     type: 'execution.step_defined';
 } & TypedTaggedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.step_started';
+} & TypedTaggedEventStreamEnvelopeExecutionStepStarted) | ({
     type: 'execution.work_associated';
 } & TypedTaggedEventStreamEnvelopeExecutionWorkAssociated) | ({
     type: 'extmsg.adapter_added';
@@ -7246,6 +7288,24 @@ export type TypedTaggedEventStreamEnvelopeEventsRotated = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope execution.step_completed
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionStepCompleted = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_completed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope execution.step_defined
  */
 export type TypedTaggedEventStreamEnvelopeExecutionStepDefined = {
@@ -7260,6 +7320,24 @@ export type TypedTaggedEventStreamEnvelopeExecutionStepDefined = {
     subject?: string;
     ts: string;
     type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.step_started
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionStepStarted = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_started';
     workflow?: WorkflowEventProjection;
 };
 

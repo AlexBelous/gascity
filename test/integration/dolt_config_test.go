@@ -79,11 +79,13 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 
 	runBDInitCompat(t, env, wsDir, "dc", port)
 
-	bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
-		"--description=Integration test for issue 011", "-t", "task", "-p", "3")
-	bdCreate.Dir = wsDir
-	bdCreate.Env = bdEnv
-	out, err := bdCreate.CombinedOutput()
+	out, err := runWithBDPostInitDatabaseNotReadyRetry(context.Background(), func() ([]byte, error) {
+		bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
+			"--description=Integration test for issue 011", "-t", "task", "-p", "3")
+		bdCreate.Dir = wsDir
+		bdCreate.Env = bdEnv
+		return bdCreate.CombinedOutput()
+	})
 	if err != nil {
 		t.Fatalf("bd create: %v\n%s", err, out)
 	}

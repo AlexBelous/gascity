@@ -5,9 +5,78 @@ package integration
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 )
+
+const (
+	// bdPostInitDatabaseNotReadyInitialInterval is the starting backoff
+	// interval for retrying the first external `bd` subprocess issued
+	// against a freshly-initialized workspace after losing the
+	// success-without-ready-database race described below. Matches the
+	// InitialInterval that beads' own `bd init --server` uses internally
+	// (github.com/steveyegge/beads internal/storage/dolt/store.go,
+	// openServerConnection) to wait out the same underlying Dolt server
+	// catalog-visibility race (upstream beads issue GH-1851) before it will
+	// even report success. A subsequent, independent `bd` process's first
+	// connection needs a comparable budget to reliably observe the same
+	// condition clear — the previous fixed 3×25ms budget was undersized
+	// against that upstream-established real-world worst case by roughly
+	// two orders of magnitude.
+	bdPostInitDatabaseNotReadyInitialInterval = 100 * time.Millisecond
+	// bdPostInitDatabaseNotReadyMaxElapsedTime bounds the total retry
+	// window. Matches the MaxElapsedTime beads' own internal retry uses for
+	// the identical race (see bdPostInitDatabaseNotReadyInitialInterval).
+	bdPostInitDatabaseNotReadyMaxElapsedTime = 10 * time.Second
+	// bdPostInitDatabaseNotReadySignature is the success-without-ready-
+	// database race signature this retries: `bd init --server ...` returns
+	// exit 0 before the database it just created is visible to a fresh
+	// connection, so the next `bd` command against that workspace fails
+	// with "database \"<prefix>\" not found on Dolt server at <host:port>".
+	// Matched on the host:port suffix only, so it applies regardless of
+	// which prefix (mc/bd/dc) the caller initialized.
+	bdPostInitDatabaseNotReadySignature = "not found on Dolt server at"
+)
+
+// runWithBDPostInitDatabaseNotReadyRetry runs an external `bd` subprocess
+// (the first one issued against a freshly-initialized workspace) via run,
+// retrying with exponential backoff when its combined output matches
+// bdPostInitDatabaseNotReadySignature, up to
+// bdPostInitDatabaseNotReadyMaxElapsedTime total. A success, a non-matching
+// failure, or context cancellation all return immediately without
+// retrying.
+func runWithBDPostInitDatabaseNotReadyRetry(ctx context.Context, run func() ([]byte, error)) ([]byte, error) {
+	return runWithBDPostInitDatabaseNotReadyRetryBackoff(ctx, run,
+		bdPostInitDatabaseNotReadyInitialInterval, bdPostInitDatabaseNotReadyMaxElapsedTime)
+}
+
+// runWithBDPostInitDatabaseNotReadyRetryBackoff is
+// runWithBDPostInitDatabaseNotReadyRetry with injectable timing, so tests
+// can exercise the retry and give-up paths without waiting out the
+// production backoff schedule.
+func runWithBDPostInitDatabaseNotReadyRetryBackoff(ctx context.Context, run func() ([]byte, error), initialInterval, maxElapsedTime time.Duration) ([]byte, error) {
+	var out []byte
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = initialInterval
+	bo.MaxElapsedTime = maxElapsedTime
+
+	err := backoff.Retry(func() error {
+		var runErr error
+		out, runErr = run()
+		if runErr == nil {
+			return nil
+		}
+		if !strings.Contains(string(out), bdPostInitDatabaseNotReadySignature) {
+			return backoff.Permanent(runErr)
+		}
+		return runErr
+	}, backoff.WithContext(bo, ctx))
+
+	return out, err
+}
 
 // These tests exercise runWithBDPostInitDatabaseNotReadyRetry (and its
 // injectable-timing variant) directly through an injected fake, rather than

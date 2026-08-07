@@ -247,10 +247,12 @@ func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes 
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bdBinary, "config", "set", "types.custom", strings.Join(customTypes, ","))
-	cmd.Dir = wsDir
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	out, err := runWithBDPostInitDatabaseNotReadyRetry(ctx, func() ([]byte, error) {
+		cmd := exec.CommandContext(ctx, bdBinary, "config", "set", "types.custom", strings.Join(customTypes, ","))
+		cmd.Dir = wsDir
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	})
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd config set types.custom timed out after %s: %s", bdInitTimeout, out)
 	}

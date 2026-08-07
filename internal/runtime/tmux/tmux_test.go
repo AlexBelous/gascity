@@ -71,6 +71,113 @@ func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []strin
 	return realExecutor{}.executeCtx(ctx, args)
 }
 
+// unlinkSocketAfterAttachProbeExecutor reproduces the socket-disappearance
+// race between a successful named-socket preflight and final attach.
+type unlinkSocketAfterAttachProbeExecutor struct {
+	socketPath string
+	unlinked   bool
+}
+
+func (e *unlinkSocketAfterAttachProbeExecutor) execute(args []string) (string, error) {
+	return realExecutor{}.execute(args)
+}
+
+func (e *unlinkSocketAfterAttachProbeExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	out, err := realExecutor{}.executeCtx(ctx, args)
+	if !e.unlinked {
+		for _, arg := range args {
+			if arg == "="+probeSessionName {
+				if removeErr := os.Remove(e.socketPath); removeErr != nil {
+					return "", fmt.Errorf("unlinking named socket after probe: %w", removeErr)
+				}
+				e.unlinked = true
+				break
+			}
+		}
+	}
+	return out, err
+}
+
+func TestAttachSessionNoStartServerDoesNotSelfRebindAfterProbe(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set-option -g exit-empty off\n"), 0o600); err != nil {
+		t.Fatalf("write isolated tmux config: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	socketRoot, err := os.MkdirTemp("/tmp", "gc-tmux-attach-")
+	if err != nil {
+		t.Fatalf("create isolated tmux socket root: %v", err)
+	}
+	t.Setenv("TMUX_TMPDIR", socketRoot)
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-attach-rebind-%d-%d", os.Getpid(), time.Now().UnixNano())
+	tm := NewTmuxWithConfig(cfg)
+	socketPath := namedSocketPath(cfg.SocketName)
+	originalPID := 0
+	t.Cleanup(func() {
+		boundPID := 0
+		if rawPID, err := tm.run("display-message", "-p", "#{pid}"); err == nil {
+			boundPID, _ = strconv.Atoi(rawPID)
+		}
+		// A regression may have rebound the exact test socket. Stop that server
+		// while it is still addressable, then stop the now-unreachable original.
+		if err := tm.KillServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("stop server bound to test socket: %v", err)
+		}
+		if boundPID > 0 {
+			terminateProcesses([]string{strconv.Itoa(boundPID)})
+		}
+		if originalPID > 0 && originalPID != boundPID {
+			terminateProcesses([]string{strconv.Itoa(originalPID)})
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove test socket: %v", err)
+		}
+		if err := os.RemoveAll(socketRoot); err != nil {
+			t.Errorf("remove test socket root: %v", err)
+		}
+	})
+	sessionName := fmt.Sprintf("gc-attach-rebind-%d", time.Now().UnixNano())
+	if err := tm.NewSessionWithCommand(sessionName, "", "sleep 60"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if exitEmpty, err := tm.run("show-options", "-gv", "exit-empty"); err != nil || exitEmpty != "off" {
+		t.Fatalf("isolated server exit-empty = %q, %v; want off", exitEmpty, err)
+	}
+	serverPID, err := tm.run("display-message", "-p", "#{pid}")
+	if err != nil {
+		t.Fatalf("read server PID: %v", err)
+	}
+	pid, err := strconv.Atoi(serverPID)
+	if err != nil {
+		t.Fatalf("parse server PID %q: %v", serverPID, err)
+	}
+	originalPID = pid
+
+	guarded := NewTmuxWithConfig(cfg)
+	exec := &unlinkSocketAfterAttachProbeExecutor{socketPath: socketPath}
+	guarded.exec = exec
+	err = guarded.AttachSession(sessionName)
+	if !errors.Is(err, ErrNoServer) {
+		t.Fatalf("AttachSession error = %v, want ErrNoServer from no-start attach", err)
+	}
+	if !exec.unlinked {
+		t.Fatal("attach preflight did not reach the original named socket")
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final attach self-rebound socket %q: lstat error = %v", socketPath, err)
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("original server PID %d was not preserved: %v", pid, err)
+	}
+}
+
 func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
@@ -506,13 +613,17 @@ func TestHiddenAttachedClientCanSendText(t *testing.T) {
 }
 
 func TestHiddenAttachScriptArgsArePlatformSpecific(t *testing.T) {
-	tmuxArgs := []string{"-u", "-L", "socket", "attach-session", "-t", "target"}
+	tm := &Tmux{cfg: Config{SocketName: "socket"}}
+	tmuxArgs := tm.hiddenAttachCommandArgs("target")
 
-	if got, want := hiddenAttachScriptArgs("darwin", tmuxArgs), []string{"-q", "/dev/null", "tmux", "-u", "-L", "socket", "attach-session", "-t", "target"}; !reflect.DeepEqual(got, want) {
+	if got, want := hiddenAttachScriptArgs("darwin", tmuxArgs), []string{"-q", "/dev/null", "tmux", "-u", "-N", "-L", "socket", "attach-session", "-t", "target"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("darwin script args = %#v, want %#v", got, want)
 	}
-	if got, want := hiddenAttachScriptArgs("linux", tmuxArgs), []string{"-qfc", "tmux -u -L socket attach-session -t target", "/dev/null"}; !reflect.DeepEqual(got, want) {
+	if got, want := hiddenAttachScriptArgs("linux", tmuxArgs), []string{"-qfc", "tmux -u -N -L socket attach-session -t target", "/dev/null"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("linux script args = %#v, want %#v", got, want)
+	}
+	if got, want := NewTmux().hiddenAttachCommandArgs("target"), []string{"-u", "attach-session", "-t", "target"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("default-socket hidden attach args = %#v, want %#v", got, want)
 	}
 }
 

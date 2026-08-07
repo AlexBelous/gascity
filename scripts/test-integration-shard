@@ -97,7 +97,7 @@ bdstore_tests=(
   TestBdStoreConformance
   TestBdStoreDeleteBatchOrphansExternalDependents
   TestBdStoreMailWispInsert
-  TestNewIsolatedEnvRootPinsHomeAwayFromAmbientBeadsConfig
+  TestNewIsolatedToolEnvPinsHomeAwayFromAmbientBeadsConfig
   TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON
 )
 

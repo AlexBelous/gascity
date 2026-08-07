@@ -1933,19 +1933,6 @@ func reconcileCities(
 		}
 		applyRuntimeCityIdentity(cfg, cityName)
 
-		nudgeShadowSelection, nudgeShadowTrace, nudgeShadowErr := prepareNudgeShadowRuntime(path, cityName, cfg, stderr)
-		if nudgeShadowErr != nil {
-			emitPendingCityCreateFailure(cr, path, cityName, "nudge_shadow_preflight_failed", nudgeShadowErr, stderr)
-			recordInitFailure(cityName, fmt.Sprintf("nudge shadow preflight: %v", nudgeShadowErr))
-			continue
-		}
-		closeNudgeShadowTrace := func() {
-			if nudgeShadowTrace != nil {
-				_ = nudgeShadowTrace.Close()
-				nudgeShadowTrace = nil
-			}
-		}
-
 		// Track initialization progress for the API.
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -1977,7 +1964,6 @@ func reconcileCities(
 			})
 			emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
-			closeNudgeShadowTrace()
 			continue
 		}
 
@@ -2027,7 +2013,6 @@ func reconcileCities(
 			})
 			emitPendingCityCreateFailure(cr, path, cityName, "session_provider_failed", spErr, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
-			closeNudgeShadowTrace()
 			continue
 		}
 
@@ -2045,7 +2030,6 @@ func reconcileCities(
 			})
 			emitPendingCityCreateFailure(cr, path, cityName, "agent_image_check_failed", err, stderr)
 			recordInitFailure(cityName, err.Error())
-			closeNudgeShadowTrace()
 			continue
 		}
 
@@ -2097,8 +2081,6 @@ func reconcileCities(
 				ConvergenceReqCh:        convergenceReqCh,
 				PokeCh:                  pokeCh,
 				ControlDispatcherCh:     controlDispatcherCh,
-				NudgeShadowSelection:    nudgeShadowSelection,
-				Trace:                   nudgeShadowTrace,
 				OnStarted: func() {
 					cr.UpdateCallback(path, func(m *managedCity) {
 						m.started = true
@@ -2116,12 +2098,10 @@ func reconcileCities(
 			})
 			return nil
 		}); err != nil {
-			closeNudgeShadowTrace()
 			emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
 			continue
 		}
-		nudgeShadowTrace = nil // ownership transferred to cityRuntime
 		mc.cr = cityRuntime
 
 		// Wire API state.

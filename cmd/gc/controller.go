@@ -1341,18 +1341,6 @@ func runController(
 	}
 	defer lock.Close() //nolint:errcheck // best-effort cleanup
 
-	nudgeShadowSelection, nudgeShadowTrace, err := prepareNudgeShadowRuntime(cityPath, cityName, cfg, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc start: nudge shadow preflight: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	nudgeShadowTraceTransferred := false
-	defer func() {
-		if nudgeShadowTrace != nil && !nudgeShadowTraceTransferred {
-			_ = nudgeShadowTrace.Close()
-		}
-	}()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1447,12 +1435,9 @@ func runController(
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
 		ControlDispatcherCh:     controlDispatcherCh,
-		NudgeShadowSelection:    nudgeShadowSelection,
-		Trace:                   nudgeShadowTrace,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
-	nudgeShadowTraceTransferred = true
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for

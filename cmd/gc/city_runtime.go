@@ -24,7 +24,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
-	"github.com/gastownhall/gascity/internal/nudgeshadow"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -146,7 +145,6 @@ type CityRuntime struct {
 	nudgeKeyController                     *nudgeKeyController
 	nudgeKeyFallback                       map[string]struct{}
 	nudgeKeyMode                           rollout.Mode
-	nudgeShadowSelection                   nudgeshadow.Selection
 	// sessionStartOptions is empty in production. Focused tests install the
 	// existing deterministic start waiters here so composition tests prove the
 	// real exact-start path without wall-clock stability delays.
@@ -245,8 +243,7 @@ type CityRuntimeParams struct {
 	ManagedDoltOwned    func(string) (bool, error)
 	ManagedDoltPort     func(string) string
 
-	NudgeShadowSelection nudgeshadow.Selection
-	Trace                *sessionReconcilerTraceManager
+	Trace *sessionReconcilerTraceManager
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -274,29 +271,6 @@ const cityRuntimeReloadLifecycleRetryLimit = 2
 // It is intentionally longer than staleCreatingStateTimeout because startup
 // plus the first patrol can legitimately exceed one minute.
 const postCreateProtectionTimeout = 2 * time.Minute
-
-// prepareNudgeShadowRuntime resolves the boot-latched selection and, only for
-// required mode, opens and verifies the trace recorder that the runtime will
-// own. Off mode does not open or inspect trace state.
-func prepareNudgeShadowRuntime(cityPath, cityName string, cfg *config.City, stderr io.Writer) (nudgeshadow.Selection, *sessionReconcilerTraceManager, error) {
-	selection, err := nudgeshadow.Resolve(cfg)
-	if err != nil {
-		return nudgeshadow.Selection{}, nil, err
-	}
-	if !selection.Required() {
-		return selection, nil, nil
-	}
-	trace := newSessionReconcilerTraceManager(cityPath, cityName, stderr)
-	selection, err = nudgeshadow.Preflight(cfg, nudgeshadow.Requirements{
-		CityPath:       cityPath,
-		TraceRecording: trace.Enabled(),
-	})
-	if err != nil {
-		_ = trace.Close()
-		return nudgeshadow.Selection{}, nil, err
-	}
-	return selection, trace, nil
-}
 
 // newCityRuntime creates a CityRuntime, building internal components
 // (crash tracker, idle tracker, wisp GC, order dispatcher) from the
@@ -422,7 +396,6 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		nudgeWakeCh:                  make(chan struct{}, 1),
 		routedWorkPoolAllocationCh:   make(chan routedWorkPoolAllocationHint, routedWorkPoolAllocationQueueSize),
 		sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, routedWorkPoolAllocationQueueSize),
-		nudgeShadowSelection:         p.NudgeShadowSelection,
 		onStarted:                    p.OnStarted,
 		onStatus:                     p.OnStatus,
 		managedDoltHealth:            managedDoltHealth,
@@ -709,7 +682,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: ready routed-work admission: %v (using ordinary reconciler pokes)\n", cr.logPrefix, err) //nolint:errcheck // optimization failure retains legacy convergence
 		}
-		if err := cr.ensureNudgeKeyControllerForSelection(ctx); err != nil {
+		if err := cr.ensureNudgeKeyController(ctx); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: keyed nudge controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
 			return
 		}
@@ -1970,23 +1943,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
-	}
-	if err := cr.nudgeShadowSelection.Validate(result.Cfg, nudgeshadow.Requirements{
-		CityPath:       cr.cityPath,
-		TraceRecording: cr.nudgeShadowSelection.Required() && cr.trace != nil && cr.trace.Enabled(),
-	}); err != nil {
-		err = fmt.Errorf("nudge shadow reload preflight: %w", err)
-		fmt.Fprintf(cr.stderr, "%s: config reload: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
-		if trace != nil {
-			trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
-		}
-		return reloadControlReply{
-			Outcome:  reloadOutcomeFailed,
-			Error:    err.Error(),
-			Revision: result.Revision,
-			Warnings: warnings,
-		}
 	}
 	oldRevision := cr.configRev
 	rejectSuperseded := func(phase string) reloadControlReply {
@@ -3311,14 +3267,7 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 		if sessionBeads == nil {
 			return
 		}
-		observer := cr.nudgeDueTargetSelectionObserver()
-		var err error
-		if observer == nil {
-			_, err = dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads)
-		} else {
-			_, err = dispatchAllQueuedNudgesObserved(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, observer)
-		}
-		if err != nil {
+		if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 		}
 		return
@@ -3839,58 +3788,6 @@ func (cr *CityRuntime) beginTraceCycle(trigger, detail string, sessionBeads *ses
 		ConfigRevision: cr.configRev,
 	}
 	return cr.trace.beginCycle(info, cr.cfg, sessionBeads)
-}
-
-const traceSiteNudgeDueTargetSelectionShadow TraceSiteCode = "nudge.due_target_selection.shadow"
-
-const nudgeDueTargetSelectionTraceFieldLimit = 13
-
-func (cr *CityRuntime) ensureNudgeKeyControllerForSelection(ctx context.Context) error {
-	if cr == nil || cr.nudgeShadowSelection.Required() {
-		return nil
-	}
-	return cr.ensureNudgeKeyController(ctx)
-}
-
-func (cr *CityRuntime) nudgeDueTargetSelectionObserver() nudgeDueTargetSelectionObserver {
-	if cr == nil || !cr.nudgeShadowSelection.Required() {
-		return nil
-	}
-	return cr.recordNudgeDueTargetSelection
-}
-
-func (cr *CityRuntime) recordNudgeDueTargetSelection(observation nudgeDueTargetSelectionObservation) {
-	if cr == nil {
-		return
-	}
-	cycle := cr.beginTraceCycle("control", nudgeshadow.ScopeQueuedExactDueTargetSelection, nil)
-	if cycle == nil {
-		return
-	}
-	fields := map[string]any{
-		"scope":                 observation.Scope,
-		"queue_item_count":      observation.QueueItemCount,
-		"candidate_count":       observation.CandidateCount,
-		"candidate_digest":      observation.CandidateDigest,
-		"legacy_count":          observation.LegacyCount,
-		"legacy_digest":         observation.LegacyDigest,
-		"comparison_outcome":    observation.ComparisonOutcome,
-		"queue_duration_ms":     observation.QueueDuration.Milliseconds(),
-		"candidate_duration_ms": observation.CandidateDuration.Milliseconds(),
-		"legacy_duration_ms":    observation.LegacyDuration.Milliseconds(),
-		"total_duration_ms":     observation.TotalDuration.Milliseconds(),
-		"legacy_effect_owner":   observation.LegacyEffectOwner,
-		"shadow_effect_applied": observation.ShadowEffectApplied,
-	}
-	cycle.RecordControllerDecision(
-		traceSiteNudgeDueTargetSelectionShadow,
-		TraceReasonRetained,
-		TraceOutcomeNoChange,
-		fields,
-	)
-	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: nudge due-target selection trace: %v\n", cr.logPrefix, err) //nolint:errcheck
-	}
 }
 
 func (cr *CityRuntime) drainOutgoingOrderDispatcher(ctx context.Context, od orderDispatcher) {

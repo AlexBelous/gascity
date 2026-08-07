@@ -12,8 +12,6 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/log/global"
-	"go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	collectormetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -99,65 +97,7 @@ func TestProviderForceFlushAddsBoundedDeadline(t *testing.T) {
 	}
 }
 
-func TestRecordNudgeShadowHealthUsesOnlyBoundedAttributes(t *testing.T) {
-	ResetInstrumentsForTest()
-	t.Cleanup(ResetInstrumentsForTest)
-	reader := metric.NewManualReader()
-	provider := metric.NewMeterProvider(metric.WithReader(reader))
-	previous := otel.GetMeterProvider()
-	otel.SetMeterProvider(provider)
-	t.Cleanup(func() { otel.SetMeterProvider(previous) })
-
-	probe := NudgeShadowHealthProbe{
-		City:            "city-a",
-		Provider:        "t3bridge",
-		Config:          "enabled",
-		Comparison:      "same",
-		OwnerGeneration: 7,
-	}
-	RecordNudgeShadowHealth(context.Background(), probe)
-
-	var out metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &out); err != nil {
-		t.Fatalf("Collect() = %v", err)
-	}
-	for _, scope := range out.ScopeMetrics {
-		for _, current := range scope.Metrics {
-			if current.Name != nudgeShadowHealthMetric {
-				continue
-			}
-			gauge, ok := current.Data.(metricdata.Gauge[int64])
-			if !ok || len(gauge.DataPoints) != 1 || gauge.DataPoints[0].Value != 1 {
-				t.Fatalf("health metric = %#v, want one healthy point", current.Data)
-			}
-			attrs := gauge.DataPoints[0].Attributes.ToSlice()
-			want := map[string]string{
-				"city":       "city-a",
-				"provider":   "t3bridge",
-				"config":     "enabled",
-				"comparison": "same",
-			}
-			if len(attrs) != len(want)+1 {
-				t.Fatalf("health attributes = %#v, want only %#v", attrs, want)
-			}
-			for _, attr := range attrs {
-				if attr.Key == "owner_generation" {
-					if attr.Value.AsInt64() != 7 {
-						t.Fatalf("owner_generation = %d, want 7", attr.Value.AsInt64())
-					}
-					continue
-				}
-				if got, ok := want[string(attr.Key)]; !ok || got != attr.Value.AsString() {
-					t.Fatalf("forbidden or incorrect health attribute %s=%s", attr.Key, attr.Value.Emit())
-				}
-			}
-			return
-		}
-	}
-	t.Fatal("nudge-shadow health metric was not emitted")
-}
-
-func TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver(t *testing.T) {
+func TestForceFlushAcknowledgesGaugeAtIsolatedOTLPReceiver(t *testing.T) {
 	resetInitState(t)
 	previousMeter := otel.GetMeterProvider()
 	previousLogger := global.GetLoggerProvider()
@@ -181,7 +121,7 @@ func TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			if !otlpRequestHasMetric(request, nudgeShadowHealthMetric) {
+			if !otlpRequestHasMetric(request, beadStoreHealthMetric) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -209,7 +149,7 @@ func TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver(t *testing.T) {
 		defer cancel()
 		_ = p.Shutdown(ctx)
 	})
-	RecordNudgeShadowHealth(context.Background(), NudgeShadowHealthProbe{City: "city-a", Provider: "fake", Config: "enabled", Comparison: "same", OwnerGeneration: 1})
+	RecordBeadStoreHealth(context.Background(), "city-a", true)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := p.ForceFlush(ctx); err != nil {
@@ -218,7 +158,7 @@ func TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver(t *testing.T) {
 	select {
 	case <-acknowledged:
 	case <-ctx.Done():
-		t.Fatal("isolated OTLP receiver did not acknowledge the health probe")
+		t.Fatal("isolated OTLP receiver did not acknowledge the gauge")
 	}
 }
 

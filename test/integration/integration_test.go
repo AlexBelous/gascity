@@ -426,7 +426,7 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 // with BEADS_DIR/BEADS_DOLT_SERVER_PORT set, exactly what this repo's own
 // fleet sessions do — that leaks straight through and misdirects the
 // store's bd subprocesses onto an unrelated database: the same "not found
-// on Dolt server at" failure class newIsolatedEnvRoot's HOME pin already
+// on Dolt server at" failure class newIsolatedToolEnv's HOME pin already
 // guards against, just reached through this runner instead. Running the
 // child with cmd.Env set to the isolated env verbatim (no ambient snapshot
 // involved at all) closes that gap; stdout is captured separately from

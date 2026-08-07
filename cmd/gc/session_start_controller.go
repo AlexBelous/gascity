@@ -33,14 +33,16 @@ const (
 )
 
 type sessionStartAdmission struct {
-	SessionID                   string
-	Source                      sessionStartAdmissionSource
-	Version                     uint64
-	PoolAllocation              *routedWorkPoolStartLease
-	PoolDrainAck                *routedWorkPoolDrainAckLease
-	WaitDependency              *sessionWaitDependencyStartLease
-	ConfiguredDependency        *configuredDependencyStartLease
-	ConfiguredDependencyEntered bool
+	SessionID                    string
+	Source                       sessionStartAdmissionSource
+	Version                      uint64
+	PoolAllocation               *routedWorkPoolStartLease
+	PoolDrainAck                 *routedWorkPoolDrainAckLease
+	WaitDependency               *sessionWaitDependencyStartLease
+	ConfiguredDependency         *configuredDependencyStartLease
+	ConfiguredDependencyEntered  bool
+	StrictDefaultPoolWake        *strictDefaultPoolWakeStartLease
+	StrictDefaultPoolWakeEntered bool
 	// PoolDrainAckUncertain retains a durable stop-pending row when an
 	// anti-entropy seed cannot reconstruct its agent acknowledgement lease.
 	// It is a retry fence, never destructive-stop authority.
@@ -205,7 +207,7 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 		return "", err
 	}
 
-	outcome, _, err := c.admit(id, source, false, 0, nil, nil, false, nil, nil)
+	outcome, _, err := c.admit(id, source, false, 0, nil, nil, false, nil, nil, nil)
 	return outcome, err
 }
 
@@ -216,7 +218,7 @@ func (c *sessionStartController) AdmitPoolAllocation(lease routedWorkPoolStartLe
 	if err := validateRoutedWorkPoolStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease, nil, false, nil, nil)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease, nil, false, nil, nil, nil)
 	return outcome, err
 }
 
@@ -229,7 +231,7 @@ func (c *sessionStartController) AdmitPoolDrainAck(lease routedWorkPoolDrainAckL
 	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, nil, &lease, false, nil, nil)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, nil, &lease, false, nil, nil, nil)
 	return outcome, err
 }
 
@@ -244,7 +246,7 @@ func (c *sessionStartController) AdmitWaitDependency(lease sessionWaitDependency
 	if err := validateSessionWaitDependencyStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionWaitDependency, false, 0, nil, nil, false, &lease, nil)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionWaitDependency, false, 0, nil, nil, false, &lease, nil, nil)
 	return outcome, err
 }
 
@@ -255,7 +257,18 @@ func (c *sessionStartController) AdmitConfiguredDependency(lease configuredDepen
 	if err := validateConfiguredDependencyStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionSocket, false, 0, nil, nil, false, nil, &lease)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionSocket, false, 0, nil, nil, false, nil, &lease, nil)
+	return outcome, err
+}
+
+func (c *sessionStartController) AdmitStrictDefaultPoolWake(lease strictDefaultPoolWakeStartLease) (sessionStartAdmissionOutcome, error) {
+	if c == nil {
+		return "", fmt.Errorf("admitting strict-default pool wake: controller is nil")
+	}
+	if err := validateStrictDefaultPoolWakeStartLease(lease); err != nil {
+		return "", err
+	}
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionSocket, false, 0, nil, nil, false, nil, nil, &lease)
 	return outcome, err
 }
 
@@ -276,10 +289,10 @@ func poolDrainAckSupersedesPoolStart(start routedWorkPoolStartLease, drain route
 }
 
 func (c *sessionStartController) admitAuthoritative(id string, censusGeneration uint64, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
-	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil, poolDrainAck, poolDrainAckUncertain, nil, nil)
+	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil, poolDrainAck, poolDrainAckUncertain, nil, nil, nil)
 }
 
-func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool, waitDependency *sessionWaitDependencyStartLease, configuredDependency *configuredDependencyStartLease) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
+func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool, waitDependency *sessionWaitDependencyStartLease, configuredDependency *configuredDependencyStartLease, strictDefaultPoolWake *strictDefaultPoolWakeStartLease) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
 	if err := validateSessionStartAdmission(id, source); err != nil {
 		return "", sessionStartAdmission{}, err
 	}
@@ -313,7 +326,7 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		admittedAt = previous.AdmittedAt
 	}
 	leaseCount := 0
-	for _, present := range []bool{poolAllocation != nil, poolDrainAck != nil, waitDependency != nil, configuredDependency != nil} {
+	for _, present := range []bool{poolAllocation != nil, poolDrainAck != nil, waitDependency != nil, configuredDependency != nil, strictDefaultPoolWake != nil} {
 		if present {
 			leaseCount++
 		}
@@ -331,11 +344,17 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 	if existed && (poolAllocation != nil || poolDrainAck != nil) && previous.WaitDependency != nil {
 		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained dependency wait conflicts with pool lease", id)
 	}
-	if existed && configuredDependency != nil && (previous.PoolAllocation != nil || previous.PoolDrainAck != nil || previous.WaitDependency != nil) {
+	if existed && configuredDependency != nil && (previous.PoolAllocation != nil || previous.PoolDrainAck != nil || previous.WaitDependency != nil || previous.StrictDefaultPoolWake != nil) {
 		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained exact-start lease conflicts with configured dependency", id)
 	}
-	if existed && (poolAllocation != nil || poolDrainAck != nil || waitDependency != nil) && previous.ConfiguredDependency != nil {
+	if existed && (poolAllocation != nil || poolDrainAck != nil || waitDependency != nil || strictDefaultPoolWake != nil) && previous.ConfiguredDependency != nil {
 		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained configured dependency conflicts with exact-start lease", id)
+	}
+	if existed && strictDefaultPoolWake != nil && (previous.PoolAllocation != nil || previous.PoolDrainAck != nil || previous.WaitDependency != nil) {
+		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained exact-start lease conflicts with strict-default pool wake", id)
+	}
+	if existed && (poolAllocation != nil || poolDrainAck != nil || waitDependency != nil) && previous.StrictDefaultPoolWake != nil {
+		return "", sessionStartAdmission{}, fmt.Errorf("admitting session start %q: retained strict-default pool wake conflicts with exact-start lease", id)
 	}
 	if existed && poolDrainAck != nil && previous.PoolAllocation != nil {
 		if !previous.PoolStartEntered || !poolDrainAckSupersedesPoolStart(*previous.PoolAllocation, *poolDrainAck) {
@@ -392,18 +411,32 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		copied := *configuredDependency
 		configuredDependency = &copied
 	}
+	strictDefaultPoolWakeEntered := false
+	if strictDefaultPoolWake == nil && existed {
+		strictDefaultPoolWake = previous.StrictDefaultPoolWake
+		strictDefaultPoolWakeEntered = previous.StrictDefaultPoolWakeEntered
+	} else if strictDefaultPoolWake != nil && existed && previous.StrictDefaultPoolWake != nil &&
+		*strictDefaultPoolWake == *previous.StrictDefaultPoolWake {
+		strictDefaultPoolWakeEntered = previous.StrictDefaultPoolWakeEntered
+	}
+	if strictDefaultPoolWake != nil {
+		copied := *strictDefaultPoolWake
+		strictDefaultPoolWake = &copied
+	}
 	admission := sessionStartAdmission{
-		SessionID:                   id,
-		Source:                      source,
-		Version:                     c.nextVersion,
-		PoolAllocation:              poolAllocation,
-		PoolDrainAck:                poolDrainAck,
-		PoolDrainAckUncertain:       poolDrainAckUncertain,
-		WaitDependency:              waitDependency,
-		ConfiguredDependency:        configuredDependency,
-		ConfiguredDependencyEntered: configuredDependencyEntered,
-		PoolStartEntered:            poolStartEntered,
-		AdmittedAt:                  admittedAt,
+		SessionID:                    id,
+		Source:                       source,
+		Version:                      c.nextVersion,
+		PoolAllocation:               poolAllocation,
+		PoolDrainAck:                 poolDrainAck,
+		PoolDrainAckUncertain:        poolDrainAckUncertain,
+		WaitDependency:               waitDependency,
+		ConfiguredDependency:         configuredDependency,
+		ConfiguredDependencyEntered:  configuredDependencyEntered,
+		StrictDefaultPoolWake:        strictDefaultPoolWake,
+		StrictDefaultPoolWakeEntered: strictDefaultPoolWakeEntered,
+		PoolStartEntered:             poolStartEntered,
+		AdmittedAt:                   admittedAt,
 	}
 	if authoritative && admission.Source == sessionStartAdmissionAntiEntropy {
 		admission.CensusGeneration = censusGeneration
@@ -680,6 +713,16 @@ func (c *sessionStartController) ownsConfiguredDependencyStart(sessionID string)
 	return ok && admission.ConfiguredDependency != nil
 }
 
+func (c *sessionStartController) ownsStrictDefaultPoolWakeStart(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.StrictDefaultPoolWake != nil
+}
+
 func (c *sessionStartController) enterConfiguredDependencyStart(lease configuredDependencyStartLease) bool {
 	if c == nil {
 		return false
@@ -691,6 +734,21 @@ func (c *sessionStartController) enterConfiguredDependencyStart(lease configured
 		return false
 	}
 	admission.ConfiguredDependencyEntered = true
+	c.admissions[lease.SessionID] = admission
+	return true
+}
+
+func (c *sessionStartController) enterStrictDefaultPoolWakeStart(lease strictDefaultPoolWakeStartLease) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[lease.SessionID]
+	if !ok || admission.StrictDefaultPoolWake == nil || *admission.StrictDefaultPoolWake != lease {
+		return false
+	}
+	admission.StrictDefaultPoolWakeEntered = true
 	c.admissions[lease.SessionID] = admission
 	return true
 }
@@ -856,6 +914,12 @@ func (c *sessionStartController) reconcileKey(key string) {
 		c.observe(result)
 		return
 	}
+	if err == nil && !legacyFallback && c.deleteAdmissionIfCoalescedStrictDefaultPoolWakeCompleted(key, admission) {
+		c.queue.Forget(key)
+		result.Outcome = sessionStartReconcileSucceeded
+		c.observe(result)
+		return
+	}
 	if !c.admissionVersionCurrent(key, admission.Version) {
 		c.queue.Forget(key)
 		result.Outcome = sessionStartReconcileSuperseded
@@ -869,7 +933,7 @@ func (c *sessionStartController) reconcileKey(key string) {
 		c.observe(result)
 		return
 	}
-	if admission.WaitDependency != nil || admission.ConfiguredDependency != nil {
+	if admission.WaitDependency != nil || admission.ConfiguredDependency != nil || admission.StrictDefaultPoolWake != nil {
 		// A retained handoff witness is never exhausted. Forget this queued
 		// attempt while retaining its lease; the next exact event or audit
 		// admission redrives it without deleting its only ownership proof.
@@ -941,6 +1005,22 @@ func (c *sessionStartController) deleteAdmissionIfVersion(key string, version ui
 		delete(c.admissions, key)
 		c.releaseAuthoritativeSlotLocked(key)
 	}
+}
+
+func (c *sessionStartController) deleteAdmissionIfCoalescedStrictDefaultPoolWakeCompleted(key string, completed sessionStartAdmission) bool {
+	if completed.StrictDefaultPoolWake == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, ok := c.admissions[key]
+	if !ok || current.Version <= completed.Version || !current.StrictDefaultPoolWakeEntered ||
+		current.StrictDefaultPoolWake == nil || *current.StrictDefaultPoolWake != *completed.StrictDefaultPoolWake {
+		return false
+	}
+	delete(c.admissions, key)
+	c.releaseAuthoritativeSlotLocked(key)
+	return true
 }
 
 func (c *sessionStartController) releaseAuthoritativeSlotLocked(key string) {

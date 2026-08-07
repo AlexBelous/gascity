@@ -36,34 +36,36 @@ type exactLoadedSessionObserver func(
 // start reconciliation. Callers must capture Generation, Config, Provider,
 // and Store together before invoking reconcileExactSessionStart.
 type exactSessionStartParams struct {
-	Generation                        uint64
-	CityPath                          string
-	CityName                          string
-	Config                            *config.City
-	Provider                          runtime.Provider
-	Store                             beads.Store
-	StatusWriter                      beads.ConditionalWriter
-	StatusWriterError                 error
-	Clock                             clock.Clock
-	Recorder                          events.Recorder
-	Stdout                            io.Writer
-	Stderr                            io.Writer
-	ObserveLoadedSession              exactLoadedSessionObserver
-	StartOptions                      []startExecutionOption
-	AsyncStopTracker                  *asyncStartTracker
-	AsyncStopCompletion               func(drainAckAsyncStopCompletion)
-	AsyncStopQueued                   func()
-	RolloutMode                       rollout.Mode
-	RigStores                         map[string]beads.Store
-	DrainOps                          drainOps
-	DrainTracker                      *drainTracker
-	Trace                             *SessionReconcilerTracer
-	AuthorizePoolStart                func(context.Context, sessionpkg.Info, routedWorkPoolStartLease) (bool, error)
-	AuthorizePoolDrainAck             func(sessionpkg.Info, routedWorkPoolDrainAckLease) (bool, error)
-	RecoverPoolDrainAck               func(sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error)
-	ValidateWaitDependencyPoolWitness func(sessionpkg.Info, sessionWaitDependencyStartLease) bool
-	ValidateConfiguredDependencyStart func(sessionpkg.Info, configuredDependencyStartLease) bool
-	EnterConfiguredDependencyStart    func(configuredDependencyStartLease) bool
+	Generation                         uint64
+	CityPath                           string
+	CityName                           string
+	Config                             *config.City
+	Provider                           runtime.Provider
+	Store                              beads.Store
+	StatusWriter                       beads.ConditionalWriter
+	StatusWriterError                  error
+	Clock                              clock.Clock
+	Recorder                           events.Recorder
+	Stdout                             io.Writer
+	Stderr                             io.Writer
+	ObserveLoadedSession               exactLoadedSessionObserver
+	StartOptions                       []startExecutionOption
+	AsyncStopTracker                   *asyncStartTracker
+	AsyncStopCompletion                func(drainAckAsyncStopCompletion)
+	AsyncStopQueued                    func()
+	RolloutMode                        rollout.Mode
+	RigStores                          map[string]beads.Store
+	DrainOps                           drainOps
+	DrainTracker                       *drainTracker
+	Trace                              *SessionReconcilerTracer
+	AuthorizePoolStart                 func(context.Context, sessionpkg.Info, routedWorkPoolStartLease) (bool, error)
+	AuthorizePoolDrainAck              func(sessionpkg.Info, routedWorkPoolDrainAckLease) (bool, error)
+	RecoverPoolDrainAck                func(sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error)
+	ValidateWaitDependencyPoolWitness  func(sessionpkg.Info, sessionWaitDependencyStartLease) bool
+	ValidateConfiguredDependencyStart  func(sessionpkg.Info, configuredDependencyStartLease) bool
+	EnterConfiguredDependencyStart     func(configuredDependencyStartLease) bool
+	ValidateStrictDefaultPoolWakeStart func(sessionpkg.Info, strictDefaultPoolWakeStartLease) bool
+	EnterStrictDefaultPoolWakeStart    func(strictDefaultPoolWakeStartLease) bool
 }
 
 type configuredDependencyStartLease struct {
@@ -76,20 +78,156 @@ type configuredDependencyStartLease struct {
 	ControllerGeneration    uint64
 }
 
-type configuredDependencyStartPreWakeStore struct {
+// strictDefaultPoolWakeStartLease binds one explicit wake to the exact
+// ordinary member identity that socket ingress certified. It carries no
+// allocation authority: reconciliation may only start this durable row.
+type strictDefaultPoolWakeStartLease struct {
+	SessionID            string
+	SessionName          string
+	InstanceToken        string
+	SessionRevision      int64
+	PoolTarget           string
+	PoolSlot             string
+	TriggerBeadID        string
+	TriggerBeadStoreRef  string
+	ControllerGeneration uint64
+}
+
+func validateStrictDefaultPoolWakeStartLease(lease strictDefaultPoolWakeStartLease) error {
+	if err := validateSessionStartAdmission(lease.SessionID, sessionStartAdmissionSocket); err != nil {
+		return err
+	}
+	if lease.SessionRevision <= 0 || lease.ControllerGeneration == 0 {
+		return errors.New("strict-default pool wake lease lacks revision or controller generation")
+	}
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{name: "session name", value: lease.SessionName},
+		{name: "instance token", value: lease.InstanceToken},
+		{name: "pool target", value: lease.PoolTarget},
+		{name: "pool slot", value: lease.PoolSlot},
+		{name: "trigger bead ID", value: lease.TriggerBeadID},
+		{name: "trigger bead store ref", value: lease.TriggerBeadStoreRef},
+	}
+	for _, field := range fields {
+		if field.value == "" || strings.TrimSpace(field.value) != field.value {
+			return fmt.Errorf("strict-default pool wake lease has invalid %s", field.name)
+		}
+	}
+	slot, err := strconv.Atoi(lease.PoolSlot)
+	if err != nil || slot <= 0 || strconv.Itoa(slot) != lease.PoolSlot {
+		return errors.New("strict-default pool wake lease has invalid pool slot")
+	}
+	return nil
+}
+
+func strictDefaultPoolWakeExplicitCurrent(info sessionpkg.Info, now time.Time) bool {
+	input := sessionpkg.LifecycleInputFromInfo(info)
+	input.Now = now
+	input.CreatedAt = info.CreatedAt
+	input.StaleCreatingAfter = staleCreatingStateTimeout
+	lifecycle := sessionpkg.ProjectLifecycle(input)
+	return lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) &&
+		!lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) &&
+		!lifecycle.HasBlocker(sessionpkg.BlockerHeld) &&
+		!lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) &&
+		!lifecycle.Terminal
+}
+
+func strictDefaultPoolWakeIdentityMatches(info sessionpkg.Info, cfg *config.City, lease strictDefaultPoolWakeStartLease) bool {
+	if cfg == nil || validateStrictDefaultPoolWakeStartLease(lease) != nil ||
+		info.ID != lease.SessionID || info.Closed || info.PendingCreateClaim || info.DependencyOnly ||
+		info.SessionOrigin != "ephemeral" ||
+		!isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) ||
+		strings.TrimSpace(info.SessionNameMetadata) != lease.SessionName ||
+		strings.TrimSpace(info.PoolSlot) != lease.PoolSlot ||
+		strings.TrimSpace(info.TriggerBeadID) != lease.TriggerBeadID ||
+		strings.TrimSpace(info.TriggerBeadStoreRef) != lease.TriggerBeadStoreRef {
+		return false
+	}
+	agent := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	if agent == nil || agent.QualifiedName() != lease.PoolTarget || isManualSessionInfoForAgent(info, agent) {
+		return false
+	}
+	namedTemplates := make(map[string]struct{}, len(cfg.NamedSessions))
+	for i := range cfg.NamedSessions {
+		namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
+	}
+	if newPoolAllocationShadowPolicy(cfg, agent, namedTemplates).reason != poolAllocationShadowEligible {
+		return false
+	}
+	slot, _ := strconv.Atoi(lease.PoolSlot)
+	return existingPoolSlotWithConfigInfo(cfg, agent, info) == slot &&
+		info.AgentName == agent.QualifiedInstanceName(poolInstanceName(agent.Name, slot, agent)) &&
+		lease.SessionName == PoolSessionName(agent.QualifiedName(), info.ID)
+}
+
+func strictDefaultPoolWakeStartMatches(info sessionpkg.Info, cfg *config.City, lease strictDefaultPoolWakeStartLease, now time.Time) bool {
+	return strictDefaultPoolWakeIdentityMatches(info, cfg, lease) &&
+		info.MetadataState == string(sessionpkg.StateAsleep) &&
+		strings.TrimSpace(info.InstanceToken) == lease.InstanceToken &&
+		strictDefaultPoolWakeExplicitCurrent(info, now)
+}
+
+func strictDefaultPoolWakeEnteredMatches(info sessionpkg.Info, cfg *config.City, lease strictDefaultPoolWakeStartLease, now time.Time) bool {
+	if !strictDefaultPoolWakeIdentityMatches(info, cfg, lease) ||
+		info.MetadataState != string(sessionpkg.StateCreating) ||
+		strings.TrimSpace(info.InstanceToken) == "" || strings.TrimSpace(info.InstanceToken) == lease.InstanceToken {
+		return false
+	}
+	input := sessionpkg.LifecycleInputFromInfo(info)
+	input.Now = now
+	input.CreatedAt = info.CreatedAt
+	input.StaleCreatingAfter = staleCreatingStateTimeout
+	lifecycle := sessionpkg.ProjectLifecycle(input)
+	return !lifecycle.HasBlocker(sessionpkg.BlockerHeld) &&
+		!lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) && !lifecycle.Terminal
+}
+
+func certifyStrictDefaultPoolWakeStartLease(
+	info sessionpkg.Info,
+	sessionRevision int64,
+	cfg *config.City,
+	controllerGeneration uint64,
+	now time.Time,
+) (strictDefaultPoolWakeStartLease, bool) {
+	agent := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	if agent == nil {
+		return strictDefaultPoolWakeStartLease{}, false
+	}
+	lease := strictDefaultPoolWakeStartLease{
+		SessionID:            info.ID,
+		SessionName:          strings.TrimSpace(info.SessionNameMetadata),
+		InstanceToken:        strings.TrimSpace(info.InstanceToken),
+		SessionRevision:      sessionRevision,
+		PoolTarget:           agent.QualifiedName(),
+		PoolSlot:             strings.TrimSpace(info.PoolSlot),
+		TriggerBeadID:        strings.TrimSpace(info.TriggerBeadID),
+		TriggerBeadStoreRef:  strings.TrimSpace(info.TriggerBeadStoreRef),
+		ControllerGeneration: controllerGeneration,
+	}
+	if !strictDefaultPoolWakeStartMatches(info, cfg, lease, now) {
+		return strictDefaultPoolWakeStartLease{}, false
+	}
+	return lease, true
+}
+
+type retainedExactStartPreWakeStore struct {
 	beads.Store
 	sessionID string
 	enter     func() bool
 	entered   bool
 }
 
-func (s *configuredDependencyStartPreWakeStore) Handles() beads.StoreHandles {
+func (s *retainedExactStartPreWakeStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Writer = s
 	return handles
 }
 
-func (s *configuredDependencyStartPreWakeStore) SetMetadataBatch(id string, kvs map[string]string) error {
+func (s *retainedExactStartPreWakeStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if err := s.Store.SetMetadataBatch(id, kvs); err != nil {
 		return err
 	}
@@ -98,7 +236,7 @@ func (s *configuredDependencyStartPreWakeStore) SetMetadataBatch(id string, kvs 
 		return nil
 	}
 	if s.enter == nil || !s.enter() {
-		return errors.New("configured-dependency admission changed after pre-wake commit")
+		return errors.New("retained exact-start admission changed after pre-wake commit")
 	}
 	s.entered = true
 	return nil
@@ -1320,6 +1458,38 @@ func reconcileExactSessionStartWithOwner(
 		}
 		owner = exactSessionStartKeyedOwner
 	}
+	var strictDefaultPoolWakeLease *strictDefaultPoolWakeStartLease
+	strictDefaultPoolWakeCurrent := func(sessionpkg.Info, bool) bool { return false }
+	strictDefaultPoolWakeFailure := func(cause error) (exactSessionStartOwner, error) {
+		if params.RolloutMode == rollout.Auto && !admission.StrictDefaultPoolWakeEntered {
+			return exactSessionStartLegacyOwner, nil
+		}
+		return exactSessionStartKeyedOwner, fmt.Errorf("strict-default pool wake parked: %w", cause)
+	}
+	if admission.StrictDefaultPoolWake != nil {
+		lease := *admission.StrictDefaultPoolWake
+		strictDefaultPoolWakeLease = &lease
+		strictDefaultPoolWakeCurrent = func(current sessionpkg.Info, entered bool) bool {
+			matches := strictDefaultPoolWakeStartMatches(current, params.Config, lease, clk.Now().UTC())
+			if entered {
+				matches = strictDefaultPoolWakeEnteredMatches(current, params.Config, lease, clk.Now().UTC())
+			}
+			return matches && lease.ControllerGeneration == params.Generation &&
+				params.ValidateStrictDefaultPoolWakeStart != nil &&
+				params.ValidateStrictDefaultPoolWakeStart(current, lease)
+		}
+		if !admission.StrictDefaultPoolWakeEntered && initialResponse.Revision != lease.SessionRevision {
+			return strictDefaultPoolWakeFailure(errors.New("strict-default pool wake row revision changed before reconciliation"))
+		}
+		if !strictDefaultPoolWakeCurrent(info, admission.StrictDefaultPoolWakeEntered) {
+			return strictDefaultPoolWakeFailure(errors.New("strict-default pool wake witness changed before reconciliation"))
+		}
+		cfgAgent = findAgentByTemplate(params.Config, lease.PoolTarget)
+		if cfgAgent == nil {
+			return strictDefaultPoolWakeFailure(errors.New("strict-default pool wake target is unavailable"))
+		}
+		owner = exactSessionStartKeyedOwner
+	}
 	if admission.WaitDependency != nil && cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
 	}
@@ -1475,7 +1645,22 @@ func reconcileExactSessionStartWithOwner(
 	}
 
 	var preWakeRead func(beads.Store, string) (sessionpkg.Info, error)
-	if configuredDependencyLease != nil && !admission.ConfiguredDependencyEntered {
+	switch {
+	case strictDefaultPoolWakeLease != nil && !admission.StrictDefaultPoolWakeEntered:
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
+			current, persisted, readErr := getAuthoritativeSessionStartPersistedRecord(store, id)
+			if readErr != nil {
+				return sessionpkg.Info{}, readErr
+			}
+			if persisted.Revision != strictDefaultPoolWakeLease.SessionRevision || !strictDefaultPoolWakeCurrent(current, false) {
+				if params.RolloutMode == rollout.Auto {
+					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
+				}
+				return sessionpkg.Info{}, errors.New("required strict-default pool wake witness changed before pre-wake")
+			}
+			return current, nil
+		}
+	case configuredDependencyLease != nil && !admission.ConfiguredDependencyEntered:
 		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
 			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
 			if readErr != nil {
@@ -1489,7 +1674,7 @@ func reconcileExactSessionStartWithOwner(
 			}
 			return current, nil
 		}
-	} else if poolStartAuthorized {
+	case poolStartAuthorized:
 		lease := *admission.PoolAllocation
 		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
 			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
@@ -1510,15 +1695,25 @@ func reconcileExactSessionStartWithOwner(
 		}
 	}
 	var prepared *preparedStart
-	if configuredDependencyLease != nil && admission.ConfiguredDependencyEntered {
+	if strictDefaultPoolWakeLease != nil && admission.StrictDefaultPoolWakeEntered ||
+		configuredDependencyLease != nil && admission.ConfiguredDependencyEntered {
 		prepared, _, err = buildPreparedStartWithWorkDirResolver(
 			startCandidate{info: info, tp: tp}, params.CityPath, params.Config, params.Store, startOpts.workDirResolver,
 		)
 	} else {
 		prepareStore := params.Store
-		if configuredDependencyLease != nil {
+		if strictDefaultPoolWakeLease != nil {
+			lease := *strictDefaultPoolWakeLease
+			prepareStore = &retainedExactStartPreWakeStore{
+				Store:     params.Store,
+				sessionID: lease.SessionID,
+				enter: func() bool {
+					return params.EnterStrictDefaultPoolWakeStart != nil && params.EnterStrictDefaultPoolWakeStart(lease)
+				},
+			}
+		} else if configuredDependencyLease != nil {
 			lease := *configuredDependencyLease
-			prepareStore = &configuredDependencyStartPreWakeStore{
+			prepareStore = &retainedExactStartPreWakeStore{
 				Store:     params.Store,
 				sessionID: lease.SessionID,
 				enter: func() bool {
@@ -1547,7 +1742,34 @@ func reconcileExactSessionStartWithOwner(
 		return owner, fmt.Errorf("reconciling exact session start %q: preparing start: %w", info.ID, err)
 	}
 	var result startResult
-	if configuredDependencyLease != nil {
+	switch {
+	case strictDefaultPoolWakeLease != nil:
+		authorize := func(context.Context) error {
+			latest, _, readErr := getAuthoritativeSessionStartRecord(params.Store, strictDefaultPoolWakeLease.SessionID)
+			if readErr != nil {
+				return fmt.Errorf("reading strict-default pool member before provider start: %w", readErr)
+			}
+			if !asyncStartIdentityMatchesInfo(prepared.candidate.info, latest) {
+				return errors.New("strict-default pool member identity changed before provider start")
+			}
+			if !strictDefaultPoolWakeCurrent(latest, true) {
+				return errors.New("strict-default pool wake witness changed before provider start")
+			}
+			return nil
+		}
+		result = runPreparedStartCandidateAuthorized(
+			ctx,
+			*prepared,
+			params.CityPath,
+			params.Provider,
+			params.Store,
+			params.Config,
+			startupTimeout,
+			resolveStartStabilityWaiter(startOpts.stabilityWaiter),
+			startOpts.sessionStaleKeyDetectionWaiter,
+			authorize,
+		)
+	case configuredDependencyLease != nil:
 		authorize := func(context.Context) error {
 			latest, _, readErr := getAuthoritativeSessionStartRecord(params.Store, configuredDependencyLease.SessionID)
 			if readErr != nil {
@@ -1573,7 +1795,7 @@ func reconcileExactSessionStartWithOwner(
 			startOpts.sessionStaleKeyDetectionWaiter,
 			authorize,
 		)
-	} else {
+	default:
 		results := executePreparedStartWaveForCity(
 			ctx,
 			[]preparedStart{*prepared},

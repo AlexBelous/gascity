@@ -179,6 +179,12 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				EnterConfiguredDependencyStart: func(lease configuredDependencyStartLease) bool {
 					return controller.enterConfiguredDependencyStart(lease)
 				},
+				ValidateStrictDefaultPoolWakeStart: func(info sessionpkg.Info, lease strictDefaultPoolWakeStartLease) bool {
+					return cr.strictDefaultPoolWakeStartWitnessCurrent(snapshot, info, lease)
+				},
+				EnterStrictDefaultPoolWakeStart: func(lease strictDefaultPoolWakeStartLease) bool {
+					return controller.enterStrictDefaultPoolWakeStart(lease)
+				},
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				return errSessionStartLegacyFallbackRequired
@@ -537,6 +543,22 @@ func (cr *CityRuntime) configuredDependencyStartWitnessCurrent(
 		)
 }
 
+func (cr *CityRuntime) strictDefaultPoolWakeStartWitnessCurrent(
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+	lease strictDefaultPoolWakeStartLease,
+) bool {
+	if cr == nil || snapshot.Config == nil || snapshot.Provider == nil || snapshot.Store == nil ||
+		validateStrictDefaultPoolWakeStartLease(lease) != nil {
+		return false
+	}
+	cr.serviceStateMu.RLock()
+	configCurrent := cr.cfg == snapshot.Config
+	cr.serviceStateMu.RUnlock()
+	return configCurrent && snapshot.Generation == lease.ControllerGeneration &&
+		strictDefaultPoolWakeIdentityMatches(info, snapshot.Config, lease)
+}
+
 func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStartSocketReply {
 	if cr == nil {
 		return cr.sessionStartSocketFallback(sessionID, "controller runtime is nil")
@@ -564,7 +586,7 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 		return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("acquiring controller snapshot: %v", err))
 	}
 	defer release()
-	info, _, err := getAuthoritativeSessionStartRecord(snapshot.Store, sessionID)
+	info, revision, err := getAuthoritativeSessionStartRecord(snapshot.Store, sessionID)
 	if err != nil {
 		if mode == rollout.Require {
 			return sessionStartSocketReplyBlocked
@@ -592,9 +614,20 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 		}
 		return sessionStartSocketReplyOK
 	}
-	_, _, owner := classifyExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC())
+	now := time.Now().UTC()
+	_, _, owner := classifyExactSessionStartOwnership(info, snapshot.Config, now)
 	if owner != exactSessionStartKeyedOwner {
-		if lease, certified := certifyConfiguredDependencyStartLease(info, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Store, snapshot.Generation, time.Now().UTC()); certified {
+		if lease, certified := certifyStrictDefaultPoolWakeStartLease(info, revision, snapshot.Config, snapshot.Generation, now); certified {
+			outcome, admitErr := controller.AdmitStrictDefaultPoolWake(lease)
+			if admitErr == nil && outcome != sessionStartAdmissionOverflow {
+				return sessionStartSocketReplyOK
+			}
+			if mode == rollout.Require {
+				return sessionStartSocketReplyBlocked
+			}
+			return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("strict-default pool wake admission rejected (outcome=%s err=%v)", outcome, admitErr))
+		}
+		if lease, certified := certifyConfiguredDependencyStartLease(info, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Store, snapshot.Generation, now); certified {
 			outcome, admitErr := controller.AdmitConfiguredDependency(lease)
 			if admitErr == nil && outcome != sessionStartAdmissionOverflow {
 				return sessionStartSocketReplyOK
@@ -661,7 +694,8 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 		return validateSessionStartAdmission(info.ID, sessionStartAdmissionInProcess) == nil &&
 			(resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC()) ||
 				(controller != nil && (controller.ownsPoolAllocationStart(info.ID, info.InstanceToken) ||
-					controller.ownsConfiguredDependencyStart(info.ID))))
+					controller.ownsConfiguredDependencyStart(info.ID) ||
+					controller.ownsStrictDefaultPoolWakeStart(info.ID))))
 	})
 	return func(opts *startExecutionOptions) {
 		startOption(opts)
@@ -700,6 +734,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 			return true
 		}
 		if controller != nil && controller.ownsConfiguredDependencyStart(info.ID) {
+			return true
+		}
+		if controller != nil && controller.ownsStrictDefaultPoolWakeStart(info.ID) {
 			return true
 		}
 		if controller != nil && controller.ownsPoolDrainAckStop(info.ID, info.InstanceToken) {

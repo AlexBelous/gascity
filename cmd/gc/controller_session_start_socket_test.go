@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -223,6 +224,152 @@ func TestCityRuntimeAdmitsSessionStartSocketKey(t *testing.T) {
 	cancel()
 }
 
+func TestCityRuntimeSessionStartSocketIngressAdmitsStrictDefaultPoolWake(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker-1", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"session_name":                          PoolSessionName("worker", bead.ID),
+		"agent_name":                            "worker-1",
+		"session_origin":                        "ephemeral",
+		poolManagedMetadataKey:                  "true",
+		"pool_slot":                             "1",
+		beadmeta.TriggerBeadIDMetadataKey:       "ga-work-1",
+		beadmeta.TriggerBeadStoreRefMetadataKey: "city:test-city",
+	})
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	_, revision, err := getAuthoritativeSessionStartRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("read strict-default pool member: %v", err)
+	}
+
+	reconciled := make(chan sessionStartAdmission, 1)
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers: 1, MaxDistinct: 8, MaxRetries: 0,
+		Reconcile: func(_ context.Context, admission sessionStartAdmission) error {
+			reconciled <- admission
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("newSessionStartController: %v", err)
+	}
+	if err := controller.Start(t.Context()); err != nil {
+		t.Fatalf("controller.Start: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+
+	cr := &CityRuntime{
+		cfg:                    env.cfg,
+		sp:                     env.sp,
+		cs:                     coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto),
+		sessionStartController: controller,
+		sessionStartOwnership:  sessionStartOwnershipKeyed,
+		stderr:                 &bytes.Buffer{},
+	}
+	if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyOK {
+		t.Fatalf("reply = %q, want %q for an existing strict-default pool member", got, sessionStartSocketReplyOK)
+	}
+	select {
+	case admission := <-reconciled:
+		if admission.SessionID != bead.ID || admission.Source != sessionStartAdmissionSocket {
+			t.Fatalf("admission = %+v, want exact socket key", admission)
+		}
+		if admission.StrictDefaultPoolWake == nil {
+			t.Fatal("strict-default pool wake admission did not retain its private witness")
+		}
+		if got, want := *admission.StrictDefaultPoolWake, (strictDefaultPoolWakeStartLease{
+			SessionID: bead.ID, SessionName: PoolSessionName("worker", bead.ID), InstanceToken: "test-token",
+			SessionRevision: revision, PoolTarget: "worker", PoolSlot: "1", TriggerBeadID: "ga-work-1",
+			TriggerBeadStoreRef: "city:test-city", ControllerGeneration: 1,
+		}); got != want {
+			t.Fatalf("strict-default pool wake witness = %+v, want %+v", got, want)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("timed out waiting for strict-default pool wake admission")
+	}
+}
+
+func TestCityRuntimeSessionStartSocketIngressLeavesUnsupportedStrictDefaultPoolWakeShapesToLegacy(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config.City, map[string]string)
+	}{
+		{name: "bounded", mutate: func(cfg *config.City, _ map[string]string) { cfg.Agents[0].MaxActiveSessions = intPtr(3) }},
+		{name: "singleton", mutate: func(cfg *config.City, _ map[string]string) { cfg.Agents[0].MaxActiveSessions = intPtr(1) }},
+		{name: "named", mutate: func(_ *config.City, metadata map[string]string) { metadata[session.NamedSessionMetadataKey] = "true" }},
+		{name: "manual", mutate: func(_ *config.City, metadata map[string]string) { metadata["manual_session"] = "true" }},
+		{name: "dependency", mutate: func(cfg *config.City, _ map[string]string) {
+			cfg.Agents[0].DependsOn = []string{"database"}
+			cfg.Agents = append(cfg.Agents, config.Agent{Name: "database", StartCommand: "true", MaxActiveSessions: intPtr(1)})
+		}},
+		{name: "malformed-slot", mutate: func(_ *config.City, metadata map[string]string) { metadata["pool_slot"] = "not-a-slot" }},
+		{name: "legacy-identity", mutate: func(_ *config.City, metadata map[string]string) { metadata["session_origin"] = "" }},
+		{name: "workspace-cap", mutate: func(cfg *config.City, _ map[string]string) { cfg.Workspace.MaxActiveSessions = intPtr(8) }},
+		{name: "custom-scaling", mutate: func(cfg *config.City, _ map[string]string) { cfg.Agents[0].ScaleCheck = "true" }},
+		{name: "namepool", mutate: func(cfg *config.City, _ map[string]string) { cfg.Agents[0].Namepool = "workers" }},
+		{name: "held", mutate: func(_ *config.City, metadata map[string]string) {
+			metadata["held_until"] = time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+		}},
+		{name: "quarantined", mutate: func(_ *config.City, metadata map[string]string) {
+			metadata["quarantined_until"] = time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+		}},
+		{name: "pending-create", mutate: func(_ *config.City, metadata map[string]string) {
+			metadata["pending_create_claim"] = "true"
+			metadata["state"] = string(session.StateCreating)
+		}},
+		{name: "terminal", mutate: func(_ *config.City, metadata map[string]string) {
+			metadata["state"] = string(session.StateFailedCreate)
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+			bead := env.createSessionBead("worker-1", "worker")
+			metadata := map[string]string{
+				"session_name":                          PoolSessionName("worker", bead.ID),
+				"agent_name":                            "worker-1",
+				"session_origin":                        "ephemeral",
+				poolManagedMetadataKey:                  "true",
+				"pool_slot":                             "1",
+				beadmeta.TriggerBeadIDMetadataKey:       "ga-work-1",
+				beadmeta.TriggerBeadStoreRefMetadataKey: "city:test-city",
+			}
+			test.mutate(env.cfg, metadata)
+			env.setSessionMetadata(&bead, metadata)
+			if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+				t.Fatalf("request explicit wake: %v", err)
+			}
+
+			controller, err := newSessionStartController(sessionStartControllerOptions{
+				Workers: 1, MaxDistinct: 8, MaxRetries: 0,
+				Reconcile: func(context.Context, sessionStartAdmission) error { return nil },
+			})
+			if err != nil {
+				t.Fatalf("newSessionStartController: %v", err)
+			}
+			if err := controller.Start(t.Context()); err != nil {
+				t.Fatalf("controller.Start: %v", err)
+			}
+			t.Cleanup(controller.Stop)
+			cr := &CityRuntime{
+				cfg: env.cfg, sp: env.sp,
+				cs:                     coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Auto),
+				sessionStartController: controller,
+				sessionStartOwnership:  sessionStartOwnershipKeyed,
+				stderr:                 &bytes.Buffer{},
+			}
+			if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyFallback {
+				t.Fatalf("reply = %q, want legacy fallback", got)
+			}
+		})
+	}
+}
+
 func TestCityRuntimeSessionStartSocketIngressFallsBackToLegacyOwner(t *testing.T) {
 	var stderr bytes.Buffer
 	cr := &CityRuntime{stderr: &stderr, sessionStartOwnership: sessionStartOwnershipLegacy}
@@ -361,6 +508,227 @@ func TestCityRuntimeSessionStartSocketIngressLeavesUnsupportedDependencyShapesTo
 				t.Fatalf("reply = %q, want legacy fallback", got)
 			}
 		})
+	}
+}
+
+func TestReconcileStrictDefaultPoolWakeStartsSameMemberAndFencesDrift(t *testing.T) {
+	type fixture struct {
+		env    *reconcilerTestEnv
+		bead   beads.Bead
+		lease  strictDefaultPoolWakeStartLease
+		before session.Info
+	}
+	newFixture := func(t *testing.T) fixture {
+		t.Helper()
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+		}
+		bead := env.createSessionBead("worker-1", "worker")
+		env.setSessionMetadata(&bead, map[string]string{
+			"session_name":                          PoolSessionName("worker", bead.ID),
+			"agent_name":                            "worker-1",
+			"session_origin":                        "ephemeral",
+			poolManagedMetadataKey:                  "true",
+			"pool_slot":                             "1",
+			beadmeta.TriggerBeadIDMetadataKey:       "ga-work-1",
+			beadmeta.TriggerBeadStoreRefMetadataKey: "city:test-city",
+		})
+		if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+			t.Fatalf("request explicit wake: %v", err)
+		}
+		info, revision, err := getAuthoritativeSessionStartRecord(env.store, bead.ID)
+		if err != nil {
+			t.Fatalf("read strict-default pool member: %v", err)
+		}
+		lease, certified := certifyStrictDefaultPoolWakeStartLease(info, revision, env.cfg, 1, env.clk.Now().UTC())
+		if !certified {
+			t.Fatal("canonical strict-default pool member was not certified")
+		}
+		return fixture{env: env, bead: bead, lease: lease, before: info}
+	}
+
+	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
+		t.Run("same-member/"+string(mode), func(t *testing.T) {
+			f := newFixture(t)
+			params := exactSessionStartTestParams(t, f.env)
+			params.Generation = 1
+			params.RolloutMode = mode
+			params.ValidateStrictDefaultPoolWakeStart = func(session.Info, strictDefaultPoolWakeStartLease) bool { return true }
+			params.EnterStrictDefaultPoolWakeStart = func(strictDefaultPoolWakeStartLease) bool { return true }
+
+			owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+				SessionID: f.bead.ID, Source: sessionStartAdmissionSocket, StrictDefaultPoolWake: &f.lease,
+			}, params)
+			if err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("reconcile result = (owner=%v, err=%v), want keyed success", owner, err)
+			}
+			started := f.env.sessionInfo(f.bead.ID)
+			if started.ID != f.before.ID || started.SessionNameMetadata != f.before.SessionNameMetadata ||
+				started.PoolSlot != f.before.PoolSlot || started.TriggerBeadID != f.before.TriggerBeadID ||
+				started.TriggerBeadStoreRef != f.before.TriggerBeadStoreRef || started.MetadataState != string(session.StateActive) {
+				t.Fatalf("started member = %+v, want same ID/name/slot/trigger active", started)
+			}
+			if got := f.env.sp.CountCalls("Start", f.lease.SessionName); got != 1 {
+				t.Fatalf("provider Start calls = %d, want exactly 1", got)
+			}
+			snapshot, err := loadSessionBeadSnapshot(f.env.store)
+			if err != nil {
+				t.Fatalf("load sessions after exact wake: %v", err)
+			}
+			open := snapshot.OpenInfos()
+			if len(open) != 1 || open[0].ID != f.bead.ID {
+				t.Fatalf("open sessions = %+v, want only original member %q", open, f.bead.ID)
+			}
+		})
+
+		for _, phase := range []struct {
+			name         string
+			validThrough int32
+			preMutation  bool
+		}{
+			{name: "pre-wake", validThrough: 1, preMutation: true},
+			{name: "provider-entry", validThrough: 2},
+		} {
+			t.Run("drift/"+phase.name+"/"+string(mode), func(t *testing.T) {
+				f := newFixture(t)
+				params := exactSessionStartTestParams(t, f.env)
+				params.Generation = 1
+				params.RolloutMode = mode
+				var validations atomic.Int32
+				params.ValidateStrictDefaultPoolWakeStart = func(session.Info, strictDefaultPoolWakeStartLease) bool {
+					return validations.Add(1) <= phase.validThrough
+				}
+				var entered atomic.Bool
+				params.EnterStrictDefaultPoolWakeStart = func(strictDefaultPoolWakeStartLease) bool {
+					entered.Store(true)
+					return true
+				}
+
+				owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+					SessionID: f.bead.ID, Source: sessionStartAdmissionSocket, StrictDefaultPoolWake: &f.lease,
+				}, params)
+				if phase.preMutation && mode == rollout.Auto {
+					if owner != exactSessionStartLegacyOwner || err != nil {
+						t.Fatalf("Auto pre-wake drift result = (owner=%v, err=%v), want clean legacy yield", owner, err)
+					}
+				} else if owner != exactSessionStartKeyedOwner || err == nil {
+					t.Fatalf("parked drift result = (owner=%v, err=%v), want keyed error", owner, err)
+				}
+				if got := f.env.sp.CountCalls("Start", f.lease.SessionName); got != 0 {
+					t.Fatalf("provider Start calls = %d, want 0 after witness drift", got)
+				}
+				if entered.Load() == phase.preMutation {
+					t.Fatalf("entered after %s drift = %t, want %t", phase.name, entered.Load(), !phase.preMutation)
+				}
+				if phase.preMutation {
+					after := f.env.sessionInfo(f.bead.ID)
+					if after.InstanceToken != f.before.InstanceToken || after.MetadataState != f.before.MetadataState ||
+						after.WakeRequest != f.before.WakeRequest || after.LastWokeAt != f.before.LastWokeAt {
+						t.Fatalf("pre-wake drift mutated member: before=%+v after=%+v", f.before, after)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStrictDefaultPoolWakeInFlightCoalescingReleasesRetainedAdmissionAfterStart(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker-1", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"session_name":                          PoolSessionName("worker", bead.ID),
+		"agent_name":                            "worker-1",
+		"session_origin":                        "ephemeral",
+		poolManagedMetadataKey:                  "true",
+		"pool_slot":                             "1",
+		beadmeta.TriggerBeadIDMetadataKey:       "ga-work-1",
+		beadmeta.TriggerBeadStoreRefMetadataKey: "city:test-city",
+	})
+	if err := env.store.SetMetadataBatch(bead.ID, session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), env.clk.Now())); err != nil {
+		t.Fatalf("request explicit wake: %v", err)
+	}
+	info, revision, err := getAuthoritativeSessionStartRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("read strict-default pool member: %v", err)
+	}
+	lease, certified := certifyStrictDefaultPoolWakeStartLease(info, revision, env.cfg, 1, env.clk.Now().UTC())
+	if !certified {
+		t.Fatal("canonical strict-default pool member was not certified")
+	}
+
+	entered := make(chan struct{})
+	releaseStart := make(chan struct{})
+	var released atomic.Bool
+	release := func() {
+		if released.CompareAndSwap(false, true) {
+			close(releaseStart)
+		}
+	}
+	t.Cleanup(release)
+	params := exactSessionStartTestParams(t, env)
+	params.Generation = 1
+	params.RolloutMode = rollout.Require
+	params.ValidateStrictDefaultPoolWakeStart = func(session.Info, strictDefaultPoolWakeStartLease) bool { return true }
+	var attempts atomic.Int32
+	var controller *sessionStartController
+	controller, err = newSessionStartController(sessionStartControllerOptions{
+		Workers: 1, MaxDistinct: 4, MaxRetries: 0,
+		Reconcile: func(ctx context.Context, admission sessionStartAdmission) error {
+			attempts.Add(1)
+			return reconcileExactSessionStart(ctx, admission, params)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new session-start controller: %v", err)
+	}
+	params.EnterStrictDefaultPoolWakeStart = func(enteredLease strictDefaultPoolWakeStartLease) bool {
+		if !controller.enterStrictDefaultPoolWakeStart(enteredLease) {
+			return false
+		}
+		close(entered)
+		<-releaseStart
+		return true
+	}
+	if err := controller.Start(t.Context()); err != nil {
+		t.Fatalf("start session-start controller: %v", err)
+	}
+	t.Cleanup(controller.Stop)
+	if outcome, err := controller.AdmitStrictDefaultPoolWake(lease); err != nil || outcome != sessionStartAdmissionAccepted {
+		t.Fatalf("admit strict-default pool wake = (%q, %v), want accepted", outcome, err)
+	}
+	awaitClose(t, entered, "strict-default pool wake pre-wake entry")
+	creating := env.sessionInfo(bead.ID)
+	if creating.MetadataState != string(session.StateCreating) || creating.InstanceToken == "" || creating.InstanceToken == lease.InstanceToken {
+		t.Fatalf("entered pool member = %+v, want creating with rotated instance token", creating)
+	}
+	if outcome, err := controller.Admit(bead.ID, sessionStartAdmissionSocket); err != nil || outcome != sessionStartAdmissionCoalesced {
+		t.Fatalf("coalesce same-key socket hint = (%q, %v), want coalesced", outcome, err)
+	}
+	coalesced, ok := controller.readAdmission(bead.ID)
+	if !ok || coalesced.StrictDefaultPoolWake == nil || *coalesced.StrictDefaultPoolWake != lease || !coalesced.StrictDefaultPoolWakeEntered {
+		t.Fatalf("coalesced admission = %+v, want retained entered strict-default pool wake", coalesced)
+	}
+	release()
+	awaitCond(t, func() bool {
+		current := env.sessionInfo(bead.ID)
+		return current.MetadataState == string(session.StateActive) &&
+			(controller.Pending() == 0 || attempts.Load() >= 2)
+	}, "coalesced strict-default pool wake completion or redrive")
+	active := env.sessionInfo(bead.ID)
+	if active.InstanceToken != creating.InstanceToken {
+		t.Fatalf("active instance token = %q, want exact started incarnation %q", active.InstanceToken, creating.InstanceToken)
+	}
+	if retained, ok := controller.readAdmission(bead.ID); ok {
+		t.Fatalf("coalesced strict-default pool wake admission remained after exact incarnation became active: %+v", retained)
+	}
+	if got := env.sp.CountCalls("Start", lease.SessionName); got != 1 {
+		t.Fatalf("provider Start calls = %d, want exactly 1", got)
 	}
 }
 

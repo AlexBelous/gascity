@@ -654,6 +654,127 @@ tick_debounce = "10m"
 		resumedTmux.Name,
 		resumedTmux.SocketPath,
 	)
+
+	if maxActiveSessions < 0 {
+		var action struct {
+			OK        bool   `json:"ok"`
+			Action    string `json:"action"`
+			SessionID string `json:"session_id"`
+			State     string `json:"state"`
+		}
+		out, err = gcDolt(cityDir, "session", "kill", session.ID, "--json")
+		if err != nil {
+			t.Fatalf("kill exact unlimited pool member: %v\n%s", err, out)
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &action); err != nil {
+			t.Fatalf("decode exact unlimited pool kill: %v\n%s", err, out)
+		}
+		if !action.OK || action.Action != "kill" || action.SessionID != session.ID {
+			t.Fatalf("exact unlimited pool kill result = %+v, want successful kill for %q", action, session.ID)
+		}
+		if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
+			t.Context(), cityDir, session.ID, "asleep", sessionWaitDependencyShadowJourneyWitnessTimeout,
+		); err != nil {
+			t.Fatalf("killed unlimited pool member did not become durably asleep: %v", err)
+		}
+		if err := sessionWaitDependencyShadowJourneyWaitForExactTmuxAbsence(
+			t.Context(), cityDir, session.SessionName, sessionWaitDependencyShadowJourneyWitnessTimeout,
+		); err != nil {
+			t.Fatalf("killed unlimited pool member remained live: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+		}
+		killedBead := sessionWaitDependencyShadowJourneyReadBead(t, cityDir, session.ID)
+		for _, key := range []string{"pool_managed", "session_origin", "pool_slot", "agent_name", "session_name", "gc.trigger_bead_id", "gc.trigger_bead_store_ref"} {
+			if killedBead.Metadata[key] != materializedBead.Metadata[key] {
+				t.Fatalf("killed unlimited pool metadata %s = %q, want preserved %q", key, killedBead.Metadata[key], materializedBead.Metadata[key])
+			}
+		}
+
+		beforeWakeTrace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+		if err != nil {
+			t.Fatalf("read detail trace before exact pool wake: %v", err)
+		}
+		wakeAfterSeq := sessionLifecycleStatusShadowJourneyLastSeq(beforeWakeTrace)
+		wakeStarted := time.Now()
+		action = struct {
+			OK        bool   `json:"ok"`
+			Action    string `json:"action"`
+			SessionID string `json:"session_id"`
+			State     string `json:"state"`
+		}{}
+		out, err = gcDolt(cityDir, "session", "wake", session.ID, "--json")
+		if err != nil {
+			t.Fatalf("wake exact unlimited pool member: %v\n%s", err, out)
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &action); err != nil {
+			t.Fatalf("decode exact unlimited pool wake: %v\n%s", err, out)
+		}
+		if !action.OK || action.Action != "wake" || action.SessionID != session.ID || action.State != "wake_requested" {
+			t.Fatalf("exact unlimited pool wake result = %+v, want wake_requested for %q", action, session.ID)
+		}
+		wokenTmux, wakeLatency, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(
+			t.Context(), cityDir, session.SessionName, wakeStarted, sessionWaitDependencyShadowJourneyWitnessTimeout,
+		)
+		if err != nil {
+			t.Fatalf("exact unlimited pool member did not wake before the ten-minute debounce: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+		}
+		if wakeLatency >= 10*time.Minute {
+			t.Fatalf("exact unlimited pool wake latency = %s, want before ten-minute debounce", wakeLatency)
+		}
+		if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
+			t.Context(), cityDir, session.ID, "active", sessionWaitDependencyShadowJourneyWitnessTimeout,
+		); err != nil {
+			t.Fatalf("woken unlimited pool member did not become durably active: %v", err)
+		}
+		socketWakeCommits := func(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, afterSeq uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
+			var matches []sessionWaitDependencyShadowJourneyTraceRecord
+			for _, record := range trace.Records {
+				if record.Seq > afterSeq && record.SiteCode == "lifecycle.start.commit" &&
+					record.SessionBeadID == sessionID && record.SessionName == session.SessionName &&
+					record.Fields.Admission == "socket" {
+					matches = append(matches, record)
+				}
+			}
+			return matches
+		}
+		wakeTrace, wakeCommitLatency, err := sessionLifecycleStatusShadowJourneyWaitForWitness(
+			t.Context(), cityDir, session.ID, wakeAfterSeq, sessionWaitDependencyShadowJourneyWitnessTimeout,
+			"socket pool wake commit", socketWakeCommits,
+		)
+		if err != nil {
+			t.Fatalf("exact unlimited pool wake commit did not converge: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+		}
+		wakeCommits := socketWakeCommits(wakeTrace, session.ID, wakeAfterSeq)
+		wakeCommit := wakeCommits[0]
+		if wakeCommit.RecordType != "operation" || wakeCommit.OutcomeCode != "success" ||
+			wakeCommit.Fields.SessionID != session.ID || wakeCommit.Fields.InstanceToken == "" ||
+			wakeCommit.Fields.EffectApplied == nil || !*wakeCommit.Fields.EffectApplied {
+			t.Fatalf("exact unlimited pool wake commit = %+v, want one applied socket start", wakeCommit)
+		}
+		wokenBead := sessionWaitDependencyShadowJourneyReadBead(t, cityDir, session.ID)
+		for _, key := range []string{"pool_managed", "session_origin", "pool_slot", "agent_name", "session_name", "gc.trigger_bead_id", "gc.trigger_bead_store_ref"} {
+			if wokenBead.Metadata[key] != materializedBead.Metadata[key] {
+				t.Fatalf("woken unlimited pool metadata %s = %q, want preserved %q", key, wokenBead.Metadata[key], materializedBead.Metadata[key])
+			}
+		}
+		afterWakeSessions, err := sessionWaitDependencyShadowJourneyListSessions(cityDir)
+		if err != nil {
+			t.Fatalf("list worker sessions after exact unlimited pool wake: %v", err)
+		}
+		var openWorkers []sessionWaitDependencyShadowJourneySessionItem
+		for _, candidate := range afterWakeSessions.Sessions {
+			if candidate.Template == "worker" && !candidate.Closed {
+				openWorkers = append(openWorkers, candidate)
+			}
+		}
+		if len(openWorkers) != 1 || openWorkers[0].ID != session.ID || openWorkers[0].SessionName != session.SessionName {
+			t.Fatalf("open worker sessions after exact unlimited pool wake = %+v, want only original %+v", openWorkers, session)
+		}
+		if got := len(sessionWaitDependencyShadowJourneyPoolMaterializationRecords(wakeTrace, workID)); got != 1 {
+			t.Fatalf("pool materializations after exact unlimited wake = %d, want original one only", got)
+		}
+		t.Logf("public exact wake resumed unlimited pool member %s in %s and committed through socket admission in %s (%s|%s|%s)",
+			session.ID, wakeLatency, wakeCommitLatency, wokenTmux.ID, wokenTmux.Name, wokenTmux.SocketPath)
+	}
 }
 
 func sessionWaitDependencyShadowJourneyWaitForControllerStop(ctx context.Context, cityDir string, timeout time.Duration) error {

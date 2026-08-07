@@ -255,7 +255,7 @@ func (p *Provider) Stop(name string) error {
 	// SIGTERMed mid-cleanup, leaving the agent alive and the bead un-closed.
 	// Excluding a caller that lives outside the pane is a harmless no-op.
 	err := p.tm.KillSessionWithProcessesExcluding(name, []string{strconv.Itoa(os.Getpid())})
-	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
+	if err != nil && errors.Is(err, ErrSessionNotFound) {
 		return nil // idempotent
 	}
 	if err == nil {

@@ -3324,6 +3324,39 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 	}
 }
 
+func TestProviderStopPreservesResponsiveEmptyNamedServer(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	socket := fmt.Sprintf("gctest-empty-stop-%d-%d", os.Getpid(), time.Now().UnixNano())
+	cfg := DefaultConfig()
+	cfg.SocketName = socket
+	provider := NewProviderWithConfig(cfg)
+	tmux := provider.Tmux()
+	_ = provider.TeardownServer()
+	t.Cleanup(func() { _ = provider.TeardownServer() })
+
+	const session = "empty-stop-target"
+	if err := provider.Start(context.Background(), session, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := provider.Stop(session); err != nil {
+		t.Fatalf("stop session: %v", err)
+	}
+
+	names, err := provider.ListRunning("")
+	if err != nil {
+		t.Fatalf("list empty named server: %v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("remaining sessions = %v, want none", names)
+	}
+	if got := mustExitEmpty(t, tmux); got != "off" {
+		t.Fatalf("empty named server exit-empty=%q, want off", got)
+	}
+}
+
 func TestConfigureServerReappliesExitEmptyAfterReplacement(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

@@ -97,6 +97,20 @@ func pinnedBdStoreCommandRunnerForEnv(t *testing.T, env []string) beads.CommandR
 	}
 }
 
+func TestNewIsolatedEnvRootPreservesAmbientHOME(t *testing.T) {
+	ambientHome := t.TempDir()
+	t.Setenv("HOME", ambientHome)
+
+	_, _, env := newIsolatedEnvRoot(t, true)
+	gotHome, ok := parseEnvList(env)["HOME"]
+	if !ok {
+		t.Fatal("isolated environment does not define HOME")
+	}
+	if gotHome != ambientHome {
+		t.Fatalf("newIsolatedEnvRoot HOME = %q, want ambient HOME %q preserved: a non-delegated `gc supervisor start` refuses a HOME override, so the shared root must leave HOME untouched and let only the bd-subprocess-only boundary pin it", gotHome, ambientHome)
+	}
+}
+
 func TestNewIsolatedEnvRootPinsHomeAwayFromAmbientBeadsConfig(t *testing.T) {
 	ambientHome := t.TempDir()
 	ambientBeadsDir := filepath.Join(ambientHome, ".beads")

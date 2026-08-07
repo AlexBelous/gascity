@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -411,17 +412,48 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 }
 
 // pinnedBdStoreCommandRunner keeps direct BdStore integration tests on the
-// same bd shim used by their setup commands. The default runner resolves the
-// ambient process PATH before its per-command environment applies, so using it
-// directly could select a host bd whose schema knowledge predates the pinned
-// Beads module that created the test database.
-func pinnedBdStoreCommandRunner() beads.CommandRunner {
-	runner := beads.ExecCommandRunner()
+// same bd shim AND the same isolated environment used by their setup
+// commands (runBDInit / configureCustomTypes). beads.ExecCommandRunner takes
+// its own ambient os.Environ() snapshot at call time and only sparsely
+// overlays whatever overrides it's given (mergeEnv) — so building an
+// overrides map from just the isolated env's own entries would NOT
+// reproduce integrationEnvFor's filtering: vars it strips (BEADS_DIR,
+// BEADS_DOLT_SERVER_HOST/PORT, GC_DOLT_HOST/PORT, BEADS_ACTOR, ...) are
+// absent from the isolated env, not set to "", so an override map built
+// from it has no key for them and mergeEnv leaves whatever the TEST
+// BINARY's own ambient process happens to have set untouched. On a dev/CI
+// process that itself has one of those exported — e.g. a live gc rig shell
+// with BEADS_DIR/BEADS_DOLT_SERVER_PORT set, exactly what this repo's own
+// fleet sessions do — that leaks straight through and misdirects the
+// store's bd subprocesses onto an unrelated database: the same "not found
+// on Dolt server at" failure class newIsolatedEnvRoot's HOME pin already
+// guards against, just reached through this runner instead. Running the
+// child with cmd.Env set to the isolated env verbatim (no ambient snapshot
+// involved at all) closes that gap; stdout is captured separately from
+// stderr (not CombinedOutput) so BdStore's extractJSON — which slices from
+// the first '{'/'[' to the end of the buffer rather than to a matching
+// close — can't have a stray stderr line appended after valid JSON.
+func pinnedBdStoreCommandRunner(env []string) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		if name == "bd" {
 			name = bdBinary
 		}
-		return runner(dir, name, args...)
+		ctx, cancel := context.WithTimeout(context.Background(), integrationBDCommandTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.WaitDelay = 2 * time.Second
+		cmd.Dir = dir
+		cmd.Env = env
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if ctx.Err() == context.DeadlineExceeded {
+			return out, fmt.Errorf("timed out after %s running %s", integrationBDCommandTimeout, renderCommand(name, args...))
+		}
+		if err != nil {
+			return out, fmt.Errorf("%w: %s", err, stderr.String())
+		}
+		return out, nil
 	}
 }
 
@@ -1218,6 +1250,16 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 		t.Fatalf("writing isolated dolt config: %v", err)
 	}
 	env := integrationEnvFor(gcHome, runtimeDir, useDolt)
+	// bd's ResolveServerMode checks a global ~/.beads/config.yaml
+	// dolt.shared-server setting BEFORE consulting workspace-local
+	// --server-host/--server-port flags (steveyegge/beads
+	// internal/doltserver/servermode.go). A real dev machine with that
+	// config set can silently redirect these tests' `bd` subprocesses
+	// onto an unrelated shared server lacking the expected database —
+	// surfacing as the same "not found on Dolt server at" text as the
+	// genuine post-init visibility race. Isolating HOME closes that
+	// off; mirrors the idiom already proven in standaloneBdEnv.
+	env = replaceEnv(env, "HOME", gcHome)
 	return gcHome, runtimeDir, env
 }
 

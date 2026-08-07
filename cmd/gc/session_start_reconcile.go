@@ -66,6 +66,8 @@ type exactSessionStartParams struct {
 	EnterConfiguredDependencyStart     func(configuredDependencyStartLease) bool
 	ValidateStrictDefaultPoolWakeStart func(sessionpkg.Info, strictDefaultPoolWakeStartLease) bool
 	EnterStrictDefaultPoolWakeStart    func(strictDefaultPoolWakeStartLease) bool
+	ValidateConfiguredNamedWakeStart   func(sessionpkg.Info, configuredNamedWakeStartLease) bool
+	EnterConfiguredNamedWakeStart      func(configuredNamedWakeStartLease) bool
 }
 
 type configuredDependencyStartLease struct {
@@ -93,11 +95,125 @@ type strictDefaultPoolWakeStartLease struct {
 	ControllerGeneration uint64
 }
 
+// configuredNamedWakeStartLease binds one explicit wake to an existing
+// canonical configured named session. It carries no materialization authority.
+type configuredNamedWakeStartLease struct {
+	SessionID            string
+	SessionName          string
+	InstanceToken        string
+	SessionRevision      int64
+	Identity             string
+	Mode                 string
+	Template             string
+	ControllerGeneration uint64
+}
+
+func validateConfiguredNamedWakeStartLease(lease configuredNamedWakeStartLease) error {
+	if lease.SessionRevision == 0 || lease.ControllerGeneration == 0 {
+		return errors.New("configured named wake lease lacks revision or controller generation")
+	}
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{name: "session ID", value: lease.SessionID},
+		{name: "session name", value: lease.SessionName},
+		{name: "instance token", value: lease.InstanceToken},
+		{name: "identity", value: lease.Identity},
+		{name: "mode", value: lease.Mode},
+		{name: "template", value: lease.Template},
+	}
+	for _, field := range fields {
+		if field.value == "" || strings.TrimSpace(field.value) != field.value {
+			return fmt.Errorf("configured named wake lease has invalid %s", field.name)
+		}
+	}
+	if lease.Mode != "always" && lease.Mode != "on_demand" {
+		return errors.New("configured named wake lease has invalid mode")
+	}
+	return nil
+}
+
+func configuredNamedWakeIdentityMatches(info sessionpkg.Info, cfg *config.City, cityName string, lease configuredNamedWakeStartLease) bool {
+	if cfg == nil || validateConfiguredNamedWakeStartLease(lease) != nil || info.ID != lease.SessionID || info.Closed ||
+		info.PendingCreateClaim || info.DependencyOnly || isPoolManagedSessionInfo(info) || !isNamedSessionInfo(info) ||
+		strings.TrimSpace(info.SessionOrigin) != "named" || strings.TrimSpace(info.SessionNameMetadata) != lease.SessionName ||
+		namedSessionIdentityInfo(info) != lease.Identity || namedSessionModeInfo(info) != lease.Mode ||
+		normalizedSessionTemplateInfo(info, cfg) != lease.Template {
+		return false
+	}
+	spec, ok := findNamedSessionSpec(cfg, config.EffectiveCityName(cfg, cityName), lease.Identity)
+	return ok && spec.Identity == lease.Identity && spec.SessionName == lease.SessionName && spec.Mode == lease.Mode &&
+		namedSessionBackingTemplate(spec) == lease.Template && spec.Agent != nil && len(spec.Agent.DependsOn) == 0 &&
+		!isManualSessionInfoForAgent(info, spec.Agent)
+}
+
+func configuredNamedWakeExplicitCurrent(info sessionpkg.Info, now time.Time) bool {
+	input := sessionpkg.LifecycleInputFromInfo(info)
+	input.Now = now
+	input.CreatedAt = info.CreatedAt
+	input.StaleCreatingAfter = staleCreatingStateTimeout
+	lifecycle := sessionpkg.ProjectLifecycle(input)
+	return lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) &&
+		!lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) &&
+		!lifecycle.HasBlocker(sessionpkg.BlockerHeld) &&
+		!lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) && !lifecycle.Terminal
+}
+
+func configuredNamedWakeStartMatches(info sessionpkg.Info, cfg *config.City, cityName string, lease configuredNamedWakeStartLease, now time.Time) bool {
+	return configuredNamedWakeIdentityMatches(info, cfg, cityName, lease) &&
+		info.MetadataState == string(sessionpkg.StateAsleep) && strings.TrimSpace(info.InstanceToken) == lease.InstanceToken &&
+		configuredNamedWakeExplicitCurrent(info, now)
+}
+
+func configuredNamedWakeEnteredMatches(info sessionpkg.Info, cfg *config.City, cityName string, lease configuredNamedWakeStartLease, now time.Time) bool {
+	if !configuredNamedWakeIdentityMatches(info, cfg, cityName, lease) ||
+		info.MetadataState != string(sessionpkg.StateCreating) || strings.TrimSpace(info.InstanceToken) == "" ||
+		strings.TrimSpace(info.InstanceToken) == lease.InstanceToken {
+		return false
+	}
+	input := sessionpkg.LifecycleInputFromInfo(info)
+	input.Now = now
+	input.CreatedAt = info.CreatedAt
+	input.StaleCreatingAfter = staleCreatingStateTimeout
+	lifecycle := sessionpkg.ProjectLifecycle(input)
+	return !lifecycle.HasBlocker(sessionpkg.BlockerHeld) && !lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) && !lifecycle.Terminal
+}
+
+func certifyConfiguredNamedWakeStartLease(
+	info sessionpkg.Info,
+	sessionRevision int64,
+	cfg *config.City,
+	cityName string,
+	controllerGeneration uint64,
+	now time.Time,
+) (configuredNamedWakeStartLease, bool) {
+	identity := namedSessionIdentityInfo(info)
+	spec, ok := findNamedSessionSpec(cfg, config.EffectiveCityName(cfg, cityName), identity)
+	if !ok {
+		return configuredNamedWakeStartLease{}, false
+	}
+	lease := configuredNamedWakeStartLease{
+		SessionID:            info.ID,
+		SessionName:          strings.TrimSpace(info.SessionNameMetadata),
+		InstanceToken:        strings.TrimSpace(info.InstanceToken),
+		SessionRevision:      sessionRevision,
+		Identity:             identity,
+		Mode:                 namedSessionModeInfo(info),
+		Template:             namedSessionBackingTemplate(spec),
+		ControllerGeneration: controllerGeneration,
+	}
+	if !configuredNamedWakeStartMatches(info, cfg, cityName, lease, now) {
+		return configuredNamedWakeStartLease{}, false
+	}
+	return lease, true
+}
+
 func validateStrictDefaultPoolWakeStartLease(lease strictDefaultPoolWakeStartLease) error {
 	if err := validateSessionStartAdmission(lease.SessionID, sessionStartAdmissionSocket); err != nil {
 		return err
 	}
-	if lease.SessionRevision <= 0 || lease.ControllerGeneration == 0 {
+	if lease.SessionRevision == 0 || lease.ControllerGeneration == 0 {
 		return errors.New("strict-default pool wake lease lacks revision or controller generation")
 	}
 	fields := []struct {
@@ -1490,6 +1606,37 @@ func reconcileExactSessionStartWithOwner(
 		}
 		owner = exactSessionStartKeyedOwner
 	}
+	var configuredNamedWakeLease *configuredNamedWakeStartLease
+	configuredNamedWakeCurrent := func(sessionpkg.Info, bool) bool { return false }
+	configuredNamedWakeFailure := func(cause error) (exactSessionStartOwner, error) {
+		if params.RolloutMode == rollout.Auto && !admission.ConfiguredNamedWakeEntered {
+			return exactSessionStartLegacyOwner, nil
+		}
+		return exactSessionStartKeyedOwner, fmt.Errorf("configured named wake parked: %w", cause)
+	}
+	if admission.ConfiguredNamedWake != nil {
+		lease := *admission.ConfiguredNamedWake
+		configuredNamedWakeLease = &lease
+		configuredNamedWakeCurrent = func(current sessionpkg.Info, entered bool) bool {
+			matches := configuredNamedWakeStartMatches(current, params.Config, params.CityName, lease, clk.Now().UTC())
+			if entered {
+				matches = configuredNamedWakeEnteredMatches(current, params.Config, params.CityName, lease, clk.Now().UTC())
+			}
+			return matches && lease.ControllerGeneration == params.Generation &&
+				params.ValidateConfiguredNamedWakeStart != nil && params.ValidateConfiguredNamedWakeStart(current, lease)
+		}
+		if !admission.ConfiguredNamedWakeEntered && initialResponse.Revision != lease.SessionRevision {
+			return configuredNamedWakeFailure(errors.New("configured named wake row revision changed before reconciliation"))
+		}
+		if !configuredNamedWakeCurrent(info, admission.ConfiguredNamedWakeEntered) {
+			return configuredNamedWakeFailure(errors.New("configured named wake witness changed before reconciliation"))
+		}
+		cfgAgent = findAgentByTemplate(params.Config, lease.Template)
+		if cfgAgent == nil {
+			return configuredNamedWakeFailure(errors.New("configured named wake template is unavailable"))
+		}
+		owner = exactSessionStartKeyedOwner
+	}
 	if admission.WaitDependency != nil && cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
 	}
@@ -1646,6 +1793,20 @@ func reconcileExactSessionStartWithOwner(
 
 	var preWakeRead func(beads.Store, string) (sessionpkg.Info, error)
 	switch {
+	case configuredNamedWakeLease != nil && !admission.ConfiguredNamedWakeEntered:
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
+			current, persisted, readErr := getAuthoritativeSessionStartPersistedRecord(store, id)
+			if readErr != nil {
+				return sessionpkg.Info{}, readErr
+			}
+			if persisted.Revision != configuredNamedWakeLease.SessionRevision || !configuredNamedWakeCurrent(current, false) {
+				if params.RolloutMode == rollout.Auto {
+					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
+				}
+				return sessionpkg.Info{}, errors.New("required configured named wake witness changed before pre-wake")
+			}
+			return current, nil
+		}
 	case strictDefaultPoolWakeLease != nil && !admission.StrictDefaultPoolWakeEntered:
 		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
 			current, persisted, readErr := getAuthoritativeSessionStartPersistedRecord(store, id)
@@ -1695,14 +1856,25 @@ func reconcileExactSessionStartWithOwner(
 		}
 	}
 	var prepared *preparedStart
-	if strictDefaultPoolWakeLease != nil && admission.StrictDefaultPoolWakeEntered ||
+	if configuredNamedWakeLease != nil && admission.ConfiguredNamedWakeEntered ||
+		strictDefaultPoolWakeLease != nil && admission.StrictDefaultPoolWakeEntered ||
 		configuredDependencyLease != nil && admission.ConfiguredDependencyEntered {
 		prepared, _, err = buildPreparedStartWithWorkDirResolver(
 			startCandidate{info: info, tp: tp}, params.CityPath, params.Config, params.Store, startOpts.workDirResolver,
 		)
 	} else {
 		prepareStore := params.Store
-		if strictDefaultPoolWakeLease != nil {
+		switch {
+		case configuredNamedWakeLease != nil:
+			lease := *configuredNamedWakeLease
+			prepareStore = &retainedExactStartPreWakeStore{
+				Store:     params.Store,
+				sessionID: lease.SessionID,
+				enter: func() bool {
+					return params.EnterConfiguredNamedWakeStart != nil && params.EnterConfiguredNamedWakeStart(lease)
+				},
+			}
+		case strictDefaultPoolWakeLease != nil:
 			lease := *strictDefaultPoolWakeLease
 			prepareStore = &retainedExactStartPreWakeStore{
 				Store:     params.Store,
@@ -1711,7 +1883,7 @@ func reconcileExactSessionStartWithOwner(
 					return params.EnterStrictDefaultPoolWakeStart != nil && params.EnterStrictDefaultPoolWakeStart(lease)
 				},
 			}
-		} else if configuredDependencyLease != nil {
+		case configuredDependencyLease != nil:
 			lease := *configuredDependencyLease
 			prepareStore = &retainedExactStartPreWakeStore{
 				Store:     params.Store,
@@ -1743,6 +1915,32 @@ func reconcileExactSessionStartWithOwner(
 	}
 	var result startResult
 	switch {
+	case configuredNamedWakeLease != nil:
+		authorize := func(context.Context) error {
+			latest, _, readErr := getAuthoritativeSessionStartRecord(params.Store, configuredNamedWakeLease.SessionID)
+			if readErr != nil {
+				return fmt.Errorf("reading configured named session before provider start: %w", readErr)
+			}
+			if !asyncStartIdentityMatchesInfo(prepared.candidate.info, latest) {
+				return errors.New("configured named session identity changed before provider start")
+			}
+			if !configuredNamedWakeCurrent(latest, true) {
+				return errors.New("configured named wake witness changed before provider start")
+			}
+			return nil
+		}
+		result = runPreparedStartCandidateAuthorized(
+			ctx,
+			*prepared,
+			params.CityPath,
+			params.Provider,
+			params.Store,
+			params.Config,
+			startupTimeout,
+			resolveStartStabilityWaiter(startOpts.stabilityWaiter),
+			startOpts.sessionStaleKeyDetectionWaiter,
+			authorize,
+		)
 	case strictDefaultPoolWakeLease != nil:
 		authorize := func(context.Context) error {
 			latest, _, readErr := getAuthoritativeSessionStartRecord(params.Store, strictDefaultPoolWakeLease.SessionID)

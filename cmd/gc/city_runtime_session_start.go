@@ -185,6 +185,12 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				EnterStrictDefaultPoolWakeStart: func(lease strictDefaultPoolWakeStartLease) bool {
 					return controller.enterStrictDefaultPoolWakeStart(lease)
 				},
+				ValidateConfiguredNamedWakeStart: func(info sessionpkg.Info, lease configuredNamedWakeStartLease) bool {
+					return cr.configuredNamedWakeStartWitnessCurrent(snapshot, info, lease)
+				},
+				EnterConfiguredNamedWakeStart: func(lease configuredNamedWakeStartLease) bool {
+					return controller.enterConfiguredNamedWakeStart(lease)
+				},
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				return errSessionStartLegacyFallbackRequired
@@ -559,6 +565,22 @@ func (cr *CityRuntime) strictDefaultPoolWakeStartWitnessCurrent(
 		strictDefaultPoolWakeIdentityMatches(info, snapshot.Config, lease)
 }
 
+func (cr *CityRuntime) configuredNamedWakeStartWitnessCurrent(
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+	lease configuredNamedWakeStartLease,
+) bool {
+	if cr == nil || snapshot.Config == nil || snapshot.Provider == nil || snapshot.Store == nil ||
+		validateConfiguredNamedWakeStartLease(lease) != nil {
+		return false
+	}
+	cr.serviceStateMu.RLock()
+	configCurrent := cr.cfg == snapshot.Config
+	cr.serviceStateMu.RUnlock()
+	return configCurrent && snapshot.Generation == lease.ControllerGeneration &&
+		configuredNamedWakeIdentityMatches(info, snapshot.Config, snapshot.CityName, lease)
+}
+
 func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStartSocketReply {
 	if cr == nil {
 		return cr.sessionStartSocketFallback(sessionID, "controller runtime is nil")
@@ -617,6 +639,16 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 	now := time.Now().UTC()
 	_, _, owner := classifyExactSessionStartOwnership(info, snapshot.Config, now)
 	if owner != exactSessionStartKeyedOwner {
+		if lease, certified := certifyConfiguredNamedWakeStartLease(info, revision, snapshot.Config, snapshot.CityName, snapshot.Generation, now); certified {
+			outcome, admitErr := controller.AdmitConfiguredNamedWake(lease)
+			if admitErr == nil && outcome != sessionStartAdmissionOverflow {
+				return sessionStartSocketReplyOK
+			}
+			if mode == rollout.Require {
+				return sessionStartSocketReplyBlocked
+			}
+			return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("configured named wake admission rejected (outcome=%s err=%v)", outcome, admitErr))
+		}
 		if lease, certified := certifyStrictDefaultPoolWakeStartLease(info, revision, snapshot.Config, snapshot.Generation, now); certified {
 			outcome, admitErr := controller.AdmitStrictDefaultPoolWake(lease)
 			if admitErr == nil && outcome != sessionStartAdmissionOverflow {
@@ -695,7 +727,8 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			(resolveExactSessionStartOwnership(info, snapshot.Config, time.Now().UTC()) ||
 				(controller != nil && (controller.ownsPoolAllocationStart(info.ID, info.InstanceToken) ||
 					controller.ownsConfiguredDependencyStart(info.ID) ||
-					controller.ownsStrictDefaultPoolWakeStart(info.ID))))
+					controller.ownsStrictDefaultPoolWakeStart(info.ID) ||
+					controller.ownsConfiguredNamedWakeStart(info.ID))))
 	})
 	return func(opts *startExecutionOptions) {
 		startOption(opts)
@@ -737,6 +770,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionPredicate() func(sessionpkg.In
 			return true
 		}
 		if controller != nil && controller.ownsStrictDefaultPoolWakeStart(info.ID) {
+			return true
+		}
+		if controller != nil && controller.ownsConfiguredNamedWakeStart(info.ID) {
 			return true
 		}
 		if controller != nil && controller.ownsPoolDrainAckStop(info.ID, info.InstanceToken) {

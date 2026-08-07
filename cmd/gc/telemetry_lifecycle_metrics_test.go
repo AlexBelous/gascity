@@ -560,15 +560,12 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 
 	lis, err := startControllerSocket(
 		cityDir,
-		controllerHostingStandalone,
 		func() {},
-		nil,
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		make(chan struct{}, 1),
 		make(chan struct{}, 1),
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)

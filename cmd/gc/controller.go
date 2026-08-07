@@ -138,24 +138,20 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 // startControllerSocket listens on a Unix socket at .gc/controller.sock.
 // When a client sends "stop\n", cancelFn is called to shut down the
 // controller loop. convergenceReqCh is used to route convergence commands
-// to the event loop for serialized processing. admitSessionStart accepts only
-// validated durable session keys; the runtime rereads their authoritative state.
+// to the event loop for serialized processing.
 // Returns the listener for cleanup.
 func startControllerSocket(
 	cityPath string,
-	hostingMode controllerHostingMode,
 	cancelFn context.CancelFunc,
-	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
-	admitSessionStart sessionStartSocketAdmitter,
 ) (net.Listener, error) {
 	return startControllerSocketWithSessionReconcilerStatus(
-		cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh,
-		pokeCh, controlDispatcherCh, admitSessionStart, nil,
+		cityPath, controllerHostingStandalone, cancelFn, nil, dirty, reloadReqCh, convergenceReqCh,
+		pokeCh, controlDispatcherCh, nil, nil,
 	)
 }
 
@@ -210,15 +206,13 @@ func handleControllerConn(
 	cityPath string,
 	hostingMode controllerHostingMode,
 	cancelFn context.CancelFunc,
-	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
-	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
 	admitSessionStart sessionStartSocketAdmitter,
 ) {
-	handleControllerConnWithSessionReconcilerStatus(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart, nil)
+	handleControllerConnWithSessionReconcilerStatus(conn, cityPath, hostingMode, cancelFn, nil, dirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh, admitSessionStart, nil)
 }
 
 func handleControllerConnWithSessionReconcilerStatus(

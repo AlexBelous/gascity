@@ -777,6 +777,125 @@ tick_debounce = "10m"
 	}
 }
 
+func TestConfiguredNamedSessionPublicWakeStartsSameCanonicalSessionBeforeDebounce(t *testing.T) {
+	if usingSubprocess() {
+		t.Skip("exact configured named wake journey requires tmux")
+	}
+
+	cityDir := setupReconcilerCityWithManagedDolt(t, `session_reconciler = "auto"
+
+[[agent]]
+name = "worker"
+start_command = "sleep 3600"
+`, `patrol_interval = "1h"
+tick_debounce = "10m"
+`, `conditional_writes = "auto"`)
+	schemaStatus, err := bdDolt(cityDir, "migrate", "schema", "--json")
+	if err != nil || !strings.Contains(schemaStatus, "v59") {
+		t.Fatalf("bd schema status = %q, err=%v, want v59", schemaStatus, err)
+	}
+
+	session, _, err := sessionWaitDependencyShadowJourneyWaitForWorkerSession(
+		t.Context(), cityDir, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout,
+	)
+	if err != nil {
+		t.Fatalf("canonical named session did not materialize: %v", err)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(t.Context(), cityDir, session.ID, "active", sessionWaitDependencyShadowJourneyWitnessTimeout); err != nil {
+		t.Fatalf("canonical named session was not durably active: %v", err)
+	}
+	if _, _, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(t.Context(), cityDir, session.SessionName, time.Now(), sessionWaitDependencyShadowJourneyWitnessTimeout); err != nil {
+		t.Fatalf("canonical named session was not live: %v", err)
+	}
+	before := sessionWaitDependencyShadowJourneyReadBead(t, cityDir, session.ID)
+	identity := before.Metadata["configured_named_identity"]
+	if identity == "" || before.Metadata["session_name"] != session.SessionName || before.Metadata["configured_named_mode"] != "always" ||
+		before.Metadata["template"] != "worker" || before.Metadata["session_origin"] != "named" {
+		t.Fatalf("canonical named metadata = %+v, want stable named worker identity", before.Metadata)
+	}
+
+	type sessionAction struct {
+		OK        bool   `json:"ok"`
+		Action    string `json:"action"`
+		SessionID string `json:"session_id"`
+		State     string `json:"state"`
+	}
+	out, err := gcDolt(cityDir, "session", "kill", session.ID, "--json")
+	var action sessionAction
+	if err != nil || json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &action) != nil ||
+		!action.OK || action.Action != "kill" || action.SessionID != session.ID {
+		t.Fatalf("kill canonical named session: action=%+v err=%v\n%s", action, err, out)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(t.Context(), cityDir, session.ID, "asleep", sessionWaitDependencyShadowJourneyWitnessTimeout); err != nil {
+		t.Fatalf("killed named session did not become durably asleep: %v", err)
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForExactTmuxAbsence(t.Context(), cityDir, session.SessionName, sessionWaitDependencyShadowJourneyWitnessTimeout); err != nil {
+		t.Fatalf("killed named session remained live: %v", err)
+	}
+	if out, err = gcDolt(cityDir, "trace", "start", "--template", "worker", "--for", "2m", "--level", "detail"); err != nil {
+		t.Fatalf("arm configured named wake trace: %v\n%s", err, out)
+	}
+	beforeTrace, err := sessionWaitDependencyShadowJourneyTrace(cityDir)
+	if err != nil {
+		t.Fatalf("read trace before configured named wake: %v", err)
+	}
+	afterSeq := sessionLifecycleStatusShadowJourneyLastSeq(beforeTrace)
+
+	wakeStarted := time.Now()
+	action = sessionAction{}
+	out, err = gcDolt(cityDir, "session", "wake", identity, "--json")
+	if err != nil || json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &action) != nil ||
+		!action.OK || action.Action != "wake" || action.SessionID != session.ID || action.State != "wake_requested" {
+		t.Fatalf("wake canonical named identity %q: action=%+v err=%v\n%s", identity, action, err, out)
+	}
+	live, latency, err := sessionWaitDependencyShadowJourneyWaitForExactTmuxSession(t.Context(), cityDir, session.SessionName, wakeStarted, integrationGCCommandTimeout)
+	if err != nil || latency >= 10*time.Minute {
+		t.Fatalf("configured named wake did not reach live tmux before debounce: latency=%s err=%v\n%s", latency, err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, session.ID, session.ID))
+	}
+	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(t.Context(), cityDir, session.ID, "active", sessionWaitDependencyShadowJourneyWitnessTimeout); err != nil {
+		t.Fatalf("woken named session did not become durably active: %v", err)
+	}
+	socketCommits := func(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, after uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
+		var matches []sessionWaitDependencyShadowJourneyTraceRecord
+		for _, record := range trace.Records {
+			if record.Seq > after && record.SiteCode == "lifecycle.start.commit" && record.SessionBeadID == sessionID &&
+				record.SessionName == session.SessionName && record.Fields.Admission == "socket" {
+				matches = append(matches, record)
+			}
+		}
+		return matches
+	}
+	trace, _, err := sessionLifecycleStatusShadowJourneyWaitForWitness(t.Context(), cityDir, session.ID, afterSeq, sessionWaitDependencyShadowJourneyWitnessTimeout, "socket configured named wake commit", socketCommits)
+	if err != nil {
+		t.Fatalf("configured named socket start did not commit exactly once: %v", err)
+	}
+	commit := socketCommits(trace, session.ID, afterSeq)[0]
+	if commit.OutcomeCode != "success" || commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
+		t.Fatalf("configured named wake commit = %+v, want applied success", commit)
+	}
+
+	after := sessionWaitDependencyShadowJourneyReadBead(t, cityDir, session.ID)
+	for _, key := range []string{"session_name", "configured_named_identity", "configured_named_mode", "template", "session_origin"} {
+		if after.Metadata[key] != before.Metadata[key] {
+			t.Fatalf("woken named metadata %s = %q, want preserved %q", key, after.Metadata[key], before.Metadata[key])
+		}
+	}
+	current, err := sessionWaitDependencyShadowJourneyListSessions(cityDir)
+	if err != nil {
+		t.Fatalf("list sessions after configured named wake: %v", err)
+	}
+	var openWorkers []sessionWaitDependencyShadowJourneySessionItem
+	for _, candidate := range current.Sessions {
+		if candidate.Template == "worker" && !candidate.Closed {
+			openWorkers = append(openWorkers, candidate)
+		}
+	}
+	if len(openWorkers) != 1 || openWorkers[0].ID != session.ID || openWorkers[0].SessionName != session.SessionName {
+		t.Fatalf("open worker sessions after configured named wake = %+v, want only original %+v", openWorkers, session)
+	}
+	t.Logf("public wake resumed configured named session %s through one socket commit in %s (%s|%s|%s)", session.ID, latency, live.ID, live.Name, live.SocketPath)
+}
+
 func sessionWaitDependencyShadowJourneyWaitForControllerStop(ctx context.Context, cityDir string, timeout time.Duration) error {
 	deadline, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

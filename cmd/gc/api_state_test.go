@@ -2521,7 +2521,7 @@ func TestReadyRoutedWorkPriorityPokesRequireKeyedOwnershipAndCoalesce(t *testing
 	}
 }
 
-func TestReadyRoutedWorkAdmissionRecordsExactEffectFreeDemandShadow(t *testing.T) {
+func TestReadyRoutedWorkAdmissionFallsBackWhenAllocationQueueIsUnavailable(t *testing.T) {
 	cityPath := t.TempDir()
 	backing := beads.NewMemStore()
 	work, err := backing.Create(beads.Bead{
@@ -2571,36 +2571,6 @@ func TestReadyRoutedWorkAdmissionRecordsExactEffectFreeDemandShadow(t *testing.T
 	evt.Ts = eventAt
 	cs.applyBeadEventToStores(evt)
 
-	records, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
-	if err != nil {
-		t.Fatalf("read routed-work demand shadow trace: %v", err)
-	}
-	var matches []SessionReconcilerTraceRecord
-	for _, record := range records {
-		if record.RecordType == TraceRecordOperation && string(record.SiteCode) == "pool_demand.contribution.shadow" {
-			matches = append(matches, record)
-		}
-	}
-	if len(matches) != 1 {
-		t.Fatalf("routed-work demand shadow records = %d, want 1: %+v", len(matches), matches)
-	}
-	record := matches[0]
-	if record.Fields["work_id"] != work.ID ||
-		record.Fields["pool_target"] != "worker" ||
-		record.Fields["source_actor"] != "bd-hook" ||
-		record.Fields["source_store"] != "rig:work" ||
-		record.Fields["contribution_present"] != true ||
-		record.Fields["effect_applied"] != false {
-		t.Fatalf("routed-work demand shadow record = %+v, want exact effect-free contribution", record)
-	}
-	eventLatency, ok := record.Fields["event_to_shadow_decision_ns"].(float64)
-	if !ok || eventLatency <= 0 {
-		t.Fatalf("event-to-shadow latency = %#v, want positive nanoseconds after %s", record.Fields["event_to_shadow_decision_ns"], eventAt)
-	}
-	decisionLatency, ok := record.Fields["observation_to_shadow_decision_ns"].(float64)
-	if !ok || decisionLatency < 0 {
-		t.Fatalf("observation-to-shadow latency = %#v, want non-negative nanoseconds", record.Fields["observation_to_shadow_decision_ns"])
-	}
 	if !cr.readyRoutedWorkPokePending.Load() || len(pokeCh) != 1 {
 		t.Fatalf("legacy fallback = (pending=%t, pokes=%d), want unchanged priority ownership", cr.readyRoutedWorkPokePending.Load(), len(pokeCh))
 	}

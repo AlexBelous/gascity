@@ -23,7 +23,19 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func receiveString(t *testing.T, values <-chan string, name string) string {
+	t.Helper()
+	select {
+	case value := <-values:
+		return value
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("timed out waiting for %s", name)
+		return ""
+	}
+}
 
 type sessionWaitDependencyLivenessInvalidationProvider struct {
 	*runtime.Fake

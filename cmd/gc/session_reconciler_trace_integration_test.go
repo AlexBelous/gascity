@@ -243,56 +243,6 @@ func TestSessionReconcilerTraceLifecycleRecordsTick(t *testing.T) {
 	}
 }
 
-func TestSessionReconcilerTraceCycleStartShadowAdmissionsExcludeExpiredAndDerivedArms(t *testing.T) {
-	cityDir := t.TempDir()
-	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
-	t.Cleanup(func() { _ = tracer.Close() })
-	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	for _, arm := range []TraceArm{
-		{
-			ScopeType:  TraceArmScopeTemplate,
-			ScopeValue: "worker",
-			Source:     TraceArmSourceManual,
-			Level:      TraceModeDetail,
-			ArmedAt:    now.Add(-2 * time.Minute),
-			ExpiresAt:  now.Add(-time.Minute),
-			UpdatedAt:  now.Add(-2 * time.Minute),
-		},
-		{
-			ScopeType:  TraceArmScopeTemplate,
-			ScopeValue: "parent",
-			Source:     TraceArmSourceManual,
-			Level:      TraceModeDetail,
-			ArmedAt:    now,
-			ExpiresAt:  now.Add(time.Minute),
-			UpdatedAt:  now,
-		},
-	} {
-		if _, err := tracer.armStore.upsertArm(arm); err != nil {
-			t.Fatalf("upsert trace arm %q: %v", arm.ScopeValue, err)
-		}
-	}
-	cfg := &config.City{Agents: []config.Agent{{
-		Name:      "parent",
-		DependsOn: []string{"derived"},
-	}}}
-	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "controller_tick", now, cfg)
-	if cycle == nil {
-		t.Fatal("BeginCycle returned nil")
-	}
-	if _, ok := cycle.startSelectionShadowAdmission("worker"); ok {
-		t.Fatal("expired direct arm admitted start-selection shadow work")
-	}
-	if _, ok := cycle.startSelectionShadowAdmission("derived"); ok {
-		t.Fatal("derived dependency scope admitted start-selection shadow work")
-	}
-	admission, ok := cycle.startSelectionShadowAdmission("parent")
-	if !ok || admission.Template != "parent" || admission.Source != TraceSourceManual ||
-		!admission.ExpiresAt.Equal(now.Add(time.Minute)) {
-		t.Fatalf("active direct admission = %+v, %t", admission, ok)
-	}
-}
-
 func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityTOML(t, cityDir, "trace-town", "mayor")

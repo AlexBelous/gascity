@@ -3602,11 +3602,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	})
 
 	phaseStart = time.Now()
-	var startSelectionInputs []sessionLifecycleStartShadowInput
-	var startSelectionInputByID map[string]int
-	observeStartSelection := reconcileOpts.startSelectionObserver != nil ||
-		(reconcileOpts.startSelectionShadowObserver != nil &&
-			reconcileOpts.startSelectionShadowAdmission != nil)
 	for _, target := range wakeTargets {
 		if ctx != nil && ctx.Err() != nil {
 			return 0
@@ -3652,31 +3647,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			lifecycleTimerBlockerInfo(info, clk.Now()) == "user_hold" {
 			shouldWake = true
 		}
-		shadowAdmitted := false
-		var shadowAdmission sessionLifecycleStartShadowAdmission
-		if reconcileOpts.startSelectionShadowObserver != nil &&
-			reconcileOpts.startSelectionShadowAdmission != nil {
-			shadowAdmission, shadowAdmitted = reconcileOpts.startSelectionShadowAdmission(target.tp.TemplateName)
-		}
-		if observeStartSelection && (reconcileOpts.startSelectionObserver != nil || shadowAdmitted) {
-			if startSelectionInputByID == nil {
-				startSelectionInputByID = make(map[string]int)
-			}
-			startSelectionInputByID[info.ID] = len(startSelectionInputs)
-			startSelectionInputs = append(startSelectionInputs, sessionLifecycleStartShadowInput{
-				Info:                 info,
-				WakeDecisionObserved: hasDec,
-				ShouldWake:           shouldWake,
-				ConfigSuppressed:     eval.ConfigSuppressed,
-				RuntimeObserved:      sp != nil && strings.TrimSpace(name) != "",
-				RuntimeAlive:         target.alive,
-				ObservedAt:           clk.Now().UTC(),
-				StartupTimeout:       startupTimeout,
-				ShadowAdmitted:       shadowAdmitted,
-				ShadowAdmission:      shadowAdmission,
-			})
-		}
-
 		// Clear-on-recovery: a live tick ends any stranding episode. Drop the
 		// stranded confirmation marker so stranded_event_emitted_at tracks
 		// CONTINUOUS non-liveness, not a one-shot flag — a worker that stranded,
@@ -3718,13 +3688,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if cbEnabled {
 				identity := namedSessionIdentityInfo(info)
 				if identity != "" {
-					circuitOpen := cb.IsOpen(identity, cbNow)
-					if observeStartSelection {
-						if idx, ok := startSelectionInputByID[info.ID]; ok {
-							startSelectionInputs[idx].CircuitOpen = circuitOpen
-						}
-					}
-					if circuitOpen {
+					if cb.IsOpen(identity, cbNow) {
 						if err := persistSessionCircuitBreakerMetadata(sessFront, target.info.ID, cb, identity, cbNow); err != nil {
 							fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 						}
@@ -3745,11 +3709,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if gate != nil && target.tp.ResolvedProvider != nil {
 				phProvider := target.tp.ResolvedProvider.Name
 				phHealthy, phPresent := phSnap.check(phProvider)
-				if observeStartSelection {
-					if idx, ok := startSelectionInputByID[info.ID]; ok {
-						startSelectionInputs[idx].ProviderUnavailable = phPresent && !phHealthy
-					}
-				}
 				if !phPresent {
 					// Registry absent or no fresh entry — fail-open, log once per provider per tick.
 					fmt.Fprintf(stderr, "session reconciler: provider-health registry unavailable for %q; treating as green\n", phProvider) //nolint:errcheck
@@ -3975,24 +3934,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// gates (uncommitted, unpushed, stashed) and overridable
 				// via cfg.Daemon.AutoPruneWorkerDir.
 				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
-			}
-		}
-	}
-	if len(startSelectionInputs) > 0 {
-		selectedByID := make(map[string]bool, len(startCandidates))
-		for _, candidate := range startCandidates {
-			selectedByID[candidate.info.ID] = true
-		}
-		for _, input := range startSelectionInputs {
-			legacySelected := selectedByID[input.Info.ID]
-			if reconcileOpts.startSelectionObserver != nil {
-				plan := planSessionLifecycleStartSelection(input)
-				reconcileOpts.startSelectionObserver(compareSessionLifecycleStartSelection(plan, legacySelected))
-			}
-			if reconcileOpts.startSelectionShadowObserver != nil && input.ShadowAdmitted {
-				reconcileOpts.startSelectionShadowObserver(
-					newAdmittedSessionLifecycleStartShadowObservation(input, legacySelected, input.ShadowAdmission),
-				)
 			}
 		}
 	}

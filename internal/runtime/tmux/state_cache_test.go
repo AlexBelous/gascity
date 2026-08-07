@@ -342,6 +342,52 @@ func TestProviderInvalidateLivenessForcesFreshSnapshot(t *testing.T) {
 	}
 }
 
+func TestProviderObserveFreshLivenessFollowsSupersedingFreshGeneration(t *testing.T) {
+	fetcher := &controlledRefreshFetcher{
+		state: runtimeStateSnapshot{
+			Sessions:           map[string]sessionRuntimeState{},
+			ProcessesAvailable: true,
+		},
+		blockCall: 1,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	cache := NewStateCache(fetcher, time.Hour)
+	cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
+		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
+	})
+	provider := &Provider{cache: cache}
+	target := gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"}
+
+	first := make(chan gcruntime.Liveness, 1)
+	go func() { first <- provider.ObserveFreshLiveness(target) }()
+	select {
+	case <-fetcher.entered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("first fresh observation did not enter its fetch")
+	}
+	second := make(chan gcruntime.Liveness, 1)
+	go func() { second <- provider.ObserveFreshLiveness(target) }()
+	select {
+	case got := <-second:
+		if got.Running || got.Alive || !got.Complete {
+			t.Fatalf("superseding fresh observation = %#v, want complete absence", got)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("superseding fresh observation did not complete")
+	}
+
+	close(fetcher.release)
+	select {
+	case got := <-first:
+		if got.Running || got.Alive || !got.Complete {
+			t.Fatalf("superseded fresh observation = %#v, want the newer complete absence", got)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("superseded fresh observation did not follow the newer generation")
+	}
+}
+
 func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T) {
 	completedScan := func(string, time.Time) exactProcessScan {
 		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}

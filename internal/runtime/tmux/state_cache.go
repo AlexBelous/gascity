@@ -117,30 +117,37 @@ func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
 	}
 }
 
-// freshState forces one post-invalidation cache generation and reports whether
-// that exact generation published a usable, non-stale snapshot.
+// freshState forces a post-invalidation cache generation and reports whether
+// that generation, or a newer generation that superseded it, published a
+// usable, non-stale snapshot.
 func (c *StateCache) freshState() (runtimeStateSnapshot, bool) {
 	c.Invalidate()
-	c.mu.RLock()
-	generation := c.generation
-	c.mu.RUnlock()
+	for {
+		c.mu.RLock()
+		generation := c.generation
+		state := c.state
+		complete := !c.dirty && c.lastError == nil && state.Sessions != nil &&
+			!c.fetchedAt.IsZero() && time.Since(c.fetchedAt) <= c.staleTTL
+		c.mu.RUnlock()
+		if complete {
+			return state, true
+		}
 
-	if c.refresh(generation) {
-		return c.snapshot(), false
+		if c.refresh(generation) {
+			continue
+		}
+
+		c.mu.RLock()
+		state = c.state
+		currentGeneration := c.generation
+		complete = !c.dirty && c.lastError == nil && state.Sessions != nil &&
+			!c.fetchedAt.IsZero() && time.Since(c.fetchedAt) <= c.staleTTL
+		c.mu.RUnlock()
+		if currentGeneration != generation {
+			continue
+		}
+		return state, complete
 	}
-
-	c.mu.RLock()
-	state := c.state
-	complete := c.generation == generation && !c.dirty && c.lastError == nil &&
-		state.Sessions != nil && !c.fetchedAt.IsZero() && time.Since(c.fetchedAt) <= c.staleTTL
-	c.mu.RUnlock()
-	return state, complete
-}
-
-func (c *StateCache) snapshot() runtimeStateSnapshot {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.state
 }
 
 func (c *StateCache) setScanBySessionID(scan func(string, time.Time) exactProcessScan) {

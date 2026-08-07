@@ -64,7 +64,7 @@ func TestBdStoreIntegrationShardOwnsRunnerIsolationAndAllCallSites(t *testing.T)
 		"TestBdStoreConformance",
 		"TestBdStoreDeleteBatchOrphansExternalDependents",
 		"TestBdStoreMailWispInsert",
-		"TestNewIsolatedEnvRootPinsHomeAwayFromAmbientBeadsConfig",
+		"TestNewIsolatedToolEnvPinsHomeAwayFromAmbientBeadsConfig",
 		"TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON",
 	}
 	want := []string{

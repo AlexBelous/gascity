@@ -203,7 +203,7 @@ func TestProviderOverridesAndSuiteContractsCrossMakeIsolation(t *testing.T) {
 	acceptanceFlags := map[string]string{"-tags": "acceptance_a"}
 	bdstoreFlags := map[string]string{
 		"-tags": "integration",
-		"-run":  "^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestNewIsolatedEnvRootPinsHomeAwayFromAmbientBeadsConfig|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON)$",
+		"-run":  "^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestNewIsolatedToolEnvPinsHomeAwayFromAmbientBeadsConfig|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON)$",
 	}
 	tests := []struct {
 		name         string

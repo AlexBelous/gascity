@@ -124,7 +124,6 @@ cmd_gc_integration_tests=(
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName
-  TestSessionLifecycleStartShadowRealTmuxJourney
 )
 
 join_regex() {

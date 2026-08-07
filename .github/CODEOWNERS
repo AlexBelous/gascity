@@ -1,8 +1,6 @@
 # Sensitive areas requiring Gas City project-admin ownership.
 /.github/CODEOWNERS @gastownhall/gascity-admin
 /.github/workflows/ @gastownhall/gascity-admin
-/.github/workflows/reconciler-contract.yml @gastownhall/gascity-admin
-/.github/reconciler-contract/ @gastownhall/gascity-admin
 /.github/actions/ @gastownhall/gascity-admin
 /.github/actionlint.yaml @gastownhall/gascity-admin
 /.github/bugflow.toml @gastownhall/gascity-admin
@@ -21,7 +19,6 @@
 # The rollout-gate registry is the only human gate on flag Expires extensions
 # and Category classification (an agent-authored repo); admin review is required.
 /internal/rollout/registry.go @gastownhall/gascity-admin
-/test/docsync/reconciler_contract_anchor_test.go @gastownhall/gascity-admin
 /engdocs/plans/reconciler-redesign/ @gastownhall/gascity-admin
 
 # Specific docs/ content folders are owned by csells (auto-requests review on

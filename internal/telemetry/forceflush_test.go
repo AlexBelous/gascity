@@ -97,7 +97,7 @@ func TestProviderForceFlushAddsBoundedDeadline(t *testing.T) {
 	}
 }
 
-func TestForceFlushAcknowledgesGaugeAtIsolatedOTLPReceiver(t *testing.T) {
+func TestForceFlushAcknowledgesHealthProbeAtIsolatedOTLPReceiver(t *testing.T) {
 	resetInitState(t)
 	previousMeter := otel.GetMeterProvider()
 	previousLogger := global.GetLoggerProvider()
@@ -158,7 +158,7 @@ func TestForceFlushAcknowledgesGaugeAtIsolatedOTLPReceiver(t *testing.T) {
 	select {
 	case <-acknowledged:
 	case <-ctx.Done():
-		t.Fatal("isolated OTLP receiver did not acknowledge the gauge")
+		t.Fatal("isolated OTLP receiver did not acknowledge the health probe")
 	}
 }
 

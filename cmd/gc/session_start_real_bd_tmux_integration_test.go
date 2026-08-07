@@ -587,6 +587,86 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if elapsed := time.Since(pinnedAt); elapsed >= 30*time.Second {
 		t.Fatalf("configured named pin latency = %s, want live before 30s legacy debounce", elapsed)
 	}
+	suspendAt := time.Now().UTC()
+	suspendOutput := runGC(10*time.Second,
+		"--city", cityPath,
+		"session", "suspend", reviewerSpec.Identity, "--json",
+	)
+	var suspendResult sessionActionResult
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(suspendOutput)), &suspendResult); err != nil {
+		t.Fatalf("decode configured named suspend: %v\n%s", err, suspendOutput)
+	}
+	if suspendResult.Action != "suspend" || suspendResult.SessionID != pinnedReviewer.ID || suspendResult.Mode != "managed" || suspendResult.State != "suspended" {
+		t.Fatalf("configured named suspend result = %+v, want managed suspended canonical ID %q", suspendResult, pinnedReviewer.ID)
+	}
+	var suspendedReviewer sessionpkg.Info
+	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
+		bead, found, findErr := sessionpkg.FindCanonicalConfiguredNamedSessionBead(backingStore, reviewerSpec)
+		if findErr != nil || !found || bead.ID != pinnedReviewer.ID {
+			return false, findErr
+		}
+		info, getErr := sessionFrontDoor(backingStore).Get(bead.ID)
+		if getErr != nil {
+			return false, getErr
+		}
+		heldUntil, parseErr := time.Parse(time.RFC3339, info.HeldUntil)
+		if parseErr != nil || info.Closed || info.MetadataState != string(sessionpkg.StateSuspended) ||
+			info.SleepIntent != "user-hold" || !heldUntil.After(time.Now().UTC()) || info.PinAwake != "true" ||
+			info.SessionName != pinnedReviewer.SessionName || info.ConfiguredNamedIdentity != reviewerSpec.Identity {
+			return false, parseErr
+		}
+		ids, listErr := tmuxClient.ListSessionIDs()
+		if listErr != nil || strings.TrimSpace(ids[info.SessionName]) != "" || !exactStartStopProcessExited(pinnedPanePID) {
+			return false, listErr
+		}
+		suspendedReviewer = info
+		return true, nil
+	}); err != nil {
+		current, currentErr := sessionFrontDoor(backingStore).Get(pinnedReviewer.ID)
+		t.Fatalf("configured named suspend did not stop before held 30s debounce: %v; current=%+v current_err=%v controller stderr=%q", err, current, currentErr, controllerStderr.String())
+	}
+	if err := removeExitedPaneProcess(pinnedPanePID); err != nil {
+		t.Fatalf("remove exited configured named pane process: %v", err)
+	}
+	suspendedBead, err := backingStore.Get(suspendedReviewer.ID)
+	if err != nil {
+		t.Fatalf("read durable configured named suspend row: %v", err)
+	}
+	for _, key := range []string{"drain_ack_source", "drain_ack_requester_session_id", "drain_ack_requester_instance_token"} {
+		if suspendedBead.Metadata[key] != "" {
+			t.Fatalf("configured named suspend retained legacy drain metadata %s=%q", key, suspendedBead.Metadata[key])
+		}
+	}
+	if suspendedBead.Metadata["state"] == "drain-ack-stop-pending" {
+		t.Fatalf("configured named suspend entered drain-ack stop-pending: %+v", suspendedBead.Metadata)
+	}
+	var exactSuspendStops []SessionReconcilerTraceRecord
+	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		suspendTrace, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+			RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleDrainAdvance,
+			SessionName: suspendedReviewer.SessionName, TraceMode: TraceModeDetail,
+		})
+		if readErr != nil {
+			return false, readErr
+		}
+		exactSuspendStops = exactSuspendStops[:0]
+		for _, record := range suspendTrace {
+			if record.SessionBeadID == suspendedReviewer.ID && record.ReasonCode == TraceReasonUserHold &&
+				record.OutcomeCode == TraceOutcomeSuccess && record.OperationID != "" &&
+				record.Fields["operation_name"] == "exact_session_suspend_stop" {
+				exactSuspendStops = append(exactSuspendStops, record)
+			}
+		}
+		if len(exactSuspendStops) > 1 {
+			return false, fmt.Errorf("exact configured named suspend traces = %#v, want exactly one keyed suspend stop", exactSuspendStops)
+		}
+		return len(exactSuspendStops) == 1, nil
+	}); err != nil {
+		t.Fatalf("wait for exact configured named suspend trace: %v; traces=%#v controller stderr=%q", err, exactSuspendStops, controllerStderr.String())
+	}
+	if elapsed := time.Since(suspendAt); elapsed >= 30*time.Second {
+		t.Fatalf("configured named suspend latency = %s, want stop before 30s legacy debounce", elapsed)
+	}
 	dependencySpec, ok := sessionpkg.FindNamedSessionSpec(loaded, guard.CityName(), "database")
 	if !ok {
 		t.Fatal("configured database named-session spec is unavailable")

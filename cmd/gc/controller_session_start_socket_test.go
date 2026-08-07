@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,17 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+type wakeBeforeSuspendStopProvider struct {
+	*unattendedStopProvider
+	once sync.Once
+	wake func()
+}
+
+func (p *wakeBeforeSuspendStopProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	p.once.Do(p.wake)
+	return p.unattendedStopProvider.ObserveFreshLiveness(target)
+}
 
 func TestPokeSessionStartControllerUsesExactKey(t *testing.T) {
 	var commands []string
@@ -783,6 +795,92 @@ func TestConfiguredNamedPinnedSessionStartsSameCanonicalSession(t *testing.T) {
 	}
 	if got := env.sp.CountCalls("Start", spec.SessionName); got != 1 {
 		t.Fatalf("provider Start calls = %d, want exactly 1", got)
+	}
+}
+
+func TestExactSuspendedSessionStopsAndRetainsDurableRow(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state":          string(session.StateSuspended),
+		"sleep_intent":   "user-hold",
+		"held_until":     time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		"instance_token": "suspend-token",
+	})
+	if info := env.sessionInfo(bead.ID); !resolveExactSessionStartOrDrainAckStopOwnership(info, env.cfg, time.Now().UTC()) {
+		t.Fatal("exact suspended session is not owned by keyed seed/legacy exclusion")
+	}
+	if err := provider.Start(t.Context(), bead.Metadata["session_name"], runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if err := provider.SetMeta(bead.Metadata["session_name"], "GC_INSTANCE_TOKEN", "suspend-token"); err != nil {
+		t.Fatalf("set runtime token: %v", err)
+	}
+	cr := &CityRuntime{
+		cityPath: "test-city", cityName: "test-city", cfg: env.cfg, sp: provider,
+		cs:  coherentSessionStartControllerStateForTest(env.cfg, provider, env.store, rollout.Require),
+		rec: events.Discard, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+	}
+	if err := cr.ensureSessionStartController(t.Context(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensure session-start controller: %v", err)
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyOK {
+		t.Fatalf("socket reply = %q, want keyed admission", got)
+	}
+	awaitCond(t, func() bool { return !provider.IsRunning(bead.Metadata["session_name"]) }, "exact suspended session stop")
+	after := env.sessionInfo(bead.ID)
+	if after.Closed || after.MetadataState != string(session.StateSuspended) || after.SleepIntent != "user-hold" || after.HeldUntil == "" {
+		t.Fatalf("durable suspended row = %+v, want retained user hold", after)
+	}
+	stored, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read suspended row: %v", err)
+	}
+	if stored.Metadata["drain_ack_source"] != "" || stored.Metadata["state"] == "drain-ack-stop-pending" {
+		t.Fatalf("durable suspended row entered drain-ack stop path: %+v", stored)
+	}
+	if calls := provider.stopSnapshot(); len(calls) != 1 || calls[0].name != bead.Metadata["session_name"] || calls[0].expectedToken != "suspend-token" {
+		t.Fatalf("unattended stop calls = %#v, want exact one token-bound stop", calls)
+	}
+}
+
+func TestExactSuspendedSessionWakeBeforeProviderEntryIsFenced(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state": string(session.StateSuspended), "sleep_intent": "user-hold",
+		"held_until": time.Now().UTC().Add(time.Hour).Format(time.RFC3339), "instance_token": "suspend-token",
+	})
+	base := &unattendedStopProvider{Fake: env.sp}
+	provider := &wakeBeforeSuspendStopProvider{unattendedStopProvider: base, wake: func() {
+		if _, err := session.NewStore(beads.SessionStore{Store: env.store}).WakeSession(bead.ID, time.Now().UTC(), session.WakeOpts{}); err != nil {
+			t.Errorf("concurrent WakeSession: %v", err)
+		}
+	}}
+	if err := provider.Start(t.Context(), bead.Metadata["session_name"], runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if err := provider.SetMeta(bead.Metadata["session_name"], "GC_INSTANCE_TOKEN", "suspend-token"); err != nil {
+		t.Fatalf("set runtime token: %v", err)
+	}
+	cr := &CityRuntime{
+		cityPath: "test-city", cityName: "test-city", cfg: env.cfg, sp: provider,
+		cs: coherentSessionStartControllerStateForTest(env.cfg, provider, env.store, rollout.Require), rec: events.Discard, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+	}
+	if err := cr.ensureSessionStartController(t.Context(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensure session-start controller: %v", err)
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyOK {
+		t.Fatalf("socket reply = %q, want keyed admission", got)
+	}
+	awaitCond(t, func() bool { return env.sessionInfo(bead.ID).WakeRequest == string(session.WakeCauseExplicit) }, "concurrent public-equivalent wake")
+	if calls := provider.stopSnapshot(); len(calls) != 0 {
+		t.Fatalf("unattended stop calls = %#v, want zero after concurrent wake", calls)
 	}
 }
 

@@ -1713,8 +1713,8 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			// Poke again to trigger immediate reconciler tick.
-			_ = pokeController(cityPath)
+			// Admit only this durably suspended session to the keyed controller.
+			_ = pokeSessionStartController(cityPath, sessionID)
 			if asJSON {
 				if err := writeSessionActionJSON(stdout, sessionActionResult{
 					Action:    "suspend",

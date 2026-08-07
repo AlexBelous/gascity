@@ -109,6 +109,16 @@ type configuredNamedWakeStartLease struct {
 	ControllerGeneration uint64
 }
 
+func exactUserHoldSuspendCurrent(info sessionpkg.Info, now time.Time) bool {
+	if info.Closed || info.MetadataState != string(sessionpkg.StateSuspended) ||
+		strings.TrimSpace(info.SleepIntent) != "user-hold" || strings.TrimSpace(info.SessionNameMetadata) == "" ||
+		strings.TrimSpace(info.InstanceToken) == "" {
+		return false
+	}
+	heldUntil, err := time.Parse(time.RFC3339, strings.TrimSpace(info.HeldUntil))
+	return err == nil && heldUntil.After(now)
+}
+
 func validateConfiguredNamedWakeStartLease(lease configuredNamedWakeStartLease) error {
 	if lease.SessionRevision == 0 || lease.ControllerGeneration == 0 {
 		return errors.New("configured named wake lease lacks revision or controller generation")
@@ -1266,6 +1276,83 @@ func reconcileExactSessionStartWithOwner(
 	if info.Closed {
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{})
 		return exactSessionStartUnowned, nil
+	}
+	if (admission.Source == sessionStartAdmissionSocket || admission.Source == sessionStartAdmissionAntiEntropy) &&
+		exactUserHoldSuspendCurrent(info, clk.Now().UTC()) && initialResponse.Revision != 0 {
+		yieldOrPark := func(cause error) (exactSessionStartOwner, error) {
+			if params.RolloutMode == rollout.Auto {
+				return exactSessionStartLegacyOwner, fmt.Errorf("%w: %w", errSessionStartLegacyFallbackRequired, cause)
+			}
+			return exactSessionStartKeyedOwner, cause
+		}
+		if params.DrainTracker != nil && params.DrainTracker.get(info.ID) != nil {
+			return yieldOrPark(errors.New("exact suspended session has an active legacy drain"))
+		}
+		if _, ok := params.Provider.(runtime.FreshLivenessObserver); !ok {
+			return yieldOrPark(errors.New("exact suspended session provider cannot prove fresh liveness"))
+		}
+		if _, ok := params.Provider.(runtime.UnattendedSessionStopper); !ok {
+			return yieldOrPark(errors.New("exact suspended session provider cannot prove unattended stop"))
+		}
+		processNames := drainAckStopPendingProcessNames(params.Config, info)
+		incarnationStartedAt := drainAckIncarnationStartedAt(info)
+		liveness := runtime.ObserveFreshLiveness(params.Provider, runtime.LivenessTarget{
+			SessionID:            info.ID,
+			SessionName:          info.SessionNameMetadata,
+			ProcessNames:         processNames,
+			IncarnationStartedAt: incarnationStartedAt,
+		})
+		if !liveness.Complete {
+			return yieldOrPark(errors.New("exact suspended session liveness observation is incomplete"))
+		}
+		if !liveness.Running && !liveness.Alive {
+			return exactSessionStartKeyedOwner, nil
+		}
+		latest, latestResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, info.ID)
+		if readErr != nil || latestResponse.Revision != initialResponse.Revision || !exactUserHoldSuspendCurrent(latest, clk.Now().UTC()) ||
+			latest.InstanceToken != info.InstanceToken || latest.SessionNameMetadata != info.SessionNameMetadata {
+			return exactSessionStartKeyedOwner, nil
+		}
+		if params.DrainTracker != nil && params.DrainTracker.get(info.ID) != nil {
+			return yieldOrPark(errors.New("exact suspended session entered an active legacy drain before stop"))
+		}
+		stopStartedAt := time.Now()
+		if stopErr := workerStopUnattendedSessionByIDWithConfig(params.CityPath, params.Store, params.Provider, params.Config, info.ID, info.InstanceToken); stopErr != nil {
+			return exactSessionStartKeyedOwner, fmt.Errorf("stopping exact suspended session %q: %w", info.ID, stopErr)
+		}
+		if completion := confirmDrainAckRuntimeDeadCompletion(params.CityPath, params.Store, params.Provider, params.Config, info.ID, info.SessionNameMetadata, info.InstanceToken, processNames, stderr, incarnationStartedAt, true); completion != drainAckAsyncStopConfirmed {
+			return exactSessionStartKeyedOwner, fmt.Errorf("confirming exact suspended session %q stopped: %v", info.ID, completion)
+		}
+		if params.Trace != nil {
+			cycle := params.Trace.BeginCycle(TraceTickTriggerControl, "exact_session_suspend_stop", time.Now().UTC(), params.Config)
+			if cycle != nil {
+				template := normalizedSessionTemplateInfo(info, params.Config)
+				if cycle.detailEnabled(template) {
+					cycle.recordAdmittedDetailOperation(
+						TraceSiteLifecycleDrainAdvance,
+						TraceReasonUserHold,
+						TraceOutcomeSuccess,
+						"exact_session_suspend_stop",
+						template,
+						info.ID,
+						info.SessionNameMetadata,
+						TraceSource(cycle.sourceFor(template)),
+						time.Since(stopStartedAt),
+						map[string]any{
+							"admission":         string(admission.Source),
+							"admission_version": admission.Version,
+							"generation":        params.Generation,
+							"instance_token":    info.InstanceToken,
+							"effect_applied":    true,
+						},
+					)
+				}
+				if traceErr := cycle.End(TraceCompletionCompleted, nil); traceErr != nil && params.Stderr != nil {
+					fmt.Fprintf(params.Stderr, "session reconciler: recording exact suspend stop trace: %v\n", traceErr) //nolint:errcheck // tracing is observational
+				}
+			}
+		}
+		return exactSessionStartKeyedOwner, nil
 	}
 	var drainAckRollback *drainAckStopPendingRollback
 	var drainAckStopPendingPatch sessionpkg.MetadataPatch
@@ -2436,7 +2523,7 @@ func resolveExactSessionStartOrDrainAckStopOwnership(
 	cfg *config.City,
 	now time.Time,
 ) bool {
-	return isDrainAckStopPendingInfo(info) || resolveExactSessionStartOwnership(info, cfg, now)
+	return isDrainAckStopPendingInfo(info) || exactUserHoldSuspendCurrent(info, now) || resolveExactSessionStartOwnership(info, cfg, now)
 }
 
 func classifyExactSessionStartOwnership(

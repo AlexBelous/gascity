@@ -89,6 +89,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		id, err = resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 		if err != nil {
 			id, err = resolveSessionIDMaterializingNamedWithMetadata(cityPath, cfg, sessStore, args[0], map[string]string{
+				"state":                     string(session.StateAsleep),
 				"pin_awake":                 "true",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",

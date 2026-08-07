@@ -140,7 +140,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 // with bd v0.60.0 (which lacks --skip-agents).
 func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
 		"--server-host", "127.0.0.1", "--server-port", port,
@@ -149,7 +149,7 @@ func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("bd init timed out: %s", out)
+		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
 	}
 	if err != nil {
 		t.Fatalf("bd init: exit status %v: %s", err, out)

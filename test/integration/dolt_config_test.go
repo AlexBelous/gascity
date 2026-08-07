@@ -196,7 +196,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 	go func() { waitCh <- cmd.Wait() }()
 
 	// Wait for server to be ready.
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(doltServerStartupLimit)
 	addr := net.JoinHostPort("127.0.0.1", port)
 	for {
 		conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -214,7 +214,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 			<-waitCh
 			_ = logFile.Close()
 			logBytes, _ := os.ReadFile(logPath)
-			t.Fatalf("dolt sql-server did not become ready on %s within 15s:\n%s", addr, logBytes)
+			t.Fatalf("dolt sql-server did not become ready on %s within %s:\n%s", addr, doltServerStartupLimit, logBytes)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

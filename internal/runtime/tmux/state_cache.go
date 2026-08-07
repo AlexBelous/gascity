@@ -96,16 +96,16 @@ type StateCache struct {
 	scanMu     sync.RWMutex
 	// scanBySessionID is an instance-owned seam so fresh liveness tests can
 	// model exact and partial process-table scans without mutable global state.
-	scanBySessionID func(string) exactProcessScan
+	scanBySessionID func(string, time.Time) exactProcessScan
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
 // staleTTL defaults to 30s.
 func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
-	var scanBySessionID func(string) exactProcessScan
+	var scanBySessionID func(string, time.Time) exactProcessScan
 	if goruntime.GOOS == "linux" || goruntime.GOOS == "darwin" {
-		scanBySessionID = func(id string) exactProcessScan {
-			runtimes, err := proctable.ScanBySessionID(id)
+		scanBySessionID = func(id string, incarnationStartedAt time.Time) exactProcessScan {
+			runtimes, err := proctable.ScanBySessionIDSince(id, incarnationStartedAt)
 			return exactProcessScan{runtimes: runtimes, complete: err == nil}
 		}
 	}
@@ -143,20 +143,20 @@ func (c *StateCache) snapshot() runtimeStateSnapshot {
 	return c.state
 }
 
-func (c *StateCache) setScanBySessionID(scan func(string) exactProcessScan) {
+func (c *StateCache) setScanBySessionID(scan func(string, time.Time) exactProcessScan) {
 	c.scanMu.Lock()
 	c.scanBySessionID = scan
 	c.scanMu.Unlock()
 }
 
-func (c *StateCache) scanSessionID(id string) (exactProcessScan, bool) {
+func (c *StateCache) scanSessionID(id string, incarnationStartedAt time.Time) (exactProcessScan, bool) {
 	c.scanMu.RLock()
 	scan := c.scanBySessionID
 	c.scanMu.RUnlock()
 	if scan == nil {
 		return exactProcessScan{}, false
 	}
-	return scan(id), true
+	return scan(id, incarnationStartedAt), true
 }
 
 // ObserveFreshLiveness forces a new tmux snapshot and combines it with an
@@ -179,7 +179,7 @@ func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.L
 		scanComplete      bool
 	)
 	if sessionID := strings.TrimSpace(target.SessionID); sessionID != "" {
-		result, scanned := p.cache.scanSessionID(sessionID)
+		result, scanned := p.cache.scanSessionID(sessionID, target.IncarnationStartedAt)
 		scanComplete = scanned && result.complete
 		for _, live := range result.runtimes {
 			if live.SessionID == sessionID {

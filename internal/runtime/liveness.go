@@ -1,6 +1,9 @@
 package runtime
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Liveness reports both provider-runtime presence and configured agent-process
 // presence for a session target.
@@ -19,6 +22,10 @@ type LivenessTarget struct {
 	SessionID    string
 	SessionName  string
 	ProcessNames []string
+	// IncarnationStartedAt bounds inaccessible-process uncertainty. A provider
+	// may ignore a process only when it can prove the process predates this
+	// session incarnation. Zero keeps the unbounded, fail-closed behavior.
+	IncarnationStartedAt time.Time
 }
 
 // LivenessObserver is implemented by providers that can observe runtime and

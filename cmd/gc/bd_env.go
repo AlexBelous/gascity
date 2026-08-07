@@ -84,9 +84,6 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		if credentialsFile != "" {
 			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 		}
-		if name == "bd" && bdBin != "" {
-			name = bdBin
-		}
 		return beadsExecCommandRunnerWithEnv(env)(dir, name, args...)
 	}
 }

@@ -1444,8 +1444,8 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
 		OpenBdStore: func() (beads.Store, error) {
-			if _, err := exec.LookPath("bd"); err != nil {
-				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
+			if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
+				return nil, err
 			}
 			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
 		},
@@ -1486,6 +1486,30 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
+}
+
+// requireBdBinaryForCity verifies that the logical bd command has either an
+// ambient executable or the city-configured, absolute workspace pin. The
+// runner keeps the logical command name as "bd" so its timeout, telemetry,
+// and backup policy still apply while executing that pin.
+func requireBdBinaryForCity(cityPath string) error {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		return err
+	}
+	if completeBinding {
+		pinned, err := workspacePinnedBdBinary(cityPath)
+		if err != nil {
+			return err
+		}
+		if filepath.IsAbs(strings.TrimSpace(pinned)) {
+			return nil
+		}
+	}
+	if _, err := exec.LookPath("bd"); err != nil {
+		return fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
+	}
+	return nil
 }
 
 // openExecStoreAtForCityWithConfig opens the exec-provider store for a city.

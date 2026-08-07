@@ -111,7 +111,7 @@ func TestNewIsolatedEnvRootPreservesAmbientHOME(t *testing.T) {
 	}
 }
 
-func TestNewIsolatedEnvRootPinsHomeAwayFromAmbientBeadsConfig(t *testing.T) {
+func TestNewIsolatedToolEnvPinsHomeAwayFromAmbientBeadsConfig(t *testing.T) {
 	ambientHome := t.TempDir()
 	ambientBeadsDir := filepath.Join(ambientHome, ".beads")
 	if err := os.MkdirAll(ambientBeadsDir, 0o755); err != nil {
@@ -123,8 +123,12 @@ func TestNewIsolatedEnvRootPinsHomeAwayFromAmbientBeadsConfig(t *testing.T) {
 	}
 	t.Setenv("HOME", ambientHome)
 
-	gcHome, _, env := newIsolatedEnvRoot(t, true)
-	gotHome, ok := parseEnvList(env)["HOME"]
+	envMap := parseEnvList(newIsolatedToolEnv(t, true))
+	gcHome, ok := envMap["GC_HOME"]
+	if !ok || gcHome == "" {
+		t.Fatal("isolated environment does not define GC_HOME")
+	}
+	gotHome, ok := envMap["HOME"]
 	if !ok {
 		t.Fatal("isolated environment does not define HOME")
 	}

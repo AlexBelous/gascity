@@ -118,6 +118,57 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 	return "", fmt.Errorf("workspace.env PATH is configured but contains no executable bd at an absolute path")
 }
 
+// errBdNotOnPath reports that neither the workspace pin nor the ambient
+// lookup produced a bd executable. Callers phrase their own remediation.
+var errBdNotOnPath = errors.New("bd not found in PATH")
+
+// resolveBdBinaryForScope resolves the bd executable a scope's commands run.
+// A scope bound to a complete storage binding runs the binary its workspace
+// PATH pins, because only that build speaks the bound backend; every other
+// scope keeps the ambient lookup. An ambient miss is errBdNotOnPath so
+// callers can phrase their own remediation; a pin that is configured but
+// unresolvable for a scope that needs it is returned verbatim rather than
+// masked as a missing binary.
+func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
+	bound, err := scopeBindsPinnedBdBinary(cityPath, scopeRoot)
+	if err != nil {
+		return "", err
+	}
+	if bound {
+		pinned, err := workspacePinnedBdBinary(cityPath)
+		if err != nil {
+			return "", err
+		}
+		if pinned = strings.TrimSpace(pinned); filepath.IsAbs(pinned) {
+			return pinned, nil
+		}
+	}
+	bdPath, err := exec.LookPath("bd")
+	if err != nil {
+		return "", errBdNotOnPath
+	}
+	return bdPath, nil
+}
+
+// scopeBindsPinnedBdBinary reports whether a scope's bd commands must run the
+// workspace-pinned build: the scope carries a complete storage binding of its
+// own, or it inherits the city's the way applyCanonicalScopeBackendEnv does.
+// A scope that overrides the city backend never reads the city binding, so a
+// fault in it is not that scope's fault and degrades to the ambient lookup
+// instead of taking the scope's bd offline. Only the scope's own binding
+// surfaces an error.
+func scopeBindsPinnedBdBinary(cityPath, scopeRoot string) (bool, error) {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
+	if err != nil || completeBinding {
+		return completeBinding, err
+	}
+	if samePath(cityPath, scopeRoot) || scopeOverridesCityBackend(cityPath, scopeRoot) {
+		return false, nil
+	}
+	inherited, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	return err == nil && inherited, nil
+}
+
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {

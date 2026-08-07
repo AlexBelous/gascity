@@ -128,7 +128,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 			return 1
 		}
 	}
-	pokeSessionPinController(cityErr, cityPath)
+	pokeSessionPinController(cityErr, cityPath, id, pinned)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -150,8 +150,12 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	return 0
 }
 
-func pokeSessionPinController(cityErr error, cityPath string) {
+func pokeSessionPinController(cityErr error, cityPath, sessionID string, pinned bool) {
 	if cityErr != nil || !cityUsesManagedReconciler(cityPath) {
+		return
+	}
+	if pinned {
+		_ = pokeSessionStartController(cityPath, sessionID)
 		return
 	}
 	_ = pokeController(cityPath)

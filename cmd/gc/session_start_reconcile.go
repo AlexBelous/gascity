@@ -95,8 +95,8 @@ type strictDefaultPoolWakeStartLease struct {
 	ControllerGeneration uint64
 }
 
-// configuredNamedWakeStartLease binds one explicit wake to an existing
-// canonical configured named session. It carries no materialization authority.
+// configuredNamedWakeStartLease binds one explicit or pinned wake to an
+// existing canonical configured named session. It carries no materialization authority.
 type configuredNamedWakeStartLease struct {
 	SessionID            string
 	SessionName          string
@@ -105,6 +105,7 @@ type configuredNamedWakeStartLease struct {
 	Identity             string
 	Mode                 string
 	Template             string
+	Cause                sessionpkg.WakeCause
 	ControllerGeneration uint64
 }
 
@@ -131,6 +132,9 @@ func validateConfiguredNamedWakeStartLease(lease configuredNamedWakeStartLease) 
 	if lease.Mode != "always" && lease.Mode != "on_demand" {
 		return errors.New("configured named wake lease has invalid mode")
 	}
+	if lease.Cause != sessionpkg.WakeCauseExplicit && lease.Cause != sessionpkg.WakeCausePinned {
+		return errors.New("configured named wake lease has invalid cause")
+	}
 	return nil
 }
 
@@ -148,13 +152,13 @@ func configuredNamedWakeIdentityMatches(info sessionpkg.Info, cfg *config.City, 
 		!isManualSessionInfoForAgent(info, spec.Agent)
 }
 
-func configuredNamedWakeExplicitCurrent(info sessionpkg.Info, now time.Time) bool {
+func configuredNamedWakeCauseCurrent(info sessionpkg.Info, cause sessionpkg.WakeCause, now time.Time) bool {
 	input := sessionpkg.LifecycleInputFromInfo(info)
 	input.Now = now
 	input.CreatedAt = info.CreatedAt
 	input.StaleCreatingAfter = staleCreatingStateTimeout
 	lifecycle := sessionpkg.ProjectLifecycle(input)
-	return lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) &&
+	return lifecycle.HasWakeCause(cause) &&
 		!lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) &&
 		!lifecycle.HasBlocker(sessionpkg.BlockerHeld) &&
 		!lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) && !lifecycle.Terminal
@@ -163,13 +167,16 @@ func configuredNamedWakeExplicitCurrent(info sessionpkg.Info, now time.Time) boo
 func configuredNamedWakeStartMatches(info sessionpkg.Info, cfg *config.City, cityName string, lease configuredNamedWakeStartLease, now time.Time) bool {
 	return configuredNamedWakeIdentityMatches(info, cfg, cityName, lease) &&
 		info.MetadataState == string(sessionpkg.StateAsleep) && strings.TrimSpace(info.InstanceToken) == lease.InstanceToken &&
-		configuredNamedWakeExplicitCurrent(info, now)
+		configuredNamedWakeCauseCurrent(info, lease.Cause, now)
 }
 
 func configuredNamedWakeEnteredMatches(info sessionpkg.Info, cfg *config.City, cityName string, lease configuredNamedWakeStartLease, now time.Time) bool {
 	if !configuredNamedWakeIdentityMatches(info, cfg, cityName, lease) ||
 		info.MetadataState != string(sessionpkg.StateCreating) || strings.TrimSpace(info.InstanceToken) == "" ||
 		strings.TrimSpace(info.InstanceToken) == lease.InstanceToken {
+		return false
+	}
+	if lease.Cause == sessionpkg.WakeCausePinned && !configuredNamedWakeCauseCurrent(info, lease.Cause, now) {
 		return false
 	}
 	input := sessionpkg.LifecycleInputFromInfo(info)
@@ -193,6 +200,13 @@ func certifyConfiguredNamedWakeStartLease(
 	if !ok {
 		return configuredNamedWakeStartLease{}, false
 	}
+	cause := sessionpkg.WakeCauseExplicit
+	if !configuredNamedWakeCauseCurrent(info, cause, now) {
+		cause = sessionpkg.WakeCausePinned
+		if !configuredNamedWakeCauseCurrent(info, cause, now) {
+			return configuredNamedWakeStartLease{}, false
+		}
+	}
 	lease := configuredNamedWakeStartLease{
 		SessionID:            info.ID,
 		SessionName:          strings.TrimSpace(info.SessionNameMetadata),
@@ -201,6 +215,7 @@ func certifyConfiguredNamedWakeStartLease(
 		Identity:             identity,
 		Mode:                 namedSessionModeInfo(info),
 		Template:             namedSessionBackingTemplate(spec),
+		Cause:                cause,
 		ControllerGeneration: controllerGeneration,
 	}
 	if !configuredNamedWakeStartMatches(info, cfg, cityName, lease, now) {

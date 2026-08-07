@@ -266,8 +266,17 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 				DependsOn:         []string{"database"},
 				Env:               map[string]string{"GC_PROVIDER": "codex"},
 			},
+			{
+				Name:              "reviewer",
+				StartCommand:      "sleep 600",
+				MaxActiveSessions: &oneSession,
+				Env:               map[string]string{"GC_PROVIDER": "codex"},
+			},
 		},
-		NamedSessions: []config.NamedSession{{Template: "database", Mode: "always"}},
+		NamedSessions: []config.NamedSession{
+			{Template: "database", Mode: "always"},
+			{Name: "reviewer", Template: "reviewer", Mode: "on_demand"},
+		},
 	}
 	configData, err := cfg.Marshal()
 	if err != nil {
@@ -473,6 +482,111 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 
 	backingStore := beads.NewBdStoreWithPrefix(cityPath, beads.ExecCommandRunner(), "gct")
 	tmuxClient := runtimetmux.NewTmuxWithConfig(runtimetmux.Config{SocketName: guard.SocketName()})
+	reviewerSpec, ok := sessionpkg.FindNamedSessionSpec(loaded, guard.CityName(), "reviewer")
+	if !ok {
+		t.Fatal("configured reviewer named-session spec is unavailable")
+	}
+	runGC(10*time.Second,
+		"--city", cityPath,
+		"trace", "start",
+		"--template", "reviewer",
+		"--for", "2m",
+		"--level", string(TraceModeDetail),
+	)
+	pinnedAt := time.Now().UTC()
+	pinOutput := runGC(10*time.Second,
+		"--city", cityPath,
+		"session", "pin", reviewerSpec.Identity, "--json",
+	)
+	var pinResult sessionActionResult
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(pinOutput)), &pinResult); err != nil {
+		t.Fatalf("decode configured named pin: %v\n%s", err, pinOutput)
+	}
+	if pinResult.Action != "pin" || pinResult.SessionID == "" || pinResult.Pinned == nil || !*pinResult.Pinned {
+		t.Fatalf("configured named pin result = %+v, want pinned session ID", pinResult)
+	}
+	var pinnedReviewer sessionpkg.Info
+	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
+		bead, found, findErr := sessionpkg.FindCanonicalConfiguredNamedSessionBead(backingStore, reviewerSpec)
+		if findErr != nil || !found || bead.ID != pinResult.SessionID {
+			return false, findErr
+		}
+		candidates, listErr := backingStore.ListByMetadata(map[string]string{
+			sessionpkg.NamedSessionIdentityMetadata: reviewerSpec.Identity,
+		}, 0)
+		if listErr != nil {
+			return false, listErr
+		}
+		if len(candidates) != 1 || candidates[0].ID != bead.ID {
+			return false, nil
+		}
+		info, getErr := sessionFrontDoor(backingStore).Get(bead.ID)
+		if getErr != nil {
+			return false, getErr
+		}
+		if sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info)).BaseState != sessionpkg.BaseStateActive ||
+			info.PinAwake != "true" || info.SessionName != reviewerSpec.SessionName || info.ConfiguredNamedIdentity != reviewerSpec.Identity ||
+			info.ConfiguredNamedMode != "on_demand" || strings.TrimSpace(info.InstanceToken) == "" {
+			return false, nil
+		}
+		ids, listErr := tmuxClient.ListSessionIDs()
+		if listErr != nil || strings.TrimSpace(ids[info.SessionName]) == "" {
+			return false, listErr
+		}
+		liveToken, tokenErr := tmuxClient.GetEnvironment(info.SessionName, "GC_INSTANCE_TOKEN")
+		if tokenErr != nil || liveToken != info.InstanceToken {
+			return false, tokenErr
+		}
+		pinnedReviewer = info
+		return true, nil
+	}); err != nil {
+		t.Fatalf("configured named pin did not start before held 30s debounce: %v; controller stdout=%q stderr=%q", err, controllerStdout.String(), controllerStderr.String())
+	}
+	pinnedPanePID, err := tmuxClient.GetPanePID(pinnedReviewer.SessionName)
+	if err != nil {
+		t.Fatalf("read configured named pin pane PID: %v", err)
+	}
+	registerLivePaneProcess(pinnedPanePID)
+	var pinCommits []SessionReconcilerTraceRecord
+	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+			RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartCommit,
+			SessionName: pinnedReviewer.SessionName, TraceMode: TraceModeDetail,
+		})
+		if readErr != nil {
+			return false, readErr
+		}
+		pinCommits = pinCommits[:0]
+		for _, record := range records {
+			if record.SessionBeadID == pinnedReviewer.ID &&
+				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+				record.Fields["session_id"] == pinnedReviewer.ID &&
+				record.Fields["instance_token"] == pinnedReviewer.InstanceToken &&
+				record.Fields["effect_applied"] == true {
+				pinCommits = append(pinCommits, record)
+			}
+		}
+		if len(pinCommits) > 1 {
+			return false, fmt.Errorf("configured named pin commits = %d, want exactly one", len(pinCommits))
+		}
+		return len(pinCommits) == 1, nil
+	}); err != nil {
+		t.Fatalf("configured named pin socket commit did not converge: %v; matching=%#v controller stderr=%q", err, pinCommits, controllerStderr.String())
+	}
+	pinStartRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+		RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartRun, SessionName: pinnedReviewer.SessionName,
+	})
+	if err != nil {
+		t.Fatalf("read configured named pin start trace: %v", err)
+	}
+	for _, record := range pinStartRecords {
+		if record.OutcomeCode == TraceOutcomeStartEnqueued {
+			t.Fatalf("configured named pin used legacy async start: %#v", pinStartRecords)
+		}
+	}
+	if elapsed := time.Since(pinnedAt); elapsed >= 30*time.Second {
+		t.Fatalf("configured named pin latency = %s, want live before 30s legacy debounce", elapsed)
+	}
 	dependencySpec, ok := sessionpkg.FindNamedSessionSpec(loaded, guard.CityName(), "database")
 	if !ok {
 		t.Fatal("configured database named-session spec is unavailable")

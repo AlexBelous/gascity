@@ -736,11 +736,113 @@ func TestConfiguredNamedSessionWakeStartsSameCanonicalSession(t *testing.T) {
 	}
 }
 
+func TestConfiguredNamedPinnedSessionStartsSameCanonicalSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Name: "reviewer", Template: "worker", Mode: "on_demand"}},
+	}
+	spec, ok := findNamedSessionSpec(env.cfg, env.cfg.EffectiveCityName(), "reviewer")
+	if !ok {
+		t.Fatal("configured named session fixture did not resolve")
+	}
+	bead := env.createSessionBead(spec.SessionName, "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"alias":                      spec.Identity,
+		"session_name":               spec.SessionName,
+		"session_origin":             "named",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: spec.Identity,
+		namedSessionModeMetadata:     spec.Mode,
+		"continuity_eligible":        "true",
+		"pin_awake":                  "true",
+	})
+	before := env.sessionInfo(bead.ID)
+	cr := &CityRuntime{
+		cityPath: "test-city", cityName: "test-city", cfg: env.cfg, sp: env.sp,
+		cs:  coherentSessionStartControllerStateForTest(env.cfg, env.sp, env.store, rollout.Require),
+		rec: events.Discard, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+		sessionStartOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+		},
+	}
+	if err := cr.ensureSessionStartController(t.Context(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensure session-start controller: %v", err)
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyOK {
+		t.Fatalf("socket reply = %q, want keyed admission", got)
+	}
+	awaitCond(t, func() bool { return env.sessionInfo(bead.ID).MetadataState == string(session.StateActive) }, "configured named pinned session exact wake")
+	after := env.sessionInfo(bead.ID)
+	if after.ID != before.ID || after.SessionNameMetadata != before.SessionNameMetadata ||
+		after.ConfiguredNamedIdentity != before.ConfiguredNamedIdentity || after.PinAwake != "true" {
+		t.Fatalf("pinned configured named session = %+v, want same canonical pinned identity from %+v", after, before)
+	}
+	if got := env.sp.CountCalls("Start", spec.SessionName); got != 1 {
+		t.Fatalf("provider Start calls = %d, want exactly 1", got)
+	}
+}
+
+func TestConfiguredNamedPinnedSessionUnpinBeforeProviderEntryIsFenced(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Name: "reviewer", Template: "worker", Mode: "on_demand"}},
+	}
+	spec, ok := findNamedSessionSpec(env.cfg, env.cfg.EffectiveCityName(), "reviewer")
+	if !ok {
+		t.Fatal("configured named session fixture did not resolve")
+	}
+	bead := env.createSessionBead(spec.SessionName, "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"alias":                      spec.Identity,
+		"session_name":               spec.SessionName,
+		"session_origin":             "named",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: spec.Identity,
+		namedSessionModeMetadata:     spec.Mode,
+		"continuity_eligible":        "true",
+		"pin_awake":                  "true",
+	})
+	info, revision, err := getAuthoritativeSessionStartRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("read pinned configured named session: %v", err)
+	}
+	lease, certified := certifyConfiguredNamedWakeStartLease(info, revision, env.cfg, "test-city", 1, env.clk.Now().UTC())
+	if !certified || lease.Cause != session.WakeCausePinned {
+		t.Fatalf("pinned configured named lease = %+v, certified=%t; want pin cause", lease, certified)
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.Generation = 1
+	params.RolloutMode = rollout.Require
+	params.ValidateConfiguredNamedWakeStart = func(session.Info, configuredNamedWakeStartLease) bool { return true }
+	params.EnterConfiguredNamedWakeStart = func(configuredNamedWakeStartLease) bool { return true }
+	params.StartOptions = append(params.StartOptions, withTaskWorkDirResolver(func(startCandidate, *config.City) string {
+		if err := env.store.SetMetadata(bead.ID, "pin_awake", ""); err != nil {
+			t.Errorf("unpin before provider entry: %v", err)
+		}
+		return ""
+	}))
+	owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID, Source: sessionStartAdmissionSocket, ConfiguredNamedWake: &lease,
+	}, params)
+	if owner != exactSessionStartKeyedOwner || err == nil {
+		t.Fatalf("unpin-before-provider result = (owner=%v, err=%v), want keyed fence error", owner, err)
+	}
+	if got := env.sp.CountCalls("Start", spec.SessionName); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0 after unpin", got)
+	}
+}
+
 func TestExactWakeLeasesAcceptNegativeNonzeroRevisionTokens(t *testing.T) {
 	configured := configuredNamedWakeStartLease{
 		SessionID: "gcs-named", SessionName: "worker", InstanceToken: "instance-1",
 		SessionRevision: -17, Identity: "worker", Mode: "always", Template: "worker",
-		ControllerGeneration: 1,
+		Cause: session.WakeCauseExplicit, ControllerGeneration: 1,
 	}
 	if err := validateConfiguredNamedWakeStartLease(configured); err != nil {
 		t.Fatalf("configured named wake negative revision: %v", err)

@@ -136,6 +136,12 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 // mirroring the libstore env-pinning precedent.
 func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	t.Helper()
+	// Isolate HOME so this test can't pick up an ambient ~/.beads/config.yaml
+	// (e.g. dolt.shared-server: true) and collide with an unrelated dolt
+	// server on the machine's default shared-server port. ExecCommandRunnerWithEnv
+	// falls back to the live process env for HOME, so t.Setenv here covers
+	// every subprocess spawned below.
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	git := exec.Command("git", "init", "--quiet", dir)
 	// GIT_DIR/GIT_WORK_TREE from the invoking shell would redirect init away

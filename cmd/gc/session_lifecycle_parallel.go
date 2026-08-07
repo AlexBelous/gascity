@@ -319,7 +319,6 @@ type startExecutionOptions struct {
 	workDirResolver                taskWorkDirResolver
 	stabilityWaiter                startStabilityWaiter
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
-	statusComparisonObserver       sessionLifecycleStatusComparisonObserver
 	exactStatusObserver            exactSessionLifecycleStatusObserver
 	legacyStartExcluded            func(sessionpkg.Info) bool
 	legacyStatusHealExcluded       func(sessionpkg.Info) bool
@@ -402,12 +401,6 @@ func withStartStabilityWaiter(waiter startStabilityWaiter) startExecutionOption 
 func withSessionStaleKeyDetectionWaiter(waiter sessionpkg.StaleKeyDetectionWaiter) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.sessionStaleKeyDetectionWaiter = waiter
-	}
-}
-
-func withSessionLifecycleStatusComparisonObserver(observer sessionLifecycleStatusComparisonObserver) startExecutionOption {
-	return func(opts *startExecutionOptions) {
-		opts.statusComparisonObserver = observer
 	}
 }
 

@@ -2013,11 +2013,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.LastWokeAt)
 			healBatch, healErr := applySessionLifecycleStatusHeal(tick, id, sessionLifecycleStatusHealContext{
-				Site:              sessionLifecycleStatusHealSiteOrphan,
 				RuntimeObserved:   livenessErr == nil,
 				RuntimeAlive:      providerAlive,
 				RollbackAvailable: !storeQueryPartial,
-			}, sessFront, clk, startupTimeout, reconcileOpts.statusComparisonObserver)
+			}, sessFront, clk, startupTimeout)
 			if healErr != nil {
 				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 				continue
@@ -2780,11 +2779,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoBeforeHeal.LastWokeAt)
 			healBatch, healErr := applySessionLifecycleStatusHeal(tick, id, sessionLifecycleStatusHealContext{
-				Site:              sessionLifecycleStatusHealSiteDesired,
 				RuntimeObserved:   sp != nil && strings.TrimSpace(name) != "",
 				RuntimeAlive:      alive,
 				RollbackAvailable: true,
-			}, sessFront, clk, startupTimeout, reconcileOpts.statusComparisonObserver)
+			}, sessFront, clk, startupTimeout)
 			if healErr != nil {
 				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 				continue

@@ -1837,12 +1837,6 @@ func TestSessionWaitDependencyShadowExactReadAndProbeCostDoesNotGrowWithFleet(t 
 		if err != nil || outcome != sessionWaitDependencyEvaluationReady {
 			t.Fatalf("validate = (%q, %v), want ready", outcome, err)
 		}
-		params := exactSessionStartTestParams(t, env)
-		params.Store = store
-		plan, err := planExactSessionWaitDependencyStartShadow(t.Context(), target.ID, params)
-		if err != nil || plan.Outcome != sessionLifecycleStartSelectionPrepare {
-			t.Fatalf("plan = (%+v, %v), want prepare", plan, err)
-		}
 		probes := 0
 		for _, call := range env.sp.SnapshotCalls() {
 			if call.Method == "IsRunning" {
@@ -1857,8 +1851,8 @@ func TestSessionWaitDependencyShadowExactReadAndProbeCostDoesNotGrowWithFleet(t 
 	if readsOne != readsFleet || probesOne != probesFleet {
 		t.Fatalf("one/fleet cost = (%d reads, %d probes)/(%d reads, %d probes), want identical", readsOne, probesOne, readsFleet, probesFleet)
 	}
-	if readsFleet != 4 || probesFleet != 1 {
-		t.Fatalf("fleet cost = (%d reads, %d probes), want (4, 1)", readsFleet, probesFleet)
+	if readsFleet != 3 || probesFleet != 0 {
+		t.Fatalf("fleet cost = (%d reads, %d probes), want (3, 0)", readsFleet, probesFleet)
 	}
 }
 
@@ -2686,7 +2680,7 @@ func TestSessionWaitDependencyShadowStaleRejectedCensusCannotReplaceNewerBlocker
 		releaseFirst := make(chan struct{})
 		firstReturned := make(chan struct{})
 		var calls atomic.Int64
-		if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
+		if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
 			attempt := calls.Add(1)
 			census, _, buildErr := buildObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
 			if buildErr == nil {
@@ -2706,7 +2700,7 @@ func TestSessionWaitDependencyShadowStaleRejectedCensusCannotReplaceNewerBlocker
 				return sessionWaitShadowAwaitRelevant
 			}
 			return sessionWaitShadowRetry
-		}, cityRuntime.sessionWaitDependencyContainsWait); err != nil {
+		}, cityRuntime.sessionWaitDependencyContainsWait, nil); err != nil {
 			t.Fatalf("install admission: %v", err)
 		}
 		t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
@@ -2856,7 +2850,7 @@ func TestSessionWaitDependencyShadowRetriesRealStaleObservationOnUnrelatedEvent(
 	installSessionWaitShadowSentinel(t, cityRuntime)
 	cs := &controllerState{}
 	var calls int
-	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
 		calls++
 		census, candidate, buildErr := buildObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
 		if buildErr != nil {
@@ -2878,7 +2872,7 @@ func TestSessionWaitDependencyShadowRetriesRealStaleObservationOnUnrelatedEvent(
 			return sessionWaitShadowConverged
 		}
 		return sessionWaitShadowRetry
-	}, cityRuntime.sessionWaitDependencyContainsWait); err != nil {
+	}, cityRuntime.sessionWaitDependencyContainsWait, nil); err != nil {
 		t.Fatalf("install admission: %v", err)
 	}
 	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
@@ -2926,7 +2920,7 @@ func TestSessionWaitDependencyShadowBootstrapIdentityRemovalRaceConverges(t *tes
 	}
 	cityRuntime := &CityRuntime{}
 	var calls int
-	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
 		calls++
 		census, candidate, buildErr := buildObservedSessionWaitDependencyIndex(beads.SessionStore{Store: cache})
 		if buildErr != nil {
@@ -2958,7 +2952,7 @@ func TestSessionWaitDependencyShadowBootstrapIdentityRemovalRaceConverges(t *tes
 			return sessionWaitShadowConverged
 		}
 		return sessionWaitShadowRetry
-	}, cityRuntime.sessionWaitDependencyContainsWait); err != nil {
+	}, cityRuntime.sessionWaitDependencyContainsWait, nil); err != nil {
 		t.Fatalf("install admission: %v", err)
 	}
 	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)

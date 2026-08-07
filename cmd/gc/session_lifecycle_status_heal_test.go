@@ -1,13 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"errors"
-	"go/ast"
-	"go/format"
-	"go/parser"
-	"go/token"
-	"os"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
@@ -19,174 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
-// TestSessionLifecycleStatusHealProductionWiring is a deliberately bounded
-// cutover canary for the helper and its two production callers.
-func TestSessionLifecycleStatusHealProductionWiring(t *testing.T) {
-	const (
-		applyName   = "applySessionLifecycleStatusHeal"
-		plannerName = "planSessionLifecycleStatus"
-		writerName  = "healStateWithRollbackInfo"
-	)
-	wantRefs := map[string]map[string]int{
-		"session_lifecycle_status_heal.go": {
-			applyName:   1, // declaration
-			plannerName: 1, // direct call
-			writerName:  1, // direct call
-		},
-		"session_reconciler.go": {
-			applyName: 2, // the orphan and desired direct calls
-		},
-	}
-	wantDirectCalls := map[string]map[string]int{
-		"session_lifecycle_status_heal.go": {
-			plannerName: 1,
-			writerName:  1,
-		},
-		"session_reconciler.go": {
-			applyName: 2,
-		},
-	}
-	wantContexts := map[string]map[string]string{
-		"sessionLifecycleStatusHealSiteOrphan": {
-			"Site":              "sessionLifecycleStatusHealSiteOrphan",
-			"RuntimeObserved":   "livenessErr == nil",
-			"RuntimeAlive":      "providerAlive",
-			"RollbackAvailable": "!storeQueryPartial",
-		},
-		"sessionLifecycleStatusHealSiteDesired": {
-			"Site":              "sessionLifecycleStatusHealSiteDesired",
-			"RuntimeObserved":   `sp != nil && strings.TrimSpace(name) != ""`,
-			"RuntimeAlive":      "alive",
-			"RollbackAvailable": "true",
-		},
-	}
-	seenContexts := make(map[string]int, len(wantContexts))
-
-	for _, filename := range []string{"session_lifecycle_status_heal.go", "session_reconciler.go"} {
-		source, err := os.ReadFile(filename)
-		if err != nil {
-			t.Fatalf("read %s: %v", filename, err)
-		}
-		fset := token.NewFileSet()
-		parsed, err := parser.ParseFile(fset, filename, source, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", filename, err)
-		}
-		if filename == "session_lifecycle_status_heal.go" {
-			helperCalls := make(map[string]int)
-			helperDecls := 0
-			for _, declaration := range parsed.Decls {
-				fn, ok := declaration.(*ast.FuncDecl)
-				if !ok || fn.Name.Name != applyName {
-					continue
-				}
-				helperDecls++
-				ast.Inspect(fn.Body, func(node ast.Node) bool {
-					call, ok := node.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					callee, ok := call.Fun.(*ast.Ident)
-					if ok && (callee.Name == plannerName || callee.Name == writerName) {
-						helperCalls[callee.Name]++
-					}
-					return true
-				})
-			}
-			if helperDecls != 1 || !reflect.DeepEqual(helperCalls, wantDirectCalls[filename]) {
-				t.Fatalf("%s helper declarations/calls = %d/%#v, want 1/%#v", filename, helperDecls, helperCalls, wantDirectCalls[filename])
-			}
-		}
-		refs := make(map[string]int)
-		directCalls := make(map[string]int)
-		ast.Inspect(parsed, func(node ast.Node) bool {
-			if ident, ok := node.(*ast.Ident); ok {
-				switch ident.Name {
-				case applyName, plannerName, writerName:
-					refs[ident.Name]++
-				}
-			}
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			callee, ok := call.Fun.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			switch callee.Name {
-			case applyName, plannerName, writerName:
-				directCalls[callee.Name]++
-			default:
-				return true
-			}
-			if filename != "session_reconciler.go" || callee.Name != applyName {
-				return true
-			}
-			if len(call.Args) != 7 {
-				t.Fatalf("%s apply helper arguments = %d, want exact seven-argument wiring", filename, len(call.Args))
-			}
-			contextLiteral, ok := call.Args[2].(*ast.CompositeLit)
-			if !ok {
-				t.Fatalf("%s apply helper argument 3 = %T, want sessionLifecycleStatusHealContext literal", filename, call.Args[2])
-			}
-			contextType, ok := contextLiteral.Type.(*ast.Ident)
-			if !ok || contextType.Name != "sessionLifecycleStatusHealContext" {
-				t.Fatalf("%s apply helper argument 3 type = %#v, want sessionLifecycleStatusHealContext", filename, contextLiteral.Type)
-			}
-			var remainingArgs []string
-			for _, argument := range call.Args[3:] {
-				var rendered bytes.Buffer
-				if err := format.Node(&rendered, fset, argument); err != nil {
-					t.Fatalf("format %s apply helper argument: %v", filename, err)
-				}
-				remainingArgs = append(remainingArgs, rendered.String())
-			}
-			wantRemainingArgs := []string{"sessFront", "clk", "startupTimeout", "reconcileOpts.statusComparisonObserver"}
-			if !reflect.DeepEqual(remainingArgs, wantRemainingArgs) {
-				t.Fatalf("%s apply helper trailing arguments = %#v, want %#v", filename, remainingArgs, wantRemainingArgs)
-			}
-			fields := make(map[string]string, len(contextLiteral.Elts))
-			for _, element := range contextLiteral.Elts {
-				field, ok := element.(*ast.KeyValueExpr)
-				if !ok {
-					t.Fatalf("%s context element = %T, want keyed field", filename, element)
-				}
-				key, ok := field.Key.(*ast.Ident)
-				if !ok {
-					t.Fatalf("%s context key = %T, want identifier", filename, field.Key)
-				}
-				var rendered bytes.Buffer
-				if err := format.Node(&rendered, fset, field.Value); err != nil {
-					t.Fatalf("format %s context field %s: %v", filename, key.Name, err)
-				}
-				fields[key.Name] = rendered.String()
-			}
-			site := fields["Site"]
-			want, ok := wantContexts[site]
-			if !ok {
-				t.Fatalf("%s context site = %q, want orphan or desired", filename, site)
-			}
-			if !reflect.DeepEqual(fields, want) {
-				t.Fatalf("%s %s context = %#v, want %#v", filename, site, fields, want)
-			}
-			seenContexts[site]++
-			return true
-		})
-		if !reflect.DeepEqual(refs, wantRefs[filename]) {
-			t.Fatalf("%s identifier references = %#v, want exact declaration/direct-call refs %#v", filename, refs, wantRefs[filename])
-		}
-		if !reflect.DeepEqual(directCalls, wantDirectCalls[filename]) {
-			t.Fatalf("%s direct calls = %#v, want %#v", filename, directCalls, wantDirectCalls[filename])
-		}
-	}
-	for site := range wantContexts {
-		if seenContexts[site] != 1 {
-			t.Fatalf("%s context count = %d, want 1", site, seenContexts[site])
-		}
-	}
-}
-
 func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -196,12 +23,10 @@ func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) 
 		lastWokeAt     time.Duration
 		wantPatch      sessionpkg.MetadataPatch
 		wantClearLease bool
-		wantCandidate  sessionLifecycleStatusPlan
 	}{
 		{
 			name: "orphan stale creating with partial store inventory preserves lease",
 			context: sessionLifecycleStatusHealContext{
-				Site:              sessionLifecycleStatusHealSiteOrphan,
 				RuntimeObserved:   true,
 				RuntimeAlive:      false,
 				RollbackAvailable: false,
@@ -209,18 +34,10 @@ func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) 
 			wantPatch: sessionpkg.MetadataPatch{
 				"state": string(sessionpkg.StateStartPending),
 			},
-			wantCandidate: sessionLifecycleStatusPlan{
-				Outcome: sessionLifecycleStatusHeal,
-				Reason:  sessionLifecycleStatusReasonHeal,
-				Patch: sessionpkg.MetadataPatch{
-					"state": string(sessionpkg.StateStartPending),
-				},
-			},
 		},
 		{
 			name: "desired stale creating with complete store inventory rolls back",
 			context: sessionLifecycleStatusHealContext{
-				Site:              sessionLifecycleStatusHealSiteDesired,
 				RuntimeObserved:   true,
 				RuntimeAlive:      false,
 				RollbackAvailable: true,
@@ -238,27 +55,10 @@ func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) 
 				"started_config_hash":        "",
 				"state":                      string(sessionpkg.StateAsleep),
 			},
-			wantCandidate: sessionLifecycleStatusPlan{
-				Outcome: sessionLifecycleStatusHeal,
-				Reason:  sessionLifecycleStatusReasonHeal,
-				Patch: sessionpkg.MetadataPatch{
-					"continuation_reset_pending": "true",
-					"pending_create_claim":       "",
-					"pending_create_started_at":  "",
-					"primed_at":                  "",
-					"priming_attempted_at":       "",
-					"prompt_hash":                "",
-					"session_key":                "",
-					"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
-					"started_config_hash":        "",
-					"state":                      string(sessionpkg.StateAsleep),
-				},
-			},
 		},
 		{
 			name: "desired configured startup timeout preserves in-flight lease",
 			context: sessionLifecycleStatusHealContext{
-				Site:              sessionLifecycleStatusHealSiteDesired,
 				RuntimeObserved:   true,
 				RuntimeAlive:      false,
 				RollbackAvailable: true,
@@ -267,13 +67,6 @@ func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) 
 			lastWokeAt:     -90 * time.Second,
 			wantPatch: sessionpkg.MetadataPatch{
 				"state": string(sessionpkg.StateAsleep),
-			},
-			wantCandidate: sessionLifecycleStatusPlan{
-				Outcome: sessionLifecycleStatusHeal,
-				Reason:  sessionLifecycleStatusReasonHeal,
-				Patch: sessionpkg.MetadataPatch{
-					"state": string(sessionpkg.StateAsleep),
-				},
 			},
 		},
 	}
@@ -291,15 +84,12 @@ func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) 
 			info, front := statusHealFixture(t, "status-heal", now.Add(-20*time.Minute), metadata)
 			tick := newReconcileTick([]sessionpkg.Info{info})
 			clk := &clock.Fake{Time: now}
-			var comparisons []sessionLifecycleStatusComparison
 
-			got, err := applySessionLifecycleStatusHeal(tick, info.ID, tt.context, front, clk, tt.startupTimeout, func(comparison sessionLifecycleStatusComparison) {
-				comparisons = append(comparisons, comparison)
-			})
+			got, err := applySessionLifecycleStatusHeal(tick, info.ID, tt.context, front, clk, tt.startupTimeout)
 			if err != nil {
 				t.Fatalf("apply status heal: %v", err)
 			}
-			if !sameSessionLifecycleStatusPatch(got, tt.wantPatch) {
+			if !maps.Equal(got, tt.wantPatch) {
 				t.Fatalf("legacy patch = %#v, want %#v", got, tt.wantPatch)
 			}
 			for _, key := range []string{"pending_create_claim", "pending_create_started_at"} {
@@ -321,14 +111,6 @@ func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) 
 			}
 			if !reflect.DeepEqual(persisted, wantInfo) {
 				t.Fatalf("persisted reread = %#v, want %#v", persisted, wantInfo)
-			}
-			if len(comparisons) != 1 {
-				t.Fatalf("comparisons = %#v, want one", comparisons)
-			}
-			gotComparison := comparisons[0]
-			tt.wantCandidate.SessionID = info.ID
-			if gotComparison.Site != tt.context.Site || gotComparison.Outcome != sessionLifecycleStatusComparisonMatched || gotComparison.Reason != sessionLifecycleStatusComparisonReasonEquivalent || !reflect.DeepEqual(gotComparison.Candidate, tt.wantCandidate) || !reflect.DeepEqual(gotComparison.LegacyPatch, tt.wantPatch) {
-				t.Fatalf("comparison = %#v, want site=%q matched/equivalent candidate=%#v legacy=%#v", gotComparison, tt.context.Site, tt.wantCandidate, tt.wantPatch)
 			}
 		})
 	}
@@ -375,24 +157,17 @@ func TestApplySessionLifecycleStatusHealRejectsInvalidTickIdentity(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			beforeInfo, beforeExists := tt.tick.infoByID[tt.request]
 			beforeLen := len(tt.tick.infoByID)
-			observerCalls := 0
 
 			patch, err := applySessionLifecycleStatusHeal(tt.tick, tt.request, sessionLifecycleStatusHealContext{
-				Site:              sessionLifecycleStatusHealSiteDesired,
 				RuntimeObserved:   true,
 				RuntimeAlive:      true,
 				RollbackAvailable: true,
-			}, front, &clock.Fake{Time: now}, 0, func(sessionLifecycleStatusComparison) {
-				observerCalls++
-			})
+			}, front, &clock.Fake{Time: now}, 0)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErrContains) {
 				t.Fatalf("error = %v, want substring %q", err, tt.wantErrContains)
 			}
 			if patch != nil {
 				t.Fatalf("patch = %#v, want nil", patch)
-			}
-			if observerCalls != 0 {
-				t.Fatalf("observer calls = %d, want 0", observerCalls)
 			}
 			if writer.attempts != 0 {
 				t.Fatalf("writer attempts = %d, want 0", writer.attempts)
@@ -421,21 +196,17 @@ func TestApplySessionLifecycleStatusHealUnknownRuntimeKeepsLegacyWriter(t *testi
 		"state": string(sessionpkg.StateAsleep),
 	})
 	tick := newReconcileTick([]sessionpkg.Info{info})
-	var comparisons []sessionLifecycleStatusComparison
 
 	patch, err := applySessionLifecycleStatusHeal(tick, info.ID, sessionLifecycleStatusHealContext{
-		Site:              sessionLifecycleStatusHealSiteOrphan,
 		RuntimeObserved:   false,
 		RuntimeAlive:      true,
 		RollbackAvailable: false,
-	}, front, &clock.Fake{Time: now}, 0, func(comparison sessionLifecycleStatusComparison) {
-		comparisons = append(comparisons, comparison)
-	})
+	}, front, &clock.Fake{Time: now}, 0)
 	if err != nil {
 		t.Fatalf("apply unknown-runtime status heal: %v", err)
 	}
 	if patch["state"] != string(sessionpkg.StateAwake) {
-		t.Fatalf("legacy patch = %#v, want state=awake despite parked candidate", patch)
+		t.Fatalf("legacy patch = %#v, want state=awake", patch)
 	}
 	if tick.infoByID[info.ID].MetadataState != string(sessionpkg.StateAwake) {
 		t.Fatalf("tick state = %q, want awake legacy patch folded", tick.infoByID[info.ID].MetadataState)
@@ -446,14 +217,6 @@ func TestApplySessionLifecycleStatusHealUnknownRuntimeKeepsLegacyWriter(t *testi
 	}
 	if !reflect.DeepEqual(persisted, tick.infoByID[info.ID]) {
 		t.Fatalf("persisted reread = %#v, want folded legacy awake state %#v", persisted, tick.infoByID[info.ID])
-	}
-	if len(comparisons) != 1 {
-		t.Fatalf("comparison count = %d, want 1", len(comparisons))
-	}
-	if comparisons[0].Candidate.Outcome != sessionLifecycleStatusPark ||
-		comparisons[0].Outcome != sessionLifecycleStatusComparisonIncomparable ||
-		comparisons[0].Reason != sessionLifecycleStatusComparisonReasonShadowParked {
-		t.Fatalf("comparison = %+v, want parked/incomparable", comparisons[0])
 	}
 }
 
@@ -473,11 +236,10 @@ func TestApplySessionLifecycleStatusHealWriteFailureDoesNotFold(t *testing.T) {
 	before := tick.infoByID[info.ID]
 
 	patch, err := applySessionLifecycleStatusHeal(tick, info.ID, sessionLifecycleStatusHealContext{
-		Site:              sessionLifecycleStatusHealSiteDesired,
 		RuntimeObserved:   true,
 		RuntimeAlive:      true,
 		RollbackAvailable: true,
-	}, front, &clock.Fake{Time: now}, 0, nil)
+	}, front, &clock.Fake{Time: now}, 0)
 	if err == nil {
 		t.Fatal("apply status heal error = nil, want apply-then-error failure")
 	}

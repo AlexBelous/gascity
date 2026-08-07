@@ -186,18 +186,18 @@ func sessionReconcilerColdDisableProveOffSuccessor(t *testing.T, cityDir, retire
 	if identity := sessionWaitDependencyShadowJourneyTmuxIdentity(t, cityDir, duringOff.SessionName); identity == "" {
 		t.Fatal("during-off runtime identity is empty")
 	}
-	trace, _, err := sessionLifecycleStatusShadowJourneyWaitForWitness(t.Context(), cityDir, duringOff.SessionID, status.HeadSeq, 15*time.Second, "off-successor start-selection", sessionReconcilerColdDisableFirstShadowRecord)
+	trace, _, err := sessionLifecycleStatusShadowJourneyWaitForWitness(t.Context(), cityDir, duringOff.SessionID, status.HeadSeq, 15*time.Second, "off-successor legacy start", sessionReconcilerColdDisableFirstLegacyStartRecord)
 	if err != nil {
-		t.Fatalf("off-successor START-shadow comparison did not converge: %v", err)
+		t.Fatalf("off-successor legacy start did not converge: %v", err)
 	}
-	shadows := sessionReconcilerColdDisableShadowRecords(trace, duringOff.SessionID, status.HeadSeq)
-	if len(shadows) == 0 || shadows[0].ControllerInstanceID == "" || shadows[0].ControllerInstanceID == retiredGeneration {
-		t.Fatalf("off-successor START-shadow records = %+v, want a successor generation distinct from %q", shadows, retiredGeneration)
+	starts := sessionReconcilerColdDisableLegacyStartRecords(trace, duringOff.SessionID, status.HeadSeq)
+	if len(starts) == 0 || starts[0].ControllerInstanceID == "" || starts[0].ControllerInstanceID == retiredGeneration {
+		t.Fatalf("off-successor legacy start records = %+v, want a successor generation distinct from %q", starts, retiredGeneration)
 	}
-	offGeneration := shadows[0].ControllerInstanceID
-	for _, shadow := range shadows[1:] {
-		if shadow.ControllerInstanceID != offGeneration {
-			t.Fatalf("off-successor START-shadow generations = %+v, want only %q", shadows, offGeneration)
+	offGeneration := starts[0].ControllerInstanceID
+	for _, start := range starts[1:] {
+		if start.ControllerInstanceID != offGeneration {
+			t.Fatalf("off-successor legacy start generations = %+v, want only %q", starts, offGeneration)
 		}
 	}
 	if got := sessionReconcilerColdDisableShadowCount(t, cityDir, retiredGeneration); got != retiredShadowCount {
@@ -383,18 +383,22 @@ func sessionReconcilerColdDisableEmitSessionUpdate(t *testing.T, cityDir, sessio
 	}
 }
 
-func sessionReconcilerColdDisableShadowRecords(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, afterSeq uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
+// sessionReconcilerColdDisableLegacyStartRecords finds the legacy start the
+// off-mode successor executed for one session. Under "off" the keyed
+// controller owns nothing, so this is the record that carries the successor's
+// controller generation.
+func sessionReconcilerColdDisableLegacyStartRecords(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, afterSeq uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
 	var matches []sessionWaitDependencyShadowJourneyTraceRecord
 	for _, record := range trace.Records {
-		if record.Seq > afterSeq && record.SiteCode == "lifecycle.start_selection.shadow" && record.Fields.SessionID == sessionID {
+		if record.Seq > afterSeq && record.SiteCode == "reconciler.start.execute" && record.Fields.SessionID == sessionID {
 			matches = append(matches, record)
 		}
 	}
 	return matches
 }
 
-func sessionReconcilerColdDisableFirstShadowRecord(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, afterSeq uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
-	matches := sessionReconcilerColdDisableShadowRecords(trace, sessionID, afterSeq)
+func sessionReconcilerColdDisableFirstLegacyStartRecord(trace sessionWaitDependencyShadowJourneyTraceShow, sessionID string, afterSeq uint64) []sessionWaitDependencyShadowJourneyTraceRecord {
+	matches := sessionReconcilerColdDisableLegacyStartRecords(trace, sessionID, afterSeq)
 	if len(matches) == 0 {
 		return nil
 	}

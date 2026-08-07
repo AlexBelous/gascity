@@ -1470,19 +1470,6 @@ func sessionWaitDependencyShadowJourneyExactRecords(
 	return matches
 }
 
-func sessionWaitDependencyShadowJourneyRoutedWorkDemandRecords(
-	trace sessionWaitDependencyShadowJourneyTraceShow,
-	workID string,
-) []sessionWaitDependencyShadowJourneyTraceRecord {
-	var matches []sessionWaitDependencyShadowJourneyTraceRecord
-	for _, record := range trace.Records {
-		if record.SiteCode == "pool_demand.contribution.shadow" && record.Fields.WorkID == workID {
-			matches = append(matches, record)
-		}
-	}
-	return matches
-}
-
 func sessionWaitDependencyShadowJourneyPoolMaterializationRecords(
 	trace sessionWaitDependencyShadowJourneyTraceShow,
 	workID string,

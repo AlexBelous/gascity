@@ -342,6 +342,143 @@ func TestProviderInvalidateLivenessForcesFreshSnapshot(t *testing.T) {
 	}
 }
 
+func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T) {
+	completedScan := func(string) exactProcessScan {
+		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
+	}
+	liveSession := runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{
+			"agent-1": {Running: true, Panes: []paneRuntimeState{{Command: "bash", PID: "101"}}},
+		},
+		Processes:          newProcessSnapshot([]processRuntimeState{{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"}}),
+		ProcessesAvailable: true,
+	}
+
+	t.Run("complete empty snapshot", func(t *testing.T) {
+		cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}}, time.Hour)
+		cache.setScanBySessionID(completedScan)
+		provider := &Provider{cache: cache}
+
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
+		if got.Running || got.Alive || !got.Complete {
+			t.Fatalf("ObserveFreshLiveness = %#v, want complete absence", got)
+		}
+	})
+
+	t.Run("refreshes a cached empty snapshot", func(t *testing.T) {
+		fetcher := &mockFetcher{state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}}
+		cache := NewStateCache(fetcher, time.Hour)
+		cache.setScanBySessionID(completedScan)
+		provider := &Provider{cache: cache}
+		if provider.IsRunning("agent-1") {
+			t.Fatal("initial cache unexpectedly reports agent-1 running")
+		}
+		fetcher.mu.Lock()
+		fetcher.state = liveSession
+		fetcher.mu.Unlock()
+
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1", ProcessNames: []string{"codex"}})
+		if !got.Running || !got.Alive || !got.Complete {
+			t.Fatalf("ObserveFreshLiveness = %#v, want complete live observation", got)
+		}
+		if calls := fetcher.getCalls(); calls != 2 {
+			t.Fatalf("fetch calls = %d, want cached prime plus forced refresh", calls)
+		}
+	})
+
+	t.Run("no server and degraded process detail are incomplete", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			state runtimeStateSnapshot
+			err   error
+		}{
+			{name: "unprimed no server", err: ErrNoServer},
+			{name: "primed no server", state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}, err: ErrNoServer},
+			{name: "degraded process snapshot", state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{"agent-1": {Running: true}}, ProcessesAvailable: false}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fetcher := &mockFetcher{state: tc.state, err: tc.err}
+				cache := NewStateCache(fetcher, time.Hour)
+				cache.setScanBySessionID(completedScan)
+				provider := &Provider{cache: cache}
+				if tc.name == "primed no server" {
+					cache.state = runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}
+					cache.fetchedAt = time.Now()
+				}
+
+				got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1", ProcessNames: []string{"codex"}})
+				if got.Complete {
+					t.Fatalf("ObserveFreshLiveness = %#v, want incomplete observation", got)
+				}
+			})
+		}
+	})
+
+	t.Run("absent pane does not require unavailable process detail", func(t *testing.T) {
+		cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{
+			Sessions:           map[string]sessionRuntimeState{},
+			ProcessesAvailable: false,
+		}}, time.Hour)
+		cache.setScanBySessionID(completedScan)
+		provider := &Provider{cache: cache}
+
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1", ProcessNames: []string{"codex"}})
+		if got.Running || got.Alive || !got.Complete {
+			t.Fatalf("ObserveFreshLiveness = %#v, want complete absence without a named pane", got)
+		}
+	})
+
+	t.Run("exact session scan is positive and partial scans remain incomplete", func(t *testing.T) {
+		cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}}, time.Hour)
+		cache.setScanBySessionID(func(id string) exactProcessScan {
+			if id != "sid-1" {
+				t.Fatalf("scan session ID = %q, want sid-1", id)
+			}
+			return exactProcessScan{
+				runtimes: []gcruntime.LiveRuntime{{SessionID: id, PID: 42}},
+				complete: true,
+			}
+		})
+		provider := &Provider{cache: cache}
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
+		if !got.Running || !got.Alive || !got.Complete {
+			t.Fatalf("exact-ID process observation = %#v, want complete live", got)
+		}
+
+		cache.setScanBySessionID(func(string) exactProcessScan {
+			return exactProcessScan{}
+		})
+		got = provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
+		if got.Complete {
+			t.Fatalf("partial process scan = %#v, want incomplete", got)
+		}
+	})
+}
+
+func TestProviderObserveFreshLivenessLastSessionUsesDrainedServerAbsence(t *testing.T) {
+	exec := &fakeExecutor{
+		outs: []string{"agent-1\t0\tclaude\t123", ""},
+		errs: []error{nil, ErrNoCurrentTarget},
+	}
+	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: exec}}, time.Hour)
+	cache.setScanBySessionID(func(string) exactProcessScan {
+		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
+	})
+	provider := &Provider{cache: cache}
+
+	if !provider.IsRunning("agent-1") {
+		t.Fatal("prime: expected agent-1 to be running")
+	}
+
+	got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{
+		SessionID:   "sid-1",
+		SessionName: "agent-1",
+	})
+	if got.Running || got.Alive || !got.Complete {
+		t.Fatalf("ObserveFreshLiveness = %#v, want complete absence on a live drained server", got)
+	}
+}
+
 // FetchState must report an unreachable tmux server as an observation FAILURE
 // (runtime.ErrRuntimeUnavailable), not as an empty success. The empty-success
 // form let refresh() overwrite last-known-good and instantly report every

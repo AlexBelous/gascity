@@ -17,6 +17,7 @@ func buildFakeProc(t *testing.T, root string, pid int, env map[string]string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
+	writeFakeProcessUID(t, dir, os.Geteuid())
 	var buf []byte
 	for k, v := range env {
 		buf = append(buf, []byte(k+"="+v+"\x00")...)
@@ -31,6 +32,14 @@ func buildFakeProc(t *testing.T, root string, pid int, env map[string]string) {
 	}
 }
 
+func writeFakeProcessUID(t *testing.T, dir string, uid int) {
+	t.Helper()
+	status := []byte("Name:\ttest\nUid:\t" + strconv.Itoa(uid) + "\t" + strconv.Itoa(uid) + "\t" + strconv.Itoa(uid) + "\t" + strconv.Itoa(uid) + "\n")
+	if err := os.WriteFile(filepath.Join(dir, "status"), status, 0o644); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+}
+
 func TestScanWithRootStatVanished(t *testing.T) {
 	root := t.TempDir()
 	pid := 500
@@ -38,6 +47,7 @@ func TestScanWithRootStatVanished(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	writeFakeProcessUID(t, dir, os.Geteuid())
 	// Write environ but no stat file (process died between environ read and stat check).
 	env := []byte("GC_SESSION_ID=ga-test\x00")
 	if err := os.WriteFile(filepath.Join(dir, "environ"), env, 0o644); err != nil {
@@ -163,11 +173,49 @@ func TestScanWithRootMissingEnvironSkipped(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	writeFakeProcessUID(t, dir, os.Geteuid())
 	got, err := scanWithRoot(root, "")
 	if err != nil {
 		t.Fatalf("scanWithRoot error: %v", err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("got %d entries, want 0", len(got))
+	}
+}
+
+func TestScanWithRootUnreadableEnvironReportsPartialScan(t *testing.T) {
+	root := t.TempDir()
+	unrelated := filepath.Join(root, "401")
+	if err := os.MkdirAll(unrelated, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFakeProcessUID(t, unrelated, os.Geteuid()+1)
+	if err := os.WriteFile(filepath.Join(unrelated, "environ"), []byte("GC_SESSION_ID=ga-hidden\x00"), 0o000); err != nil {
+		t.Fatalf("write environ: %v", err)
+	}
+
+	got, err := scanWithRoot(root, "ga-hidden")
+	if err != nil {
+		t.Fatalf("unreadable unrelated process made scan incomplete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("unrelated scan returned %d runtimes, want 0", len(got))
+	}
+
+	relevant := filepath.Join(root, "402")
+	if err := os.MkdirAll(relevant, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFakeProcessUID(t, relevant, os.Geteuid())
+	if err := os.WriteFile(filepath.Join(relevant, "environ"), []byte("GC_SESSION_ID=ga-hidden\x00"), 0o000); err != nil {
+		t.Fatalf("write environ: %v", err)
+	}
+
+	got, err = scanWithRoot(root, "ga-hidden")
+	if err == nil {
+		t.Fatalf("scanWithRoot = %v, nil error; want an incomplete-scan error", got)
+	}
+	if len(got) != 0 {
+		t.Fatalf("scanWithRoot returned %d runtimes, want no unverified result", len(got))
 	}
 }

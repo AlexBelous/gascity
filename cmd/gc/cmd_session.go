@@ -2328,6 +2328,10 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 // Tests that swap it MUST NOT call t.Parallel().
 var sessionKillPokeController = pokeController
 
+// sessionKillExactStartController is a mutable test seam over the keyed start
+// admission path. Tests that swap it MUST NOT call t.Parallel().
+var sessionKillExactStartController = pokeSessionStartController
+
 // cmdSessionKill is the CLI entry point for "gc session kill".
 func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
 	asJSON := sessionJSONRequested(jsonOutput)
@@ -2405,12 +2409,31 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	// kill leaves behind (#3629). Written here at the CLI layer rather than in
 	// Manager.Kill so the drain-ack async-stop path (verifiedStop ->
 	// handle.Kill -> Manager.Kill) keeps owning its own lifecycle state.
+	exactHandoff := false
 	if infoErr == nil {
 		now := time.Now().UTC()
 		patch := session.SleepPatch(now, "killed")
 		patch["synced_at"] = now.Format(time.RFC3339)
+		if current, getErr := sessionFrontDoor(sessStore).Get(sessionID); getErr == nil && cfg != nil {
+			identity := namedSessionIdentityInfo(current)
+			cityName := loadedCityName(cfg, cityPath)
+			spec, found := findNamedSessionSpec(cfg, cityName, identity)
+			if found && spec.Mode == "always" && isNamedSessionInfo(current) &&
+				namedSessionModeInfo(current) == "always" && strings.TrimSpace(current.SessionOrigin) == "named" &&
+				strings.TrimSpace(current.SessionNameMetadata) == spec.SessionName &&
+				normalizedSessionTemplateInfo(current, cfg) == namedSessionBackingTemplate(spec) {
+				canonical, canonicalFound, canonicalErr := session.FindCanonicalConfiguredNamedSessionBead(sessStore, spec)
+				if canonicalErr == nil && canonicalFound && canonical.ID == sessionID {
+					for key, value := range session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), now) {
+						patch[key] = value
+					}
+					exactHandoff = true
+				}
+			}
+		}
 		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+			exactHandoff = false
 		}
 	}
 
@@ -2421,7 +2444,11 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	// unconditional: a poke failure (e.g. no controller running) is non-fatal,
 	// and a spurious poke when the asleep sync was skipped is harmless — the
 	// reconciler observes unchanged state and continues.
-	if err := sessionKillPokeController(cityPath); err != nil {
+	if exactHandoff {
+		if err := sessionKillExactStartController(cityPath, sessionID); err != nil {
+			fmt.Fprintf(stderr, "gc session kill: warning: exact start handoff failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	} else if err := sessionKillPokeController(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 

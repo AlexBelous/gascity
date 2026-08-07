@@ -1193,8 +1193,25 @@ func prependPath(paths ...string) string {
 func newIsolatedToolEnv(t *testing.T, useDolt bool) []string {
 	t.Helper()
 
-	_, _, env := newIsolatedEnvRoot(t, useDolt)
-	return env
+	gcHome, _, env := newIsolatedEnvRoot(t, useDolt)
+	// bd's ResolveServerMode checks a global ~/.beads/config.yaml
+	// dolt.shared-server setting BEFORE consulting workspace-local
+	// --server-host/--server-port flags (steveyegge/beads
+	// internal/doltserver/servermode.go). A real dev machine with that
+	// config set can silently redirect these tests' `bd` subprocesses
+	// onto an unrelated shared server lacking the expected database —
+	// surfacing as the same "not found on Dolt server at" text as the
+	// genuine post-init visibility race. Isolating HOME closes that
+	// off; mirrors the idiom already proven in standaloneBdEnv.
+	//
+	// Only safe at this bd-subprocess-only boundary: a non-delegated
+	// `gc supervisor start` refuses to run under a HOME override
+	// (platformSupervisorHomeOverrideError in
+	// cmd/gc/cmd_supervisor_lifecycle.go) because the platform
+	// supervisor requires the real HOME. newIsolatedCommandEnv starts
+	// that supervisor, so it reads env straight from newIsolatedEnvRoot
+	// and must never route through this helper.
+	return replaceEnv(env, "HOME", gcHome)
 }
 
 func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
@@ -1250,16 +1267,6 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 		t.Fatalf("writing isolated dolt config: %v", err)
 	}
 	env := integrationEnvFor(gcHome, runtimeDir, useDolt)
-	// bd's ResolveServerMode checks a global ~/.beads/config.yaml
-	// dolt.shared-server setting BEFORE consulting workspace-local
-	// --server-host/--server-port flags (steveyegge/beads
-	// internal/doltserver/servermode.go). A real dev machine with that
-	// config set can silently redirect these tests' `bd` subprocesses
-	// onto an unrelated shared server lacking the expected database —
-	// surfacing as the same "not found on Dolt server at" text as the
-	// genuine post-init visibility race. Isolating HOME closes that
-	// off; mirrors the idiom already proven in standaloneBdEnv.
-	env = replaceEnv(env, "HOME", gcHome)
 	return gcHome, runtimeDir, env
 }
 

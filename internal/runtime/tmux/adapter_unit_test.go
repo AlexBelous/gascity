@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -61,10 +62,11 @@ func TestBuildLaunchCommandColorWrapsLongPromptCommand(t *testing.T) {
 
 func TestProviderAttachRefusesDeadPane(t *testing.T) {
 	fe := &fakeExecutor{
-		outs: []string{"", "1"},
+		outs: []string{"41", "", "1"},
 	}
 	p := NewProviderWithConfig(Config{SocketName: "x"})
 	p.tm.exec = fe
+	p.tm.namedSocketLstat = stableNamedSocketLstat(t)
 
 	err := p.Attach("runner")
 	if err == nil {
@@ -82,10 +84,12 @@ func TestProviderAttachRefusesDeadPane(t *testing.T) {
 
 func TestProviderAttachMissingSessionWrapsRuntimeSentinel(t *testing.T) {
 	fe := &fakeExecutor{
-		err: ErrSessionNotFound,
+		outs: []string{"41", "", "41"},
+		errs: []error{nil, ErrSessionNotFound, nil},
 	}
 	p := NewProviderWithConfig(Config{SocketName: "x"})
 	p.tm.exec = fe
+	p.tm.namedSocketLstat = stableNamedSocketLstat(t)
 
 	err := p.Attach("runner")
 	if !errors.Is(err, runtime.ErrSessionNotFound) {
@@ -357,10 +361,12 @@ func TestListSessionsAbsorbsNoServer(t *testing.T) {
 
 func TestProviderAttachReportsHasSessionError(t *testing.T) {
 	fe := &fakeExecutor{
-		err: errors.New("tmux unavailable"),
+		outs: []string{"41"},
+		errs: []error{nil, errors.New("tmux unavailable")},
 	}
 	p := NewProviderWithConfig(Config{SocketName: "x"})
 	p.tm.exec = fe
+	p.tm.namedSocketLstat = stableNamedSocketLstat(t)
 
 	err := p.Attach("runner")
 	if err == nil {
@@ -379,12 +385,13 @@ func TestProviderAttachReportsHasSessionError(t *testing.T) {
 func TestProviderAttachNamedSocketNoServerPreflightRefusesBeforeLaunchingTmux(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		observation error
+		observation namedSocketObservation
+		lstatErr    error
 		want        string
 	}{
-		{name: "missing-or-stale", want: "socket absent or stale"},
-		{name: "live-socket-observation", observation: errors.New("live-unix-socket"), want: "live-unix-socket"},
-		{name: "ambiguous-observation", observation: errors.New("permission denied"), want: "permission denied"},
+		{name: "missing", lstatErr: os.ErrNotExist, want: "reason=socket-missing"},
+		{name: "non-socket", want: "reason=not-unix-socket"},
+		{name: "stat-error", lstatErr: os.ErrPermission, want: "reason=socket-lstat"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir := t.TempDir()
@@ -394,14 +401,18 @@ func TestProviderAttachNamedSocketNoServerPreflightRefusesBeforeLaunchingTmux(t 
 				t.Fatalf("write fake tmux: %v", err)
 			}
 			t.Setenv("PATH", binDir)
+			node := stableNamedSocketNode(t)
+			if tc.name == "non-socket" {
+				tc.observation = namedSocketObservation{node: node}
+			}
 
 			p := NewProviderWithConfig(Config{SocketName: "city-socket"})
 			p.tm.exec = &fakeExecutor{
 				outs: []string{"", "", ""},
 				errs: []error{nil, nil, ErrNoServer},
 			}
-			p.tm.serverSocketObserver = func(context.Context, string) error {
-				return tc.observation
+			p.tm.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+				return tc.observation, tc.lstatErr
 			}
 
 			err := p.Attach("runner")
@@ -417,8 +428,8 @@ func TestProviderAttachNamedSocketNoServerPreflightRefusesBeforeLaunchingTmux(t 
 				t.Fatalf("read fake tmux invocations: %v", readErr)
 			}
 
-			if got := len(p.tm.exec.(*fakeExecutor).calls); got != 3 {
-				t.Fatalf("tmux preflight calls = %d, want has-session, pane check, and socket probe", got)
+			if got := len(p.tm.exec.(*fakeExecutor).calls); got != 0 {
+				t.Fatalf("tmux calls = %d, want none after initial injected witness refusal", got)
 			}
 		})
 	}
@@ -426,61 +437,82 @@ func TestProviderAttachNamedSocketNoServerPreflightRefusesBeforeLaunchingTmux(t 
 
 func TestNamedSocketAttachPreflightRefusesUnavailableServer(t *testing.T) {
 	newTmux := func(errs []error) *Tmux {
-		return &Tmux{
+		tm := &Tmux{
 			cfg:  Config{SocketName: "gc-test"},
 			exec: &fakeExecutor{errs: errs},
-			serverSocketObserver: func(context.Context, string) error {
-				return nil
-			},
 		}
+		tm.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+			return namedSocketObservation{}, os.ErrNotExist
+		}
+		return tm
 	}
 
 	t.Run("direct", func(t *testing.T) {
-		tm := newTmux([]error{ErrNoServer})
+		tm := newTmux(nil)
 		err := tm.AttachSession("runner")
 		if !errors.Is(err, ErrServerDegraded) {
 			t.Fatalf("AttachSession error = %v, want ErrServerDegraded", err)
 		}
-		if got := len(tm.exec.(*fakeExecutor).calls); got != 1 {
-			t.Fatalf("tmux calls = %d, want only attach preflight", got)
+		if got := len(tm.exec.(*fakeExecutor).calls); got != 0 {
+			t.Fatalf("tmux calls = %d, want none after injected witness refusal", got)
 		}
 	})
 
 	t.Run("hidden", func(t *testing.T) {
-		tm := newTmux([]error{nil, ErrNoServer})
+		tm := newTmux([]error{nil})
 		err := tm.ensureHiddenAttachedClient("runner")
 		if !errors.Is(err, ErrServerDegraded) {
 			t.Fatalf("ensureHiddenAttachedClient error = %v, want ErrServerDegraded", err)
 		}
-		if got := len(tm.exec.(*fakeExecutor).calls); got != 2 {
-			t.Fatalf("tmux calls = %d, want attachment check and attach preflight", got)
+		if got := len(tm.exec.(*fakeExecutor).calls); got != 0 {
+			t.Fatalf("tmux calls = %d, want none after initial injected witness refusal", got)
 		}
 	})
 }
 
-func TestNamedSocketAttachPreflightSkipsDefaultSocket(t *testing.T) {
+func TestDefaultSocketAttachBypassesWitness(t *testing.T) {
 	fe := &fakeExecutor{}
-	tm := &Tmux{exec: fe}
-	if err := tm.probeServerAliveForAttach(); err != nil {
-		t.Fatalf("probeServerAliveForAttach: %v", err)
+	tm := &Tmux{
+		exec: fe,
+		namedSocketLstat: func(context.Context, string) (namedSocketObservation, error) {
+			t.Fatal("default socket must not lstat an attach witness")
+			return namedSocketObservation{}, nil
+		},
 	}
-	if len(fe.calls) != 0 {
-		t.Fatalf("default-socket attach preflight made tmux calls: %v", fe.calls)
+	if err := tm.AttachSession("runner"); err != nil {
+		t.Fatalf("AttachSession: %v", err)
+	}
+	if got, want := fe.calls, [][]string{{"-u", "attach-session", "-t", "runner"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("default attach argv = %#v, want %#v", got, want)
 	}
 }
 
 func TestAttachSessionNamedSocketUsesNoStartServer(t *testing.T) {
-	fe := &fakeExecutor{errs: []error{ErrSessionNotFound, nil}}
+	fe := &fakeExecutor{outs: []string{"41", "41", ""}}
 	tm := &Tmux{cfg: Config{SocketName: "city-socket"}, exec: fe}
+	tm.namedSocketLstat = stableNamedSocketLstat(t)
 	if err := tm.AttachSession("runner"); err != nil {
 		t.Fatalf("AttachSession: %v", err)
 	}
+	path, err := filepath.Abs(filepath.Clean(namedSocketPath("city-socket")))
+	if err != nil {
+		t.Fatalf("canonical socket path: %v", err)
+	}
 	want := [][]string{
-		{"-u", "-L", "city-socket", "-N", "has-session", "-t", "=" + probeSessionName},
-		{"-u", "-L", "city-socket", "-N", "attach-session", "-t", "runner"},
+		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
+		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
+		{"-u", "-N", "-S", path, "attach-session", "-t", "runner"},
 	}
 	if !reflect.DeepEqual(fe.calls, want) {
 		t.Fatalf("tmux calls = %#v, want %#v", fe.calls, want)
+	}
+}
+
+func TestHiddenAttachNamedSocketUsesWitnessedSocketPath(t *testing.T) {
+	tm := &Tmux{cfg: Config{SocketName: "city-socket"}}
+	witness := namedSocketWitness{canonicalPath: "/tmp/witnessed-socket"}
+	if got, want := tm.hiddenAttachCommandArgsForWitness("runner", witness), []string{"-u", "-N", "-S", "/tmp/witnessed-socket", "attach-session", "-t", "runner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("hidden attach argv = %#v, want %#v", got, want)
 	}
 }
 
@@ -494,14 +526,31 @@ func TestProviderAttachNamedSocketUsesNoStartServer(t *testing.T) {
 	t.Setenv("PATH", binDir)
 
 	p := NewProviderWithConfig(Config{SocketName: "city-socket"})
-	p.tm.exec = &fakeExecutor{errs: []error{nil, nil, ErrSessionNotFound}}
+	p.tm.exec = &fakeExecutor{outs: []string{"41", "", "0", "41"}}
+	stable := stableNamedSocketObservation(t)
+	witnessCalls := 0
+	p.tm.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+		witnessCalls++
+		if witnessCalls == 1 && len(p.tm.exec.(*fakeExecutor).calls) != 0 {
+			t.Fatalf("witness %d observed %d tmux checks, want 0", witnessCalls, len(p.tm.exec.(*fakeExecutor).calls))
+		}
+		if witnessCalls == 3 && len(p.tm.exec.(*fakeExecutor).calls) != 3 {
+			t.Fatalf("witness %d observed %d tmux checks, want %d", witnessCalls, len(p.tm.exec.(*fakeExecutor).calls), 3)
+		}
+		return stable, nil
+	}
 	if err := p.Attach("runner"); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
+	path, err := filepath.Abs(filepath.Clean(namedSocketPath("city-socket")))
+	if err != nil {
+		t.Fatalf("canonical socket path: %v", err)
+	}
 	wantPreflight := [][]string{
+		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
 		{"-u", "-L", "city-socket", "-N", "has-session", "-t", "=runner"},
 		{"-u", "-L", "city-socket", "-N", "display-message", "-t", "runner:^.0", "-p", "#{pane_dead}"},
-		{"-u", "-L", "city-socket", "-N", "has-session", "-t", "=" + probeSessionName},
+		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
 	}
 	if !reflect.DeepEqual(p.tm.exec.(*fakeExecutor).calls, wantPreflight) {
 		t.Fatalf("provider preflight argv = %#v, want %#v", p.tm.exec.(*fakeExecutor).calls, wantPreflight)
@@ -510,7 +559,203 @@ func TestProviderAttachNamedSocketUsesNoStartServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fake tmux invocations: %v", err)
 	}
-	if got, want := string(output), "-u -N -L city-socket attach-session -t runner\n"; got != want {
+	if got, want := string(output), "-u -N -S "+path+" attach-session -t runner\n"; got != want {
 		t.Fatalf("provider attach argv = %q, want %q", got, want)
+	}
+}
+
+func stableNamedSocketNode(t *testing.T) os.FileInfo {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "socket-node")
+	if err := os.WriteFile(path, []byte("node"), 0o600); err != nil {
+		t.Fatalf("write witness node: %v", err)
+	}
+	node, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat witness node: %v", err)
+	}
+	return node
+}
+
+func stableNamedSocketObservation(t *testing.T) namedSocketObservation {
+	t.Helper()
+	return namedSocketObservation{node: stableNamedSocketNode(t), isSocket: true}
+}
+
+func stableNamedSocketLstat(t *testing.T) func(context.Context, string) (namedSocketObservation, error) {
+	t.Helper()
+	observation := stableNamedSocketObservation(t)
+	return func(context.Context, string) (namedSocketObservation, error) { return observation, nil }
+}
+
+func TestNamedSocketWitnessRefusesReplacementBeforeEveryAttachLaunch(t *testing.T) {
+	originalPath := filepath.Join(t.TempDir(), "original")
+	if err := os.WriteFile(originalPath, []byte("original"), 0o600); err != nil {
+		t.Fatalf("write original witness: %v", err)
+	}
+	original, err := os.Lstat(originalPath)
+	if err != nil {
+		t.Fatalf("lstat original witness: %v", err)
+	}
+	replacementPath := filepath.Join(t.TempDir(), "replacement")
+	if err := os.WriteFile(replacementPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement witness: %v", err)
+	}
+	replacement, err := os.Lstat(replacementPath)
+	if err != nil {
+		t.Fatalf("lstat replacement witness: %v", err)
+	}
+	lstats := func() func(context.Context, string) (namedSocketObservation, error) {
+		calls := 0
+		return func(context.Context, string) (namedSocketObservation, error) {
+			calls++
+			if calls <= 2 {
+				return namedSocketObservation{node: original, isSocket: true}, nil
+			}
+			return namedSocketObservation{node: replacement, isSocket: true}, nil
+		}
+	}
+
+	t.Run("direct", func(t *testing.T) {
+		fe := &fakeExecutor{outs: []string{"41", "42"}}
+		tm := &Tmux{cfg: Config{SocketName: "city-socket"}, exec: fe, namedSocketLstat: lstats()}
+		err := tm.AttachSession("runner")
+		if !errors.Is(err, ErrServerDegraded) || len(fe.calls) != 2 {
+			t.Fatalf("AttachSession = %v, calls=%v; want degraded refusal before final launch", err, fe.calls)
+		}
+	})
+
+	t.Run("provider", func(t *testing.T) {
+		binDir := t.TempDir()
+		invocations := filepath.Join(binDir, "tmux-invocations")
+		if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+invocations+"\n"), 0o755); err != nil {
+			t.Fatalf("write fake tmux: %v", err)
+		}
+		t.Setenv("PATH", binDir)
+		p := NewProviderWithConfig(Config{SocketName: "city-socket"})
+		p.tm.exec = &fakeExecutor{outs: []string{"41", "", "0", "42"}}
+		lstatCalls := 0
+		p.tm.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+			lstatCalls++
+			if lstatCalls == 1 && len(p.tm.exec.(*fakeExecutor).calls) != 0 {
+				t.Fatalf("initial lstat ran after tmux checks: %v", p.tm.exec.(*fakeExecutor).calls)
+			}
+			if lstatCalls == 3 && len(p.tm.exec.(*fakeExecutor).calls) != 3 {
+				t.Fatalf("verification lstat ran before provider preflight: %v", p.tm.exec.(*fakeExecutor).calls)
+			}
+			if lstatCalls <= 2 {
+				return namedSocketObservation{node: original, isSocket: true}, nil
+			}
+			return namedSocketObservation{node: replacement, isSocket: true}, nil
+		}
+		err := p.Attach("runner")
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("Provider.Attach = %v, want degraded refusal", err)
+		}
+		if output, readErr := os.ReadFile(invocations); readErr == nil && len(output) != 0 {
+			t.Fatalf("Provider.Attach launched replacement: %s", output)
+		}
+	})
+
+	t.Run("hidden", func(t *testing.T) {
+		binDir := t.TempDir()
+		started := filepath.Join(binDir, "started")
+		if err := os.WriteFile(filepath.Join(binDir, "script"), []byte("#!/bin/sh\n: > "+fmt.Sprintf("%q", started)+"\n"), 0o755); err != nil {
+			t.Fatalf("write fake script: %v", err)
+		}
+		t.Setenv("PATH", binDir)
+		fe := &fakeExecutor{outs: []string{"41", "", "42"}}
+		lstatCalls := 0
+		tm := &Tmux{cfg: Config{SocketName: "city-socket"}, exec: fe}
+		tm.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+			lstatCalls++
+			if lstatCalls == 1 && len(fe.calls) != 0 {
+				t.Fatalf("initial lstat ran after tmux checks: %v", fe.calls)
+			}
+			if lstatCalls == 3 && len(fe.calls) != 2 {
+				t.Fatalf("verification lstat ran before hidden preflight: %v", fe.calls)
+			}
+			if lstatCalls <= 2 {
+				return namedSocketObservation{node: original, isSocket: true}, nil
+			}
+			return namedSocketObservation{node: replacement, isSocket: true}, nil
+		}
+		err := tm.ensureHiddenAttachedClient("runner")
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("ensureHiddenAttachedClient = %v, want degraded refusal", err)
+		}
+		if _, statErr := os.Stat(started); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("hidden attach started replacement script: %v", statErr)
+		}
+	})
+}
+
+func TestProviderAttachRefusesDisappearanceAfterInitialWitness(t *testing.T) {
+	originalPath := filepath.Join(t.TempDir(), "original")
+	if err := os.WriteFile(originalPath, []byte("original"), 0o600); err != nil {
+		t.Fatalf("write original witness: %v", err)
+	}
+	original, err := os.Lstat(originalPath)
+	if err != nil {
+		t.Fatalf("lstat original witness: %v", err)
+	}
+	replacementPath := filepath.Join(t.TempDir(), "replacement")
+	if err := os.WriteFile(replacementPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement witness: %v", err)
+	}
+	replacement, err := os.Lstat(replacementPath)
+	if err != nil {
+		t.Fatalf("lstat replacement witness: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+	}{
+		{name: "missing"},
+		{name: "replaced"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			if tc.name == "missing" {
+				fe.outs = []string{"41", ""}
+				fe.errs = []error{nil, ErrNoServer}
+			} else {
+				fe.outs = []string{"41", "", "42"}
+				fe.errs = []error{nil, ErrNoServer, nil}
+			}
+			p := NewProviderWithConfig(Config{SocketName: "city-socket"})
+			p.tm.exec = fe
+			lstatCalls := 0
+			p.tm.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+				lstatCalls++
+				if lstatCalls == 1 {
+					if len(fe.calls) != 0 {
+						t.Fatalf("initial lstat ran after has-session: %v", fe.calls)
+					}
+				}
+				if lstatCalls <= 2 {
+					return namedSocketObservation{node: original, isSocket: true}, nil
+				}
+				if lstatCalls == 3 && len(fe.calls) != 2 {
+					t.Fatalf("verification lstat ran before has-session ErrNoServer: %v", fe.calls)
+				}
+				if tc.name == "missing" {
+					return namedSocketObservation{}, os.ErrNotExist
+				}
+				return namedSocketObservation{node: replacement, isSocket: true}, nil
+			}
+
+			err := p.Attach("missing")
+			if !errors.Is(err, ErrServerDegraded) || errors.Is(err, runtime.ErrSessionNotFound) {
+				t.Fatalf("Attach after has-session ErrNoServer = %v, want degraded without not-found", err)
+			}
+			wantLstatCalls := 3
+			if tc.name == "replaced" {
+				wantLstatCalls = 4
+			}
+			if lstatCalls != wantLstatCalls || len(fe.calls) != 2+(wantLstatCalls-3) {
+				t.Fatalf("lstat calls=%d tmux calls=%v, want A, has-session, B", lstatCalls, fe.calls)
+			}
+		})
 	}
 }

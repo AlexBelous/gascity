@@ -28,9 +28,13 @@ const (
 	// two orders of magnitude.
 	bdPostInitDatabaseNotReadyInitialInterval = 100 * time.Millisecond
 	// bdPostInitDatabaseNotReadyMaxElapsedTime bounds the total retry
-	// window. Matches the MaxElapsedTime beads' own internal retry uses for
-	// the identical race (see bdPostInitDatabaseNotReadyInitialInterval).
-	bdPostInitDatabaseNotReadyMaxElapsedTime = 10 * time.Second
+	// window. Set to 2x beads' own internal MaxElapsedTime for the
+	// identical race (see bdPostInitDatabaseNotReadyInitialInterval):
+	// under this fleet's real host contention, observed catalog-
+	// visibility latency runs close to and sometimes past a bare 10s
+	// budget, so matching upstream's internal budget exactly leaves no
+	// margin on a busy host.
+	bdPostInitDatabaseNotReadyMaxElapsedTime = 20 * time.Second
 	// bdPostInitDatabaseNotReadySignature is the success-without-ready-
 	// database race signature this retries: `bd init --server ...` returns
 	// exit 0 before the database it just created is visible to a fresh

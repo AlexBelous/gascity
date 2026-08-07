@@ -25,6 +25,14 @@ import (
 // needed to resolve a persisted provider session key and would make the
 // archival pass fleet-size dependent.
 func (m *Manager) PersistedTranscriptMetaSnapshot() ([]Info, error) {
+	return m.PersistedTranscriptMetaSnapshotWithSupplemental(nil)
+}
+
+// PersistedTranscriptMetaSnapshotWithSupplemental merges read-only historical
+// session rows supplied by the composition root. The active store wins every
+// exact ID collision; this domain helper performs only the pure projection and
+// deterministic dedupe, never opens a storage-provider artifact itself.
+func (m *Manager) PersistedTranscriptMetaSnapshotWithSupplemental(supplemental []beads.Bead) ([]Info, error) {
 	if m == nil {
 		return nil, nil
 	}
@@ -35,13 +43,27 @@ func (m *Manager) PersistedTranscriptMetaSnapshot() ([]Info, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing persisted transcript-metadata sessions: %w", err)
 	}
-
-	result := make([]Info, 0, len(infos))
+	seen := make(map[string]struct{}, len(infos)+len(supplemental))
+	result := make([]Info, 0, len(infos)+len(supplemental))
 	for _, info := range infos {
 		if info.ID == "" {
 			continue
 		}
+		if _, exists := seen[info.ID]; exists {
+			continue
+		}
+		seen[info.ID] = struct{}{}
 		result = append(result, info)
+	}
+	for _, bead := range supplemental {
+		if bead.ID == "" || !IsSessionBeadOrRepairable(bead) {
+			continue
+		}
+		if _, exists := seen[bead.ID]; exists {
+			continue
+		}
+		seen[bead.ID] = struct{}{}
+		result = append(result, infoFromPersistedBead(bead))
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil

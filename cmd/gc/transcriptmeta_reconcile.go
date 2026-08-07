@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+
+	storebindingsqlite "github.com/gastownhall/gascity/internal/storebinding/sqlite"
 )
 
 // transcriptMetaReconcilePageSize bounds each background batch's exact-path
@@ -47,7 +49,12 @@ func (cr *CityRuntime) startHistoricalTranscriptMetaReconcile(ctx context.Contex
 			fmt.Fprintf(cr.stderr, "%s: transcript metadata: building worker factory: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort patrol diagnostic
 			return
 		}
-		reconciler, err := factory.NewTranscriptMetaReconciler(transcriptMetaReconcilePageSize)
+		legacy, err := storebindingsqlite.ReadLegacySessionsSnapshot(cr.cityPath)
+		if err != nil {
+			fmt.Fprintf(cr.stderr, "%s: transcript metadata: legacy sessions snapshot: %v\n", cr.logPrefix, err) //nolint:errcheck // fail closed: no partial historical pass
+			return
+		}
+		reconciler, err := factory.NewTranscriptMetaReconcilerWithSupplemental(transcriptMetaReconcilePageSize, legacy)
 		if err != nil {
 			fmt.Fprintf(cr.stderr, "%s: transcript metadata: snapshot: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort patrol diagnostic
 			return

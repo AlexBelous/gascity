@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
 )
@@ -42,6 +43,13 @@ type TranscriptMetaReconciler struct {
 // for the enabled supervisor-only historical pass. It makes no transcript reads
 // itself. A disabled process returns nil so one-shot callers remain inert.
 func (f *Factory) NewTranscriptMetaReconciler(pageSize int) (*TranscriptMetaReconciler, error) {
+	return f.NewTranscriptMetaReconcilerWithSupplemental(pageSize, nil)
+}
+
+// NewTranscriptMetaReconcilerWithSupplemental accepts read-only historical
+// session rows from the controller composition root. It never opens a storage
+// provider; session owns projection and current-store-wins deduplication.
+func (f *Factory) NewTranscriptMetaReconcilerWithSupplemental(pageSize int, supplemental []beads.Bead) (*TranscriptMetaReconciler, error) {
 	if !transcriptmeta.Enabled() {
 		return nil, nil
 	}
@@ -51,7 +59,7 @@ func (f *Factory) NewTranscriptMetaReconciler(pageSize int) (*TranscriptMetaReco
 	if pageSize <= 0 {
 		pageSize = transcriptMetaReconcileDefaultPageSize
 	}
-	infos, err := f.manager.PersistedTranscriptMetaSnapshot()
+	infos, err := f.manager.PersistedTranscriptMetaSnapshotWithSupplemental(supplemental)
 	if err != nil {
 		return nil, err
 	}

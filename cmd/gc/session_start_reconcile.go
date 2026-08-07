@@ -1020,14 +1020,6 @@ func getAuthoritativeExactSessionStartInfoBeforeWake(
 	return info, nil
 }
 
-// reconcileExactSessionStart rereads one durable session key and executes only
-// the pending-create and explicit-wake start family. The admission source is a
-// scheduling hint; persisted lifecycle state remains authoritative.
-func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmission, params exactSessionStartParams) error {
-	_, err := reconcileExactSessionStartWithOwner(ctx, admission, params)
-	return err
-}
-
 // reconcileExactSessionStartWithOwner returns the durable row's owner as seen
 // by the same authoritative read used for reconciliation. CityRuntime uses a
 // legacy result to request an immediate fleet tick, closing the race where a
@@ -2434,23 +2426,6 @@ func classifyExactSessionStartOwnership(
 		return lifecycle, cfgAgent, exactSessionStartLegacyOwner
 	}
 	return lifecycle, cfgAgent, exactSessionStartKeyedOwner
-}
-
-func exactSessionStartOwnerForKey(
-	store beads.Store,
-	cfg *config.City,
-	sessionID string,
-	now time.Time,
-) (exactSessionStartOwner, error) {
-	if store == nil {
-		return exactSessionStartUnowned, fmt.Errorf("session store is nil")
-	}
-	info, _, err := getAuthoritativeSessionStartRecord(store, sessionID)
-	if err != nil {
-		return exactSessionStartUnowned, err
-	}
-	_, _, owner := classifyExactSessionStartOwnership(info, cfg, now)
-	return owner, nil
 }
 
 func resolveExactSessionStartTemplate(

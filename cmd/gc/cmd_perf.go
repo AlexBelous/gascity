@@ -29,7 +29,6 @@ func newPerfCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.AddCommand(newPerfSessionNewCmd(stdout, stderr))
 	cmd.AddCommand(newPerfRunCmd(stdout, stderr))
-	cmd.AddCommand(newPerfReconcilerCompareCmd(stdout))
 	return cmd
 }
 

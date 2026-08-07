@@ -23,6 +23,38 @@ import (
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
+// reconcileExactSessionStart drops the owner half of the production entry
+// point. Tests that only assert effects use it; production always reads the
+// owner to settle keyed-vs-legacy ownership.
+func reconcileExactSessionStart(ctx context.Context, admission sessionStartAdmission, params exactSessionStartParams) error {
+	_, err := reconcileExactSessionStartWithOwner(ctx, admission, params)
+	return err
+}
+
+// tokenFencedStopProvider gives the fake runtime the two capabilities the
+// keyed management path requires: a token-fenced unattended stop and a
+// complete fresh-liveness observation.
+type tokenFencedStopProvider struct {
+	*runtime.Fake
+}
+
+func (p *tokenFencedStopProvider) StopUnattendedSession(name, expectedToken string) error {
+	actualToken, err := p.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return err
+	}
+	if actualToken != expectedToken {
+		return fmt.Errorf("instance token mismatch")
+	}
+	return p.Stop(name)
+}
+
+func (p *tokenFencedStopProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	liveness := runtime.ObserveLiveness(p.Fake, target.SessionName, target.ProcessNames)
+	liveness.Complete = true
+	return liveness
+}
+
 func TestReconcileExactSessionStartStartsPendingCreateAndCommitsActive(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -1712,7 +1744,7 @@ func TestReconcileExactDrainAckAtomicTerminalCloseUsesFence(t *testing.T) {
 	}
 	params := exactSessionStartTestParams(t, env)
 	params.Store = store
-	params.Provider = &reconcilerPerfStopProvider{Fake: env.sp}
+	params.Provider = &tokenFencedStopProvider{Fake: env.sp}
 	params.StatusWriter = writer
 	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) { return true, nil }
 	dops := newFakeDrainOps()
@@ -1769,7 +1801,7 @@ func TestReconcileExactDrainAckAtomicCloseRejectsStaleFence(t *testing.T) {
 	}
 	params := exactSessionStartTestParams(t, env)
 	params.Store = store
-	params.Provider = &reconcilerPerfStopProvider{Fake: env.sp}
+	params.Provider = &tokenFencedStopProvider{Fake: env.sp}
 	dops := newFakeDrainOps()
 	params.DrainOps = dops
 	recorder := events.NewFake()

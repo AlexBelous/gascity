@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,38 +119,40 @@ func (c *StateCache) ProcessAlive(name string, processNames []string) bool {
 }
 
 func (c *StateCache) currentState() runtimeStateSnapshot {
-	c.mu.RLock()
-	state := c.state
-	fetchedAt := c.fetchedAt
-	dirty := c.dirty
-	c.mu.RUnlock()
+	for {
+		c.mu.RLock()
+		state := c.state
+		fetchedAt := c.fetchedAt
+		dirty := c.dirty
+		generation := c.generation
+		c.mu.RUnlock()
 
-	// Cache hit: fresh data, not invalidated.
-	if state.Sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
+		// Cache hit: fresh data, not invalidated.
+		if state.Sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
+			return state
+		}
+
+		// Stale, empty, or dirty — trigger a refresh. Calls from the same
+		// generation coalesce, while an invalidation advances the key so a
+		// fresh call never joins a pre-invalidation fetch.
+		if c.refresh(generation) {
+			continue
+		}
+
+		// Read the (potentially updated) cache.
+		c.mu.RLock()
+		state = c.state
+		fetchedAt = c.fetchedAt
+		c.mu.RUnlock()
+
+		// If the cache is older than staleTTL, report all sessions as not running.
+		// Note: fetchedAt is preserved on failure (never zeroed), so this only
+		// triggers after staleTTL of real wall-clock time since last success.
+		if state.Sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
+			return runtimeStateSnapshot{}
+		}
 		return state
 	}
-
-	// Stale, empty, or dirty — trigger refresh.
-	// When dirty, forget any in-flight singleflight so we get a fresh fetch
-	// instead of coalescing with a pre-invalidation call.
-	if dirty {
-		c.sf.Forget("refresh")
-	}
-	c.refresh()
-
-	// Read the (potentially updated) cache.
-	c.mu.RLock()
-	state = c.state
-	fetchedAt = c.fetchedAt
-	c.mu.RUnlock()
-
-	// If the cache is older than staleTTL, report all sessions as not running.
-	// Note: fetchedAt is preserved on failure (never zeroed), so this only
-	// triggers after staleTTL of real wall-clock time since last success.
-	if state.Sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
-		return runtimeStateSnapshot{}
-	}
-	return state
 }
 
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
@@ -167,7 +170,9 @@ func (c *StateCache) Invalidate() {
 // the next refresh cycle (which may race with singleflight coalescing).
 func (c *StateCache) EvictSession(name string) {
 	c.mu.Lock()
-	delete(c.state.Sessions, name)
+	sessions := maps.Clone(c.state.Sessions)
+	delete(sessions, name)
+	c.state.Sessions = sessions
 	c.dirty = true
 	c.generation++
 	c.mu.Unlock()
@@ -175,22 +180,25 @@ func (c *StateCache) EvictSession(name string) {
 
 // refresh executes a single coalesced fetch. If the fetch fails, the
 // last-known-good cache is preserved and the error is logged.
-func (c *StateCache) refresh() {
-	_, _, _ = c.sf.Do("refresh", func() (interface{}, error) {
+func (c *StateCache) refresh(generation uint64) bool {
+	key := "refresh:" + strconv.FormatUint(generation, 10)
+	value, _, _ := c.sf.Do(key, func() (interface{}, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
-
-		c.mu.RLock()
-		startGeneration := c.generation
-		c.mu.RUnlock()
 
 		start := time.Now()
 		state, err := c.fetcher.FetchState(ctx)
 		elapsed := time.Since(start)
 
+		c.mu.Lock()
+		if c.generation != generation {
+			c.mu.Unlock()
+			if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
+				log.Printf("tmux state cache: discarded refresh from generation %d after %v", generation, elapsed)
+			}
+			return true, nil
+		}
 		if err != nil {
-			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
-			c.mu.Lock()
 			c.lastError = err
 			// Two distinct failure regimes, keyed on whether the cache was ever
 			// primed (fetchedAt set by a prior success):
@@ -215,17 +223,10 @@ func (c *StateCache) refresh() {
 				c.dirty = false
 			}
 			c.mu.Unlock()
-			return nil, err
+			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
+			return false, err
 		}
 
-		c.mu.Lock()
-		if c.generation != startGeneration {
-			c.mu.Unlock()
-			if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
-				log.Printf("tmux state cache: discarded refresh from generation %d after %v", startGeneration, elapsed)
-			}
-			return nil, nil
-		}
 		// Successful refresh is noisy on the session loop; opt-in via env var
 		// keeps it available for diagnostics without polluting normal CLI use.
 		if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
@@ -237,8 +238,10 @@ func (c *StateCache) refresh() {
 		c.lastError = nil
 		c.dirty = false
 		c.mu.Unlock()
-		return nil, nil
+		return false, nil
 	})
+	superseded, _ := value.(bool)
+	return superseded
 }
 
 // tmuxFetcher implements StateFetcher using a real Tmux instance.

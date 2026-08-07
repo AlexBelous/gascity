@@ -15,6 +15,13 @@ type LivenessObserver interface {
 	ObserveLiveness(name string, processNames []string) Liveness
 }
 
+// LivenessInvalidator is implemented by providers that cache runtime
+// liveness. It discards cached liveness before a caller needs a fresh
+// observation for one session.
+type LivenessInvalidator interface {
+	InvalidateLiveness(name string)
+}
+
 // ObserveLiveness returns the consolidated liveness view for a provider
 // session. Providers with native support may use additional persisted runtime
 // hints; other providers fall back to IsRunning plus ProcessAlive.

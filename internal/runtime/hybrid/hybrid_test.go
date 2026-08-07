@@ -39,6 +39,31 @@ func TestProvider_ForwardsRelaunchToRoutedBackend(t *testing.T) {
 	}
 }
 
+type livenessInvalidatorStub struct {
+	*runtime.Fake
+	invalidations []string
+}
+
+func (s *livenessInvalidatorStub) InvalidateLiveness(name string) {
+	s.invalidations = append(s.invalidations, name)
+}
+
+func TestProvider_InvalidatesLivenessOnRoutedBackend(t *testing.T) {
+	local := &livenessInvalidatorStub{Fake: runtime.NewFake()}
+	remote := &livenessInvalidatorStub{Fake: runtime.NewFake()}
+	h := New(local, remote, isRemote)
+
+	h.InvalidateLiveness("local-agent")
+	h.InvalidateLiveness("remote-agent-1")
+
+	if got := local.invalidations; len(got) != 1 || got[0] != "local-agent" {
+		t.Fatalf("local invalidations = %#v, want exact local name once", got)
+	}
+	if got := remote.invalidations; len(got) != 1 || got[0] != "remote-agent-1" {
+		t.Fatalf("remote invalidations = %#v, want exact remote name once", got)
+	}
+}
+
 func TestStart_RoutesToLocal(t *testing.T) {
 	local, remote := runtime.NewFake(), runtime.NewFake()
 	h := New(local, remote, isRemote)

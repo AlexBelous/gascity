@@ -11,9 +11,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // mockFetcher implements StateFetcher for testing.
@@ -69,6 +71,7 @@ type controlledRefreshFetcher struct {
 	mu        sync.Mutex
 	calls     int
 	state     runtimeStateSnapshot
+	err       error
 	blockCall int
 	entered   chan struct{}
 	release   chan struct{}
@@ -79,6 +82,7 @@ func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeState
 	f.calls++
 	call := f.calls
 	state := f.state
+	err := f.err
 	f.mu.Unlock()
 
 	if call == f.blockCall {
@@ -89,13 +93,20 @@ func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeState
 			return runtimeStateSnapshot{}, ctx.Err()
 		}
 	}
-	return state, nil
+	return state, err
 }
 
 func (f *controlledRefreshFetcher) getCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *controlledRefreshFetcher) setResult(state runtimeStateSnapshot, err error) {
+	f.mu.Lock()
+	f.state = state
+	f.err = err
+	f.mu.Unlock()
 }
 
 func TestStateCache_FreshCacheReturnsCorrectState(t *testing.T) {
@@ -311,6 +322,26 @@ func TestProviderObserveLivenessUsesCacheProcessSnapshot(t *testing.T) {
 	}
 }
 
+func TestProviderInvalidateLivenessForcesFreshSnapshot(t *testing.T) {
+	fetcher := &mockFetcher{sessions: map[string]bool{"agent-1": false}}
+	provider := &Provider{cache: NewStateCache(fetcher, time.Hour)}
+	if provider.IsRunning("agent-1") {
+		t.Fatal("initial cached liveness = true, want false")
+	}
+	fetcher.setResult(map[string]bool{"agent-1": true}, nil)
+	if provider.IsRunning("agent-1") {
+		t.Fatal("cached liveness refreshed without invalidation")
+	}
+
+	provider.InvalidateLiveness("agent-1")
+	if !provider.IsRunning("agent-1") {
+		t.Fatal("liveness after invalidation = false, want refreshed true state")
+	}
+	if calls := fetcher.getCalls(); calls != 2 {
+		t.Fatalf("fetch calls = %d, want initial and invalidated refresh", calls)
+	}
+}
+
 // FetchState must report an unreachable tmux server as an observation FAILURE
 // (runtime.ErrRuntimeUnavailable), not as an empty success. The empty-success
 // form let refresh() overwrite last-known-good and instantly report every
@@ -461,6 +492,7 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for refresh to start")
 	}
+	f.setResult(runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}}, nil)
 	cache.EvictSession("agent-1")
 	close(f.release)
 
@@ -472,9 +504,117 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for IsRunning result")
 	}
-	if calls := f.getCalls(); calls != 2 {
-		t.Fatalf("fetch calls = %d, want 2", calls)
+	if calls := f.getCalls(); calls != 3 {
+		t.Fatalf("fetch calls = %d, want prime, superseded refresh, and retry", calls)
 	}
+}
+
+func TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot(t *testing.T) {
+	fetcher := &mockFetcher{sessions: map[string]bool{
+		"agent-1": true,
+		"agent-2": true,
+	}}
+	cache := NewStateCache(fetcher, time.Hour)
+	published := cache.currentState()
+	if !published.Sessions["agent-1"].Running {
+		t.Fatal("published snapshot missing live agent-1 before eviction")
+	}
+
+	fetcher.setResult(map[string]bool{"agent-2": true}, nil)
+	cache.EvictSession("agent-1")
+
+	if !published.Sessions["agent-1"].Running {
+		t.Fatal("retained published snapshot changed after eviction")
+	}
+	if cache.IsRunning("agent-1") {
+		t.Fatal("current liveness still contains agent-1 after eviction")
+	}
+}
+
+func TestStateCache_RetriesSupersededRefresh(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{name: "empty success"},
+		{name: "no server", err: ErrNoServer},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fetcher := &controlledRefreshFetcher{
+				state:     runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}},
+				err:       tt.err,
+				blockCall: 1,
+				entered:   make(chan struct{}),
+				release:   make(chan struct{}),
+			}
+			cache := NewStateCache(fetcher, time.Hour)
+			result := make(chan bool, 1)
+			go func() { result <- cache.IsRunning("agent-1") }()
+			select {
+			case <-fetcher.entered:
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("timed out waiting for first refresh")
+			}
+			fetcher.setResult(runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{"agent-1": {Running: true}}}, nil)
+			cache.Invalidate()
+			close(fetcher.release)
+			select {
+			case got := <-result:
+				if !got {
+					t.Fatal("same IsRunning call = false, want live result after superseded refresh retry")
+				}
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("timed out waiting for retried IsRunning")
+			}
+			if calls := fetcher.getCalls(); calls != 2 {
+				t.Fatalf("fetch calls = %d, want superseded fetch plus retry", calls)
+			}
+		})
+	}
+}
+
+func TestStateCache_CoalescesRefreshesWithinGeneration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fetcher := &controlledRefreshFetcher{
+			state:     runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}},
+			blockCall: 2,
+			entered:   make(chan struct{}),
+			release:   make(chan struct{}),
+		}
+		cache := NewStateCache(fetcher, time.Hour)
+		if cache.IsRunning("agent-1") {
+			t.Fatal("primed liveness = true, want false")
+		}
+
+		fetcher.setResult(runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{"agent-1": {Running: true}},
+		}, nil)
+		cache.Invalidate()
+
+		results := make(chan bool, 2)
+		go func() { results <- cache.IsRunning("agent-1") }()
+		synctest.Wait()
+		select {
+		case <-fetcher.entered:
+		default:
+			t.Fatal("first invalidated refresh did not enter")
+		}
+
+		go func() { results <- cache.IsRunning("agent-1") }()
+		synctest.Wait()
+		callsBeforeRelease := fetcher.getCalls()
+		close(fetcher.release)
+		synctest.Wait()
+
+		if callsBeforeRelease != 2 {
+			t.Fatalf("fetch calls before release = %d, want prime plus one coalesced generation refresh", callsBeforeRelease)
+		}
+		for range 2 {
+			if got := <-results; !got {
+				t.Fatal("coalesced IsRunning call = false, want live result")
+			}
+		}
+	})
 }
 
 func TestStateCache_InvalidateForcesNextReadToRefresh(t *testing.T) {

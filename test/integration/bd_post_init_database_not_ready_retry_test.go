@@ -8,18 +8,29 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 )
 
 const (
-	// bdPostInitDatabaseNotReadyMaxAttempts bounds how many times the first
-	// external `bd` subprocess issued against a freshly-initialized
-	// workspace is retried after losing the success-without-ready-database
-	// race described below. Matches the bound used by the sibling
-	// bdInitMigrationRaceMaxAttempts retry for consistency across the two
-	// external-bd CLI races.
-	bdPostInitDatabaseNotReadyMaxAttempts = 3
-	// bdPostInitDatabaseNotReadyBackoff is the delay between retry attempts.
-	bdPostInitDatabaseNotReadyBackoff = 25 * time.Millisecond
+	// bdPostInitDatabaseNotReadyInitialInterval is the starting backoff
+	// interval for retrying the first external `bd` subprocess issued
+	// against a freshly-initialized workspace after losing the
+	// success-without-ready-database race described below. Matches the
+	// InitialInterval that beads' own `bd init --server` uses internally
+	// (github.com/steveyegge/beads internal/storage/dolt/store.go,
+	// openServerConnection) to wait out the same underlying Dolt server
+	// catalog-visibility race (upstream beads issue GH-1851) before it will
+	// even report success. A subsequent, independent `bd` process's first
+	// connection needs a comparable budget to reliably observe the same
+	// condition clear — the previous fixed 3×25ms budget was undersized
+	// against that upstream-established real-world worst case by roughly
+	// two orders of magnitude.
+	bdPostInitDatabaseNotReadyInitialInterval = 100 * time.Millisecond
+	// bdPostInitDatabaseNotReadyMaxElapsedTime bounds the total retry
+	// window. Matches the MaxElapsedTime beads' own internal retry uses for
+	// the identical race (see bdPostInitDatabaseNotReadyInitialInterval).
+	bdPostInitDatabaseNotReadyMaxElapsedTime = 10 * time.Second
 	// bdPostInitDatabaseNotReadySignature is the success-without-ready-
 	// database race signature this retries: `bd init --server ...` returns
 	// exit 0 before the database it just created is visible to a fresh
@@ -32,50 +43,57 @@ const (
 
 // runWithBDPostInitDatabaseNotReadyRetry runs an external `bd` subprocess
 // (the first one issued against a freshly-initialized workspace) via run,
-// retrying when its combined output matches
+// retrying with exponential backoff when its combined output matches
 // bdPostInitDatabaseNotReadySignature, up to
-// bdPostInitDatabaseNotReadyMaxAttempts total attempts. A success, a
-// non-matching failure, or context cancellation all return immediately
-// without retrying.
+// bdPostInitDatabaseNotReadyMaxElapsedTime total. A success, a non-matching
+// failure, or context cancellation all return immediately without
+// retrying.
 func runWithBDPostInitDatabaseNotReadyRetry(ctx context.Context, run func() ([]byte, error)) ([]byte, error) {
+	return runWithBDPostInitDatabaseNotReadyRetryBackoff(ctx, run,
+		bdPostInitDatabaseNotReadyInitialInterval, bdPostInitDatabaseNotReadyMaxElapsedTime)
+}
+
+// runWithBDPostInitDatabaseNotReadyRetryBackoff is
+// runWithBDPostInitDatabaseNotReadyRetry with injectable timing, so tests
+// can exercise the retry and give-up paths without waiting out the
+// production backoff schedule.
+func runWithBDPostInitDatabaseNotReadyRetryBackoff(ctx context.Context, run func() ([]byte, error), initialInterval, maxElapsedTime time.Duration) ([]byte, error) {
 	var out []byte
-	var err error
-	for attempt := 1; attempt <= bdPostInitDatabaseNotReadyMaxAttempts; attempt++ {
-		out, err = run()
-		if err == nil {
-			return out, nil
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = initialInterval
+	bo.MaxElapsedTime = maxElapsedTime
+
+	err := backoff.Retry(func() error {
+		var runErr error
+		out, runErr = run()
+		if runErr == nil {
+			return nil
 		}
 		if !strings.Contains(string(out), bdPostInitDatabaseNotReadySignature) {
-			return out, err
+			return backoff.Permanent(runErr)
 		}
-		if attempt == bdPostInitDatabaseNotReadyMaxAttempts {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return out, err
-		case <-time.After(bdPostInitDatabaseNotReadyBackoff):
-		}
-	}
+		return runErr
+	}, backoff.WithContext(bo, ctx))
+
 	return out, err
 }
 
-// These tests exercise runWithBDPostInitDatabaseNotReadyRetry directly
-// through an injected fake, rather than a real dolt server, because the
-// race it recovers from is timing-dependent and not deterministically
-// reproducible: `bd init --server ...` can return success (exit 0) before
-// the database it just created is actually visible/queryable on the shared
-// Dolt server — the CLI subprocess exits once its own local workspace
-// config is written, without confirming the CREATE DATABASE has propagated
-// to where a fresh connection can see it. The very next `bd` command issued
-// against that workspace then fails with `database "<prefix>" not found on
-// Dolt server at <host:port>`. This is a different race than
-// bdInitMigrationRaceSignature (bd_init_migration_race_retry_test.go),
-// which retries a *failing* `bd init` itself; this one retries the first
-// command *after* a `bd init` that already reported success. See
-// configureCustomTypes (bdstore_test.go) and the `bd create` call in
-// TestDoltConfigWiringExternalHost (dolt_config_test.go) for the real
-// subprocess call sites this wraps.
+// These tests exercise runWithBDPostInitDatabaseNotReadyRetry (and its
+// injectable-timing variant) directly through an injected fake, rather than
+// a real dolt server, because the race it recovers from is timing-dependent
+// and not deterministically reproducible: `bd init --server ...` can return
+// success (exit 0) before the database it just created is actually
+// visible/queryable on the shared Dolt server — the CLI subprocess exits
+// once its own local workspace config is written, without confirming the
+// CREATE DATABASE has propagated to where a fresh connection can see it.
+// The very next `bd` command issued against that workspace then fails with
+// `database "<prefix>" not found on Dolt server at <host:port>`. This is a
+// different race than bdInitMigrationRaceSignature
+// (bd_init_migration_race_retry_test.go), which retries a *failing* `bd
+// init` itself; this one retries the first command *after* a `bd init` that
+// already reported success. See configureCustomTypes (bdstore_test.go) and
+// the `bd create` call in TestDoltConfigWiringExternalHost
+// (dolt_config_test.go) for the real subprocess call sites this wraps.
 
 func TestRunWithBDPostInitDatabaseNotReadyRetryRetriesAndSucceeds(t *testing.T) {
 	calls := 0
@@ -107,15 +125,28 @@ func TestRunWithBDPostInitDatabaseNotReadyRetryExhaustsRetriesAndReturnsError(t 
 		return raceOut, errors.New("exit status 1")
 	}
 
-	out, err := runWithBDPostInitDatabaseNotReadyRetry(context.Background(), run)
+	// Injected fast timing (not the production 100ms/10s budget) keeps this
+	// test quick while still proving the retry is exponential-backoff-based
+	// and genuinely bounded, not unbounded.
+	start := time.Now()
+	out, err := runWithBDPostInitDatabaseNotReadyRetryBackoff(context.Background(), run,
+		2*time.Millisecond, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
 	if err == nil {
-		t.Fatal("runWithBDPostInitDatabaseNotReadyRetry() error = nil, want non-nil after exhausting retries")
+		t.Fatal("runWithBDPostInitDatabaseNotReadyRetryBackoff() error = nil, want non-nil after exhausting retries")
+	}
+	if err.Error() != "exit status 1" {
+		t.Fatalf("error = %q, want the real operation error %q to surface (not a generic backoff/timeout error)", err, "exit status 1")
 	}
 	if string(out) != string(raceOut) {
 		t.Fatalf("output = %q, want %q", out, raceOut)
 	}
-	if calls != bdPostInitDatabaseNotReadyMaxAttempts {
-		t.Fatalf("calls = %d, want %d (bounded retry, not unbounded)", calls, bdPostInitDatabaseNotReadyMaxAttempts)
+	if calls < 2 {
+		t.Fatalf("calls = %d, want >= 2 (must retry at least once, not give up after one attempt)", calls)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("elapsed = %s, want < 1s (retry must still be bounded by MaxElapsedTime, not run away)", elapsed)
 	}
 }
 
@@ -149,13 +180,13 @@ func TestRunWithBDPostInitDatabaseNotReadyRetryRespectsContextCancellation(t *te
 	_, err := runWithBDPostInitDatabaseNotReadyRetry(ctx, run)
 	elapsed := time.Since(start)
 
-	if err == nil {
-		t.Fatal("runWithBDPostInitDatabaseNotReadyRetry() error = nil, want non-nil")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled (cancellation must surface as the returned error)", err)
 	}
 	if calls != 1 {
 		t.Fatalf("calls = %d, want 1 (cancellation must short-circuit the retry loop)", calls)
 	}
-	if elapsed >= bdPostInitDatabaseNotReadyBackoff {
-		t.Fatalf("elapsed = %s, want < backoff %s (must not sleep through a cancelled context)", elapsed, bdPostInitDatabaseNotReadyBackoff)
+	if elapsed >= 100*time.Millisecond {
+		t.Fatalf("elapsed = %s, want < 100ms (must not sleep through a cancelled context)", elapsed)
 	}
 }

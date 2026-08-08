@@ -119,6 +119,204 @@ func exactUserHoldSuspendCurrent(info sessionpkg.Info, now time.Time) bool {
 	return err == nil && heldUntil.After(now)
 }
 
+// exactOrdinaryResetStartLease binds one committed reset handoff to the exact
+// ordinary row it may restart. It carries no wake authority of its own: the
+// committed handoff on that row is the only thing it proves.
+type exactOrdinaryResetStartLease struct {
+	SessionID        string
+	SessionName      string
+	ResetCommittedAt string
+}
+
+// matches reports whether the durable row is still the one whose reset this
+// lease committed. The pre-wake patch consumes continuation_reset_pending, so
+// only the committed timestamp survives to the provider-entry recheck.
+func (l exactOrdinaryResetStartLease) matches(info sessionpkg.Info) bool {
+	return !info.Closed && info.ID == l.SessionID &&
+		strings.TrimSpace(info.SessionNameMetadata) == l.SessionName &&
+		strings.TrimSpace(info.ResetCommittedAt) == l.ResetCommittedAt
+}
+
+// pending is matches before the pre-wake patch, where the row still owes the
+// start its committed reset requested.
+func (l exactOrdinaryResetStartLease) pending(info sessionpkg.Info) bool {
+	return l.matches(info) && strings.TrimSpace(info.ContinuationResetPending) == "true"
+}
+
+// exactOrdinaryResetRequested reports the durable marker pair that a public
+// session reset persists before any runtime effect happens.
+func exactOrdinaryResetRequested(info sessionpkg.Info) bool {
+	return strings.TrimSpace(info.RestartRequested) == "true" &&
+		strings.TrimSpace(info.ContinuationResetPending) == "true"
+}
+
+// exactOrdinaryResetCommitted reports the durable handoff RestartRequestPatch
+// leaves behind: the requested marker is consumed and the row still owes the
+// fresh start that clears the reset markers.
+func exactOrdinaryResetCommitted(info sessionpkg.Info) bool {
+	_, _, committed := resetPendingCommittedAtInfo(info)
+	return committed && strings.TrimSpace(info.RestartRequested) != "true"
+}
+
+// exactOrdinaryResetAuthorityMatches reports whether a reread still carries the
+// exact identity the reset was admitted against.
+func exactOrdinaryResetAuthorityMatches(latest, expected sessionpkg.Info) bool {
+	return !latest.Closed && latest.ID == expected.ID &&
+		strings.TrimSpace(latest.SessionNameMetadata) == strings.TrimSpace(expected.SessionNameMetadata) &&
+		strings.TrimSpace(latest.InstanceToken) == strings.TrimSpace(expected.InstanceToken) &&
+		strings.TrimSpace(latest.Generation) == strings.TrimSpace(expected.Generation)
+}
+
+// exactOrdinaryResetCurrent reports whether one live ordinary row carries a
+// reset the keyed lane owns end to end — either the marker pair a public reset
+// just persisted or the committed handoff a stopped incarnation still owes a
+// start. Named canonicalization, pool capacity, and dependency waves remain
+// fleet projections, so those rows stay legacy-owned, as do held, quarantined,
+// and terminal ones.
+func exactOrdinaryResetCurrent(info sessionpkg.Info, cfg *config.City, now time.Time) bool {
+	if info.Closed || strings.TrimSpace(info.SessionNameMetadata) == "" ||
+		strings.TrimSpace(info.InstanceToken) == "" || strings.TrimSpace(info.Generation) == "" {
+		return false
+	}
+	if !exactOrdinaryResetRequested(info) && !exactOrdinaryResetCommitted(info) {
+		return false
+	}
+	if isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) || info.DependencyOnly {
+		return false
+	}
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+	case sessionpkg.StateActive, sessionpkg.StateAwake:
+	default:
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	if cfgAgent == nil || len(cfgAgent.DependsOn) > 0 {
+		return false
+	}
+	lifecycleInput := sessionpkg.LifecycleInputFromInfo(info)
+	lifecycleInput.Now = now
+	lifecycleInput.CreatedAt = info.CreatedAt
+	lifecycleInput.StaleCreatingAfter = staleCreatingStateTimeout
+	lifecycle := sessionpkg.ProjectLifecycle(lifecycleInput)
+	return !lifecycle.Terminal &&
+		!lifecycle.HasBlocker(sessionpkg.BlockerHeld) &&
+		!lifecycle.HasBlocker(sessionpkg.BlockerQuarantined)
+}
+
+// commitExactOrdinaryResetHandoff completes the durable half of one reset on
+// the exact key: it stops the live incarnation under its own instance token,
+// confirms the death, and commits the existing restart handoff so the start
+// that follows runs a fresh conversation on the same bead and name. It rereads
+// the durable authority immediately before the stop and again before the write,
+// and returns the committed row the start must authorize against.
+func commitExactOrdinaryResetHandoff(
+	params exactSessionStartParams,
+	info sessionpkg.Info,
+	initialResponse sessionpkg.PersistedResponse,
+	tp TemplateParams,
+	clk clock.Clock,
+	stderr io.Writer,
+) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
+	if params.DrainTracker != nil && params.DrainTracker.get(info.ID) != nil {
+		return info, initialResponse, errors.New("exact reset session has an active legacy drain")
+	}
+	if _, ok := params.Provider.(runtime.FreshLivenessObserver); !ok {
+		return info, initialResponse, errors.New("exact reset session provider cannot prove fresh liveness")
+	}
+	if _, ok := params.Provider.(runtime.UnattendedSessionStopper); !ok {
+		return info, initialResponse, errors.New("exact reset session provider cannot prove unattended stop")
+	}
+	processNames := drainAckStopPendingProcessNames(params.Config, info)
+	incarnationStartedAt := drainAckIncarnationStartedAt(info)
+	liveness := runtime.ObserveFreshLiveness(params.Provider, runtime.LivenessTarget{
+		SessionID:            info.ID,
+		SessionName:          info.SessionNameMetadata,
+		ProcessNames:         processNames,
+		IncarnationStartedAt: incarnationStartedAt,
+	})
+	if !liveness.Complete {
+		return info, initialResponse, errors.New("exact reset session liveness observation is incomplete")
+	}
+	if liveness.Running || liveness.Alive {
+		latest, latestResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, info.ID)
+		if readErr != nil {
+			return info, initialResponse, fmt.Errorf("re-reading exact reset session %q before stop: %w", info.ID, readErr)
+		}
+		if latestResponse.Revision != initialResponse.Revision || !exactOrdinaryResetAuthorityMatches(latest, info) ||
+			!exactOrdinaryResetCurrent(latest, params.Config, clk.Now().UTC()) {
+			return info, initialResponse, errors.New("exact reset authority changed before stop")
+		}
+		stopStartedAt := time.Now()
+		if stopErr := workerStopUnattendedSessionByIDWithConfig(params.CityPath, params.Store, params.Provider, params.Config, info.ID, info.InstanceToken); stopErr != nil {
+			return info, initialResponse, fmt.Errorf("stopping exact reset session %q: %w", info.ID, stopErr)
+		}
+		if completion := confirmDrainAckRuntimeDeadCompletion(params.CityPath, params.Store, params.Provider, params.Config,
+			info.ID, info.SessionNameMetadata, info.InstanceToken, processNames, stderr, incarnationStartedAt, true); completion != drainAckAsyncStopConfirmed {
+			return info, initialResponse, fmt.Errorf("confirming exact reset session %q stopped: %v", info.ID, completion)
+		}
+		recordExactOrdinaryResetStopTrace(params, info, time.Since(stopStartedAt))
+	}
+	if exactOrdinaryResetCommitted(info) {
+		return info, initialResponse, nil
+	}
+	current, currentResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, info.ID)
+	if readErr != nil {
+		return info, initialResponse, fmt.Errorf("re-reading exact reset session %q before the restart handoff: %w", info.ID, readErr)
+	}
+	if currentResponse.Revision != initialResponse.Revision || !exactOrdinaryResetAuthorityMatches(current, info) ||
+		!exactOrdinaryResetRequested(current) {
+		return info, initialResponse, errors.New("exact reset authority changed before the restart handoff")
+	}
+	sessionKey, hasCapability := freshRestartSessionKeyInfo(tp, current)
+	batch := sessionpkg.RestartRequestPatch(sessionKey, clk.Now().UTC())
+	if hasCapability && sessionKey == "" {
+		batch["session_key"] = ""
+	}
+	if writeErr := sessionFrontDoor(params.Store).ApplyPatch(current.ID, batch); writeErr != nil {
+		return info, initialResponse, fmt.Errorf("recording exact reset handoff for %q: %w", current.ID, writeErr)
+	}
+	committed, committedResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, current.ID)
+	if readErr != nil {
+		return info, initialResponse, fmt.Errorf("re-reading exact reset session %q after the restart handoff: %w", current.ID, readErr)
+	}
+	if !exactOrdinaryResetCommitted(committed) {
+		return info, initialResponse, errors.New("exact reset handoff did not commit a durable restart")
+	}
+	return committed, committedResponse, nil
+}
+
+func recordExactOrdinaryResetStopTrace(params exactSessionStartParams, info sessionpkg.Info, elapsed time.Duration) {
+	if params.Trace == nil {
+		return
+	}
+	cycle := params.Trace.BeginCycle(TraceTickTriggerControl, "exact_session_reset_stop", time.Now().UTC(), params.Config)
+	if cycle == nil {
+		return
+	}
+	template := normalizedSessionTemplateInfo(info, params.Config)
+	if cycle.detailEnabled(template) {
+		cycle.recordAdmittedDetailOperation(
+			TraceSiteLifecycleDrainAdvance,
+			TraceReasonFreshCycle,
+			TraceOutcomeSuccess,
+			"exact_session_reset_stop",
+			template,
+			info.ID,
+			info.SessionNameMetadata,
+			TraceSource(cycle.sourceFor(template)),
+			elapsed,
+			map[string]any{
+				"generation":     params.Generation,
+				"instance_token": info.InstanceToken,
+				"effect_applied": true,
+			},
+		)
+	}
+	if traceErr := cycle.End(TraceCompletionCompleted, nil); traceErr != nil && params.Stderr != nil {
+		fmt.Fprintf(params.Stderr, "session reconciler: recording exact reset stop trace: %v\n", traceErr) //nolint:errcheck // tracing is observational
+	}
+}
+
 func validateConfiguredNamedWakeStartLease(lease configuredNamedWakeStartLease) error {
 	if lease.SessionRevision == 0 || lease.ControllerGeneration == 0 {
 		return errors.New("configured named wake lease lacks revision or controller generation")
@@ -1648,6 +1846,12 @@ func reconcileExactSessionStartWithOwner(
 
 	ownershipNow := clk.Now().UTC()
 	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, ownershipNow)
+	resetAdmitted := (admission.Source == sessionStartAdmissionSocket || admission.Source == sessionStartAdmissionAntiEntropy) &&
+		initialResponse.Revision != 0 && exactOrdinaryResetCurrent(info, params.Config, ownershipNow)
+	if resetAdmitted {
+		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
+		owner = exactSessionStartKeyedOwner
+	}
 	var configuredDependencyLease *configuredDependencyStartLease
 	configuredDependencyCurrent := func(sessionpkg.Info, bool) bool { return false }
 	configuredDependencyFailure := func(cause error) (exactSessionStartOwner, error) {
@@ -1804,6 +2008,24 @@ func reconcileExactSessionStartWithOwner(
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{UnavailableReason: exactSessionLifecycleStatusReasonPrerequisiteUnavailable, Error: err.Error()})
 		return owner, fmt.Errorf("reconciling exact session start %q: resolving template: %w", info.ID, err)
 	}
+	var resetLease *exactOrdinaryResetStartLease
+	if resetAdmitted {
+		committed, committedResponse, resetErr := commitExactOrdinaryResetHandoff(params, info, initialResponse, tp, clk, stderr)
+		if resetErr != nil {
+			if params.RolloutMode == rollout.Auto {
+				return exactSessionStartLegacyOwner, fmt.Errorf("%w: %w", errSessionStartLegacyFallbackRequired, resetErr)
+			}
+			return exactSessionStartKeyedOwner, resetErr
+		}
+		info = committed
+		initialResponse = committedResponse
+		loadedRevision = committedResponse.Revision
+		resetLease = &exactOrdinaryResetStartLease{
+			SessionID:        info.ID,
+			SessionName:      strings.TrimSpace(info.SessionNameMetadata),
+			ResetCommittedAt: strings.TrimSpace(info.ResetCommittedAt),
+		}
+	}
 	if admission.Source == sessionStartAdmissionInProcess || admission.Source == sessionStartAdmissionWaitDependency {
 		if invalidator, ok := params.Provider.(runtime.LivenessInvalidator); ok {
 			invalidator.InvalidateLiveness(info.SessionName)
@@ -1934,6 +2156,18 @@ func reconcileExactSessionStartWithOwner(
 					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
 				}
 				return sessionpkg.Info{}, errors.New("required configured-dependency witness changed before pre-wake")
+			}
+			return current, nil
+		}
+	case resetLease != nil:
+		lease := *resetLease
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
+			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
+			if readErr != nil {
+				return sessionpkg.Info{}, readErr
+			}
+			if !lease.pending(current) {
+				return sessionpkg.Info{}, errors.New("exact reset witness changed before pre-wake")
 			}
 			return current, nil
 		}
@@ -2080,6 +2314,33 @@ func reconcileExactSessionStartWithOwner(
 			}
 			if !configuredDependencyCurrent(latest, false) {
 				return errors.New("configured-dependency witness changed before provider start")
+			}
+			return nil
+		}
+		result = runPreparedStartCandidateAuthorized(
+			ctx,
+			*prepared,
+			params.CityPath,
+			params.Provider,
+			params.Store,
+			params.Config,
+			startupTimeout,
+			resolveStartStabilityWaiter(startOpts.stabilityWaiter),
+			startOpts.sessionStaleKeyDetectionWaiter,
+			authorize,
+		)
+	case resetLease != nil:
+		lease := *resetLease
+		authorize := func(context.Context) error {
+			latest, _, readErr := getAuthoritativeSessionStartRecord(params.Store, lease.SessionID)
+			if readErr != nil {
+				return fmt.Errorf("reading exact reset session before provider start: %w", readErr)
+			}
+			if !asyncStartIdentityMatchesInfo(prepared.candidate.info, latest) {
+				return errors.New("exact reset session identity changed before provider start")
+			}
+			if !lease.matches(latest) {
+				return errors.New("exact reset witness changed before provider start")
 			}
 			return nil
 		}
@@ -2523,7 +2784,8 @@ func resolveExactSessionStartOrDrainAckStopOwnership(
 	cfg *config.City,
 	now time.Time,
 ) bool {
-	return isDrainAckStopPendingInfo(info) || exactUserHoldSuspendCurrent(info, now) || resolveExactSessionStartOwnership(info, cfg, now)
+	return isDrainAckStopPendingInfo(info) || exactUserHoldSuspendCurrent(info, now) ||
+		exactOrdinaryResetCurrent(info, cfg, now) || resolveExactSessionStartOwnership(info, cfg, now)
 }
 
 func classifyExactSessionStartOwnership(

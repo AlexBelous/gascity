@@ -884,6 +884,120 @@ func TestExactSuspendedSessionWakeBeforeProviderEntryIsFenced(t *testing.T) {
 	}
 }
 
+// resetSessionFixture persists the durable shape gc session reset leaves behind
+// on one live ordinary session: an awake row with a running incarnation and the
+// requested restart marker pair.
+func resetSessionFixture(t *testing.T, env *reconcilerTestEnv, provider *unattendedStopProvider) beads.Bead {
+	t.Helper()
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{
+		"state":                      string(session.StateActive),
+		"instance_token":             "reset-token",
+		"last_woke_at":               time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+		"started_config_hash":        "old-core-hash",
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+	})
+	if err := provider.Start(t.Context(), bead.Metadata["session_name"], runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if err := provider.SetMeta(bead.Metadata["session_name"], "GC_INSTANCE_TOKEN", "reset-token"); err != nil {
+		t.Fatalf("set runtime token: %v", err)
+	}
+	return bead
+}
+
+func TestExactResetSessionStopsAndRestartsSameCanonicalRow(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := resetSessionFixture(t, env, provider)
+	before := env.sessionInfo(bead.ID)
+	if !resolveExactSessionStartOrDrainAckStopOwnership(before, env.cfg, time.Now().UTC()) {
+		t.Fatal("reset-requested ordinary session is not owned by the keyed seed/legacy exclusion")
+	}
+	cr := &CityRuntime{
+		cityPath: t.TempDir(), cityName: "test-city", cfg: env.cfg, sp: provider,
+		cs:  coherentSessionStartControllerStateForTest(env.cfg, provider, env.store, rollout.Require),
+		rec: events.Discard, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+		sessionStartOptions: []startExecutionOption{
+			withStartStabilityWaiter(immediateStartStabilityWaiter),
+			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+		},
+	}
+	if err := cr.ensureSessionStartController(t.Context(), newSessionBeadSnapshotFromInfos(nil)); err != nil {
+		t.Fatalf("ensure session-start controller: %v", err)
+	}
+	t.Cleanup(cr.stopSessionStartController)
+	if got := cr.admitSessionStartSocketKey(bead.ID); got != sessionStartSocketReplyOK {
+		t.Fatalf("socket reply = %q, want keyed admission", got)
+	}
+	awaitCond(t, func() bool {
+		current := env.sessionInfo(bead.ID)
+		return current.MetadataState == string(session.StateActive) && current.InstanceToken != before.InstanceToken
+	}, "exact reset restart")
+	after := env.sessionInfo(bead.ID)
+	if after.ID != before.ID || after.SessionNameMetadata != before.SessionNameMetadata {
+		t.Fatalf("reset session = %+v, want the same bead and name as %+v", after, before)
+	}
+	if after.RestartRequested != "" || after.ContinuationResetPending != "" || after.ResetCommittedAt != "" {
+		t.Fatalf("reset markers survived the restart: %+v", after)
+	}
+	if !provider.IsRunning(before.SessionNameMetadata) {
+		t.Fatal("reset session has no live runtime after the restart")
+	}
+	if calls := provider.stopSnapshot(); len(calls) != 1 ||
+		calls[0].name != before.SessionNameMetadata || calls[0].expectedToken != before.InstanceToken {
+		t.Fatalf("unattended stop calls = %#v, want exactly one token-bound stop", calls)
+	}
+	if got := env.sp.CountCalls("Start", before.SessionNameMetadata); got != 2 {
+		t.Fatalf("provider Start calls = %d, want the fixture start plus exactly one restart", got)
+	}
+	stored, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read reset row: %v", err)
+	}
+	if stored.Metadata["drain_ack_source"] != "" || stored.Metadata["state"] == "drain-ack-stop-pending" {
+		t.Fatalf("reset row entered the drain-ack stop path: %+v", stored.Metadata)
+	}
+}
+
+func TestExactResetSessionUnderLegacyDrainRetainsIntentWithoutStopping(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := resetSessionFixture(t, env, provider)
+	params := exactSessionStartTestParams(t, env)
+	params.Provider = provider
+	params.Generation = 1
+	params.RolloutMode = rollout.Require
+	params.DrainTracker = newDrainTracker()
+	params.DrainTracker.set(bead.ID, &drainState{reason: "user", startedAt: time.Now().UTC()})
+
+	owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID, Source: sessionStartAdmissionSocket,
+	}, params)
+	if owner != exactSessionStartKeyedOwner || err == nil || !strings.Contains(err.Error(), "active legacy drain") {
+		t.Fatalf("legacy-drain reset result = (owner=%v, err=%v), want keyed legacy-drain park error", owner, err)
+	}
+	if calls := provider.stopSnapshot(); len(calls) != 0 {
+		t.Fatalf("unattended stop calls = %#v, want zero while legacy owns the drain", calls)
+	}
+	after := env.sessionInfo(bead.ID)
+	if after.RestartRequested != "true" || after.ContinuationResetPending != "true" || after.ResetCommittedAt != "" {
+		t.Fatalf("durable reset intent = %+v, want the requested marker pair retained and uncommitted", after)
+	}
+	if got := env.sp.CountCalls("Start", after.SessionNameMetadata); got != 1 {
+		t.Fatalf("provider Start calls = %d, want only the fixture start", got)
+	}
+}
+
 func TestConfiguredNamedPinnedSessionUnpinBeforeProviderEntryIsFenced(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

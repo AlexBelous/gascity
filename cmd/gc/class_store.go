@@ -306,6 +306,17 @@ func resolveGraphStore(routes *storageRoutes, workStore beads.Store, cfg *config
 	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassGraph, rec)
 }
 
+// graphClassBinding returns the store these routes serve the graph class from,
+// and whether they relocate it at all — the same question resolveClassStore asks
+// to choose its branch, exposed for the callers that must BEHAVE differently
+// rather than merely read elsewhere. A reader that answers by shelling `bd` in
+// the work directory cannot follow a relocated class, so it has to know it must
+// go in-process instead; resolveGraphStore alone cannot tell it, because a
+// relocated store and an unrelocated one are both just a beads.Store.
+func graphClassBinding(routes *storageRoutes) (beads.Store, bool) {
+	return routes.storeFor(coordclassFor(config.BeadClassGraph))
+}
+
 // newCityMailProvider builds the controller's mail provider as a two-store mail
 // provider: message beads persist in the messaging-class store, and mail's
 // session reads/writes for addressing/identity resolution go to the session-class

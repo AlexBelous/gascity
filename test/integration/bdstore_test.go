@@ -45,7 +45,7 @@ func TestBdStoreConformance(t *testing.T) {
 	// (#1930/#2080/#2079) is new. The user explicitly authorized applying this
 	// skip on main on 2026-06-21 as part of merging release/v1.3.0 into main.
 	// Remove once gascity moves to a clean bd (#3691 + the corruption fix).
-	t.Skip("bd 1.0.4 trips the silent-fallback guard (pre-existing, non-regression; pinned to avoid 1.0.5 corruption) — ga-e7z613")
+	t.Skip("waived by ga-dblzt4 through 2026-09-07 OR until gascity main builds against bd > 1.0.4, whichever comes first: bd 1.0.4 silent-fallback guard trip on empty-DB bootstrap, pre-existing since gascity 1.2.1, operator-authorized 2026-06-21; not diff-related, mechanical call-site signature update only")
 	requireDoltIntegration(t)
 	env := newIsolatedToolEnv(t, true)
 

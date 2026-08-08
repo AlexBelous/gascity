@@ -410,16 +410,28 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 		tp, desired := in.Desired[name]
 		live := liveness[info.ID]
 
-		detectDeadline(in, emit, base, info, template, live, now)
-		detectOrphan(in, emit, base, info, desired, runningSet, runningKnown)
-		detectStaleCreate(in, emit, base, info, runningSet, runningKnown, clk)
+		// Family precedence mirrors legacy's forward-pass early-continues: a row
+		// that raises drain, orphan, or stale-create candidacy is claimed by that
+		// family and evaluated no further this cycle. Without it the sweep would
+		// raise a sleep or wake condition on a row legacy had already routed to a
+		// close, producing detector-present/legacy-absent mismatches that are an
+		// artifact of shape rather than a real divergence.
+		if detectDrain(in, emit, base, info) {
+			continue
+		}
+		if detectOrphan(in, emit, base, info, desired, runningSet, runningKnown) {
+			continue
+		}
+		if detectStaleCreate(in, emit, base, info, runningSet, runningKnown, clk) {
+			continue
+		}
 		if desired {
 			detectDrift(in, emit, base, info, tp)
 		}
-		detectDrain(in, emit, base, info)
-		detectWakeOrSleep(emit, base, name, awake, live)
 		detectZombie(emit, base, live)
+		detectDeadline(in, emit, base, info, template, live, now)
 		detectStall(in, emit, base, infoByID, tp, live, now)
+		detectWakeOrSleep(emit, base, name, awake, live)
 		detectStranded(emit, base, info, desired, live, now)
 	}
 
@@ -727,9 +739,10 @@ func detectDeadline(in detectorSweepInput, emit *detectorConditionSink, base det
 	}
 }
 
-func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, desired bool, runningSet map[string]bool, runningKnown bool) {
+// detectOrphan reports whether the row was claimed by the orphan family.
+func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, desired bool, runningSet map[string]bool, runningKnown bool) bool {
 	if desired || in.DeferSessionCloses {
-		return
+		return false
 	}
 	if strings.TrimSpace(info.MetadataState) == string(sessionpkg.StateFailedCreate) {
 		cond := base
@@ -739,7 +752,7 @@ func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detec
 		cond.Outcome = TraceOutcomeClosed
 		cond.Fields = map[string]any{"predicted_effect": "close"}
 		emit.add(cond, true)
-		return
+		return true
 	}
 	// Proven absence, not assumed absence: without a running set the close arm
 	// fails closed for the cycle, matching legacy's liveness-error refusal.
@@ -751,7 +764,7 @@ func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detec
 		cond.Outcome = TraceOutcomeSkipped
 		cond.Fields = map[string]any{"predicted_effect": "none"}
 		emit.add(cond, false)
-		return
+		return true
 	}
 	cond := base
 	cond.Family = detectorFamilyOrphan
@@ -767,14 +780,17 @@ func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detec
 		cond.Fields = map[string]any{"predicted_effect": "close"}
 	}
 	emit.add(cond, true)
+	return true
 }
 
-func detectStaleCreate(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, runningSet map[string]bool, runningKnown bool, clk clock.Clock) {
+// detectStaleCreate reports whether the row was claimed by the stale-create
+// family.
+func detectStaleCreate(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, runningSet map[string]bool, runningKnown bool, clk clock.Clock) bool {
 	if !info.PendingCreateClaim {
-		return
+		return false
 	}
 	if runningKnown && runningSet[base.SessionName] {
-		return
+		return false
 	}
 	cond := base
 	cond.Family = detectorFamilyStaleCreate
@@ -784,13 +800,14 @@ func detectStaleCreate(in detectorSweepInput, emit *detectorConditionSink, base 
 		cond.Outcome = TraceOutcomeRollback
 		cond.Fields = map[string]any{"predicted_effect": "rollback"}
 		emit.add(cond, true)
-		return
+		return true
 	}
 	cond.Site = TraceSiteReconcilerPendingCreatePreserved
 	cond.Reason = detectorReasonPendingCreatePreserved
 	cond.Outcome = TraceOutcomeNoChange
 	cond.Fields = map[string]any{"predicted_effect": "none"}
 	emit.add(cond, false)
+	return true
 }
 
 func detectDrift(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, tp TemplateParams) {
@@ -812,13 +829,14 @@ func detectDrift(in detectorSweepInput, emit *detectorConditionSink, base detect
 	emit.add(cond, true)
 }
 
-func detectDrain(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info) {
+// detectDrain reports whether the row was claimed by the drain family.
+func detectDrain(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info) bool {
 	if in.Drains == nil {
-		return
+		return false
 	}
 	state := in.Drains.get(info.ID)
 	if state == nil {
-		return
+		return false
 	}
 	// Tracker state only. The sweep performs NO GetMeta(GC_DRAIN_ACK) read: ack
 	// discovery is handler-side (DETECTOR.md §3, D-DRAIN architect decision).
@@ -832,6 +850,7 @@ func detectDrain(in detectorSweepInput, emit *detectorConditionSink, base detect
 		"drain_reason":     state.reason,
 	}
 	emit.add(cond, true)
+	return true
 }
 
 func detectWakeOrSleep(emit *detectorConditionSink, base detectorCondition, name string, awake map[string]AwakeDecision, live detectorLivenessBits) {

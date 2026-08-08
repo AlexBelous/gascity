@@ -94,8 +94,11 @@ max_active_sessions = 2
 		autoArms  []detectorSweepJourneyTraceRecord
 		lastTrace detectorSweepJourneyTraceShow
 	)
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
+	poll := time.NewTicker(2 * time.Second)
+	defer poll.Stop()
+	deadline := time.NewTimer(90 * time.Second)
+	defer deadline.Stop()
+	for {
 		lastTrace, err = detectorSweepJourneyTrace(cityDir)
 		if err != nil {
 			t.Fatalf("read trace: %v", err)
@@ -104,7 +107,13 @@ max_active_sessions = 2
 		if len(detectorSweepJourneyDistinctCycles(sweeps)) >= detectorSweepJourneyMinCycles {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-poll.C:
+			continue
+		case <-deadline.C:
+		case <-t.Context().Done():
+		}
+		break
 	}
 
 	cycles := detectorSweepJourneyDistinctCycles(sweeps)

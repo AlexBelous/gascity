@@ -29,8 +29,8 @@ func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts Upda
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	if updateOptsEmpty(opts) {
-		return ErrEmptyConditionalUpdate
+	if err := validateConditionalUpdateOpts(opts); err != nil {
+		return err
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
 		next := applySQLiteUpdateOpts(b, opts)
@@ -157,16 +157,6 @@ func (s *SQLiteStore) conditionalWrite(id string, expectedRevision int64, apply 
 		}
 		return tx.Commit()
 	})
-}
-
-// updateOptsEmpty reports whether opts would apply no field at all — the
-// ErrEmptyConditionalUpdate contract (a fenced no-op must not consume the
-// caller's revision).
-func updateOptsEmpty(opts UpdateOpts) bool {
-	return opts.Title == nil && opts.Status == nil && opts.Type == nil &&
-		opts.Priority == nil && opts.Description == nil && opts.ParentID == nil &&
-		opts.Assignee == nil && len(opts.Metadata) == 0 &&
-		len(opts.Labels) == 0 && len(opts.RemoveLabels) == 0
 }
 
 // sqliteDeleteBatchChunk bounds how many ids ride on one DELETE statement,

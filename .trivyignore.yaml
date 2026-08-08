@@ -88,6 +88,13 @@ vulnerabilities:
       - "usr/local/bin/dolt"
     expired_at: 2026-08-07
     statement: Latest Dolt 1.88.0 still embeds github.com/apache/thrift v0.13.1; remove after a Dolt release includes thrift 0.23.0 or later.
+  - id: CVE-2026-56852
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-08-07
+    statement: Rebuilt gh and Dolt sources embed golang.org/x/text 0.38.0 and 0.36.0, and external kubectl embeds 0.33.0; remove each path when its upstream source bumps to x/text 0.39.0 or later.
   - id: CVE-2026-25680
     paths:
       - "usr/local/bin/dolt"
@@ -183,8 +190,9 @@ vulnerabilities:
   # entries so the scan must prove gc is clean rather than mask it. The v59
   # dependency bump now pins x/net v0.56.0, so gc also clears the HTML/idna
   # CVEs below. bd (beads v1.1.0) and kubectl stay external and
-  # base-pre-existing (Container Scan already red on main 2026-06-24); remove
-  # their paths once they rebuild upstream. The threshold test enforces that no
+  # base-pre-existing (Container Scan already red on main, scheduled run
+  # 2026-06-24); remove their paths once they rebuild upstream.
+  # TestTrivyIgnoreDropsGCModuleWaiversPastThreshold enforces that no
   # gc waiver outlives its go.mod fix version.
   - id: CVE-2026-25680
     paths:

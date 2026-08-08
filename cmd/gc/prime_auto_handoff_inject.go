@@ -128,7 +128,7 @@ func sessionStartAutoHandoffInjectionWithStore(store beads.Store, cityPath strin
 		return primeHookContextInjection{}, nil, nil
 	}
 	cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
+	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	var ordinaryMailProvider mail.Provider
 	if cfgErr == nil && cfg != nil {

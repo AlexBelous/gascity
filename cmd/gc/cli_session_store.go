@@ -19,7 +19,7 @@ import (
 // send the exact resulting session key over the controller socket; the
 // controller still rereads this store as the sole authority.
 func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
-	return resolveSessionStore(store, cfg, cityPath, nil)
+	return resolveSessionStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 }
 
 // cliSessionFrontDoor builds the typed session write front door over the

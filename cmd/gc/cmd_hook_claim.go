@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/executionevent"
 )
 
 const hookClaimCommandName = "hook"
@@ -61,6 +62,10 @@ type hookClaimOps struct {
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
 	StampWorkMeta hookStampWorkMetaFunc
+	// ReadWorkMeta is the post-stamp authoritative readback used only to
+	// establish the durable lifecycle-start emission point.
+	ReadWorkMeta             func(context.Context, string, []string, string, string) (beads.Bead, error)
+	EmitExecutionStepStarted func(beads.Bead, string, []string, string)
 	// PublishRunMap writes best-effort session-to-run correlation without
 	// mutating the session bead after a successful work claim.
 	PublishRunMap hookPublishRunMapFunc
@@ -157,10 +162,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if !workQueryHasReadyWork(normalized) {
 		return hookClaimResult{}
 	}
-	candidates, err := decodeHookClaimBeads(normalized)
+	candidates, skipped, err := decodeHookClaimBeads(normalized)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
+	}
+	for _, skip := range skipped {
+		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
 	if len(candidates) == 0 {
 		return hookClaimResult{}
@@ -204,6 +212,12 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.PublishRunMap == nil {
 		ops.PublishRunMap = writeRunMap
+	}
+	if ops.ReadWorkMeta == nil {
+		ops.ReadWorkMeta = hookReadClaimedBeadWithBdStore
+	}
+	if ops.EmitExecutionStepStarted == nil {
+		ops.EmitExecutionStepStarted = hookEmitExecutionStepStarted
 	}
 }
 
@@ -426,7 +440,10 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
-	stampHookClaimIdentity(bead, opts, ops, dir, stderr)
+	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
+	if stamped && hookClaimLifecycleCandidate(durable, opts) {
+		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
+	}
 	publishHookClaimRunMap(bead, opts, ops, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
@@ -578,16 +595,54 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 // an unconditional write would emit a bead.updated per tick per in-progress bead
 // (the cache-reconcile flood class). Best-effort: a missing repo, detached HEAD,
 // absent session, or write error never blocks the claim.
-func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
+func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
 	patch := hookClaimIdentityPatch(bead, opts, ops, dir)
+	sessionID := hookClaimSessionID(opts.Env)
+	needsLifecycleIdentity := sessionID != "" && !beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]))
 	if len(patch) == 0 {
-		return
+		return bead, needsLifecycleIdentity && strings.EqualFold(strings.TrimSpace(bead.Status), "in_progress") &&
+			strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) == sessionID
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	if err := ops.StampWorkMeta(ctx, dir, opts.Env, bead.ID, opts.Assignee, patch); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: stamping execution identity on %s: %v\n", bead.ID, err) //nolint:errcheck
+		return beads.Bead{}, false
 	}
+	if !needsLifecycleIdentity {
+		return beads.Bead{}, false
+	}
+	readback, err := ops.ReadWorkMeta(ctx, dir, opts.Env, bead.ID, opts.Assignee)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: reading stamped execution identity on %s: %v\n", bead.ID, err) //nolint:errcheck
+		return beads.Bead{}, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(readback.Status), "in_progress") ||
+		strings.TrimSpace(readback.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
+		return beads.Bead{}, false
+	}
+	return readback, true
+}
+
+// hookClaimLifecycleCandidate reports whether a bead can be a session-owned
+// graph step whose started fact is safe to reconcile. EmitLifecycle performs the
+// authoritative graph-root validation; this cheaper gate avoids opening the
+// graph-store path for ordinary hook work.
+func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
+	sessionID := hookClaimSessionID(opts.Env)
+	if sessionID == "" ||
+		!strings.EqualFold(strings.TrimSpace(bead.Status), "in_progress") ||
+		beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) ||
+		strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]) == "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) == "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
+		return false
+	}
+	if sessionName := hookClaimSessionName(opts.Env); sessionName != "" &&
+		strings.TrimSpace(bead.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
+		return false
+	}
+	return true
 }
 
 // hookClaimIdentityPatch builds the compare-and-skipped claim-time metadata patch.
@@ -622,6 +677,20 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 	store := hookClaimBdStore(dir, env, assignee)
 	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
+}
+
+func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
+	return hookClaimBdStore(dir, env, assignee).Get(beadID)
+}
+
+func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, assignee string) {
+	rec := openCityRecorder(io.Discard)
+	if closer, ok := rec.(io.Closer); ok {
+		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
+	}
+	// The hook's bd context owns both the claimed graph step and its workflow
+	// root; EmitLifecycle verifies the root is graph.v2 before recording.
+	_ = executionevent.EmitLifecycle(rec, hookClaimBdStore(dir, env, assignee), events.ExecutionStepStarted, step, eventActor())
 }
 
 // publishHookClaimRunMap publishes the claimed bead's resolved run ID for the
@@ -1223,24 +1292,78 @@ func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {
 	return out
 }
 
-func decodeHookClaimBeads(output string) ([]beads.Bead, error) {
+// hookClaimSkip records a work_query element that parsed as JSON but could not
+// be unmarshaled into a claim candidate — e.g. a bead a buggy filer wrote with
+// a value whose type does not match beads.Bead (a numeric "status", say). The
+// scan reports these so the caller can log and skip them instead of failing
+// wholesale: one malformed bead must not halt dispatch city-wide.
+type hookClaimSkip struct {
+	ID  string
+	Err error
+}
+
+// decodeHookClaimBeads parses work_query output into claim candidates. It is
+// resilient to individual malformed beads: the array is split into raw elements
+// first, then each is typed-decoded independently, so a single undecodable bead
+// is collected into skipped rather than failing the whole scan. A top-level
+// value that is not a JSON array still returns an error, preserving the
+// "requires JSON work_query output" contract for non-JSON command output.
+//
+// Non-string *metadata* values are already tolerated one layer down:
+// beads.Bead.Metadata is a StringMap that coerces them to their JSON text form,
+// so a nested-object or boolean metadata value decodes fine and is never
+// skipped. The per-element split guards the batch against type errors OUTSIDE
+// metadata (e.g. a numeric "status"), which that coercion does not repair and
+// which would otherwise fail the whole-slice unmarshal and drop every bead.
+func decodeHookClaimBeads(output string) ([]beads.Bead, []hookClaimSkip, error) {
 	output = strings.TrimSpace(output)
 	if output == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if !json.Valid([]byte(output)) {
 		extracted, ok := firstHookJSONValue(output)
 		if !ok {
-			return nil, errors.New("output is not JSON")
+			return nil, nil, errors.New("output is not JSON")
 		}
 		output = extracted
 	}
 	output = normalizeWorkQueryOutput(output)
-	var candidates []beads.Bead
-	if err := json.Unmarshal([]byte(output), &candidates); err != nil {
-		return nil, err
+	// Split into raw elements before typed decoding so one malformed bead
+	// cannot fail the whole batch. json.RawMessage accepts any valid JSON
+	// value, so the array split never trips on a bead that a direct
+	// []beads.Bead unmarshal would reject.
+	var raws []json.RawMessage
+	if err := json.Unmarshal([]byte(output), &raws); err != nil {
+		return nil, nil, err
 	}
-	return candidates, nil
+	candidates := make([]beads.Bead, 0, len(raws))
+	var skipped []hookClaimSkip
+	for _, raw := range raws {
+		var bead beads.Bead
+		if err := json.Unmarshal(raw, &bead); err != nil {
+			skipped = append(skipped, hookClaimSkip{ID: hookClaimBeadIDForLog(raw), Err: err})
+			continue
+		}
+		candidates = append(candidates, bead)
+	}
+	return candidates, skipped, nil
+}
+
+// hookClaimBeadIDForLog best-effort extracts a bead id from a raw work_query
+// element for skip diagnostics. A malformed bead is typically malformed only in
+// one field; its id remains a decodable string, so logging it keeps the skip
+// actionable (the offending bead can be traced to fix the upstream filer).
+// Returns "<unknown>" when even the id cannot be read.
+func hookClaimBeadIDForLog(raw json.RawMessage) string {
+	var probe struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &probe); err == nil {
+		if id := strings.TrimSpace(probe.ID); id != "" {
+			return id
+		}
+	}
+	return "<unknown>"
 }
 
 func firstHookJSONValue(output string) (string, bool) {

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 199,
+  "next_id": 201,
   "permanent_ids": [
     {
       "name": "help",
@@ -3023,7 +3023,7 @@
       "hidden_exception": "perf-wrapper",
       "classification": "perf-reconciler-compare",
       "owner": "immediate",
-      "id": 198
+      "id": 200
     },
     {
       "path": "gc perf run",
@@ -3932,6 +3932,52 @@
       "classification": "stop",
       "owner": "immediate",
       "id": 164
+    },
+    {
+      "path": "gc storage",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "path": "gc storage migrate",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-migrate",
+      "owner": "immediate",
+      "id": 198
+    },
+    {
+      "path": "gc storage status",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-status",
+      "owner": "immediate",
+      "id": 199
     },
     {
       "path": "gc supervisor",

@@ -1426,7 +1426,7 @@ func runController(
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
 
-	cr := newCityRuntime(CityRuntimeParams{
+	cr, err := newCityRuntime(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
 		TomlPath:                tomlPath,
@@ -1452,6 +1452,12 @@ func runController(
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
+	if err != nil {
+		// The runtime never came into existence, so it never took the shadow
+		// trace; the deferred close above still owns it.
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	nudgeShadowTraceTransferred = true
 
 	// Install controller-managed bead stores even when the HTTP API is

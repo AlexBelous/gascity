@@ -38,8 +38,8 @@ func (cs *controllerState) sessionStartSnapshot() (controllerSessionStartSnapsho
 		CityName:   cs.cityName,
 		Config:     cs.cfg,
 		Provider:   cs.sp,
-		Store:      resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
-		NudgeStore: resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
+		Store:      resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
+		NudgeStore: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
 		Recorder:   cs.eventProv,
 	}
 	switch {

@@ -79,6 +79,12 @@ func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string)
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		execName := name
+		if name == "bd" {
+			if pinned := strings.TrimSpace(env["BD_BIN"]); filepath.IsAbs(pinned) {
+				execName = pinned
+			}
+		}
 		start := time.Now()
 		trace := newBDExecTrace(start, dir, name, args)
 		trace("start", nil)
@@ -96,7 +102,7 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 			defer slowTimer.Stop()
 		}
 
-		cmd := exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, execName, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir

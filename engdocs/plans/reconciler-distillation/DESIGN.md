@@ -68,8 +68,8 @@ comparison tooling, no contract anchors.
 
 | Action | What | ~LOC |
 | --- | --- | --- |
-| DELETE NOW (dead today, zero callers) | parity observers, `planExactSessionWaitDependencyStartShadow`, `sessionLifecycleShadowProjection` | −414 prod, −1,260 test |
-| DELETE NOW (apparatus) | perf-compare CLI+schema, contract anchor, nudge_shadow knob+pkg, lifecycle shadow worker/compare | −3,900 prod, −8,000 test |
+| DELETE NOW | contract anchor (process ceremony, guarded a plan directory in no tree, never enforced) | −585 |
+| KEEP UNTIL EVIDENCE, THEN DELETE AT CUTOVER | **shadow/side-by-side parity machinery + perf-compare CLI + nudge_shadow gate** — owner directive D4: these are the semantic-parity verification instruments; they go only after the WE evidence campaign (below) | −7,900 (deferred) |
 | DELETE AT CUTOVER | rollout tri-state, legacy-fallback lattice, Entered flags, drain-ack rollback, ownership latch, nudge coexistence | −1,500 prod, −2,900 test |
 | DELETE AT CUTOVER | legacy reconciler cluster + wrapper chain + legacy-only trace sites | −13,700 prod, −22,000 test (triaged, not blind) |
 | FOLD | six lease families → one, 11-param admit → struct, repeated preambles, socket-admission triplication | −1,300 prod |
@@ -97,10 +97,17 @@ legacy) with zero named guarantees lost.
   handlers, porting behavior tests from the legacy corpus (triage: contract
   tests re-pointed, wiring tests die). Plus `.103`, `.105`, `.78.6`,
   `ga-adnxji` (proven impl at 3a96ef4e8, archaeology not replay).
-- **WE — cutover commit.** Keyed becomes the only owner; delete the rollout
-  lattice and the legacy cluster; rewrite the four "beats the 30s debounce"
-  assertions as absolute latency budgets; deprecation warning (not silent
-  removal) for `daemon.session_reconciler`, per the repo's own precedent.
+- **WE — evidence campaign, then cutover commit.** Precondition (owner
+  directive D4): run a real side-by-side campaign — a city on
+  `daemon.session_reconciler = auto` with the shadow observers and detail
+  traces armed, over the WD-completed behavior set — and archive the parity
+  results; run a final `gc perf reconciler-compare` A/B and archive the
+  report in engdocs. Only with that evidence recorded: keyed becomes the
+  only owner; delete the rollout lattice, the legacy cluster, and the
+  shadow/perf machinery (whose second arm no longer exists); rewrite the
+  four "beats the 30s debounce" assertions as absolute latency budgets;
+  deprecation warning (not silent removal) for `daemon.session_reconciler`,
+  per the repo's own precedent.
 - **WF — fold + rename + split.** Lease unification, shared controller
   skeleton, split the 964-line keyed reconcile function, shadow-name renames.
 
@@ -154,3 +161,10 @@ schema-v59 managed-Dolt isolated-tmux journey where lifecycle is touched,
   requires FreshLivenessObserver + UnattendedSessionStopper; incapable
   providers get a typed refusal. No degraded mode, no matrix.
 - **D3: YES — land WA substrate PRs to origin/main now.**
+- **D4 (2026-08-08, supersedes the WB apparatus deletions): KEEP the
+  shadow/side-by-side parity machinery and the perf-compare harness until
+  cutover.** Owner verbatim: *"we need the shadow and side-by-side to verify
+  semantic parity we can't delete it"*; the perf harness measured the ~50%
+  latency reduction. WB's shadow/perf deletion commits were reverted in
+  `9044a47a3f`; only the contract-anchor deletion stands. WE is now gated on
+  an actual side-by-side evidence campaign (§4 WE).

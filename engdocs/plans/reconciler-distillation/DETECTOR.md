@@ -88,6 +88,20 @@ Retirement arguments:
   (city_runtime_test.go:638-714) count channel fires on a bare struct — none observes
   a session. What breaks: one doc-example line. Poke coalescing survives via the
   cap-1 channels and workqueue key coalescing.
+  **Correction (recorded at WD.0, commit 9f7b673db4).** "One doc-example line"
+  undercounted the blast radius. Six journey fixtures also set the key, two of them
+  load-bearing: the v59 lane-gate journey
+  (cmd/gc/session_start_real_bd_tmux_integration_test.go) and the wait-dependency
+  journeys that paired `patrol_interval="1h"` with a 10m debounce specifically to
+  suppress event-driven fleet ticks. Those fixtures had bought their determinism from
+  a quiet window, and deleting the debouncer did not create the races it EXPOSED —
+  every poke now ticks immediately, so a fleet tick lands inside legs that previously
+  ran alone. Two were adjudicated on this lane: **ga-797vy** (a repairable coexistence
+  race around a production-correct suspend family — fixed by the F1/F2/F4 ownership
+  fences) and **ga-ij8mh** (a wake family that was never production-reachable, whose
+  journey leg is skipped until WD.10a re-anchors it). The retirement still stands; the
+  doctrine it establishes is that fixtures may not buy determinism with quiet windows,
+  and that determinism comes from ownership.
 - **R5 Wrapper chain — retire at WE, with the perf CLI, in the same commit.** Two
   wrappers ARE production entry points today (`AtPathWithNamedDemand` ←
   city_runtime.go:3626 + cmd_start.go:1035; `AtPath` ← the D4-retained perf CLI
@@ -124,7 +138,8 @@ the boot reconcile (:935). Event-driven keyed admissions (socket, wait-dependenc
 pool hints, nudge wake) keep their own channels — the sweep is the periodic
 anti-entropy layer over them, the level-triggered backstop role the tick has today.
 
-**Inputs (all already loaded by the tick — zero new reads).**
+**Inputs (all already loaded by the tick — no new reads beyond the two declared
+carve-outs below).**
 - session bead snapshot rows `OpenForReconcile()` (loaded/reloaded :1470/:1571/:1593)
 - desired state + configured names (:1574-1583, :2817)
 - pool desired counts `ComputePoolDesiredStates` (pure; :2750-2765, normally
@@ -132,6 +147,20 @@ anti-entropy layer over them, the level-triggered backstop role the tick has tod
 - assigned-work beads + store refs (:2715-2731), ready-wait set (:2820-2824)
 - provider-health snapshot `loadProviderHealthSnapshot` — one file read per sweep
   (moves from god-function prologue :1508)
+- routed-work view — **one bounded `ReadyLive` read per store per patrol**, arriving
+  at WD.10b (Q2 resolved yes-with-promotion). This is not a new read: it is
+  `readyDemandSnapshotFingerprint`'s existing per-patrol enumeration
+  (city_runtime.go:4058) *promoted* from hash input to the sweep's DECLARED
+  routed-work view, where it both invalidates the demand snapshot and enqueues exact
+  `(workID, poolTarget, sourceStore)` keys into pool-allocation admission.
+  Event-carried routed work is already exact-key covered (`admitReadyRoutedWorkEvent`
+  → `LiveReadyByID` → keyed admission, api_state.go:801-884), so the scan's residual
+  value is event-silent raw-bd writes only — exactly the re-detection WD.10b owes.
+  Declared on the same footing as the provider-health file read above: bounded and
+  per sweep, not zero. WD.10b then deletes `readyDemandSnapshotFingerprint` +
+  `writeReadyDemandFingerprintBead` (~70 LOC, :4058-4125), the snapshot field, and
+  `requestReadyRoutedWorkLegacyFallback` together (WE ledger entry); the interim
+  floor lands separately as WD.16 before that slice
 - liveness, two tiers: ONE `sp.ListRunning` per sweep — names-only
   (`internal/runtime/runtime.go:203`), so it can prove absence but NOT zombie-ness —
   for dead-orphan candidacy (the tick already pays it in `reconcilePoolDeaths` :1357);
@@ -174,8 +203,10 @@ resolved provider type): traced refusal, no enqueue — no 30s re-enqueue treadm
   `enqueueRoutedWorkPoolAllocation` :376).
 
 **Cost model.** O(rows) predicate evaluation + O(fleet) ComputeAwakeSet (both already
-paid by legacy) + the bounded provider reads above + **zero store mutations, zero
-provider mutations, zero domain writes**. The sweep's only writes are trace-subsystem
+paid by legacy) + the bounded provider reads above + the one declared per-store
+`ReadyLive` routed-work read from WD.10b onward (which replaces, rather than adds to,
+the fingerprint scan the tick pays today) + **zero store mutations, zero provider
+mutations, zero domain writes**. The sweep's only writes are trace-subsystem
 appends (WAL records; NOT arm mutations — the shadow reason vocabulary never triggers
 `ensureAutoArm`, §3), and those are the campaign's evidence, not a side effect.
 
@@ -351,6 +382,30 @@ construction: detection is read-only and shadow families never enqueue before WE
   pool-under-min → keyed fill (turning the request-count-only legacy tests :568 into
   a real started-session assertion, corpus's known weak spot); negative: quarantined
   named session stays asleep after churn (:5009).
+  **WD.10a amendments (five, binding; recorded on ga-f7v2ft.116 from the ga-ij8mh
+  adjudication).** (1) TARGET SHAPE: the configured-dependency arm's target is the
+  CANONICAL SINGLETON shape — accept
+  `isCanonicalPoolManagedSessionInfoForTemplate` (session_name_lookup.go:52-63) beside
+  the origin-less legacy shape; the two wake families partition on **slot markers, not
+  on `pool_managed`**, so slotized rows (pool_slot / trigger-bead / PoolSessionName
+  naming) stay with strict-pool. (2) SECOND ENTRY GATE, beside Q1: the pre-lease
+  ownership seam. The pool-managed→legacy arm of `classifyExactSessionStartOwnership`
+  (session_start_reconcile.go:2550) holds the wake-consume race open (wake write →
+  BeadUpdated → in_process admission → legacy yield → fallback poke → legacy
+  PreWakePatch consumes `wake_request`); WD.10a must either carve certified wake-family
+  targets out of that arm or make detection-side admission the sole keyed entry, and
+  state which, with a RED for the losing interleave. (3) Q1 is unchanged, but record
+  alongside it that `poolAllocationShadowDependencies` (pool_allocation_shadow.go:82-86)
+  categorically excludes dependency-bearing agents from the strict-pool lattice — that
+  exclusion is WHY this family must own the singleton shape; do not close the hole by
+  making dependency-bearing agents pool-eligible. (4) SWEEP RULE:
+  `sweepUndesiredPoolSessions` / `GCSweepSessionBeads` (city_runtime.go:3419-3424,
+  pool_session_name.go:81-87) must not reap a canonical singleton row whose explicit
+  wake is current — spec + RED. (5) ACCEPTANCE: the v59 journey's dependency leg
+  re-lands against a SYNC-PRODUCED canonical singleton row (materialized by the
+  production path, never fabricated), asserting keyed lease admission + exactly-once
+  start + dependency-alive gating within an absolute budget under active legacy at
+  debounce-0, and the existing unit tests re-anchor on the same shape.
 - **D-ZOMBIE** (TerminalProviderError). Condition: `running ∧ !alive` from the sweep's
   two-bit `observeRuntimeProviderLiveness` probe over bead-awake rows (§2 inputs) —
   matching legacy's own zombie predicate (:2324). NOT "not in running-set": a zombie
@@ -399,6 +454,44 @@ RED: persisted-open breaker past cooldown + controller restart → keyed wake ev
 starts the session. Plus the missing respawn-gate integration RED (legacy's
 :3755-3766 `continue` was never integration-tested).
 
+### §2/§3 implementation deltas (recorded at WD.1)
+
+Where the sweep as built diverges from §2/§3 as written. Reported, not improvised —
+verbatim from ga-f7v2ft.107's closing notes and the WD.1 commits (fbcaaa34c9,
+bb36c285f4, 60c0d9d2a0, f0c525dae9).
+
+1. The unknown-state guard cannot call `emitSessionUnknownStateDiagnostic` in shadow:
+   that helper SetMarkers and emits events, and the sweep is zero-write. The sweep
+   skips the row and records a `detector_unknown_state_skipped` shadow at the legacy
+   site; the throttled diagnostic stays legacy-owned this wave.
+2. D-STALL has no legacy trace site for its recycle arm (legacy only traces
+   ProgressStallExempt), so both stall arms record at
+   `TraceSiteReconcilerProgressStallExempt` with different detector reasons.
+3. `gc start` and `controlDispatcherTick` have no trace cycle, so the sweep runs there
+   for its guards and cost profile but records nothing.
+4. §2's "each family §3" per-row list has no precedence rule; legacy's forward pass
+   early-continues after drain, orphan and stale-create. Without mirroring that, the
+   sweep raised extra sleep/wake conditions on rows legacy had already routed to a
+   close (fixed in bb36c285f4: detectDrain, detectOrphan and detectStaleCreate report
+   whether they claimed the row, and the remaining families then run in legacy's order
+   — drift, zombie, deadline, stall, wake/sleep, stranded).
+5. D-DUP cannot key on canonical identity alone: unstamped pool rows all resolve to
+   the template's qualified name, so it keys on named identity (`isNamedSessionInfo`)
+   — negative test added.
+6. Shadow records at legacy site codes collide with existing tests that count by
+   (site, outcome). One collision found repo-wide
+   (`TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates`); re-pointed to
+   filter on `effect_owner`, which exists precisely to separate the legacy, keyed and
+   detector-shadow populations on a shared cycle.
+7. §1's table has 28 sites and §3 names eleven families, but main's two new unbounded
+   per-tick patrol scans — `readyDemandSnapshotFingerprint` (city_runtime.go:4058) and
+   `reconcileExecutionCompletions` (api_state.go:585, patrol phase :1698) — contradict
+   A1 and belong in the inventory. WD.1 carries them as **OBSERVED-ONLY** family
+   members (`detectorFamilyReadyDemandScan`, `detectorFamilyExecutionCompletionScan`,
+   `ObservedOnly: true`), so they are counted and traced but never enqueue;
+   absorption-or-retirement is adjudicated at WD.10b (see the §2 routed-work input)
+   and WE.
+
 ## 3b. Campaign judgment (WE sign-off bar)
 
 Per-family parity level and expected classifications. "Detection" = the shadow record
@@ -423,6 +516,12 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | D-DUP | decision | winner + loser set | none expected |
 | D-STRANDED | detection | dead-slot candidacy | confirmation-window off-by-one (duplicated counters) |
 | (global) | — | — | storeQueryPartial cycles: legacy records Closed-without-closing (:1987-1991, :2284-2288); detector suppresses — expected, bounded to partial-view cycles |
+
+**Legacy-at-0 residual** (WC council advisory): rows a pre-fix writer left at revision
+0 are refused by the `Revision==0` guards until the first unconditional write
+self-heals them, so during the window such a row shows keyed refusal against legacy
+effect — fail-closed, self-clearing, and triaged as its own class rather than a
+detector mismatch.
 
 **Window**: ≥7 consecutive days on ≥1 live auto-mode city, ≥10,000 joined trace
 cycles, spanning ≥1 controller restart and ≥1 config reload (arms re-verified after
@@ -521,6 +620,9 @@ Only after the WD.15 evidence campaign is archived (D4):
    Post-WE recovery = sweep re-detection of unallocated routed work, or conversion to
    the shared workqueue? (Re-detection is the no-new-machinery answer; confirm the
    sweep's routed-work view suffices.)
+   **RESOLVED — yes, with promotion** (WC council, ga-f7v2ft.117): re-detection, and
+   the sweep's routed-work view is made sufficient by promoting the per-store
+   `ReadyLive` read to a declared sweep input (§2). WD.10b's entry gate is satisfied.
 3. **Q3 (shapes the §3b matrix):** Do any live cities set `max_session_age`,
    `progress_stall_timeout`/`claim_holder_stall_timeout`, or
    `session_circuit_breaker`? Off-by-default families with no production user can take

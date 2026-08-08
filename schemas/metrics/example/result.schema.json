@@ -210,7 +210,8 @@
               "events-reemit-execution",
               "storage-migrate",
               "storage-status",
-              "perf-reconciler-compare"
+              "perf-reconciler-compare",
+              "perf-parity-join"
             ]
           },
           "event_id": {

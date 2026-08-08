@@ -1,0 +1,482 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+)
+
+func parityJoinTestRecord(
+	traceID, tickID string,
+	site TraceSiteCode,
+	owner string,
+	session string,
+	beadID string,
+	reason TraceReasonCode,
+	outcome TraceOutcomeCode,
+) SessionReconcilerTraceRecord {
+	rec := newTraceRecord(TraceRecordDecision)
+	rec.TraceID = traceID
+	rec.TickID = tickID
+	rec.SiteCode = site
+	rec.SessionName = session
+	rec.SessionBeadID = beadID
+	rec.ReasonCode = reason
+	rec.OutcomeCode = outcome
+	rec.Ts = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	rec.Fields["effect_owner"] = owner
+	rec.Fields["effect_applied"] = owner == parityJoinOwnerLegacy || owner == parityJoinOwnerKeyed
+	return rec
+}
+
+func parityJoinTestRollup(traceID, tickID string, dropReasons map[string]int, detailedTemplates int) SessionReconcilerTraceRecord {
+	rec := newTraceRecord(TraceRecordCycleResult)
+	rec.TraceID = traceID
+	rec.TickID = tickID
+	rec.SiteCode = TraceSiteCycleFinish
+	rec.Ts = time.Date(2026, 8, 8, 12, 0, 1, 0, time.UTC)
+	rec.DropReasonCounts = dropReasons
+	rec.DetailedTemplateCount = detailedTemplates
+	for _, count := range dropReasons {
+		rec.DroppedRecordCount += count
+	}
+	return rec
+}
+
+func parityJoinFamilyRow(t *testing.T, report parityJoinReport, family string) parityJoinFamilyReport {
+	t.Helper()
+	for _, row := range report.Families {
+		if row.Family == family {
+			return row
+		}
+	}
+	t.Fatalf("family %q missing from report families %+v", family, report.Families)
+	return parityJoinFamilyReport{}
+}
+
+func parityJoinTriageCount(report parityJoinReport, family, class string) int {
+	for _, entry := range report.Triage {
+		if entry.Family == family && entry.Class == class {
+			return entry.Count
+		}
+	}
+	return 0
+}
+
+// A seeded legacy/detector-shadow pair for the same session and site code in the
+// same trace cycle joins into a matched classification with the bead-ID
+// cross-check satisfied.
+func TestParityJoinMatchesSeededLegacyAndShadowPair(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-1", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRecord("tr-1", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-1", "1", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if row.Joined != 1 || row.Matched != 1 {
+		t.Fatalf("joined=%d matched=%d, want 1/1 (%+v)", row.Joined, row.Matched, row)
+	}
+	if row.Mismatched != 0 || row.Incomparable != 0 || row.LegacyOnly != 0 || row.DetectorOnly != 0 {
+		t.Fatalf("unexpected non-matched buckets: %+v", row)
+	}
+	if !row.BarMet || row.MatchRate != 1 {
+		t.Fatalf("bar_met=%v match_rate=%v, want true/1", row.BarMet, row.MatchRate)
+	}
+	if report.NoEvidence || report.WEBlocker {
+		t.Fatalf("no_evidence=%v we_blocker=%v, want false/false", report.NoEvidence, report.WEBlocker)
+	}
+}
+
+// A deliberately divergent pair classifies as mismatched against the section 3b
+// table rather than as an unclassified WE blocker.
+func TestParityJoinClassifiesDivergentPairAgainstSection3bTable(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-2", "7", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeDeferredPending),
+		parityJoinTestRecord("tr-2", "7", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-2", "7", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if row.Joined != 1 || row.Mismatched != 1 || row.Unclassified != 0 {
+		t.Fatalf("joined=%d mismatched=%d unclassified=%d, want 1/1/0 (%+v)", row.Joined, row.Mismatched, row.Unclassified, row)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyDeadline, "legacy_pending_interaction_deferral"); got != 1 {
+		t.Fatalf("triage class count = %d, want 1 (triage=%+v)", got, report.Triage)
+	}
+	if report.WEBlocker {
+		t.Fatalf("we_blocker = true for a classified mismatch")
+	}
+}
+
+// An unclassified mismatch is reported as a WE blocker with enough evidence to
+// extend the table, not silently bucketed.
+func TestParityJoinReportsUnclassifiedMismatchAsWEBlocker(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-3", "9", TraceSiteSessionReconcileHealRetire, parityJoinOwnerLegacy, "gc-city-worker-2", "gcs-2", TraceReasonOrphaned, TraceOutcomeHealed),
+		parityJoinTestRecord("tr-3", "9", TraceSiteSessionReconcileHealRetire, parityJoinOwnerDetectorShadow, "gc-city-worker-2", "gcs-2", TraceReasonOrphaned, TraceOutcomeNoChange),
+		parityJoinTestRollup("tr-3", "9", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDup)
+	if row.Mismatched != 1 || row.Unclassified != 1 {
+		t.Fatalf("mismatched=%d unclassified=%d, want 1/1 (%+v)", row.Mismatched, row.Unclassified, row)
+	}
+	if !report.WEBlocker {
+		t.Fatalf("we_blocker = false for an unclassified mismatch")
+	}
+	if len(report.Unclassified) != 1 {
+		t.Fatalf("unclassified samples = %d, want 1", len(report.Unclassified))
+	}
+	sample := report.Unclassified[0]
+	if sample.SessionName != "gc-city-worker-2" || sample.LegacyOutcome != string(TraceOutcomeHealed) || sample.DetectorOutcome != string(TraceOutcomeNoChange) {
+		t.Fatalf("unclassified sample lacks triage evidence: %+v", sample)
+	}
+}
+
+// A cycle whose rollup reports record_budget_exceeded drops is excluded from the
+// readout rather than counted.
+func TestParityJoinExcludesRecordBudgetExceededCycles(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-4", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRecord("tr-4", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-4", "1", map[string]int{"record_budget_exceeded": 3}, 1),
+		parityJoinTestRecord("tr-4", "2", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRecord("tr-4", "2", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-4", "2", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	if report.Cycles.ExcludedRecordBudget != 1 {
+		t.Fatalf("excluded_record_budget_exceeded = %d, want 1 (%+v)", report.Cycles.ExcludedRecordBudget, report.Cycles)
+	}
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if row.Joined != 1 {
+		t.Fatalf("joined = %d, want 1 (the budget-capped cycle must not be counted)", row.Joined)
+	}
+}
+
+// An unarmed window records nothing durable, so the readout must be an explicit
+// no-evidence result rather than a false all-matched one.
+func TestParityJoinUnarmedWindowYieldsNoEvidence(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRollup("tr-5", "1", nil, 0),
+		parityJoinTestRollup("tr-5", "2", nil, 0),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	if !report.NoEvidence {
+		t.Fatalf("no_evidence = false for a window with zero joined cycles")
+	}
+	if report.Cycles.WithoutDetailArms != 2 {
+		t.Fatalf("without_detail_arms = %d, want 2", report.Cycles.WithoutDetailArms)
+	}
+	for _, row := range report.Families {
+		if row.BarMet {
+			t.Fatalf("family %q reports bar_met with no evidence: %+v", row.Family, row)
+		}
+	}
+
+	var out bytes.Buffer
+	if err := writeParityJoinReport(&out, report); err != nil {
+		t.Fatalf("writeParityJoinReport: %v", err)
+	}
+	if !strings.Contains(out.String(), "NO EVIDENCE") {
+		t.Fatalf("human readout omits the no-evidence verdict:\n%s", out.String())
+	}
+}
+
+// The bead-ID cross-check guards the normalized-session-name join key: two rows
+// sharing a name but not an identity are incomparable, never matched.
+func TestParityJoinBeadIDCrossCheckFailureIsIncomparable(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-6", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRecord("tr-6", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-9", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-6", "1", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if row.Matched != 0 || row.Incomparable != 1 {
+		t.Fatalf("matched=%d incomparable=%d, want 0/1 (%+v)", row.Matched, row.Incomparable, row)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyDeadline, parityJoinClassBeadIDCrossCheck); got != 1 {
+		t.Fatalf("bead-id cross-check triage count = %d, want 1", got)
+	}
+}
+
+// Detection-level families predict only (key, condition): a reason/outcome
+// divergence is not a mismatch there.
+func TestParityJoinDetectionLevelIgnoresReasonAndOutcome(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-7", "1", TraceSiteReconcilerConfigDrift, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonConfigDriftAttached, TraceOutcomeDeferredAttached),
+		parityJoinTestRecord("tr-7", "1", TraceSiteReconcilerConfigDrift, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonConfigDrift, TraceOutcomeNoChange),
+		parityJoinTestRollup("tr-7", "1", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDrift)
+	if row.Level != parityJoinLevelDetection {
+		t.Fatalf("D-DRIFT level = %q, want detection", row.Level)
+	}
+	if row.Matched != 1 || row.Mismatched != 0 {
+		t.Fatalf("matched=%d mismatched=%d, want 1/0 (%+v)", row.Matched, row.Mismatched, row)
+	}
+}
+
+// Singletons and future keyed-act records are counted per family and kept out of
+// the legacy/detector pairing.
+func TestParityJoinCountsSingletonsAndKeyedRecords(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-8", "1", TraceSiteReconcilerWakeDecision, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonWake, TraceOutcomeStartCandidate),
+		parityJoinTestRecord("tr-8", "1", TraceSiteReconcilerWakeDecision, parityJoinOwnerDetectorShadow, "gc-city-worker-2", "gcs-2", TraceReasonQuarantine, TraceOutcomeDeferredQuarantine),
+		parityJoinTestRecord("tr-8", "1", TraceSiteReconcilerWakeDecision, parityJoinOwnerKeyed, "gc-city-worker-3", "gcs-3", TraceReasonWake, TraceOutcomeStartCandidate),
+		parityJoinTestRollup("tr-8", "1", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyWake)
+	if row.Joined != 0 || row.LegacyOnly != 1 || row.DetectorOnly != 1 || row.Keyed != 1 {
+		t.Fatalf("joined=%d legacy_only=%d detector_only=%d keyed=%d, want 0/1/1/1 (%+v)",
+			row.Joined, row.LegacyOnly, row.DetectorOnly, row.Keyed, row)
+	}
+	// The detector-only quarantine skip is expected: legacy never traces it.
+	if got := parityJoinTriageCount(report, parityJoinFamilyWake, "untraced_legacy_quarantine_skip"); got != 1 {
+		t.Fatalf("quarantine-skip triage count = %d, want 1 (triage=%+v)", got, report.Triage)
+	}
+}
+
+// D-DRAIN is the one genuinely time-skewed family: the handler reads the ack
+// while legacy polls in-tick, so the pair lands in adjacent cycles. Both
+// singletons triage into the section 3b ack-timing-skew class; the join stays a
+// same-cycle-handle join.
+func TestParityJoinTriagesDrainAckTimingSkewAcrossAdjacentCycles(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-9", "1", TraceSiteReconcilerDrainAck, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonAcknowledged, TraceOutcomeStopPending),
+		parityJoinTestRollup("tr-9", "1", nil, 1),
+		parityJoinTestRecord("tr-9", "2", TraceSiteReconcilerDrainAck, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonAcknowledged, TraceOutcomeStopPending),
+		parityJoinTestRollup("tr-9", "2", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDrain)
+	if row.Joined != 0 || row.LegacyOnly != 1 || row.DetectorOnly != 1 {
+		t.Fatalf("joined=%d legacy_only=%d detector_only=%d, want 0/1/1 (%+v)", row.Joined, row.LegacyOnly, row.DetectorOnly, row)
+	}
+	if row.Unclassified != 0 {
+		t.Fatalf("unclassified = %d, want 0: ack-timing skew is a section 3b class", row.Unclassified)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyDrain, "ack_timing_skew"); got != 2 {
+		t.Fatalf("ack-timing-skew triage count = %d, want 2 (triage=%+v)", got, report.Triage)
+	}
+}
+
+// A detector-shadow record that claims an applied effect breaks the read-only
+// invariant the whole campaign rests on; it must be loud, not bucketed.
+func TestParityJoinFlagsShadowRecordsClaimingAppliedEffects(t *testing.T) {
+	shadow := parityJoinTestRecord("tr-10", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop)
+	shadow.Fields["effect_applied"] = true
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-10", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		shadow,
+		parityJoinTestRollup("tr-10", "1", nil, 1),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	if report.ShadowEffectViolations != 1 {
+		t.Fatalf("shadow_effect_violations = %d, want 1", report.ShadowEffectViolations)
+	}
+	if !report.WEBlocker {
+		t.Fatalf("we_blocker = false despite a shadow record claiming an applied effect")
+	}
+}
+
+// Records outside the join contract (no effect_owner stamp) are counted, never
+// guessed at, so a pre-WD.2 trace dir reads as no-evidence with a visible cause.
+func TestParityJoinCountsUnownedRecordsInsteadOfGuessing(t *testing.T) {
+	unowned := newTraceRecord(TraceRecordDecision)
+	unowned.TraceID = "tr-11"
+	unowned.TickID = "1"
+	unowned.SiteCode = TraceSiteReconcilerIdleTimeout
+	unowned.SessionName = "gc-city-worker-1"
+	unowned.SessionBeadID = "gcs-1"
+	records := []SessionReconcilerTraceRecord{unowned, parityJoinTestRollup("tr-11", "1", nil, 1)}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	if report.Cycles.UnownedRecords != 1 {
+		t.Fatalf("unowned_records = %d, want 1", report.Cycles.UnownedRecords)
+	}
+	if !report.NoEvidence {
+		t.Fatalf("no_evidence = false for a trace dir with no owned records")
+	}
+}
+
+// A cycle with no rollup record is truncated evidence: excluded, and visibly so.
+func TestParityJoinExcludesCyclesWithoutRollup(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-12", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRecord("tr-12", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+	}
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	if report.Cycles.ExcludedNoRollup != 1 || report.Cycles.Considered != 0 {
+		t.Fatalf("excluded_no_cycle_rollup=%d considered=%d, want 1/0 (%+v)", report.Cycles.ExcludedNoRollup, report.Cycles.Considered, report.Cycles)
+	}
+	if !report.NoEvidence {
+		t.Fatalf("no_evidence = false when every cycle was truncated")
+	}
+}
+
+// The human readout carries the per-family counts and the triage log the WE
+// sign-off needs.
+func TestParityJoinHumanReadoutRendersFamilyCountsAndTriage(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-13", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeDeferredPending),
+		parityJoinTestRecord("tr-13", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-13", "1", nil, 1),
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	var out bytes.Buffer
+	if err := writeParityJoinReport(&out, report); err != nil {
+		t.Fatalf("writeParityJoinReport: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{parityJoinFamilyDeadline, "decision", "legacy_pending_interaction_deferral", "TRIAGE"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("human readout missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// End to end through the hidden perf command against a real trace store dir.
+func TestParityJoinCommandReadsTraceStoreAndEmitsJSON(t *testing.T) {
+	cityPath := t.TempDir()
+	store, err := newSessionReconcilerTraceStore(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newSessionReconcilerTraceStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	batch := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-cli", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRecord("tr-cli", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-cli", "1", nil, 1),
+	}
+	if err := store.AppendBatch(batch, TraceDurabilityDurable); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	cmd := newPerfParityJoinCmd(&stdout)
+	cmd.SetArgs([]string{"--trace-dir", traceCityRuntimeDir(cityPath), "--json"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc perf parity-join: %v", err)
+	}
+
+	var report parityJoinReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decoding JSON readout %q: %v", stdout.String(), err)
+	}
+	if report.SchemaVersion != parityJoinSchemaV1 {
+		t.Fatalf("schema_version = %q, want %q", report.SchemaVersion, parityJoinSchemaV1)
+	}
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if row.Joined != 1 || row.Matched != 1 {
+		t.Fatalf("joined=%d matched=%d, want 1/1", row.Joined, row.Matched)
+	}
+}
+
+// An unarmed trace dir must fail the command, not return success with an empty
+// all-matched table.
+func TestParityJoinCommandFailsOnNoEvidence(t *testing.T) {
+	cityPath := t.TempDir()
+	store, err := newSessionReconcilerTraceStore(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newSessionReconcilerTraceStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.AppendBatch([]SessionReconcilerTraceRecord{parityJoinTestRollup("tr-empty", "1", nil, 0)}, TraceDurabilityDurable); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	cmd := newPerfParityJoinCmd(&stdout)
+	cmd.SetArgs([]string{"--trace-dir", traceCityRuntimeDir(cityPath)})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("gc perf parity-join returned success for an unarmed window:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "NO EVIDENCE") {
+		t.Fatalf("readout omits the no-evidence verdict:\n%s", stdout.String())
+	}
+}
+
+// The command declares JSON support, and because its result schema is JSONL the
+// front door leaves the readout on stdout even though a WE blocker exits
+// nonzero — a buffered command would have its report replaced by the shared
+// failure envelope, which is the one thing the campaign cannot afford.
+func TestParityJoinDeclaresJSONLSupportSoTheReadoutSurvivesANonzeroExit(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"perf", "parity-join", "--json-schema"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(perf parity-join --json-schema) = %d, stderr=%q", code, stderr.String())
+	}
+	var manifest struct {
+		JSONSupported bool                       `json:"json_supported"`
+		Schemas       map[string]json.RawMessage `json:"schemas"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
+	}
+	if !manifest.JSONSupported || !json.Valid(manifest.Schemas["result"]) {
+		t.Fatalf("perf parity-join does not declare JSON support: %s", stdout.String())
+	}
+	var schema struct {
+		JSONL *json.RawMessage `json:"x-gc-jsonl"`
+	}
+	if err := json.Unmarshal(manifest.Schemas["result"], &schema); err != nil {
+		t.Fatalf("result schema is not JSON: %v", err)
+	}
+	if schema.JSONL == nil {
+		t.Fatalf("result schema must declare x-gc-jsonl so a nonzero verdict keeps the readout")
+	}
+}
+
+// Every site the section 3b table claims must resolve to exactly one family, and
+// every family must declare a parity level.
+func TestParityJoinFamilyTableIsWellFormed(t *testing.T) {
+	seen := map[TraceSiteCode]string{}
+	for _, spec := range parityJoinFamilySpecs {
+		if spec.Level != parityJoinLevelDetection && spec.Level != parityJoinLevelDecision && spec.Level != parityJoinLevelAct {
+			t.Fatalf("family %q has level %q", spec.Family, spec.Level)
+		}
+		if len(spec.Sites) == 0 {
+			t.Fatalf("family %q claims no trace sites", spec.Family)
+		}
+		for _, site := range spec.Sites {
+			if other, ok := seen[site]; ok {
+				t.Fatalf("site %q claimed by both %q and %q", site, other, spec.Family)
+			}
+			seen[site] = spec.Family
+		}
+	}
+}

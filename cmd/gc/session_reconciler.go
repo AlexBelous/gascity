@@ -1542,6 +1542,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// feed (ReconcileSession{Info, Circuit}) carries the session's domain
 	// projection paired with its persisted circuit-breaker cluster, read once per
 	// tick from the same bead — no per-iteration codec call, no store Get.
+	// loadedRevisionByID is each row's revision as of the load that produced this
+	// feed. The legacy status heal fences its advisory write on it (F1), so a
+	// concurrent writer that changed the row after the load — a `gc session
+	// suspend` landing between the load and this tick's heal — is skipped instead
+	// of silently reverted. Captured before Phase 0a: rows that Phase 0a/0b write
+	// keep their pre-write revision here, and the heal's CAS then correctly
+	// refuses (the heal is advisory; the next tick reconverges).
+	loadedRevisionByID := make(map[string]int64, len(rows))
+	for i := range rows {
+		if _, exists := loadedRevisionByID[rows[i].Info.ID]; !exists {
+			loadedRevisionByID[rows[i].Info.ID] = rows[i].Revision
+		}
+	}
+
 	phaseStart = time.Now()
 	// Phase 0a: heal expired held/quarantine timers — fold, no raw mirror. The
 	// fold advances rows[i].Info so the snapshot build below projects the healed
@@ -2016,6 +2030,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				Site:              sessionLifecycleStatusHealSiteOrphan,
 				RuntimeObserved:   livenessErr == nil,
 				RuntimeAlive:      providerAlive,
+				LoadedRevision:    loadedRevisionByID[id],
 				RollbackAvailable: !storeQueryPartial,
 			}, sessFront, clk, startupTimeout, reconcileOpts.statusComparisonObserver)
 			if healErr != nil {
@@ -2783,6 +2798,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				Site:              sessionLifecycleStatusHealSiteDesired,
 				RuntimeObserved:   sp != nil && strings.TrimSpace(name) != "",
 				RuntimeAlive:      alive,
+				LoadedRevision:    loadedRevisionByID[id],
 				RollbackAvailable: true,
 			}, sessFront, clk, startupTimeout, reconcileOpts.statusComparisonObserver)
 			if healErr != nil {

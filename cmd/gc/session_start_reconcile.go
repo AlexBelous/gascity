@@ -1277,8 +1277,17 @@ func reconcileExactSessionStartWithOwner(
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{})
 		return exactSessionStartUnowned, nil
 	}
-	if (admission.Source == sessionStartAdmissionSocket || admission.Source == sessionStartAdmissionAntiEntropy) &&
-		exactUserHoldSuspendCurrent(info, clk.Now().UTC()) && initialResponse.Revision != 0 {
+	// The suspend family dispatches on the durable row, not on how the admission
+	// arrived: state=suspended + sleep_intent=user-hold + a future held_until is a
+	// level-triggered condition the user wrote, and the row is the authority.
+	// Source-gating it to socket|antiEntropy let the controller's in_process
+	// coalescing rule (a pending in_process admission keeps its source when a
+	// later socket admission is folded onto the same key) silently route a user
+	// suspend request into the ordinary path's held-blocker dead end, consuming
+	// the admission with no stop and nothing to re-detect (ga-f7v2ft.125). Every
+	// guard below — drain-tracker yield, capability checks, fresh liveness, the
+	// revision reread, the token-bound stop, confirm-dead — is unchanged.
+	if exactUserHoldSuspendCurrent(info, clk.Now().UTC()) && initialResponse.Revision != 0 {
 		yieldOrPark := func(cause error) (exactSessionStartOwner, error) {
 			if params.RolloutMode == rollout.Auto {
 				return exactSessionStartLegacyOwner, fmt.Errorf("%w: %w", errSessionStartLegacyFallbackRequired, cause)

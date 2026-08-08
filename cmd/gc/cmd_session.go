@@ -1701,7 +1701,13 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	// Only use this path when the city is managed by a standalone controller
 	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
 	if cityErr == nil && cityUsesManagedReconciler(cityPath) {
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
+		// Probe with a ping, never a poke: this runs BEFORE the suspend patch, and
+		// a generic poke would hand the controller a fleet tick over the pre-suspend
+		// row. That tick's advisory status heal is computed from the pre-patch
+		// snapshot and used to revert state back to "awake" moments after the patch
+		// landed (ga-f7v2ft.125). The keyed admission below is still sent after the
+		// write, where a tick is exactly what we want.
+		if probeErr := pingController(cityPath); probeErr == nil {
 			// Controller is running — metadata-only suspend.
 			// Set held_until far in the future so the reconciler drains/stops the session.
 			heldUntil := time.Now().Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)

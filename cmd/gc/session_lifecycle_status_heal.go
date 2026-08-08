@@ -11,9 +11,15 @@ import (
 // sessionLifecycleStatusHealContext carries the site-specific runtime evidence
 // used both by the observational status plan and the legacy status-heal writer.
 type sessionLifecycleStatusHealContext struct {
-	Site              sessionLifecycleStatusHealSite
-	RuntimeObserved   bool
-	RuntimeAlive      bool
+	Site            sessionLifecycleStatusHealSite
+	RuntimeObserved bool
+	RuntimeAlive    bool
+	// LoadedRevision is the row's revision as of the snapshot the heal decision
+	// was computed from. The legacy write fences on it so a concurrent writer
+	// that changed the row after the snapshot (a `gc session suspend` landing
+	// mid-tick, say) is not silently overwritten by this advisory heal. Zero
+	// means "unknown"; see healStateWithRollbackInfo.
+	LoadedRevision    int64
 	RollbackAvailable bool
 }
 
@@ -50,7 +56,7 @@ func applySessionLifecycleStatusHeal(
 		candidate = &planned
 	}
 
-	patch, err := healStateWithRollbackInfo(info, healContext.RuntimeAlive, sessFront, clk, startupTimeout, healContext.RollbackAvailable)
+	patch, err := healStateWithRollbackInfo(info, healContext.RuntimeAlive, sessFront, clk, startupTimeout, healContext.RollbackAvailable, healContext.LoadedRevision)
 	if candidate != nil {
 		observer(compareSessionLifecycleStatus(healContext.Site, *candidate, patch, err))
 	}

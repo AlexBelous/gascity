@@ -38,7 +38,13 @@ type sessionBeadSnapshot struct {
 	// openInfos so the circuit cluster — deliberately off session.Info — reaches
 	// Phase 0.5 without a per-id store Get. An Info-fed snapshot (FromInfos) has no
 	// backing circuit metadata, so its entries are the zero CircuitState.
-	openCircuits              []sessionpkg.CircuitState
+	openCircuits []sessionpkg.CircuitState
+	// revisionByID is each open row's persisted revision as of the load that
+	// built this snapshot, the fence token for advisory writes computed from it.
+	// It is set once at construction from the reconcile-row feed and is
+	// deliberately NOT rebuilt by addInfo: a row appended mid-cycle has no
+	// load-time revision, and "absent" (zero) is the honest answer there.
+	revisionByID              map[string]int64
 	infoByID                  map[string]sessionpkg.Info
 	beadIDByAgentName         map[string]string
 	beadIDByTemplateHint      map[string]string
@@ -139,11 +145,21 @@ func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapsh
 func newSessionBeadSnapshotFromReconcileRows(rows []sessionpkg.ReconcileSession) *sessionBeadSnapshot {
 	infos := make([]sessionpkg.Info, len(rows))
 	circuits := make([]sessionpkg.CircuitState, len(rows))
+	revisions := make(map[string]int64, len(rows))
 	for i := range rows {
 		infos[i] = rows[i].Info
 		circuits[i] = rows[i].Circuit
+		if rows[i].Info.Closed {
+			continue
+		}
+		// First-wins, matching infoByID's duplicate-ID handling.
+		if _, exists := revisions[rows[i].Info.ID]; !exists {
+			revisions[rows[i].Info.ID] = rows[i].Revision
+		}
 	}
-	return newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+	snap := newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+	snap.revisionByID = revisions
+	return snap
 }
 
 // newSessionBeadSnapshotFromInfosAndCircuits is the shared index-map builder
@@ -360,9 +376,11 @@ func (s *sessionBeadSnapshot) WriteBackReconcileInfos(infoByID map[string]sessio
 }
 
 // OpenForReconcile is the reconciler tick feed: a copy of every open session's
-// ReconcileSession (Info paired with its circuit-breaker cluster), in the same order as
-// OpenInfos(). OpenForReconcile()[i].Info equals OpenInfos()[i] and
-// OpenForReconcile()[i].Circuit equals that session's circuit projection.
+// ReconcileSession (Info paired with its circuit-breaker cluster and its load-time
+// revision), in the same order as OpenInfos(). OpenForReconcile()[i].Info equals
+// OpenInfos()[i], OpenForReconcile()[i].Circuit equals that session's circuit
+// projection, and .Revision is the row's revision at snapshot load (zero for rows
+// appended mid-cycle by addInfo, or when the store supplies no revisions).
 func (s *sessionBeadSnapshot) OpenForReconcile() []sessionpkg.ReconcileSession {
 	if s == nil {
 		return nil
@@ -375,7 +393,11 @@ func (s *sessionBeadSnapshot) OpenForReconcile() []sessionpkg.ReconcileSession {
 		if i < len(s.openCircuits) {
 			circuit = s.openCircuits[i]
 		}
-		result[i] = sessionpkg.ReconcileSession{Info: s.openInfos[i], Circuit: circuit}
+		result[i] = sessionpkg.ReconcileSession{
+			Info:     s.openInfos[i],
+			Circuit:  circuit,
+			Revision: s.revisionByID[s.openInfos[i].ID],
+		}
 	}
 	return result
 }

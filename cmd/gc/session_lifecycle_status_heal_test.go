@@ -51,12 +51,14 @@ func TestSessionLifecycleStatusHealProductionWiring(t *testing.T) {
 			"Site":              "sessionLifecycleStatusHealSiteOrphan",
 			"RuntimeObserved":   "livenessErr == nil",
 			"RuntimeAlive":      "providerAlive",
+			"LoadedRevision":    "loadedRevisionByID[id]",
 			"RollbackAvailable": "!storeQueryPartial",
 		},
 		"sessionLifecycleStatusHealSiteDesired": {
 			"Site":              "sessionLifecycleStatusHealSiteDesired",
 			"RuntimeObserved":   `sp != nil && strings.TrimSpace(name) != ""`,
 			"RuntimeAlive":      "alive",
+			"LoadedRevision":    "loadedRevisionByID[id]",
 			"RollbackAvailable": "true",
 		},
 	}

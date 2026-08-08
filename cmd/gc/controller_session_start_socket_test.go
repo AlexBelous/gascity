@@ -1157,6 +1157,7 @@ func TestReconcileConfiguredNamedSessionWakeFencesDrift(t *testing.T) {
 	}
 }
 
+// Lease-mechanics pin: the bare origin-less target below is a pre-sync shape production does not sustain, so this asserts exactly-once entry, not reachability (tracked by ga-ij8mh; re-anchored on the canonical singleton shape in WD.10a).
 func TestReconcileConfiguredDependencyWakeStartsTargetOnceWithoutChangingDependency(t *testing.T) {
 	for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -1217,6 +1218,7 @@ func TestReconcileConfiguredDependencyWakeStartsTargetOnceWithoutChangingDepende
 	}
 }
 
+// Lease-mechanics pin: the bare origin-less target below is a pre-sync shape production does not sustain, so this asserts witness revalidation, not reachability (tracked by ga-ij8mh; re-anchored on the canonical singleton shape in WD.10a).
 func TestReconcileConfiguredDependencyWakeRechecksWitnessBeforeEffects(t *testing.T) {
 	for _, phase := range []struct {
 		name         string
@@ -1282,6 +1284,7 @@ func TestReconcileConfiguredDependencyWakeRechecksWitnessBeforeEffects(t *testin
 	}
 }
 
+// Lease-mechanics pin: the bare origin-less target below is a pre-sync shape production does not sustain, so this asserts dependency-identity fencing, not reachability (tracked by ga-ij8mh; re-anchored on the canonical singleton shape in WD.10a).
 func TestReconcileConfiguredDependencyWakeRejectsDependencyReplacementIdentity(t *testing.T) {
 	for _, phase := range []string{"pre-wake", "provider-entry"} {
 		for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
@@ -1368,6 +1371,7 @@ func TestReconcileConfiguredDependencyWakeRejectsDependencyReplacementIdentity(t
 	}
 }
 
+// Lease-mechanics pin: the bare origin-less target below is a pre-sync shape production does not sustain, so this asserts keyed redrive after a pre-wake, not reachability (tracked by ga-ij8mh; re-anchored on the canonical singleton shape in WD.10a).
 func TestConfiguredDependencyWakeRedriveStaysKeyedAfterPreWake(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

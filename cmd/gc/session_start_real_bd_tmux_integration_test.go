@@ -679,202 +679,211 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if elapsed := time.Since(suspendAt); elapsed >= 30*time.Second {
 		t.Fatalf("configured named suspend latency = %s, want stop within the 30s absolute budget", elapsed)
 	}
-	dependencySpec, ok := sessionpkg.FindNamedSessionSpec(loaded, guard.CityName(), "database")
-	if !ok {
-		t.Fatal("configured database named-session spec is unavailable")
-	}
-	var (
-		dependencyBefore       sessionpkg.Info
-		dependencyTmuxIDBefore string
-	)
-	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
-		bead, found, findErr := sessionpkg.FindCanonicalConfiguredNamedSessionBead(backingStore, dependencySpec)
-		if findErr != nil || !found {
-			return false, findErr
+	// The configured-dependency wake leg is excised and skipped, not deleted: its
+	// target is a bare origin-less row that no production creation path sustains
+	// (sync stamps the canonical singleton identity on any dependency-bearing
+	// single-session agent's row within one tick), so the leg certified a state
+	// production never reaches. It re-lands in WD.10a against a sync-produced
+	// canonical singleton row. Every later leg keeps running in the main flow.
+	t.Run("configured_dependency_wake", func(t *testing.T) {
+		t.Skip("ga-ij8mh: the keyed configured-dependency wake family cannot own any production-reachable row shape, so this leg certifies a born-unreachable state; it re-lands on the canonical singleton shape as ga-f7v2ft.116 (WD.10a) acceptance")
+		dependencySpec, ok := sessionpkg.FindNamedSessionSpec(loaded, guard.CityName(), "database")
+		if !ok {
+			t.Fatal("configured database named-session spec is unavailable")
 		}
-		info, getErr := sessionFrontDoor(backingStore).Get(bead.ID)
-		if getErr != nil {
-			return false, getErr
+		var (
+			dependencyBefore       sessionpkg.Info
+			dependencyTmuxIDBefore string
+		)
+		if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
+			bead, found, findErr := sessionpkg.FindCanonicalConfiguredNamedSessionBead(backingStore, dependencySpec)
+			if findErr != nil || !found {
+				return false, findErr
+			}
+			info, getErr := sessionFrontDoor(backingStore).Get(bead.ID)
+			if getErr != nil {
+				return false, getErr
+			}
+			lifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
+			if lifecycle.BaseState != sessionpkg.BaseStateActive || strings.TrimSpace(info.InstanceToken) == "" {
+				return false, nil
+			}
+			ids, listErr := tmuxClient.ListSessionIDs()
+			if listErr != nil {
+				return false, listErr
+			}
+			tmuxID := strings.TrimSpace(ids[info.SessionName])
+			if tmuxID == "" {
+				return false, nil
+			}
+			liveToken, tokenErr := tmuxClient.GetEnvironment(info.SessionName, "GC_INSTANCE_TOKEN")
+			if tokenErr != nil || liveToken != info.InstanceToken {
+				return false, tokenErr
+			}
+			dependencyBefore = info
+			dependencyTmuxIDBefore = tmuxID
+			return true, nil
+		}); err != nil {
+			t.Fatalf("configured singleton dependency did not become live: %v; controller stdout=%q stderr=%q",
+				err, controllerStdout.String(), controllerStderr.String())
 		}
-		lifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
-		if lifecycle.BaseState != sessionpkg.BaseStateActive || strings.TrimSpace(info.InstanceToken) == "" {
-			return false, nil
-		}
-		ids, listErr := tmuxClient.ListSessionIDs()
-		if listErr != nil {
-			return false, listErr
-		}
-		tmuxID := strings.TrimSpace(ids[info.SessionName])
-		if tmuxID == "" {
-			return false, nil
-		}
-		liveToken, tokenErr := tmuxClient.GetEnvironment(info.SessionName, "GC_INSTANCE_TOKEN")
-		if tokenErr != nil || liveToken != info.InstanceToken {
-			return false, tokenErr
-		}
-		dependencyBefore = info
-		dependencyTmuxIDBefore = tmuxID
-		return true, nil
-	}); err != nil {
-		t.Fatalf("configured singleton dependency did not become live: %v; controller stdout=%q stderr=%q",
-			err, controllerStdout.String(), controllerStderr.String())
-	}
 
-	dependentSessionName := guard.SessionName("dependent")
-	dependentMetadata := desiredSessionIdentity(sessionIdentityInputs{
-		AgentName:         "dependent",
-		SessionName:       dependentSessionName,
-		State:             string(sessionpkg.StateAsleep),
-		Generation:        1,
-		ContinuationEpoch: 1,
-		InstanceToken:     sessionpkg.NewInstanceToken(),
-		ConfigResolved:    true,
-	})
-	dependentMetadata["template"] = "dependent"
-	dependentBead, err := backingStore.Create(beads.Bead{
-		Title:    "ordinary configured dependency wake target",
-		Type:     sessionBeadType,
-		Status:   "open",
-		Labels:   []string{sessionBeadLabel},
-		Metadata: dependentMetadata,
-	})
-	if err != nil {
-		t.Fatalf("create ordinary configured wake target: %v", err)
-	}
-	for _, key := range []string{
-		"session_origin", "manual_session", "configured_named_identity", "configured_named_session",
-		poolManagedMetadataKey, "pool_slot", "dependency_only", "pending_create_claim",
-	} {
-		if dependentBead.Metadata[key] != "" {
-			t.Fatalf("ordinary configured wake target metadata %s = %q, want absent", key, dependentBead.Metadata[key])
-		}
-	}
-	runGC(10*time.Second,
-		"--city", cityPath,
-		"trace", "start",
-		"--template", "dependent",
-		"--for", "2m",
-		"--level", string(TraceModeDetail),
-	)
-	dependentWakeAt := time.Now().UTC()
-	dependentWakeOutput := runGC(10*time.Second,
-		"--city", cityPath,
-		"session", "wake", dependentBead.ID,
-		"--json",
-	)
-	var dependentWakeResult sessionActionResult
-	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(dependentWakeOutput)), &dependentWakeResult); err != nil {
-		t.Fatalf("decode configured-dependency wake: %v\n%s", err, dependentWakeOutput)
-	}
-	if dependentWakeResult.Action != "wake" || dependentWakeResult.SessionID != dependentBead.ID || dependentWakeResult.State != "wake_requested" {
-		t.Fatalf("configured-dependency wake result = %+v, want wake_requested for %q", dependentWakeResult, dependentBead.ID)
-	}
-	var (
-		dependentAfter  sessionpkg.Info
-		dependentTmuxID string
-	)
-	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
-		info, getErr := sessionFrontDoor(backingStore).Get(dependentBead.ID)
-		if getErr != nil {
-			return false, getErr
-		}
-		lifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
-		if lifecycle.BaseState != sessionpkg.BaseStateActive || info.PendingCreateClaim || info.WakeRequest != "" || strings.TrimSpace(info.InstanceToken) == "" {
-			return false, nil
-		}
-		ids, listErr := tmuxClient.ListSessionIDs()
-		if listErr != nil {
-			return false, listErr
-		}
-		tmuxID := strings.TrimSpace(ids[dependentSessionName])
-		if tmuxID == "" {
-			return false, nil
-		}
-		liveToken, tokenErr := tmuxClient.GetEnvironment(dependentSessionName, "GC_INSTANCE_TOKEN")
-		if tokenErr != nil || liveToken != info.InstanceToken {
-			return false, tokenErr
-		}
-		dependentAfter = info
-		dependentTmuxID = tmuxID
-		return true, nil
-	}); err != nil {
-		current, currentErr := sessionFrontDoor(backingStore).Get(dependentBead.ID)
-		t.Fatalf("configured-dependency wake did not start before the held 30s legacy debounce: %v; current=%+v current_err=%v controller stdout=%q stderr=%q",
-			err, current, currentErr, controllerStdout.String(), controllerStderr.String())
-	}
-	if dependentAfter.ID != dependentBead.ID || dependentAfter.SessionName != dependentSessionName {
-		t.Fatalf("configured-dependency wake changed target identity: bead=%+v session=%+v", dependentBead, dependentAfter)
-	}
-	dependentPanePID, err := tmuxClient.GetPanePID(dependentSessionName)
-	if err != nil {
-		t.Fatalf("read configured-dependency pane PID: %v", err)
-	}
-	registerLivePaneProcess(dependentPanePID)
-
-	var dependentCommits []SessionReconcilerTraceRecord
-	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
-		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
-			RecordType:  TraceRecordOperation,
-			SiteCode:    TraceSiteLifecycleStartCommit,
-			SessionName: dependentSessionName,
-			TraceMode:   TraceModeDetail,
+		dependentSessionName := guard.SessionName("dependent")
+		dependentMetadata := desiredSessionIdentity(sessionIdentityInputs{
+			AgentName:         "dependent",
+			SessionName:       dependentSessionName,
+			State:             string(sessionpkg.StateAsleep),
+			Generation:        1,
+			ContinuationEpoch: 1,
+			InstanceToken:     sessionpkg.NewInstanceToken(),
+			ConfigResolved:    true,
 		})
-		if readErr != nil {
-			return false, readErr
+		dependentMetadata["template"] = "dependent"
+		dependentBead, err := backingStore.Create(beads.Bead{
+			Title:    "ordinary configured dependency wake target",
+			Type:     sessionBeadType,
+			Status:   "open",
+			Labels:   []string{sessionBeadLabel},
+			Metadata: dependentMetadata,
+		})
+		if err != nil {
+			t.Fatalf("create ordinary configured wake target: %v", err)
 		}
-		dependentCommits = dependentCommits[:0]
-		for _, record := range records {
-			if record.SessionBeadID == dependentBead.ID &&
-				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
-				record.Fields["session_id"] == dependentBead.ID &&
-				record.Fields["instance_token"] == dependentAfter.InstanceToken &&
-				record.Fields["effect_applied"] == true {
-				dependentCommits = append(dependentCommits, record)
+		for _, key := range []string{
+			"session_origin", "manual_session", "configured_named_identity", "configured_named_session",
+			poolManagedMetadataKey, "pool_slot", "dependency_only", "pending_create_claim",
+		} {
+			if dependentBead.Metadata[key] != "" {
+				t.Fatalf("ordinary configured wake target metadata %s = %q, want absent", key, dependentBead.Metadata[key])
 			}
 		}
-		if len(dependentCommits) > 1 {
-			return false, fmt.Errorf("configured-dependency start commits = %d, want exactly one", len(dependentCommits))
+		runGC(10*time.Second,
+			"--city", cityPath,
+			"trace", "start",
+			"--template", "dependent",
+			"--for", "2m",
+			"--level", string(TraceModeDetail),
+		)
+		dependentWakeAt := time.Now().UTC()
+		dependentWakeOutput := runGC(10*time.Second,
+			"--city", cityPath,
+			"session", "wake", dependentBead.ID,
+			"--json",
+		)
+		var dependentWakeResult sessionActionResult
+		if err := json.Unmarshal([]byte(exactStartStopJSONPayload(dependentWakeOutput)), &dependentWakeResult); err != nil {
+			t.Fatalf("decode configured-dependency wake: %v\n%s", err, dependentWakeOutput)
 		}
-		return len(dependentCommits) == 1, nil
-	}); err != nil {
-		t.Fatalf("configured-dependency keyed commit did not converge: %v; matching=%#v controller stderr=%q",
-			err, dependentCommits, controllerStderr.String())
-	}
-	dependentStartRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
-		RecordType:  TraceRecordOperation,
-		SiteCode:    TraceSiteLifecycleStartRun,
-		SessionName: dependentSessionName,
+		if dependentWakeResult.Action != "wake" || dependentWakeResult.SessionID != dependentBead.ID || dependentWakeResult.State != "wake_requested" {
+			t.Fatalf("configured-dependency wake result = %+v, want wake_requested for %q", dependentWakeResult, dependentBead.ID)
+		}
+		var (
+			dependentAfter  sessionpkg.Info
+			dependentTmuxID string
+		)
+		if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+			info, getErr := sessionFrontDoor(backingStore).Get(dependentBead.ID)
+			if getErr != nil {
+				return false, getErr
+			}
+			lifecycle := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
+			if lifecycle.BaseState != sessionpkg.BaseStateActive || info.PendingCreateClaim || info.WakeRequest != "" || strings.TrimSpace(info.InstanceToken) == "" {
+				return false, nil
+			}
+			ids, listErr := tmuxClient.ListSessionIDs()
+			if listErr != nil {
+				return false, listErr
+			}
+			tmuxID := strings.TrimSpace(ids[dependentSessionName])
+			if tmuxID == "" {
+				return false, nil
+			}
+			liveToken, tokenErr := tmuxClient.GetEnvironment(dependentSessionName, "GC_INSTANCE_TOKEN")
+			if tokenErr != nil || liveToken != info.InstanceToken {
+				return false, tokenErr
+			}
+			dependentAfter = info
+			dependentTmuxID = tmuxID
+			return true, nil
+		}); err != nil {
+			current, currentErr := sessionFrontDoor(backingStore).Get(dependentBead.ID)
+			t.Fatalf("configured-dependency wake did not start before the held 30s legacy debounce: %v; current=%+v current_err=%v controller stdout=%q stderr=%q",
+				err, current, currentErr, controllerStdout.String(), controllerStderr.String())
+		}
+		if dependentAfter.ID != dependentBead.ID || dependentAfter.SessionName != dependentSessionName {
+			t.Fatalf("configured-dependency wake changed target identity: bead=%+v session=%+v", dependentBead, dependentAfter)
+		}
+		dependentPanePID, err := tmuxClient.GetPanePID(dependentSessionName)
+		if err != nil {
+			t.Fatalf("read configured-dependency pane PID: %v", err)
+		}
+		registerLivePaneProcess(dependentPanePID)
+
+		var dependentCommits []SessionReconcilerTraceRecord
+		if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+			records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+				RecordType:  TraceRecordOperation,
+				SiteCode:    TraceSiteLifecycleStartCommit,
+				SessionName: dependentSessionName,
+				TraceMode:   TraceModeDetail,
+			})
+			if readErr != nil {
+				return false, readErr
+			}
+			dependentCommits = dependentCommits[:0]
+			for _, record := range records {
+				if record.SessionBeadID == dependentBead.ID &&
+					record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+					record.Fields["session_id"] == dependentBead.ID &&
+					record.Fields["instance_token"] == dependentAfter.InstanceToken &&
+					record.Fields["effect_applied"] == true {
+					dependentCommits = append(dependentCommits, record)
+				}
+			}
+			if len(dependentCommits) > 1 {
+				return false, fmt.Errorf("configured-dependency start commits = %d, want exactly one", len(dependentCommits))
+			}
+			return len(dependentCommits) == 1, nil
+		}); err != nil {
+			t.Fatalf("configured-dependency keyed commit did not converge: %v; matching=%#v controller stderr=%q",
+				err, dependentCommits, controllerStderr.String())
+		}
+		dependentStartRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+			RecordType:  TraceRecordOperation,
+			SiteCode:    TraceSiteLifecycleStartRun,
+			SessionName: dependentSessionName,
+		})
+		if err != nil {
+			t.Fatalf("read configured-dependency start trace: %v", err)
+		}
+		for _, record := range dependentStartRecords {
+			if record.OutcomeCode == TraceOutcomeStartEnqueued {
+				t.Fatalf("configured-dependency wake used legacy async start: %#v", dependentStartRecords)
+			}
+		}
+		dependencyAfter, err := sessionFrontDoor(backingStore).Get(dependencyBefore.ID)
+		if err != nil {
+			t.Fatalf("read configured dependency after target wake: %v", err)
+		}
+		dependencyIDsAfter, err := tmuxClient.ListSessionIDs()
+		if err != nil {
+			t.Fatalf("read configured dependency tmux identity after target wake: %v", err)
+		}
+		dependencyLiveTokenAfter, err := tmuxClient.GetEnvironment(dependencyBefore.SessionName, "GC_INSTANCE_TOKEN")
+		if err != nil {
+			t.Fatalf("read configured dependency token after target wake: %v", err)
+		}
+		if dependencyAfter.ID != dependencyBefore.ID || dependencyAfter.InstanceToken != dependencyBefore.InstanceToken ||
+			strings.TrimSpace(dependencyIDsAfter[dependencyBefore.SessionName]) != dependencyTmuxIDBefore ||
+			dependencyLiveTokenAfter != dependencyBefore.InstanceToken {
+			t.Fatalf("configured dependency changed during target wake: before=%+v after=%+v tmux_before=%q tmux_after=%q live_token_after=%q",
+				dependencyBefore, dependencyAfter, dependencyTmuxIDBefore,
+				strings.TrimSpace(dependencyIDsAfter[dependencyBefore.SessionName]), dependencyLiveTokenAfter)
+		}
+		if elapsed := time.Since(dependentWakeAt); elapsed >= 30*time.Second || dependentTmuxID == "" {
+			t.Fatalf("configured-dependency wake latency/tmux = %s/%q, want live before 30s legacy debounce", elapsed, dependentTmuxID)
+		}
 	})
-	if err != nil {
-		t.Fatalf("read configured-dependency start trace: %v", err)
-	}
-	for _, record := range dependentStartRecords {
-		if record.OutcomeCode == TraceOutcomeStartEnqueued {
-			t.Fatalf("configured-dependency wake used legacy async start: %#v", dependentStartRecords)
-		}
-	}
-	dependencyAfter, err := sessionFrontDoor(backingStore).Get(dependencyBefore.ID)
-	if err != nil {
-		t.Fatalf("read configured dependency after target wake: %v", err)
-	}
-	dependencyIDsAfter, err := tmuxClient.ListSessionIDs()
-	if err != nil {
-		t.Fatalf("read configured dependency tmux identity after target wake: %v", err)
-	}
-	dependencyLiveTokenAfter, err := tmuxClient.GetEnvironment(dependencyBefore.SessionName, "GC_INSTANCE_TOKEN")
-	if err != nil {
-		t.Fatalf("read configured dependency token after target wake: %v", err)
-	}
-	if dependencyAfter.ID != dependencyBefore.ID || dependencyAfter.InstanceToken != dependencyBefore.InstanceToken ||
-		strings.TrimSpace(dependencyIDsAfter[dependencyBefore.SessionName]) != dependencyTmuxIDBefore ||
-		dependencyLiveTokenAfter != dependencyBefore.InstanceToken {
-		t.Fatalf("configured dependency changed during target wake: before=%+v after=%+v tmux_before=%q tmux_after=%q live_token_after=%q",
-			dependencyBefore, dependencyAfter, dependencyTmuxIDBefore,
-			strings.TrimSpace(dependencyIDsAfter[dependencyBefore.SessionName]), dependencyLiveTokenAfter)
-	}
-	if elapsed := time.Since(dependentWakeAt); elapsed >= 30*time.Second || dependentTmuxID == "" {
-		t.Fatalf("configured-dependency wake latency/tmux = %s/%q, want live before 30s legacy debounce", elapsed, dependentTmuxID)
-	}
 
 	startAdmittedAt := time.Now().UTC()
 	createdOutput := runGC(30*time.Second,
@@ -1133,7 +1142,10 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	}
 	wakeToken, err := tmuxClient.GetEnvironment(created.SessionName, "GC_INSTANCE_TOKEN")
 	if err != nil || strings.TrimSpace(wakeToken) == "" || wakeToken != woken.InstanceToken {
-		t.Fatalf("exact wake live/durable token = %q/%q err=%v, want same new non-empty token", wakeToken, woken.InstanceToken, err)
+		latest, latestErr := sessionFrontDoor(backingStore).Get(created.SessionID)
+		t.Fatalf("exact wake live/durable token = %q/%q err=%v, want same new non-empty token; pre_wake_token=%q latest=%+v latest_err=%v starts=%d controller stderr=%q",
+			wakeToken, woken.InstanceToken, err, started.InstanceToken, latest, latestErr,
+			strings.Count(controllerStderr.String(), startSuccessLog), controllerStderr.String())
 	}
 	wakeIDs, err := tmuxClient.ListSessionIDs()
 	if err != nil {

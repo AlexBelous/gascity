@@ -420,7 +420,7 @@ func TestDetectorSweepNeverArmsTraceDetail(t *testing.T) {
 // patrol/boot tick, the control-dispatcher tick, and the `gc start` one-shot
 // each run the sweep beside their legacy reconcile call.
 func TestDetectorSweepRunsAtAllThreeProductionCallSites(t *testing.T) {
-	root := repoRootForTickDebounceRetirement(t)
+	root := gcRepoRootForTest(t)
 	for _, site := range []struct{ file, fn string }{
 		{file: "cmd/gc/city_runtime.go", fn: "func (cr *CityRuntime) beadReconcileTick("},
 		{file: "cmd/gc/city_runtime.go", fn: "func (cr *CityRuntime) controlDispatcherTick("},

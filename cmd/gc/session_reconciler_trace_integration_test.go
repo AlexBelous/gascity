@@ -729,6 +729,12 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 					}
 					haveWorkRequestedSummary = true
 				}
+				// The WD.1 detector sweep records the same legacy site code in
+				// shadow, so count only the records that carry a legacy effect.
+				// effect_owner is exactly the discriminator that exists for this.
+				if owner, _ := rec.Fields["effect_owner"].(string); owner == detectorShadowEffectOwner {
+					continue
+				}
 				if rec.RecordType == TraceRecordDecision &&
 					rec.SiteCode == TraceSiteReconcilerWakeDecision &&
 					rec.Template == tc.template &&

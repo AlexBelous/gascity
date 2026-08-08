@@ -901,9 +901,13 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil, nil)
 }
 
+// prepareStartCandidateForCity is the legacy start family's entrance to the
+// shared start executor. keyedStartExcluded is the installed keyed-ownership
+// seam (nil where keyed reconciliation is not active); the prepare-time
+// validator re-runs the ownership question on the CURRENT row through it.
 func prepareStartCandidateForCity(
 	candidate startCandidate,
 	cityPath string,
@@ -914,10 +918,118 @@ func prepareStartCandidateForCity(
 	clk clock.Clock,
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
+	keyedStartExcluded func(sessionpkg.Info) bool,
 ) (*preparedStart, error) {
 	return prepareStartCandidateForCityWithNamedRefresh(
-		candidate, cityPath, cityName, cfg, sp, store, clk, stderr, workDirResolver, true, nil,
+		candidate, cityPath, cityName, cfg, sp, store, clk, stderr, workDirResolver, true,
+		legacyStartInfoBeforeWake(candidate.info, cfg, clk, keyedStartExcluded),
 	)
+}
+
+// legacyStartPreWakeSkip reports that a legacy start candidate was superseded
+// between the snapshot it was decided on and its prepare. It unwraps to
+// errPreWakeSuperseded so every caller of the shared executor treats it as the
+// same convergence outcome a lost pre-wake CAS produces; reason names the arm for
+// the traced decision.
+type legacyStartPreWakeSkip struct{ reason string }
+
+func (e *legacyStartPreWakeSkip) Error() string {
+	return "legacy start superseded: " + e.reason
+}
+
+func (e *legacyStartPreWakeSkip) Unwrap() error { return errPreWakeSuperseded }
+
+// legacyStartInfoBeforeWake is the legacy start family's prepare-time
+// re-validation, symmetric to the keyed
+// getAuthoritativeExactSessionStartInfoBeforeWake. The keyed entrance has always
+// re-read AND re-classified before committing an incarnation; the legacy
+// entrance re-read and validated nothing, so a candidate decided on a stale
+// per-tick snapshot committed its rotation regardless of what the row had become
+// (ga-l1j53).
+//
+// Under the already-held per-session mutation lock, after the current row is
+// loaded, the candidate is skipped as superseded when:
+//
+//	(i)   the keyed-ownership seam is installed AND
+//	      classifyExactSessionStartOwnership says the CURRENT row is keyed-owned.
+//	      This is the F4 exclusion generalized off the snapshot onto current
+//	      state: once wake_request=explicit lands, legacy aborts and the keyed
+//	      admission is the sole starter. It is gated on the seam because a city
+//	      without keyed reconciliation has no other starter — skipping there
+//	      would strand every explicit wake.
+//	(ii)  a wake-relevant premise drifted between the snapshot the candidate was
+//	      decided on and current. Drift means the decision was made against a row
+//	      that no longer exists; the next tick re-decides from a fresh snapshot.
+//	      This covers the respawn-after-kill (the sleep markers moved since the
+//	      snapshot) WITHOUT judging fleet demand: a genuinely-desired pool floor
+//	      refill whose row did not change still starts. Deliberately NOT gated on
+//	      IsDeliberateSleepReason — "killed" is not in that list, and fleet-demand
+//	      judgment does not belong at this boundary.
+//	(iii) another writer's rotation is already in flight (a fresh `creating` row
+//	      that already carries last_woke_at). Largely subsumed by (ii); kept
+//	      explicit because it is the arm that stops the second incarnation.
+func legacyStartInfoBeforeWake(
+	snapshot sessionpkg.Info,
+	cfg *config.City,
+	clk clock.Clock,
+	keyedStartExcluded func(sessionpkg.Info) bool,
+) func(beads.Store, string) (sessionpkg.Info, int64, error) {
+	return func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
+		current, persisted, err := sessionFrontDoor(store).GetPersistedResponse(id)
+		if err != nil {
+			return sessionpkg.Info{}, 0, err
+		}
+		if keyedStartExcluded != nil {
+			if _, _, owner := classifyExactSessionStartOwnership(current, cfg, clk.Now().UTC()); owner == exactSessionStartKeyedOwner {
+				return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "keyed_start_owner"}
+			}
+		}
+		if key, drifted := wakeStartPremiseDrift(snapshot, current); drifted {
+			return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "premise_drift:" + key}
+		}
+		if midIncarnationStartInFlight(current, clk) {
+			return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "mid_incarnation"}
+		}
+		return current, persisted.Revision, nil
+	}
+}
+
+// wakeStartPremiseDrift reports the first wake-relevant field that moved between
+// the snapshot a start candidate was decided on and the current row, naming it
+// for the traced decision. The set is exactly the durable state a wake decision
+// rests on: the lifecycle state, the incarnation (generation + token), the sleep
+// markers a kill or sleep writes, and the wake request itself. session.Info has
+// no slept_at projection, so the kill is observed through the markers SleepPatch
+// does surface — state, sleep_reason, sleep_intent, and the cleared last_woke_at.
+func wakeStartPremiseDrift(snapshot, current sessionpkg.Info) (string, bool) {
+	switch {
+	case snapshot.MetadataState != current.MetadataState:
+		return "state", true
+	case strings.TrimSpace(snapshot.Generation) != strings.TrimSpace(current.Generation):
+		return "generation", true
+	case strings.TrimSpace(snapshot.InstanceToken) != strings.TrimSpace(current.InstanceToken):
+		return "instance_token", true
+	case strings.TrimSpace(snapshot.SleepReason) != strings.TrimSpace(current.SleepReason):
+		return "sleep_reason", true
+	case strings.TrimSpace(snapshot.SleepIntent) != strings.TrimSpace(current.SleepIntent):
+		return "sleep_intent", true
+	case strings.TrimSpace(snapshot.LastWokeAt) != strings.TrimSpace(current.LastWokeAt):
+		return "last_woke_at", true
+	case strings.TrimSpace(snapshot.WakeRequest) != strings.TrimSpace(current.WakeRequest):
+		return "wake_request", true
+	}
+	return "", false
+}
+
+// midIncarnationStartInFlight reports whether the row is mid-rotation:
+// `creating` with a last_woke_at (so a pre-wake commit already landed) and not
+// yet aged past the stale-creating window. A stale creating row stays startable —
+// that is the existing respawn contract, not a race — so this reuses the
+// reconciler's own pendingCreateAttemptStaleInfo rather than a second timeout.
+func midIncarnationStartInFlight(current sessionpkg.Info, clk clock.Clock) bool {
+	return current.MetadataState == string(sessionpkg.StateCreating) &&
+		strings.TrimSpace(current.LastWokeAt) != "" &&
+		!pendingCreateAttemptStaleInfo(current, clk)
 }
 
 // prepareExactStartCandidateForCity prepares a candidate whose TemplateParams
@@ -3071,7 +3183,7 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
-				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
+				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.legacyStartExcluded)
 				if err != nil {
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 					if release != nil {
@@ -3086,9 +3198,15 @@ func executePlannedStartsTraced(
 					// snapshot. Logging it as "failed" would turn every coexistence race
 					// into an error storm (ga-l1j53).
 					if errors.Is(err, errPreWakeSuperseded) {
+						reason := "pre_wake_cas"
+						var skip *legacyStartPreWakeSkip
+						if errors.As(err, &skip) {
+							reason = skip.reason
+						}
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonCode("start_commit_superseded"), TraceOutcomeSkipped, candidate.logicalTemplate(cfg), candidate.name(), traceRecordPayload{
 								"session_id": candidate.info.ID,
+								"reason":     reason,
 							})
 						}
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "superseded", time.Time{}, time.Time{}, nil)

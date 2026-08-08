@@ -863,7 +863,7 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}))
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}), nil)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
@@ -1356,6 +1356,11 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 				"instance_token": "test-token",
 				"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
 				"last_woke_at":   s.lastWoke,
+				// last_woke_at on a `creating` row is the in-flight start lease, and
+				// the prepare-time validator refuses to start on top of one that has
+				// not aged out (ga-l1j53). These rows are stale retries, which is the
+				// only shape in which the fleet re-offers a creating row for a start.
+				"pending_create_started_at": s.lastWoke,
 			},
 		})
 		if err != nil {
@@ -1686,6 +1691,9 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 		Title:  "worker",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
+		// No last_woke_at: this row is a pending create awaiting its FIRST start,
+		// so it holds no in-flight start lease. prepare stamps last_woke_at itself,
+		// which is what the in-flight assertion below reads.
 		Metadata: creatingMeta(map[string]string{
 			"session_name":         "worker",
 			"template":             "worker",
@@ -1693,7 +1701,6 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 			"continuation_epoch":   "1",
 			"instance_token":       "tok-worker",
 			"pending_create_claim": "true",
-			"last_woke_at":         clk.Now().Format(time.RFC3339),
 		}),
 	})
 	if err != nil {

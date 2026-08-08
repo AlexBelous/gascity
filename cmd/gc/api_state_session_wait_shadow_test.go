@@ -33,13 +33,13 @@ func sessionWaitShadowEvent(t *testing.T, bead beads.Bead) events.Event {
 func TestSessionWaitDependencyShadowAdmissionRetriesPendingRequest(t *testing.T) {
 	cs := &controllerState{}
 	var calls int
-	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 		calls++
 		if calls > 1 {
 			return sessionWaitShadowConverged
 		}
 		return sessionWaitShadowRetry
-	}, func(string) bool { return false }, nil); err != nil {
+	}, func(string) bool { return false }); err != nil {
 		t.Fatalf("install admission: %v", err)
 	}
 	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
@@ -61,10 +61,10 @@ func TestSessionWaitDependencyShadowAdmissionRetriesPendingRequest(t *testing.T)
 func TestSessionWaitDependencyShadowAdmissionSkipsCleanUnrelatedEvents(t *testing.T) {
 	cs := &controllerState{}
 	var calls int
-	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 		calls++
 		return sessionWaitShadowConverged
-	}, func(string) bool { return false }, nil); err != nil {
+	}, func(string) bool { return false }); err != nil {
 		t.Fatalf("install admission: %v", err)
 	}
 	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
@@ -91,10 +91,10 @@ func TestSessionWaitDependencyShadowAdmissionSkipsCleanUnrelatedEvents(t *testin
 func TestSessionWaitDependencyShadowAdmissionRecognizesWaitIdentityRemoval(t *testing.T) {
 	cs := &controllerState{}
 	var calls int
-	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 		calls++
 		return sessionWaitShadowConverged
-	}, func(id string) bool { return id == "wait-1" }, nil); err != nil {
+	}, func(id string) bool { return id == "wait-1" }); err != nil {
 		t.Fatalf("install admission: %v", err)
 	}
 	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
@@ -117,7 +117,7 @@ func TestSessionWaitDependencyShadowAdmissionOlderSuccessCannotClearNewerFailure
 		releaseFirst := make(chan struct{})
 		firstReturned := make(chan struct{})
 		var calls atomic.Int64
-		if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+		if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 			switch calls.Add(1) {
 			case 1:
 				close(firstEntered)
@@ -126,7 +126,7 @@ func TestSessionWaitDependencyShadowAdmissionOlderSuccessCannotClearNewerFailure
 			default:
 				return sessionWaitShadowRetry
 			}
-		}, func(string) bool { return false }, nil); err != nil {
+		}, func(string) bool { return false }); err != nil {
 			t.Fatalf("install admission: %v", err)
 		}
 		t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
@@ -165,12 +165,12 @@ func TestSessionWaitDependencyShadowAdmissionStopJoinsAndRejectsLaterEvents(t *t
 		requestReturned := make(chan struct{})
 		stopReturned := make(chan struct{})
 		var calls atomic.Int64
-		if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+		if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 			calls.Add(1)
 			close(entered)
 			<-release
 			return sessionWaitShadowConverged
-		}, func(string) bool { return false }, nil); err != nil {
+		}, func(string) bool { return false }); err != nil {
 			t.Fatalf("install admission: %v", err)
 		}
 
@@ -350,18 +350,18 @@ func TestSessionWaitDependencyProducerAdmissionUsesSubjectFirstIdentity(t *testi
 
 func TestSessionWaitDependencyShadowAdmissionValidatesCallbacks(t *testing.T) {
 	var nilState *controllerState
-	if err := nilState.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+	if err := nilState.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 		return sessionWaitShadowConverged
-	}, func(string) bool { return false }, nil); err == nil {
+	}, func(string) bool { return false }); err == nil {
 		t.Fatal("nil controller state install succeeded")
 	}
 	cs := &controllerState{}
-	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(nil, func(string) bool { return false }, nil); err == nil {
+	if err := cs.installSessionWaitDependencyShadowAdmission(nil, func(string) bool { return false }); err == nil {
 		t.Fatal("nil refresh callback install succeeded")
 	}
-	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 		return sessionWaitShadowConverged
-	}, nil, nil); err == nil {
+	}, nil); err == nil {
 		t.Fatal("nil membership callback install succeeded")
 	}
 }
@@ -369,10 +369,10 @@ func TestSessionWaitDependencyShadowAdmissionValidatesCallbacks(t *testing.T) {
 func TestSessionWaitDependencyShadowAdmissionRecognizesLegacyWait(t *testing.T) {
 	cs := &controllerState{}
 	var calls int
-	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 		calls++
 		return sessionWaitShadowConverged
-	}, func(string) bool { return false }, nil); err != nil {
+	}, func(string) bool { return false }); err != nil {
 		t.Fatalf("install admission: %v", err)
 	}
 	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
@@ -418,7 +418,7 @@ func TestSessionWaitDependencyShadowAdmissionRunsAfterExistingEventEffects(t *te
 		pokeCh:        make(chan struct{}, 1),
 	}
 	var refreshCalls int
-	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 		refreshCalls++
 		if !autocloseDispatched {
 			t.Error("wait-shadow refresh ran before bead-close autoclose dispatch")
@@ -438,7 +438,7 @@ func TestSessionWaitDependencyShadowAdmissionRunsAfterExistingEventEffects(t *te
 			return sessionWaitShadowRetry
 		}
 		return sessionWaitShadowConverged
-	}, func(string) bool { return false }, nil); err != nil {
+	}, func(string) bool { return false }); err != nil {
 		t.Fatalf("install admission: %v", err)
 	}
 	t.Cleanup(cs.stopSessionWaitDependencyShadowAdmission)
@@ -466,10 +466,10 @@ func TestSessionWaitDependencyPrePokeAdmissionDoesNotReorderShadowRefresh(t *tes
 	}
 	t.Cleanup(func() { beadCloseAutocloseDispatch = previousDispatch })
 
-	if err := cs.installSessionWaitDependencyShadowAdmissionWithProducer(func() sessionWaitShadowRefreshResult {
+	if err := cs.installSessionWaitDependencyShadowAdmission(func() sessionWaitShadowRefreshResult {
 		order = append(order, "refresh")
 		return sessionWaitShadowConverged
-	}, func(string) bool { return true }, nil); err != nil {
+	}, func(string) bool { return true }); err != nil {
 		t.Fatalf("install shadow admission: %v", err)
 	}
 	if err := cs.installSessionWaitDependencyPrePokeAdmission(func(events.Event) {

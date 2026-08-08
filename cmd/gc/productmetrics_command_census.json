@@ -3010,6 +3010,22 @@
       "id": 1
     },
     {
+      "path": "gc perf reconciler-compare",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "perf-wrapper",
+      "notice_policy": "ineligible",
+      "hidden_exception": "perf-wrapper",
+      "classification": "perf-reconciler-compare",
+      "owner": "immediate",
+      "id": 198
+    },
+    {
       "path": "gc perf run",
       "aliases": [],
       "conditional_modes": [],
@@ -4493,11 +4509,5 @@
       "exclusion": "private-completion"
     }
   ],
-  "tombstones": [
-    {
-      "name": "perf-reconciler-compare",
-      "id": 198,
-      "wire": "perf-reconciler-compare"
-    }
-  ]
+  "tombstones": []
 }

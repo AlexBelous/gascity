@@ -9,15 +9,18 @@ import (
 )
 
 // sessionLifecycleStatusHealContext carries the site-specific runtime evidence
-// the legacy status-heal writer needs.
+// used both by the observational status plan and the legacy status-heal writer.
 type sessionLifecycleStatusHealContext struct {
+	Site              sessionLifecycleStatusHealSite
 	RuntimeObserved   bool
 	RuntimeAlive      bool
 	RollbackAvailable bool
 }
 
-// applySessionLifecycleStatusHeal keeps the legacy status write and its
-// successful same-tick fold on one synchronous path.
+// applySessionLifecycleStatusHeal keeps the observational status plan, legacy
+// write, comparison report, and successful same-tick fold on one synchronous
+// path. The legacy write remains authoritative until the rollout gate transfers
+// ownership; a parked candidate therefore never suppresses it.
 func applySessionLifecycleStatusHeal(
 	tick *reconcileTick,
 	sessionID string,
@@ -25,6 +28,7 @@ func applySessionLifecycleStatusHeal(
 	sessFront *session.Store,
 	clk clock.Clock,
 	startupTimeout time.Duration,
+	observer sessionLifecycleStatusComparisonObserver,
 ) (map[string]string, error) {
 	info, ok := tick.infoByID[sessionID]
 	if !ok {
@@ -33,7 +37,23 @@ func applySessionLifecycleStatusHeal(
 	if info.ID != sessionID {
 		return nil, fmt.Errorf("applying session lifecycle status heal: requested session ID %q, tick info ID %q", sessionID, info.ID)
 	}
+	var candidate *sessionLifecycleStatusPlan
+	if observer != nil {
+		planned := planSessionLifecycleStatus(sessionLifecycleShadowInput{
+			Info:              info,
+			RuntimeObserved:   healContext.RuntimeObserved,
+			RuntimeAlive:      healContext.RuntimeAlive,
+			ObservedAt:        clk.Now().UTC(),
+			StartupTimeout:    startupTimeout,
+			RollbackAvailable: healContext.RollbackAvailable,
+		})
+		candidate = &planned
+	}
+
 	patch, err := healStateWithRollbackInfo(info, healContext.RuntimeAlive, sessFront, clk, startupTimeout, healContext.RollbackAvailable)
+	if candidate != nil {
+		observer(compareSessionLifecycleStatus(healContext.Site, *candidate, patch, err))
+	}
 	if err != nil {
 		return nil, err
 	}

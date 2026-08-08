@@ -110,6 +110,69 @@ gc trace show --template repo/polecat --since 20m --json > /tmp/reconciler-after
 New records must carry a different `controller_instance_id`; do not treat old
 records in the append-only trace store as activity by the new controller.
 
+## Canary queued nudge target selection
+
+`nudge_shadow` is boot-latched. To canary it on an existing city, prepare a
+same-directory `city.toml` candidate with this exact daemon tuple and validate
+the candidate before stopping anything:
+
+```toml
+[daemon]
+nudge_dispatcher = "supervisor"
+session_reconciler = "off"
+nudge_shadow = "required"
+```
+
+```bash
+cp -f city.toml .city.toml.nudge-shadow-next
+# Edit .city.toml.nudge-shadow-next, then:
+gc config show --validate --root-file .city.toml.nudge-shadow-next
+gc supervisor stop --wait
+mv -f .city.toml.nudge-shadow-next city.toml
+gc supervisor start
+```
+
+The portable stop is destructive as described above; service-managed
+preserve-in-place restarts need their own verified supervisor configuration.
+Run this canary only while the city is quiescent. Inspect `gc nudge status
+<session-id-or-alias> --json` for every live session and require zero pending
+and in-flight items everywhere. The canary must be the single queued item in
+the whole city; if unrelated work is queued concurrently, abort, let it drain,
+and retry from a fresh trace cursor.
+
+After restart, note the `head_seq` from `gc trace status --json`, enqueue one
+unique canary, and inspect only later records. Once nudge status is terminal,
+poll trace status until `head_seq` stays unchanged for a bounded two-second
+flush window (restart that window whenever the head advances), then read the
+records:
+
+```bash
+gc session nudge <session-id-or-alias> "nudge-shadow-canary-$(date +%s)" --delivery=queue --json
+gc trace show --since 5m --json
+gc nudge status <session-id-or-alias> --json
+```
+
+Select the single later `nudge.due_target_selection.shadow` record whose
+`queue_item_count` is `1`. It must report
+`scope=queued_exact_due_target_selection`, candidate and legacy counts of `1`,
+equal 64-character digests, `comparison_outcome=matched`,
+`legacy_effect_owner=true`, and `shadow_effect_applied=false`. The timing fields
+must be non-negative. The trace must not contain the raw session ID, session
+name, alias, or canary message. Verify the canary appears exactly once in the
+target's visible transcript and that nudge status reports zero pending,
+in-flight, and dead items.
+
+If `queue_item_count` is not exactly `1`, another item coexisted with the
+canary; discard that observation and retry after the entire city queue is
+empty. Re-read after the bounded flush window and require the one-item record
+count to remain exactly one.
+
+Rollback is the same cold procedure with `nudge_shadow = "off"`. Record a new
+trace cursor after the off successor is ready, enqueue a fresh canary, and
+confirm legacy delivery still occurs exactly once. After the queue drains,
+wait the same bounded two-second quiet/flush window before declaring that no
+later `nudge.due_target_selection.shadow` record was created.
+
 ## What To Send An Agent
 
 Point the next agent at these artifacts:

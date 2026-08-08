@@ -482,6 +482,10 @@ func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
 		err:       writeErr,
 	}
 	env.store = failing
+	var comparisons []sessionLifecycleStatusComparison
+	env.startOptions = append(env.startOptions, withSessionLifecycleStatusComparisonObserver(func(comparison sessionLifecycleStatusComparison) {
+		comparisons = append(comparisons, comparison)
+	}))
 
 	if woken := env.reconcile([]beads.Bead{before}); woken != 0 {
 		t.Fatalf("wake attempts after failed heal = %d, want 0", woken)
@@ -509,6 +513,13 @@ func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
 	}
 	if after.Status != "open" {
 		t.Fatalf("persisted status = %q, want open after failed heal", after.Status)
+	}
+	if len(comparisons) != 1 {
+		t.Fatalf("comparison count = %d, want 1; comparisons=%+v", len(comparisons), comparisons)
+	}
+	comparison := comparisons[0]
+	if comparison.Site != sessionLifecycleStatusHealSiteDesired || comparison.Outcome != sessionLifecycleStatusComparisonIncomparable || comparison.Reason != sessionLifecycleStatusComparisonReasonLegacyError || comparison.LegacyPatch != nil || comparison.LegacyError != writeErr.Error() {
+		t.Fatalf("comparison = %+v, want desired/incomparable/legacy_error with nil legacy patch", comparison)
 	}
 	if drain := env.dt.get(session.ID); drain != nil {
 		t.Fatalf("failed heal started a drain: %#v", drain)

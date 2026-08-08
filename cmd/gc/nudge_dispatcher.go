@@ -2,17 +2,22 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/nudgeshadow"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -21,6 +26,35 @@ import (
 // missing socket — legacy-mode cities and pre-start producers expect the
 // dial to fail fast.
 const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
+
+const (
+	nudgeDueTargetSelectionMatched       = "matched"
+	nudgeDueTargetSelectionMismatch      = "mismatch"
+	nudgeDueTargetSelectionCandidateOnly = "candidate_only"
+	nudgeDueTargetSelectionLegacyOnly    = "legacy_only"
+
+	nudgeDueTargetSelectionDigestDomain = "gascity.nudge.due-target-selection.v1"
+)
+
+// nudgeDueTargetSelectionObservation is a bounded summary of candidate and
+// legacy due-target selection. It deliberately contains no raw session IDs.
+type nudgeDueTargetSelectionObservation struct {
+	Scope               string
+	QueueItemCount      int
+	CandidateCount      int
+	CandidateDigest     string
+	LegacyCount         int
+	LegacyDigest        string
+	ComparisonOutcome   string
+	QueueDuration       time.Duration
+	CandidateDuration   time.Duration
+	LegacyDuration      time.Duration
+	TotalDuration       time.Duration
+	LegacyEffectOwner   bool
+	ShadowEffectApplied bool
+}
+
+type nudgeDueTargetSelectionObserver func(nudgeDueTargetSelectionObservation)
 
 // pingNudgeWakeSocket sends a best-effort wake signal to the supervisor's
 // nudge dispatcher. Callers invoke this after enqueueing a queued nudge so
@@ -116,19 +150,47 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	return dispatchAllQueuedNudgesExcept(cityPath, cfg, store, sessStore, sp, sessionBeads, nil)
 }
 
+// dispatchAllQueuedNudgesObserved runs the same legacy dispatch while
+// observing its pre-provider due-target selection.
+func dispatchAllQueuedNudgesObserved(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, observer nudgeDueTargetSelectionObserver) (int, error) {
+	return dispatchAllQueuedNudgesExceptObserved(cityPath, cfg, store, sessStore, sp, sessionBeads, nil, observer)
+}
+
 // dispatchAllQueuedNudgesExcept preserves legacy delivery for every target
 // except exact session IDs currently scheduled by the keyed controller. Queue
 // claiming remains the physical cross-path delivery fence.
 func dispatchAllQueuedNudgesExcept(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, excludedSessionIDs map[string]struct{}) (int, error) {
+	return dispatchAllQueuedNudgesExceptObserved(cityPath, cfg, store, sessStore, sp, sessionBeads, excludedSessionIDs, nil)
+}
+
+func dispatchAllQueuedNudgesExceptObserved(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, excludedSessionIDs map[string]struct{}, observer nudgeDueTargetSelectionObserver) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	if !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
+	var queueStarted time.Time
+	if observer != nil {
+		queueStarted = time.Now()
+	}
 	state, err := nudgequeue.LoadState(cityPath)
 	if err != nil {
 		return 0, fmt.Errorf("loading nudge queue: %w", err)
+	}
+	if observer != nil {
+		return dispatchAllQueuedNudgesFromStateObserved(
+			cityPath,
+			cfg,
+			store,
+			sessStore,
+			sp,
+			sessionBeads,
+			excludedSessionIDs,
+			state,
+			time.Since(queueStarted),
+			observer,
+		)
 	}
 	return dispatchAllQueuedNudgesFromState(cityPath, cfg, store, sessStore, sp, sessionBeads, excludedSessionIDs, state)
 }
@@ -138,6 +200,51 @@ func dispatchAllQueuedNudgesExcept(cityPath string, cfg *config.City, store, ses
 func dispatchAllQueuedNudgesFromState(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, excludedSessionIDs map[string]struct{}, state nudgequeue.State) (int, error) {
 	targets := selectLegacyQueuedNudgeTargets(cityPath, cfg, sessionBeads, state, time.Now())
 	return dispatchSelectedQueuedNudgeTargets(targets, store, sessStore, sp, excludedSessionIDs)
+}
+
+// dispatchAllQueuedNudgesFromStateObserved compares the pure exact-session
+// candidate selector with the immutable legacy pre-provider selection, then
+// makes the legacy dispatcher consume precisely the selection it observed.
+func dispatchAllQueuedNudgesFromStateObserved(
+	cityPath string,
+	cfg *config.City,
+	store, sessStore beads.Store,
+	sp runtime.Provider,
+	sessionBeads *sessionBeadSnapshot,
+	excludedSessionIDs map[string]struct{},
+	state nudgequeue.State,
+	queueDuration time.Duration,
+	observer nudgeDueTargetSelectionObserver,
+) (int, error) {
+	selectionStarted := time.Now()
+	now := time.Now()
+
+	candidateStarted := time.Now()
+	candidateIDs := discoverDueExactNudgeSessionIDs(state, now)
+	candidateDuration := time.Since(candidateStarted)
+
+	legacyStarted := time.Now()
+	targets := selectLegacyQueuedNudgeTargets(cityPath, cfg, sessionBeads, state, now)
+	legacyDuration := time.Since(legacyStarted)
+	legacyIDs := make([]string, 0, len(targets))
+	for _, target := range targets {
+		legacyIDs = append(legacyIDs, target.sessionID)
+	}
+
+	observation := newNudgeDueTargetSelectionObservation(
+		state,
+		candidateIDs,
+		legacyIDs,
+		queueDuration,
+		candidateDuration,
+		legacyDuration,
+		queueDuration+time.Since(selectionStarted),
+	)
+	delivered, err := dispatchSelectedQueuedNudgeTargets(targets, store, sessStore, sp, excludedSessionIDs)
+	if observer != nil {
+		observer(observation)
+	}
+	return delivered, err
 }
 
 func selectLegacyQueuedNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot, state nudgequeue.State, now time.Time) []nudgeTarget {
@@ -226,4 +333,67 @@ func dispatchSelectedQueuedNudgeTargets(targets []nudgeTarget, store, sessStore 
 		}
 	}
 	return delivered, firstErr
+}
+
+func newNudgeDueTargetSelectionObservation(
+	state nudgequeue.State,
+	candidateIDs, legacyIDs []string,
+	queueDuration, candidateDuration, legacyDuration, totalDuration time.Duration,
+) nudgeDueTargetSelectionObservation {
+	return nudgeDueTargetSelectionObservation{
+		Scope:               nudgeshadow.ScopeQueuedExactDueTargetSelection,
+		QueueItemCount:      len(state.Pending) + len(state.InFlight),
+		CandidateCount:      len(candidateIDs),
+		CandidateDigest:     digestNudgeDueTargetSelection(candidateIDs),
+		LegacyCount:         len(legacyIDs),
+		LegacyDigest:        digestNudgeDueTargetSelection(legacyIDs),
+		ComparisonOutcome:   compareNudgeDueTargetSelections(candidateIDs, legacyIDs),
+		QueueDuration:       queueDuration,
+		CandidateDuration:   candidateDuration,
+		LegacyDuration:      legacyDuration,
+		TotalDuration:       totalDuration,
+		LegacyEffectOwner:   true,
+		ShadowEffectApplied: false,
+	}
+}
+
+func compareNudgeDueTargetSelections(candidateIDs, legacyIDs []string) string {
+	if equalNudgeDueTargetSelections(candidateIDs, legacyIDs) {
+		return nudgeDueTargetSelectionMatched
+	}
+	switch {
+	case len(candidateIDs) > 0 && len(legacyIDs) == 0:
+		return nudgeDueTargetSelectionCandidateOnly
+	case len(candidateIDs) == 0 && len(legacyIDs) > 0:
+		return nudgeDueTargetSelectionLegacyOnly
+	default:
+		return nudgeDueTargetSelectionMismatch
+	}
+}
+
+func equalNudgeDueTargetSelections(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	left = append([]string(nil), left...)
+	right = append([]string(nil), right...)
+	sort.Strings(left)
+	sort.Strings(right)
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func digestNudgeDueTargetSelection(ids []string) string {
+	ordered := append([]string(nil), ids...)
+	sort.Strings(ordered)
+	digest := sha256.New()
+	_, _ = io.WriteString(digest, nudgeDueTargetSelectionDigestDomain)
+	for _, id := range ordered {
+		_, _ = io.WriteString(digest, "\x00"+strconv.Itoa(len(id))+"\x00"+id)
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }

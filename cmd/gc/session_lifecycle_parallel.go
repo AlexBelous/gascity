@@ -319,7 +319,11 @@ type startExecutionOptions struct {
 	workDirResolver                taskWorkDirResolver
 	stabilityWaiter                startStabilityWaiter
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	statusComparisonObserver       sessionLifecycleStatusComparisonObserver
 	exactStatusObserver            exactSessionLifecycleStatusObserver
+	startSelectionObserver         sessionLifecycleStartSelectionComparisonObserver
+	startSelectionShadowObserver   func(sessionLifecycleStartShadowObservation)
+	startSelectionShadowAdmission  func(string) (sessionLifecycleStartShadowAdmission, bool)
 	legacyStartExcluded            func(sessionpkg.Info) bool
 	legacyStatusHealExcluded       func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
@@ -404,9 +408,37 @@ func withSessionStaleKeyDetectionWaiter(waiter sessionpkg.StaleKeyDetectionWaite
 	}
 }
 
+func withSessionLifecycleStatusComparisonObserver(observer sessionLifecycleStatusComparisonObserver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.statusComparisonObserver = observer
+	}
+}
+
 func withExactSessionLifecycleStatusObserver(observer exactSessionLifecycleStatusObserver) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.exactStatusObserver = observer
+	}
+}
+
+func withSessionLifecycleStartSelectionComparisonObserver(observer sessionLifecycleStartSelectionComparisonObserver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.startSelectionObserver = observer
+	}
+}
+
+func withSessionLifecycleStartSelectionShadowObserver(
+	observer func(sessionLifecycleStartShadowObservation),
+) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.startSelectionShadowObserver = observer
+	}
+}
+
+func withSessionLifecycleStartSelectionShadowAdmission(
+	admission func(string) (sessionLifecycleStartShadowAdmission, bool),
+) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.startSelectionShadowAdmission = admission
 	}
 }
 

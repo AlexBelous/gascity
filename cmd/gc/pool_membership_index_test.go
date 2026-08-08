@@ -364,7 +364,7 @@ func TestPoolMembershipSnapshotRebuildRejectsControllerConfigDrift(t *testing.T)
 	}
 }
 
-func TestSessionMutationRefreshesPoolMembershipOnExactKey(t *testing.T) {
+func TestSessionMutationRefreshesPoolMembershipBeforeDemandShadow(t *testing.T) {
 	cr := newSessionStartCityRuntimeForTest(t, rollout.Auto, true)
 	cr.poolMembershipShadow = newPoolMembershipIndex()
 	cr.cityPath = t.TempDir()
@@ -420,6 +420,38 @@ func TestSessionMutationRefreshesPoolMembershipOnExactKey(t *testing.T) {
 	}
 	cr.cs.admitSessionStartEvent(beadEventForSessionStartTest(t, events.BeadUpdated, updated))
 	assertCertifiedPoolMembership(t, cr.poolMembershipShadow.observe("worker"), 1, 0)
+
+	now := time.Now().UTC()
+	cr.recordReadyRoutedWorkDemandContribution(readyRoutedWorkDemandContribution{
+		WorkID:              "ga-ready",
+		PoolTarget:          "worker",
+		SourceActor:         "bd-hook",
+		SourceStore:         "city:test-city",
+		ContributionPresent: true,
+		EventAt:             now.Add(-time.Second),
+		ObservedAt:          now,
+		DecidedAt:           now,
+	})
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cr.cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("read pool membership shadow trace: %v", err)
+	}
+	for _, record := range records {
+		if record.RecordType != TraceRecordOperation || record.SiteCode != TraceSitePoolDemandContributionShadow {
+			continue
+		}
+		if record.Fields["pool_member_count"] != float64(1) ||
+			record.Fields["pool_occupancy"] != float64(0) ||
+			record.Fields["pool_membership_certified"] != true ||
+			record.Fields["pool_membership_lookup_ns"].(float64) < 0 ||
+			record.Fields["event_to_capacity_shadow_decision_ns"].(float64) <= 0 ||
+			record.Fields["effect_applied"] != false {
+			t.Fatalf("pool membership shadow record = %+v", record)
+		}
+		return
+	}
+	t.Fatal("pool membership shadow record not found")
 }
 
 func BenchmarkPoolMembershipIndexReplaceFleetSize(b *testing.B) {

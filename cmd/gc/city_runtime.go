@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/nudgeshadow"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -115,7 +116,8 @@ type CityRuntime struct {
 	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
 	// process-lifetime cache is what keeps a per-tick live lane from repeating
 	// bounded discovery and transcript reads for every awake session.
-	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
+	liveSweepMemos        sync.Map // session bead id -> liveSweepMemo
+	lifecycleShadowWorker *sessionLifecycleShadowWorker
 	// waitDependencyEnqueue is an opt-in private shadow sink. It stays nil
 	// until the lifecycle adapter owns a real downstream consumer.
 	waitDependencyEnqueue  func(sessionWaitDependencyTarget, sessionWaitDependencyCause) (retire bool, err error)
@@ -145,6 +147,7 @@ type CityRuntime struct {
 	nudgeKeyController                     *nudgeKeyController
 	nudgeKeyFallback                       map[string]struct{}
 	nudgeKeyMode                           rollout.Mode
+	nudgeShadowSelection                   nudgeshadow.Selection
 	// sessionStartOptions is empty in production. Focused tests install the
 	// existing deterministic start waiters here so composition tests prove the
 	// real exact-start path without wall-clock stability delays.
@@ -243,7 +246,9 @@ type CityRuntimeParams struct {
 	ManagedDoltOwned    func(string) (bool, error)
 	ManagedDoltPort     func(string) string
 
-	Trace *sessionReconcilerTraceManager
+	LifecycleShadowWorker *sessionLifecycleShadowWorker
+	NudgeShadowSelection  nudgeshadow.Selection
+	Trace                 *sessionReconcilerTraceManager
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -271,6 +276,29 @@ const cityRuntimeReloadLifecycleRetryLimit = 2
 // It is intentionally longer than staleCreatingStateTimeout because startup
 // plus the first patrol can legitimately exceed one minute.
 const postCreateProtectionTimeout = 2 * time.Minute
+
+// prepareNudgeShadowRuntime resolves the boot-latched selection and, only for
+// required mode, opens and verifies the trace recorder that the runtime will
+// own. Off mode does not open or inspect trace state.
+func prepareNudgeShadowRuntime(cityPath, cityName string, cfg *config.City, stderr io.Writer) (nudgeshadow.Selection, *sessionReconcilerTraceManager, error) {
+	selection, err := nudgeshadow.Resolve(cfg)
+	if err != nil {
+		return nudgeshadow.Selection{}, nil, err
+	}
+	if !selection.Required() {
+		return selection, nil, nil
+	}
+	trace := newSessionReconcilerTraceManager(cityPath, cityName, stderr)
+	selection, err = nudgeshadow.Preflight(cfg, nudgeshadow.Requirements{
+		CityPath:       cityPath,
+		TraceRecording: trace.Enabled(),
+	})
+	if err != nil {
+		_ = trace.Close()
+		return nudgeshadow.Selection{}, nil, err
+	}
+	return selection, trace, nil
+}
 
 // newCityRuntime creates a CityRuntime, building internal components
 // (crash tracker, idle tracker, wisp GC, order dispatcher) from the
@@ -373,6 +401,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
+		lifecycleShadowWorker:   p.LifecycleShadowWorker,
 		poolMembershipShadow:    newPoolMembershipIndex(),
 		convergenceReqCh:        p.ConvergenceReqCh,
 		reloadReqCh: func() chan reloadRequest {
@@ -396,6 +425,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		nudgeWakeCh:                  make(chan struct{}, 1),
 		routedWorkPoolAllocationCh:   make(chan routedWorkPoolAllocationHint, routedWorkPoolAllocationQueueSize),
 		sessionWaitDependencyStartCh: make(chan sessionWaitDependencyStartHint, routedWorkPoolAllocationQueueSize),
+		nudgeShadowSelection:         p.NudgeShadowSelection,
 		onStarted:                    p.OnStarted,
 		onStatus:                     p.OnStatus,
 		managedDoltHealth:            managedDoltHealth,
@@ -406,6 +436,14 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		stderr:                       p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
+	if cr.lifecycleShadowWorker == nil {
+		worker, err := newSessionLifecycleShadowWorker(1, cr.recordSessionLifecycleStartShadowEvaluation, shadowWorkerStderr(cr.stderr))
+		if err != nil {
+			fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle shadow worker disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow startup must not affect legacy reconciliation
+		} else {
+			cr.lifecycleShadowWorker = worker
+		}
+	}
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
@@ -422,6 +460,22 @@ func (cr *CityRuntime) setControllerState(cs *controllerState) {
 // crashTracker returns the crash tracker for API server wiring.
 func (cr *CityRuntime) crashTrack() crashTracker {
 	return cr.ct
+}
+
+func (cr *CityRuntime) startSessionLifecycleShadowWorker() {
+	if cr == nil || cr.lifecycleShadowWorker == nil {
+		return
+	}
+	if err := cr.lifecycleShadowWorker.Start(); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: lifecycle shadow worker disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow startup must not affect legacy reconciliation
+	}
+}
+
+func (cr *CityRuntime) stopSessionLifecycleShadowWorker() {
+	if cr == nil || cr.lifecycleShadowWorker == nil {
+		return
+	}
+	cr.lifecycleShadowWorker.Stop()
 }
 
 func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
@@ -443,6 +497,7 @@ func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
 		if !stillKeyed {
 			return
 		}
+		cr.recordReadyRoutedWorkDemandContribution(contribution)
 		if !cr.enqueueRoutedWorkPoolAllocation(contribution) {
 			cr.requestReadyRoutedWorkLegacyFallback()
 		}
@@ -453,6 +508,78 @@ func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
 	return nil
 }
 
+func (cr *CityRuntime) recordReadyRoutedWorkDemandContribution(contribution readyRoutedWorkDemandContribution) {
+	if cr == nil || cr.trace == nil || contribution.WorkID == "" || contribution.PoolTarget == "" ||
+		contribution.ObservedAt.IsZero() || contribution.DecidedAt.IsZero() ||
+		contribution.DecidedAt.Before(contribution.ObservedAt) {
+		return
+	}
+	lookupStarted := time.Now()
+	membership := cr.poolMembershipShadow.observe(contribution.PoolTarget)
+	lookupDuration := time.Since(lookupStarted)
+	allocation := decideRoutedWorkPoolAllocationShadow(contribution, membership)
+	capacityDecidedAt := time.Now().UTC()
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+	cycle := cr.trace.BeginCycle(TraceTickTriggerControl, "pool_demand.contribution.shadow", contribution.DecidedAt, cfg)
+	if cycle == nil {
+		return
+	}
+	reason := TraceReasonRetained
+	outcome := TraceOutcomeAccepted
+	if !contribution.ContributionPresent {
+		reason = TraceReasonNoEffectTemplateMatch
+		outcome = TraceOutcomeSkipped
+	}
+	eventToDecision := int64(0)
+	eventTimestampValid := !contribution.EventAt.IsZero() && !contribution.DecidedAt.Before(contribution.EventAt)
+	if eventTimestampValid {
+		eventToDecision = contribution.DecidedAt.Sub(contribution.EventAt).Nanoseconds()
+	}
+	eventToCapacityDecision := int64(0)
+	if !contribution.EventAt.IsZero() && !capacityDecidedAt.Before(contribution.EventAt) {
+		eventToCapacityDecision = capacityDecidedAt.Sub(contribution.EventAt).Nanoseconds()
+	}
+	demandToCapacityDecision := int64(0)
+	if !capacityDecidedAt.Before(contribution.DecidedAt) {
+		demandToCapacityDecision = capacityDecidedAt.Sub(contribution.DecidedAt).Nanoseconds()
+	}
+	cycle.RecordControllerOperation(
+		TraceSitePoolDemandContributionShadow,
+		reason,
+		outcome,
+		"pool_demand.contribution.shadow",
+		capacityDecidedAt.Sub(contribution.ObservedAt),
+		map[string]any{
+			"work_id":                               contribution.WorkID,
+			"pool_target":                           contribution.PoolTarget,
+			"source_actor":                          contribution.SourceActor,
+			"source_store":                          contribution.SourceStore,
+			"contribution_present":                  contribution.ContributionPresent,
+			"event_timestamp_valid":                 eventTimestampValid,
+			"event_to_shadow_decision_ns":           eventToDecision,
+			"observation_to_shadow_decision_ns":     contribution.DecidedAt.Sub(contribution.ObservedAt).Nanoseconds(),
+			"pool_member_count":                     membership.members,
+			"pool_occupancy":                        membership.occupied,
+			"pool_membership_certified":             membership.certified,
+			"pool_membership_revision":              membership.revision,
+			"pool_membership_reason":                string(membership.reason),
+			"pool_membership_lookup_ns":             lookupDuration.Nanoseconds(),
+			"event_to_capacity_shadow_decision_ns":  eventToCapacityDecision,
+			"demand_to_capacity_shadow_decision_ns": demandToCapacityDecision,
+			"allocation_action":                     string(allocation.action),
+			"allocation_reason":                     string(allocation.reason),
+			"allocation_start_count":                allocation.startCount,
+			"allocation_supported":                  allocation.action == poolAllocationShadowStartOne,
+			"effect_applied":                        false,
+		},
+	)
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: routed-work demand shadow trace: %v\n", cr.logPrefix, err) //nolint:errcheck // tracing must not affect legacy reconciliation
+	}
+}
+
 func shadowWorkerStderr(stderr io.Writer) io.Writer {
 	if stderr == nil {
 		return io.Discard
@@ -460,11 +587,102 @@ func shadowWorkerStderr(stderr io.Writer) io.Writer {
 	return stderr
 }
 
+func (cr *CityRuntime) recordSessionLifecycleStartShadowEvaluation(evaluation sessionLifecycleStartShadowEvaluation) {
+	if cr == nil || cr.trace == nil || evaluation.Observation.Input.ObservedAt.IsZero() ||
+		evaluation.CompletedAt.IsZero() ||
+		evaluation.CompletedAt.Before(evaluation.Observation.Input.ObservedAt) {
+		return
+	}
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+	cycle := cr.trace.BeginCycle(TraceTickTriggerControl, "lifecycle.start_selection.shadow", evaluation.CompletedAt, cfg)
+	if cycle == nil {
+		return
+	}
+	outcome := TraceOutcomeUnknown
+	switch evaluation.Comparison.Outcome {
+	case sessionLifecycleStartSelectionComparisonMatched:
+		outcome = TraceOutcomeNoChange
+	case sessionLifecycleStartSelectionComparisonMismatched:
+		outcome = TraceOutcomeFailed
+	case sessionLifecycleStartSelectionComparisonIncomparable:
+		outcome = TraceOutcomeSkipped
+	}
+	cycle.recordAdmittedDetailOperation(
+		TraceSiteLifecycleStartSelectionShadow,
+		TraceReasonRetained,
+		outcome,
+		"lifecycle.start_selection.shadow",
+		evaluation.Observation.Admission.Template,
+		evaluation.Observation.Input.Info.ID,
+		evaluation.Observation.Input.Info.SessionNameMetadata,
+		evaluation.Observation.Admission.Source,
+		evaluation.CompletedAt.Sub(evaluation.Observation.Input.ObservedAt),
+		map[string]any{
+			"session_id":               evaluation.Observation.Input.Info.ID,
+			"admitted_template":        evaluation.Observation.Admission.Template,
+			"admitted_source":          string(evaluation.Observation.Admission.Source),
+			"admitted_expires_at":      evaluation.Observation.Admission.ExpiresAt,
+			"candidate_outcome":        sessionLifecycleStartSelectionOutcomeTraceValue(evaluation.Comparison.Plan.Outcome),
+			"candidate_reason":         string(evaluation.Comparison.Plan.Reason),
+			"legacy_selected":          evaluation.Comparison.LegacySelected,
+			"comparison_outcome":       string(evaluation.Comparison.Outcome),
+			"comparison_reason":        string(evaluation.Comparison.Reason),
+			"queue_latency_ns":         evaluation.QueueLatency.Nanoseconds(),
+			"planning_latency_ns":      evaluation.PlanningLatency.Nanoseconds(),
+			"observed_to_completed_ns": evaluation.CompletedAt.Sub(evaluation.Observation.Input.ObservedAt).Nanoseconds(),
+			"effect_applied":           false,
+		},
+	)
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle start-selection shadow trace: %v\n", cr.logPrefix, err) //nolint:errcheck // tracing must not affect reconciliation
+	}
+}
+
+func sessionLifecycleStartSelectionOutcomeTraceValue(outcome sessionLifecycleStartSelectionOutcome) string {
+	switch outcome {
+	case sessionLifecycleStartSelectionPrepare:
+		return "prepare"
+	case sessionLifecycleStartSelectionNoop:
+		return "noop"
+	case sessionLifecycleStartSelectionPark:
+		return "park"
+	default:
+		return "unknown"
+	}
+}
+
+func (cr *CityRuntime) sessionLifecycleShadowStartOption(cycle *SessionReconcilerTraceCycle) startExecutionOption {
+	if cr == nil || !cr.lifecycleShadowWorker.acceptingObservations() ||
+		cr.sessionStartOwnershipState() != sessionStartOwnershipLegacy ||
+		cycle == nil || !cycle.hasStartSelectionShadowAdmission() {
+		return nil
+	}
+	admission := func(template string) (sessionLifecycleStartShadowAdmission, bool) {
+		token, ok := cycle.startSelectionShadowAdmission(template)
+		if !ok || (!token.ExpiresAt.IsZero() && token.ExpiresAt.Before(time.Now().UTC())) {
+			return sessionLifecycleStartShadowAdmission{}, false
+		}
+		return token, true
+	}
+	worker := cr.lifecycleShadowWorker
+	return func(opts *startExecutionOptions) {
+		withSessionLifecycleStartSelectionShadowObserver(func(observation sessionLifecycleStartShadowObservation) {
+			if err := worker.EnqueueStart(observation); err != nil {
+				fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: lifecycle shadow observation dropped: %v\n", cr.logPrefix, err) //nolint:errcheck // shadow admission must not affect legacy reconciliation
+			}
+		})(opts)
+		withSessionLifecycleStartSelectionShadowAdmission(admission)(opts)
+	}
+}
+
 // run executes the reconciliation loop until ctx is canceled. This is
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
 	defer cr.shutdown()
+	cr.startSessionLifecycleShadowWorker()
 
 	dirty := cr.configDirty
 	if dirty == nil {
@@ -682,7 +900,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if err := cr.installReadyRoutedWorkEventAdmission(); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: ready routed-work admission: %v (using ordinary reconciler pokes)\n", cr.logPrefix, err) //nolint:errcheck // optimization failure retains legacy convergence
 		}
-		if err := cr.ensureNudgeKeyController(ctx); err != nil {
+		if err := cr.ensureNudgeKeyControllerForSelection(ctx); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: keyed nudge controller: %v\n", cr.logPrefix, err) //nolint:errcheck // startup refusal is surfaced before readiness
 			return
 		}
@@ -1944,6 +2162,23 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
 	}
+	if err := cr.nudgeShadowSelection.Validate(result.Cfg, nudgeshadow.Requirements{
+		CityPath:       cr.cityPath,
+		TraceRecording: cr.nudgeShadowSelection.Required() && cr.trace != nil && cr.trace.Enabled(),
+	}); err != nil {
+		err = fmt.Errorf("nudge shadow reload preflight: %w", err)
+		fmt.Fprintf(cr.stderr, "%s: config reload: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
 	oldRevision := cr.configRev
 	rejectSuperseded := func(phase string) reloadControlReply {
 		cr.requestConfigReloadRetry()
@@ -2620,6 +2855,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAssignedWorkDeferTracker(cr.adt),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 	}
+	if shadowOption := cr.sessionLifecycleShadowStartOption(trace); shadowOption != nil {
+		reconcileStartOptions = append(reconcileStartOptions, shadowOption)
+	}
 	if keyedOption := cr.sessionStartLegacyExclusionOption(); keyedOption != nil {
 		reconcileStartOptions = append(reconcileStartOptions, keyedOption)
 	}
@@ -3267,7 +3505,14 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 		if sessionBeads == nil {
 			return
 		}
-		if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads); err != nil {
+		observer := cr.nudgeDueTargetSelectionObserver()
+		var err error
+		if observer == nil {
+			_, err = dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads)
+		} else {
+			_, err = dispatchAllQueuedNudgesObserved(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, observer)
+		}
+		if err != nil {
 			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 		}
 		return
@@ -3790,6 +4035,58 @@ func (cr *CityRuntime) beginTraceCycle(trigger, detail string, sessionBeads *ses
 	return cr.trace.beginCycle(info, cr.cfg, sessionBeads)
 }
 
+const traceSiteNudgeDueTargetSelectionShadow TraceSiteCode = "nudge.due_target_selection.shadow"
+
+const nudgeDueTargetSelectionTraceFieldLimit = 13
+
+func (cr *CityRuntime) ensureNudgeKeyControllerForSelection(ctx context.Context) error {
+	if cr == nil || cr.nudgeShadowSelection.Required() {
+		return nil
+	}
+	return cr.ensureNudgeKeyController(ctx)
+}
+
+func (cr *CityRuntime) nudgeDueTargetSelectionObserver() nudgeDueTargetSelectionObserver {
+	if cr == nil || !cr.nudgeShadowSelection.Required() {
+		return nil
+	}
+	return cr.recordNudgeDueTargetSelection
+}
+
+func (cr *CityRuntime) recordNudgeDueTargetSelection(observation nudgeDueTargetSelectionObservation) {
+	if cr == nil {
+		return
+	}
+	cycle := cr.beginTraceCycle("control", nudgeshadow.ScopeQueuedExactDueTargetSelection, nil)
+	if cycle == nil {
+		return
+	}
+	fields := map[string]any{
+		"scope":                 observation.Scope,
+		"queue_item_count":      observation.QueueItemCount,
+		"candidate_count":       observation.CandidateCount,
+		"candidate_digest":      observation.CandidateDigest,
+		"legacy_count":          observation.LegacyCount,
+		"legacy_digest":         observation.LegacyDigest,
+		"comparison_outcome":    observation.ComparisonOutcome,
+		"queue_duration_ms":     observation.QueueDuration.Milliseconds(),
+		"candidate_duration_ms": observation.CandidateDuration.Milliseconds(),
+		"legacy_duration_ms":    observation.LegacyDuration.Milliseconds(),
+		"total_duration_ms":     observation.TotalDuration.Milliseconds(),
+		"legacy_effect_owner":   observation.LegacyEffectOwner,
+		"shadow_effect_applied": observation.ShadowEffectApplied,
+	}
+	cycle.RecordControllerDecision(
+		traceSiteNudgeDueTargetSelectionShadow,
+		TraceReasonRetained,
+		TraceOutcomeNoChange,
+		fields,
+	)
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge due-target selection trace: %v\n", cr.logPrefix, err) //nolint:errcheck
+	}
+}
+
 func (cr *CityRuntime) drainOutgoingOrderDispatcher(ctx context.Context, od orderDispatcher) {
 	if od == nil {
 		return
@@ -3856,6 +4153,7 @@ func (cr *CityRuntime) shutdown() {
 		cr.stopSessionWaitDependencyProducer()
 		cr.stopSessionStartController()
 		cr.stopNudgeKeyController()
+		cr.stopSessionLifecycleShadowWorker()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()

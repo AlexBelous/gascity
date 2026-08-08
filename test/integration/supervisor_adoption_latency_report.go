@@ -34,6 +34,7 @@ type adoptionLatencyBinary struct {
 type adoptionLatencyBenchmarkProfile struct {
 	Version                  string `json:"version"`
 	BeadsProvider            string `json:"beads_provider"`
+	ShadowMode               string `json:"shadow_mode"`
 	DispatcherMode           string `json:"dispatcher_mode"`
 	ReconcilerMode           string `json:"reconciler_mode"`
 	PreserveSessionsOnSignal bool   `json:"preserve_sessions_on_signal"`
@@ -122,7 +123,7 @@ func buildAdoptionLatencyReport(p adoptionLatencyProvenance, run adoptionLatency
 		report.PhaseStats = append(report.PhaseStats, adoptionLatencyPhaseStats{Name: name, ObservedCount: len(phaseDurations[i]), Latency: adoptionLatencyPercentileStats(phaseDurations[i])})
 	}
 	report.PhaseStats = append(report.PhaseStats, adoptionLatencyPhaseStats{Name: "starting_bead_store", ObservedCount: len(stores), CensoredCount: len(durations) - len(stores), CensorThreshold: adoptionLatencyStoreCensorThreshold, PercentilesObservedOnly: true, Latency: adoptionLatencyPercentileStats(stores)})
-	provenanceOK := p.Error == "" && p.BenchmarkProfile == adoptionLatencyBenchmarkProfileV2() &&
+	provenanceOK := p.Error == "" && p.BenchmarkProfile == adoptionLatencyBenchmarkProfileV1() &&
 		p.GCCommit != "" && p.RuntimeProvider == "tmux" && p.RuntimeIdentity != "" && p.HostOS != "" && p.HostArch != "" && p.CPUCount > 0 && slices.EqualFunc(p.Binaries, adoptionLatencyRequiredBinaries, func(binary adoptionLatencyBinary, name string) bool {
 		return binary.Name == name && binary.Path != "" && binary.SHA256 != "" && binary.Version != ""
 	})
@@ -130,10 +131,11 @@ func buildAdoptionLatencyReport(p adoptionLatencyProvenance, run adoptionLatency
 	return report, nil
 }
 
-func adoptionLatencyBenchmarkProfileV2() adoptionLatencyBenchmarkProfile {
+func adoptionLatencyBenchmarkProfileV1() adoptionLatencyBenchmarkProfile {
 	return adoptionLatencyBenchmarkProfile{
-		Version:                  "2",
+		Version:                  "1",
 		BeadsProvider:            "bd",
+		ShadowMode:               "required",
 		DispatcherMode:           "supervisor",
 		ReconcilerMode:           "off",
 		PreserveSessionsOnSignal: true,

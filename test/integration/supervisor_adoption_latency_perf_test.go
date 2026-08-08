@@ -45,7 +45,7 @@ func TestAdoptionLatencyReportNearestRankBoundaries(t *testing.T) {
 }
 
 func TestAdoptionLatencyReportRequiresExactBenchmarkProfile(t *testing.T) {
-	validProfile := adoptionLatencyBenchmarkProfileV2()
+	validProfile := adoptionLatencyBenchmarkProfileV1()
 	validRun := adoptionLatencyRunState{
 		Requested: 1,
 		Warmup:    readyAdoptionLatencySample(0, time.Millisecond),
@@ -64,6 +64,7 @@ func TestAdoptionLatencyReportRequiresExactBenchmarkProfile(t *testing.T) {
 		"missing":            func(profile *adoptionLatencyBenchmarkProfile) { *profile = adoptionLatencyBenchmarkProfile{} },
 		"version":            func(profile *adoptionLatencyBenchmarkProfile) { profile.Version = "wrong" },
 		"beads provider":     func(profile *adoptionLatencyBenchmarkProfile) { profile.BeadsProvider = "wrong" },
+		"shadow mode":        func(profile *adoptionLatencyBenchmarkProfile) { profile.ShadowMode = "wrong" },
 		"dispatcher mode":    func(profile *adoptionLatencyBenchmarkProfile) { profile.DispatcherMode = "wrong" },
 		"reconciler mode":    func(profile *adoptionLatencyBenchmarkProfile) { profile.ReconcilerMode = "wrong" },
 		"preserve on signal": func(profile *adoptionLatencyBenchmarkProfile) { profile.PreserveSessionsOnSignal = false },
@@ -231,7 +232,7 @@ func TestSupervisorPreserveAdoptionLatencyExactBinary(t *testing.T) {
 	if !filepath.IsAbs(reportPath) {
 		t.Fatal("GC_ADOPTION_PERF_REPORT must be an absolute path")
 	}
-	provenance := adoptionLatencyProvenance{Error: "setup not attempted", BenchmarkProfile: adoptionLatencyBenchmarkProfileV2()}
+	provenance := adoptionLatencyProvenance{Error: "setup not attempted", BenchmarkProfile: adoptionLatencyBenchmarkProfileV1()}
 	run := adoptionLatencyRunState{Warmup: adoptionLatencySample{Outcome: adoptionLatencyOutcomeNotAttempted, Error: "setup not attempted"}, FatalError: "setup not attempted"}
 	defer func() {
 		if err := writeAdoptionLatencyReport(reportPath, provenance, run); err != nil {
@@ -273,7 +274,7 @@ func adoptionLatencyPerfRun(t *testing.T, ctx context.Context, p *adoptionLatenc
 	if out, err := adoptionLatencyPerfCommand(ctx, "", env, 15*time.Second, gcBinary, "supervisor", "stop", "--wait"); err != nil {
 		return fmt.Errorf("stop bootstrap supervisor: %w: %s", err, strings.TrimSpace(out))
 	}
-	profile := adoptionLatencyBenchmarkProfileV2()
+	profile := adoptionLatencyBenchmarkProfileV1()
 	preserveOnSignal := "0"
 	if profile.PreserveSessionsOnSignal {
 		preserveOnSignal = "1"
@@ -342,10 +343,11 @@ func adoptionLatencyPerfRun(t *testing.T, ctx context.Context, p *adoptionLatenc
 func adoptionLatencyPerfPrepareCity(t *testing.T, env []string, gcHome string) (string, string, error) {
 	root := t.TempDir()
 	cityDir, configPath := filepath.Join(root, "c"), filepath.Join(root, "city.toml")
-	profile := adoptionLatencyBenchmarkProfileV2()
-	config := fmt.Sprintf("[workspace]\nname=%q\n[beads]\nprovider=%q\n[daemon]\nnudge_dispatcher=%q\nsession_reconciler=%q\n[[agent]]\nname=\"worker\"\nstart_command=\"sleep 3600\"\n[[named_session]]\ntemplate=\"worker\"\nmode=\"always\"\n",
+	profile := adoptionLatencyBenchmarkProfileV1()
+	config := fmt.Sprintf("[workspace]\nname=%q\n[beads]\nprovider=%q\n[daemon]\nnudge_shadow=%q\nnudge_dispatcher=%q\nsession_reconciler=%q\n[[agent]]\nname=\"worker\"\nstart_command=\"sleep 3600\"\n[[named_session]]\ntemplate=\"worker\"\nmode=\"always\"\n",
 		"adopt-"+strconv.FormatInt(time.Now().UnixNano(), 36),
 		profile.BeadsProvider,
+		profile.ShadowMode,
 		profile.DispatcherMode,
 		profile.ReconcilerMode,
 	)
@@ -544,7 +546,7 @@ func adoptionLatencyPerfProvenance(ctx context.Context, h *adoptionLatencyPerfHa
 		return adoptionLatencyProvenance{}, fmt.Errorf("decode gc version: %v", err)
 	}
 	binaries[0].Version = gc.Version
-	return adoptionLatencyProvenance{BenchmarkProfile: adoptionLatencyBenchmarkProfileV2(), Binaries: binaries, GCCommit: gc.Commit, RuntimeProvider: parseEnvList(h.env)["GC_SESSION"], RuntimeIdentity: h.tmux, HostOS: runtime.GOOS, HostArch: runtime.GOARCH, CPUCount: runtime.NumCPU()}, nil
+	return adoptionLatencyProvenance{BenchmarkProfile: adoptionLatencyBenchmarkProfileV1(), Binaries: binaries, GCCommit: gc.Commit, RuntimeProvider: parseEnvList(h.env)["GC_SESSION"], RuntimeIdentity: h.tmux, HostOS: runtime.GOOS, HostArch: runtime.GOARCH, CPUCount: runtime.NumCPU()}, nil
 }
 
 func adoptionLatencyPerfBinary(ctx context.Context, h *adoptionLatencyPerfHarness, name, path string, args ...string) (adoptionLatencyBinary, error) {
@@ -564,5 +566,5 @@ func adoptionLatencyProvenanceForTest() adoptionLatencyProvenance {
 	for i, name := range adoptionLatencyRequiredBinaries {
 		binaries[i] = adoptionLatencyBinary{Name: name, Path: "/bin", SHA256: "hash", Version: "version"}
 	}
-	return adoptionLatencyProvenance{BenchmarkProfile: adoptionLatencyBenchmarkProfileV2(), Binaries: binaries, GCCommit: "commit", RuntimeProvider: "tmux", RuntimeIdentity: "identity", HostOS: "linux", HostArch: "amd64", CPUCount: 1}
+	return adoptionLatencyProvenance{BenchmarkProfile: adoptionLatencyBenchmarkProfileV1(), Binaries: binaries, GCCommit: "commit", RuntimeProvider: "tmux", RuntimeIdentity: "identity", HostOS: "linux", HostArch: "amd64", CPUCount: 1}
 }

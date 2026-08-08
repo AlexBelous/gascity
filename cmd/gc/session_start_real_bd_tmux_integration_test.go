@@ -14,7 +14,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -28,43 +27,6 @@ import (
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
-
-// exactStartStopStartCall records one provider Start invocation so the socket
-// journey can prove the reconciler never re-entered the provider for a session
-// that was already live.
-type exactStartStopStartCall struct {
-	Name        string
-	EnteredAt   time.Time
-	CompletedAt time.Time
-	Err         error
-}
-
-type exactStartStopRecordingProvider struct {
-	runtime.Provider
-
-	mu         sync.Mutex
-	startCalls []exactStartStopStartCall
-}
-
-func (p *exactStartStopRecordingProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	call := exactStartStopStartCall{
-		Name:      name,
-		EnteredAt: time.Now().UTC(),
-	}
-	call.Err = p.Provider.Start(ctx, name, cfg)
-	call.CompletedAt = time.Now().UTC()
-
-	p.mu.Lock()
-	p.startCalls = append(p.startCalls, call)
-	p.mu.Unlock()
-	return call.Err
-}
-
-func (p *exactStartStopRecordingProvider) snapshotStartCalls() []exactStartStopStartCall {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]exactStartStopStartCall(nil), p.startCalls...)
-}
 
 type exactSessionStartStopDurableSample struct {
 	Version                        string `json:"version"`
@@ -91,7 +53,7 @@ func testExactSessionStartSocketLiveSessionRecordsDetachedStatusShadow(t *testin
 	if err != nil {
 		t.Fatalf("construct isolated tmux provider: %v", err)
 	}
-	provider := &exactStartStopRecordingProvider{Provider: baseProvider}
+	provider := &sessionLifecycleShadowJourneyProvider{Provider: baseProvider}
 	if err := provider.Start(t.Context(), sessionName, runtime.Config{
 		Command: "sleep 600",
 		WorkDir: cityPath,
@@ -1811,6 +1773,45 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			originalAfterLegacyStart, originalBeadAfterLegacyStart, originalLifecycleAfterLegacyStart)
 	}
 
+	var shadowWitness SessionReconcilerTraceRecord
+	if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
+		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+			SiteCode:    TraceSiteLifecycleStartSelectionShadow,
+			Template:    "worker",
+			TraceMode:   TraceModeDetail,
+			TraceSource: TraceSourceManual,
+		})
+		if readErr != nil {
+			return false, readErr
+		}
+		matches := 0
+		for _, record := range records {
+			if record.Fields["session_id"] != shadowCreated.SessionID {
+				continue
+			}
+			matches++
+			shadowWitness = record
+		}
+		if matches > 1 {
+			return false, fmt.Errorf("legacy shadow witnesses = %d, want exactly one", matches)
+		}
+		return matches == 1, nil
+	}); err != nil {
+		t.Fatalf("legacy START-shadow witness did not converge: %v; controller stdout=%q stderr=%q",
+			err, legacyControllerStdout.String(), legacyControllerStderr.String())
+	}
+	if shadowWitness.RecordType != TraceRecordOperation ||
+		shadowWitness.OutcomeCode != TraceOutcomeNoChange ||
+		shadowWitness.Fields["admitted_template"] != "worker" ||
+		shadowWitness.Fields["admitted_source"] != string(TraceSourceManual) ||
+		shadowWitness.Fields["candidate_outcome"] != "prepare" ||
+		shadowWitness.Fields["candidate_reason"] != string(sessionLifecycleStartSelectionReasonReady) ||
+		shadowWitness.Fields["legacy_selected"] != true ||
+		shadowWitness.Fields["comparison_outcome"] != string(sessionLifecycleStartSelectionComparisonMatched) ||
+		shadowWitness.Fields["comparison_reason"] != string(sessionLifecycleStartSelectionComparisonReasonEquivalent) ||
+		shadowWitness.Fields["effect_applied"] != false {
+		t.Fatalf("legacy START-shadow witness = %#v, want matched legacy-owned no-effect evidence", shadowWitness)
+	}
 	startRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 		RecordType:  TraceRecordOperation,
 		SiteCode:    TraceSiteLifecycleStartRun,

@@ -23,6 +23,10 @@ const (
 	sessionWaitShadowAwaitRelevant
 )
 
+func (cs *controllerState) installSessionWaitDependencyShadowAdmission(admit func() sessionWaitShadowRefreshResult, mayContain func(string) bool) error {
+	return cs.installSessionWaitDependencyShadowAdmissionWithProducer(admit, mayContain, nil)
+}
+
 func (cs *controllerState) installSessionWaitDependencyShadowAdmissionWithProducer(admit func() sessionWaitShadowRefreshResult, mayContain func(string) bool, producer func(sessionWaitDependencyProducerRequest)) error {
 	if cs == nil {
 		return fmt.Errorf("installing session-wait shadow admission: controller state is nil")

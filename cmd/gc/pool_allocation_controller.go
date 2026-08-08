@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const routedWorkPoolAllocationQueueSize = 256
@@ -793,32 +794,69 @@ func (cs *controllerState) routedWorkStore(cfg *config.City, sourceStore string)
 	return nil, false
 }
 
-func findRoutedWorkPoolSession(store beads.Store, cfg *config.City, hint routedWorkPoolAllocationHint) (sessionpkg.Info, bool, error) {
+// routedWorkPoolSessionClaims returns every live, open, pool-managed member of
+// hint.PoolTarget that already claims hint.WorkID through the durable trigger
+// provenance stamped at member creation. The read is deliberately LIVE: a claim
+// the other start family wrote moments ago must be visible within the same tick,
+// which is exactly what a cached per-tick snapshot cannot promise.
+//
+// The work item is the identity; the store ref is a SCOPE, compared through the
+// same storeref semantics rootStoreRefMatchesCandidate uses rather than as an
+// exact metadata equality. The two builders reach this provenance by different
+// routes and stamp different spellings of the same city scope ("city" vs
+// "city:<name>"), so an equality filter makes each side blind to the other's
+// claim and both materialize a member for one work item.
+func routedWorkPoolSessionClaims(store beads.Store, cfg *config.City, hint routedWorkPoolAllocationHint) ([]sessionpkg.Info, error) {
 	rows, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		Metadata: map[string]string{
-			beadmeta.TriggerBeadIDMetadataKey:       hint.WorkID,
-			beadmeta.TriggerBeadStoreRefMetadataKey: hint.SourceStore,
-		},
+		Metadata: map[string]string{beadmeta.TriggerBeadIDMetadataKey: hint.WorkID},
 		Sort:     beads.SortCreatedAsc,
 		TierMode: beads.TierBoth,
 	})
 	if err != nil {
-		return sessionpkg.Info{}, false, fmt.Errorf("finding existing routed-work pool session: %w", err)
+		return nil, fmt.Errorf("finding existing routed-work pool session: %w", err)
 	}
-	var found sessionpkg.Info
+	var found []sessionpkg.Info
 	for _, row := range rows {
-		if row.Status != "closed" && isPoolManagedSessionBead(row) && normalizedSessionTemplate(row, cfg) == hint.PoolTarget {
-			info, err := sessionFrontDoor(store).Get(row.ID)
-			if err != nil {
-				return sessionpkg.Info{}, false, fmt.Errorf("projecting existing routed-work pool session %q: %w", row.ID, err)
-			}
-			if found.ID != "" {
-				return sessionpkg.Info{}, false, fmt.Errorf("ambiguous routed-work pool sessions %q and %q", found.ID, info.ID)
-			}
-			found = info
+		if row.Status == "closed" || !isPoolManagedSessionBead(row) || normalizedSessionTemplate(row, cfg) != hint.PoolTarget {
+			continue
 		}
+		if !routedWorkClaimStoreScopeMatches(row.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey], hint.SourceStore) {
+			continue
+		}
+		info, err := sessionFrontDoor(store).Get(row.ID)
+		if err != nil {
+			return nil, fmt.Errorf("projecting existing routed-work pool session %q: %w", row.ID, err)
+		}
+		found = append(found, info)
 	}
-	return found, found.ID != "", nil
+	return found, nil
+}
+
+// routedWorkClaimStoreScopeMatches reports whether a claim stamped with
+// rowStoreRef can be the claim on work in hintStoreRef. An unscoped ref on
+// either side is a wildcard — the same rule rootStoreRefMatchesCandidate applies
+// to root provenance — so only a rig-scoped disagreement excludes a row.
+func routedWorkClaimStoreScopeMatches(rowStoreRef, hintStoreRef string) bool {
+	rowRig, rowScoped := storeref.ScopeRigContext(rowStoreRef)
+	hintRig, hintScoped := storeref.ScopeRigContext(hintStoreRef)
+	if !rowScoped || !hintScoped {
+		return true
+	}
+	return rowRig == hintRig
+}
+
+func findRoutedWorkPoolSession(store beads.Store, cfg *config.City, hint routedWorkPoolAllocationHint) (sessionpkg.Info, bool, error) {
+	found, err := routedWorkPoolSessionClaims(store, cfg, hint)
+	if err != nil {
+		return sessionpkg.Info{}, false, err
+	}
+	if len(found) > 1 {
+		return sessionpkg.Info{}, false, fmt.Errorf("ambiguous routed-work pool sessions %q and %q", found[0].ID, found[1].ID)
+	}
+	if len(found) == 0 {
+		return sessionpkg.Info{}, false, nil
+	}
+	return found[0], true, nil
 }
 
 func routedWorkPoolProviderHealthy(cityPath string, cfg *config.City, agent *config.Agent) bool {

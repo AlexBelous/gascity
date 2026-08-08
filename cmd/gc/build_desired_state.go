@@ -3890,6 +3890,56 @@ func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualified
 	return metadata
 }
 
+// errPoolMemberAlreadyClaimed reports that the work item a planned member would
+// serve is already served by a live member of the same pool.
+var errPoolMemberAlreadyClaimed = errors.New("routed work already has a live pool member")
+
+// revalidatePlannedPoolMemberDemand re-checks a planned member's demand against
+// CURRENT open rows immediately before it is materialized.
+//
+// The plan was selected from a per-tick session snapshot, so a member the keyed
+// routed-work allocation created after that snapshot is invisible to it and the
+// same work item gets a SECOND member — a real duplicate agent session per routed
+// bead, with real tmux processes and real model spend (ga-f7v2ft.126). The keyed
+// allocation stamps its claim durably (trigger bead id + store ref) at create, so
+// re-reading that claim live at the member-creation boundary is enough to make
+// the two builders mutually exclusive per work item; no controller, queue,
+// schema, marker, or provider interface is added.
+//
+// A claim only counts when the claiming member still ABSORBS this demand, which
+// is poolSessionConsumesNewDemandInfo — the planner's own definition. A member
+// that has gone asleep with a missing runtime, drained, or failed its create no
+// longer serves its work item, and the fleet materializes a replacement for it;
+// treating those as claims would wedge that replacement forever.
+//
+// Floor refills carry no work item and are never gated here. A failed claim read
+// blocks this create for one tick rather than risking a duplicate, matching how
+// a partial demand read already blocks fresh creates; demand is level-triggered
+// and the next tick re-decides.
+func revalidatePlannedPoolMemberDemand(bp *agentBuildParams, template string, plan poolSessionCreatePlan) error {
+	if bp == nil || bp.beadStore == nil || bp.city == nil {
+		return nil
+	}
+	workID := strings.TrimSpace(plan.metadata[beadmeta.TriggerBeadIDMetadataKey])
+	if workID == "" {
+		return nil
+	}
+	claims, err := routedWorkPoolSessionClaims(bp.beadStore, bp.city, routedWorkPoolAllocationHint{
+		WorkID:      workID,
+		PoolTarget:  template,
+		SourceStore: strings.TrimSpace(plan.metadata[beadmeta.TriggerBeadStoreRefMetadataKey]),
+	})
+	if err != nil {
+		return fmt.Errorf("re-validating routed-work demand for %q: %w", workID, err)
+	}
+	for _, claim := range claims {
+		if poolSessionConsumesNewDemandInfo(claim) {
+			return fmt.Errorf("%w: %s is already served by %s", errPoolMemberAlreadyClaimed, workID, claim.ID)
+		}
+	}
+	return nil
+}
+
 // executePlannedPoolSessionBeadCreate materializes a pool session bead from a
 // plan produced by selectOrPlanPoolSessionBead. The underlying call is
 // createPoolSessionBeadWithGuardedAlias, whose per-identity session locks make
@@ -3901,6 +3951,10 @@ func executePlannedPoolSessionBeadCreate(
 	template string,
 	plan poolSessionCreatePlan,
 ) (session.Info, error) {
+	if err := revalidatePlannedPoolMemberDemand(bp, template, plan); err != nil {
+		bp.releasePoolSessionCreate()
+		return session.Info{}, err
+	}
 	info, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot, plan.metadata)
 	if err != nil {
 		bp.releasePoolSessionCreate()

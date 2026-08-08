@@ -41,7 +41,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -171,6 +174,17 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
 	if shape == storageSplitNone {
+		// The natural revert edit — every class pointed back at work — is
+		// exactly the re-point the served-binding note exists to hold. A city
+		// that never served a split has no note and passes untouched; the
+		// no-[storage]-at-all bypass above is deliberately not covered, so
+		// that boundary stays where the compatibility contract drew it.
+		if blocked, held := servedBindingNoteHold(cityPath, config.StorageWorkBinding, "", ""); held {
+			blocked.Target = infraBindingTarget{Binding: config.StorageWorkBinding}
+			advice := infraMigrationOperatorAdvice(blocked, logPrefix)
+			recordStorageBindingOutcome(rec, blocked, advice)
+			return nil, errors.New(advice)
+		}
 		return nil, nil
 	}
 
@@ -178,15 +192,51 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
-	if !ok {
+	var report infraMigrationReport
+	if ok {
+		report = checkInfraClassConvergence(cityPath, cfg, logPrefix, stderr)
+	} else {
 		// The shape is the supported one, so the only thing that can have
 		// refused the target is the provider: this build carries the migration
 		// and genesis discipline for its own bead engine and for nothing else.
-		return nil, fmt.Errorf("%s: binding %q is backed by provider %q, and this build carries no migration or genesis discipline for it. %s",
-			logPrefix, binding, storage.Bindings[binding].Provider, storageSupportedTopologyStatement)
+		// A compiled provider that opens a bead engine can still serve — under
+		// the born-split discipline below, which asks nothing of the binding
+		// and proves the one invariant the work store alone can prove.
+		target = infraBindingTarget{Binding: binding}
+		// A provider that opens no bead engine cannot serve regardless of
+		// what the work store holds. Refusing here, before any outcome is
+		// recorded, keeps the event stream honest: a permanently unservable
+		// binding must not publish converged on every boot.
+		if opener := plannedBindingOpener(plan, binding); opener == nil {
+			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served",
+				logPrefix, binding, storage.Bindings[binding].Provider)
+		}
+		if blocked, held := servedBindingNoteHold(cityPath, binding, storage.Bindings[binding].Provider, configuredBindingLocation(storage.Bindings[binding])); held {
+			report = blocked
+			report.Target = target
+		} else {
+			report = checkBornSplitDiscipline(cityPath, logPrefix, stderr)
+			report.Target = target
+		}
 	}
-
-	report := checkInfraClassConvergence(cityPath, cfg, logPrefix, stderr)
+	if report.serving() {
+		// Serving is durable history the moment it happens, on BOTH arms:
+		// the note records which binding and provider serve this city's
+		// infrastructure classes, and every later boot or migration that
+		// points them anywhere else refuses until the operator attests by
+		// removing it. Without the built-in arm writing it too, a city that
+		// genesised on this build's engine could be re-pointed at another
+		// binding and orphaned silently in the outbound direction.
+		bindingCfg := storage.Bindings[target.Binding]
+		location := configuredBindingLocation(bindingCfg)
+		if bindingCfg.Provider == config.StorageProviderSQLiteBeads {
+			location = target.Database
+		}
+		note := bornSplitServedNote{Binding: target.Binding, Provider: bindingCfg.Provider, Location: location}
+		if err := writeBornSplitServedNote(cityPath, note); err != nil {
+			return nil, fmt.Errorf("%s: recording the served-binding note, the durable record of which binding serves this city's infrastructure classes: %w", logPrefix, err)
+		}
+	}
 	if !report.serving() {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
 		if advice == "" {
@@ -199,16 +249,190 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	return openStorageRoutes(plan, target)
 }
 
+// bornSplitServedNote records the durable fact that this city has served its
+// infrastructure classes from a binding this build cannot read. It is not
+// process state — it is history, the same durability class as the convergence
+// marker, and the one input that keeps a later genesis from blessing an empty
+// store while the city's real state lives in that binding.
+type bornSplitServedNote struct {
+	Binding  string `json:"binding"`
+	Provider string `json:"provider"`
+	// Location pins WHERE the binding serves from — the resolved database
+	// path for this build's engine, the configured reference otherwise — so
+	// a re-point that keeps the binding's name but moves its storage cannot
+	// slip past a name-and-provider comparison.
+	Location string `json:"location"`
+}
+
+// configuredBindingLocation is the location a note records for a binding this
+// build cannot resolve: the opaque reference its provider does, or the path
+// when a spec carries one.
+func configuredBindingLocation(binding config.StorageBindingConfig) string {
+	if binding.ConfigRef != "" {
+		return binding.ConfigRef
+	}
+	return binding.Path
+}
+
+// bornSplitServedNotePath is where the note lives, under the city's own .gc.
+func bornSplitServedNotePath(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "storage-served-binding.json")
+}
+
+// readBornSplitServedNote reads the note if one exists. An unreadable or
+// undecodable note is an error, never an absence: absence is the license
+// genesis acts on, and a corrupt file must not grant it.
+func readBornSplitServedNote(cityPath string) (bornSplitServedNote, bool, error) {
+	data, err := os.ReadFile(bornSplitServedNotePath(cityPath))
+	if errors.Is(err, fs.ErrNotExist) {
+		return bornSplitServedNote{}, false, nil
+	}
+	if err != nil {
+		return bornSplitServedNote{}, false, err
+	}
+	var note bornSplitServedNote
+	if err := json.Unmarshal(data, &note); err != nil {
+		return bornSplitServedNote{}, false, fmt.Errorf("decoding %s: %w", bornSplitServedNotePath(cityPath), err)
+	}
+	return note, true, nil
+}
+
+// writeBornSplitServedNote durably records the served binding before the first
+// serve. Atomic replace, idempotent, and a failure refuses the boot: serving
+// without the note is what re-opens the genesis hole this note closes.
+func writeBornSplitServedNote(cityPath string, note bornSplitServedNote) error {
+	path := bornSplitServedNotePath(cityPath)
+	if existing, present, err := readBornSplitServedNote(cityPath); err != nil {
+		return err
+	} else if present && existing == note {
+		return nil
+	}
+	data, err := json.Marshal(note)
+	if err != nil {
+		return fmt.Errorf("encoding the served-binding note: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".storage-served-binding-*")
+	if err != nil {
+		return fmt.Errorf("staging the served-binding note: %w", err)
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(temp.Name())
+		return fmt.Errorf("writing the served-binding note: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(temp.Name())
+		return fmt.Errorf("closing the served-binding note: %w", err)
+	}
+	if err := os.Rename(temp.Name(), path); err != nil {
+		_ = os.Remove(temp.Name())
+		return fmt.Errorf("installing the served-binding note: %w", err)
+	}
+	return nil
+}
+
+// servedBindingNoteHold is the one rule every serving and migrating path asks:
+// does the served-binding note name a different binding or provider than the
+// one this path is about to serve or migrate onto? A mismatch is a hold — the
+// note's binding holds infrastructure state the new target cannot read — and
+// an unreadable note holds exactly as a readable one would, because a corrupt
+// file must not grant what its absence grants. The note's removal is the
+// operator's attestation, and the refusal string carries everything.
+func servedBindingNoteHold(cityPath, binding, provider, location string) (infraMigrationReport, bool) {
+	note, present, err := readBornSplitServedNote(cityPath)
+	if err != nil {
+		return infraMigrationReport{
+			Outcome:        infraMigrationGenesisBlocked,
+			ServedNotePath: bornSplitServedNotePath(cityPath),
+		}, true
+	}
+	if !present || (note.Binding == binding && note.Provider == provider && note.Location == location) {
+		return infraMigrationReport{}, false
+	}
+	return infraMigrationReport{
+		Outcome:        infraMigrationGenesisBlocked,
+		ServedBinding:  note.Binding,
+		ServedProvider: note.Provider,
+		ServedNotePath: bornSplitServedNotePath(cityPath),
+	}, true
+}
+
+// checkBornSplitDiscipline decides whether a binding served by a provider this
+// build carries no migration discipline for may serve this city's split.
+//
+// Such a provider can still open the binding's bead engine — that is the
+// EngineOpener seam — but nothing in this build can move a bead onto its
+// binding, prove a marker about it, or read a manifest from it: the whole
+// convergence apparatus is written against this build's own engine. What CAN
+// be proven, from the work store alone, is the one invariant that matters for
+// a city born on the split: no infrastructure bead has ever landed in the
+// work store. So the discipline is containment with nothing persisted,
+// re-proven on every boot — serve while the work store holds zero
+// infrastructure beads, and refuse naming ids the moment one exists, whether
+// it was written by an earlier configuration, by a writer that never saw this
+// [storage] section, or by a city that in fact predates the split and needs a
+// migration this build cannot perform.
+//
+// Failures to prove are reported as facts about the check, not the city: a
+// work store that cannot be opened or listed decides nothing, and the
+// uncheckable outcome withholds both serving and the revert instruction.
+func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Writer) infraMigrationReport {
+	source, err := openInfraMigrationSource(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: born-split check: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+	}
+	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
+	infra, err := readInfraSnapshot(source)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: born-split check: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+	}
+	if len(infra) == 0 {
+		return infraMigrationReport{Outcome: infraMigrationConverged}
+	}
+	ids := make([]string, 0, len(infra))
+	for _, b := range infra {
+		ids = append(ids, b.ID)
+	}
+	sort.Strings(ids)
+	return infraMigrationReport{Outcome: infraMigrationBornSplitBlocked, Stranded: ids}
+}
+
+// plannedBindingOpener returns the engine-opening hook for the named binding
+// in a resolved plan, or nil when the plan does not carry the binding or its
+// provider opens no engine.
+func plannedBindingOpener(plan *storebinding.StoragePlan, name string) storebinding.EngineOpener {
+	if plan == nil {
+		return nil
+	}
+	for _, planned := range plan.Bindings() {
+		if string(planned.Name) != name {
+			continue
+		}
+		if opener, ok := storebinding.EngineOpenerFor(planned); ok {
+			return opener
+		}
+		return nil
+	}
+	return nil
+}
+
 // storageBindingEventTypes maps a migration outcome to the event that reports
 // it. Outcomes with no entry are not events: not-configured describes a city
 // that was never asked, and stranded is carried inside the refusal that names
 // the ids.
 var storageBindingEventTypes = map[infraMigrationOutcome]string{
-	infraMigrationConverged:   events.StorageBindingConverged,
-	infraMigrationGenesis:     events.StorageBindingGenesis,
-	infraMigrationUnconverged: events.StorageBindingUnconverged,
-	infraMigrationStranded:    events.StorageBindingUnconverged,
-	infraMigrationUncheckable: events.StorageBindingUncheckable,
+	infraMigrationConverged:        events.StorageBindingConverged,
+	infraMigrationGenesis:          events.StorageBindingGenesis,
+	infraMigrationUnconverged:      events.StorageBindingUnconverged,
+	infraMigrationStranded:         events.StorageBindingUnconverged,
+	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
+	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
+	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 
 // recordStorageBindingOutcome publishes what one gate or one migration

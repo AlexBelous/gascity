@@ -341,11 +341,55 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		return 1
 	}
 	if !ok {
+		if shape, binding := storageSplitShapeOf(storage); shape == storageSplitWhole {
+			// The split shape is supported and only the provider refused the
+			// target: a binding this build cannot migrate onto, serving under
+			// the born-split discipline. Report that discipline's state — the
+			// same one boot enforces — rather than claiming the work store
+			// serves classes it does not.
+			provider := storage.Bindings[binding].Provider
+			fmt.Fprintf(stdout, "binding: %s\n  provider: %s (not this build's engine; serves under the born-split discipline)\n", binding, provider) //nolint:errcheck // best-effort stdout
+			// The same resolution and seam check boot performs, so this
+			// command's exit code keeps its deploy-gate contract: a city boot
+			// refuses must not report may-serve here.
+			plan, planErr := resolveCityStoragePlan(request.CityPath, request.Cfg)
+			if planErr != nil {
+				fmt.Fprintf(stderr, "%s: %v\n", logPrefix, planErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if plannedBindingOpener(plan, binding) == nil {
+				fmt.Fprintf(stdout, "born-split: BLOCKED — provider %s does not open a bead engine, so the classes assigned to binding %s cannot be served\n", provider, binding) //nolint:errcheck // best-effort stdout
+				return 1
+			}
+			if blocked, held := servedBindingNoteHold(request.CityPath, binding, provider, configuredBindingLocation(storage.Bindings[binding])); held {
+				fmt.Fprintf(stdout, "born-split: BLOCKED — %s\n", infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stdout
+				return 1
+			}
+			report := checkBornSplitDiscipline(request.CityPath, logPrefix, stderr)
+			switch report.Outcome {
+			case infraMigrationConverged:
+				fmt.Fprintln(stdout, "born-split: clean — the work store holds no infrastructure bead, so the binding may serve.") //nolint:errcheck // best-effort stdout
+				return 0
+			case infraMigrationBornSplitBlocked:
+				fmt.Fprintf(stdout, "born-split: BLOCKED — the work store holds %d infrastructure bead(s) the binding cannot read: %s\n", //nolint:errcheck // best-effort stdout
+					len(report.Stranded), strings.Join(report.Stranded, ", "))
+				return 1
+			default:
+				fmt.Fprintf(stdout, "born-split: could not be verified (%s); reason on stderr\n", report.Outcome) //nolint:errcheck // best-effort stdout
+				return 1
+			}
+		}
 		fmt.Fprintln(stdout, "binding: none — every class is served by the work store, and nothing migrates.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintf(stdout, "binding: %s\n  database: %s\n  marker:   %s\n  manifest: %s\n", //nolint:errcheck // best-effort stdout
 		target.Binding, target.Database, target.MarkerPath(), target.ManifestPath())
+
+	if blocked, held := servedBindingNoteHold(request.CityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); held {
+		blocked.Target = target
+		fmt.Fprintf(stdout, "served-binding hold: %s\n", infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stdout
+		return 1
+	}
 
 	state, err := readInfraConvergenceState(target)
 	if err != nil {

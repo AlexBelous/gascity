@@ -2424,14 +2424,22 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 			identity := namedSessionIdentityInfo(current)
 			cityName := loadedCityName(cfg, cityPath)
 			spec, found := findNamedSessionSpec(cfg, cityName, identity)
-			if found && spec.Mode == "always" && isNamedSessionInfo(current) &&
-				namedSessionModeInfo(current) == "always" && strings.TrimSpace(current.SessionOrigin) == "named" &&
+			mode := namedSessionModeInfo(current)
+			// An always session has no durable wake authority of its own, so the
+			// keyed restart still needs the explicit request. A pinned on-demand
+			// session already carries one: the pin is the sole wake authority and
+			// synthesizing a second would outlive an operator unpin.
+			pinnedOnDemand := mode == "on_demand" && strings.TrimSpace(current.PinAwake) == "true"
+			if found && spec.Mode == mode && (mode == "always" || pinnedOnDemand) && isNamedSessionInfo(current) &&
+				strings.TrimSpace(current.SessionOrigin) == "named" &&
 				strings.TrimSpace(current.SessionNameMetadata) == spec.SessionName &&
 				normalizedSessionTemplateInfo(current, cfg) == namedSessionBackingTemplate(spec) {
 				canonical, canonicalFound, canonicalErr := session.FindCanonicalConfiguredNamedSessionBead(sessStore, spec)
 				if canonicalErr == nil && canonicalFound && canonical.ID == sessionID {
-					for key, value := range session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), now) {
-						patch[key] = value
+					if mode == "always" {
+						for key, value := range session.RequestExplicitWakePatch(string(session.WakeCauseExplicit), now) {
+							patch[key] = value
+						}
 					}
 					exactHandoff = true
 				}

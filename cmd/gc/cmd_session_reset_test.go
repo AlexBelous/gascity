@@ -667,7 +667,7 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 		case cmd, ok := <-commands:
 			if !ok {
 				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping, poke, poke", gotCommands)
+					t.Fatalf("controller commands = %v, want ping, poke, session-start", gotCommands)
 				}
 				break
 			}
@@ -676,7 +676,9 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantExact := []string{"ping\n", "poke\n", "poke\n"}
+	// The trailing hint is the exact key, not a fleet poke: gc session reset
+	// hands the resolved session ID to the keyed lifecycle lane (ga-f7v2ft.103).
+	wantExact := []string{"ping\n", "poke\n", sessionStartCommandPrefix + bead.ID + "\n"}
 	for i, want := range wantExact {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)

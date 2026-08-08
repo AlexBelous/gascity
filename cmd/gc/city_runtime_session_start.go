@@ -647,6 +647,17 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 		}
 		return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("exact suspend admission rejected (outcome=%s err=%v)", outcome, admitErr))
 	}
+	if revision != 0 && exactOrdinaryResetCurrent(info, snapshot.Config, now) &&
+		!controller.ownsPoolDrainAckStop(info.ID, info.InstanceToken) {
+		outcome, admitErr := controller.Admit(sessionID, sessionStartAdmissionSocket)
+		if admitErr == nil && outcome != sessionStartAdmissionOverflow {
+			return sessionStartSocketReplyOK
+		}
+		if mode == rollout.Require {
+			return sessionStartSocketReplyBlocked
+		}
+		return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("exact reset admission rejected (outcome=%s err=%v)", outcome, admitErr))
+	}
 	_, _, owner := classifyExactSessionStartOwnership(info, snapshot.Config, now)
 	if owner != exactSessionStartKeyedOwner {
 		if lease, certified := certifyConfiguredNamedWakeStartLease(info, revision, snapshot.Config, snapshot.CityName, snapshot.Generation, now); certified {

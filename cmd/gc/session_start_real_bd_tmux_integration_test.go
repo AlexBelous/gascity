@@ -539,7 +539,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		pinnedReviewer = info
 		return true, nil
 	}); err != nil {
-		t.Fatalf("configured named pin did not start before held 30s debounce: %v; controller stdout=%q stderr=%q", err, controllerStdout.String(), controllerStderr.String())
+		t.Fatalf("configured named pin did not start within the 30s absolute budget: %v; controller stdout=%q stderr=%q", err, controllerStdout.String(), controllerStderr.String())
 	}
 	pinnedPanePID, err := tmuxClient.GetPanePID(pinnedReviewer.SessionName)
 	if err != nil {
@@ -584,8 +584,21 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		}
 	}
 	if elapsed := time.Since(pinnedAt); elapsed >= 30*time.Second {
-		t.Fatalf("configured named pin latency = %s, want live before 30s legacy debounce", elapsed)
+		t.Fatalf("configured named pin latency = %s, want live within the 30s absolute budget", elapsed)
 	}
+	// The suspend leg's determinism is an ownership argument, not a quiet-window
+	// one. This city runs patrol=1h and every poke ticks immediately, so a fleet
+	// tick can land anywhere inside the leg; what makes the keyed stop the sole
+	// converger once the suspend patch is durable is:
+	//   F1 the legacy status heal is revision-fenced, so a heal computed from a
+	//      pre-patch snapshot loses its CAS and cannot revert state to "awake";
+	//   F2 the suspend family engages on ANY admission source, so no coalescing
+	//      rule can drop the request into the ordinary path's held-blocker dead end;
+	//   F4 legacyStartExcluded carries exactUserHoldSuspendCurrent, so a tick whose
+	//      snapshot IS post-patch skips the row before it can begin a legacy drain.
+	// The assertions below are therefore keyed-ownership evidence (canonical row,
+	// tmux and pane gone, exactly one exact_session_suspend_stop, no drain-ack
+	// metadata) measured against an absolute budget -- never "legacy was asleep".
 	suspendAt := time.Now().UTC()
 	suspendOutput := runGC(10*time.Second,
 		"--city", cityPath,
@@ -622,7 +635,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		return true, nil
 	}); err != nil {
 		current, currentErr := sessionFrontDoor(backingStore).Get(pinnedReviewer.ID)
-		t.Fatalf("configured named suspend did not stop before held 30s debounce: %v; current=%+v current_err=%v controller stderr=%q", err, current, currentErr, controllerStderr.String())
+		t.Fatalf("configured named suspend did not stop within the 30s absolute budget: %v; current=%+v current_err=%v controller stderr=%q", err, current, currentErr, controllerStderr.String())
 	}
 	if err := removeExitedPaneProcess(pinnedPanePID); err != nil {
 		t.Fatalf("remove exited configured named pane process: %v", err)
@@ -664,7 +677,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("wait for exact configured named suspend trace: %v; traces=%#v controller stderr=%q", err, exactSuspendStops, controllerStderr.String())
 	}
 	if elapsed := time.Since(suspendAt); elapsed >= 30*time.Second {
-		t.Fatalf("configured named suspend latency = %s, want stop before 30s legacy debounce", elapsed)
+		t.Fatalf("configured named suspend latency = %s, want stop within the 30s absolute budget", elapsed)
 	}
 	dependencySpec, ok := sessionpkg.FindNamedSessionSpec(loaded, guard.CityName(), "database")
 	if !ok {

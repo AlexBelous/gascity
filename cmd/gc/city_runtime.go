@@ -2863,6 +2863,35 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// fan-out; the first steady-state tick performs them.
 		reconcileStartOptions = append(reconcileStartOptions, withDeferSessionClosesOnBoot())
 	}
+	// Detector sweep, beside legacy and read-only (WD.1). It reuses this
+	// tick's already-loaded inputs, records detector-shadow trace, and
+	// enqueues nothing: every family's act constant is false until WE.
+	runDetectorSweep(ctx, trace, detectorSweepInput{
+		CityPath:           cr.cityPath,
+		CityName:           cityName,
+		Cfg:                cr.cfg,
+		Provider:           cr.sp,
+		Rows:               sessionBeads.OpenForReconcile(),
+		Snapshot:           sessionBeads,
+		Desired:            desiredState,
+		CfgNames:           cfgNames,
+		PoolDesired:        poolDesired,
+		NamedDemand:        result.NamedSessionDemand,
+		NamedRoutedDemand:  result.NamedSessionRoutedDemand,
+		WorkSet:            workSet,
+		ReadyWaitSet:       readyWaitSet,
+		AssignedWorkBeads:  awakeAssignedWorkBeads,
+		ReadyAssignedFlags: readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs),
+		ProviderHealth:     loadProviderHealthSnapshot(cr.cityPath),
+		Drains:             cr.sessionDrains,
+		Idle:               cr.it,
+		MaxAge:             cr.mat,
+		Clock:              clock.Real{},
+		StartupTimeout:     cr.cfg.Session.StartupTimeoutDuration(),
+		StoreQueryPartial:  result.snapshotQueryPartial(),
+		DeferSessionCloses: bootReconcile,
+		Trigger:            detectorSweepTriggerFor(bootReconcile),
+	})
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
 		cr.dops,
@@ -3619,6 +3648,32 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, wfcResult.NamedSessionDemand, filteredCfg)
+	// Detector sweep beside legacy on the control-dispatcher entry point, over
+	// the same narrowed inputs this tick already computed (WD.1). The
+	// control-dispatcher tick has no trace cycle of its own, so the sweep runs
+	// for its guards and cost profile and records nothing here.
+	runDetectorSweep(ctx, nil, detectorSweepInput{
+		CityPath:          cr.cityPath,
+		CityName:          cr.cityName,
+		Cfg:               filteredCfg,
+		Provider:          cr.sp,
+		Rows:              filteredRows,
+		Snapshot:          filteredSnap,
+		Desired:           desiredState,
+		CfgNames:          reconcileNames,
+		PoolDesired:       poolDesired,
+		NamedDemand:       wfcResult.NamedSessionDemand,
+		NamedRoutedDemand: wfcResult.NamedSessionRoutedDemand,
+		ProviderHealth:    loadProviderHealthSnapshot(cr.cityPath),
+		Drains:            cr.sessionDrains,
+		Idle:              cr.it,
+		Clock:             clock.Real{},
+		StartupTimeout:    cr.cfg.Session.StartupTimeoutDuration(),
+		// The config-change path does not query work beads, so its view is
+		// never partial for the reasons the guard exists.
+		StoreQueryPartial: false,
+		Trigger:           "control-dispatcher",
+	})
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx,
 		cr.cityPath,

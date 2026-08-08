@@ -612,17 +612,17 @@ func doStopWithoutSuccessMessage(sessionNames []string, sp runtime.Provider, cfg
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
 	visible := map[string]bool{}
-	inventoryFailed := false
+	observationIncomplete := false
 	if sp != nil {
 		names, err := sp.ListRunning("")
 		partialList := runtime.IsPartialListError(err)
 		if err != nil && !partialList {
-			inventoryFailed = true
+			observationIncomplete = true
 			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 			names = nil
 		}
 		if partialList {
-			inventoryFailed = true
+			observationIncomplete = true
 			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		for _, name := range names {
@@ -637,7 +637,15 @@ func doStopWithoutSuccessMessage(sessionNames []string, sp runtime.Provider, cfg
 		if sn == "" {
 			continue
 		}
-		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
+		alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+		if err != nil {
+			// The target's own observation failed, so it is unknown rather
+			// than absent. Keep the error correlated to the target, withhold
+			// terminal success, and fall through to the runtime inventory so
+			// a positively witnessed name is still a cleanup candidate.
+			observationIncomplete = true
+			fmt.Fprintf(stderr, "gc stop: observing session %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+		} else if alive {
 			running = append(running, sn)
 			continue
 		}
@@ -646,7 +654,7 @@ func doStopWithoutSuccessMessage(sessionNames []string, sp runtime.Provider, cfg
 		}
 	}
 	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
-	if inventoryFailed {
+	if observationIncomplete {
 		return 1
 	}
 	return 0

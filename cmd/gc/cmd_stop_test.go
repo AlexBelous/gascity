@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,6 +45,145 @@ func (p *recordingStopProvider) Stop(name string) error {
 func (p *recordingStopProvider) Interrupt(name string) error {
 	p.interrupts <- name
 	return p.Fake.Interrupt(name)
+}
+
+func (p *recordingStopProvider) stopped() []string {
+	var names []string
+	for {
+		select {
+		case name := <-p.stops:
+			names = append(names, name)
+		default:
+			return names
+		}
+	}
+}
+
+// observationFailingStopStore fails the observation read of selected session
+// beads while letting the preceding target resolution succeed, reproducing a
+// per-target worker observation failure without also breaking target lookup.
+type observationFailingStopStore struct {
+	beads.Store
+	mu      sync.Mutex
+	gets    map[string]int
+	failFor map[string]error
+}
+
+func newObservationFailingStopStore(store beads.Store, failFor map[string]error) *observationFailingStopStore {
+	return &observationFailingStopStore{Store: store, gets: map[string]int{}, failFor: failFor}
+}
+
+func (s *observationFailingStopStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	s.gets[id]++
+	seen := s.gets[id]
+	err := s.failFor[id]
+	s.mu.Unlock()
+	if err != nil && seen > 1 {
+		return beads.Bead{}, err
+	}
+	return s.Store.Get(id)
+}
+
+func newStopTestSession(t *testing.T, store beads.Store, sp runtime.Provider, title string, beadOnly bool) sessionpkg.Info {
+	t.Helper()
+	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		BeadOnly: beadOnly,
+		Template: "worker",
+		Title:    title,
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession(%s): %v", title, err)
+	}
+	return info
+}
+
+// TestDoStopPerTargetObservationFailureFailsClosed proves gc stop cannot report
+// terminal success when a target's worker observation failed: the target is
+// unknown rather than absent, so it is left untouched and the diagnostic stays
+// correlated to it.
+func TestDoStopPerTargetObservationFailureFailsClosed(t *testing.T) {
+	base := beads.NewMemStore()
+	provider := newRecordingStopProvider()
+	info := newStopTestSession(t, base, provider, "unobservable", true)
+	store := newObservationFailingStopStore(base, map[string]error{
+		info.ID: errors.New("session record unavailable"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doStop([]string{info.ID}, provider, nil, store, 0, events.Discard, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("doStop = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout reported terminal success after target observation failed: %q", stdout.String())
+	}
+	for _, want := range []string{info.ID, "session record unavailable"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want retained observation detail %q", stderr.String(), want)
+		}
+	}
+	if got := provider.stopped(); len(got) != 0 {
+		t.Fatalf("stop calls = %v, want none for an unwitnessed target whose observation failed", got)
+	}
+}
+
+// TestDoStopObservationFailureStaysCorrelatedToItsTarget proves a failed
+// observation neither swallows its own error nor contaminates the sibling
+// targets that were observed cleanly.
+func TestDoStopObservationFailureStaysCorrelatedToItsTarget(t *testing.T) {
+	base := beads.NewMemStore()
+	provider := newRecordingStopProvider()
+	healthy := newStopTestSession(t, base, provider, "healthy", false)
+	broken := newStopTestSession(t, base, provider, "unobservable", true)
+	store := newObservationFailingStopStore(base, map[string]error{
+		broken.ID: errors.New("session record unavailable"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doStop([]string{healthy.ID, broken.ID}, provider, nil, store, 0, events.Discard, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("doStop = %d, want fail-closed code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout reported terminal success after target observation failed: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "observing session "+broken.ID) {
+		t.Fatalf("stderr = %q, want observation failure correlated to %s", stderr.String(), broken.ID)
+	}
+	if strings.Contains(stderr.String(), "observing session "+healthy.ID) {
+		t.Fatalf("stderr = %q, want no observation failure attributed to cleanly observed %s", stderr.String(), healthy.ID)
+	}
+	if provider.IsRunning(healthy.SessionName) {
+		t.Fatalf("cleanly observed session %s survived the stop", healthy.SessionName)
+	}
+}
+
+// TestDoStopStopsDuplicateTargetsExactlyOnce keeps best-effort cleanup
+// idempotent when the same session is listed twice among the stop targets.
+func TestDoStopStopsDuplicateTargetsExactlyOnce(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := newRecordingStopProvider()
+	info := newStopTestSession(t, store, provider, "healthy", false)
+
+	var stdout, stderr bytes.Buffer
+	code := doStop([]string{info.ID, info.ID}, provider, nil, store, 0, events.Discard, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("doStop = %d, want 0 for a fully observed city; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout = %q, want terminal success for a fully observed city", stdout.String())
+	}
+	if got := provider.stopped(); len(got) != 1 {
+		t.Fatalf("stop calls = %v, want exactly one for a duplicated target", got)
+	}
 }
 
 func TestDoStopPartialRuntimeObservationFailsClosedAfterBestEffortCleanup(t *testing.T) {

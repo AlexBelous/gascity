@@ -2586,8 +2586,11 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
-	// are logged as warnings and left in place for operator review. Session
+	// tree, no stashes, and no commits that removal would orphan — commits
+	// reachable from no branch, tag, or remote-tracking ref — are removed;
+	// push state is deliberately not the test, since `git worktree remove`
+	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
+	// as warnings and left in place for operator review. Session
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
@@ -2598,9 +2601,13 @@ type DaemonConfig struct {
 	// what it protected, without removing anything. This is the safe
 	// staged-rollout surface: an operator enables dry-run first, confirms via
 	// `gc events` that no live worktree appears in the would-reap set, then
-	// enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no
-	// effect when AutoReapClosedBeadWorktrees is already true (real removal
-	// supersedes it). Defaults to false.
+	// enables AutoReapClosedBeadWorktrees for real removal. Those events are
+	// edge-triggered: each worktree is reported when the patrol first
+	// classifies it and again whenever its verdict changes, not once per
+	// tick, so the would-reap set is complete right after dry-run is enabled
+	// rather than reprinted every sweep. Dry-run has no effect when
+	// AutoReapClosedBeadWorktrees is already true (real removal supersedes
+	// it). Defaults to false.
 	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
 	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
 	// in minutes, before a closed-bead worktree becomes eligible for reap

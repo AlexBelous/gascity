@@ -935,10 +935,10 @@ func prepareExactStartCandidateForCity(
 	clk clock.Clock,
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
-	readCurrent func(beads.Store, string) (sessionpkg.Info, error),
+	readCurrent func(beads.Store, string) (sessionpkg.Info, int64, error),
 ) (*preparedStart, error) {
 	if readCurrent == nil {
-		readCurrent = func(store beads.Store, id string) (sessionpkg.Info, error) {
+		readCurrent = func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
 			return getAuthoritativeExactSessionStartInfoBeforeWake(store, id, cfg, clk.Now().UTC())
 		}
 	}
@@ -968,7 +968,7 @@ func prepareStartCandidateForCityWithNamedRefresh(
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
 	refreshNamed bool,
-	readCurrent func(beads.Store, string) (sessionpkg.Info, error),
+	readCurrent func(beads.Store, string) (sessionpkg.Info, int64, error),
 ) (*preparedStart, error) {
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
@@ -983,11 +983,14 @@ func prepareStartCandidateForCityWithNamedRefresh(
 			// documented front-door-Get delta from the former raw store.Get. This is
 			// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
 			var current sessionpkg.Info
+			var loadedRevision int64
 			var err error
 			if readCurrent != nil {
-				current, err = readCurrent(store, id)
+				current, loadedRevision, err = readCurrent(store, id)
 			} else {
-				current, _, err = sessFront.GetPersistedResponse(id)
+				var persisted sessionpkg.PersistedResponse
+				current, persisted, err = sessFront.GetPersistedResponse(id)
+				loadedRevision = persisted.Revision
 			}
 			if err != nil {
 				return err
@@ -996,8 +999,11 @@ func prepareStartCandidateForCityWithNamedRefresh(
 			// the batch; folding it onto the freshly re-read Info keeps the twin
 			// byte-coherent with the persisted state without a second Get. It shares
 			// preWakeCommit's error contract: a failed re-read already returned above,
-			// so the twin is never folded from a stale/rejected bead.
-			_, _, fold, err := preWakeCommit(current, sessFront, clk)
+			// so the twin is never folded from a stale/rejected bead. The commit is
+			// fenced on the revision THAT re-read carried, so a writer that moved the
+			// row since (including one in another process) makes this entrant abort as
+			// superseded instead of rotating the incarnation a second time.
+			_, _, fold, err := preWakeCommit(current, loadedRevision, sessFront, clk)
 			if err != nil {
 				return err
 			}
@@ -1006,7 +1012,7 @@ func prepareStartCandidateForCityWithNamedRefresh(
 		}); err != nil {
 			return nil, err
 		}
-	} else if _, _, fold, err := preWakeCommit(candidate.info, sessionFrontDoor(store), clk); err != nil {
+	} else if _, _, fold, err := preWakeCommit(candidate.info, 0, sessionFrontDoor(store), clk); err != nil {
 		return nil, err
 	} else {
 		candidate.info = candidate.info.ApplyPatch(fold)
@@ -3073,6 +3079,20 @@ func executePlannedStartsTraced(
 					}
 					if done != nil {
 						done()
+					}
+					// A superseded prepare is convergence, not a failure: another writer
+					// owns this row's current state, so this candidate is dropped without
+					// entering the provider and the next tick re-decides from a fresh
+					// snapshot. Logging it as "failed" would turn every coexistence race
+					// into an error storm (ga-l1j53).
+					if errors.Is(err, errPreWakeSuperseded) {
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonCode("start_commit_superseded"), TraceOutcomeSkipped, candidate.logicalTemplate(cfg), candidate.name(), traceRecordPayload{
+								"session_id": candidate.info.ID,
+							})
+						}
+						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "superseded", time.Time{}, time.Time{}, nil)
+						continue
 					}
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)

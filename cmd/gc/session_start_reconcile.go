@@ -1330,27 +1330,30 @@ func sessionLifecycleStartSelectionTraceOutcome(outcome sessionLifecycleStartSel
 	}
 }
 
+// getAuthoritativeExactSessionStartInfoBeforeWake returns the keyed entrant's
+// authoritative pre-wake read together with the revision it was loaded at, so
+// the shared pre-wake commit can fence on exactly that read.
 func getAuthoritativeExactSessionStartInfoBeforeWake(
 	store beads.Store,
 	id string,
 	cfg *config.City,
 	now time.Time,
-) (sessionpkg.Info, error) {
-	info, _, err := getAuthoritativeSessionStartRecord(store, id)
+) (sessionpkg.Info, int64, error) {
+	info, revision, err := getAuthoritativeSessionStartRecord(store, id)
 	if err != nil {
-		return sessionpkg.Info{}, err
+		return sessionpkg.Info{}, 0, err
 	}
 	if isDrainAckStopPendingInfo(info) {
-		return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartKeyedOwner}
+		return sessionpkg.Info{}, 0, &exactSessionStartPreWakeSkip{owner: exactSessionStartKeyedOwner}
 	}
 	lifecycle, _, owner := classifyExactSessionStartOwnership(info, cfg, now)
 	if owner != exactSessionStartKeyedOwner {
-		return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: owner}
+		return sessionpkg.Info{}, 0, &exactSessionStartPreWakeSkip{owner: owner}
 	}
 	if lifecycle.HasBlocker(sessionpkg.BlockerHeld) || lifecycle.HasBlocker(sessionpkg.BlockerQuarantined) {
-		return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: owner}
+		return sessionpkg.Info{}, 0, &exactSessionStartPreWakeSkip{owner: owner}
 	}
-	return info, nil
+	return info, revision, nil
 }
 
 // reconcileExactSessionStart rereads one durable session key and executes only
@@ -2124,80 +2127,80 @@ func reconcileExactSessionStartWithOwner(
 		)
 	}
 
-	var preWakeRead func(beads.Store, string) (sessionpkg.Info, error)
+	var preWakeRead func(beads.Store, string) (sessionpkg.Info, int64, error)
 	switch {
 	case configuredNamedWakeLease != nil && !admission.ConfiguredNamedWakeEntered:
-		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
 			current, persisted, readErr := getAuthoritativeSessionStartPersistedRecord(store, id)
 			if readErr != nil {
-				return sessionpkg.Info{}, readErr
+				return sessionpkg.Info{}, 0, readErr
 			}
 			if persisted.Revision != configuredNamedWakeLease.SessionRevision || !configuredNamedWakeCurrent(current, false) {
 				if params.RolloutMode == rollout.Auto {
-					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
+					return sessionpkg.Info{}, 0, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
 				}
-				return sessionpkg.Info{}, errors.New("required configured named wake witness changed before pre-wake")
+				return sessionpkg.Info{}, 0, errors.New("required configured named wake witness changed before pre-wake")
 			}
-			return current, nil
+			return current, persisted.Revision, nil
 		}
 	case strictDefaultPoolWakeLease != nil && !admission.StrictDefaultPoolWakeEntered:
-		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
 			current, persisted, readErr := getAuthoritativeSessionStartPersistedRecord(store, id)
 			if readErr != nil {
-				return sessionpkg.Info{}, readErr
+				return sessionpkg.Info{}, 0, readErr
 			}
 			if persisted.Revision != strictDefaultPoolWakeLease.SessionRevision || !strictDefaultPoolWakeCurrent(current, false) {
 				if params.RolloutMode == rollout.Auto {
-					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
+					return sessionpkg.Info{}, 0, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
 				}
-				return sessionpkg.Info{}, errors.New("required strict-default pool wake witness changed before pre-wake")
+				return sessionpkg.Info{}, 0, errors.New("required strict-default pool wake witness changed before pre-wake")
 			}
-			return current, nil
+			return current, persisted.Revision, nil
 		}
 	case configuredDependencyLease != nil && !admission.ConfiguredDependencyEntered:
-		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
-			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
+			current, revision, readErr := getAuthoritativeSessionStartRecord(store, id)
 			if readErr != nil {
-				return sessionpkg.Info{}, readErr
+				return sessionpkg.Info{}, 0, readErr
 			}
 			if !configuredDependencyCurrent(current, true) {
 				if params.RolloutMode == rollout.Auto {
-					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
+					return sessionpkg.Info{}, 0, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
 				}
-				return sessionpkg.Info{}, errors.New("required configured-dependency witness changed before pre-wake")
+				return sessionpkg.Info{}, 0, errors.New("required configured-dependency witness changed before pre-wake")
 			}
-			return current, nil
+			return current, revision, nil
 		}
 	case resetLease != nil:
 		lease := *resetLease
-		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
-			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
+			current, revision, readErr := getAuthoritativeSessionStartRecord(store, id)
 			if readErr != nil {
-				return sessionpkg.Info{}, readErr
+				return sessionpkg.Info{}, 0, readErr
 			}
 			if !lease.pending(current) {
-				return sessionpkg.Info{}, errors.New("exact reset witness changed before pre-wake")
+				return sessionpkg.Info{}, 0, errors.New("exact reset witness changed before pre-wake")
 			}
-			return current, nil
+			return current, revision, nil
 		}
 	case poolStartAuthorized:
 		lease := *admission.PoolAllocation
-		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, error) {
-			current, _, readErr := getAuthoritativeSessionStartRecord(store, id)
+		preWakeRead = func(store beads.Store, id string) (sessionpkg.Info, int64, error) {
+			current, revision, readErr := getAuthoritativeSessionStartRecord(store, id)
 			if readErr != nil {
-				return sessionpkg.Info{}, readErr
+				return sessionpkg.Info{}, 0, readErr
 			}
 			authorized, authorizeErr := params.AuthorizePoolStart(ctx, current, lease)
 			if authorizeErr != nil {
-				return sessionpkg.Info{}, authorizeErr
+				return sessionpkg.Info{}, 0, authorizeErr
 			}
 			if !authorized {
 				if lease.RecoverActive && params.RolloutMode == rollout.Require {
-					return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartUnowned}
+					return sessionpkg.Info{}, 0, &exactSessionStartPreWakeSkip{owner: exactSessionStartUnowned}
 				}
-				return sessionpkg.Info{}, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
+				return sessionpkg.Info{}, 0, &exactSessionStartPreWakeSkip{owner: exactSessionStartLegacyOwner}
 			}
-			return current, nil
+			return current, revision, nil
 		}
 	}
 	var prepared *preparedStart
@@ -2255,6 +2258,16 @@ func reconcileExactSessionStartWithOwner(
 		var skip *exactSessionStartPreWakeSkip
 		if errors.As(err, &skip) {
 			return skip.owner, nil
+		}
+		// Another writer moved the row between this entrant's authoritative
+		// re-read and its commit. Unlike startCommitSuperseded — which reports a
+		// start that already RAN and must not be repeated — a lost pre-wake CAS
+		// wrote nothing and started nothing, and the durable wake cause is still
+		// there. Surfacing it keeps the key on the exact-start workqueue so the
+		// next attempt re-reads; converging silently would strand the wake until
+		// some unrelated admission happened to arrive (ga-l1j53).
+		if errors.Is(err, errPreWakeSuperseded) {
+			return exactSessionStartKeyedOwner, fmt.Errorf("reconciling exact session start %q: %w", info.ID, err)
 		}
 		return owner, fmt.Errorf("reconciling exact session start %q: preparing start: %w", info.ID, err)
 	}

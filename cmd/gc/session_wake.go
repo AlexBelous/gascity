@@ -25,6 +25,13 @@ import (
 // different incarnation and this drain/stop is stale.
 var errTokenMismatch = errors.New("instance token mismatch")
 
+// errPreWakeSuperseded reports that another writer moved the row between the
+// freshness re-read this incarnation was computed from and its commit. It is an
+// expected convergence outcome, not a failure: the caller aborts the start
+// BEFORE any provider call and lets the next tick re-decide from a fresh
+// snapshot.
+var errPreWakeSuperseded = errors.New("pre-wake commit superseded")
+
 // preWakeCommit persists a new incarnation (generation + token) BEFORE
 // starting the process. This is Phase 1 of the two-phase wake protocol.
 // Returns the new generation, instance token, and the PreWakePatch batch it
@@ -33,8 +40,20 @@ var errTokenMismatch = errors.New("instance token mismatch")
 // persisted state off the caller's typed Info (session_name, generation,
 // continuation epoch, sleep_reason, wake_mode, and the continuation-reset
 // signals) — every field a verbatim raw mirror — so no raw bead crosses in.
+//
+// The write is FENCED on loadedRevision — the revision of the genuine re-read
+// info came from. The legacy and keyed start families share this executor, and
+// `gc start` runs the same wave in a SECOND process beside a controller, so the
+// per-session mutation lock cannot serialize every entrant. Unfenced, the loser
+// re-rotates on top of the winner and the durable instance_token ends up naming
+// an incarnation with no runtime behind it — a permanent split-brain, since
+// every token-fenced operation then refuses forever (ga-l1j53). A lost CAS
+// returns errPreWakeSuperseded. Deployments with conditional writes off keep the
+// unconditional write (the ga-797vy F1 precedent): there is no revision contract
+// to fence on there, and a mandatory lifecycle write must not fail closed.
 func preWakeCommit(
 	info sessions.Info,
+	loadedRevision int64,
 	sessFront *sessions.Store,
 	clk clock.Clock,
 ) (newGen int, token string, fold sessions.MetadataPatch, err error) {
@@ -42,13 +61,49 @@ func preWakeCommit(
 	if err != nil {
 		return 0, "", nil, err
 	}
-	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
+	applied, writeErr := applyPreWakePatchFenced(sessFront, info.ID, loadedRevision, batch)
+	if writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
+	}
+	if !applied {
+		return 0, "", nil, errPreWakeSuperseded
 	}
 	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
 	traceFreshWakeMetadataReset(info.SessionNameMetadata, freshWakeResetPriorValues(info), batch, freshWake)
 
 	return newGen, token, batch, nil
+}
+
+// applyPreWakePatchFenced persists the pre-wake incarnation and reports whether
+// it landed, mirroring applyHealPatchFenced (ga-797vy F1). A CAS miss returns
+// (false, nil): another writer rotated the row since the re-read, so this
+// incarnation must not be committed at all. A non-positive revision, or a
+// deployment with conditional writes off, keeps the unconditional write — unlike
+// the advisory heal, the pre-wake commit cannot fail closed without making the
+// start unreachable.
+func applyPreWakePatchFenced(
+	sessFront *sessions.Store,
+	id string,
+	loadedRevision int64,
+	batch sessions.MetadataPatch,
+) (bool, error) {
+	writer, _, resolveErr := beads.ResolveConditionalWriter(sessFront.Store())
+	if resolveErr != nil {
+		return false, fmt.Errorf("resolving conditional writer for pre-wake commit %q: %w", id, resolveErr)
+	}
+	if writer != nil && loadedRevision > 0 {
+		if err := writer.UpdateIfMatch(id, loadedRevision, beads.UpdateOpts{Metadata: batch}); err != nil {
+			if beads.IsPreconditionFailed(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}
+	if err := sessFront.ApplyPatch(id, batch); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // buildPreWakePatch computes one new runtime incarnation without persisting it.

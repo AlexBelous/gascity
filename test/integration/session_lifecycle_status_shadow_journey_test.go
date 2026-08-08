@@ -38,7 +38,6 @@ func TestSessionLifecycleStatusShadowExactBinaryJourney(t *testing.T) {
 name = "worker"
 start_command = "sleep 3600"
 `, `patrol_interval = "1m"
-tick_debounce = "30s"
 	`, `conditional_writes = "auto"`)
 	waitForExpectedTmuxSessions(t, cityDir, []string{"worker"})
 	out, err := gc(cityDir, "session", "new", "worker", "--no-attach", "--json")

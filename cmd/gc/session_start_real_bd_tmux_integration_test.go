@@ -239,7 +239,6 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		Daemon: config.DaemonConfig{
 			SessionReconciler: "auto",
 			PatrolInterval:    "1h",
-			TickDebounce:      "30s",
 		},
 		Session: config.SessionConfig{
 			Socket:         guard.SocketName(),

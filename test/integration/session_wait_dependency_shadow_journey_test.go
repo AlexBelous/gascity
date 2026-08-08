@@ -114,7 +114,6 @@ name = "worker"
 start_command = "sleep 3600"
 depends_on = ["database", "cache"]
 `, `patrol_interval = "1h"
-tick_debounce = "30s"
 `, `conditional_writes = "auto"`)
 
 	dependencyTmux := make(map[string]sessionWaitDependencyShadowJourneyTmuxSession, 2)
@@ -360,7 +359,6 @@ start_command = "sleep 3600"
 min_active_sessions = 0
 max_active_sessions = %d
 `, maxActiveSessions), `patrol_interval = "1h"
-tick_debounce = "10m"
 `, `conditional_writes = "auto"`)
 	schemaStatus, err := bdDolt(cityDir, "migrate", "schema", "--json")
 	if err != nil {
@@ -788,7 +786,6 @@ func TestConfiguredNamedSessionPublicKillRecyclesSameCanonicalSessionBeforeDebou
 name = "worker"
 start_command = "sleep 3600"
 `, `patrol_interval = "1h"
-tick_debounce = "10m"
 `, `conditional_writes = "auto"`)
 	schemaStatus, err := bdDolt(cityDir, "migrate", "schema", "--json")
 	if err != nil || !strings.Contains(schemaStatus, "v59") {

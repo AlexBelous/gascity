@@ -93,7 +93,6 @@ const (
 	TraceSiteReconcilerCloseOrphan          TraceSiteCode = "reconciler.session.close_orphan"
 	TraceSiteReconcilerPendingCreate        TraceSiteCode = "reconciler.session.rollback_pending_create"
 	TraceSiteReconcilerConfigDrift          TraceSiteCode = "reconciler.session.config_drift"
-	TraceSiteReconcilerIdleDrain            TraceSiteCode = "reconciler.session.idle_drain"
 	TraceSiteReconcilerIdleTimeout          TraceSiteCode = "reconciler.session.idle_timeout"
 	TraceSiteReconcilerResetStalled         TraceSiteCode = "reconciler.session.reset_stalled"
 	TraceSiteReconcilerProgressStallExempt  TraceSiteCode = "reconciler.session.progress_stall_exempt"

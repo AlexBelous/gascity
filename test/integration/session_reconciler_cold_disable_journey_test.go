@@ -52,7 +52,6 @@ name = "worker"
 start_command = "sleep 3600"
 max_active_sessions = -1
 `, `patrol_interval = "10s"
-tick_debounce = "1s"
 `, "")
 	env := commandEnvForDir(cityDir, false)
 	if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {

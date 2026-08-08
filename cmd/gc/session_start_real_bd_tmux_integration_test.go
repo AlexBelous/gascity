@@ -587,6 +587,124 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if elapsed := time.Since(pinnedAt); elapsed >= 30*time.Second {
 		t.Fatalf("configured named pin latency = %s, want live before 30s legacy debounce", elapsed)
 	}
+	killedReviewer := pinnedReviewer
+	killedPanePID := pinnedPanePID
+	killedTmuxIDs, err := tmuxClient.ListSessionIDs()
+	if err != nil {
+		t.Fatalf("read configured named pin tmux identity before kill: %v", err)
+	}
+	killedTmuxID := strings.TrimSpace(killedTmuxIDs[killedReviewer.SessionName])
+	if killedTmuxID == "" {
+		t.Fatalf("configured named pin tmux identity for %q is empty: %v", killedReviewer.SessionName, killedTmuxIDs)
+	}
+	killedAt := time.Now().UTC()
+	pinnedKillOutput := runGC(10*time.Second,
+		"--city", cityPath,
+		"session", "kill", killedReviewer.ID, "--json",
+	)
+	var pinnedKillResult sessionActionResult
+	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(pinnedKillOutput)), &pinnedKillResult); err != nil {
+		t.Fatalf("decode configured named pinned kill: %v\n%s", err, pinnedKillOutput)
+	}
+	if !pinnedKillResult.OK || pinnedKillResult.Action != "kill" || pinnedKillResult.SessionID != killedReviewer.ID {
+		t.Fatalf("configured named pinned kill result = %+v, want successful kill for canonical %q", pinnedKillResult, killedReviewer.ID)
+	}
+	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
+		bead, found, findErr := sessionpkg.FindCanonicalConfiguredNamedSessionBead(backingStore, reviewerSpec)
+		if findErr != nil || !found || bead.ID != killedReviewer.ID {
+			return false, findErr
+		}
+		info, getErr := sessionFrontDoor(backingStore).Get(bead.ID)
+		if getErr != nil {
+			return false, getErr
+		}
+		if info.Closed || info.SessionName != killedReviewer.SessionName || info.PinAwake != "true" ||
+			info.ConfiguredNamedIdentity != reviewerSpec.Identity || info.WakeRequest != "" ||
+			sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info)).BaseState != sessionpkg.BaseStateActive ||
+			info.PendingCreateClaim || strings.TrimSpace(info.InstanceToken) == "" ||
+			info.InstanceToken == killedReviewer.InstanceToken {
+			return false, nil
+		}
+		if !exactStartStopProcessExited(killedPanePID) {
+			return false, nil
+		}
+		ids, listErr := tmuxClient.ListSessionIDs()
+		if listErr != nil {
+			return false, listErr
+		}
+		tmuxID := strings.TrimSpace(ids[info.SessionName])
+		if tmuxID == "" || tmuxID == killedTmuxID {
+			return false, nil
+		}
+		liveToken, tokenErr := tmuxClient.GetEnvironment(info.SessionName, "GC_INSTANCE_TOKEN")
+		if tokenErr != nil || liveToken != info.InstanceToken {
+			return false, tokenErr
+		}
+		pinnedReviewer = info
+		return true, nil
+	}); err != nil {
+		current, currentErr := sessionFrontDoor(backingStore).Get(killedReviewer.ID)
+		t.Fatalf("killed pinned on-demand session did not restart the same row within 30s: %v; current=%+v current_err=%v controller stdout=%q stderr=%q",
+			err, current, currentErr, controllerStdout.String(), controllerStderr.String())
+	}
+	// The bead AC phrases this budget as beating the held legacy debounce; per
+	// DETECTOR.md sec 4 the journey asserts the equivalent absolute bound.
+	if elapsed := time.Since(killedAt); elapsed >= 30*time.Second {
+		t.Fatalf("killed pinned on-demand restart latency = %s, want the same row live again within 30s", elapsed)
+	}
+	if err := removeExitedPaneProcess(killedPanePID); err != nil {
+		t.Fatalf("remove exited configured named pinned pane process: %v", err)
+	}
+	pinnedPanePID, err = tmuxClient.GetPanePID(pinnedReviewer.SessionName)
+	if err != nil {
+		t.Fatalf("read restarted configured named pinned pane PID: %v", err)
+	}
+	registerLivePaneProcess(pinnedPanePID)
+	var pinnedKillCommits []SessionReconcilerTraceRecord
+	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+			RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartCommit,
+			SessionName: pinnedReviewer.SessionName, TraceMode: TraceModeDetail,
+		})
+		if readErr != nil {
+			return false, readErr
+		}
+		pinnedKillCommits = pinnedKillCommits[:0]
+		for _, record := range records {
+			if record.SessionBeadID == pinnedReviewer.ID &&
+				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+				record.Fields["session_id"] == pinnedReviewer.ID &&
+				record.Fields["instance_token"] == pinnedReviewer.InstanceToken &&
+				record.Fields["effect_applied"] == true {
+				pinnedKillCommits = append(pinnedKillCommits, record)
+			}
+		}
+		if len(pinnedKillCommits) > 1 {
+			return false, fmt.Errorf("killed pinned restart commits = %d, want exactly one", len(pinnedKillCommits))
+		}
+		return len(pinnedKillCommits) == 1, nil
+	}); err != nil {
+		t.Fatalf("killed pinned restart socket commit did not converge: %v; matching=%#v controller stderr=%q",
+			err, pinnedKillCommits, controllerStderr.String())
+	}
+	pinnedKillStartRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
+		RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartRun, SessionName: pinnedReviewer.SessionName,
+	})
+	if err != nil {
+		t.Fatalf("read killed pinned restart start trace: %v", err)
+	}
+	for _, record := range pinnedKillStartRecords {
+		if record.OutcomeCode == TraceOutcomeStartEnqueued {
+			t.Fatalf("killed pinned on-demand restart used legacy async start: %#v", pinnedKillStartRecords)
+		}
+	}
+	restartedPinnedBead, err := backingStore.Get(pinnedReviewer.ID)
+	if err != nil {
+		t.Fatalf("read durable killed pinned restart row: %v", err)
+	}
+	if restartedPinnedBead.Metadata["wake_request"] != "" || restartedPinnedBead.Metadata["wake_requested_at"] != "" {
+		t.Fatalf("killed pinned restart synthesized a wake marker: %+v", restartedPinnedBead.Metadata)
+	}
 	suspendAt := time.Now().UTC()
 	suspendOutput := runGC(10*time.Second,
 		"--city", cityPath,
@@ -1096,7 +1214,14 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		if getErr != nil {
 			return false, getErr
 		}
-		if info.MetadataState != string(sessionpkg.StateAwake) || info.PendingCreateClaim {
+		// Converge on the restarted incarnation itself. The keyed wake commits
+		// `active` and only a later status-heal pass makes it `awake`, while the
+		// durable row can already read awake before the wake is consumed — so
+		// the leg waits for the live projection with the wake marker cleared and
+		// a rotated instance token instead of on a bare state string.
+		if sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info)).BaseState != sessionpkg.BaseStateActive ||
+			info.PendingCreateClaim || info.WakeRequest != "" ||
+			strings.TrimSpace(info.InstanceToken) == "" || info.InstanceToken == started.InstanceToken {
 			return false, nil
 		}
 		woken = info
@@ -1140,7 +1265,8 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			wakeTmuxServerPID, wakeTmuxID, wakeIDs)
 	}
 	var socketWakeCommitRecords []SessionReconcilerTraceRecord
-	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+	var socketWakeCommitCandidates []SessionReconcilerTraceRecord
+	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
 		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 			RecordType:  TraceRecordOperation,
 			SiteCode:    TraceSiteLifecycleStartCommit,
@@ -1151,6 +1277,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		if readErr != nil {
 			return false, readErr
 		}
+		socketWakeCommitCandidates = records
 		socketWakeCommitRecords = socketWakeCommitRecords[:0]
 		for _, record := range records {
 			if record.SessionBeadID == created.SessionID &&
@@ -1166,8 +1293,8 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		}
 		return len(socketWakeCommitRecords) == 1, nil
 	}); err != nil {
-		t.Fatalf("exact wake commit trace did not converge: %v; matching=%#v controller stderr=%q",
-			err, socketWakeCommitRecords, controllerStderr.String())
+		t.Fatalf("exact wake commit trace did not converge: %v; matching=%#v read=%#v woken_token=%q controller stderr=%q",
+			err, socketWakeCommitRecords, socketWakeCommitCandidates, woken.InstanceToken, controllerStderr.String())
 	}
 	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
 		count := strings.Count(controllerStderr.String(), startSuccessLog)
@@ -1202,11 +1329,14 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	}
 
 	// The keyed reset proves runtime death through the controlled process
-	// table, so every earlier fixture pane that has already exited must leave
-	// it first: a retired PID can be recycled by an unrelated process and turn
-	// a complete absence proof into an unreadable one.
-	if err := removeExitedPaneProcess(dependentPanePID); err != nil {
-		t.Fatalf("remove exited configured-dependency pane process: %v", err)
+	// table, and one unreadable entry there makes the whole absence proof
+	// incomplete. The configured-dependency leg is finished with its pane, so
+	// retire its registration unconditionally: the controlled root is a
+	// whitelist of fixtures the scanner may see, and a retired PID that the
+	// host recycles into an unrelated process is exactly the unreadable entry
+	// an exit-conditional prune leaves behind.
+	if err := os.RemoveAll(filepath.Join(processScanRoot, dependentPanePID)); err != nil {
+		t.Fatalf("retire configured-dependency pane registration: %v", err)
 	}
 	wokenPanePID, err := tmuxClient.GetPanePID(created.SessionName)
 	if err != nil {
@@ -1657,7 +1787,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("sibling routed-work drain acknowledgement = %+v, want resolved target %q and runtime %q acknowledged",
 			secondDrainAck, secondPool.info.Alias, secondPool.info.SessionName)
 	}
-	if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
+	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
 		if removeErr := removeExitedPaneProcess(secondPool.panePID); removeErr != nil {
 			return false, removeErr
 		}

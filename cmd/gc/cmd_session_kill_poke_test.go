@@ -14,13 +14,19 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
+// killPokeSessionIdentity is the configured named-session identity every
+// kill-poke fixture city declares.
+const killPokeSessionIdentity = "session-a"
+
 // newKillPokeSession stands up a city, store, and fake runtime for an awake
 // canonical configured named session, returning the store and the session
 // bead. The fake provider is wired through buildSessionProviderByName so
 // cmdSessionKill resolves a real handle and reaches the asleep-sync + handoff
 // tail.
-func newKillPokeSession(t *testing.T, identity, mode string) (beads.Store, beads.Bead, string) {
+func newKillPokeSession(t *testing.T, mode string) (beads.Store, beads.Bead, string) {
 	t.Helper()
+	const identity = killPokeSessionIdentity
+
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -93,8 +99,7 @@ func newKillPokeSession(t *testing.T, identity, mode string) (beads.Store, beads
 // explicit wake before handing the exact canonical bead ID to the keyed start
 // controller.
 func TestCmdSessionKill_AlwaysNamedPersistsWakeBeforeExactHandoff(t *testing.T) {
-	const identity = "session-a"
-	store, bead, cityDir := newKillPokeSession(t, identity, "always")
+	store, bead, cityDir := newKillPokeSession(t, "always")
 
 	calls := 0
 	var gotCityPath, gotSessionID string
@@ -112,7 +117,7 @@ func TestCmdSessionKill_AlwaysNamedPersistsWakeBeforeExactHandoff(t *testing.T) 
 	t.Cleanup(func() { sessionKillExactStartController = old })
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -146,8 +151,7 @@ func TestCmdSessionKill_AlwaysNamedPersistsWakeBeforeExactHandoff(t *testing.T) 
 // on-demand configured session retains the killed sleep transition without a
 // durable wake request or exact-key start hint.
 func TestCmdSessionKill_OnDemandNamedStaysAsleepWithoutExactHandoff(t *testing.T) {
-	const identity = "session-a"
-	store, bead, _ := newKillPokeSession(t, identity, "on_demand")
+	store, bead, _ := newKillPokeSession(t, "on_demand")
 
 	exactCalls := 0
 	oldExact := sessionKillExactStartController
@@ -165,7 +169,7 @@ func TestCmdSessionKill_OnDemandNamedStaysAsleepWithoutExactHandoff(t *testing.T
 	t.Cleanup(func() { sessionKillPokeController = oldGeneric })
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if exactCalls != 0 {
@@ -192,19 +196,81 @@ func TestCmdSessionKill_OnDemandNamedStaysAsleepWithoutExactHandoff(t *testing.T
 	}
 }
 
+// TestCmdSessionKill_PinnedOnDemandNamedHandsOffExactKeyWithoutWakeMarker
+// proves a killed pinned on-demand configured session persists asleep with the
+// killed reason and its retained pin, hands exactly one canonical bead ID to
+// the keyed start controller with zero generic pokes, and synthesizes no wake
+// request: the pin is the only wake authority the restart may use.
+func TestCmdSessionKill_PinnedOnDemandNamedHandsOffExactKeyWithoutWakeMarker(t *testing.T) {
+	store, bead, cityDir := newKillPokeSession(t, "on_demand")
+	if err := store.SetMetadata(bead.ID, "pin_awake", "true"); err != nil {
+		t.Fatalf("pin on-demand named session: %v", err)
+	}
+
+	exactCalls := 0
+	var gotCityPath, gotSessionID string
+	var metadataAtHandoff map[string]string
+	oldExact := sessionKillExactStartController
+	sessionKillExactStartController = func(cityPath, sessionID string) error {
+		exactCalls++
+		gotCityPath = cityPath
+		gotSessionID = sessionID
+		if b, getErr := store.Get(sessionID); getErr == nil {
+			metadataAtHandoff = b.Metadata
+		}
+		return nil
+	}
+	t.Cleanup(func() { sessionKillExactStartController = oldExact })
+	genericCalls := 0
+	oldGeneric := sessionKillPokeController
+	sessionKillPokeController = func(string) error {
+		genericCalls++
+		return nil
+	}
+	t.Cleanup(func() { sessionKillPokeController = oldGeneric })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if exactCalls != 1 || genericCalls != 0 {
+		t.Fatalf("handoff calls = exact %d generic %d, want exactly one exact key and no generic poke", exactCalls, genericCalls)
+	}
+	if gotCityPath != cityDir || gotSessionID != bead.ID {
+		t.Fatalf("handoff = (%q, %q), want canonical bead %q in city %q", gotCityPath, gotSessionID, bead.ID, cityDir)
+	}
+	if got := metadataAtHandoff["state"]; got != string(sessionpkg.StateAsleep) {
+		t.Errorf("state at handoff = %q, want %q", got, sessionpkg.StateAsleep)
+	}
+	if got := metadataAtHandoff["sleep_reason"]; got != "killed" {
+		t.Errorf("sleep_reason at handoff = %q, want killed", got)
+	}
+	if got := metadataAtHandoff["pin_awake"]; got != "true" {
+		t.Errorf("pin_awake at handoff = %q, want the retained pin", got)
+	}
+	if got := metadataAtHandoff["wake_request"]; got != "" {
+		t.Errorf("wake_request at handoff = %q, want the pin to remain the sole wake authority", got)
+	}
+	if got := metadataAtHandoff["wake_requested_at"]; got != "" {
+		t.Errorf("wake_requested_at at handoff = %q, want empty", got)
+	}
+	if metadataAtHandoff["synced_at"] == "" {
+		t.Error("synced_at at handoff is empty")
+	}
+}
+
 // TestCmdSessionKill_ExactHandoffFailureIsNonFatal pins the best-effort
 // contract: an exact start-handoff failure must not fail the kill after the
 // durable sleep and wake intent have been persisted.
 func TestCmdSessionKill_ExactHandoffFailureIsNonFatal(t *testing.T) {
-	const identity = "session-a"
-	_, _, _ = newKillPokeSession(t, identity, "always")
+	_, _, _ = newKillPokeSession(t, "always")
 
 	old := sessionKillExactStartController
 	sessionKillExactStartController = func(string, string) error { return errors.New("dial failed") }
 	t.Cleanup(func() { sessionKillExactStartController = old })
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionKill = %d, want 0 (handoff failure is best-effort); stderr=%s", code, stderr.String())
 	}
 }

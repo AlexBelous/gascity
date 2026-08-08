@@ -18,6 +18,9 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Hold and Blocked Label Conventions](hold-label-conventions.md) when a bead
   needs to pause on a specific actor or condition — only `hold:mayor` and
   `hold:external` are canonical
+- [WD Parity Campaign Instruments](wd-parity-campaign-instruments.md) when
+  running the WD detector parity campaign — the arming harness and
+  `gc perf parity-join`
 - [Release Gate Criteria Conventions](release-gate-criteria-conventions.md)
   when signing off the "Tests pass" criterion on a `release-gates/*.md`
   deploy gate — it must cite the CI jobs `ci-required` actually gates on

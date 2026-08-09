@@ -23,6 +23,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/storebinding"
 
 	_ "modernc.org/sqlite" // Graph inspection and fences use the CGO-free deployed driver.
@@ -95,6 +96,13 @@ func GraphPath(root string) (string, error) {
 // trailing segments. A binding locator must never retain a symlink spelling:
 // aliases need to identify the same component before fences or overlap checks
 // run, while new destination paths still need a stable prospective locator.
+//
+// The resolved result is finished through pathutil so this locator speaks the
+// same canonical spelling as everything it is compared against — above all the
+// migration guard, which requires its city directory already be canonical. Bare
+// EvalSymlinks alone answers /private/var/... on macOS where pathutil uses the
+// equivalent /var alias, and a locator in the other spelling was rejected by
+// every fence on that host (gas-bsj).
 func canonicalPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -108,7 +116,7 @@ func canonicalPath(path string) (string, error) {
 			for index := len(missing) - 1; index >= 0; index-- {
 				resolved = filepath.Join(resolved, missing[index])
 			}
-			return filepath.Clean(resolved), nil
+			return pathutil.NormalizePathForCompare(resolved), nil
 		}
 		if !errors.Is(evalErr, os.ErrNotExist) {
 			return "", evalErr

@@ -66,6 +66,18 @@ func reconcileExactSessionDetectorFamily(
 	// covers both fingerprint halves and both convergence lanes, because the
 	// facts that split them (attachment, launch-only, named) are all re-derived
 	// from the one row the guard already resolved.
+	//
+	// D-SLEEP goes LAST among the forward-pass families because legacy puts it
+	// last: the wake/sleep decision runs in a SEPARATE phase after the entire
+	// forward pass has finished, so a row any earlier family claimed — retired,
+	// closed, converged, rolled back, or idle-killed — never reaches the awake
+	// scan at all. Ordering it ahead of D-DEADLINE would be the sharpest version
+	// of the mistake: an over-deadline row's keyed stop persists its own sleep
+	// patch, and draining it as a plain no-wake row instead would race that stop
+	// and stamp the wrong sleep_reason on the record ops read afterwards. Its
+	// guard is also the broadest here — every awake, unpinned, unheld row — so
+	// keeping it below the narrower families lets the cheaper guards
+	// short-circuit first.
 	switch {
 	case detectorActDup && exactSessionDuplicateNamedCandidate(params, info, response):
 		owner, err := reconcileExactSessionDuplicateNamedRetire(admission, params, info, response, clk)
@@ -83,6 +95,9 @@ func reconcileExactSessionDetectorFamily(
 		return true, owner, err
 	case detectorActStaleCreate && exactSessionStaleCreateRollbackCandidate(params, info, response, clk):
 		owner, err := reconcileExactSessionStaleCreateRollback(ctx, admission, params, info, response, clk)
+		return true, owner, err
+	case detectorActSleep && exactSessionSleepDrainCandidate(params, info, response, clk):
+		owner, err := reconcileExactSessionSleepDrain(ctx, admission, params, info, response, clk)
 		return true, owner, err
 	}
 	return false, exactSessionStartUnowned, nil

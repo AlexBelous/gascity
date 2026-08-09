@@ -58,6 +58,13 @@ const (
 	// keyed on that loser's exact durable session ID. One key per loser, so a
 	// three-way duplicate is three independent fenced effects, never a batch.
 	sessionStartAdmissionDuplicateNamed sessionStartAdmissionSource = "duplicate_named"
+	// sessionStartAdmissionSleepDrain is the detector sweep's D-SLEEP key
+	// (DETECTOR.md §3): one alive session the awake set no longer wants, keyed
+	// on its exact durable session ID. The same source carries the family's
+	// idle-probe launch — a probe and a drain are two rungs of one ladder on one
+	// key, and the handler picks the rung from the durable row plus the probe
+	// tracker, never from the source.
+	sessionStartAdmissionSleepDrain sessionStartAdmissionSource = "sleep_drain"
 )
 
 type sessionStartAdmission struct {
@@ -698,7 +705,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionOrphanDrain,
 		sessionStartAdmissionStaleCreate,
 		sessionStartAdmissionConfigDrift,
-		sessionStartAdmissionDuplicateNamed:
+		sessionStartAdmissionDuplicateNamed,
+		sessionStartAdmissionSleepDrain:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -1014,6 +1022,24 @@ func (c *sessionStartController) ownsDuplicateNamedRetire(sessionID string) bool
 	defer c.mu.Unlock()
 	admission, ok := c.admissions[sessionID]
 	return ok && admission.Source == sessionStartAdmissionDuplicateNamed
+}
+
+// ownsSleepDrain reports whether the keyed controller currently holds a D-SLEEP
+// admission for this exact key. Legacy's awake-scan no-wake arm consults it and
+// yields. It is a SIBLING of ownsOrphanDrain rather than a widening of it, for
+// the reason WD.2, WD.3 and WD.4 all recorded: each predicate answers "is THIS
+// family's effect in flight for this key", and one predicate serving both drain
+// families would make legacy's orphan drain stand down for sleep-owned rows and
+// legacy's sleep drain stand down for orphan-owned ones. Retired at WE with the
+// god function.
+func (c *sessionStartController) ownsSleepDrain(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.Source == sessionStartAdmissionSleepDrain
 }
 
 // YieldPoolDrainAck releases a retained agent drain acknowledgement only when

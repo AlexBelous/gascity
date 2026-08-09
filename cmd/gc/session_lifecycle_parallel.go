@@ -333,6 +333,7 @@ type startExecutionOptions struct {
 	legacyConfigDriftConvergeExcluded func(sessionpkg.Info) bool
 	legacyConfigDriftDeferExcluded    func(sessionpkg.Info) bool
 	legacyDuplicateRetireExcluded     func(sessionpkg.Info) bool
+	legacySleepDrainExcluded          func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -586,6 +587,32 @@ func withLegacyConfigDriftDeferExclusion(excluded func(sessionpkg.Info) bool) st
 func withLegacyDuplicateRetireExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyDuplicateRetireExcluded = excluded
+	}
+}
+
+// withLegacySleepDrainExclusion installs the keyed-ownership bridge for the
+// D-SLEEP family. Returning true keeps the fleet loop's awake-scan no-wake arm
+// off that row entirely — no idle-probe consumption, no idle-stop-pending mark,
+// no drain begin — because the keyed handler already owns that exact key.
+//
+// It sits BELOW the #3994 keep-alive escape on purpose. That escape cancels a
+// drain a heartbeat hold has overtaken, and it must keep running for every row:
+// the keyed family never enqueues a held row, so a yield above the escape would
+// only disable a cancel nobody replaced.
+//
+// Like the deadline seam and unlike the start seam this is not a race to lose.
+// Both writers record drain intent in the SAME in-memory tracker and consume the
+// same idle probe, so an un-yielding legacy would either double-begin or win and
+// stamp its own reason on the keyed arm's drain — and legacy's consumption of a
+// ready probe (shouldBeginIdleDrainInfo clears it) would silently retract the
+// confirmation the keyed handler is waiting for. It is a SIBLING of
+// withLegacyOrphanDrainExclusion, not a reuse: the orphan predicate is false for
+// every sleep admission, and one predicate serving both would make each arm's
+// legacy counterpart stand down for the other's rows. Retired at WE with the god
+// function.
+func withLegacySleepDrainExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacySleepDrainExcluded = excluded
 	}
 }
 

@@ -166,6 +166,31 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 				Classification: parityJoinIncomparable,
 				AnyOutcomes:    []TraceOutcomeCode{TraceOutcomeDeferredPending},
 			},
+			{
+				// WD.5 delta 1: legacy's plain "no-wake-reason" rung is a fleet
+				// verdict the keyed handler cannot re-derive per key, so the
+				// detector records those rows and never enqueues them. Legacy
+				// drains where the detector predicts nothing, by design, until
+				// D-WAKE gives the fleet demand rungs a keyed home.
+				Class:           "fleet_only_no_wake_left_to_legacy",
+				Classification:  parityJoinIncomparable,
+				DetectorReasons: []TraceReasonCode{detectorReasonNoWakeFleetOnly},
+			},
+			{
+				// WD.5 delta 4: the per-sweep probe budget and the probe already in
+				// flight are detector-side scheduling, not a decision about the row.
+				Class:           "idle_probe_scheduling",
+				Classification:  parityJoinIncomparable,
+				DetectorReasons: []TraceReasonCode{detectorReasonIdleProbePending, detectorReasonIdleProbeBudget},
+			},
+			{
+				// WD.5 delta 2: the #3994 keep-alive escape is a detection-side
+				// non-enqueue where legacy cancels mid-pass and records nothing.
+				Class:           "keep_alive_escape_detector_only",
+				Classification:  parityJoinIncomparable,
+				Side:            parityJoinSideDetectorOnly,
+				DetectorReasons: []TraceReasonCode{detectorReasonSleepKeepAlive},
+			},
 		},
 	},
 	{

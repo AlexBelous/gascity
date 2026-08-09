@@ -121,6 +121,7 @@ cmd_gc_integration_tests=(
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestExactSessionStartNativeV59RealBDTmuxJourney
+  TestKeyedDrainFinalizeLiveReadObservesForeignProcessClose
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName

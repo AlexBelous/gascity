@@ -3096,6 +3096,7 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		return info, nil
 	}
 	workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	request.WorkStoreRef = canonicalTriggerWorkStoreRef(bp, request)
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
 	if len(patch) == 0 {
 		return info, nil
@@ -3863,6 +3864,23 @@ func selectOrPlanPoolSessionBead(
 	return session.Info{}, 0, plan, nil
 }
 
+// canonicalTriggerWorkStoreRef resolves the store ref a pool trigger stamp
+// persists. The legacy demand collector hands SessionRequest.WorkStoreRef its
+// own bare storeKey vocabulary ("city", a bare rig name), which the keyed pool
+// seams and the launched agent's GC_TRIGGER_WORK_STORE_REF environment do not
+// speak, so the stamp writes the canonical spelling instead (ga-2oboq).
+//
+// Both stamp sites must use this: poolTriggerMetadata writes the row at create
+// and bindPoolSessionTriggerBead reconciles it afterwards, so canonicalizing
+// only one would make the other rewrite the row back to bare on the next tick.
+func canonicalTriggerWorkStoreRef(bp *agentBuildParams, request SessionRequest) string {
+	storeRef := strings.TrimSpace(request.WorkStoreRef)
+	if storeRef == "" || bp == nil {
+		return storeRef
+	}
+	return canonicalizeLegacyWorkflowStoreRef(bp.city, bp.cityPath, storeRef)
+}
+
 func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) map[string]string {
 	workID := strings.TrimSpace(request.WorkBeadID)
 	if workID == "" {
@@ -3871,7 +3889,7 @@ func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualified
 	metadata := map[string]string{
 		beadmeta.TriggerBeadIDMetadataKey: workID,
 	}
-	if storeRef := strings.TrimSpace(request.WorkStoreRef); storeRef != "" {
+	if storeRef := canonicalTriggerWorkStoreRef(bp, request); storeRef != "" {
 		metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = storeRef
 	}
 	if parentSID := strings.TrimSpace(request.BrainParentSID); parentSID != "" {

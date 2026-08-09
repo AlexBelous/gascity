@@ -297,6 +297,14 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("controlled process-scan root %q is not a directory: info=%v err=%v", processScanRoot, info, err)
 	}
+	// proctable places a process in or out of an incarnation by reading the boot
+	// time from <root>/stat. Without it the age proof cannot even run, so an
+	// entry the scanner cannot read costs the whole scan its completeness
+	// instead of costing that one entry a classification. The scanner enumerates
+	// directories only, so this file is never mistaken for a PID.
+	if err := os.Symlink("/proc/stat", filepath.Join(processScanRoot, "stat")); err != nil {
+		t.Fatalf("link boot time into controlled process-scan root: %v", err)
+	}
 	buildDir := t.TempDir()
 	realBinPath := filepath.Join(buildDir, "gc-real")
 	gcBinary := filepath.Join(buildDir, "gc")
@@ -320,10 +328,39 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if err := os.WriteFile(gcBinary, []byte(wrapper), 0o755); err != nil {
 		t.Fatalf("write controlled-process-scan gc wrapper: %v", err)
 	}
+	// A PID alone does not name a process: the host recycles PIDs, and the
+	// occupant that follows a retired pane is some unrelated process whose
+	// /proc files this fixture does not own and often cannot read. Recording
+	// each registration's start time gives every entry in the controlled root a
+	// provenance the retirement below can check, so a recycled PID is retired
+	// rather than left behind as the unreadable entry that costs a whole scan
+	// its completeness.
+	registeredPaneStarts := map[string]string{}
+	paneProcessStartTicks := func(pid string) (string, bool) {
+		data, err := os.ReadFile(filepath.Join("/proc", pid, "stat"))
+		if err != nil {
+			return "", false
+		}
+		text := string(data)
+		closeParen := strings.LastIndexByte(text, ')')
+		if closeParen < 0 || closeParen+1 >= len(text) {
+			return "", false
+		}
+		fields := strings.Fields(text[closeParen+1:])
+		const startTicksIndexAfterComm = 19
+		if len(fields) <= startTicksIndexAfterComm {
+			return "", false
+		}
+		return fields[startTicksIndexAfterComm], true
+	}
 	registerLivePaneProcess := func(pid string) {
 		t.Helper()
 		if _, err := strconv.Atoi(pid); err != nil {
 			t.Fatalf("controlled process-scan pane PID = %q, want numeric: %v", pid, err)
+		}
+		startTicks, ok := paneProcessStartTicks(pid)
+		if !ok {
+			t.Fatalf("read start time for controlled process-scan pane PID %q", pid)
 		}
 		procDir := filepath.Join(processScanRoot, pid)
 		if err := os.MkdirAll(procDir, 0o755); err != nil {
@@ -338,15 +375,33 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 				t.Fatalf("link live procfs %s for pane PID %q: %v", name, pid, err)
 			}
 		}
+		registeredPaneStarts[pid] = startTicks
+	}
+	// retireExitedPaneProcess reports whether the exact process registered under
+	// pid is gone — exited, reaped, or replaced by a PID the host recycled — and
+	// drops its controlled-root entry when it is. Absence proofs poll it so a
+	// recycled PID stops poisoning the scanner on the first observation instead
+	// of holding the leg until its budget expires.
+	retireExitedPaneProcess := func(pid string) (bool, error) {
+		if _, err := strconv.Atoi(pid); err != nil {
+			// Joining a non-numeric PID names the scan root itself, and
+			// removing that would delete every registration at once.
+			return false, fmt.Errorf("retire controlled procfs entry: pane PID = %q, want numeric: %w", pid, err)
+		}
+		registered, tracked := registeredPaneStarts[pid]
+		startTicks, running := paneProcessStartTicks(pid)
+		if running && (!tracked || startTicks == registered) && !exactStartStopProcessExited(pid) {
+			return false, nil
+		}
+		delete(registeredPaneStarts, pid)
+		if err := os.RemoveAll(filepath.Join(processScanRoot, pid)); err != nil {
+			return true, fmt.Errorf("retire controlled procfs entry for pane PID %q: %w", pid, err)
+		}
+		return true, nil
 	}
 	removeExitedPaneProcess := func(pid string) error {
-		if !exactStartStopProcessExited(pid) {
-			return nil
-		}
-		if err := os.RemoveAll(filepath.Join(processScanRoot, pid)); err != nil {
-			return fmt.Errorf("remove exited controlled procfs entry for pane PID %q: %w", pid, err)
-		}
-		return nil
+		_, err := retireExitedPaneProcess(pid)
+		return err
 	}
 	runtimeDir := t.TempDir()
 	gcHome := t.TempDir()
@@ -624,7 +679,9 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			info.InstanceToken == killedReviewer.InstanceToken {
 			return false, nil
 		}
-		if !exactStartStopProcessExited(killedPanePID) {
+		if gone, retireErr := retireExitedPaneProcess(killedPanePID); retireErr != nil {
+			return false, retireErr
+		} else if !gone {
 			return false, nil
 		}
 		ids, listErr := tmuxClient.ListSessionIDs()
@@ -746,8 +803,13 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			return false, parseErr
 		}
 		ids, listErr := tmuxClient.ListSessionIDs()
-		if listErr != nil || strings.TrimSpace(ids[info.SessionName]) != "" || !exactStartStopProcessExited(pinnedPanePID) {
+		if listErr != nil || strings.TrimSpace(ids[info.SessionName]) != "" {
 			return false, listErr
+		}
+		if gone, retireErr := retireExitedPaneProcess(pinnedPanePID); retireErr != nil {
+			return false, retireErr
+		} else if !gone {
+			return false, nil
 		}
 		suspendedReviewer = info
 		return true, nil
@@ -1357,10 +1419,10 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	// incomplete: the controlled root is a whitelist of fixtures the scanner may
 	// see, and a retired PID that the host recycles into an unrelated process is
 	// exactly the unreadable entry an exit-conditional prune leaves behind. The
-	// only registration this leg inherited came from the configured-dependency
-	// leg, which is skipped under ga-ij8mh, so there is nothing to retire here
-	// today; WD.10a restores the unconditional retirement with that leg. Do not
-	// retire a PID that may be empty -- joining "" yields the scan root itself.
+	// wait below therefore retires by registered identity, not by exit, so the
+	// recycled case is dropped on the first observation. The only registration
+	// this leg inherited came from the configured-dependency leg, which is
+	// skipped under ga-ij8mh; WD.10a restores that registration with the leg.
 	wokenPanePID, err := tmuxClient.GetPanePID(created.SessionName)
 	if err != nil {
 		t.Fatalf("read exact wake pane PID: %v", err)
@@ -1401,7 +1463,9 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			strings.TrimSpace(info.ResetCommittedAt) != "" {
 			return false, nil
 		}
-		if !exactStartStopProcessExited(wokenPanePID) {
+		if gone, retireErr := retireExitedPaneProcess(wokenPanePID); retireErr != nil {
+			return false, retireErr
+		} else if !gone {
 			return false, nil
 		}
 		ids, listErr := tmuxClient.ListSessionIDs()

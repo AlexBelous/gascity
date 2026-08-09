@@ -61,13 +61,18 @@ const (
 // A constant flips only when that family's keyed handler AND its legacy yield
 // have both landed — an acting family beside a non-yielding legacy double-acts
 // by construction. D-DEADLINE crossed at WD.2 (handler:
-// session_deadline_reconcile.go; yield: withLegacyDeadlineStopExclusion). The
-// rest flip in the WE cutover commit, one family at a time, once the WD.15
-// parity window has cleared their must-match bar. They are compile-time
-// constants on purpose: this is not a config surface.
+// session_deadline_reconcile.go; yield: withLegacyDeadlineStopExclusion).
+// D-ORPHAN crossed at WD.3 for its CLOSE arms only (handler:
+// session_orphan_close_reconcile.go; yield: withLegacyOrphanCloseExclusion);
+// the family's live-orphan DRAIN arm still records shadow because
+// detectorAdmissionSourceFor routes only the close outcome, and it crosses at
+// WD.4 with its own handler and yield. The rest flip in the WE cutover commit,
+// one family at a time, once the WD.15 parity window has cleared their
+// must-match bar. They are compile-time constants on purpose: this is not a
+// config surface.
 const (
 	detectorActDeadline                = true
-	detectorActOrphan                  = false
+	detectorActOrphan                  = true
 	detectorActStaleCreate             = false
 	detectorActDrift                   = false
 	detectorActSleep                   = false
@@ -110,6 +115,7 @@ const (
 	detectorReasonDeadlineDeferred        TraceReasonCode = "detector_deadline_deferred"
 	detectorReasonOrphanDead              TraceReasonCode = "detector_orphan_dead"
 	detectorReasonOrphanLive              TraceReasonCode = "detector_orphan_live"
+	detectorReasonOrphanAssignedWork      TraceReasonCode = "detector_orphan_assigned_work"
 	detectorReasonFailedCreate            TraceReasonCode = "detector_failed_create"
 	detectorReasonStalePendingCreate      TraceReasonCode = "detector_stale_pending_create"
 	detectorReasonPendingCreatePreserved  TraceReasonCode = "detector_pending_create_preserved"
@@ -138,6 +144,7 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonDeadlineDeferred,
 	detectorReasonOrphanDead,
 	detectorReasonOrphanLive,
+	detectorReasonOrphanAssignedWork,
 	detectorReasonFailedCreate,
 	detectorReasonStalePendingCreate,
 	detectorReasonPendingCreatePreserved,
@@ -795,6 +802,21 @@ func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detec
 	if desired || in.DeferSessionCloses {
 		return false
 	}
+	// Legacy's kept-open suppressor (session_reconciler.go:2193-2204), evaluated
+	// against the assigned-work snapshot the tick already loaded — no new read.
+	// A row still holding work is claimed by the family and recorded, but never
+	// enqueued: the handler's own live re-query inside
+	// closeSessionBeadIfReachableStoreUnassigned stays the authority.
+	if sessionBeadHasAssignedWorkInfo(in.AssignedWorkBeads, info) {
+		cond := base
+		cond.Family = detectorFamilyOrphan
+		cond.Site = TraceSiteReconcilerOrphaned
+		cond.Reason = detectorReasonOrphanAssignedWork
+		cond.Outcome = TraceOutcomeNoChange
+		cond.Fields = map[string]any{"predicted_effect": "none", "live_assigned_work": true}
+		emit.add(cond, false)
+		return true
+	}
 	if strings.TrimSpace(info.MetadataState) == string(sessionpkg.StateFailedCreate) {
 		cond := base
 		cond.Family = detectorFamilyOrphan
@@ -1072,9 +1094,15 @@ func detectorDuplicateBeats(candidate, incumbent sessionpkg.Info) bool {
 // and never enqueue. No new controller, queue, or framework: the value returned
 // here is fed straight into the existing Admit(id, source) entry.
 func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSource, bool) {
-	switch cond.Family { //nolint:gocritic // the seam is a table, not a branch: WD.3-14 each add one case
+	switch cond.Family {
 	case detectorFamilyDeadline:
 		return sessionStartAdmissionDeadline, detectorActDeadline && cond.Outcome == TraceOutcomeStop
+	case detectorFamilyOrphan:
+		// CLOSE arms only. The live-orphan drain arm (TraceOutcomeDrain) and the
+		// running-set-unavailable refusal (TraceOutcomeSkipped) predict no close,
+		// so they keep recording for the parity join and never enqueue — the
+		// drain arm gets its own source and handler at WD.4.
+		return sessionStartAdmissionOrphanClose, detectorActOrphan && cond.Outcome == TraceOutcomeClosed
 	}
 	return "", false
 }

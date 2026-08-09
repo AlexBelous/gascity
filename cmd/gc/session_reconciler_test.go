@@ -6809,6 +6809,10 @@ func TestReconcileSessionBeads_DeadDrainAckedOrphanWithAssignedWorkCompletesDrai
 	}
 }
 
+// TestReconcileSessionBeads_OrphanNotRunningClosed is DETECTOR.md §1 site 4's
+// anchor. Its CONTRACT is re-pointed keyed at WD.3 by
+// TestExactOrphanDeadRowClosesOnceByKey; this legacy form stays green until the
+// god function dies at WE, because a city with no keyed owner still closes here.
 func TestReconcileSessionBeads_OrphanNotRunningClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
@@ -11965,6 +11969,10 @@ func TestReconcileSessionBeads_SyncReplacesFailedCreateNamedSession(t *testing.T
 // TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot verifies
 // the post-lease-expiry close path for a pool session bead whose close call
 // failed after failed-create metadata was written.
+//
+// DETECTOR.md §1 site 5's anchor. Its CONTRACT is re-pointed keyed at WD.3 by
+// TestExactOrphanFailedCreateClosesByKeyAndFreesSlot; this legacy form stays
+// green until the god function dies at WE.
 func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}

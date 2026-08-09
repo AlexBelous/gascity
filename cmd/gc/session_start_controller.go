@@ -34,6 +34,11 @@ const (
 	// (DETECTOR.md §3): an idle-timeout or max-session-age stop for one exact
 	// durable session ID. Later WD slices add one value per condition family.
 	sessionStartAdmissionDeadline sessionStartAdmissionSource = "deadline"
+	// sessionStartAdmissionOrphanClose is the detector sweep's D-ORPHAN CLOSE
+	// key (DETECTOR.md §3): an undesired row whose runtime is provably absent,
+	// or a failed-create row whose create lease has expired. The live-orphan
+	// drain arm of the same family gets its own source at WD.4.
+	sessionStartAdmissionOrphanClose sessionStartAdmissionSource = "orphan_close"
 )
 
 type sessionStartAdmission struct {
@@ -669,7 +674,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionSocket,
 		sessionStartAdmissionAntiEntropy,
 		sessionStartAdmissionWaitDependency,
-		sessionStartAdmissionDeadline:
+		sessionStartAdmissionDeadline,
+		sessionStartAdmissionOrphanClose:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -868,6 +874,25 @@ func (c *sessionStartController) ownsDeadlineStop(sessionID string) bool {
 	defer c.mu.Unlock()
 	admission, ok := c.admissions[sessionID]
 	return ok && admission.Source == sessionStartAdmissionDeadline
+}
+
+// ownsOrphanClose reports whether the keyed controller currently holds a
+// D-ORPHAN close admission for this exact key. Legacy's CloseOrphan and
+// CloseFailedCreate arms consult it and yield. This is a SIBLING of
+// ownsDeadlineStop rather than a widening of it: each answers "is THIS family's
+// effect in flight for this key", and a predicate that answered true for both
+// families would make legacy's deadline arms stand down for rows the keyed
+// orphan handler owns (and vice versa) — the same silent-disable trap WD.2
+// recorded when it declined to reuse sessionStartLegacyExclusionPredicate.
+// Retired at WE with the god function.
+func (c *sessionStartController) ownsOrphanClose(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.Source == sessionStartAdmissionOrphanClose
 }
 
 // YieldPoolDrainAck releases a retained agent drain acknowledgement only when

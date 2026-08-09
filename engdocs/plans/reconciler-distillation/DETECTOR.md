@@ -560,6 +560,82 @@ not improvised.
    from a narrowed-input call site buys nothing a coalesced key does not already
    give.
 
+### §3 D-ORPHAN close deltas (recorded at WD.3)
+
+Where the family's CLOSE arms as built diverge from §3 as written. Reported,
+not improvised. WD.3 flips `detectorActOrphan` for the close outcome ONLY —
+`detectorAdmissionSourceFor` routes `TraceOutcomeClosed`, so the live-orphan
+drain arm and the running-set-unavailable refusal keep recording shadow until
+WD.4 lands their handler and yield.
+
+1. **Undesiredness is the one input no per-key predicate can answer, so the
+   tick publishes it.** Every other rung of this family is durable (state,
+   pending-create lease, named spec, state_reason) or provable per key
+   (fresh liveness, reachable-store assigned work). Undesiredness is not: it
+   falls out of pool desired counts, named specs and demand, and recomputing
+   `buildDesiredState` per key would turn an O(1) handler into an O(fleet)
+   one. `beadReconcileTick` therefore publishes its desired-name view through
+   `CityRuntime.publishDesiredSessionNames` immediately before the sweep, and
+   the handler reads it back through `exactSessionStartParams.
+   DesiredSessionNames` — the same threading WD.2 used for the idle and
+   max-age trackers, and for the same reason: keyed and legacy must answer
+   from one fleet input, never two. A nil accessor or an unpublished view
+   fails the close closed. Only the patrol/boot call site publishes:
+   `controlDispatcherTick` and `gc start` build NARROWED desired states, and a
+   narrowed view would read as fleet-wide undesiredness (this is the publish
+   half of WD.2's delta 6).
+2. **The legacy yield is a SIBLING of `withLegacyDeadlineStopExclusion`, not a
+   widening of it.** WD.2's ownership-semantics test asked whether the
+   existing predicate answers the question the new arm needs;
+   `ownsDeadlineStop` answers "is a D-DEADLINE stop in flight for this key",
+   which is false for every orphan-close admission. Widening it to accept both
+   sources would have made legacy's idle and max-age arms stand down for rows
+   the keyed ORPHAN handler owns (and, symmetrically, legacy's close arms stand
+   down for deadline-owned rows) — the same silent-disable trap WD.2 recorded
+   when it declined to reuse `sessionStartLegacyExclusionPredicate`. WD.3 adds
+   `withLegacyOrphanCloseExclusion` backed by
+   `sessionStartController.ownsOrphanClose(id)`, installed in the same block
+   and the same window as the deadline option. Both retire at WE.
+3. **`.78.6`'s atomic terminal closure reaches this arm through the close
+   helper's single transaction, not through `CloseWithMetadataIfMatch`.** §3
+   names `closeSessionBeadIfReachableStoreUnassigned` as the reuse, and that
+   helper routes to `closeBead`/`closeFailedCreateBead`, which commit the
+   terminal metadata batch and the status close in ONE `store.Tx` — the
+   ga-igcny0.1.1 property — AND run the extmsg cancel plus the
+   orphaned-work release cascade a bare conditional closer skips. Lifting the
+   A5 fenced-close block here would have had to replicate both cascades and
+   the failed-create claim clears, so the fence WD.3 adds instead is the
+   authoritative pre-close match on revision, instance token and name, plus a
+   post-close terminal witness: `effect_applied:true` is recorded only when
+   the durable row actually shows the close and its canonical close_reason.
+4. **The detection-side D2 screen stays the shared stop-capable pair, though
+   the close needs only half of it.** `routeDetectorConditions` screens every
+   destructive family with `detectorProviderStopCapable`
+   (`FreshLivenessObserver` + `UnattendedSessionStopper`); the close arm
+   performs no stop and the handler asserts only `FreshLivenessObserver`. The
+   screen is therefore stricter than the effect requires. Left shared on
+   purpose: the D2 hard capabilities travel together on tmux/auto/hybrid, a
+   per-family screen would be a second spelling of the same fact, and the
+   over-strict direction is a traced refusal, never an unproven close.
+5. **The kept-open suppressor is snapshot-side, and the live re-query is still
+   the authority.** §3 lists "open assigned work (kept-open :2193-2204)" as a
+   detection-side suppressor; legacy answers it with a live store query the
+   sweep cannot pay fleet-wide. The sweep answers it from
+   `sessionBeadHasAssignedWorkInfo` over the assigned-work beads the tick has
+   already loaded — zero new reads — records
+   `detector_orphan_assigned_work` and never enqueues. A row whose work is
+   invisible to that snapshot is still refused inside
+   `closeSessionBeadIfReachableStoreUnassigned`, which re-queries live and
+   fails closed on error. Expected-divergence for §3b: the two views can
+   disagree on a row whose assigned work is not wake-relevant, which shows as
+   a detector kept-open against a legacy close.
+6. **The seam case is ordered BEFORE D-DEADLINE.** Legacy's forward pass runs
+   its not-desired block before the deadline arms and early-continues, and the
+   sweep's own family precedence puts orphan ahead of deadline. An undesired
+   awake row past its idle deadline is therefore the orphan family's; the
+   handler-dispatch switch mirrors that order so the two paths cannot disagree
+   about which family owns such a row.
+
 ## 3b. Campaign judgment (WE sign-off bar)
 
 Per-family parity level and expected classifications. "Detection" = the shadow record

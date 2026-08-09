@@ -149,6 +149,14 @@ type CityRuntime struct {
 	sessionStartOwnership  sessionStartOwnership
 	sessionStartMode       rollout.Mode
 	poolMembershipShadow   *poolMembershipIndex
+	// desiredSessionNames is the desired-session view the patrol/boot bead
+	// reconcile tick publishes for the keyed D-ORPHAN close handler, which has
+	// to re-derive undesiredness per key and cannot recompute a fleet-shaped
+	// answer itself. Guarded by sessionStartMu; nil until the first tick
+	// publishes, which fails every keyed close closed. Only beadReconcileTick
+	// publishes: controlDispatcherTick and `gc start` build narrowed desired
+	// states, and a narrowed view would read as fleet-wide undesiredness.
+	desiredSessionNames map[string]bool
 	// guarded by sessionStartMu; startup retries reuse this runtime's one
 	// controller-state admission owner.
 	readyRoutedWorkEventAdmissionInstalled bool
@@ -2866,8 +2874,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// Detector sweep, beside legacy (WD.1). Detection itself is read-only and
 	// reuses this tick's already-loaded inputs; the routing seam then hands the
 	// ACTING families' exact keys to the session-start controller (WD.2:
-	// D-DEADLINE only). Admit is nil in a legacy-owned city, which keeps the
-	// whole sweep read-only there.
+	// D-DEADLINE; WD.3: D-ORPHAN's close arms). Admit is nil in a legacy-owned
+	// city, which keeps the whole sweep read-only there. The desired view is
+	// published first so the keyed close handler re-derives undesiredness from
+	// the same view that raised the condition.
+	cr.publishDesiredSessionNames(desiredState)
 	runDetectorSweep(ctx, trace, detectorSweepInput{
 		CityPath:           cr.cityPath,
 		CityName:           cityName,

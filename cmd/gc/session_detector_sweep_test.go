@@ -57,29 +57,51 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 
 // TestDetectorFamiliesStayShadowOnlyDuringWD pins the act frontier: exactly the
 // families whose keyed handler AND legacy yield have landed may act, and every
-// other family stays shadow-only. D-DEADLINE crossed at WD.2. A family that
-// flips its act constant without an arm in detectorAdmissionSourceFor — or with
-// an arm but no landed handler — fails here before it can double-act beside a
-// non-yielding legacy.
+// other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
+// arm crossed at WD.3. A family that flips its act constant without an arm in
+// detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
+// before it can double-act beside a non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
-	acting := map[detectorFamily]bool{detectorFamilyDeadline: true}
+	// The outcome each acting family's EFFECT arm carries. A family absent from
+	// this table must not route under any outcome.
+	acting := map[detectorFamily]TraceOutcomeCode{
+		detectorFamilyDeadline: TraceOutcomeStop,
+		detectorFamilyOrphan:   TraceOutcomeClosed,
+	}
 	if !detectorAnyFamilyActs() {
 		t.Fatal("detectorAnyFamilyActs() = false; D-DEADLINE acts from WD.2 onward")
 	}
 	for _, spec := range detectorFamilySpecs {
-		if spec.Acts != acting[spec.Family] || detectorFamilyActs(spec.Family) != acting[spec.Family] {
-			t.Errorf("family %q acts=%v, want %v", spec.Family, spec.Acts, acting[spec.Family])
+		effect, acts := acting[spec.Family]
+		if spec.Acts != acts || detectorFamilyActs(spec.Family) != acts {
+			t.Errorf("family %q acts=%v, want %v", spec.Family, spec.Acts, acts)
 		}
-		source, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: TraceOutcomeStop})
-		if routed != acting[spec.Family] {
-			t.Errorf("family %q routes an effect arm = %v, want %v", spec.Family, routed, acting[spec.Family])
+		if !acts {
+			for _, outcome := range detectorShadowOutcomes {
+				if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: outcome}); routed {
+					t.Errorf("shadow-only family %q routed outcome %q", spec.Family, outcome)
+				}
+			}
+			continue
 		}
-		if routed && source == "" {
+		source, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: effect})
+		if !routed {
+			t.Errorf("family %q did not route its effect arm (outcome %q)", spec.Family, effect)
+		}
+		if source == "" {
 			t.Errorf("family %q routes with an empty admission source", spec.Family)
 		}
-	}
-	if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyDeadline, Outcome: TraceOutcomeNoChange}); routed {
-		t.Error("D-DEADLINE routed a non-effect arm; only its stop arms may enqueue")
+		if err := validateSessionStartAdmission("ga-detector", source); err != nil {
+			t.Errorf("family %q admission source %q is not accepted by the controller: %v", spec.Family, source, err)
+		}
+		for _, outcome := range detectorShadowOutcomes {
+			if outcome == effect {
+				continue
+			}
+			if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: outcome}); routed {
+				t.Errorf("family %q routed non-effect outcome %q; only its effect arm may enqueue", spec.Family, outcome)
+			}
+		}
 	}
 	for _, family := range []detectorFamily{
 		detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilyStaleCreate,

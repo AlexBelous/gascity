@@ -1524,6 +1524,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	asyncStopTracker := reconcileOpts.asyncStopTracker
 	legacyDrainAckStopExcluded := reconcileOpts.legacyStartExcluded
 	legacyDeadlineStopExcluded := reconcileOpts.legacyDeadlineStopExcluded
+	legacyOrphanCloseExcluded := reconcileOpts.legacyOrphanCloseExcluded
+	// Coexistence seam for the acting D-ORPHAN close family: while the keyed
+	// controller holds this exact key, both legacy close arms yield entirely —
+	// no ClosePatch, no status close, no work-release cascade. Like the deadline
+	// seam this is not a race to lose: both writers read the same durable row on
+	// the same tick, so an un-yielding legacy would double-close by
+	// construction. Retired at WE with the god function.
+	legacyOrphanCloseKeyed := func(info sessionpkg.Info, site TraceSiteCode, template, name string) bool {
+		if legacyOrphanCloseExcluded == nil || !legacyOrphanCloseExcluded(info) {
+			return false
+		}
+		if trace != nil {
+			trace.RecordDecision(site, TraceReasonCode("keyed_orphan_close_owner"), TraceOutcomeSkipped, template, name, traceRecordPayload{
+				"session_id":     info.ID,
+				"effect_owner":   "keyed",
+				"effect_applied": false,
+			})
+		}
+		return true
+	}
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
 			trace.RecordControllerOperation(site, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
@@ -1998,6 +2018,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
+					if legacyOrphanCloseKeyed(infoByID[id], TraceSiteReconcilerCloseFailedCreate, template, name) {
+						continue
+					}
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeClosed, template, name, nil)
 					}
@@ -2294,6 +2317,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								"liveness_error": livenessErr.Error(),
 							})
 						}
+						continue
+					}
+					if legacyOrphanCloseKeyed(infoByID[id], TraceSiteReconcilerCloseOrphan, template, name) {
 						continue
 					}
 					if trace != nil {

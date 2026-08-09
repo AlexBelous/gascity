@@ -44,7 +44,13 @@ func reconcileExactSessionDetectorFamily(
 	if clk == nil {
 		clk = clock.Real{}
 	}
-	switch { //nolint:gocritic // the seam is a table, not a branch: WD.3-14 each add one case
+	// Case order mirrors legacy's forward pass, where the not-desired block runs
+	// before the deadline arms and early-continues: an undesired row past its
+	// idle deadline is the orphan family's, not the deadline family's.
+	switch {
+	case detectorActOrphan && exactSessionOrphanCloseCandidate(params, info, response, clk) != "":
+		owner, err := reconcileExactSessionOrphanClose(ctx, admission, params, info, response, clk)
+		return true, owner, err
 	case detectorActDeadline && exactSessionDeadlineStopCandidate(params, info, response, clk.Now().UTC()):
 		owner, err := reconcileExactSessionDeadlineStop(ctx, admission, params, info, response, clk)
 		return true, owner, err

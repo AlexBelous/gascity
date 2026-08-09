@@ -371,7 +371,16 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			if _, err := os.Stat(source); err != nil {
 				t.Fatalf("stat live procfs %s for pane PID %q: %v", name, pid, err)
 			}
-			if err := os.Symlink(source, filepath.Join(procDir, name)); err != nil {
+			// Idempotent by PID. Registration is per-PANE, but a pane can be
+			// registered by more than one leg (and a poll loop can reach here on a
+			// retry), so an existing link for the same PID is the same fact, not a
+			// conflict. Re-linking became reachable once the configured-dependency
+			// leg was un-skipped at WD.10a and started registering its own pane.
+			link := filepath.Join(procDir, name)
+			if _, err := os.Lstat(link); err == nil {
+				continue
+			}
+			if err := os.Symlink(source, link); err != nil {
 				t.Fatalf("link live procfs %s for pane PID %q: %v", name, pid, err)
 			}
 		}

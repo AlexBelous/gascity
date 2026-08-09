@@ -59,7 +59,8 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // families whose keyed handler AND legacy yield have landed may act, and every
 // other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
 // arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4; D-STALE-CREATE at
-// WD.7; D-DUP at WD.13. A family that flips an act constant without an arm in
+// WD.7; D-DRIFT's CONVERGENCE arms at WD.8 and its DEFERRAL arms at WD.9;
+// D-DUP at WD.13. A family that flips an act constant without an arm in
 // detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
 // before it can double-act beside a non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
@@ -73,6 +74,7 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 		detectorFamilyDeadline:    {TraceOutcomeStop: true},
 		detectorFamilyOrphan:      {TraceOutcomeClosed: true, TraceOutcomeDrain: true},
 		detectorFamilyStaleCreate: {TraceOutcomeRollback: true},
+		detectorFamilyDrift:       {TraceOutcomeDrain: true},
 		detectorFamilyDup:         {TraceOutcomeNoChange: true},
 	}
 	if !detectorAnyFamilyActs() {
@@ -121,6 +123,39 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	}
 	if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyStaleCreate, Outcome: TraceOutcomeNoChange}); routed {
 		t.Error("D-STALE-CREATE routed its preserved arm; only its rollback arm may enqueue")
+	}
+	// D-DRIFT's split is CONVERGE vs DEFER, and it is invisible to detection:
+	// attachment is provider I/O, so both arms ride one condition and one source.
+	// Neither half can therefore be pinned by an outcome — each is pinned by its
+	// own constant, and each constant may only be true once BOTH that half's
+	// handler and that half's legacy yield have landed. Flipping one early would
+	// apply a keyed effect beside a legacy arm that has not stood down.
+	if !detectorActDriftConverge {
+		t.Error("detectorActDriftConverge must be true from WD.8: the convergence handler and withLegacyConfigDriftConvergeExclusion have landed")
+	}
+	if !detectorActDriftDefer {
+		t.Error("detectorActDriftDefer must be true from WD.9: applyExactSessionConfigDriftDeferral and withLegacyConfigDriftDeferExclusion have landed")
+	}
+	if source, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyDrift, Outcome: TraceOutcomeDrain}); !routed || source != sessionStartAdmissionConfigDrift {
+		t.Errorf("D-DRIFT routed=%v under source %q, want both its halves under the single source %q", routed, source, sessionStartAdmissionConfigDrift)
+	}
+	// The deferral outcomes are the family's own, and they must NOT open a second
+	// enqueue path: a deferral is decided inside the handler, off the same
+	// admission the convergence arms ride.
+	for _, outcome := range []TraceOutcomeCode{TraceOutcomeDeferredAttached, TraceOutcomeDeferredActive, TraceOutcomeDeferredPending} {
+		if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyDrift, Outcome: outcome}); routed {
+			t.Errorf("D-DRIFT routed deferral outcome %q; its A6 half rides the convergence admission, not a second one", outcome)
+		}
+	}
+	// One source per family arm: D-DRIFT's two SITES (ConfigDrift, LiveDrift)
+	// are one arm behind one legacy yield, so they must not have grown a second
+	// source that would make each site's yield stand down for the other's rows.
+	for _, family := range []detectorFamily{detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilyStaleCreate, detectorFamilyDup} {
+		for _, outcome := range detectorShadowOutcomes {
+			if source, routed := detectorAdmissionSourceFor(detectorCondition{Family: family, Outcome: outcome}); routed && source == sessionStartAdmissionConfigDrift {
+				t.Errorf("family %q routed outcome %q under D-DRIFT's admission source", family, outcome)
+			}
+		}
 	}
 	// D-DUP raises exactly one arm — one condition per loser row — so it routes
 	// on the family alone. Pin that so a future second arm cannot ride in

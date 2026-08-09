@@ -47,6 +47,12 @@ const (
 	// key: a crash-stranded pending create whose lease has expired with no
 	// runtime, for one exact durable session ID.
 	sessionStartAdmissionStaleCreate sessionStartAdmissionSource = "stale_create"
+	// sessionStartAdmissionConfigDrift is the detector sweep's D-DRIFT key: a
+	// session whose stored core or live fingerprint no longer matches the config
+	// it is declared with. One source serves both legacy sites (ConfigDrift and
+	// LiveDrift) because they are two spellings of one convergence ladder behind
+	// one legacy yield.
+	sessionStartAdmissionConfigDrift sessionStartAdmissionSource = "config_drift"
 	// sessionStartAdmissionDuplicateNamed is the detector sweep's D-DUP key
 	// (DETECTOR.md §3): the retire of ONE duplicate configured-named session row,
 	// keyed on that loser's exact durable session ID. One key per loser, so a
@@ -691,6 +697,7 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionOrphanClose,
 		sessionStartAdmissionOrphanDrain,
 		sessionStartAdmissionStaleCreate,
+		sessionStartAdmissionConfigDrift,
 		sessionStartAdmissionDuplicateNamed:
 		return nil
 	default:
@@ -947,6 +954,48 @@ func (c *sessionStartController) ownsStaleCreateRollback(sessionID string) bool 
 	defer c.mu.Unlock()
 	_, ok := c.admissions[sessionID]
 	return ok
+}
+
+// ownsConfigDriftConverge reports whether the keyed controller currently holds
+// ANY admission for this exact key. It takes WD.7's ownership semantics rather
+// than WD.2's, and the choice is deliberate on both halves.
+//
+// Not source-gated, because the handler-dispatch seam guards on the DURABLE ROW
+// (seam rule 1) and the controller coalesces admissions on a key while keeping
+// the earlier source. Config drift is the family where that bites hardest: a
+// config edit drifts the whole fleet at once, so a drift key routinely lands on
+// a key that already carries an in_process or anti_entropy admission. Every one
+// of those runs the keyed converge ladder, so a source-gated yield would leave
+// legacy converging the same row at the same moment — the ga-f7v2ft.125 hole,
+// on legacy's side.
+//
+// The predicate's other half — "and this arm is really keyed's" — is the
+// CALLER's, and it is answered twice at each legacy site: the site re-derives
+// the drift key it is about to act on, and the yield is installed at the
+// CONVERGENCE effects only, with the deferral arms carrying their own bridge.
+// Retired at WE with the god function.
+func (c *sessionStartController) ownsConfigDriftConverge(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.admissions[sessionID]
+	return ok
+}
+
+// ownsConfigDriftDefer reports whether the keyed controller currently holds an
+// admission that will run the D-DRIFT ladder's A6 half for this exact key. It
+// answers identically to ownsConfigDriftConverge, and that is not an accident to
+// be collapsed: the family's converge and defer arms ride ONE detected
+// condition and ONE admission source because the fact that forks them —
+// attachment — is provider I/O the detector may not pay, so an admitted key is
+// an admission to the whole ladder. What is genuinely separate is the YIELD:
+// each half's legacy counterpart stands down through its own option, which is
+// what let the two halves cross in two slices without ever leaving an attached
+// session undefended.
+func (c *sessionStartController) ownsConfigDriftDefer(sessionID string) bool {
+	return c.ownsConfigDriftConverge(sessionID)
 }
 
 // ownsDuplicateNamedRetire reports whether the keyed controller currently holds

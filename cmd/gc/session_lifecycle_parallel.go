@@ -330,6 +330,8 @@ type startExecutionOptions struct {
 	legacyOrphanCloseExcluded         func(sessionpkg.Info) bool
 	legacyOrphanDrainExcluded         func(sessionpkg.Info) bool
 	legacyStaleCreateRollbackExcluded func(sessionpkg.Info) bool
+	legacyConfigDriftConvergeExcluded func(sessionpkg.Info) bool
+	legacyConfigDriftDeferExcluded    func(sessionpkg.Info) bool
 	legacyDuplicateRetireExcluded     func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
@@ -513,6 +515,54 @@ func withLegacyOrphanDrainExclusion(excluded func(sessionpkg.Info) bool) startEx
 func withLegacyStaleCreateRollbackExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyStaleCreateRollbackExcluded = excluded
+	}
+}
+
+// withLegacyConfigDriftConvergeExclusion installs the keyed-ownership bridge for
+// the D-DRIFT CONVERGENCE arms. Returning true keeps the fleet loop out of the
+// silent rebaseline write, the launch-only relaunch, the named restart-in-place,
+// the ordinary drift drain, and the live re-apply — because the keyed handler
+// already owns that exact key and converges the same row from the same durable
+// hashes. Like the deadline seam and unlike the start seam this is not a race to
+// lose: both writers compare the same two fingerprints on the same tick, so an
+// un-yielding legacy relaunches the agent twice, or drains a session the keyed
+// handler just relaunched.
+//
+// It is installed at the CONVERGENCE effects only, never at the top of the drift
+// block, and its deferral counterpart below is installed at the deferral effects
+// for the same reason: each arm's legacy counterpart stands down exactly when
+// the keyed handler owns THAT arm, so no arm is ever unguarded by both writers.
+//
+// Retired at WE with the god function.
+func withLegacyConfigDriftConvergeExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyConfigDriftConvergeExcluded = excluded
+	}
+}
+
+// withLegacyConfigDriftDeferExclusion installs the keyed-ownership bridge for
+// the D-DRIFT DEFERRAL arms. Returning true keeps the fleet loop out of the
+// attached window stamp, the named bounded-window stamp, and the two
+// drain-cancel arms — because the keyed handler already owns that exact key and
+// writes the same durable stamps through the same metadata keys. An un-yielding
+// legacy would refresh the attached window a second time on the tick the keyed
+// handler wrote it, which is a Dolt commit per session per tick for every
+// attached drifted row — the exact churn sessionAttachedConfigDriftRefreshInterval
+// exists to prevent.
+//
+// It is a SEPARATE option from the convergence bridge, not a wider one, because
+// the two arms crossed in separate slices: while only convergence had landed,
+// legacy's deferral arms had to keep stamping or an attached session would have
+// been defended by nobody. The call site guards the deferral arms on BOTH
+// predicates for the same reason (session_reconciler.go): standing legacy's
+// deferral arm down while its convergence arms still ran would drop an attached
+// session through the ladder into a relaunch or a drain, which is the one
+// outcome A6 forbids.
+//
+// Retired at WE with the god function.
+func withLegacyConfigDriftDeferExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyConfigDriftDeferExcluded = excluded
 	}
 }
 

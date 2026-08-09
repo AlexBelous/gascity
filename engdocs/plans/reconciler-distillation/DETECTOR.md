@@ -951,7 +951,25 @@ for the DrainAdvance phase had drifted to `:4282-4290`.
    record (site ∈ the drain/stop/wake set, outcome ∈ the applied set,
    `effect_owner` ≠ keyed/detector-shadow) names the drained row or its sibling.
    Same logic as ruling 3's sibling respec: isolation of effects, not silence of
-   the fleet.
+   the fleet. **Both legs are un-skipped**
+   (`routed_work_drain_finalize`, `routed_work_sibling_retirement`).
+11. **JOURNEY RUN OWED.** The un-skipped legs were exercised at unit/process
+   level only; the full `TestExactSessionStartNativeV59RealBDTmuxJourney` is
+   HOST-blocked at slice time, and the block is upstream of every drain leg. Its
+   `gc init` fixture bootstrap fails with bd v1.1.0 (the `deps.env` pin) —
+   `legacy Dolt server workspace detected; explicit migration is required before
+   this bd version can open or modify the workspace` — so the run never reaches
+   `:1782`. Nothing on the init path is touched by this slice; the
+   `live_socket_noop` sibling leg passes. Standing proof in the meantime:
+   `TestExactAckedDrainReachesStopPendingOnceByKey` (stop-pending exactly once
+   by key, then release), `TestReconcileExactDrainAckRequiresAtomicCloseBeforeStop`
+   (auto + require, atomic close before stop),
+   `TestExactDrainAdvanceCompletesWhenTheProcessExited` (finalize to drained),
+   `TestRoutedWorkPoolAllocationCanonicalSingletonRetiresByExactDrainAck`
+   (process-level retire by exact drain-ack) and
+   `TestSiblingPoolIsolationMetadataDiff` (the respecced sibling comparison). The
+   journey re-run on a host with a migrated bd workspace is owed before WE
+   sign-off.
 
 ### §3 D-STALE-CREATE deltas (recorded at WD.7)
 

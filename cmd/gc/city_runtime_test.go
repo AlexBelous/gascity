@@ -791,6 +791,11 @@ func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
 		t.Fatalf("Create routed work: %v", err)
 	}
 
+	// The ready-demand scan is floored at readyDemandFingerprintFloor, so put
+	// this second tick where a real patrol tick always is — past the floor.
+	// Every patrol_interval at or above the floor (the 30s default included)
+	// lands here; see TestCityRuntimeReadyDemandFingerprintFloorsPatrolRescan.
+	cr.readyDemandFingerprintAt = time.Now().Add(-2 * readyDemandFingerprintFloor)
 	second := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	if buildCalls != 2 {
 		t.Fatalf("buildDesiredState call count = %d, want 2 after ready-demand change", buildCalls)
@@ -2289,6 +2294,154 @@ func TestCityRuntimeDemandSnapshotPokeDoesNotScanReadyFingerprint(t *testing.T) 
 	}
 	if store.readyCalls != 0 {
 		t.Fatalf("Ready calls = %d, want 0 for forced non-patrol rebuild", store.readyCalls)
+	}
+}
+
+// unstableErrorReadyStore fails Ready with a different message every call, the
+// way a real store outage reports varying connection ids, retry counts, or
+// timestamps.
+type unstableErrorReadyStore struct {
+	beads.Store
+	readyCalls int
+}
+
+func (s *unstableErrorReadyStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	s.readyCalls++
+	return nil, fmt.Errorf("dial dolt: connection %d refused at %d", s.readyCalls, s.readyCalls*7)
+}
+
+func TestCityRuntimeReadyDemandFingerprintFloorsPatrolRescan(t *testing.T) {
+	store := &readyStaticStore{Store: beads.NewMemStore(), ready: []beads.Bead{{ID: "work-1", Status: "open"}}}
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+	if !cr.demandSnapshotsEnabled() {
+		t.Fatal("demand snapshots must be enabled for this fixture")
+	}
+
+	sessionBeads := newSessionBeadSnapshot(nil)
+
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if store.readyCalls != 1 {
+		t.Fatalf("Ready calls after first patrol = %d, want 1", store.readyCalls)
+	}
+
+	// A second patrol tick inside the floor reuses the previous fingerprint
+	// instead of re-running the cache-bypassing ReadyLive scan against every
+	// store.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if store.readyCalls != 1 {
+		t.Fatalf("Ready calls after sub-interval second patrol = %d, want 1 (floored)", store.readyCalls)
+	}
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState calls = %d, want 1", buildCalls)
+	}
+
+	// Certified-readiness wakes (routed-work / wait-dep pokes) are non-patrol
+	// triggers, so they bypass the floor and rebuild immediately.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "poke", false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState calls after poke = %d, want 2 (poke must bypass the floor)", buildCalls)
+	}
+
+	// Once the floor elapses the scan runs again: at the default 30s patrol
+	// cadence every tick is past the floor, so behavior is unchanged.
+	cr.readyDemandFingerprintAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if store.readyCalls != 2 {
+		t.Fatalf("Ready calls after floor elapsed = %d, want 2", store.readyCalls)
+	}
+}
+
+func TestCityRuntimeReadyDemandFingerprintDefaultCadenceScansEveryTick(t *testing.T) {
+	store := &readyStaticStore{Store: beads.NewMemStore(), ready: []beads.Bead{{ID: "work-1", Status: "open"}}}
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	sessionBeads := newSessionBeadSnapshot(nil)
+	const ticks = 4
+	for i := range ticks {
+		if i > 0 {
+			// Advance the clock by one default patrol interval.
+			cr.readyDemandFingerprintAt = cr.readyDemandFingerprintAt.Add(-runtimeDemandSnapshotMaxAge)
+		}
+		_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	}
+	if store.readyCalls != ticks {
+		t.Fatalf("Ready calls across %d default-cadence patrols = %d, want %d (floor must be a no-op)", ticks, store.readyCalls, ticks)
+	}
+}
+
+func TestCityRuntimeReadyDemandFingerprintStableAcrossUnstableStoreErrors(t *testing.T) {
+	oldLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(oldLogOutput) })
+
+	store := &unstableErrorReadyStore{Store: beads.NewMemStore()}
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	first := cr.readyDemandSnapshotFingerprint()
+	second := cr.readyDemandSnapshotFingerprint()
+	if first != second {
+		t.Fatalf("readyDemandSnapshotFingerprint changed across an unstable store outage: %q != %q", first, second)
+	}
+
+	// The outage must degrade to cache reuse, not a per-tick buildDesiredState
+	// rebuild storm.
+	sessionBeads := newSessionBeadSnapshot(nil)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	for range 3 {
+		cr.readyDemandFingerprintAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
+		_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	}
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState calls across a store outage = %d, want 1 (stable marker, no rebuild storm)", buildCalls)
 	}
 }
 

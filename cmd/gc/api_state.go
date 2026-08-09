@@ -95,6 +95,10 @@ type controllerState struct {
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
 	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	// executionCompletionMemo bounds the patrol-cadence completion reconcile to
+	// roots it has not already fully projected. Process-local and guarded by mu;
+	// see reconcileExecutionCompletions.
+	executionCompletionMemo *executionevent.CompletionMemo
 
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
@@ -592,7 +596,7 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 	// graph.v2 executions normally live in the individual rig work stores.
 	// Scan both surfaces in stable order, collapsing wrappers first so aliases
 	// are not scanned more than once.
-	cs.mu.RLock()
+	cs.mu.Lock()
 	stores := []beads.Store{
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
 		cs.cityBeadStore,
@@ -601,7 +605,16 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 	for name, store := range cs.beadStores {
 		rigStores[name] = store
 	}
-	cs.mu.RUnlock()
+	// Retained closed roots accumulate for the life of the city while wisp GC
+	// stays disabled, so the pass carries a process-local memo of the ones it
+	// has already fully projected. A controller that has just booted (or
+	// crashed and restarted) starts with an empty memo and replays the full
+	// pass, which is what makes the boot-time repair unconditional.
+	if cs.executionCompletionMemo == nil {
+		cs.executionCompletionMemo = executionevent.NewCompletionMemo()
+	}
+	memo := cs.executionCompletionMemo
+	cs.mu.Unlock()
 
 	rigNames := make([]string, 0, len(rigStores))
 	for name := range rigStores {
@@ -627,7 +640,7 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 		}
 		graphStores = append(graphStores, beads.GraphStore{Store: store})
 	}
-	executionevent.ReconcileCompletedStores(ep, graphStores, "execution-reconcile")
+	executionevent.ReconcileCompletedStoresMemo(ep, graphStores, "execution-reconcile", memo)
 }
 
 // uncachedBeadStore peels the controller's policy/cache read layers so a

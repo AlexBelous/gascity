@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -307,21 +308,112 @@ func ReconcileCompleted(recorder events.Provider, graphStore beads.GraphStore, a
 	return ReconcileCompletedStores(recorder, []beads.GraphStore{graphStore}, actor)
 }
 
+// CompletionMemo remembers roots whose closed steps a reconcile pass has
+// already projected in full, so a steady-state pass re-reads neither the
+// completion journal nor those roots' steps. Retained closed roots accumulate
+// forever while wisp GC stays disabled, and re-walking all of them every patrol
+// tick is what this bounds.
+//
+// A root settles only when it is closed AND every one of its steps is closed
+// and carries its completion fact. Such a root has nothing left for a later
+// event-silent raw-bd close to produce: that needs an open step, and a settled
+// root has none. Any change to the root row itself un-settles it, and the memo
+// is process-local, so boot and crash restart always replay the full pass.
+//
+// The zero value is not usable; a nil *CompletionMemo is, and settles nothing —
+// that is the pre-memo behavior ReconcileCompletedStores keeps.
+type CompletionMemo struct {
+	settled map[string]time.Time
+}
+
+// NewCompletionMemo returns an empty memo, which replays the full pass once
+// before it can skip anything.
+func NewCompletionMemo() *CompletionMemo {
+	return &CompletionMemo{settled: make(map[string]time.Time)}
+}
+
+func (m *CompletionMemo) isSettled(root beads.Bead) bool {
+	if m == nil {
+		return false
+	}
+	at, ok := m.settled[root.ID]
+	return ok && at.Equal(rootRevisionMarker(root))
+}
+
+func (m *CompletionMemo) settle(root beads.Bead) {
+	if m == nil {
+		return
+	}
+	m.settled[root.ID] = rootRevisionMarker(root)
+}
+
+func (m *CompletionMemo) forget(root beads.Bead) {
+	if m == nil {
+		return
+	}
+	delete(m.settled, root.ID)
+}
+
+// rootRevisionMarker is the change signal a settled root is keyed on.
+// UpdatedAt is zero for legacy rows, where CreatedAt is the stable stand-in.
+func rootRevisionMarker(root beads.Bead) time.Time {
+	if !root.UpdatedAt.IsZero() {
+		return root.UpdatedAt
+	}
+	return root.CreatedAt
+}
+
 // ReconcileCompletedStores repairs completion facts across graph stores with
 // one journal read. The completed-fact index is updated after each append so
 // the pass remains idempotent even when more than one source is scanned.
 func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.GraphStore, actor string) int {
+	return ReconcileCompletedStoresMemo(recorder, graphStores, actor, nil)
+}
+
+// ReconcileCompletedStoresMemo is ReconcileCompletedStores bounded by a memo of
+// already fully-projected roots. A tick that finds no unsettled root returns
+// without reading the journal or walking a single step.
+func ReconcileCompletedStoresMemo(recorder events.Provider, graphStores []beads.GraphStore, actor string, memo *CompletionMemo) int {
 	if recorder == nil {
 		return 0
 	}
-	hasStore := false
+
+	// Select the roots that still need a step walk BEFORE touching the journal,
+	// so a steady-state tick over retained closed roots reads nothing at all.
+	type pendingStore struct {
+		store beads.GraphStore
+		roots []beads.Bead
+	}
+	var pending []pendingStore
 	for _, graphStore := range graphStores {
-		if graphStore.Store != nil {
-			hasStore = true
-			break
+		if graphStore.Store == nil {
+			continue
+		}
+		roots, err := graphStore.ListByMetadata(
+			map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+			0,
+			beads.IncludeClosed,
+			beads.WithBothTiers,
+		)
+		if err != nil {
+			continue
+		}
+		sort.Slice(roots, func(i, j int) bool { return roots[i].ID < roots[j].ID })
+		unsettled := make([]beads.Bead, 0, len(roots))
+		for _, root := range roots {
+			if root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
+				continue
+			}
+			if memo.isSettled(root) {
+				continue
+			}
+			unsettled = append(unsettled, root)
+		}
+		if len(unsettled) > 0 {
+			pending = append(pending, pendingStore{store: graphStore, roots: unsettled})
 		}
 	}
-	if !hasStore {
+	if len(pending) == 0 {
 		return 0
 	}
 
@@ -339,35 +431,23 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 	}
 
 	emitted := 0
-	for _, graphStore := range graphStores {
-		if graphStore.Store == nil {
-			continue
-		}
-		roots, err := graphStore.ListByMetadata(
-			map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
-			0,
-			beads.IncludeClosed,
-			beads.WithBothTiers,
-		)
-		if err != nil {
-			continue
-		}
-		sort.Slice(roots, func(i, j int) bool { return roots[i].ID < roots[j].ID })
-		for _, root := range roots {
-			if root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
-				continue
-			}
-			definitions, err := currentSteps(graphStore, root.ID)
+	for _, entry := range pending {
+		for _, root := range entry.roots {
+			definitions, err := currentSteps(entry.store, root.ID)
 			if err != nil {
+				memo.forget(root)
 				continue
 			}
+			fullyProjected := isClosedStatus(root.Status)
 			for _, definition := range definitions {
-				step, err := graphStore.Get(definition.BeadID)
-				if err != nil || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+				step, err := entry.store.Get(definition.BeadID)
+				if err != nil || !isClosedStatus(step.Status) {
+					fullyProjected = false
 					continue
 				}
 				event, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, actor)
 				if !ok {
+					fullyProjected = false
 					continue
 				}
 				key := completedFactKeyFor(event)
@@ -378,9 +458,18 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 				completed[key] = struct{}{}
 				emitted++
 			}
+			if fullyProjected {
+				memo.settle(root)
+			} else {
+				memo.forget(root)
+			}
 		}
 	}
 	return emitted
+}
+
+func isClosedStatus(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "closed")
 }
 
 // completedFacts returns the retained completion journal, including a

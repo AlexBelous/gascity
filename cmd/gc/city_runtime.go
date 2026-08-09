@@ -168,6 +168,11 @@ type CityRuntime struct {
 	// because it is the one call site with a cross-tick identity and the one
 	// that routes.
 	orphanSuspendDeferrals *detectorSuspendDeferralTracker
+	// sleepIdleProbeCursor is the detector's own round-robin position over
+	// D-SLEEP's idle-probe candidates (DETECTOR.md §2, "probe cursor"). Guarded
+	// by sessionStartMu and created on first use; supplied by beadReconcileTick
+	// alone, for the same reason orphanSuspendDeferrals is.
+	sleepIdleProbeCursor *detectorIdleProbeCursor
 	// guarded by sessionStartMu; startup retries reuse this runtime's one
 	// controller-state admission owner.
 	readyRoutedWorkEventAdmissionInstalled bool
@@ -2912,6 +2917,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		Idle:               cr.it,
 		MaxAge:             cr.mat,
 		SuspendDeferrals:   cr.detectorSuspendDeferrals(),
+		IdleProbes:         cr.detectorIdleProbes(),
 		Clock:              clock.Real{},
 		StartupTimeout:     cr.cfg.Session.StartupTimeoutDuration(),
 		StoreQueryPartial:  result.snapshotQueryPartial(),

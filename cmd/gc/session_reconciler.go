@@ -1526,6 +1526,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	legacyDeadlineStopExcluded := reconcileOpts.legacyDeadlineStopExcluded
 	legacyOrphanCloseExcluded := reconcileOpts.legacyOrphanCloseExcluded
 	legacyOrphanDrainExcluded := reconcileOpts.legacyOrphanDrainExcluded
+	legacySleepDrainExcluded := reconcileOpts.legacySleepDrainExcluded
 	// Coexistence seam for the acting D-ORPHAN close family: while the keyed
 	// controller holds this exact key, both legacy close arms yield entirely —
 	// no ClosePatch, no status close, no work-release cascade. Like the deadline
@@ -3970,6 +3971,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				cancelSessionDrainInfo(info, sp, dt)
 				continue
 			}
+			// Coexistence seam for the acting D-SLEEP family (WD.5). While the
+			// keyed controller holds this exact key, everything below stands down:
+			// the idle probe stays unconsumed, no idle-stop-pending mark lands, and
+			// no drain begins. Both writers share one in-memory tracker and one
+			// probe on the same tick, so this is not a race to lose — an
+			// un-yielding legacy would double-begin, or consume the very
+			// confirmation the keyed handler is waiting on. Retired at WE.
+			if legacySleepDrainExcluded != nil && legacySleepDrainExcluded(info) {
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode("keyed_sleep_owner"), TraceOutcomeSkipped, target.tp.TemplateName, name, traceRecordPayload{
+						"session_id": info.ID,
+					})
+				}
+				continue
+			}
 			var reason string
 			switch {
 			case intent == "idle-stop-pending":
@@ -5729,24 +5745,45 @@ func launchIdleProbes(
 	if len(idleProbeTargets) == 0 || dt == nil || sp == nil {
 		return
 	}
-	wp, ok := sp.(runtime.IdleWaitProvider)
-	if !ok {
-		return
-	}
 	for _, target := range wakeTargets {
 		if strings.TrimSpace(target.info.ID) == "" || !idleProbeTargets[target.info.ID] {
 			continue
 		}
-		name := infoByID[target.info.ID].SessionNameMetadata
-		probe := dt.startIdleProbe(target.info.ID)
-		if name == "" || probe == nil {
-			continue
-		}
-		go func(beadID, sessionName string, probe *idleProbeState) {
-			err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeout)
-			dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
-		}(target.info.ID, name, probe)
+		launchIdleProbeForSession(ctx, dt, sp, clk, target.info.ID, infoByID[target.info.ID].SessionNameMetadata)
 	}
+}
+
+// launchIdleProbeForSession starts ONE async WaitForIdle probe and reports
+// whether it started. It is the whole per-session half of the idle-probe engine:
+// the fleet loop drives it from its own budgeted target set, and the keyed
+// D-SLEEP handler drives it from a single admitted key (DETECTOR.md §3 — the
+// budget stays detector-side, the launch moves handler-side). A session that
+// already has a probe in flight, or a provider that cannot wait for idle, is a
+// no-op, so a second caller can never stack two probes on one session.
+func launchIdleProbeForSession(
+	ctx context.Context,
+	dt *drainTracker,
+	sp runtime.Provider,
+	clk clock.Clock,
+	beadID string,
+	sessionName string,
+) bool {
+	if dt == nil || sp == nil || strings.TrimSpace(beadID) == "" || strings.TrimSpace(sessionName) == "" {
+		return false
+	}
+	wp, ok := sp.(runtime.IdleWaitProvider)
+	if !ok {
+		return false
+	}
+	probe := dt.startIdleProbe(beadID)
+	if probe == nil {
+		return false
+	}
+	go func() {
+		err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeout)
+		dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
+	}()
+	return true
 }
 
 func clearCompletedIdleProbe(beadID string, dt *drainTracker) {

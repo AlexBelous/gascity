@@ -717,6 +717,115 @@ deferred-interrupt rescue window — today's semantics, and WD.6 inherits it.
    by some other admission still lands on WD.3's active-drain refusal, which
    is correct — advancing a drain is D-DRAIN's (WD.6).
 
+### §3 D-SLEEP deltas (recorded at WD.5)
+
+Where the no-wake family as built diverges from §3 as written. Reported, not
+improvised.
+
+1. **The effect arm is NARROWER than legacy's, and the narrowing is the
+   handler-answers-from-the-row rule, not a shortcut.** §3's condition is
+   "alive ∧ not in the awake set". Legacy's own drain arm stamps one of
+   five reasons for such a row (session_reconciler.go:3973-3985), and the
+   last of them — plain `no-wake-reason` — means "ComputeAwakeSet found no
+   reason to be awake", a FLEET verdict over pool counts, named and routed
+   demand and the ready-wait set. No per-key predicate can re-derive it, and
+   the seam's rule is that the detector's reason is a hint while the row is
+   the authority. Unlike WD.3's undesiredness, publishing the fleet view
+   would not help: the reason ladder is not one bit but a five-way choice
+   whose branches carry different effects (the `idle` branch marks
+   `sleep_intent` and waits on a probe; the others drain immediately), so a
+   published verdict the handler cannot check would be exactly the trusted
+   reason the seam forbids. WD.5 therefore acts on the two rungs the handler
+   CAN re-derive per key — a durable `sleep_intent`, and the sleep-policy
+   suppression pass — and records the fleet-only rows under
+   `detector_no_wake_fleet_only` with a non-routing outcome, leaving them to
+   legacy for this wave. They come back with D-WAKE (WD.10a/b), which is
+   where the fleet demand rungs get their keyed home.
+2. **The sleep-policy/ConfigSuppressed pass moves INTO detection, minus its
+   two provider probes.** §3 names the pass (:3550-3591, now :3666-3704) as
+   part of the condition, and it has to be: it is the only rung that fires
+   for a workspace `session_sleep` window, which is the idle-sleep
+   production path and the anchor test's own mechanism. The sweep therefore
+   runs `resolveSessionSleepPolicyInfo` + `configWakeSuppressedInfo` +
+   `wakeDemandOverridesSleepSuppression` per live row, which costs one
+   capability read (unrecorded, in-memory on every provider) and — only for
+   a row whose policy is actually enabled — one `GetLastActivity`, already a
+   declared §2 input. The two rungs it does NOT run are
+   `pendingInteractionReady` and the attachment probe: §2 moves both
+   handler-side by name, §3b already marks D-SLEEP's "probe/pending arms
+   unpredicted", and the handler pays both before it drains anything. The
+   detector's suppression is therefore the WIDER view and the handler is the
+   authority — the same direction of asymmetry WD.3 recorded for kept-open.
+   The pass is evaluated for every live row rather than only for
+   `ShouldWake` rows, because it is also the predicate that decides whether
+   a row's no-wake verdict is re-derivable at all (delta 1).
+3. **One act constant for the whole family, unlike D-ORPHAN.** WD.4 split
+   `detectorActOrphan` because that family's two effect arms landed a slice
+   apart. D-SLEEP's probe and drain are two rungs of ONE ladder on ONE key
+   that land together here, so a second constant would gate nothing, and the
+   act-frontier pin's "no two effect arms share an admission source" holds
+   trivially: there is one arm and one source. The probe is not a second
+   effect — it is the confirmation the idle drain waits on, and legacy runs
+   both in the same pass for the same session.
+4. **The probe budget stays detector-side as a SECOND cursor, and it gates
+   the ENQUEUE.** §2 names "probe cursor" as bounded in-memory detector
+   state and §3 keeps `maxIdleSleepProbesPerTick` detector-side, so
+   `detectorIdleProbeCursor` grants slots round-robin over the sweep's
+   pinned candidate order and only the winners are enqueued; the losers
+   record `detector_idle_probe_budget` and wait a sweep. It is a second
+   cursor rather than legacy's for the reason WD.4 gave the named suspend
+   window its own counter: legacy keeps advancing its own position over its
+   own candidate list on the same tick, and one shared position would
+   interleave two round-robins and starve rows neither meant to skip. The
+   ceiling itself is shared — both sides subtract the probes actually in
+   flight (`drainTracker.activeIdleProbes`) — so the two schedules cannot
+   between them exceed the fleet's per-tick probe rate. Only the patrol/boot
+   call site supplies a cursor (WD.2 delta 6 again); a nil cursor grants
+   nothing, which defers rather than drains.
+5. **A6 becomes an explicit handler rung here too, and it is REQUIRED rather
+   than a strengthening.** WD.4 added the attached/pending-interaction
+   refusal to the orphan drain as a strengthening of legacy. For D-SLEEP it
+   is not optional: the sweep hands `ComputeAwakeSet` an EMPTY
+   `AttachedSessions`/`PendingSessions` map by design, so the detector's
+   no-wake verdict is blind to exactly the two facts legacy consults before
+   it suppresses a wake. The handler reuses WD.4's predicate verbatim —
+   renamed `exactSessionActiveUseDeferralReason`, one rung with one spelling
+   for both drain families — and it sits ABOVE the probe rung, so an
+   attached session is not even probed.
+6. **The seam guard has to carry the suppression check, because every rung
+   above it is the shape of an ordinary running session.** D-DEADLINE's
+   guard is narrow (a fired timer), D-ORPHAN's is narrow (an undesired row);
+   "awake, unpinned, unheld" is the shape of every healthy session, so a
+   guard that stopped at the durable rungs would claim every admission on
+   every live key and divert it out of the ordinary start path. The guard
+   therefore ends with the durable-intent test or the policy suppression
+   test, and `configWakeSuppressedInfo` short-circuits on pure config
+   (`policy.enabled()`) before any provider read — so on a city that
+   configures no sleep the family costs nothing and claims nothing. A nil
+   drain tracker or provider likewise fails the guard rather than the
+   handler: without them there is no intent to record and no probe state to
+   read, so the row is legacy's.
+7. **The legacy yield sits below the #3994 keep-alive escape.**
+   `withLegacySleepDrainExclusion`/`ownsSleepDrain` are siblings of the
+   orphan-drain pair for the reason WD.2, WD.3 and WD.4 all recorded. The
+   placement matters: legacy's escape CANCELS a drain a heartbeat hold has
+   overtaken, and the keyed family never enqueues a held row, so a yield
+   above the escape would disable a cancel nobody replaced. Below it, the
+   yield covers everything that is actually shared and destructive — the
+   idle-probe consumption (`shouldBeginIdleDrainInfo` clears the probe it
+   reads, so an un-yielded legacy would retract the very confirmation the
+   keyed handler is waiting on), the `idle-stop-pending` write, and the
+   drain begin into the one shared in-memory tracker.
+8. **A suspended-but-still-running row is out of scope, as WD.1 already left
+   it.** Legacy's arm keys on runtime liveness, so it drains a
+   `state=suspended` row whose runtime is still up. The sweep probes
+   liveness for bead-awake rows only (`detectorBeadAwake`, WD.1), so it
+   never sees such a row as alive, and the handler's guard uses the same
+   predicate deliberately — detection and re-derivation answer from one
+   predicate (the WD.13 delta 1 rule). Recorded rather than fixed here: the
+   fix belongs with whatever slice widens the sweep's liveness set, and
+   widening it inside this family would put the two sides back out of step.
+
 ### §3 D-STALE-CREATE deltas (recorded at WD.7)
 
 Where the rollback family as built diverges from §3 as written. Reported, not

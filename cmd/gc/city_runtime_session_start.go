@@ -763,6 +763,23 @@ func (cr *CityRuntime) detectorSuspendDeferrals() *detectorSuspendDeferralTracke
 	return cr.orphanSuspendDeferrals
 }
 
+// detectorIdleProbes returns this runtime's D-SLEEP round-robin probe cursor
+// for the detector sweep, creating it on first use. Only the patrol/boot tick
+// calls it: the control dispatcher and `gc start` run narrowed sweeps, and a
+// second sweep spending the same per-tick probe budget would double the fleet's
+// idle-probe rate.
+func (cr *CityRuntime) detectorIdleProbes() *detectorIdleProbeCursor {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	if cr.sleepIdleProbeCursor == nil {
+		cr.sleepIdleProbeCursor = newDetectorIdleProbeCursor()
+	}
+	return cr.sleepIdleProbeCursor
+}
+
 // desiredSessionNamesView returns the last published desired-session view, or
 // nil before the first patrol/boot tick has published one.
 func (cr *CityRuntime) desiredSessionNamesView() map[string]bool {
@@ -824,6 +841,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			}),
 			withLegacyDuplicateRetireExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsDuplicateNamedRetire(info.ID)
+			}),
+			withLegacySleepDrainExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsSleepDrain(info.ID)
 			}),
 		)
 	}

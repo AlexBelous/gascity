@@ -73,7 +73,11 @@ const (
 // back into one Acts bit. D-STALE-CREATE crossed at WD.7 (handler:
 // session_stale_create_reconcile.go; yield:
 // withLegacyStaleCreateRollbackExclusion). D-DUP crossed at WD.13 (handler:
-// session_dup_reconcile.go; yield: withLegacyDuplicateRetireExclusion). The
+// session_dup_reconcile.go; yield: withLegacyDuplicateRetireExclusion).
+// D-SLEEP crossed at WD.5 (handler: session_sleep_reconcile.go; yield:
+// withLegacySleepDrainExclusion) with ONE constant for its whole effect arm:
+// unlike D-ORPHAN its idle probe and its drain are two rungs of one ladder on
+// one key that landed in one slice, so a second constant would gate nothing. The
 // rest flip in the WE cutover commit, one family at a time, once the WD.15
 // parity window has cleared their must-match bar. They are compile-time
 // constants on purpose: this is not a config surface.
@@ -83,7 +87,7 @@ const (
 	detectorActOrphanDrain             = true
 	detectorActStaleCreate             = true
 	detectorActDrift                   = false
-	detectorActSleep                   = false
+	detectorActSleep                   = true
 	detectorActDrain                   = false
 	detectorActWake                    = false
 	detectorActZombie                  = false
@@ -130,6 +134,10 @@ const (
 	detectorReasonPendingCreatePreserved  TraceReasonCode = "detector_pending_create_preserved"
 	detectorReasonConfigDrift             TraceReasonCode = "detector_config_drift"
 	detectorReasonNoWake                  TraceReasonCode = "detector_no_wake"
+	detectorReasonNoWakeFleetOnly         TraceReasonCode = "detector_no_wake_fleet_only"
+	detectorReasonSleepKeepAlive          TraceReasonCode = "detector_sleep_keep_alive"
+	detectorReasonIdleProbePending        TraceReasonCode = "detector_idle_probe_pending"
+	detectorReasonIdleProbeBudget         TraceReasonCode = "detector_idle_probe_budget"
 	detectorReasonDrainInFlight           TraceReasonCode = "detector_drain_in_flight"
 	detectorReasonWakeTarget              TraceReasonCode = "detector_wake_target"
 	detectorReasonZombie                  TraceReasonCode = "detector_zombie"
@@ -160,6 +168,10 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonPendingCreatePreserved,
 	detectorReasonConfigDrift,
 	detectorReasonNoWake,
+	detectorReasonNoWakeFleetOnly,
+	detectorReasonSleepKeepAlive,
+	detectorReasonIdleProbePending,
+	detectorReasonIdleProbeBudget,
 	detectorReasonDrainInFlight,
 	detectorReasonWakeTarget,
 	detectorReasonZombie,
@@ -372,6 +384,15 @@ type detectorSweepInput struct {
 	// deferred, never drained on its first spec-absent tick.
 	SuspendDeferrals *detectorSuspendDeferralTracker
 
+	// IdleProbes carries D-SLEEP's round-robin probe position across sweeps
+	// (DETECTOR.md §2, "probe cursor"). Only the patrol/boot call site supplies
+	// one, for the same reason it is the only site that supplies SuspendDeferrals
+	// and Admit: it is the sole site with a cross-tick identity, and a second
+	// sweep spending the same per-tick probe budget would double the fleet's
+	// probe rate. A nil cursor grants no probe slots, which defers rather than
+	// drains.
+	IdleProbes *detectorIdleProbeCursor
+
 	// StoreQueryPartial marks a degraded view of the work/session stores. Every
 	// destructive family fails closed for the cycle.
 	StoreQueryPartial bool
@@ -458,9 +479,10 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 		infoByID[row.Info.ID] = row.Info
 	}
 
-	awake := detectorAwakeSet(in, known, liveness, now)
+	awake, wakeEvals := detectorAwakeSet(in, known, liveness, now)
 
 	namedIdentityRows := make(map[string][]sessionpkg.Info)
+	var idleProbeCandidates []detectorCondition
 
 	for _, row := range known {
 		if ctx != nil && ctx.Err() != nil {
@@ -510,10 +532,11 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 		detectZombie(emit, base, live)
 		detectDeadline(in, emit, base, info, template, live, now)
 		detectStall(in, emit, base, infoByID, tp, live, now)
-		detectWakeOrSleep(emit, base, name, awake, live)
+		detectWakeOrSleep(in, emit, base, info, awake, wakeEvals, live, &idleProbeCandidates, clk)
 		detectStranded(emit, base, info, desired, live, now)
 	}
 
+	detectorGrantIdleProbeSlots(in, emit, idleProbeCandidates)
 	detectDuplicateNamed(in, emit, namedIdentityRows)
 	// Retire every confirmation window this sweep did not count. A row that
 	// stopped raising named live-orphan candidacy — its spec came back, it went
@@ -614,7 +637,11 @@ func detectorProcessNames(cfg *config.City, info sessionpkg.Info) []string {
 // order. Attachment and pending-interaction probes are deliberately absent:
 // they are provider I/O and move handler-side, so their arms are unpredicted
 // (DETECTOR.md §3b, D-SLEEP "probe/pending arms unpredicted").
-func detectorAwakeSet(in detectorSweepInput, rows []sessionpkg.ReconcileSession, liveness map[string]detectorLivenessBits, now time.Time) map[string]AwakeDecision {
+// The wakeEvaluation map it returns beside the decisions is the same bridge
+// projection legacy feeds its sleep-policy pass (awakeSetToWakeEvals), so the
+// detector's ConfigSuppressed pass and legacy's answer the demand-override rung
+// from one derivation rather than two.
+func detectorAwakeSet(in detectorSweepInput, rows []sessionpkg.ReconcileSession, liveness map[string]detectorLivenessBits, now time.Time) (map[string]AwakeDecision, map[string]wakeEvaluation) {
 	input := AwakeInput{
 		ScaleCheckCounts:         in.PoolDesired,
 		NamedSessionDemand:       cloneBoolMap(in.NamedDemand),
@@ -640,7 +667,8 @@ func detectorAwakeSet(in detectorSweepInput, rows []sessionpkg.ReconcileSession,
 	detectorFillAwakeConfig(&input, in.Cfg, in.CityPath)
 	detectorFillAwakeWork(&input, in.AssignedWorkBeads, in.ReadyAssignedFlags)
 	detectorFillAwakeSessions(&input, in.Cfg, infos, now)
-	return ComputeAwakeSet(input)
+	decisions := ComputeAwakeSet(input)
+	return decisions, awakeSetToWakeEvals(decisions, input.SessionBeads)
 }
 
 func detectorFillAwakeConfig(input *AwakeInput, cfg *config.City, cityPath string) {
@@ -1067,13 +1095,22 @@ func detectDrain(in detectorSweepInput, emit *detectorConditionSink, base detect
 	return true
 }
 
-func detectWakeOrSleep(emit *detectorConditionSink, base detectorCondition, name string, awake map[string]AwakeDecision, live detectorLivenessBits) {
-	decision, ok := awake[name]
+func detectWakeOrSleep(
+	in detectorSweepInput,
+	emit *detectorConditionSink,
+	base detectorCondition,
+	info sessionpkg.Info,
+	awake map[string]AwakeDecision,
+	evals map[string]wakeEvaluation,
+	live detectorLivenessBits,
+	probes *[]detectorCondition,
+	clk clock.Clock,
+) {
+	decision, ok := awake[base.SessionName]
 	if !ok {
 		return
 	}
-	switch {
-	case decision.ShouldWake && !live.Alive:
+	if decision.ShouldWake && !live.Alive {
 		cond := base
 		cond.Family = detectorFamilyWake
 		cond.Site = TraceSiteReconcilerWakeDecision
@@ -1081,15 +1118,179 @@ func detectWakeOrSleep(emit *detectorConditionSink, base detectorCondition, name
 		cond.Outcome = TraceOutcomeStartCandidate
 		cond.Fields = map[string]any{"predicted_effect": "start", "wake_reason": decision.Reason}
 		emit.add(cond, false)
-	case !decision.ShouldWake && live.Alive:
-		cond := base
-		cond.Family = detectorFamilySleep
-		cond.Site = TraceSiteReconcilerDrainDecision
-		cond.Reason = detectorReasonNoWake
-		cond.Outcome = TraceOutcomeDrain
-		cond.Fields = map[string]any{"predicted_effect": "drain", "no_wake_reason": decision.Reason}
+		return
+	}
+	if !live.Alive {
+		// Asleep and not wanted. Nothing to drain, nothing to start.
+		return
+	}
+	detectSleep(in, emit, base, info, decision, evals[info.ID], probes, clk)
+}
+
+// detectSleep raises D-SLEEP for one ALIVE row. It runs the sleep-policy pass
+// legacy runs between the awake scan and the drain arm
+// (session_reconciler.go:3666-3704), because a row ComputeAwakeSet still wants
+// awake is exactly the row a workspace `session_sleep` window puts to sleep —
+// that pass IS the idle-sleep production path, and without it the family would
+// key only the arms nobody runs.
+//
+// Two of legacy's rungs are deliberately absent, and both are provider I/O the
+// sweep may not pay fleet-wide (DETECTOR.md §2): the pending-interaction probe
+// and the attachment probe. Their arms are unpredicted by §3b, and the handler
+// pays both per key before it drains anything, so the detector's suppression is
+// the wider of the two views and the handler is the authority.
+func detectSleep(
+	in detectorSweepInput,
+	emit *detectorConditionSink,
+	base detectorCondition,
+	info sessionpkg.Info,
+	decision AwakeDecision,
+	eval wakeEvaluation,
+	probes *[]detectorCondition,
+	clk clock.Clock,
+) {
+	policy := resolveSessionSleepPolicyInfo(info, in.Cfg, in.Provider)
+	intent := strings.TrimSpace(info.SleepIntent)
+	// The suppression verdict is computed for EVERY live row, not just the ones
+	// the awake set still wants, because it is also what makes the no-wake
+	// verdict re-derivable per key. A row ComputeAwakeSet already put down for
+	// its own idle-sleep reason is the family's only if this per-key pass agrees;
+	// otherwise the reason is fleet-only and the handler could not check it.
+	suppressed := strings.TrimSpace(info.PinAwake) != "true" &&
+		configWakeSuppressedInfo(info, policy, in.Provider, clk)
+	if decision.ShouldWake {
+		if !suppressed || wakeDemandOverridesSleepSuppression(decision, eval, policy, in.PoolDesired, base.Template, intent != "") {
+			// Still wanted awake: no sleep condition at all.
+			return
+		}
+	}
+
+	cond := base
+	cond.Family = detectorFamilySleep
+	cond.Site = TraceSiteReconcilerDrainDecision
+	cond.Reason = detectorReasonNoWake
+	cond.Outcome = TraceOutcomeDrain
+	cond.Fields = map[string]any{
+		"predicted_effect":  "drain",
+		"no_wake_reason":    decision.Reason,
+		"config_suppressed": suppressed,
+		"sleep_intent":      intent,
+	}
+
+	// The #3994 keep-alive escape becomes a detection-side NON-ENQUEUE rather
+	// than a mid-pass branch: a live session held only by a future held_until
+	// with no sleep_intent is running `gc runtime heartbeat` through a long,
+	// silent operation, and draining it would force-stop the very session the
+	// heartbeat protects.
+	if intent == "" && lifecycleTimerBlockerInfo(info, clk.Now()) == "user_hold" {
+		cond.Reason = detectorReasonSleepKeepAlive
+		cond.Outcome = TraceOutcomeSkipped
+		cond.Fields["predicted_effect"] = "none"
+		emit.add(cond, true)
+		return
+	}
+
+	// Legacy's last reason rung — plain "no-wake-reason" — is a FLEET verdict
+	// over pool counts, named and routed demand and the ready-wait set, and no
+	// per-key predicate can re-derive it. The seam's rule is that the handler
+	// answers from the row, so rather than hand it a reason it cannot check, the
+	// family records those rows and leaves them to legacy this wave.
+	if !suppressed && intent == "" {
+		cond.Reason = detectorReasonNoWakeFleetOnly
+		cond.Outcome = TraceOutcomeSkipped
+		cond.Fields["predicted_effect"] = "none"
+		emit.add(cond, true)
+		return
+	}
+
+	if !exactSessionSleepPolicyProbeGated(policy) || intent == sessionSleepIntentIdleStopPending {
+		// No idle confirmation stands between this row and its drain.
+		emit.add(cond, true)
+		return
+	}
+	if probe, has := in.Drains.idleProbe(info.ID); has {
+		if !probe.ready {
+			cond.Reason = detectorReasonIdleProbePending
+			cond.Outcome = TraceOutcomeDeferredConfirm
+			cond.Fields["predicted_effect"] = "none"
+			emit.add(cond, true)
+			return
+		}
+		// The confirmation is in. The handler consumes it and drains.
+		emit.add(cond, true)
+		return
+	}
+	// The row needs a probe it does not have. Its key competes for one of the
+	// sweep's per-tick probe slots, which is the fleet-shaped rate limit that
+	// stays detector-side.
+	cond.Fields["predicted_effect"] = "idle_probe"
+	*probes = append(*probes, cond)
+}
+
+// detectorGrantIdleProbeSlots applies maxIdleSleepProbesPerTick to the sweep's
+// probe candidates and enqueues only the winners, exactly as legacy's
+// selectIdleProbeTargets does: the per-tick ceiling is reduced by the probes
+// already in flight, and a round-robin cursor over the sweep's pinned candidate
+// order means no session is starved across sweeps and none is probed twice in a
+// cycle. What legacy launches inline, this hands to the handler behind the key.
+//
+// Only the patrol/boot call site supplies a cursor. A nil cursor grants nothing
+// — fail-closed, in the direction of not draining — because the narrowed sweeps
+// have no cross-tick identity and a second sweep spending the same budget on the
+// same tick would double the fleet's probe rate.
+func detectorGrantIdleProbeSlots(in detectorSweepInput, emit *detectorConditionSink, candidates []detectorCondition) {
+	if len(candidates) == 0 {
+		return
+	}
+	limit := maxIdleSleepProbesPerTick - in.Drains.activeIdleProbes()
+	granted := in.IdleProbes.grant(len(candidates), limit)
+	for i := range candidates {
+		cond := candidates[i]
+		if !granted[i] {
+			cond.Reason = detectorReasonIdleProbeBudget
+			cond.Outcome = TraceOutcomeDeferredConfirm
+			cond.Fields["predicted_effect"] = "none"
+		}
 		emit.add(cond, true)
 	}
+}
+
+// detectorIdleProbeCursor is the sweep's round-robin position over its idle-probe
+// candidates — the "probe cursor" §2 names as bounded in-memory detector state.
+//
+// It is a SECOND cursor rather than legacy's (drainTracker.idleProbeCursor), for
+// the reason WD.4 recorded when it gave the named suspend window its own
+// counter: legacy keeps advancing its cursor over its OWN candidate list on the
+// same tick, so sharing one position would have made two writers interleave
+// their round-robins and starve rows neither meant to skip. A cursor is an int,
+// so the duplication costs nothing and keeps the two fairness schedules apart.
+type detectorIdleProbeCursor struct {
+	mu     sync.Mutex
+	cursor int
+}
+
+func newDetectorIdleProbeCursor() *detectorIdleProbeCursor {
+	return &detectorIdleProbeCursor{}
+}
+
+// grant returns which of the count candidates, in the sweep's pinned order, win
+// a probe slot this sweep, and advances the cursor past them.
+func (c *detectorIdleProbeCursor) grant(count, limit int) map[int]bool {
+	granted := make(map[int]bool)
+	if c == nil || count <= 0 || limit <= 0 {
+		return granted
+	}
+	if limit > count {
+		limit = count
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	start := c.cursor % count
+	for i := 0; i < limit; i++ {
+		granted[(start+i)%count] = true
+	}
+	c.cursor = (start + limit) % count
+	return granted
 }
 
 func detectZombie(emit *detectorConditionSink, base detectorCondition, live detectorLivenessBits) {
@@ -1300,6 +1501,15 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// D-DUP arm carrying some other outcome cannot ride in unnoticed on a
 		// family-wide gate, it has to come here and declare itself.
 		return sessionStartAdmissionDuplicateNamed, detectorActDup && cond.Outcome == TraceOutcomeNoChange
+	case detectorFamilySleep:
+		// One effect arm, one source. The family raises several arms — the #3994
+		// keep-alive escape, a probe still in flight, a budget-deferred probe slot,
+		// and the fleet-only no-wake verdicts this slice's handler cannot
+		// re-derive per key — and every one of them predicts NO effect, so they
+		// record for the parity join and never enqueue. Only the arm that predicts
+		// a real drain (or the probe launch that gates it) carries
+		// TraceOutcomeDrain, and only that arm routes.
+		return sessionStartAdmissionSleepDrain, detectorActSleep && cond.Outcome == TraceOutcomeDrain
 	}
 	return "", false
 }

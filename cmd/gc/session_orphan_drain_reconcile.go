@@ -23,18 +23,21 @@ func exactSessionOrphanDrainReasons(reason string) bool {
 	return reason == "orphaned" || reason == "suspended"
 }
 
-// exactSessionOrphanDrainDeferralReason answers A6 — attached-user safety, a
-// KEEP invariant of the whole redesign (DESIGN.md §2) — for the drain arm. A
-// drain's first act on the next tick is an interrupt (Ctrl-C) into the pane, so
-// beginning one against a session a human is attached to, or one whose user is
-// waiting on a pending interaction, interrupts a person mid-sentence.
+// exactSessionActiveUseDeferralReason answers A6 — attached-user safety, a
+// KEEP invariant of the whole redesign (DESIGN.md §2) — for every keyed arm
+// whose effect is a drain. A drain's first act on the next tick is an interrupt
+// (Ctrl-C) into the pane, so beginning one against a session a human is attached
+// to, or one whose user is waiting on a pending interaction, interrupts a person
+// mid-sentence. D-ORPHAN's drain arm (WD.4) and D-SLEEP's (WD.5) share it
+// deliberately: one rung, one spelling, so the two families cannot drift on what
+// counts as an engaged human.
 //
 // It leads with the same two positive-use signals namedSessionActiveUseReasonInfo
 // leads with, and deliberately stops there: that helper's remaining rungs
 // (activity_unknown, recent_activity) are config-drift POLICY, and adopting them
 // here would defer orphan drains indefinitely on every provider that cannot
 // report activity. Returning "" means no human is engaged.
-func exactSessionOrphanDrainDeferralReason(
+func exactSessionActiveUseDeferralReason(
 	params exactSessionStartParams,
 	info sessionpkg.Info,
 	name string,
@@ -102,7 +105,7 @@ func reconcileExactSessionOrphanDrain(
 	if !detectorProviderStopCapable(params.Provider) {
 		return yieldOrPark(errors.New("exact orphan drain provider cannot prove fresh liveness and an unattended stop"))
 	}
-	if deferral := exactSessionOrphanDrainDeferralReason(params, info, name, clk); deferral != "" {
+	if deferral := exactSessionActiveUseDeferralReason(params, info, name, clk); deferral != "" {
 		recordExactSessionOrphanDrainTrace(params, admission, info, reason, TraceOutcomeDeferred, 0, false, map[string]any{
 			"active_use": deferral,
 		})

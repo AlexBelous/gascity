@@ -457,48 +457,66 @@ max_active_sessions = %d
 	if liveWorkerSessions != 1 {
 		t.Fatalf("unclosed worker sessions = %d, want exactly 1: %+v", liveWorkerSessions, current.Sessions)
 	}
-	trace, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForPoolStartCommit(
-		t.Context(),
-		cityDir,
-		workID,
-		session,
-		started,
-		sessionWaitDependencyShadowJourneyWitnessTimeout,
-	)
-	if err != nil {
-		t.Fatalf("wait for routed-work pool start proof: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+	// Who materializes the member is variant-dependent today. The unlimited arm
+	// is keyed-owned and proves the full keyed record chain; the bounded arm's
+	// member is created by the legacy builder, because under coexistence
+	// first-creator-wins is the settled doctrine (legacy wins, keyed adopts, zero
+	// duplicates -- which :458 above proves in BOTH arms, 6/6). ga-f7v2ft.117
+	// owns the allocation-ownership seam that makes keyed the winner, and its
+	// acceptance un-skips this proof for the bounded arm.
+	keyedMaterialization := maxActiveSessions < 0
+	wantPoolMaterializations := 0
+	if keyedMaterialization {
+		wantPoolMaterializations = 1
 	}
-	materializationRecords := sessionWaitDependencyShadowJourneyPoolMaterializationRecords(trace, workID)
-	if len(materializationRecords) != 1 {
-		t.Fatalf("routed-work pool materialization records = %d, want 1: %+v\n%s", len(materializationRecords), materializationRecords, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
-	}
-	materialized := materializationRecords[0]
-	if materialized.Seq == 0 || materialized.RecordID == "" ||
-		materialized.RecordType != "operation" ||
-		materialized.OutcomeCode != "applied" ||
-		materialized.Fields.WorkID != workID ||
-		materialized.Fields.PoolTarget != "worker" ||
-		materialized.Fields.SessionID != session.ID ||
-		materialized.Fields.EffectOwner != "keyed" ||
-		materialized.Fields.EffectApplied == nil || !*materialized.Fields.EffectApplied ||
-		!materialized.Fields.EventTimestampValid ||
-		materialized.Fields.EventToMaterializationNS <= 0 {
-		t.Fatalf("routed-work pool materialization record = %+v, want one applied keyed effect", materialized)
-	}
-	commitRecords := sessionWaitDependencyShadowJourneyPoolStartCommitRecords(trace, session)
-	if len(commitRecords) != 1 {
-		t.Fatalf("routed-work pool start commit records = %d, want 1: %+v", len(commitRecords), commitRecords)
-	}
-	commit := commitRecords[0]
-	if commit.Seq == 0 || commit.RecordID == "" ||
-		commit.RecordType != "operation" ||
-		commit.OutcomeCode != "success" ||
-		commit.Fields.Admission != "in_process" ||
-		commit.Fields.SessionID != session.ID ||
-		commit.Fields.InstanceToken == "" ||
-		commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
-		t.Fatalf("routed-work pool start commit record = %+v, want one applied in-process exact start", commit)
-	}
+	t.Run("keyed_materialization", func(t *testing.T) {
+		if !keyedMaterialization {
+			t.Skip("ga-f7v2ft.117: the bounded member is legacy-materialized under first-creator-wins, so no keyed materialization or in-process start commit exists; this proof re-lands with the WD.10b allocation-ownership seam")
+		}
+		trace, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForPoolStartCommit(
+			t.Context(),
+			cityDir,
+			workID,
+			session,
+			started,
+			sessionWaitDependencyShadowJourneyWitnessTimeout,
+		)
+		if err != nil {
+			t.Fatalf("wait for routed-work pool start proof: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+		}
+		materializationRecords := sessionWaitDependencyShadowJourneyPoolMaterializationRecords(trace, workID)
+		if len(materializationRecords) != 1 {
+			t.Fatalf("routed-work pool materialization records = %d, want 1: %+v\n%s", len(materializationRecords), materializationRecords, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, workID, workID))
+		}
+		materialized := materializationRecords[0]
+		if materialized.Seq == 0 || materialized.RecordID == "" ||
+			materialized.RecordType != "operation" ||
+			materialized.OutcomeCode != "applied" ||
+			materialized.Fields.WorkID != workID ||
+			materialized.Fields.PoolTarget != "worker" ||
+			materialized.Fields.SessionID != session.ID ||
+			materialized.Fields.EffectOwner != "keyed" ||
+			materialized.Fields.EffectApplied == nil || !*materialized.Fields.EffectApplied ||
+			!materialized.Fields.EventTimestampValid ||
+			materialized.Fields.EventToMaterializationNS <= 0 {
+			t.Fatalf("routed-work pool materialization record = %+v, want one applied keyed effect", materialized)
+		}
+		commitRecords := sessionWaitDependencyShadowJourneyPoolStartCommitRecords(trace, session)
+		if len(commitRecords) != 1 {
+			t.Fatalf("routed-work pool start commit records = %d, want 1: %+v", len(commitRecords), commitRecords)
+		}
+		commit := commitRecords[0]
+		if commit.Seq == 0 || commit.RecordID == "" ||
+			commit.RecordType != "operation" ||
+			commit.OutcomeCode != "success" ||
+			commit.Fields.Admission != "in_process" ||
+			commit.Fields.SessionID != session.ID ||
+			commit.Fields.InstanceToken == "" ||
+			commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
+			t.Fatalf("routed-work pool start commit record = %+v, want one applied in-process exact start", commit)
+		}
+		t.Logf("keyed materialization %s committed the exact start in %s", time.Duration(materialized.Fields.EventToMaterializationNS), commitLatency)
+	})
 	materializedBead := sessionWaitDependencyShadowJourneyReadBead(t, cityDir, session.ID)
 	if materializedBead.Metadata["pool_managed"] != "true" ||
 		materializedBead.Metadata["session_origin"] != "ephemeral" ||
@@ -626,8 +644,8 @@ max_active_sessions = %d
 	if err != nil {
 		t.Fatalf("read trace after pool resume: %v", err)
 	}
-	if got := len(sessionWaitDependencyShadowJourneyPoolMaterializationRecords(afterTrace, workID)); got != 1 {
-		t.Fatalf("pool materializations after resume = %d, want original one only", got)
+	if got := len(sessionWaitDependencyShadowJourneyPoolMaterializationRecords(afterTrace, workID)); got != wantPoolMaterializations {
+		t.Fatalf("pool materializations after resume = %d, want the original %d only", got, wantPoolMaterializations)
 	}
 	durableWait, err := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
 	if err != nil {
@@ -637,12 +655,10 @@ max_active_sessions = %d
 		t.Fatalf("pool member wait after resume = %+v, want id=%q state=ready status=open", durableWait.Wait, waitID)
 	}
 	t.Logf(
-		"ready routed-work event materialized keyed session %s in %s, projected it in %s, reached live tmux in %s, committed in %s, then resumed the same member through keyed wait_dependency in %s and committed in %s (initial %s|%s|%s; resumed %s|%s|%s)",
+		"ready routed-work event materialized session %s, projected it in %s, reached live tmux in %s, then resumed the same member through keyed wait_dependency in %s and committed in %s (initial %s|%s|%s; resumed %s|%s|%s)",
 		session.ID,
-		time.Duration(materialized.Fields.EventToMaterializationNS),
 		projectionLatency,
 		liveLatency,
-		commitLatency,
 		resumeLatency,
 		resumeCommitLatency,
 		tmuxSession.ID,

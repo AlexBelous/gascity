@@ -325,6 +325,14 @@ type BdStore struct {
 	// incapable-because-old on every later capability answer.
 	condWriteProbeErr error
 
+	// Atomic terminal-close (AtomicConditionalCloser) capability state, memoized
+	// lazily on the first discovery or close (bdstore_atomic_close.go). Its own
+	// mutex, never held across condWriteMu.
+	statusGuardMu       sync.Mutex
+	statusGuardProbed   bool
+	statusGuardCapable  bool
+	statusGuardProbeErr error
+
 	// condWritesStamp carries the factory-stamped beads.conditional_writes
 	// mode plus the once-per-store degrade latch, under its own mutex
 	// (disjoint from condWriteMu's capability state; no nesting).

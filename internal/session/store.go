@@ -278,9 +278,13 @@ const terminalCloseMaxAttempts = 3
 
 // Close closes the session bead with terminal close metadata via ClosePatch.
 // Stores with atomic terminal-close support commit the metadata and closed
-// status together behind the row revision; a concurrent writer causes a
-// bounded reread and retry. Other stores retain the historical ClosePatch then
-// Close sequence. It is the front door for closeBead / closeFailedCreateBead.
+// status together behind whatever fence that store can honor — a row revision
+// on the native stores, bd's in-transaction status compare-and-swap on a
+// bd-backed store — and a concurrent writer that wins the fence causes a
+// bounded reread and retry. Only stores WITHOUT that capability retain the
+// historical ClosePatch-then-Close sequence, whose gap is what let a stale
+// writer strand a closed row in a nonterminal state (ga-f7v2ft.78.6).
+// It is the front door for closeBead / closeFailedCreateBead.
 // stateCode is the canonical short state code recorded before close;
 // ClosePatch expands it to a validator-safe close_reason.
 //
@@ -310,9 +314,13 @@ func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
 
 	var conflict error
 	for attempt := 1; attempt <= terminalCloseMaxAttempts; attempt++ {
-		if bead.Revision == 0 {
-			return false, fmt.Errorf("closing session %q atomically: persisted revision is unavailable", id)
-		}
+		// The observed revision is passed through as-is, including 0. Fence
+		// validity belongs to the store, not here: only `bd show` projects bd's
+		// row_lock token as `revision`, so a bead served from a CachingStore
+		// primed by `bd list` legitimately carries 0, and refusing it here would
+		// wedge every session close on a bd-backed city. A store that fences on
+		// the revision rejects a useless token with a precondition — retried and
+		// bounded below — and never closes unfenced.
 		_, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch))
 		if err == nil {
 			return true, nil

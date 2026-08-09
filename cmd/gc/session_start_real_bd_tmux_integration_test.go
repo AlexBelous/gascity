@@ -1791,9 +1791,18 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sibling token after exact drain: %v", err)
 	}
-	if secondPoolAfter.Revision != secondPool.bead.Revision ||
-		!reflect.DeepEqual(secondPoolAfter.Metadata, secondPool.bead.Metadata) ||
-		secondPoolAfter.Status != secondPool.bead.Status ||
+	// Sibling isolation means the drain adds no lifecycle or incarnation effect
+	// to the sibling -- not that the fleet freezes around it. Two writers
+	// legitimately run inside the drain window and are allowlisted below; every
+	// other key, INCLUDING instance_token, generation, continuation_epoch,
+	// sleep_intent, sleep_reason, held_until, quarantined_until, wake_request,
+	// session_key, the trigger binding, all drain_ack_* keys (which must remain
+	// absent) and the pool markers, stays byte-equal by construction of the
+	// remainder compare.
+	if err := siblingPoolIsolationMetadataDiff(secondPool.bead.Metadata, secondPoolAfter.Metadata); err != nil {
+		t.Fatalf("sibling pool session metadata changed during exact drain: %v\nbefore=%+v after=%+v", err, secondPool.bead, secondPoolAfter)
+	}
+	if secondPoolAfter.Status != secondPool.bead.Status ||
 		strings.TrimSpace(secondIDsAfter[secondPool.info.SessionName]) != secondPool.tmuxID ||
 		secondTokenAfter != secondPool.token {
 		t.Fatalf("sibling pool session changed during exact drain: before=%+v after=%+v tmux_before=%q tmux_after=%q token_before=%q token_after=%q",

@@ -335,6 +335,7 @@ type startExecutionOptions struct {
 	legacyDuplicateRetireExcluded     func(sessionpkg.Info) bool
 	legacySleepDrainExcluded          func(sessionpkg.Info) bool
 	legacyProgressStallExcluded       func(sessionpkg.Info) bool
+	legacyStrandedRepairExcluded      func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -634,6 +635,26 @@ func withLegacySleepDrainExclusion(excluded func(sessionpkg.Info) bool) startExe
 func withLegacyProgressStallRecycleExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyProgressStallExcluded = excluded
+	}
+}
+
+// withLegacyStrandedRepairExclusion installs the keyed-ownership bridge for the
+// D-STRANDED family. Returning true keeps the fleet pass's dead-pool repair off
+// that row entirely — no unassign/reopen of its work, no close, no worktree
+// prune — because the keyed handler already owns that exact key. Like the
+// deadline and duplicate seams this is not a race to lose: both writers read the
+// same durable marker on the same tick, so an un-yielding legacy races a second
+// release at the same work beads, and a release that lands after a replacement
+// member has claimed the work clears a LIVE claim.
+//
+// The stranded DIAGNOSTIC above the repair takes no such fence, deliberately. It
+// is the emit-once stamp of the confirmation marker, and that marker is the
+// keyed family's own entry condition: fencing it would starve the detector of
+// the fact it keys on. Retired at WE with the god function, at which point the
+// marker's ownership moves with it.
+func withLegacyStrandedRepairExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyStrandedRepairExcluded = excluded
 	}
 }
 

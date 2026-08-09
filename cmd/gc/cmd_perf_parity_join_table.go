@@ -267,7 +267,13 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 		Sites:  []TraceSiteCode{TraceSiteSessionReconcileHealRetire},
 	},
 	{
-		// "confirmation-window off-by-one (duplicated counters)"
+		// "confirmation-window off-by-one (duplicated counters)" — the class
+		// name is a misnomer WD.15 owns retiring (WD.14 delta 2): the window is
+		// ONE durable marker (stranded_event_emitted_at) read by both paths, so
+		// no counters can skew. What the rule actually triages is the detector's
+		// in-window DEFER arm, which legacy records nothing for — this family
+		// has no legacy decision record at all (WD.14 delta 1), so its detection
+		// parity is candidacy agreement, not a record-to-record join.
 		Family: parityJoinFamilyStranded,
 		Level:  parityJoinLevelDetection,
 		Sites:  []TraceSiteCode{TraceSiteSessionReconcileWakeSleep},

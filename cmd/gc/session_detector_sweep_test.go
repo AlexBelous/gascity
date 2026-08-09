@@ -60,8 +60,8 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
 // arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4; D-STALE-CREATE at
 // WD.7; D-SLEEP at WD.5; D-DRIFT's CONVERGENCE arms at WD.8 and its DEFERRAL
-// arms at WD.9; D-STALL at WD.12; D-DUP at WD.13. A family that flips an act
-// constant without an arm in
+// arms at WD.9; D-STALL at WD.12; D-DUP at WD.13; D-STRANDED at WD.14. A family
+// that flips an act constant without an arm in
 // detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
 // before it can double-act beside a non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
@@ -78,6 +78,7 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 		detectorFamilyDrift:       {TraceOutcomeDrain: true},
 		detectorFamilyDup:         {TraceOutcomeNoChange: true},
 		detectorFamilyStall:       {TraceOutcomeStop: true},
+		detectorFamilyStranded:    {TraceOutcomeClosed: true},
 		// D-SLEEP raises several arms and exactly one of them predicts an effect:
 		// the drain (and the idle probe that gates it) ride TraceOutcomeDrain,
 		// while the keep-alive escape, the in-flight probe, the budget-deferred
@@ -160,6 +161,7 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	for _, family := range []detectorFamily{
 		detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilyStaleCreate,
 		detectorFamilyDup, detectorFamilySleep, detectorFamilyStall,
+		detectorFamilyStranded,
 	} {
 		for _, outcome := range detectorShadowOutcomes {
 			if source, routed := detectorAdmissionSourceFor(detectorCondition{Family: family, Outcome: outcome}); routed && source == sessionStartAdmissionConfigDrift {
@@ -171,8 +173,9 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	// legacy yield stands down on, so a shared one would make one family's
 	// legacy counterpart yield for the other family's rows. The batch made this
 	// reachable rather than theoretical: D-STALL and D-DEADLINE both route under
-	// TraceOutcomeStop, and D-SLEEP and D-DRIFT both under TraceOutcomeDrain, so
-	// only the family switch separates each pair.
+	// TraceOutcomeStop, D-SLEEP and D-DRIFT both under TraceOutcomeDrain, and
+	// D-STRANDED and D-ORPHAN's close arm both under TraceOutcomeClosed, so only
+	// the family switch separates each pair.
 	sourceOwner := map[sessionStartAdmissionSource]detectorFamily{}
 	for family, effects := range acting {
 		for effect := range effects {

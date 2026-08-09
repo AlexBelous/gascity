@@ -72,6 +72,11 @@ const (
 	// still arrives here whenever claim_holder_stall_timeout is positive and the
 	// handler owes it the per-session claim lookup.
 	sessionStartAdmissionProgressStall sessionStartAdmissionSource = "progress_stall"
+	// sessionStartAdmissionStrandedRepair is the detector sweep's D-STRANDED
+	// key (DETECTOR.md §3): a pool slot whose runtime is gone, whose bead sits
+	// in a terminal sleep state, and whose confirmed stranding episode has
+	// outlived strandedRepairConfirmGrace while it still holds assigned work.
+	sessionStartAdmissionStrandedRepair sessionStartAdmissionSource = "stranded_repair"
 )
 
 type sessionStartAdmission struct {
@@ -714,7 +719,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionConfigDrift,
 		sessionStartAdmissionDuplicateNamed,
 		sessionStartAdmissionSleepDrain,
-		sessionStartAdmissionProgressStall:
+		sessionStartAdmissionProgressStall,
+		sessionStartAdmissionStrandedRepair:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -963,6 +969,34 @@ func (c *sessionStartController) ownsOrphanDrain(sessionID string) bool {
 // yield — "and the row really is a rollback candidate" — is the caller's, and
 // legacy already evaluates it before entering its rollback arm.
 func (c *sessionStartController) ownsStaleCreateRollback(sessionID string) bool {
+	return c.holdsAnyAdmission(sessionID)
+}
+
+// ownsStrandedRepair reports whether the keyed controller currently holds ANY
+// admission for this exact key. Legacy's dead-pool stranded repair consults it
+// and yields the destructive half of that arm — the unassign/reopen and the
+// close — while the diagnostic above it keeps firing, because the marker the
+// diagnostic stamps IS the keyed family's entry condition.
+//
+// It takes D-STALE-CREATE's any-admission shape rather than D-DEADLINE's
+// source-gated one, for the reason WD.7 recorded and this family meets more
+// often: the seam guards on the DURABLE ROW, and the controller coalesces
+// admissions on a key while keeping the EARLIER source. A stranded pool member
+// is routinely already held by a pool wake when the sweep finds it — the
+// acked-member re-point residual (ga-f7v2ft.131) arrives exactly that way — so
+// a source-gated yield would let the keyed handler repair through the coalesced
+// admission while legacy raced it at the same work beads. The other half of the
+// yield ("and the row really is a stranded-repair candidate") is the caller's:
+// legacy evaluates pool-freeability, non-liveness, assigned work and the
+// partial-store guard before it ever reaches the repair.
+func (c *sessionStartController) ownsStrandedRepair(sessionID string) bool {
+	return c.holdsAnyAdmission(sessionID)
+}
+
+// holdsAnyAdmission is the source-blind half of the two yields above. It exists
+// so the families that deliberately answer on ANY in-flight admission share one
+// spelling of that decision instead of two copies that can drift apart.
+func (c *sessionStartController) holdsAnyAdmission(sessionID string) bool {
 	if c == nil || sessionID == "" {
 		return false
 	}

@@ -854,6 +854,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			withLegacyProgressStallRecycleExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsProgressStallRecycle(info.ID)
 			}),
+			withLegacyStrandedRepairExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsStrandedRepair(info.ID)
+			}),
 		)
 	}
 	familyOption := combineStartExecutionOptions(familyOptions...)

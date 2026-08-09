@@ -90,7 +90,11 @@ const (
 // session_sleep_reconcile.go; yield: withLegacySleepDrainExclusion) with ONE
 // constant for its whole effect arm: unlike D-ORPHAN its idle probe and its
 // drain are two rungs of one ladder on one key that landed in one slice, so a
-// second constant would gate nothing. The rest flip in the WE cutover commit,
+// second constant would gate nothing. D-STRANDED crossed at WD.14 (handler:
+// session_stranded_reconcile.go; yield: withLegacyStrandedRepairExclusion),
+// gating only the DESTRUCTIVE half of legacy's block: the diagnostic above it
+// keeps stamping the confirmation marker, because that marker is the keyed
+// family's own entry condition. The rest flip in the WE cutover commit,
 // one family at a time, once the WD.15 parity window has cleared their
 // must-match bar. They are compile-time constants on purpose: this is not a
 // config surface.
@@ -107,7 +111,7 @@ const (
 	detectorActZombie                  = false
 	detectorActStall                   = true
 	detectorActDup                     = true
-	detectorActStranded                = false
+	detectorActStranded                = true
 	detectorActReadyDemandScan         = false
 	detectorActExecutionCompletionScan = false
 )
@@ -160,6 +164,7 @@ const (
 	detectorReasonProgressStallExempt     TraceReasonCode = "detector_progress_stall_exempt"
 	detectorReasonDuplicateNamed          TraceReasonCode = "detector_duplicate_named"
 	detectorReasonStrandedPoolSlot        TraceReasonCode = "detector_stranded_pool_slot"
+	detectorReasonStrandedConfirmDeferred TraceReasonCode = "detector_stranded_confirm_deferred"
 	detectorReasonUnknownStateSkipped     TraceReasonCode = "detector_unknown_state_skipped"
 	detectorReasonStoreQueryPartial       TraceReasonCode = "detector_store_query_partial"
 	detectorReasonFamilyBudgetExceeded    TraceReasonCode = "detector_family_budget_exceeded"
@@ -195,6 +200,7 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonProgressStallExempt,
 	detectorReasonDuplicateNamed,
 	detectorReasonStrandedPoolSlot,
+	detectorReasonStrandedConfirmDeferred,
 	detectorReasonUnknownStateSkipped,
 	detectorReasonStoreQueryPartial,
 	detectorReasonFamilyBudgetExceeded,
@@ -1390,6 +1396,19 @@ func detectStall(in detectorSweepInput, emit *detectorConditionSink, base detect
 	emit.add(cond, true)
 }
 
+// detectStranded raises D-STRANDED for one row. The family's entry condition is
+// the stranded diagnostic's own confirmation marker: a pool member the fleet has
+// already seen not-alive while it still held assigned work. The marker tracks
+// CONTINUOUS non-liveness (clearStrandedEventMarker drops it on any alive
+// observation), so an alive row is never this family's.
+//
+// The arm SPLIT is what makes the family safe to act on. Only a row that
+// satisfies every durable rung the handler re-derives — pool-managed, in a
+// freeable terminal sleep state, and past strandedRepairConfirmGrace — carries
+// the effect outcome and may enqueue. Every other marker-bearing row still
+// records, under the deferred outcome, so the WD.15 join keeps the whole
+// population WD.1 gave it; it just never becomes a key the handler would refuse
+// on every patrol.
 func detectStranded(emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, desired bool, live detectorLivenessBits, now time.Time) {
 	marker := strings.TrimSpace(info.StrandedEventEmittedAt)
 	if marker == "" || live.Alive {
@@ -1399,13 +1418,23 @@ func detectStranded(emit *detectorConditionSink, base detectorCondition, info se
 	if err != nil {
 		return
 	}
+	confirmed := !emittedAt.IsZero() &&
+		now.Sub(emittedAt) >= strandedRepairConfirmGrace &&
+		isPoolManagedSessionInfo(info) &&
+		isPoolSessionSlotFreeableInfo(info)
 	cond := base
 	cond.Family = detectorFamilyStranded
 	cond.Site = TraceSiteSessionReconcileWakeSleep
 	cond.Reason = detectorReasonStrandedPoolSlot
 	cond.Outcome = TraceOutcomeClosed
+	predicted := "repair_and_close"
+	if !confirmed {
+		cond.Reason = detectorReasonStrandedConfirmDeferred
+		cond.Outcome = TraceOutcomeDeferredConfirm
+		predicted = "defer"
+	}
 	cond.Fields = map[string]any{
-		"predicted_effect":        "repair_and_close",
+		"predicted_effect":        predicted,
 		"stranded_for_seconds":    int64(now.Sub(emittedAt).Seconds()),
 		"desired":                 desired,
 		"confirmation_window_sec": int64(strandedRepairConfirmGrace.Seconds()),
@@ -1573,6 +1602,12 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// positive, so the handler can pay the per-session claim lookup legacy
 		// pays at session_reconciler.go:2696.
 		return sessionStartAdmissionProgressStall, detectorActStall && cond.Outcome == TraceOutcomeStop
+	case detectorFamilyStranded:
+		// Only the CONFIRMED arm predicts an effect: a marker-bearing row that
+		// is still inside its confirmation window, or that no longer satisfies
+		// the durable pool-freeable rungs, records the deferred outcome for the
+		// parity join and never enqueues (WD.14).
+		return sessionStartAdmissionStrandedRepair, detectorActStranded && cond.Outcome == TraceOutcomeClosed
 	}
 	return "", false
 }

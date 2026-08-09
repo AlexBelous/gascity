@@ -86,6 +86,25 @@ func reconcileExactSessionDetectorFamily(
 	// guard is also the broadest here — every awake, unpinned, unheld row — so
 	// keeping it below the narrower families lets the cheaper guards
 	// short-circuit first.
+	//
+	// D-STRANDED goes LAST, BELOW D-SLEEP. Both slices were authored claiming
+	// "last" — each was the only wake/sleep-phase family on its own branch — so
+	// their relative order was decided here against legacy's actual sequence
+	// rather than by merge order. Legacy runs both inside ONE per-target loop in
+	// the wake/sleep phase, and the sleep block comes first: the no-wake drain
+	// arm sits at session_reconciler.go:4088 (`!shouldWake && alive`) and the
+	// stranded pool-slot repair at :4191 (`!shouldWake && !alive && poolFreeable`).
+	//
+	// Today the order is not observable: the two guards are DISJOINT on the
+	// durable row, because D-SLEEP requires detectorBeadAwake (state active,
+	// awake, creating or start_pending) and D-STRANDED requires
+	// isPoolSessionSlotFreeableInfo (state drained, or asleep with a terminal
+	// sleep reason). That is exactly why it is worth pinning in the order rather
+	// than leaving to chance — legacy splits these two on `alive`, which is
+	// provider I/O the seam guard may not pay, so the durable-state disjointness
+	// is a property of today's guards and not of the family boundary. If either
+	// guard widens, this order is what keeps a row legacy would have repaired
+	// from being drained as an ordinary no-wake row instead.
 	switch {
 	case detectorActDup && exactSessionDuplicateNamedCandidate(params, info, response):
 		owner, err := reconcileExactSessionDuplicateNamedRetire(admission, params, info, response, clk)
@@ -109,6 +128,9 @@ func reconcileExactSessionDetectorFamily(
 		return true, owner, err
 	case detectorActSleep && exactSessionSleepDrainCandidate(params, info, response, clk):
 		owner, err := reconcileExactSessionSleepDrain(ctx, admission, params, info, response, clk)
+		return true, owner, err
+	case detectorActStranded && exactSessionStrandedRepairCandidate(params, info, response, clk):
+		owner, err := reconcileExactSessionStrandedRepair(ctx, admission, params, info, response, clk)
 		return true, owner, err
 	}
 	return false, exactSessionStartUnowned, nil

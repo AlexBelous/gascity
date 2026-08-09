@@ -65,6 +65,13 @@ const (
 	// key, and the handler picks the rung from the durable row plus the probe
 	// tracker, never from the source.
 	sessionStartAdmissionSleepDrain sessionStartAdmissionSource = "sleep_drain"
+	// sessionStartAdmissionProgressStall is the detector sweep's D-STALL key
+	// (DETECTOR.md §3): one live session whose provider-reported activity gap
+	// has passed the configured stall threshold. The min-floor exemption
+	// suppresses this key for the claim-less family only, so a floor worker
+	// still arrives here whenever claim_holder_stall_timeout is positive and the
+	// handler owes it the per-session claim lookup.
+	sessionStartAdmissionProgressStall sessionStartAdmissionSource = "progress_stall"
 )
 
 type sessionStartAdmission struct {
@@ -706,7 +713,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionStaleCreate,
 		sessionStartAdmissionConfigDrift,
 		sessionStartAdmissionDuplicateNamed,
-		sessionStartAdmissionSleepDrain:
+		sessionStartAdmissionSleepDrain,
+		sessionStartAdmissionProgressStall:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -1040,6 +1048,27 @@ func (c *sessionStartController) ownsSleepDrain(sessionID string) bool {
 	defer c.mu.Unlock()
 	admission, ok := c.admissions[sessionID]
 	return ok && admission.Source == sessionStartAdmissionSleepDrain
+}
+
+// ownsProgressStallRecycle reports whether the keyed controller currently holds
+// a D-STALL admission for this exact key. Legacy's progress-stall arms consult
+// it and skip their restart_requested write. It is a source-gated SIBLING of
+// ownsDeadlineStop and ownsDuplicateNamedRetire — not the stale-create form,
+// which accepts any admission — because the legacy arm it stands down is a
+// destructive recycle and the seam's own guard already re-derives the
+// condition. Like the deadline seam this is not a race to lose: both writers
+// evaluate the same ladder over the same durable row on the same tick, so an
+// un-yielding legacy sets restart_requested behind the keyed handler's back and
+// its restart block kills the replacement incarnation the keyed reset just
+// committed. Retired at WE with the god function.
+func (c *sessionStartController) ownsProgressStallRecycle(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.Source == sessionStartAdmissionProgressStall
 }
 
 // YieldPoolDrainAck releases a retained agent drain acknowledgement only when

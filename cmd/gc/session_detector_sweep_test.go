@@ -60,7 +60,8 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
 // arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4; D-STALE-CREATE at
 // WD.7; D-SLEEP at WD.5; D-DRIFT's CONVERGENCE arms at WD.8 and its DEFERRAL
-// arms at WD.9; D-DUP at WD.13. A family that flips an act constant without an arm in
+// arms at WD.9; D-STALL at WD.12; D-DUP at WD.13. A family that flips an act
+// constant without an arm in
 // detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
 // before it can double-act beside a non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
@@ -76,6 +77,7 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 		detectorFamilyStaleCreate: {TraceOutcomeRollback: true},
 		detectorFamilyDrift:       {TraceOutcomeDrain: true},
 		detectorFamilyDup:         {TraceOutcomeNoChange: true},
+		detectorFamilyStall:       {TraceOutcomeStop: true},
 		// D-SLEEP raises several arms and exactly one of them predicts an effect:
 		// the drain (and the idle probe that gates it) ride TraceOutcomeDrain,
 		// while the keep-alive escape, the in-flight probe, the budget-deferred
@@ -157,12 +159,31 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	// source that would make each site's yield stand down for the other's rows.
 	for _, family := range []detectorFamily{
 		detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilyStaleCreate,
-		detectorFamilyDup, detectorFamilySleep,
+		detectorFamilyDup, detectorFamilySleep, detectorFamilyStall,
 	} {
 		for _, outcome := range detectorShadowOutcomes {
 			if source, routed := detectorAdmissionSourceFor(detectorCondition{Family: family, Outcome: outcome}); routed && source == sessionStartAdmissionConfigDrift {
 				t.Errorf("family %q routed outcome %q under D-DRIFT's admission source", family, outcome)
 			}
+		}
+	}
+	// No two families may share an admission source. Each source is the unit a
+	// legacy yield stands down on, so a shared one would make one family's
+	// legacy counterpart yield for the other family's rows. The batch made this
+	// reachable rather than theoretical: D-STALL and D-DEADLINE both route under
+	// TraceOutcomeStop, and D-SLEEP and D-DRIFT both under TraceOutcomeDrain, so
+	// only the family switch separates each pair.
+	sourceOwner := map[sessionStartAdmissionSource]detectorFamily{}
+	for family, effects := range acting {
+		for effect := range effects {
+			source, routed := detectorAdmissionSourceFor(detectorCondition{Family: family, Outcome: effect})
+			if !routed {
+				continue
+			}
+			if prior, seen := sourceOwner[source]; seen && prior != family {
+				t.Errorf("families %q and %q both route under admission source %q", prior, family, source)
+			}
+			sourceOwner[source] = family
 		}
 	}
 	// D-DUP raises exactly one arm — one condition per loser row — so it routes

@@ -851,6 +851,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			withLegacySleepDrainExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsSleepDrain(info.ID)
 			}),
+			withLegacyProgressStallRecycleExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsProgressStallRecycle(info.ID)
+			}),
 		)
 	}
 	familyOption := combineStartExecutionOptions(familyOptions...)

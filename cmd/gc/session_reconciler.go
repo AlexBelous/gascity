@@ -1527,6 +1527,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	legacyOrphanCloseExcluded := reconcileOpts.legacyOrphanCloseExcluded
 	legacyOrphanDrainExcluded := reconcileOpts.legacyOrphanDrainExcluded
 	legacySleepDrainExcluded := reconcileOpts.legacySleepDrainExcluded
+	legacyProgressStallExcluded := reconcileOpts.legacyProgressStallExcluded
 	// Coexistence seam for the acting D-ORPHAN close family: while the keyed
 	// controller holds this exact key, both legacy close arms yield entirely —
 	// no ClosePatch, no status close, no work-release cascade. Like the deadline
@@ -2771,7 +2772,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						providerHealthy = h
 					}
 				}
-				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt, lastActivity, clk.Now()) {
+				// Coexistence seam for the acting D-STALL family (WD.12). The
+				// exemption trace above still fires so the parity join keeps
+				// seeing legacy's own decision; only the restart_requested writes
+				// stand down while the keyed handler owns this exact key. An
+				// un-yielding legacy would re-request a restart behind the keyed
+				// reset handoff and kill the incarnation it just committed.
+				// Retired at WE with the god function.
+				keyedOwnsStallRecycle := legacyProgressStallExcluded != nil && legacyProgressStallExcluded(infoByID[id])
+				if !keyedOwnsStallRecycle && sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt, lastActivity, clk.Now()) {
 					// Record the restart request on the typed snapshot only. This
 					// marker is decision-state consumed by the restart-request block
 					// below (which reads Info.RestartRequested off infoByID) and never
@@ -2783,7 +2792,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
 					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, claimlessThreshold) //nolint:errcheck
 				}
-				if claimKnown && sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if !keyedOwnsStallRecycle && claimKnown && sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
 					// A confirmed holder can wedge mid-work on a provider condition it
 					// will not self-clear. This remains opt-in and uses a separate,
 					// more conservative timeout because it interrupts in-progress work.

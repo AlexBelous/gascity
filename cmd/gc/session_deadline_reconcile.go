@@ -67,6 +67,14 @@ func reconcileExactSessionDetectorFamily(
 	// facts that split them (attachment, launch-only, named) are all re-derived
 	// from the one row the guard already resolved.
 	//
+	// D-STALL sits between D-ORPHAN and D-DRIFT for the same forward-pass reason:
+	// legacy evaluates its progress-stall arm before the drift block and before
+	// the max-age and idle arms, and `continue`s the row past them once the
+	// recycle fires. Its guard is therefore the whole decision rather than a
+	// trigger rung, so a quiet row the ladder declines still reaches D-DRIFT and
+	// D-DEADLINE on the same dispatch instead of being claimed and starved every
+	// sweep.
+	//
 	// D-SLEEP goes LAST among the forward-pass families because legacy puts it
 	// last: the wake/sleep decision runs in a SEPARATE phase after the entire
 	// forward pass has finished, so a row any earlier family claimed — retired,
@@ -85,6 +93,9 @@ func reconcileExactSessionDetectorFamily(
 	case (detectorActOrphanClose || detectorActOrphanDrain) &&
 		exactSessionOrphanCloseCandidate(params, info, response, clk) != "":
 		owner, err := reconcileExactSessionOrphanClose(ctx, admission, params, info, response, clk)
+		return true, owner, err
+	case detectorActStall && exactSessionProgressStallCandidate(params, info, response, clk):
+		owner, err := reconcileExactSessionProgressStallRecycle(admission, params, info, response, clk)
 		return true, owner, err
 	case (detectorActDriftConverge || detectorActDriftDefer) &&
 		exactSessionConfigDriftCandidate(params, info, response, clk):

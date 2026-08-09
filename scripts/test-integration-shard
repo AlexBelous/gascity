@@ -125,6 +125,7 @@ cmd_gc_integration_tests=(
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName
   TestSessionLifecycleStartShadowRealTmuxJourney
+  TestSiblingPoolIsolationMetadataDiff
 )
 
 join_regex() {

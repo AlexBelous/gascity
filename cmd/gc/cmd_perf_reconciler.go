@@ -661,12 +661,14 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 		return nil, fmt.Errorf("starting drain-ack stop runtime: %w", err)
 	}
 	for key, value := range map[string]string{
-		"GC_SESSION_ID":                   info.ID,
-		"GC_INSTANCE_TOKEN":               token,
-		reconcilerDrainAckSourceKey:       drainAckSourceAgentValue,
-		drainAckRequesterSessionIDKey:     info.ID,
-		drainAckRequesterInstanceTokenKey: token,
-		"GC_DRAIN_ACK":                    "1",
+		"GC_SESSION_ID":                      info.ID,
+		"GC_INSTANCE_TOKEN":                  token,
+		reconcilerDrainAckSourceKey:          drainAckSourceAgentValue,
+		drainAckRequesterSessionIDKey:        info.ID,
+		drainAckRequesterInstanceTokenKey:    token,
+		reconcilerDrainAckTriggerBeadIDKey:   work.ID,
+		reconcilerDrainAckTriggerStoreRefKey: sourceStore,
+		"GC_DRAIN_ACK":                       "1",
 	} {
 		if err := provider.SetMeta(sessionName, key, value); err != nil {
 			return nil, fmt.Errorf("setting drain-ack stop runtime metadata %s: %w", key, err)

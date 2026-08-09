@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1241,6 +1242,8 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 		reconcilerDrainAckSourceKey,
 		drainAckRequesterSessionIDKey,
 		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckTriggerBeadIDKey,
+		reconcilerDrainAckTriggerStoreRefKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 		"GC_DRAIN",
@@ -1276,6 +1279,148 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	if !slices.Equal(sp.setKeys, wantSet) {
 		t.Fatalf("set keys = %v, want %v", sp.setKeys, wantSet)
 	}
+}
+
+// TestProviderDrainOpsSetDrainAckStampsAcknowledgedTrigger pins the ack-time
+// half of ga-f7v2ft.131: the routed work an agent finished travels WITH its
+// acknowledgement, verbatim off the member row, so the controller never has to
+// ask what the row says on a later tick.
+func TestProviderDrainOpsSetDrainAckStampsAcknowledgedTrigger(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("start fake runtime: %v", err)
+	}
+	dops := newDrainAckOps(sp, func() (drainAckTriggerBinding, error) {
+		return drainAckTriggerBinding{BeadID: "gc-work-1", StoreRef: "rig:packs"}, nil
+	})
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("set drain acknowledgement: %v", err)
+	}
+	for key, want := range map[string]string{
+		reconcilerDrainAckTriggerBeadIDKey:   "gc-work-1",
+		reconcilerDrainAckTriggerStoreRefKey: "rig:packs",
+	} {
+		got, err := sp.GetMeta("worker", key)
+		if err != nil || got != want {
+			t.Fatalf("runtime metadata %s = (%q, %v), want %q", key, got, err, want)
+		}
+	}
+}
+
+func TestProviderDrainOpsSetDrainAckStampsBothOrNeither(t *testing.T) {
+	t.Run("no reader leaves the acknowledgement unstamped", func(t *testing.T) {
+		sp := newStartedFakeRuntime(t)
+		if err := newDrainOps(sp).setDrainAck("worker"); err != nil {
+			t.Fatalf("set drain acknowledgement: %v", err)
+		}
+		assertNoAckTriggerStamp(t, sp)
+	})
+
+	t.Run("empty row trigger leaves the acknowledgement unstamped", func(t *testing.T) {
+		sp := newStartedFakeRuntime(t)
+		dops := newDrainAckOps(sp, func() (drainAckTriggerBinding, error) {
+			return drainAckTriggerBinding{}, nil
+		})
+		if err := dops.setDrainAck("worker"); err != nil {
+			t.Fatalf("set drain acknowledgement: %v", err)
+		}
+		assertNoAckTriggerStamp(t, sp)
+	})
+
+	t.Run("a row with no store ref leaves the acknowledgement unstamped", func(t *testing.T) {
+		sp := newStartedFakeRuntime(t)
+		dops := newDrainAckOps(sp, func() (drainAckTriggerBinding, error) {
+			return drainAckTriggerBinding{BeadID: "gc-work-1"}, nil
+		})
+		if err := dops.setDrainAck("worker"); err != nil {
+			t.Fatalf("set drain acknowledgement: %v", err)
+		}
+		assertNoAckTriggerStamp(t, sp)
+	})
+
+	t.Run("a half-written pair is rolled back", func(t *testing.T) {
+		sp := &failOnKeySetMetaProvider{Fake: runtime.NewFake(), failKey: reconcilerDrainAckTriggerStoreRefKey}
+		if err := sp.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+			t.Fatalf("start fake runtime: %v", err)
+		}
+		dops := newDrainAckOps(sp, func() (drainAckTriggerBinding, error) {
+			return drainAckTriggerBinding{BeadID: "gc-work-1", StoreRef: "city:test-city"}, nil
+		})
+		if err := dops.setDrainAck("worker"); err == nil {
+			t.Fatal("setDrainAck should report a failed trigger stamp")
+		}
+		assertNoAckTriggerStamp(t, sp)
+	})
+}
+
+// TestDrainAckTriggerReaderDegradesToUnstampedAck pins the contract that keeps
+// the acknowledgement itself as reliable as it was before the stamp: an
+// unreadable member row warns and yields no stamp rather than failing an ack
+// the agent has already earned.
+func TestDrainAckTriggerReaderDegradesToUnstampedAck(t *testing.T) {
+	var stderr bytes.Buffer
+	read := drainAckTriggerReaderFrom(func() (drainAckTriggerBinding, error) {
+		return drainAckTriggerBinding{}, errors.New("opening store: unavailable")
+	}, &stderr)
+	binding, err := read()
+	if err != nil || binding != (drainAckTriggerBinding{}) {
+		t.Fatalf("degraded trigger read = (%+v, %v), want an empty binding and no error", binding, err)
+	}
+	if !strings.Contains(stderr.String(), "acknowledging without a trigger stamp") {
+		t.Fatalf("stderr = %q, want the unstamped-acknowledgement warning", stderr.String())
+	}
+}
+
+func TestNewDrainAckTriggerReaderRequiresDurableIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target sessionRuntimeTarget
+	}{
+		{name: "no city path", target: sessionRuntimeTarget{sessionID: "gc-1"}},
+		{name: "no session id", target: sessionRuntimeTarget{cityPath: t.TempDir()}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if reader := newDrainAckTriggerReader(test.target, io.Discard); reader != nil {
+				t.Fatal("reader built without a durable session identity; there is no row to read")
+			}
+		})
+	}
+}
+
+func newStartedFakeRuntime(t *testing.T) *runtime.Fake {
+	t.Helper()
+	sp := runtime.NewFake()
+	if err := sp.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("start fake runtime: %v", err)
+	}
+	return sp
+}
+
+func assertNoAckTriggerStamp(t *testing.T, sp runtime.Provider) {
+	t.Helper()
+	for _, key := range []string{reconcilerDrainAckTriggerBeadIDKey, reconcilerDrainAckTriggerStoreRefKey} {
+		got, err := sp.GetMeta("worker", key)
+		if err != nil {
+			t.Fatalf("read %s: %v", key, err)
+		}
+		if got != "" {
+			t.Fatalf("runtime metadata %s = %q, want no stamp", key, got)
+		}
+	}
+}
+
+// failOnKeySetMetaProvider fails exactly one SetMeta key, which is how a
+// half-written trigger pair happens in the field.
+type failOnKeySetMetaProvider struct {
+	*runtime.Fake
+	failKey string
+}
+
+func (p *failOnKeySetMetaProvider) SetMeta(name, key, value string) error {
+	if key == p.failKey {
+		return errors.New("metadata write unavailable")
+	}
+	return p.Fake.SetMeta(name, key, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -1711,6 +1856,19 @@ func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	}
 	t.Cleanup(func() { drainAckPokeSessionStartController = oldExact })
 
+	// This city is a bare directory with no store behind it. The reader is
+	// swapped for one that fails so the leg also proves the contract in
+	// newDrainAckTriggerReader: an unreadable trigger binding warns and leaves
+	// the acknowledgement unstamped rather than failing an ack the agent has
+	// already earned.
+	oldReader := drainAckTriggerReaderFor
+	drainAckTriggerReaderFor = func(_ sessionRuntimeTarget, stderr io.Writer) drainAckTriggerReader {
+		return drainAckTriggerReaderFrom(func() (drainAckTriggerBinding, error) {
+			return drainAckTriggerBinding{}, errors.New("opening store: unavailable")
+		}, stderr)
+	}
+	t.Cleanup(func() { drainAckTriggerReaderFor = oldReader })
+
 	var stdout, stderr bytes.Buffer
 	cmd := newRuntimeDrainAckCmd(&stdout, &stderr)
 	cmd.SilenceErrors = true
@@ -1730,6 +1888,9 @@ func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Drain acknowledged") {
 		t.Fatalf("stdout = %q, want drain acknowledgement", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "acknowledging without a trigger stamp") {
+		t.Fatalf("stderr = %q, want the unstamped-acknowledgement warning", stderr.String())
 	}
 }
 

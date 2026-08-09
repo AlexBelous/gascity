@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -82,4 +83,163 @@ func TestRoutedWorkPoolDrainAckSurvivesLegacyTriggerRepoint(t *testing.T) {
 	if !authorized {
 		t.Fatal("drain acknowledgement is refused after a legacy trigger re-point; the acknowledged drain can never finalize (ga-f7v2ft.131)")
 	}
+}
+
+// TestRoutedWorkPoolDrainAckSurvivesCrossStoreTriggerRepoint is the cross-store
+// arm of the same defect. The acknowledged work lives in a rig store; legacy
+// re-points the member onto city-store work. The acknowledgement is about the
+// rig work, so both halves of the lease — the work id AND the store it must be
+// read from — have to come from the ack, or the effect boundary would look for
+// a rig bead in the city store.
+func TestRoutedWorkPoolDrainAckSurvivesCrossStoreTriggerRepoint(t *testing.T) {
+	fixture := newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(t, routedWorkPoolAuthorizationFixtureOptions{rigName: "packs"})
+
+	cityWork, err := fixture.store.Create(beads.Bead{
+		Title:    "city routed work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": fixture.template},
+	})
+	if err != nil {
+		t.Fatalf("create city routed work: %v", err)
+	}
+	if err := sessionFrontDoor(fixture.store).ApplyPatch(fixture.info.ID, sessionpkg.MetadataPatch{
+		beadmeta.TriggerBeadIDMetadataKey:       cityWork.ID,
+		beadmeta.TriggerBeadStoreRefMetadataKey: "city:test-city",
+	}); err != nil {
+		t.Fatalf("legacy re-points the drained member across stores: %v", err)
+	}
+	repointed, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read re-pointed member: %v", err)
+	}
+
+	lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
+	if err != nil || !agentDrainAck {
+		t.Fatalf("rebuild drain acknowledgement lease = (%+v, %t, %v), want an admitted lease", lease, agentDrainAck, err)
+	}
+	if lease.WorkID != fixture.work.ID || lease.SourceStore != "rig:packs" {
+		t.Fatalf("rebuilt lease = work %q store %q, want the acknowledged rig work %q in %q",
+			lease.WorkID, lease.SourceStore, fixture.work.ID, "rig:packs")
+	}
+	authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, repointed, lease)
+	if err != nil || !authorized {
+		t.Fatalf("cross-store drain acknowledgement authorization = (%t, %v), want true", authorized, err)
+	}
+}
+
+// TestRoutedWorkPoolDrainAckMixedVersionTriggerEvidence pins both directions of
+// the version skew the stamp introduces.
+//
+// The old-controller direction is only reachable as a lease built by the
+// fallback path — the pre-stamp controller binary is not in this process — so it
+// is exercised as an in-flight lease carrying no stamp provenance against a
+// session whose acknowledgement does.
+func TestRoutedWorkPoolDrainAckMixedVersionTriggerEvidence(t *testing.T) {
+	t.Run("unstamped ack still finalizes when the row is unchanged", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		clearAckTriggerStamp(&fixture)
+
+		lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err != nil || !agentDrainAck {
+			t.Fatalf("rebuild unstamped lease = (%+v, %t, %v), want an admitted lease", lease, agentDrainAck, err)
+		}
+		if lease.TriggerFromAck || lease.WorkID != fixture.work.ID {
+			t.Fatalf("unstamped lease = %+v, want the row's trigger %q in fallback mode", lease, fixture.work.ID)
+		}
+		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, lease)
+		if err != nil || !authorized {
+			t.Fatalf("unstamped drain acknowledgement authorization = (%t, %v), want true", authorized, err)
+		}
+	})
+
+	// The documented residual: an acknowledgement from an agent CLI that predates
+	// the stamp carries no evidence of what it acknowledged, so a legacy re-point
+	// still strands it. That refusal is bounded by the WD.6 deadline release
+	// (ga-f7v2ft.112 round-4 ruling 1b), not by this seam.
+	t.Run("unstamped ack still loses a re-pointed row", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		clearAckTriggerStamp(&fixture)
+		repointed := repointDrainedMemberOntoSibling(t, fixture)
+
+		lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
+		if err != nil || !agentDrainAck {
+			t.Fatalf("rebuild unstamped lease = (%+v, %t, %v), want an admitted lease", lease, agentDrainAck, err)
+		}
+		if lease.WorkID == fixture.work.ID {
+			t.Fatalf("unstamped lease named the acknowledged work %q; a pre-stamp ack carries no such evidence", lease.WorkID)
+		}
+		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, repointed, lease)
+		if err != nil || authorized {
+			t.Fatalf("unstamped re-pointed authorization = (%t, %v), want a clean refusal", authorized, err)
+		}
+	})
+
+	t.Run("stamped ack still finalizes an in-flight fallback lease", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		lease := fixture.lease
+		lease.TriggerFromAck = false
+
+		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, lease)
+		if err != nil || !authorized {
+			t.Fatalf("fallback-mode lease against a stamped acknowledgement = (%t, %v), want true", authorized, err)
+		}
+	})
+}
+
+// TestRoutedWorkPoolDrainAckIgnoresLoneTriggerStamp pins both-or-neither. A
+// half-written pair carries no usable binding — one of the two halves the
+// effect boundary needs is missing — so it must read as no stamp at all rather
+// than as a partially trusted one.
+func TestRoutedWorkPoolDrainAckIgnoresLoneTriggerStamp(t *testing.T) {
+	for _, test := range []struct{ name, drop string }{
+		{name: "store ref stamp missing", drop: reconcilerDrainAckTriggerStoreRefKey},
+		{name: "bead id stamp missing", drop: reconcilerDrainAckTriggerBeadIDKey},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+			if err := fixture.provider.RemoveMeta(fixture.info.SessionName, test.drop); err != nil {
+				t.Fatalf("drop %s: %v", test.drop, err)
+			}
+			repointed := repointDrainedMemberOntoSibling(t, fixture)
+
+			lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
+			if err != nil || !agentDrainAck {
+				t.Fatalf("rebuild half-stamped lease = (%+v, %t, %v), want an admitted lease", lease, agentDrainAck, err)
+			}
+			if lease.TriggerFromAck {
+				t.Fatalf("half-stamped lease claimed acknowledgement provenance: %+v", lease)
+			}
+			if lease.WorkID != strings.TrimSpace(repointed.TriggerBeadID) {
+				t.Fatalf("half-stamped lease work = %q, want the row's %q (full fallback)",
+					lease.WorkID, repointed.TriggerBeadID)
+			}
+		})
+	}
+}
+
+// repointDrainedMemberOntoSibling is the legacy re-point at the heart of
+// ga-f7v2ft.131: a second, genuinely open routed work item bound onto a member
+// that has already acknowledged its drain.
+func repointDrainedMemberOntoSibling(t *testing.T, fixture routedWorkPoolDrainAckAuthorizationFixture) sessionpkg.Info {
+	t.Helper()
+	sibling, err := fixture.workStore.Create(beads.Bead{
+		Title:    "sibling routed work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": fixture.template},
+	})
+	if err != nil {
+		t.Fatalf("create sibling routed work: %v", err)
+	}
+	if err := sessionFrontDoor(fixture.store).ApplyPatch(fixture.info.ID, sessionpkg.MetadataPatch{
+		beadmeta.TriggerBeadIDMetadataKey: sibling.ID,
+	}); err != nil {
+		t.Fatalf("legacy re-points the drained member: %v", err)
+	}
+	repointed, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read re-pointed member: %v", err)
+	}
+	return repointed
 }

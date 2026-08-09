@@ -996,6 +996,25 @@ deferral rungs stay shadow behind `detectorActDriftDefer` until WD.9.
    only because delta 4 keeps legacy's deferral arms unyielded: legacy stamps on
    the same tick, and the keyed rung reads what legacy wrote. When WD.9 lands the
    write, the read-only mirror becomes the handler's own.
+11. **A row carrying a durable `restart_requested` is the RESTART family's, at
+   both the sweep and the seam** (corrected at ga-f7v2ft.138, after WD.8 shipped
+   without it). Legacy's restart-requested block (`session_reconciler.go:2806`,
+   reading the marker off the snapshot at `:2819`) runs ABOVE the drift block
+   (`:3050`) and `continue`s the row past it once the kill lands (`:2906`); the
+   single path that falls through has already applied `RestartRequestPatch`,
+   which clears `started_config_hash`, so legacy's drift compare cannot see a
+   drifted row carrying the marker by either route. Detecting or claiming one is
+   therefore a detector-present/legacy-absent divergence, and it cost two real
+   effects: the seam claimed a public `gc session reset` — whose keyed arm lives
+   BELOW the family dispatch in `reconcileExactSessionStartWithOwner` — and
+   silently rebaselined or drained it instead, with no drain-tracker gate, on
+   rows ga-f7v2ft.103's legacy-drain park fence exists to leave alone; and the
+   sweep's `config_drift` enqueue overwrote the source a pending reset was
+   admitted under (`admit()` keeps the earlier source only for `anti_entropy`
+   and `in_process`), which the source-gated reset arm then declined. Yielding
+   costs no convergence: the restart re-stamps all four fingerprints. The
+   predicate is the marker alone, so named and pool rows keyed does not own stay
+   with legacy's block above, unyielded.
 
 ### §3 D-DRIFT deferral deltas (recorded at WD.9)
 

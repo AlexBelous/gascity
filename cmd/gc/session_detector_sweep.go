@@ -1099,6 +1099,21 @@ func detectStaleCreate(in detectorSweepInput, emit *detectorConditionSink, base 
 // handler-side: the rungs below the hash compare read attachment and pending
 // interaction, which are provider probes the sweep may not pay fleet-wide.
 func detectDrift(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, tp TemplateParams) {
+	// Legacy's restart-requested block (session_reconciler.go:2806) runs above
+	// the drift block and `continue`s the row past it, and on the one path that
+	// falls through it has already cleared started_config_hash — so a drifted row
+	// carrying the durable marker is legacy-ABSENT at this site. Raising it is
+	// the detector-present/legacy-absent mismatch the family precedence above
+	// exists to prevent, and it is not free: the enqueued config_drift admission
+	// overwrites the source a pending public reset was admitted under
+	// (admit(), :383 keeps the earlier source only for anti_entropy and
+	// in_process), so the source-gated keyed reset arm
+	// (session_start_reconcile.go:1920) declines and the reset is dropped
+	// (ga-f7v2ft.138). The seam guard in resolveExactSessionConfigDrift makes the
+	// same call from the row; this keeps the sweep from spending the key at all.
+	if strings.TrimSpace(info.RestartRequested) == "true" {
+		return
+	}
 	cond := base
 	cond.Family = detectorFamilyDrift
 	cond.Outcome = TraceOutcomeDrain

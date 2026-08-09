@@ -2924,6 +2924,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		DeferSessionCloses: bootReconcile,
 		Trigger:            detectorSweepTriggerFor(bootReconcile),
 		Admit:              cr.detectorAdmitFunc(),
+		AdmitWake:          cr.detectorWakeAdmitFunc(),
 	})
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
@@ -3443,6 +3444,10 @@ func sweepUndesiredPoolSessionBeads(
 		template := normalizedSessionTemplateInfo(info, cfg)
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil || !isEphemeralSessionInfo(info) {
+			continue
+		}
+		// WD.10a sweep rule: never reap a wake-current canonical singleton.
+		if wakeCurrentSingletonPreservesUndesiredRow(info, cfg, time.Now().UTC()) {
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, *agentCfg, exec.LookPath)

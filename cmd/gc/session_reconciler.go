@@ -2191,6 +2191,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				continue
 			default:
+				// WD.10a sweep rule (ga-f7v2ft.116): a canonical singleton row with a
+				// CURRENT explicit wake is the wake family's live target, and no
+				// configured single-session agent generates desired-state demand of
+				// its own, so this undesired arm would drain or close the very row
+				// `gc session wake` just asked to start. Same predicate the detector,
+				// the keyed orphan-close handler and the pool sweep answer from.
+				if wakeCurrentSingletonPreservesUndesiredRow(infoPostHeal, cfg, clk.Now().UTC()) {
+					continue
+				}
 				if dops != nil {
 					if acked, _ := dops.isDrainAcked(name); acked {
 						// gc-hz0nu: every drain-acked decision below depends on the

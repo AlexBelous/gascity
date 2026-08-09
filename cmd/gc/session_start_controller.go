@@ -77,6 +77,13 @@ const (
 	// in a terminal sleep state, and whose confirmed stranding episode has
 	// outlived strandedRepairConfirmGrace while it still holds assigned work.
 	sessionStartAdmissionStrandedRepair sessionStartAdmissionSource = "stranded_repair"
+	// sessionStartAdmissionWakeFill is the detector sweep's D-WAKE key: a row
+	// the awake set wants and the two-bit liveness probe found dead. It names the
+	// SOURCE only; the admission itself always carries one of the certified wake
+	// leases (AdmitConfiguredNamedWake / AdmitConfiguredDependency /
+	// AdmitStrictDefaultPoolWake), because a wake is a start and a start is the
+	// exclusive effect boundary a lease exists to fence.
+	sessionStartAdmissionWakeFill sessionStartAdmissionSource = "wake_fill"
 )
 
 type sessionStartAdmission struct {
@@ -299,36 +306,41 @@ func (c *sessionStartController) AdmitWaitDependency(lease sessionWaitDependency
 	return outcome, err
 }
 
-func (c *sessionStartController) AdmitConfiguredDependency(lease configuredDependencyStartLease) (sessionStartAdmissionOutcome, error) {
+// The three wake-lease admissions take their SOURCE from the caller because the
+// same certificate now arrives by two entry points: the CLI socket, and the
+// detector sweep's D-WAKE routing seam (WD.10a), which admits under
+// sessionStartAdmissionWakeFill so the parity join can tell a detected wake from
+// an operator-driven one. The lease, not the source, is the ownership proof.
+func (c *sessionStartController) AdmitConfiguredDependency(lease configuredDependencyStartLease, source sessionStartAdmissionSource) (sessionStartAdmissionOutcome, error) {
 	if c == nil {
 		return "", fmt.Errorf("admitting configured-dependency start: controller is nil")
 	}
 	if err := validateConfiguredDependencyStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionSocket, false, 0, nil, nil, false, nil, &lease, nil, nil)
+	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, nil, &lease, nil, nil)
 	return outcome, err
 }
 
-func (c *sessionStartController) AdmitStrictDefaultPoolWake(lease strictDefaultPoolWakeStartLease) (sessionStartAdmissionOutcome, error) {
+func (c *sessionStartController) AdmitStrictDefaultPoolWake(lease strictDefaultPoolWakeStartLease, source sessionStartAdmissionSource) (sessionStartAdmissionOutcome, error) {
 	if c == nil {
 		return "", fmt.Errorf("admitting strict-default pool wake: controller is nil")
 	}
 	if err := validateStrictDefaultPoolWakeStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionSocket, false, 0, nil, nil, false, nil, nil, &lease, nil)
+	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, nil, nil, &lease, nil)
 	return outcome, err
 }
 
-func (c *sessionStartController) AdmitConfiguredNamedWake(lease configuredNamedWakeStartLease) (sessionStartAdmissionOutcome, error) {
+func (c *sessionStartController) AdmitConfiguredNamedWake(lease configuredNamedWakeStartLease, source sessionStartAdmissionSource) (sessionStartAdmissionOutcome, error) {
 	if c == nil {
 		return "", fmt.Errorf("admitting configured named wake: controller is nil")
 	}
 	if err := validateConfiguredNamedWakeStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionSocket, false, 0, nil, nil, false, nil, nil, nil, &lease)
+	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, nil, nil, nil, &lease)
 	return outcome, err
 }
 
@@ -720,7 +732,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionDuplicateNamed,
 		sessionStartAdmissionSleepDrain,
 		sessionStartAdmissionProgressStall,
-		sessionStartAdmissionStrandedRepair:
+		sessionStartAdmissionStrandedRepair,
+		sessionStartAdmissionWakeFill:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)

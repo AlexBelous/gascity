@@ -195,6 +195,9 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				EnterConfiguredNamedWakeStart: func(lease configuredNamedWakeStartLease) bool {
 					return controller.enterConfiguredNamedWakeStart(lease)
 				},
+				CertifyWakeFamilyStart: func(info sessionpkg.Info, revision int64) bool {
+					return cr.certifyWakeFamilyStartForKey(snapshot, info, revision)
+				},
 			})
 			if reconcileErr == nil && owner == exactSessionStartLegacyOwner {
 				return errSessionStartLegacyFallbackRequired
@@ -565,8 +568,34 @@ func (cr *CityRuntime) strictDefaultPoolWakeStartWitnessCurrent(
 	cr.serviceStateMu.RLock()
 	configCurrent := cr.cfg == snapshot.Config
 	cr.serviceStateMu.RUnlock()
-	return configCurrent && snapshot.Generation == lease.ControllerGeneration &&
-		strictDefaultPoolWakeIdentityMatches(info, snapshot.Config, lease)
+	if !configCurrent || snapshot.Generation != lease.ControllerGeneration ||
+		!strictDefaultPoolWakeIdentityMatches(info, snapshot.Config, lease) {
+		return false
+	}
+	// Clause 2 of the uniform predicate contract (ga-f7v2ft.116 Q1). Eligibility
+	// moved to supported(), which admits agent-capped pools for the first time,
+	// so the cap itself now has to be checked where the action can change the
+	// active count instead of being smuggled into the eligibility reason. Waking
+	// a member that already holds its own occupancy adds no member, so its own
+	// occupancy is excluded — the same self-exclusion the bounded wait-dependency
+	// resume uses.
+	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
+	if agent == nil {
+		return false
+	}
+	namedTemplates := make(map[string]struct{}, len(snapshot.Config.NamedSessions))
+	for i := range snapshot.Config.NamedSessions {
+		namedTemplates[snapshot.Config.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
+	}
+	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates)
+	if policy.maxActiveSessions < 0 {
+		return true
+	}
+	observation, selfOccupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)
+	if !observation.certified {
+		return false
+	}
+	return strictDefaultPoolWakeCapacityAvailable(policy.maxActiveSessions, observation.occupied, selfOccupied)
 }
 
 func (cr *CityRuntime) configuredNamedWakeStartWitnessCurrent(
@@ -664,35 +693,17 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 	}
 	_, _, owner := classifyExactSessionStartOwnership(info, snapshot.Config, now)
 	if owner != exactSessionStartKeyedOwner {
-		if lease, certified := certifyConfiguredNamedWakeStartLease(info, revision, snapshot.Config, snapshot.CityName, snapshot.Generation, now); certified {
-			outcome, admitErr := controller.AdmitConfiguredNamedWake(lease)
-			if admitErr == nil && outcome != sessionStartAdmissionOverflow {
+		admitted, admitErr := cr.admitCertifiedWakeFamilyStart(
+			controller, snapshot, info, revision, sessionStartAdmissionSocket, now,
+		)
+		if admitted.Certified {
+			if admitErr == nil && admitted.Outcome != sessionStartAdmissionOverflow {
 				return sessionStartSocketReplyOK
 			}
 			if mode == rollout.Require {
 				return sessionStartSocketReplyBlocked
 			}
-			return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("configured named wake admission rejected (outcome=%s err=%v)", outcome, admitErr))
-		}
-		if lease, certified := certifyStrictDefaultPoolWakeStartLease(info, revision, snapshot.Config, snapshot.Generation, now); certified {
-			outcome, admitErr := controller.AdmitStrictDefaultPoolWake(lease)
-			if admitErr == nil && outcome != sessionStartAdmissionOverflow {
-				return sessionStartSocketReplyOK
-			}
-			if mode == rollout.Require {
-				return sessionStartSocketReplyBlocked
-			}
-			return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("strict-default pool wake admission rejected (outcome=%s err=%v)", outcome, admitErr))
-		}
-		if lease, certified := certifyConfiguredDependencyStartLease(info, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Store, snapshot.Generation, now); certified {
-			outcome, admitErr := controller.AdmitConfiguredDependency(lease)
-			if admitErr == nil && outcome != sessionStartAdmissionOverflow {
-				return sessionStartSocketReplyOK
-			}
-			if mode == rollout.Require {
-				return sessionStartSocketReplyBlocked
-			}
-			return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("configured-dependency admission rejected (outcome=%s err=%v)", outcome, admitErr))
+			return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("%s admission rejected (outcome=%s err=%v)", admitted.Family, admitted.Outcome, admitErr))
 		}
 		if mode == rollout.Require {
 			return sessionStartSocketReplyBlocked
@@ -707,6 +718,126 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 		return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("exact session-start admission rejected (outcome=%s err=%v)", outcome, err))
 	}
 	return sessionStartSocketReplyOK
+}
+
+// admitCertifiedWakeFamilyStart is the ONE place a wake certificate is minted
+// and admitted. Every entry point that can reach a wake target uses it — the CLI
+// socket, the detector sweep's D-WAKE routing seam, and the pre-lease ownership
+// seam inside the keyed handler — so the three families are certified in one
+// fixed order against one authoritative row, and no entry point can drift into
+// admitting a shape another one refuses.
+//
+// The families are tried named → strict-default pool → configured dependency,
+// which is the order the socket path has always used and is disjoint by
+// construction: named rows fail the pool predicates, slotized rows fail the
+// named and singleton predicates, and canonical singletons fail the slot
+// predicate.
+type certifiedWakeAdmission struct {
+	// Family names the certifying family for diagnostics only. Empty means
+	// nothing certified — the row is a wake target no lease can own, which is a
+	// legitimate answer, not an error.
+	Family    string
+	Outcome   sessionStartAdmissionOutcome
+	Certified bool
+}
+
+func (cr *CityRuntime) admitCertifiedWakeFamilyStart(
+	controller *sessionStartController,
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+	revision int64,
+	source sessionStartAdmissionSource,
+	now time.Time,
+) (certifiedWakeAdmission, error) {
+	if cr == nil || controller == nil || snapshot.Config == nil {
+		return certifiedWakeAdmission{}, nil
+	}
+	if lease, certified := certifyConfiguredNamedWakeStartLease(info, revision, snapshot.Config, snapshot.CityName, snapshot.Generation, now); certified {
+		outcome, err := controller.AdmitConfiguredNamedWake(lease, source)
+		return certifiedWakeAdmission{Family: "configured named wake", Outcome: outcome, Certified: true}, err
+	}
+	if lease, certified := certifyStrictDefaultPoolWakeStartLease(info, revision, snapshot.Config, snapshot.Generation, now); certified &&
+		cr.strictDefaultPoolWakeStartWitnessCurrent(snapshot, info, lease) {
+		outcome, err := controller.AdmitStrictDefaultPoolWake(lease, source)
+		return certifiedWakeAdmission{Family: "strict-default pool wake", Outcome: outcome, Certified: true}, err
+	}
+	if lease, certified := certifyConfiguredDependencyStartLease(info, snapshot.Config, snapshot.Provider, snapshot.CityName, snapshot.Store, snapshot.Generation, now); certified {
+		outcome, err := controller.AdmitConfiguredDependency(lease, source)
+		return certifiedWakeAdmission{Family: "configured-dependency", Outcome: outcome, Certified: true}, err
+	}
+	return certifiedWakeAdmission{}, nil
+}
+
+// certifyWakeFamilyStartForKey backs exactSessionStartParams.CertifyWakeFamilyStart:
+// the pre-lease ownership seam. The keyed handler calls it with the row it has
+// already read, immediately before it would have surrendered that row to legacy
+// and asked for the fallback poke that consumes the durable wake cause. A true
+// return means a certified lease now names this exact key and the key has been
+// re-admitted under it.
+func (cr *CityRuntime) certifyWakeFamilyStartForKey(
+	snapshot controllerSessionStartSnapshot,
+	info sessionpkg.Info,
+	revision int64,
+) bool {
+	if cr == nil {
+		return false
+	}
+	cr.sessionStartMu.Lock()
+	controller := cr.sessionStartController
+	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	cr.sessionStartMu.Unlock()
+	if !owned || controller == nil {
+		return false
+	}
+	admitted, err := cr.admitCertifiedWakeFamilyStart(
+		controller, snapshot, info, revision, sessionStartAdmissionWakeFill, time.Now().UTC(),
+	)
+	return admitted.Certified && err == nil && admitted.Outcome != sessionStartAdmissionOverflow
+}
+
+// detectorWakeAdmitFunc hands the detector sweep D-WAKE's certified-lease
+// admission. Unlike every other acting family, D-WAKE cannot ride the bare
+// Admit(id, source) entry: a wake IS a start, and the keyed start path fences a
+// start with a lease, so the routing seam must certify.
+//
+// Recorded §3 delta: certification runs at the ROUTING seam, not in detection.
+// The sweep itself stays read-only and pays no new reads; the seam pays one
+// authoritative row read per ROUTED wake key, which is the same read the socket
+// path pays for the same decision and is bounded by the wake-target set (rows the
+// awake set wants and the liveness probe found dead), not by the fleet.
+//
+// An EMPTY outcome with a nil error is the seam's "no lease can own this row"
+// answer — a pool-fill member, or one whose dependency is not alive. It is not a
+// failure: the row stays legacy's and the level-triggered sweep re-detects it.
+func (cr *CityRuntime) detectorWakeAdmitFunc() func(string) (sessionStartAdmissionOutcome, error) {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	controller := cr.sessionStartController
+	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	cr.sessionStartMu.Unlock()
+	if !owned || controller == nil {
+		return nil
+	}
+	return func(sessionID string) (sessionStartAdmissionOutcome, error) {
+		snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
+		if err != nil {
+			return "", fmt.Errorf("acquiring wake admission snapshot for %q: %w", sessionID, err)
+		}
+		defer release()
+		info, revision, err := getAuthoritativeSessionStartRecord(snapshot.Store, sessionID)
+		if err != nil {
+			return "", fmt.Errorf("reading wake target %q: %w", sessionID, err)
+		}
+		admitted, admitErr := cr.admitCertifiedWakeFamilyStart(
+			controller, snapshot, info, revision, sessionStartAdmissionWakeFill, time.Now().UTC(),
+		)
+		if !admitted.Certified {
+			return "", nil
+		}
+		return admitted.Outcome, admitErr
+	}
 }
 
 // detectorAdmitFunc hands the detector sweep the existing session-start

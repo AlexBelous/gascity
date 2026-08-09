@@ -2144,6 +2144,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if preserveConfiguredNamedSessionBead(b, cfg, cityName) {
 				continue
 			}
+			// WD.10a sweep rule: this pass stamps the canonical singleton identity
+			// on a configured single-session agent's row and, in the same pass,
+			// would close that row as an orphan — because no such agent generates
+			// desired-state demand of its own. A CURRENT explicit wake is demand,
+			// and reaping it here is what made the keyed wake family unreachable.
+			if wakeCurrentSingletonPreservesUndesiredBead(b, cfg, now) {
+				continue
+			}
 			if spec, conflict, err := findConflictingNamedSessionSpecForBead(cfg, cityName, b); err != nil {
 				fmt.Fprintf(stderr, "session beads: checking named-session conflict for %s: %v\n", b.ID, err) //nolint:errcheck
 			} else if conflict {

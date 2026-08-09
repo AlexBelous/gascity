@@ -859,14 +859,23 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if elapsed := time.Since(suspendAt); elapsed >= 30*time.Second {
 		t.Fatalf("configured named suspend latency = %s, want stop within the 30s absolute budget", elapsed)
 	}
-	// The configured-dependency wake leg is excised and skipped, not deleted: its
-	// target is a bare origin-less row that no production creation path sustains
-	// (sync stamps the canonical singleton identity on any dependency-bearing
-	// single-session agent's row within one tick), so the leg certified a state
-	// production never reaches. It re-lands in WD.10a against a sync-produced
-	// canonical singleton row. Every later leg keeps running in the main flow.
+	// RE-LANDED at WD.10a (ga-f7v2ft.116), closing ga-ij8mh. The leg used to
+	// fabricate a bare origin-less target and assert the pool markers were ABSENT
+	// — a pre-sync shape no production path sustains, which only survived because
+	// the fixture's 30s tick debounce guaranteed no sync ran inside the leg. It
+	// now runs against the shape production actually produces: the row is handed
+	// to the fleet, syncSessionBeads stamps the canonical singleton identity
+	// (pool_managed + ephemeral origin, no slot), and the leg asserts those
+	// markers are PRESENT on the row the keyed family starts. Under debounce-0
+	// the wake is requested before the fleet can see the row, which is what the
+	// sweep rule and the pre-lease ownership seam exist to survive.
+	// configuredDependencyWakeBudget is the leg's absolute detect-to-start bound.
+	// It is wall-clock, not debounce-relative: the tick debouncer is retired, so
+	// the old "beats the 30s debounce" framing named a mechanism that no longer
+	// exists. The bound covers a full sync adoption plus a certified keyed start
+	// under an active legacy at debounce-0.
+	const configuredDependencyWakeBudget = 60 * time.Second
 	t.Run("configured_dependency_wake", func(t *testing.T) {
-		t.Skip("ga-ij8mh: the keyed configured-dependency wake family cannot own any production-reachable row shape, so this leg certifies a born-unreachable state; it re-lands on the canonical singleton shape as ga-f7v2ft.116 (WD.10a) acceptance")
 		dependencySpec, ok := sessionpkg.FindNamedSessionSpec(loaded, guard.CityName(), "database")
 		if !ok {
 			t.Fatal("configured database named-session spec is unavailable")
@@ -908,6 +917,22 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 				err, controllerStdout.String(), controllerStderr.String())
 		}
 
+		// Detail-arm BEFORE the row exists. Arming sends trace-arm:, which pokes
+		// the runtime, and post-WD.0 that poke runs a fleet tick immediately. Doing
+		// it after the create would put a deliberate tick between a bare,
+		// demand-less row and its wake — and a configured single-session agent
+		// generates no desired-state demand of its own, so that tick's successor
+		// reaps the row before the operator's wake ever lands. Arming first leaves
+		// the create→wake window with no poke in it (raw bd writes are
+		// event-silent), which is the same window production has.
+		runGC(10*time.Second,
+			"--city", cityPath,
+			"trace", "start",
+			"--template", "dependent",
+			"--for", "2m",
+			"--level", string(TraceModeDetail),
+		)
+
 		dependentSessionName := guard.SessionName("dependent")
 		dependentMetadata := desiredSessionIdentity(sessionIdentityInputs{
 			AgentName:         "dependent",
@@ -919,6 +944,18 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			ConfigResolved:    true,
 		})
 		dependentMetadata["template"] = "dependent"
+		// The row is born carrying its explicit wake. Between a bare create and a
+		// separate wake there is a window in which the row is asleep, undesired and
+		// demand-less — a configured single-session agent generates no
+		// desired-state demand of its own — and in that window every reaper in the
+		// fleet is CORRECT to close it. That window is a fixture artifact: a
+		// production row for such an agent never exists without demand. Creating it
+		// wake-current removes the artifact without weakening anything the leg
+		// proves; `gc session wake` below is still the CLI trigger that drives the
+		// certified keyed admission.
+		for key, value := range sessionpkg.RequestExplicitWakePatch(string(sessionpkg.WakeCauseExplicit), time.Now().UTC()) {
+			dependentMetadata[key] = value
+		}
 		dependentBead, err := backingStore.Create(beads.Bead{
 			Title:    "ordinary configured dependency wake target",
 			Type:     sessionBeadType,
@@ -929,21 +966,18 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create ordinary configured wake target: %v", err)
 		}
+		// The row is handed over BARE. Nothing here stamps an identity: the whole
+		// point of the re-land is that the production sync path, not the fixture,
+		// materializes the canonical singleton shape, and the assertions below
+		// require it to have done so by the time the keyed family starts the row.
 		for _, key := range []string{
 			"session_origin", "manual_session", "configured_named_identity", "configured_named_session",
 			poolManagedMetadataKey, "pool_slot", "dependency_only", "pending_create_claim",
 		} {
 			if dependentBead.Metadata[key] != "" {
-				t.Fatalf("ordinary configured wake target metadata %s = %q, want absent", key, dependentBead.Metadata[key])
+				t.Fatalf("ordinary configured wake target metadata %s = %q, want absent at hand-over", key, dependentBead.Metadata[key])
 			}
 		}
-		runGC(10*time.Second,
-			"--city", cityPath,
-			"trace", "start",
-			"--template", "dependent",
-			"--for", "2m",
-			"--level", string(TraceModeDetail),
-		)
 		dependentWakeAt := time.Now().UTC()
 		dependentWakeOutput := runGC(10*time.Second,
 			"--city", cityPath,
@@ -961,7 +995,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			dependentAfter  sessionpkg.Info
 			dependentTmuxID string
 		)
-		if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		if err := waitExactStartStopState(t.Context(), configuredDependencyWakeBudget, func() (bool, error) {
 			info, getErr := sessionFrontDoor(backingStore).Get(dependentBead.ID)
 			if getErr != nil {
 				return false, getErr
@@ -987,11 +1021,32 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			return true, nil
 		}); err != nil {
 			current, currentErr := sessionFrontDoor(backingStore).Get(dependentBead.ID)
-			t.Fatalf("configured-dependency wake did not start before the held 30s legacy debounce: %v; current=%+v current_err=%v controller stdout=%q stderr=%q",
+			t.Fatalf("configured-dependency wake did not start within the 60s absolute budget: %v; current=%+v current_err=%v controller stdout=%q stderr=%q",
 				err, current, currentErr, controllerStdout.String(), controllerStderr.String())
 		}
 		if dependentAfter.ID != dependentBead.ID || dependentAfter.SessionName != dependentSessionName {
 			t.Fatalf("configured-dependency wake changed target identity: bead=%+v session=%+v", dependentBead, dependentAfter)
+		}
+		// The acceptance the re-land exists for (ga-ij8mh ruling 4, amendment 5):
+		// the row the keyed family started is the SYNC-PRODUCED canonical
+		// singleton, not the bare row the fixture handed over. syncSessionBeads
+		// stamps pool_managed + ephemeral origin on every dependency-bearing
+		// single-session agent's row, the sweep rule keeps the wake-current row out
+		// of GCSweepSessionBeads, and the wake family owns the shape because the
+		// two families partition on SLOT markers.
+		if !isCanonicalPoolManagedSessionInfoForTemplate(dependentAfter, "dependent") {
+			t.Fatalf("configured-dependency wake target is not the sync-produced canonical singleton: %+v", dependentAfter)
+		}
+		if strings.TrimSpace(dependentAfter.SessionOrigin) != "ephemeral" || !dependentAfter.PoolManaged {
+			t.Fatalf("configured-dependency wake target lost the sync-produced markers: origin=%q pool_managed=%t",
+				dependentAfter.SessionOrigin, dependentAfter.PoolManaged)
+		}
+		if strings.TrimSpace(dependentAfter.PoolSlot) != "" {
+			t.Fatalf("configured-dependency wake target acquired a pool slot (%q); slotized rows belong to the strict-default pool family",
+				dependentAfter.PoolSlot)
+		}
+		if dependentAfter.Closed || dependentAfter.MetadataState == "gc_swept" {
+			t.Fatalf("configured-dependency wake target was reaped by the undesired-pool sweep: %+v", dependentAfter)
 		}
 		dependentPanePID, err := tmuxClient.GetPanePID(dependentSessionName)
 		if err != nil {
@@ -1000,7 +1055,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		registerLivePaneProcess(dependentPanePID)
 
 		var dependentCommits []SessionReconcilerTraceRecord
-		if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
+		if err := waitExactStartStopState(t.Context(), configuredDependencyWakeBudget, func() (bool, error) {
 			records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 				RecordType:  TraceRecordOperation,
 				SiteCode:    TraceSiteLifecycleStartCommit,
@@ -1012,8 +1067,17 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			}
 			dependentCommits = dependentCommits[:0]
 			for _, record := range records {
+				// The LEASE, not the admission source, is the ownership proof. A
+				// certified configured-dependency certificate now reaches the handler
+				// by three entry points — the CLI socket, the pre-lease ownership
+				// seam, and the detector sweep's routing seam — and the source is
+				// sticky to whichever admitted the key FIRST, so asserting on it
+				// would prove only that some keyed admission ran. `start_lease` names
+				// the family that actually authorized the start.
+				if record.Fields["start_lease"] != "configured_dependency" {
+					continue
+				}
 				if record.SessionBeadID == dependentBead.ID &&
-					record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
 					record.Fields["session_id"] == dependentBead.ID &&
 					record.Fields["instance_token"] == dependentAfter.InstanceToken &&
 					record.Fields["effect_applied"] == true {
@@ -1060,8 +1124,13 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 				dependencyBefore, dependencyAfter, dependencyTmuxIDBefore,
 				strings.TrimSpace(dependencyIDsAfter[dependencyBefore.SessionName]), dependencyLiveTokenAfter)
 		}
-		if elapsed := time.Since(dependentWakeAt); elapsed >= 30*time.Second || dependentTmuxID == "" {
-			t.Fatalf("configured-dependency wake latency/tmux = %s/%q, want live before 30s legacy debounce", elapsed, dependentTmuxID)
+		// Absolute budget, not a debounce-relative claim: the debouncer is retired
+		// (WD.0), so "beat the 30s debounce" no longer names anything. What the leg
+		// asserts is that a certified wake converges within a fixed wall-clock
+		// bound while legacy is active at debounce-0.
+		if elapsed := time.Since(dependentWakeAt); elapsed >= configuredDependencyWakeBudget || dependentTmuxID == "" {
+			t.Fatalf("configured-dependency wake latency/tmux = %s/%q, want live within the %s absolute budget",
+				elapsed, dependentTmuxID, configuredDependencyWakeBudget)
 		}
 	})
 
@@ -1420,9 +1489,9 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	// see, and a retired PID that the host recycles into an unrelated process is
 	// exactly the unreadable entry an exit-conditional prune leaves behind. The
 	// wait below therefore retires by registered identity, not by exit, so the
-	// recycled case is dropped on the first observation. The only registration
-	// this leg inherited came from the configured-dependency leg, which is
-	// skipped under ga-ij8mh; WD.10a restores that registration with the leg.
+	// recycled case is dropped on the first observation. The registration this
+	// leg inherits comes from the configured-dependency leg, restored with that
+	// leg at WD.10a.
 	wokenPanePID, err := tmuxClient.GetPanePID(created.SessionName)
 	if err != nil {
 		t.Fatalf("read exact wake pane PID: %v", err)

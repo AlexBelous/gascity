@@ -54,6 +54,13 @@ func exactSessionOrphanCloseCandidate(
 	if desired == nil || desired[name] {
 		return ""
 	}
+	// WD.10a sweep rule: a wake-current canonical singleton is D-WAKE's live
+	// target, and no configured single-session agent generates desired-state
+	// demand of its own, so undesiredness alone would reap the row an operator
+	// just asked to wake.
+	if wakeCurrentSingletonPreservesUndesiredRow(info, params.Config, clk.Now().UTC()) {
+		return ""
+	}
 	if isFailedCreateSessionInfo(info) {
 		if pendingCreateSessionStillLeasedInfo(info, params.Config, clk) {
 			return ""

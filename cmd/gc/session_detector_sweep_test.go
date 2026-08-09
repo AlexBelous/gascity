@@ -58,18 +58,19 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // TestDetectorFamiliesStayShadowOnlyDuringWD pins the act frontier: exactly the
 // families whose keyed handler AND legacy yield have landed may act, and every
 // other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
-// arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4. A family that flips
-// an act constant without an arm in detectorAdmissionSourceFor — or with an arm
-// but no landed handler — fails here before it can double-act beside a
-// non-yielding legacy.
+// arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4; D-STALE-CREATE at
+// WD.7. A family that flips an act constant without an arm in
+// detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
+// before it can double-act beside a non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	// The outcomes each acting family's EFFECT arms carry, one entry per landed
 	// handler+yield pair. A family absent from this table must not route under
 	// any outcome, and an outcome absent from a listed family's set must not
 	// route either.
 	acting := map[detectorFamily]map[TraceOutcomeCode]bool{
-		detectorFamilyDeadline: {TraceOutcomeStop: true},
-		detectorFamilyOrphan:   {TraceOutcomeClosed: true, TraceOutcomeDrain: true},
+		detectorFamilyDeadline:    {TraceOutcomeStop: true},
+		detectorFamilyOrphan:      {TraceOutcomeClosed: true, TraceOutcomeDrain: true},
+		detectorFamilyStaleCreate: {TraceOutcomeRollback: true},
 	}
 	if !detectorAnyFamilyActs() {
 		t.Fatal("detectorAnyFamilyActs() = false; D-DEADLINE acts from WD.2 onward")
@@ -114,6 +115,9 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 				t.Errorf("family %q routed non-effect outcome %q; only its effect arms may enqueue", spec.Family, outcome)
 			}
 		}
+	}
+	if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyStaleCreate, Outcome: TraceOutcomeNoChange}); routed {
+		t.Error("D-STALE-CREATE routed its preserved arm; only its rollback arm may enqueue")
 	}
 	for _, family := range []detectorFamily{
 		detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilyStaleCreate,

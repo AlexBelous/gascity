@@ -70,14 +70,17 @@ const (
 // withLegacyOrphanDrainExclusion). One constant governing both would have made
 // a family cross wholesale the moment either half landed, which is exactly the
 // double-act this rule exists to prevent; the family-spec table folds the two
-// back into one Acts bit. The rest flip in the WE cutover commit, one family at
-// a time, once the WD.15 parity window has cleared their must-match bar. They
-// are compile-time constants on purpose: this is not a config surface.
+// back into one Acts bit. D-STALE-CREATE crossed at WD.7 (handler:
+// session_stale_create_reconcile.go; yield:
+// withLegacyStaleCreateRollbackExclusion). The rest flip in the WE cutover
+// commit, one family at a time, once the WD.15 parity window has cleared their
+// must-match bar. They are compile-time constants on purpose: this is not a
+// config surface.
 const (
 	detectorActDeadline                = true
 	detectorActOrphanClose             = true
 	detectorActOrphanDrain             = true
-	detectorActStaleCreate             = false
+	detectorActStaleCreate             = true
 	detectorActDrift                   = false
 	detectorActSleep                   = false
 	detectorActDrain                   = false
@@ -1231,6 +1234,10 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 			return sessionStartAdmissionOrphanDrain, detectorActOrphanDrain
 		}
 		return "", false
+	case detectorFamilyStaleCreate:
+		// Only the expired-lease ROLLBACK arm predicts an effect; the
+		// preserved-row arm records no-change for the parity join (WD.7).
+		return sessionStartAdmissionStaleCreate, detectorActStaleCreate && cond.Outcome == TraceOutcomeRollback
 	}
 	return "", false
 }

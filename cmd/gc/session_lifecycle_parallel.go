@@ -309,26 +309,27 @@ func (p startPhaseTimings) tracePayload(sessionID string, total time.Duration) t
 }
 
 type startExecutionOptions struct {
-	async                          bool
-	asyncFollowUp                  func()
-	asyncLimiter                   *asyncStartLimiter
-	asyncTracker                   *asyncStartTracker
-	asyncStopTracker               *asyncStartTracker
-	maxSessionAgeTr                maxSessionAgeTracker
-	assignedWorkDeferTr            assignedWorkDeferTracker
-	workDirResolver                taskWorkDirResolver
-	stabilityWaiter                startStabilityWaiter
-	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
-	statusComparisonObserver       sessionLifecycleStatusComparisonObserver
-	exactStatusObserver            exactSessionLifecycleStatusObserver
-	startSelectionObserver         sessionLifecycleStartSelectionComparisonObserver
-	startSelectionShadowObserver   func(sessionLifecycleStartShadowObservation)
-	startSelectionShadowAdmission  func(string) (sessionLifecycleStartShadowAdmission, bool)
-	legacyStartExcluded            func(sessionpkg.Info) bool
-	legacyStatusHealExcluded       func(sessionpkg.Info) bool
-	legacyDeadlineStopExcluded     func(sessionpkg.Info) bool
-	legacyOrphanCloseExcluded      func(sessionpkg.Info) bool
-	legacyOrphanDrainExcluded      func(sessionpkg.Info) bool
+	async                             bool
+	asyncFollowUp                     func()
+	asyncLimiter                      *asyncStartLimiter
+	asyncTracker                      *asyncStartTracker
+	asyncStopTracker                  *asyncStartTracker
+	maxSessionAgeTr                   maxSessionAgeTracker
+	assignedWorkDeferTr               assignedWorkDeferTracker
+	workDirResolver                   taskWorkDirResolver
+	stabilityWaiter                   startStabilityWaiter
+	sessionStaleKeyDetectionWaiter    sessionpkg.StaleKeyDetectionWaiter
+	statusComparisonObserver          sessionLifecycleStatusComparisonObserver
+	exactStatusObserver               exactSessionLifecycleStatusObserver
+	startSelectionObserver            sessionLifecycleStartSelectionComparisonObserver
+	startSelectionShadowObserver      func(sessionLifecycleStartShadowObservation)
+	startSelectionShadowAdmission     func(string) (sessionLifecycleStartShadowAdmission, bool)
+	legacyStartExcluded               func(sessionpkg.Info) bool
+	legacyStatusHealExcluded          func(sessionpkg.Info) bool
+	legacyDeadlineStopExcluded        func(sessionpkg.Info) bool
+	legacyOrphanCloseExcluded         func(sessionpkg.Info) bool
+	legacyOrphanDrainExcluded         func(sessionpkg.Info) bool
+	legacyStaleCreateRollbackExcluded func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -499,9 +500,45 @@ func withLegacyOrphanDrainExclusion(excluded func(sessionpkg.Info) bool) startEx
 	}
 }
 
+// withLegacyStaleCreateRollbackExclusion installs the keyed-ownership bridge for
+// the D-STALE-CREATE family. Returning true keeps the fleet loop's pending-create
+// rollback arms out of the effect entirely — no Tx close, no retired-session
+// cleanup, and no per-tick budget spent — because the keyed handler already owns
+// that exact key. It is deliberately NOT the start-family predicate: a stranded
+// create is usually lifecycle-terminal or named/pool-managed, which
+// classifyExactSessionStartOwnership hands to legacy, so reusing that predicate
+// would leave exactly these rows unyielded while disabling legacy rollback on
+// rows keyed never admitted. Retired at WE with the god function.
+func withLegacyStaleCreateRollbackExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyStaleCreateRollbackExcluded = excluded
+	}
+}
+
 func withLegacyStatusHealExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyStatusHealExcluded = excluded
+	}
+}
+
+// combineStartExecutionOptions folds several options into one, skipping nils.
+// It returns nil when nothing is left to apply, so a caller can hand the result
+// straight back as "no option". Each WD slice adds one more legacy-yield bridge
+// to the same call site, and this keeps that a one-line addition.
+func combineStartExecutionOptions(opts ...startExecutionOption) startExecutionOption {
+	applied := make([]startExecutionOption, 0, len(opts))
+	for _, opt := range opts {
+		if opt != nil {
+			applied = append(applied, opt)
+		}
+	}
+	if len(applied) == 0 {
+		return nil
+	}
+	return func(target *startExecutionOptions) {
+		for _, apply := range applied {
+			apply(target)
+		}
 	}
 }
 

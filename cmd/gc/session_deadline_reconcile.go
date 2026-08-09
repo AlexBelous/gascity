@@ -61,6 +61,9 @@ func reconcileExactSessionDetectorFamily(
 	case detectorActDeadline && exactSessionDeadlineStopCandidate(params, info, response, clk.Now().UTC()):
 		owner, err := reconcileExactSessionDeadlineStop(ctx, admission, params, info, response, clk)
 		return true, owner, err
+	case detectorActStaleCreate && exactSessionStaleCreateRollbackCandidate(params, info, response, clk):
+		owner, err := reconcileExactSessionStaleCreateRollback(ctx, admission, params, info, response, clk)
+		return true, owner, err
 	}
 	return false, exactSessionStartUnowned, nil
 }

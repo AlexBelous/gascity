@@ -1707,20 +1707,15 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		firstPoolFinalBead beads.Bead
 		drainFinalizedAt   time.Time
 	)
-	// The acknowledgement itself lands -- the command returns acknowledged and
-	// the runtime metadata above is exact -- but nothing finalizes it. Under
-	// first-creator-wins the legacy builder created this member and stamped the
-	// demand collector's bare "city" trigger scope, so the keyed drain-ack
-	// authorization refuses it forever: forSourceStore asks
-	// agentutil.AgentReachesWorkflowStore, which requires a "city:" prefix for a
-	// rig-less agent, so the allocation policy reports unsupported and every tick
-	// parks with "recovered drain acknowledgement authorization no longer holds
-	// before provenance write". A parked drain-ack admission is re-queued without
-	// limit (session_start_controller.go:1004), so legacy never inherits it
-	// either. Keyed can only own this stop once it owns the allocation, which is
-	// the ga-f7v2ft.117 seam; the finalization proof itself is WD.6 acceptance.
+	// Under first-creator-wins the legacy builder created this member and stamped
+	// the demand collector's bare "city" trigger scope. The keyed drain-ack seam
+	// canonicalizes that legacy spelling at lease construction (ga-2oboq), so it
+	// can own the stop on a legacy-created row: without it, forSourceStore asked
+	// agentutil.AgentReachesWorkflowStore -- which requires a "city:" prefix for a
+	// rig-less agent -- reported the allocation policy unsupported, and every tick
+	// parked with "recovered drain acknowledgement authorization no longer holds
+	// before provenance write" forever.
 	t.Run("routed_work_drain_finalize", func(t *testing.T) {
-		t.Skip("ga-f7v2ft.112: keyed drain advance/ack/cancel by exact key is unbuilt, so no owner finalizes this acknowledged drain; it re-lands as WD.6 acceptance once ga-f7v2ft.117 makes keyed the allocation winner")
 		if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
 			if removeErr := removeExitedPaneProcess(firstPool.panePID); removeErr != nil {
 				return false, removeErr
@@ -1806,9 +1801,8 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			strings.TrimSpace(secondIDsAfter[secondPool.info.SessionName]), secondPool.token, secondTokenAfter)
 	}
 
-	// Retire the sibling through the same user-visible path. The request half
-	// still runs so the later legacy-shadow leg observes a real acknowledged
-	// fixture; its durable retirement is the same WD.6 proof skipped above.
+	// Retire the sibling through the same user-visible path, so the later
+	// legacy-shadow leg observes a real acknowledged fixture.
 	if err := backingStore.Close(secondRoutedWork.ID); err != nil {
 		t.Fatalf("close sibling routed trigger %s: %v", secondRoutedWork.ID, err)
 	}
@@ -1827,7 +1821,6 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			secondDrainAck, secondPool.info.Alias, secondPool.info.SessionName)
 	}
 	t.Run("routed_work_sibling_retirement", func(t *testing.T) {
-		t.Skip("ga-f7v2ft.112: the sibling retirement is the same unbuilt keyed drain finalization as routed_work_drain_finalize; it re-lands as WD.6 acceptance once ga-f7v2ft.117 makes keyed the allocation winner")
 		if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
 			if removeErr := removeExitedPaneProcess(secondPool.panePID); removeErr != nil {
 				return false, removeErr

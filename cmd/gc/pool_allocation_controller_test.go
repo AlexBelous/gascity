@@ -3629,6 +3629,133 @@ func TestAuthorizeRoutedWorkPoolDrainAckAcceptsExactStopPendingRow(t *testing.T)
 	}
 }
 
+// TestCanonicalizeLegacyWorkflowStoreRef pins the definite legacy→canonical
+// mapping. It is deliberately not a wildcard: an unknown bare ref stays
+// unchanged so downstream validation still refuses it (ga-2oboq).
+func TestCanonicalizeLegacyWorkflowStoreRef(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Prefix: "hq"},
+		Rigs:      []config.Rig{{Name: "packs", Path: filepath.Join(cityPath, "rigs", "packs")}},
+	}
+	for _, test := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "legacy bare city", ref: "city", want: "city:test-city"},
+		{name: "legacy bare rig", ref: "packs", want: "rig:packs"},
+		{name: "canonical city untouched", ref: "city:other", want: "city:other"},
+		{name: "canonical rig untouched", ref: "rig:packs", want: "rig:packs"},
+		{name: "unknown bare ref untouched", ref: "not-a-store", want: "not-a-store"},
+		{name: "empty ref untouched", ref: "", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := canonicalizeLegacyWorkflowStoreRef(cfg, cityPath, test.ref); got != test.want {
+				t.Fatalf("canonicalizeLegacyWorkflowStoreRef(%q) = %q, want %q", test.ref, got, test.want)
+			}
+		})
+	}
+}
+
+// TestRoutedWorkPoolDrainAckCanonicalizesLegacyBareStoreRefs covers the
+// permanent park ga-2oboq filed. The legacy demand collector speaks a bare
+// storeKey vocabulary ("city", a bare rig name) and stamps it verbatim into the
+// member row; the keyed drain-ack seam rebuilds its lease FROM that row, so the
+// bare spelling failed both AgentReachesWorkflowStore (rig-less agents require a
+// "city:" prefix) and routedWorkStore's canonical equality. Under
+// first-creator-wins, legacy-created members are the norm, so that refusal made
+// keyed drain of the normal population impossible.
+func TestRoutedWorkPoolDrainAckCanonicalizesLegacyBareStoreRefs(t *testing.T) {
+	t.Run("bare city ref reaches the provider-meta checks", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		info := stampLegacyBareTriggerStoreRef(t, fixture, "city")
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+		if err != nil || !agentAck {
+			t.Fatalf("legacy-stamped drain acknowledgement lease = (%+v, %t, %v), want an admitted lease", lease, agentAck, err)
+		}
+		if lease.SourceStore != "city:test-city" {
+			t.Fatalf("lease source store = %q, want the canonical HQ spelling %q", lease.SourceStore, "city:test-city")
+		}
+		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+		if err != nil || !authorized {
+			t.Fatalf("legacy bare-city drain acknowledgement authorization = (%t, %v), want true", authorized, err)
+		}
+	})
+
+	t.Run("bare rig ref reaches the provider-meta checks", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(t, routedWorkPoolAuthorizationFixtureOptions{rigName: "packs"})
+		info := stampLegacyBareTriggerStoreRef(t, fixture, "packs")
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+		if err != nil || !agentAck {
+			t.Fatalf("legacy-stamped drain acknowledgement lease = (%+v, %t, %v), want an admitted lease", lease, agentAck, err)
+		}
+		if lease.SourceStore != "rig:packs" {
+			t.Fatalf("lease source store = %q, want the canonical rig spelling %q", lease.SourceStore, "rig:packs")
+		}
+		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+		if err != nil || !authorized {
+			t.Fatalf("legacy bare-rig drain acknowledgement authorization = (%t, %v), want true", authorized, err)
+		}
+	})
+
+	t.Run("unknown bare ref still refuses", func(t *testing.T) {
+		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
+		info := stampLegacyBareTriggerStoreRef(t, fixture, "not-a-configured-store")
+		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+		if err != nil || !agentAck {
+			t.Fatalf("unknown-ref drain acknowledgement lease = (%+v, %t, %v), want an admitted lease", lease, agentAck, err)
+		}
+		if lease.SourceStore != "not-a-configured-store" {
+			t.Fatalf("lease source store = %q, want the unknown ref left verbatim", lease.SourceStore)
+		}
+		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+		if authorized || err != nil {
+			t.Fatalf("unknown bare-ref drain acknowledgement authorization = (%t, %v), want a clean refusal", authorized, err)
+		}
+	})
+
+	// Sibling audit: the pool start seam builds its lease from the canonical
+	// allocation hint but re-checks it against the raw row, so a legacy-created
+	// member could never be recovered either.
+	t.Run("pool start recovery accepts a legacy bare-city row", func(t *testing.T) {
+		fixture := newRoutedWorkPoolAuthorizationFixture(t)
+		if err := fixture.store.SetMetadata(fixture.info.ID, beadmeta.TriggerBeadStoreRefMetadataKey, "city"); err != nil {
+			t.Fatalf("stamp legacy bare trigger store ref: %v", err)
+		}
+		info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+		if err != nil {
+			t.Fatalf("read legacy-stamped pool session: %v", err)
+		}
+		authorized, err := fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), fixture.snapshot, info, fixture.lease)
+		if err != nil || !authorized {
+			t.Fatalf("legacy bare-city pool start authorization = (%t, %v), want true", authorized, err)
+		}
+	})
+}
+
+func stampLegacyBareTriggerStoreRef(
+	t *testing.T,
+	fixture routedWorkPoolDrainAckAuthorizationFixture,
+	bareRef string,
+) sessionpkg.Info {
+	t.Helper()
+	if err := fixture.store.SetMetadata(fixture.info.ID, beadmeta.TriggerBeadStoreRefMetadataKey, bareRef); err != nil {
+		t.Fatalf("stamp legacy bare trigger store ref: %v", err)
+	}
+	info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
+	if err != nil {
+		t.Fatalf("read legacy-stamped pool session: %v", err)
+	}
+	if strings.TrimSpace(info.TriggerBeadStoreRef) != bareRef {
+		t.Fatalf("legacy-stamped trigger store ref = %q, want %q", info.TriggerBeadStoreRef, bareRef)
+	}
+	if err := fixture.cr.poolMembershipShadow.replace(fixture.snapshot.Config, info); err != nil {
+		t.Fatalf("publish legacy-stamped pool membership: %v", err)
+	}
+	return info
+}
+
 func TestRecoverRoutedWorkPoolDrainAckLeaseDistinguishesLegacyFromUnknownProvenance(t *testing.T) {
 	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
 	if err := fixture.provider.SetMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue); err != nil {
@@ -3881,6 +4008,11 @@ type routedWorkPoolAuthorizationFixture struct {
 	work     beads.Bead
 	info     sessionpkg.Info
 	lease    routedWorkPoolStartLease
+	// workStore holds the trigger work. It is store for a city-scoped pool and
+	// the rig's own store when the fixture is rig-scoped.
+	workStore   beads.Store
+	template    string
+	sourceStore string
 }
 
 type exactPoolRecoveryPostPreWakeHookStore struct {
@@ -4016,7 +4148,15 @@ func (p poolDrainAckGetMetaErrorProvider) GetMeta(string, string) (string, error
 
 func newRoutedWorkPoolDrainAckAuthorizationFixture(t *testing.T) routedWorkPoolDrainAckAuthorizationFixture {
 	t.Helper()
-	base := newRoutedWorkPoolAuthorizationFixtureWithStore(t, beads.NewAtomicCloseMemStore())
+	return newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(t, routedWorkPoolAuthorizationFixtureOptions{})
+}
+
+func newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(
+	t *testing.T,
+	options routedWorkPoolAuthorizationFixtureOptions,
+) routedWorkPoolDrainAckAuthorizationFixture {
+	t.Helper()
+	base := newRoutedWorkPoolAuthorizationFixtureWithOptions(t, beads.NewAtomicCloseMemStore(), options)
 	if err := base.provider.Start(t.Context(), base.info.SessionName, runtime.Config{Command: "true"}); err != nil {
 		t.Fatalf("start pool runtime: %v", err)
 	}
@@ -4039,7 +4179,7 @@ func newRoutedWorkPoolDrainAckAuthorizationFixture(t *testing.T) routedWorkPoolD
 	}); err != nil {
 		t.Fatalf("mark pool session active: %v", err)
 	}
-	if err := base.store.Close(base.work.ID); err != nil {
+	if err := base.workStore.Close(base.work.ID); err != nil {
 		t.Fatalf("close trigger work: %v", err)
 	}
 	info, err := sessionFrontDoor(base.store).Get(base.info.ID)
@@ -4050,7 +4190,7 @@ func newRoutedWorkPoolDrainAckAuthorizationFixture(t *testing.T) routedWorkPoolD
 	if err := base.cr.poolMembershipShadow.replace(base.snapshot.Config, info); err != nil {
 		t.Fatalf("publish active pool membership: %v", err)
 	}
-	observation, occupied := base.cr.poolMembershipShadow.observeOccupiedMember("worker", info.ID)
+	observation, occupied := base.cr.poolMembershipShadow.observeOccupiedMember(base.template, info.ID)
 	if !occupied {
 		t.Fatal("active pool session is not an occupied member")
 	}
@@ -4060,9 +4200,9 @@ func newRoutedWorkPoolDrainAckAuthorizationFixture(t *testing.T) routedWorkPoolD
 		RequesterSessionID:     info.ID,
 		RequesterInstanceToken: info.InstanceToken,
 		ControllerGeneration:   base.snapshot.Generation,
-		PoolTarget:             "worker",
+		PoolTarget:             base.template,
 		WorkID:                 base.work.ID,
-		SourceStore:            "city:test-city",
+		SourceStore:            base.sourceStore,
 		MembershipRevision:     observation.revision,
 	}
 	authorized, err := base.cr.authorizeRoutedWorkPoolDrainAck(base.snapshot, info, lease)
@@ -4082,6 +4222,23 @@ func newRoutedWorkPoolAuthorizationFixture(t *testing.T) routedWorkPoolAuthoriza
 
 func newRoutedWorkPoolAuthorizationFixtureWithStore(t *testing.T, store beads.Store) routedWorkPoolAuthorizationFixture {
 	t.Helper()
+	return newRoutedWorkPoolAuthorizationFixtureWithOptions(t, store, routedWorkPoolAuthorizationFixtureOptions{})
+}
+
+// routedWorkPoolAuthorizationFixtureOptions scopes the fixture's pool agent to a
+// configured rig. The session row stays in the city store (where session beads
+// live) while the trigger work moves to the rig's own store, which is the real
+// cross-store shape a rig-scoped pool member has.
+type routedWorkPoolAuthorizationFixtureOptions struct {
+	rigName string
+}
+
+func newRoutedWorkPoolAuthorizationFixtureWithOptions(
+	t *testing.T,
+	store beads.Store,
+	options routedWorkPoolAuthorizationFixtureOptions,
+) routedWorkPoolAuthorizationFixture {
+	t.Helper()
 	unlimited := -1
 	cityPath := t.TempDir()
 	cfg := &config.City{
@@ -4092,10 +4249,22 @@ func newRoutedWorkPoolAuthorizationFixtureWithStore(t *testing.T, store beads.St
 			MaxActiveSessions: &unlimited,
 		}},
 	}
+	workStore := store
+	sourceStore := "city:test-city"
+	rigStores := map[string]beads.Store{}
+	if options.rigName != "" {
+		cfg.Rigs = []config.Rig{{Name: options.rigName, Path: filepath.Join(cityPath, "rigs", options.rigName)}}
+		cfg.Agents[0].Dir = options.rigName
+		workStore = beads.NewMemStore()
+		rigStores[options.rigName] = workStore
+		sourceStore = "rig:" + options.rigName
+	}
+	template := cfg.Agents[0].QualifiedName()
 	provider := runtime.NewFake()
 	cs := coherentSessionStartControllerStateForTest(cfg, provider, store, rollout.Auto)
 	cs.cityPath = cityPath
 	cs.cityName = "test-city"
+	cs.beadStores = rigStores
 	cr := &CityRuntime{
 		cityPath:             cityPath,
 		cityName:             "test-city",
@@ -4110,12 +4279,12 @@ func newRoutedWorkPoolAuthorizationFixtureWithStore(t *testing.T, store beads.St
 	if !cr.poolMembershipShadow.publishRebuild(0, newPoolMembershipState()) {
 		t.Fatal("publish empty pool membership")
 	}
-	work, err := store.Create(beads.Bead{
+	work, err := workStore.Create(beads.Bead{
 		Title:  "ready routed work",
 		Type:   "task",
 		Status: "open",
 		Metadata: map[string]string{
-			"gc.routed_to": "worker",
+			"gc.routed_to": template,
 		},
 	})
 	if err != nil {
@@ -4123,11 +4292,11 @@ func newRoutedWorkPoolAuthorizationFixtureWithStore(t *testing.T, store beads.St
 	}
 	hint := routedWorkPoolAllocationHint{
 		WorkID:      work.ID,
-		PoolTarget:  "worker",
-		SourceStore: "city:test-city",
+		PoolTarget:  template,
+		SourceStore: sourceStore,
 	}
-	info, err := createPoolSessionBeadWithAlias(store, "worker", cfg, nil, time.Now().UTC(), poolSessionCreateIdentity{
-		AgentName: "worker-1",
+	info, err := createPoolSessionBeadWithAlias(store, template, cfg, nil, time.Now().UTC(), poolSessionCreateIdentity{
+		AgentName: cfg.Agents[0].QualifiedInstanceName("worker-1"),
 		Slot:      1,
 		Metadata: map[string]string{
 			beadmeta.TriggerBeadIDMetadataKey:       work.ID,
@@ -4154,8 +4323,8 @@ func newRoutedWorkPoolAuthorizationFixtureWithStore(t *testing.T, store beads.St
 		t.Fatalf("baseline pool start authorization = (%t, %v), want true", authorized, err)
 	}
 	return routedWorkPoolAuthorizationFixture{
-		t: t, cr: cr, store: store, provider: provider, snapshot: snapshot,
-		work: work, info: info, lease: lease,
+		t: t, cr: cr, store: store, workStore: workStore, provider: provider, snapshot: snapshot,
+		work: work, info: info, lease: lease, template: template, sourceStore: sourceStore,
 	}
 }
 

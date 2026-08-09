@@ -178,7 +178,7 @@ func (cr *CityRuntime) newRoutedWorkPoolDrainAckLease(
 		ControllerGeneration:   snapshot.Generation,
 		PoolTarget:             template,
 		WorkID:                 strings.TrimSpace(info.TriggerBeadID),
-		SourceStore:            strings.TrimSpace(info.TriggerBeadStoreRef),
+		SourceStore:            canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, info.TriggerBeadStoreRef),
 		MembershipRevision:     observation.revision,
 	}
 	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
@@ -239,7 +239,8 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 		!isRoutedWorkPoolDrainAckLifecycleShape(info) || !isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) ||
 		lease.RequesterSessionID != info.ID || lease.RequesterInstanceToken != lease.InstanceToken ||
 		strings.TrimSpace(info.InstanceToken) != lease.InstanceToken || normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget ||
-		strings.TrimSpace(info.TriggerBeadID) != lease.WorkID || strings.TrimSpace(info.TriggerBeadStoreRef) != lease.SourceStore {
+		strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
+		canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, info.TriggerBeadStoreRef) != lease.SourceStore {
 		return false, nil
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
@@ -732,7 +733,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 		(policy.maxActiveSessions == 1 && !isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget)) ||
 		!isEphemeralSessionInfoForAgent(info, agent) || isManualSessionInfoForAgent(info, agent) || info.DependencyOnly ||
 		strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
-		strings.TrimSpace(info.TriggerBeadStoreRef) != lease.SourceStore {
+		canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, info.TriggerBeadStoreRef) != lease.SourceStore {
 		return false, nil
 	}
 	if lease.RecoverActive {
@@ -764,6 +765,45 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 		return false, nil
 	}
 	return true, nil
+}
+
+// canonicalizeLegacyWorkflowStoreRef translates the legacy demand collector's
+// bare store vocabulary into the canonical workflow store refs every keyed seam
+// compares against. The collector names the HQ store "city" and a rig store by
+// its bare rig name (build_desired_state.go's activeStores/storeKey), and stamps
+// that spelling verbatim into member rows; the keyed seams rebuild their leases
+// FROM those rows, then hand the ref to agentutil.AgentReachesWorkflowStore and
+// routedWorkStore, both of which speak only "city:<name>"/"rig:<name>". Under
+// first-creator-wins, legacy-created members are the norm, so without this
+// translation the keyed seams refuse the normal population forever (ga-2oboq).
+//
+// The mapping is DEFINITE, not a wildcard: "city" is the collector's own name
+// for the HQ store and a bare rig name matches a configured rig, so both resolve
+// to exactly one store. Anything else is returned unchanged so the downstream
+// validation still refuses it rather than guessing. This compatibility is
+// deliberately seam-local — storeref.ScopeRigContext and
+// agentutil.AgentReachesWorkflowStore are shared vocabulary whose refusal of
+// bare refs is a deliberate semantic.
+func canonicalizeLegacyWorkflowStoreRef(cfg *config.City, cityPath, storeRef string) string {
+	storeRef = strings.TrimSpace(storeRef)
+	if storeRef == "" || cfg == nil {
+		return storeRef
+	}
+	if _, scoped := storeref.ScopeRigContext(storeRef); scoped {
+		return storeRef
+	}
+	if storeRef == "city" {
+		if canonical := workflowStoreRefForDir(cityPath, cityPath, loadedCityName(cfg, cityPath), cfg); canonical != "" {
+			return canonical
+		}
+		return storeRef
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == storeRef {
+			return "rig:" + storeRef
+		}
+	}
+	return storeRef
 }
 
 func (cs *controllerState) routedWorkStore(cfg *config.City, sourceStore string) (beads.Store, bool) {

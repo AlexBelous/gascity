@@ -457,22 +457,15 @@ max_active_sessions = %d
 	if liveWorkerSessions != 1 {
 		t.Fatalf("unclosed worker sessions = %d, want exactly 1: %+v", liveWorkerSessions, current.Sessions)
 	}
-	// Who materializes the member is variant-dependent today. The unlimited arm
-	// is keyed-owned and proves the full keyed record chain; the bounded arm's
-	// member is created by the legacy builder, because under coexistence
-	// first-creator-wins is the settled doctrine (legacy wins, keyed adopts, zero
-	// duplicates -- which :458 above proves in BOTH arms, 6/6). ga-f7v2ft.117
-	// owns the allocation-ownership seam that makes keyed the winner, and its
-	// acceptance un-skips this proof for the bounded arm.
-	keyedMaterialization := maxActiveSessions < 0
+	// Neither arm is keyed-materialized today. Under coexistence first-creator-
+	// wins is the settled doctrine -- legacy wins, keyed adopts, zero duplicates,
+	// which :458 above proves in BOTH arms -- and the gating HEAD run recorded on
+	// ga-f7v2ft.117 measured the unlimited arm at 0/0 too, with the member created
+	// by actor cache-reconcile. ga-f7v2ft.117 owns the allocation-ownership seam
+	// that makes keyed the winner, and its acceptance un-skips BOTH arms.
 	wantPoolMaterializations := 0
-	if keyedMaterialization {
-		wantPoolMaterializations = 1
-	}
 	t.Run("keyed_materialization", func(t *testing.T) {
-		if !keyedMaterialization {
-			t.Skip("ga-f7v2ft.117: the bounded member is legacy-materialized under first-creator-wins, so no keyed materialization or in-process start commit exists; this proof re-lands with the WD.10b allocation-ownership seam")
-		}
+		t.Skip("ga-f7v2ft.117: the member is legacy-materialized under first-creator-wins on BOTH arms, so no keyed materialization or in-process start commit exists; this proof re-lands with the WD.10b allocation-ownership seam")
 		trace, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForPoolStartCommit(
 			t.Context(),
 			cityDir,
@@ -580,7 +573,8 @@ max_active_sessions = %d
 	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
 		t.Context(), cityDir, session.ID, "asleep", sessionWaitDependencyShadowJourneyWitnessTimeout,
 	); err != nil {
-		t.Fatalf("pool member did not become durably asleep: %v", err)
+		t.Fatalf("pool member did not become durably asleep: %v\n%s", err,
+			sessionWaitDependencyShadowJourneyDiagnostics(cityDir, session.ID, workID))
 	}
 	if err := sessionWaitDependencyShadowJourneyWaitForExactTmuxAbsence(
 		t.Context(), cityDir, session.SessionName, sessionWaitDependencyShadowJourneyWitnessTimeout,

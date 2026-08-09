@@ -826,6 +826,133 @@ improvised.
    fix belongs with whatever slice widens the sweep's liveness set, and
    widening it inside this family would put the two sides back out of step.
 
+### §3 D-DRAIN deltas (recorded at WD.6)
+
+Where the family as built diverges from §3 as written. Reported, not improvised.
+Line anchors are HEAD at the slice; §3's `session_start_reconcile.go:1366-1647`
+for the keyed drain-ack stop had drifted to `:1180-1920` (fence at `:1204-1252`,
+stop-pending block at `:1711-1916`), and §1 row 28's `session_reconciler.go:4033-4047`
+for the DrainAdvance phase had drifted to `:4282-4290`.
+
+1. **The handler-dispatch case goes SECOND, directly below D-DUP — not last.**
+   §1 row 28 names the DrainAdvance phase, which runs at the very END of the
+   tick (`advanceSessionDrainsWithSessionsTraced`, after the wake/sleep phase
+   and after start execution), so "last" is the reading the phase anchor
+   invites. It is the wrong one. Legacy's drain handling STRADDLES two
+   positions, and the one that decides precedence is the earlier: the undesired
+   block opens with `isDrainAcked` (`session_reconciler.go:2195`) before either
+   orphan arm, and the desired path's acknowledgement block (`:2548`)
+   `continue`s the row past progress-stall, drift, the deadline arms and the
+   entire wake/sleep phase. The trailing advance scan is a SEPARATE loop over
+   the tracker re-walking rows the forward pass already claimed, not a
+   lower-precedence arm on the same row. Phase-0b duplicate retire is the only
+   arm that genuinely precedes drain handling, which is what puts D-DUP above
+   and everything else below. **The slot is also the only one that composes:**
+   every landed family's handler already refuses a row with an active drain
+   (`params.DrainTracker.get(info.ID) != nil` → `yieldOrPark` in D-ORPHAN close,
+   D-DEADLINE, D-STALE-CREATE and D-STRANDED; a quiet no-change in D-SLEEP),
+   and every one of those refusals was written to mean "advancing a drain is
+   D-DRAIN's" (WD.4 delta 7 says so in as many words). Any lower slot would let
+   those refusals swallow the key and starve the advance the moment this family
+   began acting.
+2. **ONE act constant for a family that straddles two legacy positions.** The
+   per-EFFECT-ARM rule WD.4 introduced would suggest two constants, one per
+   legacy site. It would gate halves of a single decision: the forward-pass
+   block and the advance scan read the same `drainState` pointer, and the
+   acknowledgement the scan WRITES is the one the block READS. `detectorActDrain`
+   is one constant and `withLegacyDrainAdvanceExclusion` is one option installed
+   at both sites for the same reason.
+3. **`verifiedInterrupt` is dead on this path; the third effect is the
+   acknowledgement WRITE.** §3 lists the handler's fenced effects as
+   "`completeDrain`, `verifiedInterrupt`, or the ack metadata write". The drain
+   library has not interrupted since the deferred-signal rework
+   (`session_wake.go`: "The interrupt signal (Ctrl-C) is NOT sent immediately …
+   no Ctrl-C keystroke injection into the pane"); its terminal arm is
+   `verifiedStop`, and the deferred `setReconcilerDrainAckMetadata` write IS the
+   signal. The keyed handler applies exactly one of: the stale-generation clear,
+   `completeDrain`, one of the two cancel arms, the stop-pending transition, the
+   deferred acknowledgement write, or the timeout `verifiedStop`.
+   `verifiedInterrupt` survives only for non-drain callers and should be struck
+   from §3's list at WE.
+4. **The seam guard reads the in-memory TRACKER, and that is not a violation of
+   the durable-row rule.** Every other family's guard answers from the durable
+   row. This one cannot: Q4 (resolved on ga-f7v2ft.110, inherited here) keeps
+   drain intent in `drainTracker`, so the row carries no durable trace of an
+   in-flight drain until it reaches stop-pending. It is the shape D-DEADLINE
+   already takes with the lifecycle timer trackers — one tracker, two readers,
+   no second opinion — and the one rung that IS durable is the guard's top
+   refusal (delta 5).
+5. **The stop leg is a FALL-THROUGH to the existing keyed drain-ack stop, not a
+   handover message.** §3 says the keyed drain-ack stop "absorbs the stop leg".
+   Mechanically that is achieved by the guard REFUSING every
+   `isDrainAckStopPendingInfo` row: `reconcileExactSessionDetectorFamily` runs
+   above the `isDrainAckStopPendingInfo` block in
+   `reconcileExactSessionStartWithOwner`, so once the handler has marked
+   stop-pending (and retired the tracker entry, exactly as legacy's
+   `clearDrainTrackerForStopPending` does) the next admission on that key falls
+   straight through to the block that owns the atomic close and the async stop
+   (A5). No second stop path, no new state, and the "exactly once" property is
+   the guard, not a latch. **Consequence to carry to WE:** the transition uses
+   `markDrainAckStopPending` (`sessionpkg.DrainAckStopPendingPatch`), which is
+   RECONCILER-owned and carries no agent provenance, so a tracker-originated
+   drain arrives at the stop-pending block without one. In auto mode that block
+   yields the row to legacy, which is the correct coexistence answer; in require
+   mode it parks — and that park is exactly what ruling 1b's deadline now bounds
+   (delta 9). An AGENT acknowledgement (`gc runtime drain-ack`, the journey's
+   shape) carries provenance and finishes keyed end to end.
+6. **Two cancel arms are re-derived per key from the probe the FLEET reason was
+   built from.** The fleet scan cancels on `wakeEvals` — `WakePending` and
+   `eval.Reason == "assigned-work"` — which is fleet-tick state no per-key
+   predicate can re-derive. Rather than trust a reason it cannot check, the
+   handler re-pays the two observations those reasons are derived from:
+   `pendingInteractionKeepsAwakeInfo` and
+   `sessionHasAwakeAssignedWorkForReachableStore` (the same query D-SLEEP's
+   handler re-pays, delta-for-delta). The plain `len(eval.Reasons) > 0` cancel
+   has no per-key analogue and is deliberately NOT ported: those rows stay
+   legacy's for the WD wave, and the detector still records them for the parity
+   join. **Expected-divergence class for §3b's D-DRAIN row:** keyed declines a
+   wake-reasons-reappeared cancel legacy applies.
+7. **Non-liveness is a FRESH-liveness proof, and it fails closed the other way
+   from legacy.** The fleet scan treats an unreadable running-probe as `running
+   = false` and completes the drain — writing `asleep` onto a row whose agent
+   may still be working. The keyed arm screens on the D2 pair and refuses with
+   zero effect on `!liveness.Complete`. Strictly safer, level-triggered, and the
+   same over-strict direction WD.3 delta 4 and WD.14 delta 6 both recorded.
+   RED: `TestExactDrainAdvanceRefusesWhenLivenessIsIncomplete`.
+8. **The legacy yield stands down BOTH halves and is source-GATED.**
+   `ownsDrainAdvance` answers only on a `drain_advance` admission, unlike
+   D-STALE-CREATE's and D-STRANDED's source-blind predicates. The reason is
+   specific to this family: an agent may `gc runtime drain-ack` a row that
+   carries no tracker intent at all, such a row is never routed under this
+   source, and a source-blind yield would stand legacy's acknowledgement block
+   down for it while no keyed handler claimed it. The narrow yield is what keeps
+   the un-tracked agent acknowledgement legacy's for the whole WD wave.
+9. **The retained drain-ack admission is bounded by the DRAIN's deadline, and
+   the bound is this slice's (ruling 1b).** `session_start_controller.go`'s
+   re-queue exempted `PoolDrainAck` / `PoolDrainAckUncertain` /
+   `errSessionStartPoolDrainAckPending` from `maxRetries` with no other bound,
+   while `ownsPoolDrainAckStop` excluded legacy from the row — so a permanently
+   refusing authorization parked forever AND blocked the drain under any owner.
+   The obligation now carries `DrainAckDeadline` (stamped on first retention,
+   carried across coalescing so a re-admission storm cannot roll it forward,
+   budget = `defaultDrainTimeout` because that IS the drain's ack-or-timeout
+   contract). On expiry the controller deletes the admission, drops the retained
+   lease, arms `auditPending` and reports
+   `sessionStartReconcileDeadlineExceeded`; the runtime's observer emits one
+   traced event at the DrainAck site and requests the legacy fallback in auto
+   mode. Refusals are never classified — a throttled consecutive-refusal
+   diagnostic (`drainAckRefusalDiagnosticInterval`) is the only escalation.
+   This bound doubles as the bound for the ga-f7v2ft.131 old-agent fallback
+   residue.
+10. **The drain-finalize purity assertion is ROW-SCOPED (`:1779` ruling).** The
+   journey leg asserted that no patrol/poke cycle START record appeared inside
+   the finalize window — fleet silence, which a level-triggered controller
+   cannot promise. It now asserts that no LEGACY-owned drain/stop/wake EFFECT
+   record (site ∈ the drain/stop/wake set, outcome ∈ the applied set,
+   `effect_owner` ≠ keyed/detector-shadow) names the drained row or its sibling.
+   Same logic as ruling 3's sibling respec: isolation of effects, not silence of
+   the fleet.
+
 ### §3 D-STALE-CREATE deltas (recorded at WD.7)
 
 Where the rollback family as built diverges from §3 as written. Reported, not
@@ -1446,7 +1573,7 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | D-STALE-CREATE | decision | rollback vs preserved | legacy defers rollback #6+ (R6 budget retired) |
 | D-DRIFT | detection | hash-mismatch firing per session, per HALF (core arm at ConfigDrift, live arm at LiveDrift — WD.8 delta 2) | entire 5-arm ladder handler-side (attached probe is provider I/O — excluded, sign-off required); **keyed `no_change` refusal against a legacy `repair_in_place` on an asleep-named row** (WD.8 delta 7); the A6 deferral rungs are keyed and legacy yields them from WD.9, so on an owned key the deferral appears once under `effect_owner=keyed` with no legacy twin (WD.9 delta 1) |
 | D-SLEEP | decision | awake-set membership (incl. winner identity, R3) | probe/pending arms unpredicted |
-| D-DRAIN | detection | tracker-state candidacy (drain intent / draining) | ack-timing skew (handler-side ack read vs legacy's in-tick poll); advance arms journey-proven |
+| D-DRAIN | detection | tracker-state candidacy (drain intent / draining) | ack-timing skew (handler-side ack read vs legacy's in-tick poll); advance arms journey-proven; **keyed declines the plain wake-reasons-reappeared cancel legacy applies** (WD.6 delta 6 — the fleet `len(eval.Reasons) > 0` verdict has no per-key analogue, so those rows stay legacy's for the WD wave and the detector records them without enqueueing); keyed refuses on incomplete liveness where legacy completes the drain (WD.6 delta 7) |
 | D-WAKE | decision | wake-target set | legacy quarantine skip is UNTRACED (:3702-3705) → detector-present/legacy-absent, expected |
 | D-ZOMBIE | detection | running ∧ !alive candidacy | classification arm handler-side |
 | D-STALL | decision | claim-less stall + floor exemption | claim-check-error fail-safe arm incomparable; keyed refuses a pinned configured named row where legacy sets-then-clears the marker (WD.12 delta 2); keyed skips the named circuit-breaker clear until WD.11 (WD.12 delta 9) |
@@ -1508,7 +1635,7 @@ WD.3-9/13-14 parallelize across worktrees after WD.2, at one-line rebase cost.
 | WD.3 | Undesired dead session / failed-create closed by exact key with proven absence (D-ORPHAN close) | atomic close + absence confirm (A5) | SERIAL after WD.2 (parallelizable per §4 note) |
 | WD.4 | Live orphan drained by exact key incl. named deferred-confirm (D-ORPHAN drain); **resolves Q4 first** (WD.6 inherits via SERIAL) | drain library session_wake.go | SERIAL |
 | WD.5 | No-wake session drained + idle probes (D-SLEEP) | ComputeAwakeSet, probe engine | SERIAL |
-| WD.6 | Drain advance/ack/cancel keyed (D-DRAIN, handler-side ack read per the recorded §3 amendment; chair-gated on that amendment landing — satisfied by this revision, all other slices proceed per go-order) | keyed drain-ack stop :1366-1647 | SERIAL |
+| WD.6 | Drain advance/ack/cancel keyed (D-DRAIN, handler-side ack read per the recorded §3 amendment; chair-gated on that amendment landing — satisfied by this revision, all other slices proceed per go-order). **LANDED** — handler `session_drain_reconcile.go`, yield `withLegacyDrainAdvanceExclusion` at both legacy positions, dispatch case SECOND (delta 1), drain-ack admissions bounded by the drain's own deadline (delta 9) | keyed drain-ack stop :1366-1647 (drifted to :1180-1920) | SERIAL |
 | WD.7 | Stale pending-create rolled back by exact key (D-STALE-CREATE) | keyed start rollback | SERIAL |
 | WD.8 | Detached drift converges: rebaseline / launch-relaunch / restart-in-place (D-DRIFT 1) | relaunch helper :5948 | SERIAL |
 | WD.9 | Attached/active drift defers + cancels drains (D-DRIFT 2, A6) | deferral records | SERIAL |

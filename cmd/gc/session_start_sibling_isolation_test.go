@@ -48,6 +48,60 @@ var siblingPoolIsolationAllowedChurn = []string{
 	"synced_at",
 }
 
+// legacyDrainEffectSites are the trace sites at which a WRITE to a session row
+// carries drain, stop, or wake intent. They are the sites the drain-finalize
+// purity assertion is scoped to (ga-f7v2ft.112 :1779 ruling): the invariant is
+// "legacy applied no drain EFFECT to the drained row", not "no legacy cycle ran
+// anywhere", so a poke-triggered cycle that touches none of these on this row is
+// background activity and is tolerated.
+var legacyDrainEffectSites = map[TraceSiteCode]struct{}{
+	TraceSiteReconcilerDrainAck:      {},
+	TraceSiteReconcilerDrainDecision: {},
+	TraceSiteDrainStale:              {},
+	TraceSiteDrainComplete:           {},
+	TraceSiteDrainCancel:             {},
+	TraceSiteDrainTimeout:            {},
+	TraceSiteLifecycleDrainAdvance:   {},
+	TraceSiteReconcilerWakeDecision:  {},
+	TraceSiteReconcilerIdleTimeout:   {},
+	TraceSiteReconcilerMaxSessionAge: {},
+}
+
+// legacyDrainEffectOutcomes are the outcomes that mean the record APPLIED
+// something rather than merely observing or declining. A kept-open, skipped,
+// deferred or no-change record at a drain site is not an effect.
+var legacyDrainEffectOutcomes = map[TraceOutcomeCode]struct{}{
+	TraceOutcomeStopPending:         {},
+	TraceOutcomeStop:                {},
+	TraceOutcomeComplete:            {},
+	TraceOutcomeClosed:              {},
+	TraceOutcomeDrain:               {},
+	TraceOutcomeCancel:              {},
+	TraceOutcomeCancelPending:       {},
+	TraceOutcomeCancelAssignedWork:  {},
+	TraceOutcomeCancelReconcilerAck: {},
+	TraceOutcomeClear:               {},
+}
+
+// legacyDrainEffectRecord reports whether one trace record is a LEGACY-owned
+// drain/stop/wake effect. A record the keyed owner wrote carries
+// effect_owner=keyed and is this slice's own work, not a coexistence violation.
+func legacyDrainEffectRecord(record SessionReconcilerTraceRecord) bool {
+	if _, ok := legacyDrainEffectSites[record.SiteCode]; !ok {
+		return false
+	}
+	if _, ok := legacyDrainEffectOutcomes[record.OutcomeCode]; !ok {
+		return false
+	}
+	if owner, ok := record.Fields["effect_owner"]; ok {
+		if text, isText := owner.(string); isText &&
+			(text == detectorKeyedEffectOwner || text == detectorShadowEffectOwner) {
+			return false
+		}
+	}
+	return true
+}
+
 // siblingPoolIsolationMetadataDiff reports whether a sibling's session metadata
 // carries any effect of another member's drain. Revision equality and a blanket
 // DeepEqual are deliberately NOT asserted: any allowlisted bookkeeping write

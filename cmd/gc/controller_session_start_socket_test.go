@@ -977,17 +977,35 @@ func TestExactResetSessionUnderLegacyDrainRetainsIntentWithoutStopping(t *testin
 	params.Provider = provider
 	params.Generation = 1
 	params.RolloutMode = rollout.Require
+	params.DrainOps = newDrainOps(provider)
 	params.DrainTracker = newDrainTracker()
-	params.DrainTracker.set(bead.ID, &drainState{reason: "user", startedAt: time.Now().UTC()})
+	// The generation matches the row, so this is a CURRENT drain rather than a
+	// stale one — the shape the reset must not restart through.
+	params.DrainTracker.set(bead.ID, &drainState{
+		reason: "user", startedAt: time.Now().UTC(),
+		deadline: time.Now().UTC().Add(defaultDrainTimeout), generation: 1,
+	})
 
+	// WD.6 ownership semantics (ga-f7v2ft.112). A row carrying drain intent is
+	// D-DRAIN's, and its seam case sits above every other family precisely
+	// because each of those families' handlers already refused such a row. The
+	// invariant this leg pins is unchanged — the reset never restarts through an
+	// in-flight drain, no runtime is stopped, and the durable reset markers are
+	// retained — but it is now delivered by the drain family OWNING the key
+	// rather than by the reset arm parking on it. Before WD.6 the same row
+	// produced an "active legacy drain" park error from the reset arm below the
+	// seam; that arm is now unreachable for a row the drain family claims.
 	owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
 		SessionID: bead.ID, Source: sessionStartAdmissionSocket,
 	}, params)
-	if owner != exactSessionStartKeyedOwner || err == nil || !strings.Contains(err.Error(), "active legacy drain") {
-		t.Fatalf("legacy-drain reset result = (owner=%v, err=%v), want keyed legacy-drain park error", owner, err)
+	if owner != exactSessionStartKeyedOwner || err != nil {
+		t.Fatalf("legacy-drain reset result = (owner=%v, err=%v), want the drain family to own the key with no error", owner, err)
+	}
+	if state := params.DrainTracker.get(bead.ID); state == nil || state.reason != "user" {
+		t.Fatalf("drain intent = %+v, want the in-flight drain retained rather than reset through", state)
 	}
 	if calls := provider.stopSnapshot(); len(calls) != 0 {
-		t.Fatalf("unattended stop calls = %#v, want zero while legacy owns the drain", calls)
+		t.Fatalf("unattended stop calls = %#v, want zero while the drain is in flight", calls)
 	}
 	after := env.sessionInfo(bead.ID)
 	if after.RestartRequested != "true" || after.ContinuationResetPending != "true" || after.ResetCommittedAt != "" {

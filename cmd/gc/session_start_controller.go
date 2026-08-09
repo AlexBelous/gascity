@@ -72,6 +72,13 @@ const (
 	// still arrives here whenever claim_holder_stall_timeout is positive and the
 	// handler owes it the per-session claim lookup.
 	sessionStartAdmissionProgressStall sessionStartAdmissionSource = "progress_stall"
+	// sessionStartAdmissionDrainAdvance is the detector sweep's D-DRAIN key: a
+	// session with drain intent recorded in the shared in-memory tracker. The
+	// handler behind it discovers the acknowledgement, applies the cancel arms,
+	// and drives the drain to its terminal state; the stop leg belongs to the
+	// keyed drain-ack stop, which owns the row from the stop-pending transition
+	// on.
+	sessionStartAdmissionDrainAdvance sessionStartAdmissionSource = "drain_advance"
 	// sessionStartAdmissionStrandedRepair is the detector sweep's D-STRANDED
 	// key (DETECTOR.md §3): a pool slot whose runtime is gone, whose bead sits
 	// in a terminal sleep state, and whose confirmed stranding episode has
@@ -100,6 +107,22 @@ type sessionStartAdmission struct {
 	CensusGeneration      uint64
 	Culled                bool
 	AdmittedAt            time.Time
+	// DrainAckDeadline bounds the retained drain-ack re-queue below. A drain-ack
+	// is a durable obligation that must never be dropped, so it is deliberately
+	// NOT bounded by maxRetries — but while it is parked the keyed controller
+	// EXCLUDES legacy from the row (ownsPoolDrainAckStop), so an authorization
+	// that permanently refuses would block the drain from finishing under ANY
+	// owner. The bound is therefore the DRAIN's own ack-or-timeout deadline
+	// (ga-f7v2ft.112 ruling 1b): stamped when the obligation is first retained,
+	// carried across coalescing so a re-admission storm cannot roll it forward.
+	DrainAckDeadline time.Time
+	// DrainAckRefusals counts CONSECUTIVE refusals of this admission version.
+	// Repeated (false, nil) authorization refusals are indistinguishable from
+	// transient by construction, so the counter classifies nothing: it only
+	// throttles one observability escalation while the deadline bound above does
+	// the actual bounding. It resets with every new version, which is what makes
+	// it consecutive.
+	DrainAckRefusals int
 }
 
 type sessionStartAdmissionOutcome string
@@ -119,6 +142,12 @@ const (
 	sessionStartReconcileRetrying   sessionStartReconcileOutcome = "retrying"
 	sessionStartReconcileExhausted  sessionStartReconcileOutcome = "exhausted"
 	sessionStartReconcileCanceled   sessionStartReconcileOutcome = "canceled"
+	// sessionStartReconcileDeadlineExceeded is the drain-ack obligation's own
+	// terminal outcome. It is NOT exhaustion: the admission was never bounded by
+	// a retry count, it was bounded by the drain's ack-or-timeout deadline, and
+	// reaching that deadline RELEASES ownership so a surviving owner can finish
+	// the row (ga-f7v2ft.112 ruling 1b).
+	sessionStartReconcileDeadlineExceeded sessionStartReconcileOutcome = "deadline_exceeded"
 )
 
 type sessionStartReconcileResult struct {
@@ -128,6 +157,10 @@ type sessionStartReconcileResult struct {
 	FinishedAt     time.Time
 	LegacyFallback bool
 	Err            error
+	// DrainAckRefusals is the consecutive-refusal count that produced this
+	// result, carried out so the runtime's observer can emit the throttled
+	// diagnostic without the controller learning how to trace.
+	DrainAckRefusals int
 }
 
 type sessionStartAuthoritativeSeedResult struct {
@@ -501,6 +534,14 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		copied := *configuredNamedWake
 		configuredNamedWake = &copied
 	}
+	// The drain-ack bound survives coalescing; its refusal counter does not. A
+	// new version is a new admission for the escalation's purposes, but the
+	// obligation's deadline belongs to the DRAIN, not to whichever hint most
+	// recently landed on the key.
+	drainAckDeadline := time.Time{}
+	if existed {
+		drainAckDeadline = previous.DrainAckDeadline
+	}
 	admission := sessionStartAdmission{
 		SessionID:                    id,
 		Source:                       source,
@@ -517,6 +558,7 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		ConfiguredNamedWakeEntered:   configuredNamedWakeEntered,
 		PoolStartEntered:             poolStartEntered,
 		AdmittedAt:                   admittedAt,
+		DrainAckDeadline:             drainAckDeadline,
 	}
 	if authoritative && admission.Source == sessionStartAdmissionAntiEntropy {
 		admission.CensusGeneration = censusGeneration
@@ -720,7 +762,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionDuplicateNamed,
 		sessionStartAdmissionSleepDrain,
 		sessionStartAdmissionProgressStall,
-		sessionStartAdmissionStrandedRepair:
+		sessionStartAdmissionStrandedRepair,
+		sessionStartAdmissionDrainAdvance:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -1084,6 +1127,29 @@ func (c *sessionStartController) ownsSleepDrain(sessionID string) bool {
 	return ok && admission.Source == sessionStartAdmissionSleepDrain
 }
 
+// ownsDrainAdvance reports whether the keyed controller currently holds a
+// D-DRAIN admission for this exact key. Legacy's forward-pass acknowledgement
+// block and its drain-advance scan both consult it and yield. It is a
+// source-gated SIBLING of ownsSleepDrain and ownsOrphanDrain, not a widening of
+// either: the two drain-BEGIN families and this drain-ADVANCE family each answer
+// "is THIS family's effect in flight for this key", and one predicate serving
+// them all would make each begin arm's legacy counterpart stand down for rows
+// the advance owns.
+//
+// Source-gating is also what keeps the yield NARROW enough to be safe. An agent
+// may acknowledge a drain on a row that carries no tracker intent at all; such a
+// row is never routed under this source, so legacy keeps its acknowledgement
+// block for it. Retired at WE with the god function.
+func (c *sessionStartController) ownsDrainAdvance(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.Source == sessionStartAdmissionDrainAdvance
+}
+
 // ownsProgressStallRecycle reports whether the keyed controller currently holds
 // a D-STALL admission for this exact key. Legacy's progress-stall arms consult
 // it and skip their restart_requested write. It is a source-gated SIBLING of
@@ -1258,7 +1324,28 @@ func (c *sessionStartController) reconcileKey(key string) {
 		c.observe(result)
 		return
 	}
-	if admission.PoolDrainAck != nil || admission.PoolDrainAckUncertain || errors.Is(err, errSessionStartPoolDrainAckPending) || c.queue.NumRequeues(key) < c.maxRetries {
+	// A retained drain-ack obligation bypasses maxRetries on purpose: a drain-ack
+	// is a durable obligation that must never be dropped. It is bounded instead
+	// by the DRAIN's own ack-or-timeout deadline — on expiry the admission is
+	// deleted, the retained lease dropped and an audit armed, so level-triggered
+	// re-detection re-owns the row instead of being fenced out of it forever
+	// (ga-f7v2ft.112 ruling 1b).
+	if admission.PoolDrainAck != nil || admission.PoolDrainAckUncertain || errors.Is(err, errSessionStartPoolDrainAckPending) {
+		expired, refusals := c.boundRetainedDrainAck(key, admission.Version)
+		result.DrainAckRefusals = refusals
+		if expired {
+			c.queue.Forget(key)
+			c.releaseAdmission(key, admission.Version)
+			result.Outcome = sessionStartReconcileDeadlineExceeded
+			c.observe(result)
+			return
+		}
+		c.queue.AddRateLimited(key)
+		result.Outcome = sessionStartReconcileRetrying
+		c.observe(result)
+		return
+	}
+	if c.queue.NumRequeues(key) < c.maxRetries {
 		c.queue.AddRateLimited(key)
 		result.Outcome = sessionStartReconcileRetrying
 		c.observe(result)
@@ -1266,15 +1353,53 @@ func (c *sessionStartController) reconcileKey(key string) {
 	}
 
 	c.queue.Forget(key)
+	c.releaseAdmission(key, admission.Version)
+	result.Outcome = sessionStartReconcileExhausted
+	c.observe(result)
+}
+
+// releaseAdmission drops one admission version and arms an authoritative audit
+// so the released key is re-detected rather than forgotten. Exhaustion and the
+// drain-ack deadline release share it: both give the key back, and the audit is
+// what makes that safe.
+func (c *sessionStartController) releaseAdmission(key string, version uint64) {
 	c.mu.Lock()
-	if current, exists := c.admissions[key]; exists && current.Version == admission.Version {
+	defer c.mu.Unlock()
+	if current, exists := c.admissions[key]; exists && current.Version == version {
 		delete(c.admissions, key)
 		c.releaseAuthoritativeSlotLocked(key)
 		c.auditPending = true
 	}
-	c.mu.Unlock()
-	result.Outcome = sessionStartReconcileExhausted
-	c.observe(result)
+}
+
+// drainAckAdmissionBudget is how long one retained drain-ack obligation may hold
+// its ownership fence. It is defaultDrainTimeout because that IS the drain's
+// contract: every drain is bounded by ack-or-timeout, and an acknowledgement
+// runs the same clock the tracker's own deadline runs on.
+const drainAckAdmissionBudget = defaultDrainTimeout
+
+// drainAckRefusalDiagnosticInterval throttles the consecutive-refusal
+// escalation. Repeated (false, nil) refusals are indistinguishable from
+// transient ones by construction, so the controller never classifies them — it
+// reports them periodically and keeps retrying until the deadline bound fires.
+const drainAckRefusalDiagnosticInterval = 8
+
+// boundRetainedDrainAck stamps the drain's own deadline on first retention,
+// counts the consecutive refusal, and reports whether the obligation has now
+// outlived its bound.
+func (c *sessionStartController) boundRetainedDrainAck(key string, version uint64) (bool, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, ok := c.admissions[key]
+	if !ok || current.Version != version {
+		return false, 0
+	}
+	if current.DrainAckDeadline.IsZero() {
+		current.DrainAckDeadline = c.now().Add(drainAckAdmissionBudget)
+	}
+	current.DrainAckRefusals++
+	c.admissions[key] = current
+	return !c.now().Before(current.DrainAckDeadline), current.DrainAckRefusals
 }
 
 func (c *sessionStartController) readAdmission(key string) (sessionStartAdmission, bool) {

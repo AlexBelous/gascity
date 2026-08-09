@@ -60,7 +60,8 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
 // arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4; D-STALE-CREATE at
 // WD.7; D-SLEEP at WD.5; D-DRIFT's CONVERGENCE arms at WD.8 and its DEFERRAL
-// arms at WD.9; D-STALL at WD.12; D-DUP at WD.13; D-STRANDED at WD.14. A family
+// arms at WD.9; D-STALL at WD.12; D-DUP at WD.13; D-STRANDED at WD.14;
+// D-ZOMBIE at WD.11. A family
 // that flips an act constant without an arm in
 // detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
 // before it can double-act beside a non-yielding legacy.
@@ -79,6 +80,11 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 		detectorFamilyDup:         {TraceOutcomeNoChange: true},
 		detectorFamilyStall:       {TraceOutcomeStop: true},
 		detectorFamilyStranded:    {TraceOutcomeClosed: true},
+		// D-ZOMBIE raises exactly one arm — running ∧ !alive — and it carries
+		// TraceOutcomeNoChange because the sweep applies nothing: the mark is the
+		// predicted EFFECT, and the honest applied/skipped lives on the handler's
+		// record at the same legacy site.
+		detectorFamilyZombie: {TraceOutcomeNoChange: true},
 		// D-SLEEP raises several arms and exactly one of them predicts an effect:
 		// the drain (and the idle probe that gates it) ride TraceOutcomeDrain,
 		// while the keep-alive escape, the in-flight probe, the budget-deferred
@@ -161,7 +167,7 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	for _, family := range []detectorFamily{
 		detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilyStaleCreate,
 		detectorFamilyDup, detectorFamilySleep, detectorFamilyStall,
-		detectorFamilyStranded,
+		detectorFamilyStranded, detectorFamilyZombie,
 	} {
 		for _, outcome := range detectorShadowOutcomes {
 			if source, routed := detectorAdmissionSourceFor(detectorCondition{Family: family, Outcome: outcome}); routed && source == sessionStartAdmissionConfigDrift {

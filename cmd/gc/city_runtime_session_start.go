@@ -164,6 +164,8 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				MaxSessionAgeTracker:     cr.mat,
 				AssignedWorkDeferTracker: cr.adt,
 				DesiredSessionNames:      cr.desiredSessionNamesView,
+				ProviderHealth:           cr.providerHealthSnapshotView,
+				SessionLiveness:          cr.sessionLivenessView,
 				Trace:                    cr.trace,
 				AuthorizePoolStart: func(authorizeCtx context.Context, info sessionpkg.Info, lease routedWorkPoolStartLease) (bool, error) {
 					return cr.authorizeRoutedWorkPoolStart(authorizeCtx, snapshot, info, lease)
@@ -791,6 +793,59 @@ func (cr *CityRuntime) desiredSessionNamesView() map[string]bool {
 	return cr.desiredSessionNames
 }
 
+// providerHealthSnapshotView returns the provider-health snapshot the last
+// patrol/boot tick published for its sweep. A nil return falls the keyed gates
+// back to their own file read, which is what a controller-free entry point and
+// a city whose first tick has not run yet both need.
+func (cr *CityRuntime) providerHealthSnapshotView() *providerHealthSnapshot {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	return cr.providerHealthSnap
+}
+
+// publishProviderHealthSnapshot records the registry view of the tick that is
+// about to run the sweep, so every key that tick produces answers the ADR-0013
+// respawn gate from ONE file read rather than one per key. It is the health
+// half of publishDesiredSessionNames, and it keeps the same property: keyed and
+// legacy answer the gate from one fleet input, never two.
+func (cr *CityRuntime) publishProviderHealthSnapshot(snap *providerHealthSnapshot) {
+	if cr == nil {
+		return
+	}
+	cr.sessionStartMu.Lock()
+	cr.providerHealthSnap = snap
+	cr.sessionStartMu.Unlock()
+}
+
+// sessionLivenessView returns the two-bit observation the last patrol/boot
+// sweep made. A nil return declines the D-ZOMBIE guard rather than making it
+// probe, which is the fail-safe direction: the condition is level-triggered, so
+// the next sweep re-detects.
+func (cr *CityRuntime) sessionLivenessView() map[string]detectorLivenessBits {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	return cr.sessionLiveness
+}
+
+// publishSessionLiveness records the sweep's two-bit observation for the keyed
+// D-ZOMBIE guard. Only the patrol/boot sweep calls it, for the reason
+// publishDesiredSessionNames has the same restriction: a narrowed sweep would
+// overwrite the fleet view with a partial one.
+func (cr *CityRuntime) publishSessionLiveness(liveness map[string]detectorLivenessBits) {
+	if cr == nil {
+		return
+	}
+	cr.sessionStartMu.Lock()
+	cr.sessionLiveness = liveness
+	cr.sessionStartMu.Unlock()
+}
+
 func (cr *CityRuntime) requestLegacySessionStartFallback() {
 	if cr == nil {
 		return
@@ -856,6 +911,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			}),
 			withLegacyStrandedRepairExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsStrandedRepair(info.ID)
+			}),
+			withLegacyZombieMarkExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsZombieMark(info.ID)
 			}),
 		)
 	}

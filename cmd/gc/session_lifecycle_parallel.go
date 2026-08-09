@@ -336,6 +336,7 @@ type startExecutionOptions struct {
 	legacySleepDrainExcluded          func(sessionpkg.Info) bool
 	legacyProgressStallExcluded       func(sessionpkg.Info) bool
 	legacyStrandedRepairExcluded      func(sessionpkg.Info) bool
+	legacyZombieMarkExcluded          func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -655,6 +656,31 @@ func withLegacyProgressStallRecycleExclusion(excluded func(sessionpkg.Info) bool
 func withLegacyStrandedRepairExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyStrandedRepairExcluded = excluded
+	}
+}
+
+// withLegacyZombieMarkExclusion installs the keyed-ownership bridge for the
+// D-ZOMBIE family. Returning true keeps the fleet loop's zombie-capture block
+// off that row entirely — no markProviderTerminalError write, no SessionCrashed
+// event, no crash telemetry — because the keyed handler already owns that exact
+// key.
+//
+// It gates the WHOLE block rather than just the write, unlike the stranded and
+// stall seams which keep legacy's observational records above the yield. The
+// reason is that this arm has no observational half: every step below the
+// `running && !alive` test is an effect (a metadata batch, a bus event, a
+// telemetry sample), and the SessionCrashed event in particular is exactly the
+// alarm a duplicate would corrupt — ops read one crash per incarnation.
+//
+// Like the deadline and duplicate seams this is not a race to lose. Both
+// writers observe the same dead incarnation on the same tick, so an un-yielding
+// legacy does not merely double-write an idempotent batch: it fires a second
+// crash event and a second telemetry sample for one death, and its unfenced
+// front-door patch can land between the keyed handler's fence read and its
+// conditional write. Retired at WE with the god function.
+func withLegacyZombieMarkExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyZombieMarkExcluded = excluded
 	}
 }
 

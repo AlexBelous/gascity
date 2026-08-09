@@ -1099,6 +1099,158 @@ The legacy corpus's two A6 anchors have keyed twins as of this slice:
 originals stay green and stay meaningful for the whole WD wave: they cover the
 rows the keyed controller does not own.
 
+### §3 D-ZOMBIE + circuit/health deltas (recorded at WD.11)
+
+Where the zombie family and the circuit/health hydration as built diverge from
+§3 as written. Reported, not improvised. Line anchors are HEAD at the slice;
+§3's `:2324-2354` for legacy's zombie arm had drifted to
+`session_reconciler.go:2460-2502`, and its `:1599-1659` circuit-restore phase to
+`:1690-1761`.
+
+1. **The dispatch arm goes LAST and is an `if`, not a switch case — because
+   legacy's zombie arm is the one forward-pass arm that CLAIMS NOTHING.** Every
+   other family's legacy counterpart `continue`s the row, so mirroring legacy's
+   textual order also mirrors its ownership. Legacy's zombie block marks and
+   falls straight through: drift, deadline, stall and the wake/sleep phase all
+   still evaluate the same row on the same tick. A switch case returns
+   `handled` and therefore claims, and no position in legacy's order reproduces
+   "claims nothing" — so the arm takes the position where a claim preempts
+   least, below D-STRANDED. Placing it at legacy's textual position (above
+   D-DRIFT and D-DEADLINE) would starve those families of the row on every
+   sweep for an ownership legacy never asserts. The `if` form is WD.4 delta 2's
+   rule applied to the family that meets it hardest: this condition is PURE
+   provider I/O, so a bool-returning guard would force the handler to probe a
+   second time, and a second probe may disagree with the first and leave the row
+   owned by neither arm. The guard therefore hands its candidacy — session name,
+   template and process names — straight to the handler, which makes the one
+   observation that licenses the effect (delta 3).
+2. **The family stays NON-destructive, so it takes neither the D2 screen nor the
+   partial-store suppression.** WD.1 seated it that way and this slice keeps it.
+   Its effect is a metadata mark, not a member of §2's close/stop/drain/rollback/
+   retire set; legacy gates it on neither; and the mark needs no fleet view, so a
+   partial store cannot make it wrong. Screening it on D2 would strand zombies
+   forever on non-tmux providers (WD.13 delta 3's argument), and the runtime is
+   already dead so there is nothing to stop.
+3. **The guard consults a PUBLISHED fleet liveness view instead of probing, and
+   that is a cost requirement rather than an optimization.** D-ZOMBIE has no
+   cheap durable trigger rung — `running ∧ !alive` has no durable shadow — while
+   "awake, unmarked, with a live token" is the shape of every healthy session.
+   The first build probed inside the guard after the durable rungs, and that put
+   one provider call on the ordinary start path for every admitted key, which
+   `TestExactSessionStatusShadowOneKeyCostDoesNotGrowWithFleet` (zero provider
+   calls for one ordinary keyed start) caught immediately. The fix is WD.3's
+   `DesiredSessionNames` threading applied to a second fleet-shaped fact: the
+   patrol sweep already probes bead-awake rows once per tick (O(awake), a
+   declared §2 input), so it publishes that view through
+   `CityRuntime.publishSessionLiveness` and the guard reads it back through
+   `exactSessionStartParams.SessionLiveness`. Only the patrol/boot sweep
+   publishes (WD.2 delta 6 again): the control dispatcher and `gc start` sweep
+   NARROWED row sets, and publishing one would overwrite the fleet view with a
+   partial one and mask a real zombie for a tick. **The view is a scheduling
+   filter, never authority.** It is up to one patrol old, so the handler makes
+   its OWN observation first and refuses with zero effect on a row that
+   recovered — a replacement incarnation must never inherit the dead one's mark
+   (`TestExactZombieHandlerRefusesARecoveredRow`). An unpublished or unprobed
+   view declines the family with no provider call at all, which is fail-safe and
+   level-triggered. The durable rungs are unchanged and still run first: fenced
+   revision, open, named, live instance token, state ACTIVE or AWAKE, and not
+   already terminal-marked. Creating/start_pending rows are excluded
+   deliberately — legacy's arm runs on the desired fast path, a start in flight
+   has no incarnation to declare dead, and pending-create rollback owns that
+   shape.
+4. **Legacy's exit-classification lane is a SIBLING writer of the same cluster
+   and does NOT yield.** `checkRateLimitStability`
+   (session_reconcile.go:505-533, called from the desired branch below the
+   zombie block) marks the same terminal-error cluster for the same dead row
+   from the same peek — and it also owns rate-limit quarantine, which nothing
+   in this slice replaces, so fencing it would disable a recovery path with no
+   keyed successor. The two writes are content-identical because both classify
+   one peek, so the row converges either way; what is uniquely the zombie arm's
+   is the `SessionCrashed` event, and that is what
+   `withLegacyZombieMarkExclusion` protects. The keyed handler treats a lost
+   CAS fence as CONVERGENCE rather than an error: it re-reads, and a row that
+   now carries the mark ends the arm with zero effect claimed.
+   **Consequence for §3b:** on a keyed-owned row the health cluster may carry a
+   legacy write while the crash event carries only the keyed one; triage that
+   as expected rather than as a double-act.
+5. **The legacy yield gates the WHOLE block, unlike the stranded and stall
+   seams.** Those keep legacy's observational records above the yield so the
+   join sees both populations. This arm has no observational half: every step
+   below `running && !alive` is an effect (a metadata batch, a bus event, a
+   telemetry sample). The yield records a `keyed_zombie_mark_owner` skip at the
+   legacy site so the join still sees legacy on the tick, and nothing else runs.
+   `ownsZombieMark` is source-BLIND (WD.7/WD.14's `holdsAnyAdmission` shape),
+   because a zombie row is awake and desired and is routinely already held by an
+   ordinary wake, drift or deadline admission when the sweep finds it.
+6. **Reset persistence became LEVEL-triggered on BOTH sides, and that was
+   mandatory rather than tidy.** §3 says the wake handler derives `circuitOpen`
+   from the hydrated model and persists the reset before the gate. Building only
+   that half would have shipped a live regression: `restoreFromMetadata` is a
+   consume-once EDGE (it no-ops for an identity that already has an entry) and
+   the sweep runs BEFORE the god function on every tick, so a hydrating sweep
+   silently disables legacy's `else if reset { persist }` on every city for the
+   whole WD wave — stranding a durable "open" string that nothing clears and
+   losing auto-recovery fleet-wide. `ObserveProgressSignature`'s boolean return
+   is the same shape and the same trap. Both legacy gates therefore became
+   convergence questions — `sessionCircuitBreakerResetOwed` ("does the row still
+   say OPEN while the model says CLOSED?") and
+   `sessionCircuitBreakerProgressPersistOwed` ("has the model's signature moved
+   away from the row's?") — answered from the row feed the tick already holds,
+   with no extra store read and no extra steady-state write. Both are
+   edge-identical on the un-swept path. The signature comparison deliberately
+   excludes `last_observed`, which advances in memory every tick and would turn
+   a change-triggered write into a per-tick one per named identity.
+   **Ownership, stated:** the legacy circuit arms are READ-SHARED with the
+   sweep, not effect-competing, and they take NO fence — the write is
+   idempotent, provider-free and convergent, so neither side depends on who
+   hydrated first (the D-DUP expired-timer-heal shape, WD.13 delta 6). Pinned by
+   `TestLegacyCircuitRestorePersistsResetAfterSweepHydration`, whose fixture
+   quarantines the row so the restore arm is the only writer that could clear
+   the string.
+7. **The keyed gate's cold-model branch keeps the raw string, and that is the
+   fail-closed direction rather than a fallback.** `exactSessionCircuitOpen`
+   answers from the model where the model knows the identity and from the
+   durable string where it does not. A controller that has just restarted and
+   not yet swept has no grounds to believe a persisted OPEN breaker has cooled
+   down, so it refuses; the next sweep's hydration converges it and the
+   admission after that starts the session. That is what "EVENTUALLY starts" in
+   the slice's RED means, and it is why the RED asserts the pre-hydration
+   refusal as well as the post-hydration start. Trip accounting is untouched and
+   stays at the shared start-failure write.
+8. **The provider-health half splits the OTHER way from the breaker: the sweep
+   owns the SNAPSHOT and never touches the GATE.** Hydrating the breaker is a
+   pure in-memory restore, so the sweep can own it. `providerHealthGate`'s
+   accrual is not analogous — `recordRedSkip` mints an episode, counts parked
+   sessions and emits the ADR-0013 escalation alert (a bus event and a stdout
+   line). That is an effect, effects are handler-side, and a sweep accruing
+   beside legacy on the same tick would inflate the `sessions_parked` number
+   operators read. So §3's "accrue provider-health episodes" is implemented as
+   the snapshot half only: the tick loads `provider-health.json` ONCE, hands it
+   to the sweep, and publishes it through
+   `exactSessionStartParams.ProviderHealth` so the three keyed gates
+   (`session_start_reconcile.go`'s two, `session_stall_reconcile.go`'s one)
+   stop re-reading the file PER KEY. A nil accessor falls back to the per-call
+   read, which is what a controller-free entry point needs.
+9. **The named circuit-breaker clear now travels with the recycle, closing
+   WD.12 delta 9 — and it sits BELOW the authority re-read, not at legacy's
+   textual position.** Legacy clears between the kill and the handoff commit;
+   the keyed body has a revision fence in between, and the clear is itself a
+   store write, so above the fence its own revision bump would fail the very
+   authority check that licenses the handoff. Below it the ordering legacy
+   depends on still holds: the breaker is clear before the restart is committed.
+   It lives in the shared `commitExactSessionResetHandoff` body and is a no-op
+   for .103's own arm, whose ownership lattice excludes named rows. §3b's
+   D-STALL row loses its "keyed skips the named circuit-breaker clear until
+   WD.11" divergence.
+10. **The respawn-gate RED landed as a PAIR.** §3 asks for the integration
+    coverage legacy's `continue` never had; the fleet arm's test drives the real
+    reconciler over a real on-disk `provider-health.json` with a green control,
+    and a second test pins the KEYED half (the start plan refuses to prepare
+    while the published snapshot is red) so the gate does not quietly vanish at
+    the WE cutover. `TestGate_NoRespawnWhileRed`'s unit coverage of the episode
+    bookkeeping stays: it is the gate's own state machine, which neither new
+    test replaces.
+
 ### §3 D-STALL deltas (recorded at WD.12)
 
 Where the progress-stall family as built diverges from §3 as written. Reported,
@@ -1216,6 +1368,8 @@ not improvised.
    keyed lane is WD.11's (§3, circuit/health), so a named row recycled here keeps
    whatever breaker state it had until WD.11 lands — recorded as an expected
    divergence for §3b's D-STALL row rather than fixed twice.
+   **CLOSED at WD.11** (delta 9): the clear now travels with the shared
+   `commitExactSessionResetHandoff` body, below its authority re-read.
 
 ### §3 D-DUP deltas (recorded at WD.13)
 
@@ -1448,8 +1602,8 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | D-SLEEP | decision | awake-set membership (incl. winner identity, R3) | probe/pending arms unpredicted |
 | D-DRAIN | detection | tracker-state candidacy (drain intent / draining) | ack-timing skew (handler-side ack read vs legacy's in-tick poll); advance arms journey-proven |
 | D-WAKE | decision | wake-target set | legacy quarantine skip is UNTRACED (:3702-3705) → detector-present/legacy-absent, expected |
-| D-ZOMBIE | detection | running ∧ !alive candidacy | classification arm handler-side |
-| D-STALL | decision | claim-less stall + floor exemption | claim-check-error fail-safe arm incomparable; keyed refuses a pinned configured named row where legacy sets-then-clears the marker (WD.12 delta 2); keyed skips the named circuit-breaker clear until WD.11 (WD.12 delta 9) |
+| D-ZOMBIE | detection | running ∧ !alive candidacy | classification arm handler-side; **legacy's exit-classification lane (`checkRateLimitStability`) writes the same terminal-error cluster for the same row and does NOT yield, so on a keyed-owned row the health cluster may carry a legacy write while the crash event carries only the keyed one** (WD.11 delta 4) |
+| D-STALL | decision | claim-less stall + floor exemption | claim-check-error fail-safe arm incomparable; keyed refuses a pinned configured named row where legacy sets-then-clears the marker (WD.12 delta 2); the named circuit-breaker clear now travels with the recycle, so WD.12 delta 9's divergence is CLOSED (WD.11 delta 9) |
 | D-DUP | decision | winner + loser set | none expected |
 | D-STRANDED | detection | dead-slot candidacy (no legacy decision record exists — WD.14 delta 1) | marker-stamping skew only; the confirmation window itself is one DURABLE marker read by both paths, so the "duplicated counters" off-by-one does not arise (WD.14 delta 2) |
 | (global) | — | — | storeQueryPartial cycles: legacy records Closed-without-closing (:1987-1991, :2284-2288); detector suppresses — expected, bounded to partial-view cycles |

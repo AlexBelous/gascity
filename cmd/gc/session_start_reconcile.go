@@ -75,6 +75,15 @@ type exactSessionStartParams struct {
 	IdleTracker              idleTracker
 	MaxSessionAgeTracker     maxSessionAgeTracker
 	AssignedWorkDeferTracker assignedWorkDeferTracker
+
+	// DesiredSessionNames returns the fleet's own desired-session view, the same
+	// one the tick hands the sweep and the god function. The D-ORPHAN close
+	// handler re-derives undesiredness from it per key: undesiredness is
+	// fleet-shaped (pool counts, named specs, demand), so no per-row predicate
+	// can answer it, and recomputing buildDesiredState per key would turn an
+	// O(1) handler into an O(fleet) one. Nil — or a view no tick has published
+	// yet — fails the close closed.
+	DesiredSessionNames func() map[string]bool
 }
 
 type configuredDependencyStartLease struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -61,13 +62,21 @@ const (
 // A constant flips only when that family's keyed handler AND its legacy yield
 // have both landed — an acting family beside a non-yielding legacy double-acts
 // by construction. D-DEADLINE crossed at WD.2 (handler:
-// session_deadline_reconcile.go; yield: withLegacyDeadlineStopExclusion). The
-// rest flip in the WE cutover commit, one family at a time, once the WD.15
-// parity window has cleared their must-match bar. They are compile-time
-// constants on purpose: this is not a config surface.
+// session_deadline_reconcile.go; yield: withLegacyDeadlineStopExclusion).
+// D-ORPHAN has TWO effect arms and therefore TWO constants: its CLOSE arms
+// crossed at WD.3 (handler: session_orphan_close_reconcile.go; yield:
+// withLegacyOrphanCloseExclusion) and its live-orphan DRAIN arm at WD.4
+// (handler: session_orphan_drain_reconcile.go; yield:
+// withLegacyOrphanDrainExclusion). One constant governing both would have made
+// a family cross wholesale the moment either half landed, which is exactly the
+// double-act this rule exists to prevent; the family-spec table folds the two
+// back into one Acts bit. The rest flip in the WE cutover commit, one family at
+// a time, once the WD.15 parity window has cleared their must-match bar. They
+// are compile-time constants on purpose: this is not a config surface.
 const (
 	detectorActDeadline                = true
-	detectorActOrphan                  = false
+	detectorActOrphanClose             = true
+	detectorActOrphanDrain             = true
 	detectorActStaleCreate             = false
 	detectorActDrift                   = false
 	detectorActSleep                   = false
@@ -110,6 +119,8 @@ const (
 	detectorReasonDeadlineDeferred        TraceReasonCode = "detector_deadline_deferred"
 	detectorReasonOrphanDead              TraceReasonCode = "detector_orphan_dead"
 	detectorReasonOrphanLive              TraceReasonCode = "detector_orphan_live"
+	detectorReasonOrphanAssignedWork      TraceReasonCode = "detector_orphan_assigned_work"
+	detectorReasonOrphanSuspendDeferred   TraceReasonCode = "detector_orphan_suspend_deferred"
 	detectorReasonFailedCreate            TraceReasonCode = "detector_failed_create"
 	detectorReasonStalePendingCreate      TraceReasonCode = "detector_stale_pending_create"
 	detectorReasonPendingCreatePreserved  TraceReasonCode = "detector_pending_create_preserved"
@@ -138,6 +149,8 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonDeadlineDeferred,
 	detectorReasonOrphanDead,
 	detectorReasonOrphanLive,
+	detectorReasonOrphanAssignedWork,
+	detectorReasonOrphanSuspendDeferred,
 	detectorReasonFailedCreate,
 	detectorReasonStalePendingCreate,
 	detectorReasonPendingCreatePreserved,
@@ -171,6 +184,7 @@ var detectorShadowOutcomes = []TraceOutcomeCode{
 	TraceOutcomeStartCandidate,
 	TraceOutcomeSkipped,
 	TraceOutcomeNoChange,
+	TraceOutcomeDeferredConfirm,
 }
 
 // detectorFamilySpec records the fixed properties of one family: whether its
@@ -186,7 +200,7 @@ type detectorFamilySpec struct {
 
 var detectorFamilySpecs = []detectorFamilySpec{
 	{Family: detectorFamilyDeadline, Destructive: true, Acts: detectorActDeadline},
-	{Family: detectorFamilyOrphan, Destructive: true, Acts: detectorActOrphan},
+	{Family: detectorFamilyOrphan, Destructive: true, Acts: detectorActOrphanClose || detectorActOrphanDrain},
 	{Family: detectorFamilyStaleCreate, Destructive: true, Acts: detectorActStaleCreate},
 	{Family: detectorFamilyDrift, Destructive: true, Acts: detectorActDrift},
 	{Family: detectorFamilySleep, Destructive: true, Acts: detectorActSleep},
@@ -324,6 +338,15 @@ type detectorSweepInput struct {
 	MaxAge         maxSessionAgeTracker
 	Clock          clock.Clock
 	StartupTimeout time.Duration
+
+	// SuspendDeferrals carries #3630's named spec-absence confirmation window,
+	// moved off the drain tracker into detector state (DETECTOR.md §3,
+	// D-ORPHAN). Only the patrol/boot call site supplies one: it is the sole
+	// site with a cross-tick identity and the sole site that routes, and a
+	// second counting sweep on the same tick would burn the window twice as
+	// fast. A nil tracker therefore fails CLOSED — a named live orphan is
+	// deferred, never drained on its first spec-absent tick.
+	SuspendDeferrals *detectorSuspendDeferralTracker
 
 	// StoreQueryPartial marks a degraded view of the work/session stores. Every
 	// destructive family fails closed for the cycle.
@@ -472,6 +495,11 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 	}
 
 	detectDuplicateNamed(emit, namedIdentityRows, in.Cfg)
+	// Retire every confirmation window this sweep did not count. A row that
+	// stopped raising named live-orphan candidacy — its spec came back, it went
+	// dead, it picked up work — gets a fresh window next time, which is what
+	// makes the counter consecutive rather than cumulative.
+	in.SuspendDeferrals.prune()
 
 	result.Conditions = emit.conditions
 	result.SuppressedByPartialStore = emit.suppressed
@@ -790,10 +818,104 @@ func detectDeadline(in detectorSweepInput, emit *detectorConditionSink, base det
 	}
 }
 
+// detectorSuspendDeferralTracker is the detector's own copy of #3630's named
+// spec-absence confirmation window (legacy's drainTracker.suspendDeferrals,
+// session_reconciler.go:2264). It counts CONSECUTIVE sweeps in which a named
+// row raised live-orphan candidacy: a namedSessionSpecs enumeration collapse
+// that drops a spec for a single tick must not drain a named session and lose
+// its in-session context.
+//
+// It is deliberately a SECOND counter rather than a shared one. Legacy keeps
+// counting on its own tracker for the WD.15 parity join, and §3b already
+// classifies the resulting off-by-one as expected divergence; sharing would
+// have coupled the two paths' windows and made the join unable to tell them
+// apart.
+//
+// Bounded by construction: prune() at the end of every sweep retains only the
+// rows that sweep counted, so the map never outgrows the live fleet and a row
+// that stops being a candidate restarts its window.
+type detectorSuspendDeferralTracker struct {
+	mu    sync.Mutex
+	ticks map[string]int
+	seen  map[string]bool
+}
+
+func newDetectorSuspendDeferralTracker() *detectorSuspendDeferralTracker {
+	return &detectorSuspendDeferralTracker{
+		ticks: make(map[string]int),
+		seen:  make(map[string]bool),
+	}
+}
+
+// bump advances one row's confirmation window and returns the new consecutive
+// count.
+func (t *detectorSuspendDeferralTracker) bump(sessionID string) int {
+	if t == nil || sessionID == "" {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.ticks == nil {
+		t.ticks = make(map[string]int)
+	}
+	if t.seen == nil {
+		t.seen = make(map[string]bool)
+	}
+	t.ticks[sessionID]++
+	t.seen[sessionID] = true
+	return t.ticks[sessionID]
+}
+
+// prune drops every window the sweep just ending did not count, which is what
+// makes the counter consecutive and bounds it to the live fleet. A sweep cut
+// short by context cancellation prunes the rows it never reached, restarting
+// their windows — fail-closed, in the direction of not draining.
+func (t *detectorSuspendDeferralTracker) prune() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id := range t.ticks {
+		if !t.seen[id] {
+			delete(t.ticks, id)
+		}
+	}
+	t.seen = make(map[string]bool)
+}
+
+// detectorNamedSuspendConfirmed advances the confirmation window for one named
+// live-orphan row and reports whether it has elapsed. A nil tracker fails
+// closed: a sweep with no cross-tick state cannot prove a spec has been absent
+// for namedSuspendConfirmTicks consecutive ticks, and an unproven window must
+// not drain a named session.
+func detectorNamedSuspendConfirmed(tr *detectorSuspendDeferralTracker, sessionID string) (int, bool) {
+	if tr == nil {
+		return 0, false
+	}
+	ticks := tr.bump(sessionID)
+	return ticks, ticks >= namedSuspendConfirmTicks
+}
+
 // detectOrphan reports whether the row was claimed by the orphan family.
 func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, desired bool, runningSet map[string]bool, runningKnown bool) bool {
 	if desired || in.DeferSessionCloses {
 		return false
+	}
+	// Legacy's kept-open suppressor (session_reconciler.go:2193-2204), evaluated
+	// against the assigned-work snapshot the tick already loaded — no new read.
+	// A row still holding work is claimed by the family and recorded, but never
+	// enqueued: the handler's own live re-query inside
+	// closeSessionBeadIfReachableStoreUnassigned stays the authority.
+	if sessionBeadHasAssignedWorkInfo(in.AssignedWorkBeads, info) {
+		cond := base
+		cond.Family = detectorFamilyOrphan
+		cond.Site = TraceSiteReconcilerOrphaned
+		cond.Reason = detectorReasonOrphanAssignedWork
+		cond.Outcome = TraceOutcomeNoChange
+		cond.Fields = map[string]any{"predicted_effect": "none", "live_assigned_work": true}
+		emit.add(cond, false)
+		return true
 	}
 	if strings.TrimSpace(info.MetadataState) == string(sessionpkg.StateFailedCreate) {
 		cond := base
@@ -821,6 +943,27 @@ func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detec
 	cond.Family = detectorFamilyOrphan
 	if runningSet[base.SessionName] {
 		cond.Site = TraceSiteReconcilerOrphaned
+		// #3630, moved off the drain tracker into detector state: a LIVE named
+		// row reaches the drain arm only because its configured spec is absent
+		// this sweep, and a boot-time namedSessionSpecs enumeration collapse can
+		// drop a spec for one tick and restore it on the next. Suspend-class
+		// drains are revertible, so the window must confirm before the key is
+		// ever enqueued. Scoped to live rows exactly as legacy scopes it: a dead
+		// named row still releases its alias immediately through the close arm
+		// (ga-ue1r).
+		if isNamedSessionInfo(info) {
+			if ticks, confirmed := detectorNamedSuspendConfirmed(in.SuspendDeferrals, info.ID); !confirmed {
+				cond.Reason = detectorReasonOrphanSuspendDeferred
+				cond.Outcome = TraceOutcomeDeferredConfirm
+				cond.Fields = map[string]any{
+					"predicted_effect": "none",
+					"confirm_ticks":    ticks,
+					"confirm_required": namedSuspendConfirmTicks,
+				}
+				emit.add(cond, false)
+				return true
+			}
+		}
 		cond.Reason = detectorReasonOrphanLive
 		cond.Outcome = TraceOutcomeDrain
 		cond.Fields = map[string]any{"predicted_effect": "drain"}
@@ -1072,9 +1215,22 @@ func detectorDuplicateBeats(candidate, incumbent sessionpkg.Info) bool {
 // and never enqueue. No new controller, queue, or framework: the value returned
 // here is fed straight into the existing Admit(id, source) entry.
 func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSource, bool) {
-	switch cond.Family { //nolint:gocritic // the seam is a table, not a branch: WD.3-14 each add one case
+	switch cond.Family {
 	case detectorFamilyDeadline:
 		return sessionStartAdmissionDeadline, detectorActDeadline && cond.Outcome == TraceOutcomeStop
+	case detectorFamilyOrphan:
+		// The family's two effect arms split by OUTCOME and carry SEPARATE
+		// admission sources: a provably dead undesired row is closed (WD.3), a
+		// live one is drained (WD.4). Every other arm — kept-open,
+		// deferred-confirm, running-set-unavailable — predicts no effect, so it
+		// records for the parity join and never enqueues.
+		switch cond.Outcome {
+		case TraceOutcomeClosed:
+			return sessionStartAdmissionOrphanClose, detectorActOrphanClose
+		case TraceOutcomeDrain:
+			return sessionStartAdmissionOrphanDrain, detectorActOrphanDrain
+		}
+		return "", false
 	}
 	return "", false
 }

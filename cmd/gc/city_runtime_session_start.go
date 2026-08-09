@@ -163,6 +163,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				IdleTracker:              cr.it,
 				MaxSessionAgeTracker:     cr.mat,
 				AssignedWorkDeferTracker: cr.adt,
+				DesiredSessionNames:      cr.desiredSessionNamesView,
 				Trace:                    cr.trace,
 				AuthorizePoolStart: func(authorizeCtx context.Context, info sessionpkg.Info, lease routedWorkPoolStartLease) (bool, error) {
 					return cr.authorizeRoutedWorkPoolStart(authorizeCtx, snapshot, info, lease)
@@ -726,6 +727,53 @@ func (cr *CityRuntime) detectorAdmitFunc() func(string, sessionStartAdmissionSou
 	return controller.Admit
 }
 
+// publishDesiredSessionNames records the desired-session view of the tick that
+// is about to run the sweep, so the keyed D-ORPHAN close handler re-derives
+// undesiredness from the SAME view that raised the condition. Keeping the view
+// on the runtime rather than in the admission is what keeps the seam's rule
+// intact: the handler still answers from durable state plus the fleet's own
+// inputs, never from the detector's reason.
+func (cr *CityRuntime) publishDesiredSessionNames(desired map[string]TemplateParams) {
+	if cr == nil {
+		return
+	}
+	names := make(map[string]bool, len(desired))
+	for name := range desired {
+		names[name] = true
+	}
+	cr.sessionStartMu.Lock()
+	cr.desiredSessionNames = names
+	cr.sessionStartMu.Unlock()
+}
+
+// detectorSuspendDeferrals returns this runtime's named spec-absence
+// confirmation window for the detector sweep, creating it on first use. Only
+// the patrol/boot tick calls it: the control dispatcher and `gc start` run
+// narrowed sweeps, and a second sweep counting the same window on the same tick
+// would confirm a suspend twice as fast as legacy does.
+func (cr *CityRuntime) detectorSuspendDeferrals() *detectorSuspendDeferralTracker {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	if cr.orphanSuspendDeferrals == nil {
+		cr.orphanSuspendDeferrals = newDetectorSuspendDeferralTracker()
+	}
+	return cr.orphanSuspendDeferrals
+}
+
+// desiredSessionNamesView returns the last published desired-session view, or
+// nil before the first patrol/boot tick has published one.
+func (cr *CityRuntime) desiredSessionNamesView() map[string]bool {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	return cr.desiredSessionNames
+}
+
 func (cr *CityRuntime) requestLegacySessionStartFallback() {
 	if cr == nil {
 		return
@@ -755,11 +803,26 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 	// in flight right now — and it is installed whenever a controller exists,
 	// including the bounded handoff windows where the start predicate stands
 	// down, because an admitted key outlives those windows.
+	// The D-ORPHAN close and drain yields ride the same reasoning and the same
+	// window, each on its OWN predicate: one predicate covering several arms
+	// would make each arm's legacy counterpart stand down for rows another keyed
+	// arm owns.
 	var deadlineOption startExecutionOption
 	if controller != nil {
-		deadlineOption = withLegacyDeadlineStopExclusion(func(info sessionpkg.Info) bool {
+		stopExclusion := withLegacyDeadlineStopExclusion(func(info sessionpkg.Info) bool {
 			return controller.ownsDeadlineStop(info.ID)
 		})
+		closeExclusion := withLegacyOrphanCloseExclusion(func(info sessionpkg.Info) bool {
+			return controller.ownsOrphanClose(info.ID)
+		})
+		drainExclusion := withLegacyOrphanDrainExclusion(func(info sessionpkg.Info) bool {
+			return controller.ownsOrphanDrain(info.ID)
+		})
+		deadlineOption = func(opts *startExecutionOptions) {
+			stopExclusion(opts)
+			closeExclusion(opts)
+			drainExclusion(opts)
+		}
 	}
 	excluded := cr.sessionStartLegacyExclusionPredicate()
 	if excluded == nil {

@@ -327,6 +327,8 @@ type startExecutionOptions struct {
 	legacyStartExcluded            func(sessionpkg.Info) bool
 	legacyStatusHealExcluded       func(sessionpkg.Info) bool
 	legacyDeadlineStopExcluded     func(sessionpkg.Info) bool
+	legacyOrphanCloseExcluded      func(sessionpkg.Info) bool
+	legacyOrphanDrainExcluded      func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -463,6 +465,37 @@ func withLegacyStartExclusion(excluded func(sessionpkg.Info) bool) startExecutio
 func withLegacyDeadlineStopExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyDeadlineStopExcluded = excluded
+	}
+}
+
+// withLegacyOrphanCloseExclusion installs the keyed-ownership bridge for the
+// D-ORPHAN CLOSE family. Returning true keeps the fleet loop's CloseOrphan and
+// CloseFailedCreate arms out of the close entirely — no ClosePatch, no status
+// close, no work-release cascade — because the keyed handler already owns that
+// exact key. It is a sibling of withLegacyDeadlineStopExclusion, not a reuse:
+// each names one family's in-flight effect, and one predicate covering both
+// would silently disable the other family's legacy arm. Like the deadline seam
+// this is not a race to lose — both writers read the same durable row on the
+// same tick, so an acting D-ORPHAN beside a non-yielding legacy double-closes
+// by construction. Retired at WE with the god function.
+func withLegacyOrphanCloseExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyOrphanCloseExcluded = excluded
+	}
+}
+
+// withLegacyOrphanDrainExclusion installs the keyed-ownership bridge for the
+// D-ORPHAN DRAIN arm. Returning true keeps the fleet loop's Orphaned drain out
+// of beginSessionDrainInfo entirely, because the keyed handler already owns
+// that exact key and writes its intent into the SAME in-memory tracker. That
+// shared tracker is why the yield is mandatory rather than best-effort: an
+// un-yielding legacy would either double-begin or, worse, win the race and
+// stamp its own reason on the keyed arm's drain. It is a sibling of
+// withLegacyOrphanCloseExclusion — the close arm's predicate is false for every
+// drain admission, and vice versa. Retired at WE with the god function.
+func withLegacyOrphanDrainExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyOrphanDrainExcluded = excluded
 	}
 }
 

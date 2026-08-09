@@ -840,12 +840,12 @@ func (cs *controllerState) routedWorkStore(cfg *config.City, sourceStore string)
 // the other start family wrote moments ago must be visible within the same tick,
 // which is exactly what a cached per-tick snapshot cannot promise.
 //
-// The work item is the identity; the store ref is a SCOPE, compared through the
-// same storeref semantics rootStoreRefMatchesCandidate uses rather than as an
-// exact metadata equality. The two builders reach this provenance by different
-// routes and stamp different spellings of the same city scope ("city" vs
-// "city:<name>"), so an equality filter makes each side blind to the other's
-// claim and both materialize a member for one work item.
+// The work item is the identity; the store ref is a SCOPE, matched by
+// routedWorkClaimStoreScopeMatches rather than by exact metadata equality. The
+// two builders reach this provenance by different routes and stamp different
+// spellings of the same city scope ("city" vs "city:<name>"), so an equality
+// filter makes each side blind to the other's claim and both materialize a
+// member for one work item.
 func routedWorkPoolSessionClaims(store beads.Store, cfg *config.City, hint routedWorkPoolAllocationHint) ([]sessionpkg.Info, error) {
 	rows, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{beadmeta.TriggerBeadIDMetadataKey: hint.WorkID},
@@ -873,9 +873,24 @@ func routedWorkPoolSessionClaims(store beads.Store, cfg *config.City, hint route
 }
 
 // routedWorkClaimStoreScopeMatches reports whether a claim stamped with
-// rowStoreRef can be the claim on work in hintStoreRef. An unscoped ref on
-// either side is a wildcard — the same rule rootStoreRefMatchesCandidate applies
-// to root provenance — so only a rig-scoped disagreement excludes a row.
+// rowStoreRef can be the claim on work in hintStoreRef. The rule is symmetric:
+// an unscoped ref on EITHER side is a wildcard, and two canonical refs match
+// when their rig contexts agree — city scope against city scope, or the same
+// named rig. Only a canonical disagreement excludes a row.
+//
+// The symmetry is deliberately unlike rootStoreRefMatchesCandidate, which
+// wildcards an unscoped ROOT but rejects an unscoped CANDIDATE against a scoped
+// root. There the candidate is a physical store the caller enumerated and can
+// always name canonically, so an unscoped candidate really is a different store
+// and the strict arm is what collapses duplicate views of one physical row.
+//
+// Here both sides are provenance stamps written at different moments by callers
+// with different vocabularies: poolTriggerMetadata canonicalizes through
+// canonicalTriggerWorkStoreRef, while the re-point stamp and the demand
+// contribution can carry the collector's bare storeKey ("city", a bare rig
+// name) that ScopeRigContext reads as unscoped. An unscoped value here means
+// "scope not recorded", not "the legacy unscoped store", so refusing on it
+// would blind each side to the other's claim.
 func routedWorkClaimStoreScopeMatches(rowStoreRef, hintStoreRef string) bool {
 	rowRig, rowScoped := storeref.ScopeRigContext(rowStoreRef)
 	hintRig, hintScoped := storeref.ScopeRigContext(hintStoreRef)

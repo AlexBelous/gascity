@@ -29,16 +29,22 @@ var siblingPoolIsolationLiveStateClass = map[string]struct{}{
 // unexplained new key failing the compare is a FINDING, not an allowlist
 // candidate (ga-f7v2ft.112 ruling 3).
 //
-//   - idle_claim_nudge_{trigger,count,at}: the idle-claim nudge scheduler's
-//     bookkeeping (cmd/gc/idle_nudge.go). The drained member's trigger closure
-//     can make the sibling the next claim target, so this churn is
+//   - idleClaimNudge{Trigger,Count,At}Key: the idle-claim nudge scheduler's
+//     bookkeeping (cmd/gc/idle_nudge.go:21-23). The drained member's trigger
+//     closure can make the sibling the next claim target, so this churn is
 //     drain-ADJACENT by design -- re-targeting work is the intended system
 //     response, not an isolation violation.
-//   - synced_at: the session sync stamp.
+//   - synced_at: the session sync stamp, written by syncSessionBeads
+//     (cmd/gc/session_beads.go) on every tick that touches a row and by the
+//     lifecycle patch builders (internal/session/lifecycle_transition.go).
+//     Neither writer carries drain intent.
+//
+// The nudge keys are taken from the production constants rather than respelled
+// so a rename cannot silently widen this allowlist into a stale no-op.
 var siblingPoolIsolationAllowedChurn = []string{
-	"idle_claim_nudge_trigger",
-	"idle_claim_nudge_count",
-	"idle_claim_nudge_at",
+	idleClaimNudgeTriggerKey,
+	idleClaimNudgeCountKey,
+	idleClaimNudgeAtKey,
 	"synced_at",
 }
 

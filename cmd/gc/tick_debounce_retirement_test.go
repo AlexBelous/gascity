@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -27,7 +26,7 @@ var tickDebounceRetirementScanSkipDirs = map[string]bool{
 // The retirement tests themselves are the only place the retired names may
 // appear, so they are skipped by filename.
 func TestTickDebounceRetirementLeavesNoSourceReferences(t *testing.T) {
-	root := gcRepoRootForTest(t)
+	root := repoRoot(t)
 	// "TickDebounce" catches the retired config field, its accessor, and
 	// newTickDebouncer; "tickDebouncer" catches the lowercase type and its
 	// methods.
@@ -111,7 +110,7 @@ func TestEventDrivenPokeBurstCoalescesToSingleTick(t *testing.T) {
 // the key: examples/hyperscale still loads and still declares the same patrol
 // cadence and per-tick budget knobs it declared before the key was dropped.
 func TestHyperscaleExampleCityKeepsCadenceAfterTickDebounceRetirement(t *testing.T) {
-	path := filepath.Join(gcRepoRootForTest(t), "examples", "hyperscale", "city.toml")
+	path := filepath.Join(repoRoot(t), "examples", "hyperscale", "city.toml")
 	cfg, err := config.Load(fsys.OSFS{}, path)
 	if err != nil {
 		t.Fatalf("load hyperscale example city: %v", err)
@@ -130,17 +129,4 @@ func TestHyperscaleExampleCityKeepsCadenceAfterTickDebounceRetirement(t *testing
 	} else if strings.Contains(string(raw), "tick_"+"debounce") {
 		t.Fatal("hyperscale example city still documents the retired tick-debounce key")
 	}
-}
-
-func gcRepoRootForTest(t *testing.T) string {
-	t.Helper()
-	_, currentFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root, err := filepath.Abs(filepath.Join(filepath.Dir(currentFile), "..", ".."))
-	if err != nil {
-		t.Fatalf("resolve repo root: %v", err)
-	}
-	return root
 }

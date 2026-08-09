@@ -586,10 +586,24 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | (global) | — | — | storeQueryPartial cycles: legacy records Closed-without-closing (:1987-1991, :2284-2288); detector suppresses — expected, bounded to partial-view cycles |
 
 **Legacy-at-0 residual** (WC council advisory): rows a pre-fix writer left at revision
-0 are refused by the `Revision==0` guards until the first unconditional write
+0 are refused by the keyed `Revision==0` guards until the first unconditional write
 self-heals them, so during the window such a row shows keyed refusal against legacy
 effect — fail-closed, self-clearing, and triaged as its own class rather than a
-detector mismatch.
+detector mismatch. The two the campaign will actually meet are the drain-ack
+terminal-close fence (`exactCloseFence.revision == 0`, session_reconciler.go:632,
+which returns an empty finalize result rather than closing) and the pre-start
+metadata fence (`loadedRevision == 0`, session_start_reconcile.go:1612, which skips
+the conditional patch); triage against those two before opening a new class.
+
+The residual is narrower than when this advisory was written (772c2c4d5f):
+`session.Store.Close` no longer refuses a zero revision (d45315d498). Fence validity
+moved out of the caller and into the store — a row revision on the native stores, bd's
+in-transaction status compare-and-swap on a bd-backed one — because only `bd show`
+projects bd's `row_lock` as `revision`, so a bead served from a `CachingStore` primed
+by `bd list` legitimately carries 0 and the old caller-side refusal would have wedged
+every session close on a bd-backed city. A store that does fence on the revision
+rejects the useless token with a bounded-retry precondition and never closes unfenced.
+Terminal close therefore contributes no legacy-at-0 refusals to the campaign at all.
 
 **Window**: ≥7 consecutive days on ≥1 live auto-mode city, ≥10,000 joined trace
 cycles, spanning ≥1 controller restart and ≥1 config reload (arms re-verified after

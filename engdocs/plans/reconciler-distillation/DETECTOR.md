@@ -765,6 +765,129 @@ improvised.
    `commitStartFailure` makes for its own failed starts, and no second
    rollback implementation exists.
 
+### §3 D-DRIFT convergence deltas (recorded at WD.8)
+
+Where the family's CONVERGENCE arms as built diverge from §3 as written.
+Reported, not improvised. WD.8 flips `detectorActDriftConverge`; the ladder's
+deferral rungs stay shadow behind `detectorActDriftDefer` until WD.9.
+
+1. **The split is CONVERGE vs DEFER, and it cannot be expressed by outcome.**
+   WD.4 split D-ORPHAN into two act constants whose arms the DETECTOR can
+   separate — running-set membership is a sweep input, so each arm got its own
+   routing outcome and its own admission source. D-DRIFT's split is invisible to
+   detection: the fact that decides it is attachment, which is provider I/O and
+   is excluded from this family's parity level by §3b. So the two constants ride
+   ONE detected condition, ONE outcome, ONE admission source
+   (`config_drift`) and ONE legacy yield, and the fork happens inside the
+   handler: `detectorActDriftConverge` gates the routing and every effect,
+   `detectorActDriftDefer` gates nothing yet and is asserted false by the
+   act-frontier pin. The frontier test therefore gains a per-constant assertion
+   beside its per-outcome table, because an outcome table cannot see this seam.
+2. **Site 9 merges in at DETECTION, not just in the handler.** §3's condition
+   says "`StartedConfigHash != CoreFingerprint(current)` **or a live-hash
+   mismatch**", but WD.1 built only the core compare, so a live-only drift was
+   never enqueued and the handler could never have re-applied one. `detectDrift`
+   now raises the LIVE arm — at the legacy `LiveDrift` site, under
+   `detector_live_drift` — when the core compare holds and the live one does
+   not. The arms are mutually exclusive by construction (the live helper answers
+   "" for a core-drifted row), exactly as legacy reaches its live clause only
+   through the else of the core compare, so no row raises two drift conditions.
+   This MOVES the WD.1 shadow population: D-DRIFT's per-cycle count grows by the
+   live-only drifts, which is a completion of §3's stated condition rather than
+   a change to it, and the campaign readout must be joined against the arm's
+   site rather than the family alone.
+3. **A fingerprint carries its own colon, so the joined drift key is not a
+   parseable pair.** WD.1's shadow record split `sessionConfigDriftKey` on the
+   first `:` to fill `stored_hash`/`current_hash`, but a fingerprint is
+   `"<version>:<digest>"`, so every shadow record since WD.1 has carried
+   `stored_hash:"v5"` and the whole remainder as `current_hash`. WD.8 adds
+   `sessionConfigDriftHashes`/`sessionLiveDriftHashes` — the unjoined form — and
+   the sweep and handler both read those. The JOINED key is unchanged and still
+   built the same way, because it is persisted as legacy's config-drift deferral
+   key and a re-spelling would orphan every stamp already on disk.
+4. **The yield sits at the CONVERGENCE effects, and that placement is what makes
+   the two-constant split safe.** `withLegacyConfigDriftConvergeExclusion` is
+   installed at four sites inside legacy's drift block — the version-artifact
+   rebaseline, the named lane's relaunch/restart pair, the ordinary lane's
+   relaunch/drain pair, and the live-half clause — never at the top of the block.
+   Legacy keeps raising, STAMPING and tracing its deferral arms above it. That is
+   not stylistic: WD.8's handler applies nothing on a deferral rung, so a
+   top-of-block yield would suppress the attached-deferral stamp on every tick an
+   admission was in flight, and `recentlyDeferredSessionAttachedConfigDrift` is
+   the guard that keeps a single transient `IsAttached` false negative from
+   destroying an attached conversation (A6, a KEEP invariant). It also makes a
+   keyed refusal free: legacy's bookkeeping already ran on that tick.
+5. **The ownership predicate is WD.7's shape, not WD.2's.**
+   `ownsConfigDriftConverge` answers "is ANY admission in flight for this key",
+   because the seam guards on the durable row and the controller coalesces
+   admissions while keeping the earlier source — and this is the family where
+   that bites hardest, since one config edit drifts the whole fleet onto keys
+   that already carry ordinary start admissions. A source-gated yield would
+   reproduce the ga-f7v2ft.125 hole on legacy's side. The predicate's other half
+   is re-derived at the legacy call site: the row must still be the drift
+   candidate the keyed handler converges, which keeps the yield off rows keyed
+   never claimed.
+6. **The handler pays one template resolution per candidate admission, and that
+   is the family's declared cost.** Unlike D-DEADLINE, whose condition is
+   re-derivable from durable timestamps, "has this row's config moved" is only
+   answerable against the RESOLVED template — the same resolution the ordinary
+   start path already performs per admission, including its idempotent hook
+   install. The seam guard runs the cheap durable rungs first (open, revisioned,
+   named, a stamped baseline, no create in flight) so a row that cannot be
+   drifted never pays it, and the guard and the handler share one resolution
+   rather than answering from two derivations that could skew. Declared on the
+   same footing as D-DUP's bounded sibling list (WD.13 delta 5).
+7. **The keyed family owns the ALIVE lane only; the asleep-named repair stays
+   legacy's.** Legacy has two drift sites: the alive block and a separate
+   asleep-named repair guarded by `driftRestartedInPlace`, a TICK-LOCAL flag no
+   keyed handler can see. The handler therefore proves liveness per key
+   (`workerSessionTargetRunningWithConfig`, failing CLOSED on an unreadable
+   provider) and refuses with zero effect on a row whose runtime is not alive,
+   and no yield is installed on the asleep site. Expected-divergence class for
+   §3b's D-DRIFT row: on a cycle where the sweep enqueues an asleep-named
+   drifted row, the keyed population shows a `no_change` refusal against a legacy
+   `repair_in_place`. WD.9 or WE absorbs the arm. The reason an OFF-TICK restart
+   is nonetheless safe beside that unyielded arm is durable, not lucky:
+   `ConfigDriftResetPatch` stages the pending-create claim alongside the
+   preserved `session_key` and baseline, so the staged row satisfies
+   `pendingResumePreservingNamedRestartInfo` and the next fleet pass's asleep
+   repair skips it and starts the session instead of rotating its key. Pinned by
+   `TestExactConfigDriftRestartInPlaceKeepsResumeAcrossTheNextLegacyPass`,
+   because the alternative — legacy's tick-local `driftRestartedInPlace` — is
+   invisible to a keyed handler and would have lost the conversation.
+8. **The deferral prediction is recorded by the HANDLER, shadow-flavoured, under
+   a `detector_`-prefixed reason.** WD.8's handler is the first place in the
+   design where a LANDED handler records a prediction for an arm a LATER slice
+   owns, so the record carries `effect_owner=detector-shadow`,
+   `effect_applied=false`, and `detector_config_drift_deferred` rather than
+   legacy's `TraceReasonConfigDrift` — which is on `shouldAutoArmForTrace`'s
+   reason leg and would have let a shadow-flavoured record write arms. The three
+   deferral outcomes join `detectorShadowOutcomes` so the non-perturbation
+   invariant test covers them too.
+9. **D-DRIFT inherits the shared D2 screen although only one of its five rungs
+   stops anything.** `routeDetectorConditions` screens the whole destructive
+   class on `detectorProviderStopCapable`, and the family is `Destructive: true`
+   for the storeQueryPartial guard. Its effects are a metadata write, a
+   `Relaunch`, a `RunLive`, a kill-and-reset, and a drain BEGIN — none of which
+   is the token-bound unattended stop the screen exists to guarantee (that stop
+   is D-DRAIN's, at the far end of the drain). D-DUP took the
+   `StopCapabilityExempt` carve-out for exactly this shape, and D-DRIFT
+   deliberately does NOT: unlike duplicate retire, drift convergence is not
+   stranded by the screen — legacy keeps converging those cities for the whole
+   WD wave, so the over-strict direction costs a traced refusal rather than an
+   unconverged fleet. Consequence to expect in §3b: on a D2-incapable city the
+   family records `refused_provider_incapable` every sweep and never enqueues.
+10. **The named-active deferral rungs are read READ-ONLY, and legacy supplies the
+   stamp.** Legacy's `shouldDeferNamedSessionConfigDrift` writes as it reads: it
+   persists `config_drift_deferred_at` to START the bounded window that retires
+   the `activity_unknown` and `recent_activity` rungs. WD.8 may not apply that
+   write — it is WD.9's effect — so
+   `namedSessionConfigDriftDeferralStillBinding` reads the stamp back through the
+   same key and treats an elapsed window as no longer a deferral. This composes
+   only because delta 4 keeps legacy's deferral arms unyielded: legacy stamps on
+   the same tick, and the keyed rung reads what legacy wrote. When WD.9 lands the
+   write, the read-only mirror becomes the handler's own.
+
 ### §3 D-DUP deltas (recorded at WD.13)
 
 Where the D-DUP family as built diverges from §3 as written. Reported, not
@@ -854,7 +977,7 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | D-DEADLINE | decision | deadline firing + hold/quarantine/work blockers | legacy pending-interaction deferral (probe-only signal, unpredicted) |
 | D-ORPHAN | decision | close/drain/kept-open arm choice | deferred-confirm off-by-one (duplicated counters); liveness-error arm incomparable; **keyed A6 attached/pending-interaction deferral against a legacy drain** (WD.4 delta 4) |
 | D-STALE-CREATE | decision | rollback vs preserved | legacy defers rollback #6+ (R6 budget retired) |
-| D-DRIFT | detection | hash-mismatch firing per session | entire 5-arm ladder handler-side (attached probe is provider I/O — excluded, sign-off required) |
+| D-DRIFT | detection | hash-mismatch firing per session, per HALF (core arm at ConfigDrift, live arm at LiveDrift — WD.8 delta 2) | entire 5-arm ladder handler-side (attached probe is provider I/O — excluded, sign-off required); **keyed `no_change` refusal against a legacy `repair_in_place` on an asleep-named row** (WD.8 delta 7) |
 | D-SLEEP | decision | awake-set membership (incl. winner identity, R3) | probe/pending arms unpredicted |
 | D-DRAIN | detection | tracker-state candidacy (drain intent / draining) | ack-timing skew (handler-side ack read vs legacy's in-tick poll); advance arms journey-proven |
 | D-WAKE | decision | wake-target set | legacy quarantine skip is UNTRACED (:3702-3705) → detector-present/legacy-absent, expected |

@@ -73,16 +73,25 @@ const (
 // back into one Acts bit. D-STALE-CREATE crossed at WD.7 (handler:
 // session_stale_create_reconcile.go; yield:
 // withLegacyStaleCreateRollbackExclusion). D-DUP crossed at WD.13 (handler:
-// session_dup_reconcile.go; yield: withLegacyDuplicateRetireExclusion). The
-// rest flip in the WE cutover commit, one family at a time, once the WD.15
-// parity window has cleared their must-match bar. They are compile-time
-// constants on purpose: this is not a config surface.
+// session_dup_reconcile.go; yield: withLegacyDuplicateRetireExclusion).
+// D-DRIFT splits like D-ORPHAN but along a different seam: its CONVERGENCE
+// arms (silent rebaseline, launch-only relaunch, restart-in-place, drift drain,
+// live re-apply) crossed at WD.8 (handler: session_drift_reconcile.go; yield:
+// withLegacyConfigDriftConvergeExclusion), while its DEFERRAL arms — attached,
+// recently-attached, named-active, pending-interaction, live-assigned-work —
+// stay shadow until WD.9 lands their handler and their own legacy yield. One
+// constant cannot express that split because the DETECTOR cannot see it:
+// attachment is provider I/O, so both arms ride one detected condition and the
+// ladder forks inside the handler. The rest flip in the WE cutover commit, one
+// family at a time, once the WD.15 parity window has cleared their must-match
+// bar. They are compile-time constants on purpose: this is not a config surface.
 const (
 	detectorActDeadline                = true
 	detectorActOrphanClose             = true
 	detectorActOrphanDrain             = true
 	detectorActStaleCreate             = true
-	detectorActDrift                   = false
+	detectorActDriftConverge           = true
+	detectorActDriftDefer              = false
 	detectorActSleep                   = false
 	detectorActDrain                   = false
 	detectorActWake                    = false
@@ -129,6 +138,8 @@ const (
 	detectorReasonStalePendingCreate      TraceReasonCode = "detector_stale_pending_create"
 	detectorReasonPendingCreatePreserved  TraceReasonCode = "detector_pending_create_preserved"
 	detectorReasonConfigDrift             TraceReasonCode = "detector_config_drift"
+	detectorReasonLiveDrift               TraceReasonCode = "detector_live_drift"
+	detectorReasonConfigDriftDeferred     TraceReasonCode = "detector_config_drift_deferred"
 	detectorReasonNoWake                  TraceReasonCode = "detector_no_wake"
 	detectorReasonDrainInFlight           TraceReasonCode = "detector_drain_in_flight"
 	detectorReasonWakeTarget              TraceReasonCode = "detector_wake_target"
@@ -159,6 +170,8 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonStalePendingCreate,
 	detectorReasonPendingCreatePreserved,
 	detectorReasonConfigDrift,
+	detectorReasonLiveDrift,
+	detectorReasonConfigDriftDeferred,
 	detectorReasonNoWake,
 	detectorReasonDrainInFlight,
 	detectorReasonWakeTarget,
@@ -176,8 +189,11 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonProviderLivenessUnknown,
 }
 
-// detectorShadowOutcomes is the closed predicted-outcome vocabulary. It may
-// never contain TraceOutcomeFailed, TraceOutcomeProviderError, or
+// detectorShadowOutcomes is the closed predicted-outcome vocabulary of the
+// detector-shadow population: the sweep's own records, plus the shadow-only
+// predictions a landed handler writes for an arm a LATER slice owns (WD.8's
+// handler predicts WD.9's three deferral outcomes without applying them). It
+// may never contain TraceOutcomeFailed, TraceOutcomeProviderError, or
 // TraceOutcomeDeadlineExceeded: shouldAutoArmForTrace's OUTCOME leg fires on
 // those regardless of reason, which would let a shadow record write arms.
 var detectorShadowOutcomes = []TraceOutcomeCode{
@@ -189,6 +205,9 @@ var detectorShadowOutcomes = []TraceOutcomeCode{
 	TraceOutcomeSkipped,
 	TraceOutcomeNoChange,
 	TraceOutcomeDeferredConfirm,
+	TraceOutcomeDeferredAttached,
+	TraceOutcomeDeferredActive,
+	TraceOutcomeDeferredPending,
 }
 
 // detectorFamilySpec records the fixed properties of one family: whether its
@@ -217,7 +236,7 @@ var detectorFamilySpecs = []detectorFamilySpec{
 	{Family: detectorFamilyDeadline, Destructive: true, Acts: detectorActDeadline},
 	{Family: detectorFamilyOrphan, Destructive: true, Acts: detectorActOrphanClose || detectorActOrphanDrain},
 	{Family: detectorFamilyStaleCreate, Destructive: true, Acts: detectorActStaleCreate},
-	{Family: detectorFamilyDrift, Destructive: true, Acts: detectorActDrift},
+	{Family: detectorFamilyDrift, Destructive: true, Acts: detectorActDriftConverge || detectorActDriftDefer},
 	{Family: detectorFamilySleep, Destructive: true, Acts: detectorActSleep},
 	{Family: detectorFamilyDrain, Destructive: true, Acts: detectorActDrain},
 	{Family: detectorFamilyStall, Destructive: true, Acts: detectorActStall},
@@ -1024,17 +1043,38 @@ func detectStaleCreate(in detectorSweepInput, emit *detectorConditionSink, base 
 	return true
 }
 
+// detectDrift raises the family's ONE effect arm for one row: the CORE
+// fingerprint moved, or — when it did not — the LIVE fingerprint did. Both are
+// pure hash compares over the snapshot plus config, with zero provider I/O, and
+// both predict the same thing at detection level: this session's running config
+// no longer matches its declared config, so the handler will converge it
+// (DETECTOR.md §3b, D-DRIFT parity level = detection).
+//
+// The two arms differ in SITE and REASON, never in outcome, so the family keeps
+// a single routing outcome and therefore a single admission source. Legacy's
+// ConfigDrift and LiveDrift sites are two spellings of one convergence ladder
+// behind one yield ("site 9 merges in"), and two outcomes would have implied two
+// legacy yields that do not exist.
+//
+// Which RUNG of the ladder runs — silent rebaseline, launch-only relaunch,
+// restart-in-place, drift drain, live re-apply, or a WD.9 deferral — is decided
+// handler-side: the rungs below the hash compare read attachment and pending
+// interaction, which are provider probes the sweep may not pay fleet-wide.
 func detectDrift(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, tp TemplateParams) {
-	key := sessionConfigDriftKey(info, in.Cfg, tp)
-	if key == "" {
-		return
-	}
-	stored, current, _ := strings.Cut(key, ":")
 	cond := base
 	cond.Family = detectorFamilyDrift
+	cond.Outcome = TraceOutcomeDrain
 	cond.Site = TraceSiteReconcilerConfigDrift
 	cond.Reason = detectorReasonConfigDrift
-	cond.Outcome = TraceOutcomeDrain
+	stored, current, drifted := sessionConfigDriftHashes(info, in.Cfg, tp)
+	if !drifted {
+		cond.Site = TraceSiteReconcilerLiveDrift
+		cond.Reason = detectorReasonLiveDrift
+		stored, current, drifted = sessionLiveDriftHashes(info, in.Cfg, tp)
+	}
+	if !drifted {
+		return
+	}
 	cond.Fields = map[string]any{
 		"predicted_effect": "converge",
 		"stored_hash":      stored,
@@ -1289,6 +1329,15 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// Only the expired-lease ROLLBACK arm predicts an effect; the
 		// preserved-row arm records no-change for the parity join (WD.7).
 		return sessionStartAdmissionStaleCreate, detectorActStaleCreate && cond.Outcome == TraceOutcomeRollback
+	case detectorFamilyDrift:
+		// D-DRIFT's two SITES (ConfigDrift, LiveDrift) are one effect arm under
+		// one outcome, so they take one admission source and one legacy yield.
+		// The split this family needs is the one detection cannot make —
+		// converge versus defer — so it lives in the handler and is gated on
+		// detectorActDriftConverge here: the key is enqueued from WD.8 onward,
+		// and the handler applies nothing on a row whose ladder lands on a
+		// deferral rung until WD.9 flips detectorActDriftDefer.
+		return sessionStartAdmissionConfigDrift, detectorActDriftConverge && cond.Outcome == TraceOutcomeDrain
 	case detectorFamilyDup:
 		// D-DUP has a single arm: detectDuplicateNamed raises one condition per
 		// LOSER row and nothing else, so every condition here predicts the retire

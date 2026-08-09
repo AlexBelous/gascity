@@ -1545,6 +1545,32 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		return true
 	}
+	// Coexistence seam for the acting D-DRIFT convergence arms. Placed at each
+	// CONVERGENCE effect, never at the top of the drift block: legacy keeps
+	// raising, stamping and tracing its own deferral arms above it, because
+	// WD.8's handler applies nothing on those rungs (WD.9 owns them) and
+	// attached-user safety may not stand down for a handler that has not landed.
+	// The ownership predicate answers "is ANY admission in flight for this key"
+	// — the seam guards on the durable row, and a config edit drifts the fleet
+	// onto keys that already carry other admissions — so the second half of the
+	// yield is re-derived here: the row must still be the drift candidate the
+	// keyed handler converges. Retired at WE with the god function.
+	legacyConfigDriftConvergeKeyed := func(info sessionpkg.Info, tp TemplateParams, site TraceSiteCode, name string) bool {
+		if reconcileOpts.legacyConfigDriftConvergeExcluded == nil || !reconcileOpts.legacyConfigDriftConvergeExcluded(info) {
+			return false
+		}
+		if sessionConfigDriftKey(info, cfg, tp) == "" && sessionLiveDriftKey(info, cfg, tp) == "" {
+			return false
+		}
+		if trace != nil {
+			trace.RecordDecision(site, TraceReasonCode("keyed_config_drift_owner"), TraceOutcomeSkipped, tp.TemplateName, name, traceRecordPayload{
+				"session_id":     info.ID,
+				"effect_owner":   "keyed",
+				"effect_applied": false,
+			})
+		}
+		return true
+	}
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
 			trace.RecordControllerOperation(site, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
@@ -3008,6 +3034,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// draining the session. The mismatch is a versioning
 						// artifact, not real config drift. See ga-s760 FRs 1-3.
 						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
+							if legacyConfigDriftConvergeKeyed(infoByID[id], tp, TraceSiteReconcilerConfigDrift, name) {
+								continue
+							}
 							outcome := rebaselineLegacyHashOutcome(storedHash)
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
@@ -3098,6 +3127,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								continue
 							}
+							// The named lane's two convergence effects — the warm-box
+							// relaunch and the restart-in-place — stand down together,
+							// below the deferral arms above.
+							if legacyConfigDriftConvergeKeyed(infoByID[id], tp, TraceSiteReconcilerConfigDrift, name) {
+								continue
+							}
 							if launchOnlyDrift {
 								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, infoByID[id], name,
 									tp, cityPath, cfg, store, storedHash, currentHash, storedProvision, storedLaunch,
@@ -3179,6 +3214,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								fmt.Fprintf(stdout, "Skipping config-drift drain for '%s': live assigned work found\n", name) //nolint:errcheck
 								continue
 							}
+							// The ordinary lane's two convergence effects — the warm-box
+							// relaunch and the drift drain — stand down together, below
+							// the pending-interaction and assigned-work deferrals above.
+							if legacyConfigDriftConvergeKeyed(infoByID[id], tp, TraceSiteReconcilerConfigDrift, name) {
+								continue
+							}
 							if launchOnlyDrift {
 								relaunched, launchBatch := relaunchAgentForLaunchDrift(ctx, sp, sessFront, infoByID[id], name,
 									tp, cityPath, cfg, store, storedHash, currentHash, storedProvision, storedLaunch,
@@ -3229,7 +3270,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// the started_config_hash pattern above.
 					storedLive := infoByID[id].StartedLiveHash
 					currentLive := runtime.LiveFingerprint(agentCfg)
-					if storedLive != currentLive {
+					if storedLive != currentLive &&
+						// Site 9 merges into D-DRIFT: the live half's backfill,
+						// rebaseline and RunLive re-apply are convergence effects of
+						// the same family, behind the same yield. The deferral-clear
+						// above stays legacy's — it is a convergent, idempotent clear
+						// with no destructive effect to serialize.
+						!legacyConfigDriftConvergeKeyed(infoByID[id], tp, TraceSiteReconcilerLiveDrift, name) {
 						switch {
 						case storedLive == "" && len(agentCfg.SessionLive) == 0:
 							// No stored hash and no live config — silently
@@ -5417,23 +5464,82 @@ func sessionAttachedForConfigDrift(id string, sp runtime.Provider, cityPath stri
 }
 
 func sessionConfigDriftKey(info sessionpkg.Info, cfg *config.City, tp TemplateParams) string {
+	stored, current, drifted := sessionConfigDriftHashes(info, cfg, tp)
+	if !drifted {
+		return ""
+	}
+	return stored + ":" + current
+}
+
+// sessionConfigDriftHashes is sessionConfigDriftKey's unjoined form: it returns
+// the stored and current CORE fingerprints separately. Callers that want the two
+// hashes must use this rather than splitting the key, because a fingerprint is
+// itself "<version>:<digest>" and a split on the first colon yields the version
+// prefix, not the stored hash. The joined key stays exactly as legacy writes it,
+// since it is persisted as the config-drift deferral key.
+func sessionConfigDriftHashes(info sessionpkg.Info, cfg *config.City, tp TemplateParams) (string, string, bool) {
 	template := tp.TemplateName
 	if template == "" {
 		template = normalizedSessionTemplateInfo(info, cfg)
 	}
 	storedHash := info.StartedConfigHash
 	if template == "" || storedHash == "" {
-		return ""
+		return "", "", false
 	}
 	if findAgentByTemplate(cfg, template) == nil {
-		return ""
+		return "", "", false
 	}
 	agentCfg := sessionCoreConfigForHashInfo(tp, info)
 	currentHash := runtime.CoreFingerprint(agentCfg)
 	if storedHash == currentHash {
+		return "", "", false
+	}
+	return storedHash, currentHash, true
+}
+
+// sessionLiveDriftKey is sessionConfigDriftKey's live-half sibling: it returns
+// "<stored>:<current>" when the session's LIVE fingerprint has moved while its
+// CORE fingerprint held, and "" otherwise. Core drift owns the row when both
+// moved — legacy reaches its live-drift clause only through the else of the
+// core compare — so this deliberately answers "" for a core-drifted row rather
+// than raising a second condition for the same session.
+//
+// Like the core key it is a pure compare over the typed snapshot plus config,
+// with no provider I/O, and it inherits the same started_config_hash gate
+// (#127): before the startup window has stamped a baseline there is nothing to
+// compare against, so a fresh session is never called drifted.
+func sessionLiveDriftKey(info sessionpkg.Info, cfg *config.City, tp TemplateParams) string {
+	stored, current, drifted := sessionLiveDriftHashes(info, cfg, tp)
+	if !drifted {
 		return ""
 	}
-	return storedHash + ":" + currentHash
+	return stored + ":" + current
+}
+
+// sessionLiveDriftHashes is the unjoined form, for the same reason its core
+// sibling has one: a fingerprint carries its own colon.
+func sessionLiveDriftHashes(info sessionpkg.Info, cfg *config.City, tp TemplateParams) (string, string, bool) {
+	template := tp.TemplateName
+	if template == "" {
+		template = normalizedSessionTemplateInfo(info, cfg)
+	}
+	storedHash := info.StartedConfigHash
+	if template == "" || storedHash == "" {
+		return "", "", false
+	}
+	if findAgentByTemplate(cfg, template) == nil {
+		return "", "", false
+	}
+	agentCfg := sessionCoreConfigForHashInfo(tp, info)
+	if storedHash != runtime.CoreFingerprint(agentCfg) {
+		return "", "", false
+	}
+	storedLive := info.StartedLiveHash
+	currentLive := runtime.LiveFingerprint(agentCfg)
+	if storedLive == currentLive {
+		return "", "", false
+	}
+	return storedLive, currentLive, true
 }
 
 func configDriftTracePayload(storedHash, currentHash string, driftedFields []string, extra traceRecordPayload) traceRecordPayload {

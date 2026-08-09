@@ -822,6 +822,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			withLegacyStaleCreateRollbackExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsStaleCreateRollback(info.ID)
 			}),
+			withLegacyConfigDriftConvergeExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsConfigDriftConverge(info.ID)
+			}),
 			withLegacyDuplicateRetireExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsDuplicateNamedRetire(info.ID)
 			}),

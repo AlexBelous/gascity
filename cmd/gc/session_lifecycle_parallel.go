@@ -330,6 +330,7 @@ type startExecutionOptions struct {
 	legacyOrphanCloseExcluded         func(sessionpkg.Info) bool
 	legacyOrphanDrainExcluded         func(sessionpkg.Info) bool
 	legacyStaleCreateRollbackExcluded func(sessionpkg.Info) bool
+	legacyConfigDriftConvergeExcluded func(sessionpkg.Info) bool
 	legacyDuplicateRetireExcluded     func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
@@ -513,6 +514,32 @@ func withLegacyOrphanDrainExclusion(excluded func(sessionpkg.Info) bool) startEx
 func withLegacyStaleCreateRollbackExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyStaleCreateRollbackExcluded = excluded
+	}
+}
+
+// withLegacyConfigDriftConvergeExclusion installs the keyed-ownership bridge for
+// the D-DRIFT CONVERGENCE arms. Returning true keeps the fleet loop out of the
+// silent rebaseline write, the launch-only relaunch, the named restart-in-place,
+// the ordinary drift drain, and the live re-apply — because the keyed handler
+// already owns that exact key and converges the same row from the same durable
+// hashes. Like the deadline seam and unlike the start seam this is not a race to
+// lose: both writers compare the same two fingerprints on the same tick, so an
+// un-yielding legacy relaunches the agent twice, or drains a session the keyed
+// handler just relaunched.
+//
+// It is installed at the CONVERGENCE effects only, never at the top of the drift
+// block. Legacy keeps raising, stamping and tracing its own deferral arms —
+// attached, recently-attached, named-active, pending-interaction and
+// live-assigned-work — above the yield, because WD.8's handler applies nothing
+// on those rungs (they are WD.9's) and attached-user safety is a KEEP invariant
+// that may not stand down for a handler that has not landed. The same placement
+// is why a keyed refusal costs nothing: legacy's deferral bookkeeping already
+// ran on the tick the handler refused.
+//
+// Retired at WE with the god function.
+func withLegacyConfigDriftConvergeExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyConfigDriftConvergeExcluded = excluded
 	}
 }
 

@@ -58,6 +58,14 @@ func reconcileExactSessionDetectorFamily(
 	// (is the runtime alive) is provider I/O, not durable state. Splitting the
 	// case would mean two guards that can never disagree, so whichever came
 	// second would be dead code.
+	//
+	// D-DRIFT sits ABOVE D-DEADLINE for the same reason D-ORPHAN does: legacy's
+	// forward pass runs its config-drift block before the deadline arms and
+	// early-continues, so a drifted session that is also past its idle deadline
+	// is the drift family's — it gets converged, not killed. Its single case
+	// covers both fingerprint halves and both convergence lanes, because the
+	// facts that split them (attachment, launch-only, named) are all re-derived
+	// from the one row the guard already resolved.
 	switch {
 	case detectorActDup && exactSessionDuplicateNamedCandidate(params, info, response):
 		owner, err := reconcileExactSessionDuplicateNamedRetire(admission, params, info, response, clk)
@@ -65,6 +73,9 @@ func reconcileExactSessionDetectorFamily(
 	case (detectorActOrphanClose || detectorActOrphanDrain) &&
 		exactSessionOrphanCloseCandidate(params, info, response, clk) != "":
 		owner, err := reconcileExactSessionOrphanClose(ctx, admission, params, info, response, clk)
+		return true, owner, err
+	case detectorActDriftConverge && exactSessionConfigDriftConvergeCandidate(params, info, response, clk):
+		owner, err := reconcileExactSessionConfigDriftConverge(ctx, admission, params, info, response, clk)
 		return true, owner, err
 	case detectorActDeadline && exactSessionDeadlineStopCandidate(params, info, response, clk.Now().UTC()):
 		owner, err := reconcileExactSessionDeadlineStop(ctx, admission, params, info, response, clk)

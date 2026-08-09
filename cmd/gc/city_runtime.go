@@ -119,6 +119,11 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+	// readyDemandFingerprint memoizes the last ready-demand scan so consecutive
+	// patrol ticks inside readyDemandFingerprintFloor reuse it instead of
+	// re-running a cache-bypassing ReadyLive query against every store.
+	readyDemandFingerprint   string
+	readyDemandFingerprintAt time.Time
 
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
@@ -3925,12 +3930,12 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	readyDemandFingerprint := ""
 	refresh := cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint)
 	if !refresh && trigger == "patrol" && cr.demandSnapshotsEnabled() {
-		readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+		readyDemandFingerprint = cr.flooredReadyDemandSnapshotFingerprint()
 		refresh = cr.demandSnapshot.readyDemandFingerprint != readyDemandFingerprint
 	}
 	if refresh {
 		if trigger == "patrol" && cr.demandSnapshotsEnabled() && readyDemandFingerprint == "" {
-			readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+			readyDemandFingerprint = cr.flooredReadyDemandSnapshotFingerprint()
 		} else if cr.demandSnapshot != nil {
 			readyDemandFingerprint = cr.demandSnapshot.readyDemandFingerprint
 		}
@@ -4016,6 +4021,30 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	return scaleCheckDemandMinInterval
 }
 
+// readyDemandFingerprintFloor bounds how often consecutive patrol ticks re-run
+// the cache-bypassing ready-demand scan. The scan queries every store on every
+// tick, so a sub-second patrol_interval reproduces exactly the query storm
+// scaleCheckDemandMinInterval was introduced to stop. Reusing the previous
+// fingerprint inside the floor is a no-op at any patrol_interval at or above it
+// (the 30s default included) and bounds ready-work discovery latency to the
+// floor only on pathologically fast cadences. Non-patrol triggers — including
+// certified-readiness routed-work and wait-dependency pokes — never reach this
+// path (see shouldRefreshDemandSnapshot), so an event-driven wake still
+// rebuilds immediately.
+const readyDemandFingerprintFloor = scaleCheckDemandMinInterval
+
+// flooredReadyDemandSnapshotFingerprint returns the memoized ready-demand
+// fingerprint when the previous scan is younger than readyDemandFingerprintFloor,
+// and otherwise rescans and re-memoizes.
+func (cr *CityRuntime) flooredReadyDemandSnapshotFingerprint() string {
+	if !cr.readyDemandFingerprintAt.IsZero() && time.Since(cr.readyDemandFingerprintAt) < readyDemandFingerprintFloor {
+		return cr.readyDemandFingerprint
+	}
+	cr.readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+	cr.readyDemandFingerprintAt = time.Now()
+	return cr.readyDemandFingerprint
+}
+
 func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
 	stores := []struct {
 		ref   string
@@ -4045,9 +4074,14 @@ func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
 		}
 		ready, err := beads.ReadyLive(entry.store, beads.ReadyQuery{TierMode: beads.TierBoth})
 		if err != nil {
+			// Fold a stable marker, never the error text. A real outage reports
+			// varying connection ids, retry counts, or timestamps, and hashing
+			// that text turns the outage into a changed fingerprint — and so a
+			// full buildDesiredState rebuild — on every patrol tick. The marker
+			// keeps an unreachable store distinguishable from an empty one while
+			// degrading the outage to cache reuse. The error itself is logged.
 			log.Printf("readyDemandSnapshotFingerprint: store %s: %v", entry.ref, err)
-			_, _ = io.WriteString(h, "error:")
-			_, _ = io.WriteString(h, err.Error())
+			_, _ = io.WriteString(h, "error")
 			_, _ = io.WriteString(h, "\x00")
 			continue
 		}

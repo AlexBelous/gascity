@@ -3432,8 +3432,29 @@ func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) 
 			},
 		},
 		{
-			name: "durable trigger changed",
+			// In stamp mode the fence is the acknowledgement's own trigger, so a
+			// live stamp that no longer matches the lease is the refusal — the
+			// ROW moving is not, because legacy re-pointing a member that already
+			// acknowledged its drain is exactly what the stamp exists to survive
+			// (ga-f7v2ft.131).
+			name: "acknowledged trigger stamp changed",
 			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				restampAckTrigger(f, "ga-other-work", f.sourceStore)
+			},
+		},
+		{
+			name: "acknowledged store ref stamp changed",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				restampAckTrigger(f, f.work.ID, "rig:elsewhere")
+			},
+		},
+		{
+			// An unstamped acknowledgement (older agent CLI) keeps the row as its
+			// only evidence, so the row binding stays its fence.
+			name: "durable trigger changed on an unstamped acknowledgement",
+			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
+				clearAckTriggerStamp(f)
+				f.lease.TriggerFromAck = false
 				f.info.TriggerBeadID = "ga-other-work"
 			},
 		},
@@ -3457,6 +3478,7 @@ func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) 
 			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
 				f.info.TriggerBeadStoreRef = "city:missing"
 				f.lease.SourceStore = "city:missing"
+				restampAckTrigger(f, f.work.ID, "city:missing")
 			},
 		},
 		{
@@ -3526,6 +3548,7 @@ func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) 
 			mutate: func(f *routedWorkPoolDrainAckAuthorizationFixture) {
 				f.info.TriggerBeadID = "ga-missing-work"
 				f.lease.WorkID = "ga-missing-work"
+				restampAckTrigger(f, "ga-missing-work", f.sourceStore)
 			},
 		},
 		{
@@ -3734,6 +3757,31 @@ func TestRoutedWorkPoolDrainAckCanonicalizesLegacyBareStoreRefs(t *testing.T) {
 	})
 }
 
+// restampAckTrigger rewrites the acknowledgement's own trigger stamp. A test
+// that fabricates a lease has to move the ack evidence with it: in stamp mode
+// the effect boundary fences on the LIVE stamp, not on the member row.
+func restampAckTrigger(f *routedWorkPoolDrainAckAuthorizationFixture, beadID, storeRef string) {
+	f.t.Helper()
+	if err := f.provider.SetMeta(f.info.SessionName, reconcilerDrainAckTriggerBeadIDKey, beadID); err != nil {
+		f.t.Fatalf("restamp acknowledged trigger bead: %v", err)
+	}
+	if err := f.provider.SetMeta(f.info.SessionName, reconcilerDrainAckTriggerStoreRefKey, storeRef); err != nil {
+		f.t.Fatalf("restamp acknowledged trigger store ref: %v", err)
+	}
+}
+
+// clearAckTriggerStamp reproduces an acknowledgement written by an agent CLI
+// from before the trigger stamp existed.
+func clearAckTriggerStamp(f *routedWorkPoolDrainAckAuthorizationFixture) {
+	f.t.Helper()
+	if err := f.provider.RemoveMeta(f.info.SessionName, reconcilerDrainAckTriggerBeadIDKey); err != nil {
+		f.t.Fatalf("clear acknowledged trigger bead stamp: %v", err)
+	}
+	if err := f.provider.RemoveMeta(f.info.SessionName, reconcilerDrainAckTriggerStoreRefKey); err != nil {
+		f.t.Fatalf("clear acknowledged trigger store ref stamp: %v", err)
+	}
+}
+
 func stampLegacyBareTriggerStoreRef(
 	t *testing.T,
 	fixture routedWorkPoolDrainAckAuthorizationFixture,
@@ -3742,6 +3790,11 @@ func stampLegacyBareTriggerStoreRef(
 	t.Helper()
 	if err := fixture.store.SetMetadata(fixture.info.ID, beadmeta.TriggerBeadStoreRefMetadataKey, bareRef); err != nil {
 		t.Fatalf("stamp legacy bare trigger store ref: %v", err)
+	}
+	// The ack stamps the row VERBATIM, so a bare row yields a bare stamp: the
+	// canonicalizer stays the single read-side point either way (ga-2oboq).
+	if err := fixture.provider.SetMeta(fixture.info.SessionName, reconcilerDrainAckTriggerStoreRefKey, bareRef); err != nil {
+		t.Fatalf("stamp legacy bare acknowledged store ref: %v", err)
 	}
 	info, err := sessionFrontDoor(fixture.store).Get(fixture.info.ID)
 	if err != nil {
@@ -4160,13 +4213,18 @@ func newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(
 	if err := base.provider.Start(t.Context(), base.info.SessionName, runtime.Config{Command: "true"}); err != nil {
 		t.Fatalf("start pool runtime: %v", err)
 	}
+	// Exactly what `gc runtime drain-ack` stamps on a pool member today: the
+	// four ack keys, GC_DRAIN_ACK, and the ack-time trigger pair read verbatim
+	// off the member row (providerDrainOps.setDrainAck / stampDrainAckTrigger).
 	for key, value := range map[string]string{
-		"GC_SESSION_ID":                   base.info.ID,
-		"GC_INSTANCE_TOKEN":               base.info.InstanceToken,
-		reconcilerDrainAckSourceKey:       drainAckSourceAgentValue,
-		drainAckRequesterSessionIDKey:     base.info.ID,
-		drainAckRequesterInstanceTokenKey: base.info.InstanceToken,
-		"GC_DRAIN_ACK":                    "1",
+		"GC_SESSION_ID":                      base.info.ID,
+		"GC_INSTANCE_TOKEN":                  base.info.InstanceToken,
+		reconcilerDrainAckSourceKey:          drainAckSourceAgentValue,
+		drainAckRequesterSessionIDKey:        base.info.ID,
+		drainAckRequesterInstanceTokenKey:    base.info.InstanceToken,
+		reconcilerDrainAckTriggerBeadIDKey:   base.work.ID,
+		reconcilerDrainAckTriggerStoreRefKey: base.sourceStore,
+		"GC_DRAIN_ACK":                       "1",
 	} {
 		if err := base.provider.SetMeta(base.info.SessionName, key, value); err != nil {
 			t.Fatalf("set runtime metadata %s: %v", key, err)
@@ -4204,6 +4262,7 @@ func newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(
 		WorkID:                 base.work.ID,
 		SourceStore:            base.sourceStore,
 		MembershipRevision:     observation.revision,
+		TriggerFromAck:         true,
 	}
 	authorized, err := base.cr.authorizeRoutedWorkPoolDrainAck(base.snapshot, info, lease)
 	if err != nil || !authorized {

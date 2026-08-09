@@ -302,6 +302,18 @@ const (
 	drainAckRequesterInstanceTokenKey = "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN"
 	reconcilerDrainAckReasonKey       = "GC_DRAIN_REASON"
 	reconcilerDrainAckGenerationKey   = "GC_DRAIN_GENERATION"
+	// The routed work the agent had finished when it acknowledged its drain,
+	// captured at ack time by the ack's own writer (gc runtime drain-ack). An
+	// acknowledgement is about a unit of work, not about whatever trigger the
+	// member row happens to carry when the keyed sweep next rebuilds its lease:
+	// the legacy pool builder may legitimately re-point a still-active member
+	// during the ack → stop-pending window, and every lease rebuilt after that
+	// named a different, genuinely open trigger (ga-f7v2ft.131). The pair
+	// travels WITH the ack, in the ack's own channel, and has exactly the ack's
+	// lifetime (ack → stop) — which is why it is provider meta and not a
+	// durable bead write.
+	reconcilerDrainAckTriggerBeadIDKey   = "GC_DRAIN_ACK_TRIGGER_BEAD_ID"
+	reconcilerDrainAckTriggerStoreRefKey = "GC_DRAIN_ACK_TRIGGER_STORE_REF"
 )
 
 func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState) error {
@@ -336,6 +348,8 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 		reconcilerDrainAckSourceKey,
 		drainAckRequesterSessionIDKey,
 		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckTriggerBeadIDKey,
+		reconcilerDrainAckTriggerStoreRefKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 	} {

@@ -70,6 +70,11 @@ type routedWorkPoolDrainAckLease struct {
 	WorkID                 string
 	SourceStore            string
 	MembershipRevision     uint64
+	// TriggerFromAck reports that WorkID/SourceStore came from the
+	// acknowledgement's own trigger stamp rather than from the member row. In
+	// that mode the row binding is no longer the fence — the live ack stamps
+	// are (see authorizeRoutedWorkPoolDrainAck).
+	TriggerFromAck bool
 }
 
 func validateRoutedWorkPoolStartLease(lease routedWorkPoolStartLease) error {
@@ -162,6 +167,14 @@ func (cr *CityRuntime) newRoutedWorkPoolDrainAckLease(
 	if err != nil {
 		return routedWorkPoolDrainAckLease{}, true, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading requester instance token: %w", info.ID, err)
 	}
+	stampedWorkID, err := snapshot.Provider.GetMeta(name, reconcilerDrainAckTriggerBeadIDKey)
+	if err != nil {
+		return routedWorkPoolDrainAckLease{}, true, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading acknowledged trigger bead: %w", info.ID, err)
+	}
+	stampedStoreRef, err := snapshot.Provider.GetMeta(name, reconcilerDrainAckTriggerStoreRefKey)
+	if err != nil {
+		return routedWorkPoolDrainAckLease{}, true, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading acknowledged trigger store ref: %w", info.ID, err)
+	}
 	if cr.poolMembershipShadow == nil {
 		return routedWorkPoolDrainAckLease{}, true, fmt.Errorf("authorizing pool drain acknowledgement: keyed state is unavailable")
 	}
@@ -170,6 +183,7 @@ func (cr *CityRuntime) newRoutedWorkPoolDrainAckLease(
 	if !occupied {
 		return routedWorkPoolDrainAckLease{}, true, nil
 	}
+	workID, storeRef, triggerFromAck := drainAckTriggerBindingForLease(info, stampedWorkID, stampedStoreRef)
 	lease := routedWorkPoolDrainAckLease{
 		SessionID:              info.ID,
 		InstanceToken:          strings.TrimSpace(info.InstanceToken),
@@ -177,14 +191,36 @@ func (cr *CityRuntime) newRoutedWorkPoolDrainAckLease(
 		RequesterInstanceToken: strings.TrimSpace(requesterInstanceToken),
 		ControllerGeneration:   snapshot.Generation,
 		PoolTarget:             template,
-		WorkID:                 strings.TrimSpace(info.TriggerBeadID),
-		SourceStore:            canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, info.TriggerBeadStoreRef),
+		WorkID:                 workID,
+		SourceStore:            canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, storeRef),
 		MembershipRevision:     observation.revision,
+		TriggerFromAck:         triggerFromAck,
 	}
 	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
 		return routedWorkPoolDrainAckLease{}, true, nil
 	}
 	return lease, true, nil
+}
+
+// drainAckTriggerBindingForLease resolves which trigger a rebuilt drain-ack
+// lease is about, returning the raw (un-canonicalized) store ref and whether the
+// answer came from the acknowledgement itself.
+//
+// An acknowledgement is about the unit of work the agent finished. The member
+// row is not that: the legacy pool builder may legitimately re-point a member
+// that is still active — the ack → stop-pending window — onto the next ready
+// work item, and every lease rebuilt after that named a different, genuinely
+// open trigger, so the effect boundary refused forever (ga-f7v2ft.131). So the
+// ack's own stamp wins whenever it is complete.
+//
+// Both-or-neither: a lone key is treated as no stamp at all, which is also the
+// mixed-version answer — acknowledgements from an older agent CLI carry no
+// stamp and behave exactly as they did before this pair existed.
+func drainAckTriggerBindingForLease(info sessionpkg.Info, stampedWorkID, stampedStoreRef string) (workID, storeRef string, fromAck bool) {
+	if id, ref := strings.TrimSpace(stampedWorkID), strings.TrimSpace(stampedStoreRef); id != "" && ref != "" {
+		return id, ref, true
+	}
+	return strings.TrimSpace(info.TriggerBeadID), info.TriggerBeadStoreRef, false
 }
 
 // recoverRoutedWorkPoolDrainAckLease distinguishes a confirmed legacy marker
@@ -218,6 +254,16 @@ func (cr *CityRuntime) recoverRoutedWorkPoolDrainAckLease(
 	return routedWorkPoolDrainAckLease{}, false, false, errors.New("drain acknowledgement provenance is not a confirmed legacy marker")
 }
 
+// drainAckProviderCheck is one live provider-meta equality the drain-ack effect
+// boundary re-proves. normalize maps the raw stamp into the lease's own
+// spelling before comparison — the trigger store ref is stamped verbatim and
+// canonicalized on read (ga-2oboq) — and a nil normalize means byte equality.
+type drainAckProviderCheck struct {
+	key       string
+	want      string
+	normalize func(string) string
+}
+
 // authorizeRoutedWorkPoolDrainAck repeats every destructive precondition at
 // the effect boundary. It intentionally uses live exact reads and strict
 // provider probes rather than the legacy reconciler's best-effort snapshots.
@@ -238,9 +284,19 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 	if !configCurrent || snapshot.Generation != lease.ControllerGeneration || info.ID != lease.SessionID || info.Closed ||
 		!isRoutedWorkPoolDrainAckLifecycleShape(info) || !isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) ||
 		lease.RequesterSessionID != info.ID || lease.RequesterInstanceToken != lease.InstanceToken ||
-		strings.TrimSpace(info.InstanceToken) != lease.InstanceToken || normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget ||
-		strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
-		canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, info.TriggerBeadStoreRef) != lease.SourceStore {
+		strings.TrimSpace(info.InstanceToken) != lease.InstanceToken || normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget {
+		return false, nil
+	}
+	// The row binding is the fence only for an UNSTAMPED acknowledgement, where
+	// the row is the sole evidence of what was acknowledged. A stamped ack
+	// carries its own trigger, so binding the effect to the row would re-open
+	// exactly the defect the stamp closes: legacy re-points a still-active
+	// member during the ack → stop-pending window and the acknowledged drain
+	// can never finalize (ga-f7v2ft.131). In stamp mode the fence moves to the
+	// live ack stamps in the provider-meta check table below.
+	if !lease.TriggerFromAck &&
+		(strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
+			canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, info.TriggerBeadStoreRef) != lease.SourceStore) {
 		return false, nil
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
@@ -261,17 +317,29 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 		(policy.maxActiveSessions == 1 && !isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget)) {
 		return false, nil
 	}
-	for _, check := range []struct{ key, want string }{
-		{"GC_SESSION_ID", info.ID},
-		{"GC_INSTANCE_TOKEN", lease.InstanceToken},
-		{reconcilerDrainAckSourceKey, drainAckSourceAgentValue},
-		{drainAckRequesterSessionIDKey, lease.RequesterSessionID},
-		{drainAckRequesterInstanceTokenKey, lease.RequesterInstanceToken},
-		{"GC_DRAIN_ACK", "1"},
-	} {
+	checks := []drainAckProviderCheck{
+		{key: "GC_SESSION_ID", want: info.ID},
+		{key: "GC_INSTANCE_TOKEN", want: lease.InstanceToken},
+		{key: reconcilerDrainAckSourceKey, want: drainAckSourceAgentValue},
+		{key: drainAckRequesterSessionIDKey, want: lease.RequesterSessionID},
+		{key: drainAckRequesterInstanceTokenKey, want: lease.RequesterInstanceToken},
+		{key: "GC_DRAIN_ACK", want: "1"},
+	}
+	if lease.TriggerFromAck {
+		checks = append(checks,
+			drainAckProviderCheck{key: reconcilerDrainAckTriggerBeadIDKey, want: lease.WorkID, normalize: strings.TrimSpace},
+			drainAckProviderCheck{key: reconcilerDrainAckTriggerStoreRefKey, want: lease.SourceStore, normalize: func(v string) string {
+				return canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, v)
+			}},
+		)
+	}
+	for _, check := range checks {
 		got, err := snapshot.Provider.GetMeta(name, check.key)
 		if err != nil {
 			return false, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading %s: %w", info.ID, check.key, err)
+		}
+		if check.normalize != nil {
+			got = check.normalize(got)
 		}
 		if got != check.want {
 			return false, nil
@@ -288,6 +356,10 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 	if pending != nil {
 		return false, nil
 	}
+	// Unchanged in code, corrected in meaning: with a stamped acknowledgement
+	// the lease's work and store are the ACKED ones, so this proves the work
+	// the agent actually finished is closed in the store it finished it in —
+	// not whatever the row was last re-pointed at.
 	sourceStore, ok := cr.cs.routedWorkStore(snapshot.Config, lease.SourceStore)
 	if !ok || sourceStore == nil {
 		return false, fmt.Errorf("authorizing pool drain acknowledgement for %q: source store %q is unavailable", info.ID, lease.SourceStore)

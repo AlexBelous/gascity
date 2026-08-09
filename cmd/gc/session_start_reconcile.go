@@ -68,6 +68,13 @@ type exactSessionStartParams struct {
 	EnterStrictDefaultPoolWakeStart    func(strictDefaultPoolWakeStartLease) bool
 	ValidateConfiguredNamedWakeStart   func(sessionpkg.Info, configuredNamedWakeStartLease) bool
 	EnterConfiguredNamedWakeStart      func(configuredNamedWakeStartLease) bool
+
+	// The lifecycle-timer trackers the D-DEADLINE handler re-derives its
+	// condition from. They are the same singletons the fleet loop uses, so the
+	// keyed and legacy deadline arms can never disagree about a threshold.
+	IdleTracker              idleTracker
+	MaxSessionAgeTracker     maxSessionAgeTracker
+	AssignedWorkDeferTracker assignedWorkDeferTracker
 }
 
 type configuredDependencyStartLease struct {
@@ -1563,6 +1570,9 @@ func reconcileExactSessionStartWithOwner(
 			}
 		}
 		return exactSessionStartKeyedOwner, nil
+	}
+	if handled, owner, familyErr := reconcileExactSessionDetectorFamily(ctx, admission, params, info, initialResponse, clk); handled {
+		return owner, familyErr
 	}
 	var drainAckRollback *drainAckStopPendingRollback
 	var drainAckStopPendingPatch sessionpkg.MetadataPatch

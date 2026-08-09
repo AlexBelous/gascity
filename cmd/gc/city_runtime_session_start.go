@@ -156,11 +156,14 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				AsyncStopQueued: func() {
 					leaseTransferred = true
 				},
-				RolloutMode:  mode,
-				RigStores:    cr.rigBeadStores(),
-				DrainOps:     cr.dops,
-				DrainTracker: cr.sessionDrains,
-				Trace:        cr.trace,
+				RolloutMode:              mode,
+				RigStores:                cr.rigBeadStores(),
+				DrainOps:                 cr.dops,
+				DrainTracker:             cr.sessionDrains,
+				IdleTracker:              cr.it,
+				MaxSessionAgeTracker:     cr.mat,
+				AssignedWorkDeferTracker: cr.adt,
+				Trace:                    cr.trace,
 				AuthorizePoolStart: func(authorizeCtx context.Context, info sessionpkg.Info, lease routedWorkPoolStartLease) (bool, error) {
 					return cr.authorizeRoutedWorkPoolStart(authorizeCtx, snapshot, info, lease)
 				},
@@ -705,6 +708,24 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 	return sessionStartSocketReplyOK
 }
 
+// detectorAdmitFunc hands the detector sweep the existing session-start
+// controller's Admit entry. It is nil unless keyed ownership is live, so a
+// legacy-owned city's sweep stays read-only no matter which detector family has
+// flipped to act.
+func (cr *CityRuntime) detectorAdmitFunc() func(string, sessionStartAdmissionSource) (sessionStartAdmissionOutcome, error) {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	controller := cr.sessionStartController
+	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	cr.sessionStartMu.Unlock()
+	if !owned || controller == nil {
+		return nil
+	}
+	return controller.Admit
+}
+
 func (cr *CityRuntime) requestLegacySessionStartFallback() {
 	if cr == nil {
 		return
@@ -722,16 +743,36 @@ func (cr *CityRuntime) requestLegacySessionStartFallback() {
 }
 
 func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption {
-	excluded := cr.sessionStartLegacyExclusionPredicate()
-	if excluded == nil {
-		return nil
-	}
-	startOption := withLegacyStartExclusion(excluded)
-
 	cr.sessionStartMu.Lock()
 	state := cr.sessionStartOwnership
 	controller := cr.sessionStartController
 	cr.sessionStartMu.Unlock()
+
+	// The D-DEADLINE yield is deliberately NOT folded into the start predicate:
+	// that one answers "does keyed own this row's START family", which is true
+	// for rows legacy must stay free to idle-kill. This one answers the narrow
+	// question the deadline arms need — is a D-DEADLINE stop for this exact key
+	// in flight right now — and it is installed whenever a controller exists,
+	// including the bounded handoff windows where the start predicate stands
+	// down, because an admitted key outlives those windows.
+	var deadlineOption startExecutionOption
+	if controller != nil {
+		deadlineOption = withLegacyDeadlineStopExclusion(func(info sessionpkg.Info) bool {
+			return controller.ownsDeadlineStop(info.ID)
+		})
+	}
+	excluded := cr.sessionStartLegacyExclusionPredicate()
+	if excluded == nil {
+		return deadlineOption
+	}
+	startOption := withLegacyStartExclusion(excluded)
+	if deadlineOption != nil {
+		startExclusion := startOption
+		startOption = func(opts *startExecutionOptions) {
+			startExclusion(opts)
+			deadlineOption(opts)
+		}
+	}
 	if state != sessionStartOwnershipKeyed {
 		return startOption
 	}

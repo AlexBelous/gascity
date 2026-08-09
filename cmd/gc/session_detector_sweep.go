@@ -58,12 +58,15 @@ const (
 // for idle stop, orphan close, drift, stall, dup, or stranded, so a latch-gated
 // enqueue would double-act beside a non-yielding legacy.
 //
-// Every constant is false for the whole WD wave. The WE cutover commit flips
-// them, one family at a time, after that family's handler has landed and the
-// WD.15 parity window has cleared its must-match bar. They are compile-time
+// A constant flips only when that family's keyed handler AND its legacy yield
+// have both landed — an acting family beside a non-yielding legacy double-acts
+// by construction. D-DEADLINE crossed at WD.2 (handler:
+// session_deadline_reconcile.go; yield: withLegacyDeadlineStopExclusion). The
+// rest flip in the WE cutover commit, one family at a time, once the WD.15
+// parity window has cleared their must-match bar. They are compile-time
 // constants on purpose: this is not a config surface.
 const (
-	detectorActDeadline                = false
+	detectorActDeadline                = true
 	detectorActOrphan                  = false
 	detectorActStaleCreate             = false
 	detectorActDrift                   = false
@@ -83,6 +86,11 @@ const (
 // the three record populations on a shared trace cycle.
 const detectorShadowEffectOwner = "detector-shadow"
 
+// detectorKeyedEffectOwner is the effect_owner a routed condition carries. The
+// key belongs to the keyed population from the moment it is admitted, so the
+// WD.15 join must not count it against the shadow arm.
+const detectorKeyedEffectOwner = "keyed"
+
 // detectorFamilyRecordBudget bounds how many per-session records one family may
 // emit in a single trace cycle; beyond it the sweep emits one summary record
 // naming the suppressed count. Eleven acting families at this bound cost at most
@@ -99,6 +107,7 @@ const detectorFamilyRecordBudget = 100
 const (
 	detectorReasonIdleTimeout             TraceReasonCode = "detector_idle_timeout"
 	detectorReasonMaxSessionAge           TraceReasonCode = "detector_max_session_age"
+	detectorReasonDeadlineDeferred        TraceReasonCode = "detector_deadline_deferred"
 	detectorReasonOrphanDead              TraceReasonCode = "detector_orphan_dead"
 	detectorReasonOrphanLive              TraceReasonCode = "detector_orphan_live"
 	detectorReasonFailedCreate            TraceReasonCode = "detector_failed_create"
@@ -126,6 +135,7 @@ const (
 var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonIdleTimeout,
 	detectorReasonMaxSessionAge,
+	detectorReasonDeadlineDeferred,
 	detectorReasonOrphanDead,
 	detectorReasonOrphanLive,
 	detectorReasonFailedCreate,
@@ -239,7 +249,28 @@ type detectorCondition struct {
 	Reason      TraceReasonCode
 	Outcome     TraceOutcomeCode
 	Fields      map[string]any
+
+	// AdmissionSource and AdmissionOutcome are filled by routeDetectorConditions
+	// for the arms of an ACTING family. They stay zero for every shadow-only
+	// family, which is what keeps a shadow record's effect_owner honest.
+	AdmissionSource  sessionStartAdmissionSource
+	AdmissionOutcome detectorRouteOutcome
 }
+
+// detectorRouteOutcome records what the routing seam did with one condition.
+type detectorRouteOutcome string
+
+const (
+	// detectorAdmissionRefusedProviderIncapable is the traced refusal for a
+	// destructive family under a provider that cannot prove fresh liveness or
+	// an unattended stop (the D2 capabilities). It is a refusal, not a retry:
+	// the condition is re-detected every sweep and refused every sweep, so no
+	// re-enqueue treadmill forms.
+	detectorAdmissionRefusedProviderIncapable detectorRouteOutcome = "refused_provider_incapable"
+	// detectorAdmissionRefusedError is a rejected Admit call. Detector
+	// conditions are level-triggered, so the next sweep re-detects.
+	detectorAdmissionRefusedError detectorRouteOutcome = "refused_error"
+)
 
 // detectorSweepResult is the sweep's whole output. During the WD wave it is
 // recorded as shadow trace and otherwise discarded; nothing in it is enqueued.
@@ -305,6 +336,11 @@ type detectorSweepInput struct {
 	// "start") and is carried on every record so the parity join can scope a
 	// cycle to its entry point.
 	Trigger string
+	// Admit hands one exact durable session ID to the existing session-start
+	// controller. It is nil wherever no keyed controller owns session start —
+	// `gc start`, the control dispatcher, and any legacy-owned city — so those
+	// entry points stay read-only no matter which family has flipped to act.
+	Admit func(sessionID string, source sessionStartAdmissionSource) (sessionStartAdmissionOutcome, error)
 }
 
 // detectSessionConditions classifies every session row in the snapshot into
@@ -708,14 +744,35 @@ func detectDeadline(in detectorSweepInput, emit *detectorConditionSink, base det
 	if !live.Alive {
 		return
 	}
-	if in.Idle != nil && in.Idle.checkIdle(base.SessionName, template, in.Provider, now) {
+	// The durable blocker rung of DecideIdleTimeout / DecideMaxSessionAge is the
+	// only rung the sweep can evaluate: it reads held_until and quarantined_until
+	// off the row it already has. The pending-interaction and assigned-work rungs
+	// are a provider probe and a reachable-store scan, so they stay handler-side
+	// with the rest of the ladder (§3b: "legacy pending-interaction deferral —
+	// probe-only signal, unpredicted"). A blocked row records its deferral for
+	// the parity join and is never enqueued, so the handler is never entered.
+	blocker := lifecycleTimerBlockerInfo(info, now)
+	deadline := func(site TraceSiteCode, reason TraceReasonCode, fields map[string]any) {
 		cond := base
 		cond.Family = detectorFamilyDeadline
-		cond.Site = TraceSiteReconcilerIdleTimeout
-		cond.Reason = detectorReasonIdleTimeout
+		cond.Site = site
+		if blocker != "" {
+			cond.Reason = detectorReasonDeadlineDeferred
+			cond.Outcome = TraceOutcomeNoChange
+			cond.Fields = map[string]any{"predicted_effect": "none", "blocker": blocker, "deadline": string(reason)}
+			emit.add(cond, false)
+			return
+		}
+		cond.Reason = reason
 		cond.Outcome = TraceOutcomeStop
-		cond.Fields = map[string]any{"predicted_effect": "stop", "sleep_reason": "idle-timeout"}
+		cond.Fields = fields
 		emit.add(cond, true)
+	}
+	if in.Idle != nil && in.Idle.checkIdle(base.SessionName, template, in.Provider, now) {
+		deadline(TraceSiteReconcilerIdleTimeout, detectorReasonIdleTimeout, map[string]any{
+			"predicted_effect": "stop",
+			"sleep_reason":     string(sessionpkg.SleepReasonIdleTimeout),
+		})
 	}
 	if in.MaxAge == nil {
 		return
@@ -725,17 +782,11 @@ func detectDeadline(in detectorSweepInput, emit *detectorConditionSink, base det
 		return
 	}
 	if in.MaxAge.shouldRestart(base.SessionName, template, completeAt, now) {
-		cond := base
-		cond.Family = detectorFamilyDeadline
-		cond.Site = TraceSiteReconcilerMaxSessionAge
-		cond.Reason = detectorReasonMaxSessionAge
-		cond.Outcome = TraceOutcomeStop
-		cond.Fields = map[string]any{
+		deadline(TraceSiteReconcilerMaxSessionAge, detectorReasonMaxSessionAge, map[string]any{
 			"predicted_effect": "stop",
-			"sleep_reason":     "max-session-age",
+			"sleep_reason":     string(sessionpkg.SleepReasonMaxSessionAge),
 			"age_seconds":      int64(now.Sub(completeAt).Seconds()),
-		}
-		emit.add(cond, true)
+		})
 	}
 }
 
@@ -1011,11 +1062,76 @@ func detectorDuplicateBeats(candidate, incumbent sessionpkg.Info) bool {
 	return candidate.ID > incumbent.ID
 }
 
+// detectorAdmissionSourceFor is THE detector half of the handler-dispatch seam.
+// It answers one question for one detected condition: may this arm hand its
+// exact key to the session-start controller, and under which admission source?
+//
+// Each later WD slice adds EXACTLY ONE case. The case names the family, its act
+// constant, and the arm(s) that predict a real effect — a family's non-effect
+// arms (deferrals, preserved rows, traced refusals) record for the parity join
+// and never enqueue. No new controller, queue, or framework: the value returned
+// here is fed straight into the existing Admit(id, source) entry.
+func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSource, bool) {
+	switch cond.Family { //nolint:gocritic // the seam is a table, not a branch: WD.3-14 each add one case
+	case detectorFamilyDeadline:
+		return sessionStartAdmissionDeadline, detectorActDeadline && cond.Outcome == TraceOutcomeStop
+	}
+	return "", false
+}
+
+// detectorProviderStopCapable is the detection-side D2 screen: a family whose
+// handler must stop or kill a runtime is never enqueued under a provider that
+// cannot prove fresh liveness and an unattended, token-bound stop. Screening
+// here rather than in the handler is what keeps a D2-incapable city off the
+// 30-second re-enqueue treadmill (DETECTOR.md §2).
+func detectorProviderStopCapable(sp runtime.Provider) bool {
+	if sp == nil {
+		return false
+	}
+	if _, ok := sp.(runtime.FreshLivenessObserver); !ok {
+		return false
+	}
+	_, ok := sp.(runtime.UnattendedSessionStopper)
+	return ok
+}
+
+// routeDetectorConditions hands every acting family's effect arms to the
+// existing session-start controller by exact key. It is the only place the
+// sweep is allowed to leave read-only mode, and it still writes nothing itself:
+// the handler behind the key owns every effect.
+func routeDetectorConditions(in detectorSweepInput, result *detectorSweepResult) {
+	if in.Admit == nil || result == nil || !detectorAnyFamilyActs() {
+		return
+	}
+	for i := range result.Conditions {
+		cond := &result.Conditions[i]
+		source, routable := detectorAdmissionSourceFor(*cond)
+		if !routable || cond.SessionID == "" {
+			continue
+		}
+		if detectorFamilyDestructive(cond.Family) && !detectorProviderStopCapable(in.Provider) {
+			cond.AdmissionOutcome = detectorAdmissionRefusedProviderIncapable
+			continue
+		}
+		cond.AdmissionSource = source
+		outcome, err := in.Admit(cond.SessionID, source)
+		if err != nil {
+			cond.AdmissionOutcome = detectorAdmissionRefusedError
+			continue
+		}
+		cond.AdmissionOutcome = detectorRouteOutcome(outcome)
+	}
+}
+
 // recordDetectorShadow writes the sweep's conditions to the trace cycle as
 // detector-shadow records: the LEGACY site codes, effect_applied=false,
-// effect_owner=detector-shadow, and a detector_-prefixed reason. It writes
-// nothing else — no store, no provider, no enqueue. A nil cycle (the `gc start`
-// one-shot has no tracer) makes every call a no-op.
+// effect_owner=detector-shadow, and a detector_-prefixed reason. A condition
+// that WAS routed carries effect_owner=keyed instead, because the keyed
+// population now owns it — but still effect_applied=false, because the sweep
+// enqueued a key and applied nothing. The effect_applied=true record at the
+// same legacy site is the handler's, written when the effect actually lands.
+// The sweep writes nothing else — no store, no provider. A nil cycle (the `gc
+// start` one-shot has no tracer) makes every call a no-op.
 func recordDetectorShadow(cycle *sessionReconcilerTraceCycle, in detectorSweepInput, result detectorSweepResult) {
 	if cycle == nil {
 		return
@@ -1025,14 +1141,24 @@ func recordDetectorShadow(cycle *sessionReconcilerTraceCycle, in detectorSweepIn
 		conditions = append(append([]detectorCondition(nil), conditions...), detectorOverflowSummaries(result.FamilyOverflow)...)
 	}
 	for _, cond := range conditions {
+		owner := detectorShadowEffectOwner
+		if cond.AdmissionSource != "" {
+			owner = detectorKeyedEffectOwner
+		}
 		fields := traceRecordPayload{
 			"effect_applied":   false,
-			"effect_owner":     detectorShadowEffectOwner,
+			"effect_owner":     owner,
 			"detector_family":  string(cond.Family),
 			"detector_acts":    detectorFamilyActs(cond.Family),
 			"session_id":       cond.SessionID,
 			"session_identity": cond.Identity,
 			"sweep_trigger":    in.Trigger,
+		}
+		if cond.AdmissionOutcome != "" {
+			fields["admission_outcome"] = string(cond.AdmissionOutcome)
+		}
+		if cond.AdmissionSource != "" {
+			fields["admission"] = string(cond.AdmissionSource)
 		}
 		for k, v := range cond.Fields {
 			fields[k] = v
@@ -1076,11 +1202,14 @@ func detectorSweepTriggerFor(bootReconcile bool) string {
 	return "patrol"
 }
 
-// runDetectorSweep is the single production entry point: detect, then record.
-// It never enqueues — detectorAnyFamilyActs() is false for the whole WD wave,
-// and the sweep has no enqueue path to reach even if it were not. Callers
-// deliberately discard the result: during the WD wave the trace records ARE the
-// output. Tests that need the conditions call detectSessionConditions directly.
+// runDetectorSweep is the single production entry point: detect (read-only),
+// route the acting families' exact keys into the existing session-start
+// controller, then record. Shadow-only families and every entry point without
+// an Admit hook come out of this exactly as they went in: read-only. Callers
+// deliberately discard the result — the trace records ARE the output. Tests
+// that need the conditions call detectSessionConditions directly.
 func runDetectorSweep(ctx context.Context, cycle *sessionReconcilerTraceCycle, in detectorSweepInput) {
-	recordDetectorShadow(cycle, in, detectSessionConditions(ctx, in))
+	result := detectSessionConditions(ctx, in)
+	routeDetectorConditions(in, &result)
+	recordDetectorShadow(cycle, in, result)
 }

@@ -1523,6 +1523,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	assignedWorkDeferTr := reconcileOpts.assignedWorkDeferTr
 	asyncStopTracker := reconcileOpts.asyncStopTracker
 	legacyDrainAckStopExcluded := reconcileOpts.legacyStartExcluded
+	legacyDeadlineStopExcluded := reconcileOpts.legacyDeadlineStopExcluded
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
 			trace.RecordControllerOperation(site, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
@@ -3293,7 +3294,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// sessionpkg.DecideMaxSessionAge owns the decision ladder (blocker,
 		// then pending interaction, then assigned work, then stop); this
 		// block gathers the facts it asks for and executes the outcome.
-		if maxAgeTr != nil && alive {
+		// Coexistence seam for the acting D-DEADLINE family: while the keyed
+		// controller holds this exact key, both deadline arms below yield
+		// entirely — no provider kill, no sleep patch, no event. This is not a
+		// race to lose. Both writers read the SAME idle/max-age tracker on the
+		// same tick, so an un-yielding legacy would double-stop by construction,
+		// and its kill targets the session NAME, which a replacement incarnation
+		// may already own. Retired at WE with the god function, like the
+		// keyed_start_owner arms.
+		deadlineKeyed := false
+		if (maxAgeTr != nil || it != nil) && alive && legacyDeadlineStopExcluded != nil && legacyDeadlineStopExcluded(infoByID[id]) {
+			deadlineKeyed = true
+			if trace != nil {
+				yieldSite := TraceSiteReconcilerIdleTimeout
+				if it == nil {
+					yieldSite = TraceSiteReconcilerMaxSessionAge
+				}
+				trace.RecordDecision(yieldSite, TraceReasonCode("keyed_deadline_owner"), TraceOutcomeSkipped, tp.TemplateName, name, traceRecordPayload{
+					"session_id":     id,
+					"effect_owner":   "keyed",
+					"effect_applied": false,
+					"idle_armed":     it != nil,
+					"max_age_armed":  maxAgeTr != nil,
+				})
+			}
+		}
+
+		if maxAgeTr != nil && alive && !deadlineKeyed {
 			creationCompleteAt, hasAnchor := parseRFC3339Metadata(infoByID[id].CreationCompleteAt)
 			facts := sessionpkg.TimerFacts{
 				Triggered: hasAnchor && maxAgeTr.shouldRestart(name, tp.TemplateName, creationCompleteAt, clk.Now()),
@@ -3381,7 +3408,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// idle-kills ComputeAwakeSet does not itself hold the session awake
 		// for, trading the kill/wake treadmill (ga-3ox7rk) for the opposite
 		// mismatch.
-		if it != nil && alive {
+		if it != nil && alive && !deadlineKeyed {
 			facts := sessionpkg.TimerFacts{
 				Triggered: it.checkIdle(name, tp.TemplateName, sp, clk.Now()),
 			}

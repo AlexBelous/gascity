@@ -3245,7 +3245,15 @@ func TestCityRuntimeSessionStartConfigMutationKeepsOneOwner(t *testing.T) {
 			if _, _, err := cs.acquireSessionStartSnapshot(); err == nil {
 				t.Fatal("keyed owner remained available while runtime config application was pending")
 			}
+			// The option itself is no longer empty during the handoff: WD.2's
+			// D-DEADLINE yield rides on it and is installed whenever a
+			// controller exists, because an admitted deadline key outlives this
+			// window. What must stand down is the START exclusion.
+			var opts startExecutionOptions
 			if option := cr.sessionStartLegacyExclusionOption(); option != nil {
+				option(&opts)
+			}
+			if opts.legacyStartExcluded != nil {
 				t.Fatal("auto mode did not temporarily return pending config ownership to legacy")
 			}
 

@@ -30,6 +30,10 @@ const (
 	sessionStartAdmissionSocket         sessionStartAdmissionSource = "socket"
 	sessionStartAdmissionAntiEntropy    sessionStartAdmissionSource = "anti_entropy"
 	sessionStartAdmissionWaitDependency sessionStartAdmissionSource = "wait_dependency"
+	// sessionStartAdmissionDeadline is the detector sweep's D-DEADLINE key
+	// (DETECTOR.md §3): an idle-timeout or max-session-age stop for one exact
+	// durable session ID. Later WD slices add one value per condition family.
+	sessionStartAdmissionDeadline sessionStartAdmissionSource = "deadline"
 )
 
 type sessionStartAdmission struct {
@@ -664,7 +668,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionInProcess,
 		sessionStartAdmissionSocket,
 		sessionStartAdmissionAntiEntropy,
-		sessionStartAdmissionWaitDependency:
+		sessionStartAdmissionWaitDependency,
+		sessionStartAdmissionDeadline:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -846,6 +851,23 @@ func (c *sessionStartController) ownsPoolDrainAckStop(sessionID, instanceToken s
 	}
 	lease := admission.PoolDrainAck
 	return lease.SessionID == sessionID && lease.InstanceToken == instanceToken
+}
+
+// ownsDeadlineStop reports whether the keyed controller currently holds a
+// D-DEADLINE admission for this exact key. Legacy's idle-timeout and
+// max-session-age arms consult it and yield: both writers fire off the same
+// tracker on the same tick, so an acting D-DEADLINE beside a non-yielding
+// legacy is a guaranteed double stop, not a race. The admission survives in the
+// map from Admit until the handler succeeds or exhausts, so the yield covers
+// the whole in-flight window.
+func (c *sessionStartController) ownsDeadlineStop(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.Source == sessionStartAdmissionDeadline
 }
 
 // YieldPoolDrainAck releases a retained agent drain acknowledgement only when

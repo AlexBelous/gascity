@@ -242,23 +242,28 @@ in per-family files beside session_start_reconcile.go; the dispatch point is one
 routing block added once (WD.2) — no new framework.
 
 Shared shadow shape (D4, every family). **The shadow/act rule is per-family and
-explicit, NOT the ownership latch**: every detector-fed family introduced by this
-design is **shadow-only — it never enqueues — until the WE cutover commit flips it,
-regardless of `sessionStartOwnershipState()`**. The latch cannot gate this: it is a
+explicit, NOT the ownership latch**: a detector-fed family is **shadow-only — it
+never enqueues — regardless of `sessionStartOwnershipState()`, until its own act
+constant is flipped**. A constant flips only when BOTH that family's keyed
+handler and its legacy yield have landed, which is the end of that family's
+slice: D-DEADLINE flipped at WD.2; every remaining family flips in the WE
+cutover commit. The latch cannot gate this: it is a
 single start-scoped tri-state (city_runtime_session_start.go:23-29) that reads Keyed
 in the very auto-mode campaign city D4 mandates (DESIGN.md:100-105), while legacy
 yields only at the start-family seams (`keyed_start_owner` skips,
 session_reconciler.go:1739/:3770) — there is NO legacy yield for idle stop, orphan
 close, drift, stall, dup, or stranded — a latch-gated enqueue would double-act beside
-a non-yielding legacy. The rule is one compile-time constant per family (flipped in
-the WE commit), not config. Detectors always run (read-only); in shadow they record
-the same legacy TraceSite with
+a non-yielding legacy — which is why WD.2 landed
+`withLegacyDeadlineStopExclusion` in the same commit that flipped D-DEADLINE. The
+rule is one compile-time constant per family, not config. Detectors always run
+(read-only); in shadow they record the same legacy TraceSite with
 `effect_applied:false`, `effect_owner:"detector-shadow"`, and the predicted
 (reason, outcome) where §3b grants decision-level parity — mirroring the five existing
 shadow sites (city_runtime.go:575/:635, city_runtime_wait_dependency_index.go:410,
 city_runtime_session_start.go:371, nudge_dispatcher.go:356; pattern:
 session_lifecycle_status_heal.go:24-62). Handlers are proven per slice in
-require-mode test-city journeys; in production they first act at WE. **State honestly
+require-mode test-city journeys; in production a family first acts when its own
+constant flips (D-DEADLINE: WD.2; the rest: WE). **State honestly
 what the auto campaign therefore exercises**: detection
 (and where granted, decision) parity for the new families, plus full act-level parity
 for the already-keyed start families — D4 sign-off targets exactly that scope (§3b).
@@ -491,6 +496,69 @@ bb36c285f4, 60c0d9d2a0, f0c525dae9).
    `ObservedOnly: true`), so they are counted and traced but never enqueue;
    absorption-or-retirement is adjudicated at WD.10b (see the §2 routed-work input)
    and WE.
+
+### §3 D-DEADLINE deltas (recorded at WD.2)
+
+Where the first ACTING family as built diverges from §3 as written. Reported,
+not improvised.
+
+1. **The decision ladder runs handler-side, not detector-side.** §3's D-DEADLINE
+   entry puts `DecideIdleTimeout`/`DecideMaxSessionAge` and their blockers in the
+   *condition*; §2's cost model and §3b's own matrix put pending-interaction
+   probes and store scans handler-side. §2/§3b win, because the two rungs below
+   the blocker are provider I/O (`pendingInteractionKeepsAwakeInfo`) and a
+   reachable-store scan (`sessionHasAwakeAssignedWorkForReachableStore`), and a
+   zero-store-read sweep cannot pay either fleet-wide. The sweep evaluates the
+   one rung it can compute purely — the durable `held_until`/`quarantined_until`
+   blocker via `lifecycleTimerBlockerInfo` — records the deferral for the join
+   under `detector_deadline_deferred`, and never enqueues a blocked row. The
+   handler then runs the whole ladder per key, with real gathers and legacy's
+   fail-closed error mapping. The consecutive-defer backstop (ga-nllza6) travels
+   with the ladder for the same reason: legacy yields the key, so its own
+   backstop would never see the defer.
+2. **The D2 screen is an interface assertion in the routing seam, not a config
+   predicate in detection.** §2 says "pure config predicate on the resolved
+   provider type"; the capabilities are actually carried as
+   `runtime.FreshLivenessObserver` + `runtime.UnattendedSessionStopper` on the
+   provider value the handler itself asserts, so asserting the same pair is
+   exact rather than a second, driftable spelling. Putting it in
+   `routeDetectorConditions` rather than in `detectDeadline` also keeps the
+   shadow record intact for the parity join: the condition is still detected and
+   recorded, it just carries `admission_outcome=refused_provider_incapable` and
+   no enqueue. Refused every sweep, so no treadmill forms.
+3. **The sleep patch takes the CAS fence when the store has one and the front
+   door when it does not.** Conditional writes are a per-store gated capability
+   that is off by default (`beads.ResolveConditionalWriter` returns a nil writer
+   on an unset/off mode), so requiring one would have made the whole family yield
+   on most cities. `persistExactSessionDeadlineSleep` fences on the pre-stop
+   reread's revision with one bounded retry where a writer exists, and otherwise
+   writes the same patch through the same `sessionFrontDoor(...).ApplyPatch` the
+   legacy arm uses. What is unconditional is the ORDERING the design actually
+   asks for: the patch lands before the key is released. A resolution *error*
+   (conditional writes required but unavailable) still fails closed.
+4. **A routed record carries `effect_owner=keyed` with `effect_applied=false`.**
+   §3 says the family fires the legacy site with `effect_owner:"keyed"`,
+   `effect_applied:true` — that is the HANDLER's record, written when the effect
+   lands. The sweep's own record for a routed condition flips only the owner (the
+   key belongs to the keyed population from admission onward) and adds
+   `admission`/`admission_outcome`; claiming `effect_applied:true` at enqueue
+   time would re-open exactly the trace lie §2's partial-store ordering closes.
+5. **Legacy's deadline arms needed a NEW exclusion, not an existing one.**
+   `sessionStartLegacyExclusionPredicate` answers "does keyed own this row's
+   START family", which is true for rows legacy must stay free to idle-kill;
+   reusing it would have silently disabled legacy idle kills fleet-wide. WD.2
+   adds `withLegacyDeadlineStopExclusion`, backed by
+   `sessionStartController.ownsDeadlineStop(id)` — true from Admit until the
+   handler succeeds or exhausts. Note the difference from the start seam: this
+   is not a race to lose. Both writers read the SAME tracker on the same tick,
+   so an acting D-DEADLINE beside a non-yielding legacy double-stops by
+   construction, and legacy's kill targets the session NAME, which a replacement
+   incarnation may already own. The arm retires at WE with the god function.
+6. **Only the patrol/boot call site routes.** `controlDispatcherTick` and
+   `gc start` pass no `Admit` hook, so their sweeps stay read-only — the patrol
+   sweep is the anti-entropy layer §2 describes, and doubling the enqueue rate
+   from a narrowed-input call site buys nothing a coalesced key does not already
+   give.
 
 ## 3b. Campaign judgment (WE sign-off bar)
 

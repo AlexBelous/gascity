@@ -55,18 +55,31 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 	}
 }
 
-// TestDetectorFamiliesStayShadowOnlyDuringWD pins the per-family act constants
-// WD.2 and later build their handler seam on: every family is shadow-only, and
-// the close/stop/drain/rollback/retire families are classified destructive so
-// the partial-store guard covers them.
+// TestDetectorFamiliesStayShadowOnlyDuringWD pins the act frontier: exactly the
+// families whose keyed handler AND legacy yield have landed may act, and every
+// other family stays shadow-only. D-DEADLINE crossed at WD.2. A family that
+// flips its act constant without an arm in detectorAdmissionSourceFor — or with
+// an arm but no landed handler — fails here before it can double-act beside a
+// non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
-	if detectorAnyFamilyActs() {
-		t.Fatal("detectorAnyFamilyActs() = true, want false for the whole WD wave")
+	acting := map[detectorFamily]bool{detectorFamilyDeadline: true}
+	if !detectorAnyFamilyActs() {
+		t.Fatal("detectorAnyFamilyActs() = false; D-DEADLINE acts from WD.2 onward")
 	}
 	for _, spec := range detectorFamilySpecs {
-		if spec.Acts || detectorFamilyActs(spec.Family) {
-			t.Errorf("family %q acts; every family is shadow-only until the WE cutover commit", spec.Family)
+		if spec.Acts != acting[spec.Family] || detectorFamilyActs(spec.Family) != acting[spec.Family] {
+			t.Errorf("family %q acts=%v, want %v", spec.Family, spec.Acts, acting[spec.Family])
 		}
+		source, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: TraceOutcomeStop})
+		if routed != acting[spec.Family] {
+			t.Errorf("family %q routes an effect arm = %v, want %v", spec.Family, routed, acting[spec.Family])
+		}
+		if routed && source == "" {
+			t.Errorf("family %q routes with an empty admission source", spec.Family)
+		}
+	}
+	if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyDeadline, Outcome: TraceOutcomeNoChange}); routed {
+		t.Error("D-DEADLINE routed a non-effect arm; only its stop arms may enqueue")
 	}
 	for _, family := range []detectorFamily{
 		detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilyStaleCreate,

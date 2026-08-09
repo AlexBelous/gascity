@@ -2863,9 +2863,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// fan-out; the first steady-state tick performs them.
 		reconcileStartOptions = append(reconcileStartOptions, withDeferSessionClosesOnBoot())
 	}
-	// Detector sweep, beside legacy and read-only (WD.1). It reuses this
-	// tick's already-loaded inputs, records detector-shadow trace, and
-	// enqueues nothing: every family's act constant is false until WE.
+	// Detector sweep, beside legacy (WD.1). Detection itself is read-only and
+	// reuses this tick's already-loaded inputs; the routing seam then hands the
+	// ACTING families' exact keys to the session-start controller (WD.2:
+	// D-DEADLINE only). Admit is nil in a legacy-owned city, which keeps the
+	// whole sweep read-only there.
 	runDetectorSweep(ctx, trace, detectorSweepInput{
 		CityPath:           cr.cityPath,
 		CityName:           cityName,
@@ -2891,6 +2893,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		StoreQueryPartial:  result.snapshotQueryPartial(),
 		DeferSessionCloses: bootReconcile,
 		Trigger:            detectorSweepTriggerFor(bootReconcile),
+		Admit:              cr.detectorAdmitFunc(),
 	})
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,

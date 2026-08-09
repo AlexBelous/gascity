@@ -326,6 +326,7 @@ type startExecutionOptions struct {
 	startSelectionShadowAdmission  func(string) (sessionLifecycleStartShadowAdmission, bool)
 	legacyStartExcluded            func(sessionpkg.Info) bool
 	legacyStatusHealExcluded       func(sessionpkg.Info) bool
+	legacyDeadlineStopExcluded     func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -449,6 +450,19 @@ func withSessionLifecycleStartSelectionShadowAdmission(
 func withLegacyStartExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyStartExcluded = excluded
+	}
+}
+
+// withLegacyDeadlineStopExclusion installs the keyed-ownership bridge for the
+// D-DEADLINE family. Returning true keeps the fleet loop's idle-timeout and
+// max-session-age arms out of the kill entirely — no provider stop, no sleep
+// patch, no event — because the keyed handler already owns that exact key.
+// Unlike the start seam this is not a race to lose: both writers fire off the
+// same tracker on the same tick, so without the yield an acting D-DEADLINE
+// double-stops by construction. Retired at WE with the god function.
+func withLegacyDeadlineStopExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyDeadlineStopExcluded = excluded
 	}
 }
 

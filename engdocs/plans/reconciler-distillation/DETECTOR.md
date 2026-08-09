@@ -246,8 +246,8 @@ explicit, NOT the ownership latch**: a detector-fed family is **shadow-only — 
 never enqueues — regardless of `sessionStartOwnershipState()`, until its own act
 constant is flipped**. A constant flips only when BOTH that family's keyed
 handler and its legacy yield have landed, which is the end of that family's
-slice: D-DEADLINE flipped at WD.2; every remaining family flips in the WE
-cutover commit. The latch cannot gate this: it is a
+slice: D-DEADLINE flipped at WD.2 and D-DUP at WD.13; every remaining family
+flips in the WE cutover commit. The latch cannot gate this: it is a
 single start-scoped tri-state (city_runtime_session_start.go:23-29) that reads Keyed
 in the very auto-mode campaign city D4 mandates (DESIGN.md:100-105), while legacy
 yields only at the start-family seams (`keyed_start_owner` skips,
@@ -764,6 +764,80 @@ improvised.
    handler has no use for — so the family reuses the exact call
    `commitStartFailure` makes for its own failed starts, and no second
    rollback implementation exists.
+
+### §3 D-DUP deltas (recorded at WD.13)
+
+Where the D-DUP family as built diverges from §3 as written. Reported, not
+improvised.
+
+1. **The grouping predicate is legacy's whole predicate, not just "named".**
+   WD.1's delta 5 recorded that D-DUP keys on named identity rather than
+   canonical identity (unstamped pool rows all resolve to the template's
+   qualified name). WD.13 tightens it the rest of the way to the retire body's
+   own gate — open, `isNamedSessionInfo`, `NamedSessionInfoContinuityEligible`,
+   and a `findNamedSessionSpec` hit on the stored identity — because detection
+   and the handler's re-derivation must answer from the SAME predicate. A
+   detector that grouped more loosely would enqueue a key the handler refuses on
+   every patrol: a 30-second treadmill against a condition that is real but not
+   this family's.
+2. **The winner rule is `namedSessionWinsCanonicalRepairInfo`, reused.** §3 spells
+   the rule out as "generation → canonical name → created-at", and WD.1 shipped a
+   detector-local tiebreak that had already drifted from it (created-at, then ID
+   — no generation rung, no canonical-name rung). `detectorDuplicateWinner` now
+   calls the retire body's own comparator with the spec's canonical session name,
+   so the detector cannot schedule the retire of a row the handler keeps. The
+   ordering is asserted rung by rung, from both iteration orders, so it cannot
+   drift again. §1's iteration-order pinning still seats the incumbent — the
+   sweep's stable sort by session name then bead ID feeds both sides — but the
+   rule is a total order over distinct IDs, so pinned order and rule agree by
+   construction rather than by luck.
+3. **D-DUP is exempt from the D2 stop-capability routing screen, and stays
+   destructive for the partial-store guard.** The screen exists to guarantee the
+   token-bound unattended stop D-DEADLINE's handler performs. D-DUP's handler
+   performs the retire path's own stop-before-mutate
+   (`stopRuntimeBeforeSessionBeadMutationInfo`: `IsRunning` → kill → `IsRunning`),
+   a self-verifying stop every provider supports. Screening it on D2 would make
+   the keyed family strictly less capable than the legacy phase it replaces and
+   strand duplicate named rows forever on non-tmux providers. The family spec
+   therefore carries `StopCapabilityExempt` while remaining `Destructive`, and
+   `routeDetectorConditions` screens on the narrower predicate.
+4. **The family routes on its act constant alone.** `detectDuplicateNamed` raises
+   exactly one arm — one condition per LOSER row — so unlike D-DEADLINE there is
+   no non-effect arm to exclude with an outcome gate. The shadow record keeps
+   WD.1's `no_change` predicted outcome (the sweep applies nothing; the honest
+   `applied`/`skipped` lives on the handler's record at the same site), so the
+   parity join sees no vocabulary churn across the flip.
+5. **The handler pays one bounded session list per candidate admission.** Unlike
+   D-DEADLINE, whose condition is re-derivable from the row plus a per-session
+   provider probe, "is this row a loser" is only answerable against its siblings.
+   The guard runs the cheap durable rungs first, so the list is paid only by
+   admissions for configured named sessions whose identity still has a spec —
+   declared on the same footing as §2's provider-health file read. Every failure
+   fails closed (not a loser): a store blip must never archive a row and re-point
+   its work.
+6. **The two Phase-0 arms take DIFFERENT ownership semantics, deliberately.** The
+   duplicate retire takes a fence — `withLegacyDuplicateRetireExclusion`, backed
+   by `sessionStartController.ownsDuplicateNamedRetire(id)`, threaded into the
+   retire body as a per-loser skip so the identity's other losers still retire on
+   the same pass. Like the deadline seam this is not a race to lose: both writers
+   derive the same duplicate set from the same durable rows on the same tick, so
+   an un-yielding legacy stops the loser's runtime twice and races two re-points
+   at the same work beads. The expired-timer heal takes NO fence: it is a
+   convergent, idempotent, provider-free clear of an already-elapsed timestamp,
+   so two writers cannot disagree and there is no destructive effect to
+   serialize. It SELF-yields — once the keyed admission heal has cleared the
+   timer, legacy's Phase-0a fold finds nothing to clear and performs zero writes,
+   which is what the RED asserts.
+7. **The heal runs at the top of the admission path and re-reads.** §3 says the
+   wake handler clears expired timers "at admission, since it already re-reads
+   the row". It lands immediately after the closed check — before the suspend
+   arm, before the detector-family seam, before the ordinary start path — so
+   every arm below decides against a row whose lapsed timers are already gone. A
+   current (future-dated) timer is untouched, so the suspend arm's own
+   future-`held_until` condition is unaffected. Because the clear is a write, the
+   handler re-reads and carries the POST-heal revision forward; a failed re-read
+   yields a zero revision, which every downstream fence reads as "refuse" rather
+   than fencing against a revision that no longer exists.
 
 ## 3b. Campaign judgment (WE sign-off bar)
 

@@ -606,6 +606,12 @@ func retireDuplicateConfiguredNamedSessionBeads(
 // fold (Closed stays false: the raw form re-asserts Status="open"). The raw form
 // survives for the class-(c) sync path. TestRetireDuplicateRowsMatchesBeads pins
 // the both-ways equivalence.
+//
+// excluded is the keyed-ownership yield (WD.13): a loser it accepts is left
+// entirely alone — no runtime stop, no archive, no re-point — because the keyed
+// D-DUP handler holds that exact key. It never suppresses the winner
+// computation, so the identity's other losers still retire on this pass. A nil
+// predicate is the pre-WD behavior.
 func retireDuplicateConfiguredNamedSessionRows(
 	store beads.Store,
 	rigStores map[string]beads.Store,
@@ -613,6 +619,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 	cfg *config.City,
 	cityName string,
 	rows []session.ReconcileSession,
+	excluded func(session.Info) bool,
 	now time.Time,
 	stderr io.Writer,
 ) []session.ReconcileSession {
@@ -651,6 +658,9 @@ func retireDuplicateConfiguredNamedSessionRows(
 				continue
 			}
 			info := rows[idx].Info
+			if excluded != nil && excluded(info) {
+				continue
+			}
 			oldSessionName := strings.TrimSpace(info.SessionNameMetadata)
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
 				!stopRuntimeBeforeSessionBeadMutationInfo(store, sp, cfg, info, "duplicate named session", stderr) {

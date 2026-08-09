@@ -1590,7 +1590,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// rows, returning the folded row set (retired losers carry their retire batch).
 	if cfg != nil {
 		rows = retireDuplicateConfiguredNamedSessionRows(
-			store, rigStores, sp, cfg, cityName, rows, clk.Now().UTC(), stderr,
+			store, rigStores, sp, cfg, cityName, rows,
+			reconcileOpts.legacyDuplicateRetireExcluded, clk.Now().UTC(), stderr,
 		)
 	}
 	recordPhase(TraceSiteSessionReconcileHealRetire, "session_reconcile.heal_and_retire_duplicates", phaseStart, map[string]any{

@@ -72,10 +72,11 @@ const (
 // double-act this rule exists to prevent; the family-spec table folds the two
 // back into one Acts bit. D-STALE-CREATE crossed at WD.7 (handler:
 // session_stale_create_reconcile.go; yield:
-// withLegacyStaleCreateRollbackExclusion). The rest flip in the WE cutover
-// commit, one family at a time, once the WD.15 parity window has cleared their
-// must-match bar. They are compile-time constants on purpose: this is not a
-// config surface.
+// withLegacyStaleCreateRollbackExclusion). D-DUP crossed at WD.13 (handler:
+// session_dup_reconcile.go; yield: withLegacyDuplicateRetireExclusion). The
+// rest flip in the WE cutover commit, one family at a time, once the WD.15
+// parity window has cleared their must-match bar. They are compile-time
+// constants on purpose: this is not a config surface.
 const (
 	detectorActDeadline                = true
 	detectorActOrphanClose             = true
@@ -87,7 +88,7 @@ const (
 	detectorActWake                    = false
 	detectorActZombie                  = false
 	detectorActStall                   = false
-	detectorActDup                     = false
+	detectorActDup                     = true
 	detectorActStranded                = false
 	detectorActReadyDemandScan         = false
 	detectorActExecutionCompletionScan = false
@@ -193,12 +194,23 @@ var detectorShadowOutcomes = []TraceOutcomeCode{
 // detectorFamilySpec records the fixed properties of one family: whether its
 // keyed effect is destructive (close, stop, drain, rollback, retire — the set
 // the storeQueryPartial guard fails closed on), whether it is observed-only,
-// and whether it may enqueue yet.
+// whether it may enqueue yet, and whether the D2 stop-capability screen applies
+// to it.
 type detectorFamilySpec struct {
 	Family       detectorFamily
 	Destructive  bool
 	ObservedOnly bool
 	Acts         bool
+	// StopCapabilityExempt drops the family out of the D2 routing screen. It is
+	// set for exactly one reason: the family's handler does NOT use the
+	// token-bound unattended stop the screen exists to guarantee. D-DUP reuses
+	// the retire path's own stop-before-mutate
+	// (stopRuntimeBeforeSessionBeadMutationInfo: IsRunning → kill → IsRunning),
+	// a self-verifying stop every provider supports. Screening it on D2 would
+	// make the keyed family strictly less capable than the legacy phase it
+	// replaces and strand duplicate named rows forever on non-tmux providers.
+	// The partial-store suppression still applies: the effect is destructive.
+	StopCapabilityExempt bool
 }
 
 var detectorFamilySpecs = []detectorFamilySpec{
@@ -209,7 +221,7 @@ var detectorFamilySpecs = []detectorFamilySpec{
 	{Family: detectorFamilySleep, Destructive: true, Acts: detectorActSleep},
 	{Family: detectorFamilyDrain, Destructive: true, Acts: detectorActDrain},
 	{Family: detectorFamilyStall, Destructive: true, Acts: detectorActStall},
-	{Family: detectorFamilyDup, Destructive: true, Acts: detectorActDup},
+	{Family: detectorFamilyDup, Destructive: true, Acts: detectorActDup, StopCapabilityExempt: true},
 	{Family: detectorFamilyStranded, Destructive: true, Acts: detectorActStranded},
 	{Family: detectorFamilyUnknownState, Acts: false},
 	{Family: detectorFamilyWake, Acts: detectorActWake},
@@ -231,6 +243,15 @@ func detectorFamilySpecFor(family detectorFamily) detectorFamilySpec {
 // to the close/stop/drain/rollback/retire set suppressed on a partial store view.
 func detectorFamilyDestructive(family detectorFamily) bool {
 	return detectorFamilySpecFor(family).Destructive
+}
+
+// detectorFamilyRequiresStopCapability reports whether the routing seam must
+// prove the D2 pair (fresh liveness + unattended stop) before it hands this
+// family a key. It is the destructive set minus the families whose handler
+// stops a runtime some other proven way (see StopCapabilityExempt).
+func detectorFamilyRequiresStopCapability(family detectorFamily) bool {
+	spec := detectorFamilySpecFor(family)
+	return spec.Destructive && !spec.StopCapabilityExempt
 }
 
 // detectorFamilyActs reports whether the family may enqueue exact keys yet.
@@ -456,12 +477,8 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 		}
 		cfgAgent := findAgentByTemplate(in.Cfg, template)
 		_, identity := canonicalSessionIdentityWithConfigInfo(in.Cfg, cfgAgent, info)
-		// D-DUP keys on NAMED identity only. Pool rows that have not yet been
-		// stamped with a slot all resolve to the template's qualified name, so
-		// grouping every row by identity would read ordinary pool siblings as
-		// duplicates of one another.
-		if identity != "" && isNamedSessionInfo(info) {
-			namedIdentityRows[identity] = append(namedIdentityRows[identity], info)
+		if dupIdentity := detectorDuplicateNamedIdentity(in, info); dupIdentity != "" {
+			namedIdentityRows[dupIdentity] = append(namedIdentityRows[dupIdentity], info)
 		}
 		base := detectorCondition{
 			SessionID:   info.ID,
@@ -497,7 +514,7 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 		detectStranded(emit, base, info, desired, live, now)
 	}
 
-	detectDuplicateNamed(emit, namedIdentityRows, in.Cfg)
+	detectDuplicateNamed(in, emit, namedIdentityRows)
 	// Retire every confirmation window this sweep did not count. A row that
 	// stopped raising named live-orphan candidacy — its spec came back, it went
 	// dead, it picked up work — gets a fresh window next time, which is what
@@ -1151,10 +1168,39 @@ func detectStranded(emit *detectorConditionSink, base detectorCondition, info se
 	emit.add(cond, true)
 }
 
+// detectorDuplicateNamedIdentity answers D-DUP's grouping key for one row with
+// the SAME predicate the retire logic applies
+// (retireDuplicateConfiguredNamedSessionRows, session_beads.go): an open
+// configured-named row, continuity-eligible, whose stored identity still
+// resolves to a named-session spec. Two things about it are load-bearing.
+//
+// First, D-DUP cannot key on the canonical identity every other family uses:
+// pool rows that have no slot stamp yet all resolve to the template's qualified
+// name, so identity-grouping would read ordinary pool siblings as duplicates of
+// one another (the WD.1 delta this preserves).
+//
+// Second, detection and the handler's re-derivation must answer from the same
+// predicate. A detector that grouped more loosely than the handler would enqueue
+// keys the handler refuses on every patrol — a 30-second treadmill against a
+// condition that is real but not this family's.
+func detectorDuplicateNamedIdentity(in detectorSweepInput, info sessionpkg.Info) string {
+	if info.Closed || !isNamedSessionInfo(info) || !sessionpkg.NamedSessionInfoContinuityEligible(info) {
+		return ""
+	}
+	identity := namedSessionIdentityInfo(info)
+	if identity == "" {
+		return ""
+	}
+	if _, ok := findNamedSessionSpec(in.Cfg, in.CityName, identity); !ok {
+		return ""
+	}
+	return identity
+}
+
 // detectDuplicateNamed raises one condition per LOSER row when more than one
-// open row shares a canonical named identity. Winner selection stays legacy's:
-// highest generation, then canonical name, then oldest created-at.
-func detectDuplicateNamed(emit *detectorConditionSink, byIdentity map[string][]sessionpkg.Info, cfg *config.City) {
+// open continuity-eligible row shares a named identity. The family has exactly
+// this one arm: every condition it raises predicts the retire of its own key.
+func detectDuplicateNamed(in detectorSweepInput, emit *detectorConditionSink, byIdentity map[string][]sessionpkg.Info) {
 	identities := make([]string, 0, len(byIdentity))
 	for identity, rows := range byIdentity {
 		if len(rows) > 1 {
@@ -1164,7 +1210,8 @@ func detectDuplicateNamed(emit *detectorConditionSink, byIdentity map[string][]s
 	sort.Strings(identities)
 	for _, identity := range identities {
 		rows := byIdentity[identity]
-		winner := detectorDuplicateWinner(rows)
+		spec, _ := findNamedSessionSpec(in.Cfg, in.CityName, identity)
+		winner := detectorDuplicateWinner(rows, spec.SessionName)
 		for _, info := range rows {
 			if info.ID == winner.ID {
 				continue
@@ -1173,7 +1220,7 @@ func detectDuplicateNamed(emit *detectorConditionSink, byIdentity map[string][]s
 				Family:      detectorFamilyDup,
 				SessionID:   info.ID,
 				SessionName: strings.TrimSpace(info.SessionNameMetadata),
-				Template:    normalizedSessionTemplateInfo(info, cfg),
+				Template:    normalizedSessionTemplateInfo(info, in.Cfg),
 				Identity:    identity,
 				Site:        TraceSiteSessionReconcileHealRetire,
 				Reason:      detectorReasonDuplicateNamed,
@@ -1188,24 +1235,28 @@ func detectDuplicateNamed(emit *detectorConditionSink, byIdentity map[string][]s
 	}
 }
 
-func detectorDuplicateWinner(rows []sessionpkg.Info) sessionpkg.Info {
+// detectorDuplicateWinner names the surviving row with the retire path's OWN
+// rule — generation, then canonical session name, then created-at, then bead ID
+// (namedSessionWinsCanonicalRepairInfo). Reusing that predicate rather than
+// restating it is the point: a detector-side tiebreak that drifted from the
+// handler's would schedule the retire of a row the handler then keeps.
+//
+// rows arrive in the sweep's pinned iteration order (session name, then bead ID
+// — detectorOrderedRows), which is what makes the incumbent seat deterministic;
+// the rule itself is a total order over distinct IDs, so pinned order and rule
+// agree by construction rather than by luck. Both the sweep and the handler feed
+// this the same pinned order.
+func detectorDuplicateWinner(rows []sessionpkg.Info, canonicalSessionName string) sessionpkg.Info {
+	if len(rows) == 0 {
+		return sessionpkg.Info{}
+	}
 	winner := rows[0]
 	for _, candidate := range rows[1:] {
-		if detectorDuplicateBeats(candidate, winner) {
+		if namedSessionWinsCanonicalRepairInfo(candidate, winner, canonicalSessionName) {
 			winner = candidate
 		}
 	}
 	return winner
-}
-
-func detectorDuplicateBeats(candidate, incumbent sessionpkg.Info) bool {
-	if candidate.CreatedAt.After(incumbent.CreatedAt) {
-		return true
-	}
-	if candidate.CreatedAt.Before(incumbent.CreatedAt) {
-		return false
-	}
-	return candidate.ID > incumbent.ID
 }
 
 // detectorAdmissionSourceFor is THE detector half of the handler-dispatch seam.
@@ -1238,6 +1289,17 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// Only the expired-lease ROLLBACK arm predicts an effect; the
 		// preserved-row arm records no-change for the parity join (WD.7).
 		return sessionStartAdmissionStaleCreate, detectorActStaleCreate && cond.Outcome == TraceOutcomeRollback
+	case detectorFamilyDup:
+		// D-DUP has a single arm: detectDuplicateNamed raises one condition per
+		// LOSER row and nothing else, so every condition here predicts the retire
+		// of its own key. That arm carries TraceOutcomeNoChange — the retire is
+		// the predicted EFFECT, while the sweep itself applies nothing — and the
+		// gate names that outcome explicitly rather than routing on the act
+		// constant alone. Naming it is behavior-identical today and is what
+		// actually delivers the guarantee this family wants: a future second
+		// D-DUP arm carrying some other outcome cannot ride in unnoticed on a
+		// family-wide gate, it has to come here and declare itself.
+		return sessionStartAdmissionDuplicateNamed, detectorActDup && cond.Outcome == TraceOutcomeNoChange
 	}
 	return "", false
 }
@@ -1272,7 +1334,7 @@ func routeDetectorConditions(in detectorSweepInput, result *detectorSweepResult)
 		if !routable || cond.SessionID == "" {
 			continue
 		}
-		if detectorFamilyDestructive(cond.Family) && !detectorProviderStopCapable(in.Provider) {
+		if detectorFamilyRequiresStopCapability(cond.Family) && !detectorProviderStopCapable(in.Provider) {
 			cond.AdmissionOutcome = detectorAdmissionRefusedProviderIncapable
 			continue
 		}

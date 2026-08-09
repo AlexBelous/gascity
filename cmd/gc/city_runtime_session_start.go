@@ -798,15 +798,15 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 
 	// The detector-family yields are deliberately NOT folded into the start
 	// predicate: that one answers "does keyed own this row's START family",
-	// which is true for rows legacy must stay free to idle-kill and false for
-	// the lifecycle-terminal rows a stale create leaves behind. Each family's
-	// bridge answers its own narrow question — is an effect for this exact key
-	// in flight right now — and they are installed whenever a controller
-	// exists, including the bounded handoff windows where the start predicate
-	// stands down, because an admitted key outlives those windows. D-ORPHAN's
-	// close and drain arms carry SEPARATE predicates for the same reason one
-	// predicate never covers several arms: it would make each arm's legacy
-	// counterpart stand down for rows another keyed arm owns.
+	// which is true for rows legacy must stay free to idle-kill or de-duplicate,
+	// and false for the lifecycle-terminal rows a stale create leaves behind.
+	// Each family's bridge answers its own narrow question — is an effect for
+	// this exact key in flight right now — and they are installed whenever a
+	// controller exists, including the bounded handoff windows where the start
+	// predicate stands down, because an admitted key outlives those windows.
+	// D-ORPHAN's close and drain arms carry SEPARATE predicates for the same
+	// reason one predicate never covers several arms: it would make each arm's
+	// legacy counterpart stand down for rows another keyed arm owns.
 	var familyOptions []startExecutionOption
 	if controller != nil {
 		familyOptions = append(familyOptions,
@@ -821,6 +821,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			}),
 			withLegacyStaleCreateRollbackExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsStaleCreateRollback(info.ID)
+			}),
+			withLegacyDuplicateRetireExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsDuplicateNamedRetire(info.ID)
 			}),
 		)
 	}

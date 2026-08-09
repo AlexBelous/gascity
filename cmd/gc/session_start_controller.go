@@ -47,6 +47,11 @@ const (
 	// key: a crash-stranded pending create whose lease has expired with no
 	// runtime, for one exact durable session ID.
 	sessionStartAdmissionStaleCreate sessionStartAdmissionSource = "stale_create"
+	// sessionStartAdmissionDuplicateNamed is the detector sweep's D-DUP key
+	// (DETECTOR.md §3): the retire of ONE duplicate configured-named session row,
+	// keyed on that loser's exact durable session ID. One key per loser, so a
+	// three-way duplicate is three independent fenced effects, never a batch.
+	sessionStartAdmissionDuplicateNamed sessionStartAdmissionSource = "duplicate_named"
 )
 
 type sessionStartAdmission struct {
@@ -685,7 +690,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionDeadline,
 		sessionStartAdmissionOrphanClose,
 		sessionStartAdmissionOrphanDrain,
-		sessionStartAdmissionStaleCreate:
+		sessionStartAdmissionStaleCreate,
+		sessionStartAdmissionDuplicateNamed:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -941,6 +947,24 @@ func (c *sessionStartController) ownsStaleCreateRollback(sessionID string) bool 
 	defer c.mu.Unlock()
 	_, ok := c.admissions[sessionID]
 	return ok
+}
+
+// ownsDuplicateNamedRetire reports whether the keyed controller currently holds
+// a D-DUP admission for this exact key. Legacy's Phase-0b duplicate retire
+// consults it and yields that row. Like the deadline seam and unlike the start
+// seam, this is not a race to lose: both writers compute the same duplicate set
+// from the same durable rows on the same tick, so an un-yielding legacy stops
+// the loser's runtime a second time and races a second re-point at the same work
+// beads. The admission survives in the map from Admit until the handler succeeds
+// or exhausts, so the yield covers the whole in-flight window.
+func (c *sessionStartController) ownsDuplicateNamedRetire(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.Source == sessionStartAdmissionDuplicateNamed
 }
 
 // YieldPoolDrainAck releases a retained agent drain acknowledgement only when

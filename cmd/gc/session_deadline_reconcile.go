@@ -44,9 +44,14 @@ func reconcileExactSessionDetectorFamily(
 	if clk == nil {
 		clk = clock.Real{}
 	}
-	// Case order mirrors legacy's forward pass, where the not-desired block runs
-	// before the deadline arms and early-continues: an undesired row past its
-	// idle deadline is the orphan family's, not the deadline family's.
+	// Case order mirrors legacy's own pass order. D-DUP goes first because its
+	// legacy counterpart is Phase 0b, which retires duplicate named rows BEFORE
+	// the forward pass runs at all: a loser row that is also undesired, or also
+	// past its idle deadline, is the duplicate family's in legacy, so it must be
+	// the duplicate family's here. The remaining three mirror the forward pass,
+	// where the not-desired block runs before the deadline arms and
+	// early-continues: an undesired row past its idle deadline is the orphan
+	// family's, not the deadline family's.
 	//
 	// D-ORPHAN has one case for its two effect arms because their durable-row
 	// guard is identical — an undesired open row — and the fact that splits them
@@ -54,6 +59,9 @@ func reconcileExactSessionDetectorFamily(
 	// case would mean two guards that can never disagree, so whichever came
 	// second would be dead code.
 	switch {
+	case detectorActDup && exactSessionDuplicateNamedCandidate(params, info, response):
+		owner, err := reconcileExactSessionDuplicateNamedRetire(admission, params, info, response, clk)
+		return true, owner, err
 	case (detectorActOrphanClose || detectorActOrphanDrain) &&
 		exactSessionOrphanCloseCandidate(params, info, response, clk) != "":
 		owner, err := reconcileExactSessionOrphanClose(ctx, admission, params, info, response, clk)

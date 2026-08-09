@@ -330,6 +330,7 @@ type startExecutionOptions struct {
 	legacyOrphanCloseExcluded         func(sessionpkg.Info) bool
 	legacyOrphanDrainExcluded         func(sessionpkg.Info) bool
 	legacyStaleCreateRollbackExcluded func(sessionpkg.Info) bool
+	legacyDuplicateRetireExcluded     func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -512,6 +513,29 @@ func withLegacyOrphanDrainExclusion(excluded func(sessionpkg.Info) bool) startEx
 func withLegacyStaleCreateRollbackExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyStaleCreateRollbackExcluded = excluded
+	}
+}
+
+// withLegacyDuplicateRetireExclusion installs the keyed-ownership bridge for
+// the D-DUP family. Returning true keeps the fleet pass's Phase-0b duplicate
+// retire off that row entirely — no runtime stop, no archive batch, no work
+// re-point — because the keyed handler already owns that exact key. Like the
+// deadline seam and unlike the start seam, this is not a race to lose: both
+// writers derive the same duplicate set from the same durable rows on the same
+// tick, so an un-yielding legacy stops the loser's runtime a second time and
+// races a second re-point at the same work beads.
+//
+// The expired-timer heal in the phase above takes NO such fence, deliberately.
+// It is a convergent, idempotent, provider-free clear of an already-elapsed
+// timestamp: two writers cannot disagree, and there is no destructive effect to
+// serialize. It self-yields instead — once the keyed admission heal
+// (healExactSessionAdmissionTimers) has cleared the timer, the fold here finds
+// nothing to clear and performs zero writes.
+//
+// Retired at WE with the god function.
+func withLegacyDuplicateRetireExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyDuplicateRetireExcluded = excluded
 	}
 }
 

@@ -44,9 +44,12 @@ func reconcileExactSessionDetectorFamily(
 	if clk == nil {
 		clk = clock.Real{}
 	}
-	switch { //nolint:gocritic // the seam is a table, not a branch: WD.3-14 each add one case
+	switch {
 	case detectorActDeadline && exactSessionDeadlineStopCandidate(params, info, response, clk.Now().UTC()):
 		owner, err := reconcileExactSessionDeadlineStop(ctx, admission, params, info, response, clk)
+		return true, owner, err
+	case detectorActDup && exactSessionDuplicateNamedCandidate(params, info, response):
+		owner, err := reconcileExactSessionDuplicateNamedRetire(admission, params, info, response, clk)
 		return true, owner, err
 	}
 	return false, exactSessionStartUnowned, nil

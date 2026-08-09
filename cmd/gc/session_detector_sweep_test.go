@@ -57,12 +57,15 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 
 // TestDetectorFamiliesStayShadowOnlyDuringWD pins the act frontier: exactly the
 // families whose keyed handler AND legacy yield have landed may act, and every
-// other family stays shadow-only. D-DEADLINE crossed at WD.2. A family that
-// flips its act constant without an arm in detectorAdmissionSourceFor — or with
-// an arm but no landed handler — fails here before it can double-act beside a
-// non-yielding legacy.
+// other family stays shadow-only. D-DEADLINE crossed at WD.2, D-DUP at WD.13. A
+// family that flips its act constant without an arm in
+// detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
+// before it can double-act beside a non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
-	acting := map[detectorFamily]bool{detectorFamilyDeadline: true}
+	acting := map[detectorFamily]bool{
+		detectorFamilyDeadline: true,
+		detectorFamilyDup:      true,
+	}
 	if !detectorAnyFamilyActs() {
 		t.Fatal("detectorAnyFamilyActs() = false; D-DEADLINE acts from WD.2 onward")
 	}
@@ -80,6 +83,27 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	}
 	if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyDeadline, Outcome: TraceOutcomeNoChange}); routed {
 		t.Error("D-DEADLINE routed a non-effect arm; only its stop arms may enqueue")
+	}
+	// D-DUP raises exactly one arm — one condition per loser row — so it routes
+	// on the family alone. Pin that so a future second arm cannot ride in
+	// unnoticed on the family gate.
+	if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyDup, Outcome: TraceOutcomeNoChange}); !routed {
+		t.Error("D-DUP must route its only arm; every condition it raises predicts the retire of its own key")
+	}
+	// The D2 stop-capability screen guards the token-bound unattended stop.
+	// D-DUP's handler reuses the retire path's own IsRunning → kill → IsRunning
+	// stop instead, so screening it would strand duplicates on providers where
+	// legacy retires them today.
+	for _, family := range []detectorFamily{detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilySleep} {
+		if !detectorFamilyRequiresStopCapability(family) {
+			t.Errorf("family %q must be screened on the D2 stop capability", family)
+		}
+	}
+	if detectorFamilyRequiresStopCapability(detectorFamilyDup) {
+		t.Error("D-DUP must be exempt from the D2 stop-capability screen; its handler uses the retire path's own stop")
+	}
+	if !detectorFamilyDestructive(detectorFamilyDup) {
+		t.Error("D-DUP stays destructive for the partial-store guard even though it is D2-exempt")
 	}
 	for _, family := range []detectorFamily{
 		detectorFamilyDeadline, detectorFamilyOrphan, detectorFamilyStaleCreate,

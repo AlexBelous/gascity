@@ -1485,6 +1485,17 @@ func reconcileExactSessionStartWithOwner(
 		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{})
 		return exactSessionStartUnowned, nil
 	}
+	// Expired hold and quarantine timers are healed HERE rather than by a
+	// detector family of their own (DETECTOR.md §3, D-DUP entry): this path
+	// already re-reads the authoritative row, so clearing an elapsed timer costs
+	// one write on exactly the rows that have one and adds no second heal path.
+	// It runs before every arm below so the suspend arm, the detector-family
+	// seam, and the ordinary start path all decide against a row whose lapsed
+	// timers are already gone. A current (future-dated) timer is untouched.
+	if healed, healedResponse, applied := healExactSessionAdmissionTimers(params, info, initialResponse, clk); applied {
+		info, initialResponse = healed, healedResponse
+		loadedRevision = initialResponse.Revision
+	}
 	// The suspend family dispatches on the durable row, not on how the admission
 	// arrived: state=suspended + sleep_intent=user-hold + a future held_until is a
 	// level-triggered condition the user wrote, and the row is the authority.

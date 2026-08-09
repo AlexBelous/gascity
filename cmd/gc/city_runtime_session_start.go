@@ -748,29 +748,37 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 	controller := cr.sessionStartController
 	cr.sessionStartMu.Unlock()
 
-	// The D-DEADLINE yield is deliberately NOT folded into the start predicate:
-	// that one answers "does keyed own this row's START family", which is true
-	// for rows legacy must stay free to idle-kill. This one answers the narrow
-	// question the deadline arms need — is a D-DEADLINE stop for this exact key
-	// in flight right now — and it is installed whenever a controller exists,
-	// including the bounded handoff windows where the start predicate stands
-	// down, because an admitted key outlives those windows.
-	var deadlineOption startExecutionOption
+	// The detector-family yields are deliberately NOT folded into the start
+	// predicate: that one answers "does keyed own this row's START family",
+	// which is true for rows legacy must stay free to idle-kill or de-duplicate.
+	// These answer the narrow question each acting family's legacy arm needs —
+	// is a D-DEADLINE stop, or a D-DUP retire, for this exact key in flight
+	// right now — and they are installed whenever a controller exists, including
+	// the bounded handoff windows where the start predicate stands down, because
+	// an admitted key outlives those windows.
+	var familyOption startExecutionOption
 	if controller != nil {
-		deadlineOption = withLegacyDeadlineStopExclusion(func(info sessionpkg.Info) bool {
+		deadlineOption := withLegacyDeadlineStopExclusion(func(info sessionpkg.Info) bool {
 			return controller.ownsDeadlineStop(info.ID)
 		})
+		duplicateOption := withLegacyDuplicateRetireExclusion(func(info sessionpkg.Info) bool {
+			return controller.ownsDuplicateNamedRetire(info.ID)
+		})
+		familyOption = func(opts *startExecutionOptions) {
+			deadlineOption(opts)
+			duplicateOption(opts)
+		}
 	}
 	excluded := cr.sessionStartLegacyExclusionPredicate()
 	if excluded == nil {
-		return deadlineOption
+		return familyOption
 	}
 	startOption := withLegacyStartExclusion(excluded)
-	if deadlineOption != nil {
+	if familyOption != nil {
 		startExclusion := startOption
 		startOption = func(opts *startExecutionOptions) {
 			startExclusion(opts)
-			deadlineOption(opts)
+			familyOption(opts)
 		}
 	}
 	if state != sessionStartOwnershipKeyed {

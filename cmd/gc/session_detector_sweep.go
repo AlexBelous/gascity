@@ -73,7 +73,11 @@ const (
 // back into one Acts bit. D-STALE-CREATE crossed at WD.7 (handler:
 // session_stale_create_reconcile.go; yield:
 // withLegacyStaleCreateRollbackExclusion). D-DUP crossed at WD.13 (handler:
-// session_dup_reconcile.go; yield: withLegacyDuplicateRetireExclusion). The
+// session_dup_reconcile.go; yield: withLegacyDuplicateRetireExclusion). D-STALL
+// crossed at WD.12 (handler: session_stall_reconcile.go; yield:
+// withLegacyProgressStallRecycleExclusion) — one constant for both its arms,
+// because the claim-less and claim-holder arms share one condition, one handler
+// and one legacy yield, and differ only in which threshold answered. The
 // rest flip in the WE cutover commit, one family at a time, once the WD.15
 // parity window has cleared their must-match bar. They are compile-time
 // constants on purpose: this is not a config surface.
@@ -87,7 +91,7 @@ const (
 	detectorActDrain                   = false
 	detectorActWake                    = false
 	detectorActZombie                  = false
-	detectorActStall                   = false
+	detectorActStall                   = true
 	detectorActDup                     = true
 	detectorActStranded                = false
 	detectorActReadyDemandScan         = false
@@ -1300,6 +1304,15 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// D-DUP arm carrying some other outcome cannot ride in unnoticed on a
 		// family-wide gate, it has to come here and declare itself.
 		return sessionStartAdmissionDuplicateNamed, detectorActDup && cond.Outcome == TraceOutcomeNoChange
+	case detectorFamilyStall:
+		// Only the RECYCLE arm predicts an effect. The min-floor exempt arm
+		// carries TraceOutcomeNoChange and records for the parity join without
+		// enqueueing — that suppression is the whole bounded exemption, and it
+		// applies to the claim-less family only: detectStall falls through to
+		// this arm for a floor worker whenever claim_holder_stall_timeout is
+		// positive, so the handler can pay the per-session claim lookup legacy
+		// pays at session_reconciler.go:2696.
+		return sessionStartAdmissionProgressStall, detectorActStall && cond.Outcome == TraceOutcomeStop
 	}
 	return "", false
 }

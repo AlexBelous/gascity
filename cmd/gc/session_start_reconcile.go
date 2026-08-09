@@ -220,11 +220,10 @@ func exactOrdinaryResetCurrent(info sessionpkg.Info, cfg *config.City, now time.
 }
 
 // commitExactOrdinaryResetHandoff completes the durable half of one reset on
-// the exact key: it stops the live incarnation under its own instance token,
-// confirms the death, and commits the existing restart handoff so the start
-// that follows runs a fresh conversation on the same bead and name. It rereads
-// the durable authority immediately before the stop and again before the write,
-// and returns the committed row the start must authorize against.
+// the exact key for the ORDINARY reset family (ga-f7v2ft.103). Its pre-stop
+// authority is exactOrdinaryResetCurrent, which is that family's OWNERSHIP
+// predicate: named, pool-managed and dependency-bearing rows stay legacy's for
+// a public reset.
 func commitExactOrdinaryResetHandoff(
 	params exactSessionStartParams,
 	info sessionpkg.Info,
@@ -232,6 +231,36 @@ func commitExactOrdinaryResetHandoff(
 	tp TemplateParams,
 	clk clock.Clock,
 	stderr io.Writer,
+) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
+	return commitExactSessionResetHandoff(params, info, initialResponse, tp, clk, stderr, func(latest sessionpkg.Info) bool {
+		return exactOrdinaryResetCurrent(latest, params.Config, clk.Now().UTC())
+	})
+}
+
+// commitExactSessionResetHandoff is the shared reset machinery: it stops the
+// live incarnation under its own instance token, confirms the death, and
+// commits the existing restart handoff so the start that follows runs a fresh
+// conversation on the same bead and name. It rereads the durable authority
+// immediately before the stop and again before the write, and returns the
+// committed row the start must authorize against.
+//
+// `authority` is the caller's own pre-stop authority — "does this row still
+// qualify for the reset it was admitted for". It is a parameter because the
+// question is family-scoped, not universal: the ordinary reset family asks
+// about its ownership lattice, while D-STALL (WD.12) targets exactly the named
+// and pool rows that lattice excludes and asks instead whether the row still
+// owes the reset its handler just persisted. Everything below the authority —
+// the D2 capability pair, the token-bound stop, the death confirmation, the
+// revision fence, and the RestartRequestPatch commit — is shared verbatim, so
+// there is only ever one recycle implementation.
+func commitExactSessionResetHandoff(
+	params exactSessionStartParams,
+	info sessionpkg.Info,
+	initialResponse sessionpkg.PersistedResponse,
+	tp TemplateParams,
+	clk clock.Clock,
+	stderr io.Writer,
+	authority func(sessionpkg.Info) bool,
 ) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
 	if params.DrainTracker != nil && params.DrainTracker.get(info.ID) != nil {
 		return info, initialResponse, errors.New("exact reset session has an active legacy drain")
@@ -259,7 +288,7 @@ func commitExactOrdinaryResetHandoff(
 			return info, initialResponse, fmt.Errorf("re-reading exact reset session %q before stop: %w", info.ID, readErr)
 		}
 		if latestResponse.Revision != initialResponse.Revision || !exactOrdinaryResetAuthorityMatches(latest, info) ||
-			!exactOrdinaryResetCurrent(latest, params.Config, clk.Now().UTC()) {
+			authority == nil || !authority(latest) {
 			return info, initialResponse, errors.New("exact reset authority changed before stop")
 		}
 		stopStartedAt := time.Now()

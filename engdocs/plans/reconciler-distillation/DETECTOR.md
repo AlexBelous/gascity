@@ -839,6 +839,124 @@ improvised.
    yields a zero revision, which every downstream fence reads as "refuse" rather
    than fencing against a revision that no longer exists.
 
+### §3 D-STALL deltas (recorded at WD.12)
+
+Where the progress-stall family as built diverges from §3 as written. Reported,
+not improvised.
+
+1. **The reset machinery is reused through a PARAMETERIZED pre-stop authority,
+   not copied.** §3 says D-STALL converges on .103's keyed reset machinery, and
+   `commitExactOrdinaryResetHandoff` is that machinery — but its pre-stop
+   authority, `exactOrdinaryResetCurrent`, is the ordinary reset family's
+   OWNERSHIP lattice: it excludes named, pool-managed and dependency-bearing
+   rows, which is precisely the population a progress-stall recycle targets
+   (legacy's two anchors are a pool floor worker and a configured named worker).
+   Reusing it verbatim would have refused every row this family owns; copying the
+   body would have been the second recycle implementation §3 forbids. So the body
+   became `commitExactSessionResetHandoff(..., authority func(Info) bool)` and
+   `commitExactOrdinaryResetHandoff` is now a one-line wrapper passing .103's own
+   predicate — zero behavior change there. D-STALL passes
+   `exactSessionProgressStallResetCurrent`, which proves the narrower thing this
+   family actually needs between admission and stop and the same thing legacy's
+   restart block re-reads: the row is open and still owes the reset the handler
+   just persisted. The D2 pair, the token-bound stop, the death confirmation, the
+   revision fence and the `RestartRequestPatch` commit are shared verbatim. (The
+   commit body's check-then-write is flagged for a WF-fold fence in
+   ga-f7v2ft.133 item 2 and is reused here unchanged.)
+2. **The marker PAIR is written before the stop, which legacy does not do — so
+   pinned configured named sessions are refused at the guard.** Legacy sets
+   `restart_requested` alone and lets its restart block mint
+   `continuation_reset_pending` inside `RestartRequestPatch`; the keyed handler
+   must persist both up front, because the pair is what makes the row a reset
+   .103's machinery recognizes. End state is identical, but the intermediate
+   state is not: legacy's restart block treats `continuation_reset_pending=true`
+   as an *explicit controller reset* and, on that basis alone, overrides the
+   pinned-named kill protection at :2766. A crash between the two keyed writes
+   would therefore hand legacy a licence to kill a session its own stall arm
+   protects. The guard refuses `pinnedConfiguredNamedSessionKillProtected` rows
+   outright, which is net-identical to legacy (set marker → decline kill → clear
+   marker) with no window at all.
+3. **The seam case sits between D-ORPHAN and D-DEADLINE, and its guard is the
+   WHOLE ladder, not a trigger rung.** Legacy evaluates the stall arm at :2638,
+   above the max-age (:3363) and idle (:3471) arms, and a firing stall
+   `continue`s the row past them while a non-firing one falls through to them. A
+   candidacy-only guard would claim every quiet row the ladder then declines and
+   starve D-DEADLINE of it on every sweep — the treadmill WD.13 delta 1 names,
+   pointed at a sibling family instead of at itself. `exactSessionProgressStallCandidate`
+   therefore runs `decideExactSessionProgressStall` in full and the handler re-runs
+   it against its own fresh re-read (A1). The rungs are ordered by COST rather
+   than in legacy's textual order: liveness moves BELOW the activity-gap check,
+   because legacy already holds an `alive` bit for every row from its fleet pass
+   while a keyed guard would pay a provider probe on every admission to answer it
+   first. The rungs are ANDed either way, so the answer is identical and only
+   already-stalled rows pay. That liveness rung is also what makes the recycle
+   exactly-once: the incarnation the handler just killed can never re-satisfy it.
+4. **`floorExempt` IS re-derived handler-side, from one bounded row list.** §3
+   puts the exemption detector-side because it is fleet-shaped, and that is where
+   the ENQUEUE suppression stays — but the whole point of the bounded exemption
+   is that a floor worker with `claim_holder_stall_timeout > 0` IS enqueued, and
+   without the bit the handler cannot reproduce legacy's `exempt || floorExempt`
+   gate on the claim-less arm (:2721). Threading a second fleet view (WD.3's
+   `DesiredSessionNames` pattern) would add publish plumbing for one boolean;
+   instead the handler pays D-DUP's price — one bounded `ListAllForReconcile` per
+   candidate admission, after the cheap durable, activity and liveness rungs have
+   already held — and answers from the SAME `openPoolSessionCountForTemplate` the
+   sweep calls, so the two sides cannot drift. A store failure exempts (fails
+   safe): an unreadable fleet must not recycle a floor worker.
+5. **The enqueue-refuse loop for a claim-less floor worker is the ga-nllza6
+   question, and the answer is that nothing travels.** WD.2 delta 1 established
+   that a backstop legacy owns for a ladder must move with that ladder, since
+   legacy yields the key and its own counter never sees the defer. D-STALL's arms
+   have no counter: legacy's stall block is a pure per-tick threshold evaluation,
+   and the assigned-work consecutive-defer backstop belongs to D-DEADLINE's idle
+   ladder, which this family precedes rather than replaces. What the question
+   does surface is the one repeating shape here — a floor worker with a positive
+   claim-holder timeout and no claim is enqueued, looked up and refused every
+   sweep. That is bounded and legacy-identical: it is exactly the lookup legacy
+   pays for the same row on every tick at :2696, so the keyed loop adds no work
+   legacy did not already do, and it is level-triggered rather than a treadmill
+   against a condition that is not this family's.
+6. **The legacy ResetStalled arm does NOT yield to keyed-owned rows.**
+   `recordResetStallIfDue` (:203-268) is an observational alarm, not an effect:
+   no store write, no provider call, self-deduping through the drain tracker,
+   self-clearing when the reset lands. There is no destructive effect to
+   serialize and no second writer to disagree with, because the keyed handler
+   emits no alarm of its own — the same reasoning WD.13 delta 6 applied to the
+   expired-timer heal, minus even the second writer. Yielding it would blind the
+   fleet to exactly the recycles the new handler owns, which is the single
+   failure this alarm exists to report. The pre-commit window needs no special
+   handling: `resetPendingCommittedAtInfo` requires `reset_committed_at`, which
+   the handler's marker pair does not carry, so the transient state cannot trip
+   the alarm early. Pinned by
+   `TestLegacyResetStalledArmKeepsWatchingKeyedRecycles`.
+7. **Both arms record at `TraceSiteReconcilerProgressStallExempt`** — WD.1's
+   delta 2 carried forward to the handler. The recycle arm has no legacy site of
+   its own, so the handler's `effect_applied:true` record fires at the exempt
+   site under `detector_progress_stall`, and the refusal records under
+   `detector_progress_stall_exempt` when the floor exemption is what declined it.
+   Legacy's own record keeps `TraceReasonMinFloorIdleWorker`/`TraceOutcomeExempt`,
+   which the detector-shadow vocabulary deliberately does not reuse, so the
+   WD.15 join separates the three populations by reason and `effect_owner` on a
+   shared cycle. One act constant governs both arms: they share one condition,
+   one handler and one legacy yield, and differ only in which threshold answered
+   — unlike D-ORPHAN, whose two arms have two handlers and two yields.
+8. **The provider-health gate reads the row's own provider, not a resolved
+   template.** Legacy reads `tp.ResolvedProvider.Name` off the tick's already
+   resolved `TemplateParams`; rebuilding that per admission inside a guard is not
+   affordable. The durable row records the provider its live incarnation actually
+   started under, which is the authority for a session that is running right now,
+   with the fleet's own `firstNonEmpty(agent override, city default)` spelling as
+   the fallback for a row written before the mirror existed. An unresolvable
+   provider leaves the gate fail-open, exactly as legacy's
+   `tp.ResolvedProvider != nil` guard does.
+9. **The circuit-breaker clear does not travel with the recycle, inherited from
+   .103.** Legacy's restart block calls `resetSessionCircuitBreakerState` for a
+   named identity before it commits the handoff; .103's reset machinery does not,
+   and this slice reuses that machinery unchanged. Breaker persistence at the
+   keyed lane is WD.11's (§3, circuit/health), so a named row recycled here keeps
+   whatever breaker state it had until WD.11 lands — recorded as an expected
+   divergence for §3b's D-STALL row rather than fixed twice.
+
 ## 3b. Campaign judgment (WE sign-off bar)
 
 Per-family parity level and expected classifications. "Detection" = the shadow record
@@ -859,7 +977,7 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | D-DRAIN | detection | tracker-state candidacy (drain intent / draining) | ack-timing skew (handler-side ack read vs legacy's in-tick poll); advance arms journey-proven |
 | D-WAKE | decision | wake-target set | legacy quarantine skip is UNTRACED (:3702-3705) → detector-present/legacy-absent, expected |
 | D-ZOMBIE | detection | running ∧ !alive candidacy | classification arm handler-side |
-| D-STALL | decision | claim-less stall + floor exemption | claim-check-error fail-safe arm incomparable |
+| D-STALL | decision | claim-less stall + floor exemption | claim-check-error fail-safe arm incomparable; keyed refuses a pinned configured named row where legacy sets-then-clears the marker (WD.12 delta 2); keyed skips the named circuit-breaker clear until WD.11 (WD.12 delta 9) |
 | D-DUP | decision | winner + loser set | none expected |
 | D-STRANDED | detection | dead-slot candidacy | confirmation-window off-by-one (duplicated counters) |
 | (global) | — | — | storeQueryPartial cycles: legacy records Closed-without-closing (:1987-1991, :2284-2288); detector suppresses — expected, bounded to partial-view cycles |

@@ -331,6 +331,7 @@ type startExecutionOptions struct {
 	legacyOrphanDrainExcluded         func(sessionpkg.Info) bool
 	legacyStaleCreateRollbackExcluded func(sessionpkg.Info) bool
 	legacyDuplicateRetireExcluded     func(sessionpkg.Info) bool
+	legacyProgressStallExcluded       func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -536,6 +537,26 @@ func withLegacyStaleCreateRollbackExclusion(excluded func(sessionpkg.Info) bool)
 func withLegacyDuplicateRetireExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyDuplicateRetireExcluded = excluded
+	}
+}
+
+// withLegacyProgressStallRecycleExclusion installs the keyed-ownership bridge
+// for the D-STALL family. Returning true keeps the fleet loop's progress-stall
+// and claim-holder-stall arms from writing restart_requested for that row,
+// because the keyed handler already owns that exact key. It gates the WRITES
+// only: legacy keeps evaluating its ladder and keeps recording its
+// ProgressStallExempt trace above the yield, so the WD.15 parity join still sees
+// both populations on every tick (the shape WD.4 recorded for the drain begin).
+//
+// The yield is mandatory rather than best-effort. Both writers evaluate the same
+// thresholds against the same durable row on the same tick, so an un-yielding
+// legacy does not merely double-request a restart: its restart block would kill
+// the fresh incarnation the keyed reset handoff has just committed, and the
+// keyed handler would report a recycle that a second stop immediately undid.
+// Retired at WE with the god function.
+func withLegacyProgressStallRecycleExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyProgressStallExcluded = excluded
 	}
 }
 

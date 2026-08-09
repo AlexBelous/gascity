@@ -825,6 +825,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			withLegacyDuplicateRetireExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsDuplicateNamedRetire(info.ID)
 			}),
+			withLegacyProgressStallRecycleExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsProgressStallRecycle(info.ID)
+			}),
 		)
 	}
 	familyOption := combineStartExecutionOptions(familyOptions...)

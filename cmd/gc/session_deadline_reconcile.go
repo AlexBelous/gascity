@@ -58,6 +58,13 @@ func reconcileExactSessionDetectorFamily(
 	// (is the runtime alive) is provider I/O, not durable state. Splitting the
 	// case would mean two guards that can never disagree, so whichever came
 	// second would be dead code.
+	//
+	// D-STALL sits between orphan and deadline for the same forward-pass reason:
+	// legacy evaluates its progress-stall arm (session_reconciler.go:2638) before
+	// the max-age and idle arms and `continue`s the row past them once the
+	// recycle fires. Its guard is therefore the whole decision rather than a
+	// trigger rung, so a quiet row the ladder declines still reaches D-DEADLINE
+	// on the same dispatch instead of being claimed and starved every sweep.
 	switch {
 	case detectorActDup && exactSessionDuplicateNamedCandidate(params, info, response):
 		owner, err := reconcileExactSessionDuplicateNamedRetire(admission, params, info, response, clk)
@@ -65,6 +72,9 @@ func reconcileExactSessionDetectorFamily(
 	case (detectorActOrphanClose || detectorActOrphanDrain) &&
 		exactSessionOrphanCloseCandidate(params, info, response, clk) != "":
 		owner, err := reconcileExactSessionOrphanClose(ctx, admission, params, info, response, clk)
+		return true, owner, err
+	case detectorActStall && exactSessionProgressStallCandidate(params, info, response, clk):
+		owner, err := reconcileExactSessionProgressStallRecycle(admission, params, info, response, clk)
 		return true, owner, err
 	case detectorActDeadline && exactSessionDeadlineStopCandidate(params, info, response, clk.Now().UTC()):
 		owner, err := reconcileExactSessionDeadlineStop(ctx, admission, params, info, response, clk)

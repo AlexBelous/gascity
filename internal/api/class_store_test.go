@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -141,7 +142,18 @@ func TestBeadStoresForIDClassArmBeatsCityRouteCapture(t *testing.T) {
 // the other way a work store can name a reserved prefix: a rig configured with
 // the class prefix itself. config.ReservedPrefixWarnings allows that today but
 // documents the class store as the owner once relocation is active, so on a
-// relocated city the class arm — not the shadowing rig — answers.
+// relocated city the class arm — not the shadowing rig — answers FIRST.
+//
+// The shadowing rig store still has to be IN the list, behind the class store.
+// The prefix is warned-and-allowed, not rejected (config.ValidateRigs lets it
+// through), so that rig's beads are real; a list that dropped it made every one
+// of them unreachable by id the moment graph relocated. That was carried minor
+// (a) from PR #5128's council, and this is where it is closed.
+//
+// It goes behind the CITY store too, so [graph, city] — the whole of the
+// pre-seam list — stays the head. The handlers fail a by-id read fast on a
+// non-ErrNotFound probe, so a leg inserted ahead of the city store would let
+// that rig's outage answer for a bead the city store was serving.
 func TestBeadStoresForIDClassArmBeatsShadowingRigPrefix(t *testing.T) {
 	st, graph, city, rig := relocatedGraphRouteState(t)
 	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
@@ -152,8 +164,145 @@ func TestBeadStoresForIDClassArmBeatsShadowingRigPrefix(t *testing.T) {
 
 	s := New(st)
 	got := s.beadStoresForID(prefix + "-1")
-	if len(got) != 2 || got[0] != graph || got[1] != city {
-		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, city]; shadowing rig store is %p", prefix, got, len(got), rig)
+	if len(got) != 3 || got[0] != graph || got[1] != city || got[2] != rig {
+		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, city, rig]; graph is %p, city is %p, rig is %p", prefix, got, len(got), graph, city, rig)
+	}
+}
+
+// TestBeadStoresForIDClassArmKeepsLongerRigPrefix closes carried minor (b): an
+// id under a LONGER configured prefix that starts with the reserved one is
+// inside the class namespace by the exact-or-hyphen rule, so the class arm
+// fires — and used to return [graph, city], silently losing the rig store that
+// declares the longer prefix and actually mints the id.
+//
+// The rig is appended behind the pre-seam [graph, city] head: it is a leg this
+// slice ADDS, and an added leg extends reachability rather than re-answering an
+// id the old list already resolved.
+func TestBeadStoresForIDClassArmKeepsLongerRigPrefix(t *testing.T) {
+	st, graph, city, rig := relocatedGraphRouteState(t)
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+	longer := prefix + "-alpha"
+	st.cfg.Rigs[0].Prefix = longer
+
+	s := New(st)
+	got := s.beadStoresForID(longer + "-1")
+	if len(got) != 3 || got[0] != graph || got[1] != city || got[2] != rig {
+		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, city, rig]; graph is %p, city is %p, rig is %p", longer, got, len(got), graph, city, rig)
+	}
+}
+
+// getFailStore is a store whose by-id read fails HARD — the shape an
+// unreachable rig backend takes on the by-id probe path, as distinct from a
+// clean ErrNotFound miss.
+type getFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s getFailStore) Get(string) (beads.Bead, error) { return beads.Bead{}, s.err }
+
+// TestBeadGetSurvivesAShadowingRigOutage is the availability half of the
+// shadowing-store fix, and the reason the added legs go LAST.
+//
+// The by-id handlers fail fast on a non-ErrNotFound probe: an unreachable store
+// must not be reported as a missing bead, and where two stores claim one
+// namespace it must not be silently replaced by the other store's row of the
+// same id. That rule costs availability the moment a leg is inserted AHEAD of a
+// store that was answering — a rig outage would then 500 a read the city store
+// had been serving. Appending the shadows behind [graph, city] is what removes
+// that exposure, and this drives it through the real handler.
+func TestBeadGetSurvivesAShadowingRigOutage(t *testing.T) {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+	st, _, city, rig := relocatedGraphRouteState(t)
+	st.cfg.Rigs[0].Prefix = prefix
+	st.stores["myrig"] = getFailStore{Store: rig, err: errors.New("rig backend unreachable")}
+
+	memCity, isMem := city.(*beads.MemStore)
+	if !isMem {
+		t.Fatalf("fixture city store is %T, want *beads.MemStore so the test can pin its minted prefix", city)
+	}
+	memCity.IDPrefix = prefix
+	created, err := memCity.Create(beads.Bead{Title: "city work bead in the class namespace"})
+	if err != nil {
+		t.Fatalf("seeding the city store: %v", err)
+	}
+
+	out, err := New(st).humaHandleBeadGet(context.Background(), &BeadGetInput{ID: created.ID})
+	if err != nil {
+		t.Fatalf("GET bead %s: %v — an unrelated rig's outage answered for a bead the city store holds", created.ID, err)
+	}
+	if out.Body.ID != created.ID {
+		t.Fatalf("resolved bead id = %q, want %q", out.Body.ID, created.ID)
+	}
+}
+
+// TestBeadStoresForIDDoesNotCoverMigratedLegacyIDs pins the limitation the
+// resolver's doc now states instead of the coverage the doc used to claim.
+//
+// `gc storage migrate` copies the work store's infrastructure slice with ids
+// PRESERVED and never deletes the source (infra_class_migrate.go). So a
+// relocated bead can carry an HQ-prefixed id — which is OUTSIDE the class
+// namespace, so the class arm never fires for it, and the configured-prefix
+// resolver answers it from the work store's retained copy. The relocated store
+// is not even a candidate.
+//
+// cmd/gc/cmd_bd_by_id.go covers this case the other way, by probing residence
+// for every id rather than routing on the prefix. This path has no equivalent;
+// the assertion exists so the gap cannot be forgotten or silently closed.
+func TestBeadStoresForIDDoesNotCoverMigratedLegacyIDs(t *testing.T) {
+	st, graph, city, _ := relocatedGraphRouteState(t)
+	st.cfg.Workspace.Prefix = "mc"
+
+	s := New(st)
+	got := s.beadStoresForID("mc-123")
+	if len(got) != 1 || got[0] != city {
+		t.Fatalf("beadStoresForID(mc-123) = %v (len %d), want only the city work store %p — a legacy-prefixed id is outside the class namespace; graph is %p", got, len(got), city, graph)
+	}
+}
+
+// TestBeadGetResolvesAShadowingRigID is the mutation proof behind the two
+// carried minors: a bead that exists ONLY in a rig whose configured prefix sits
+// inside the relocated class namespace must still resolve through the handler
+// the by-id candidate list feeds. Before the fix the rig store was not a
+// candidate at all, so this read 404'd.
+func TestBeadGetResolvesAShadowingRigID(t *testing.T) {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+	for _, rigPrefix := range []string{prefix, prefix + "-alpha"} {
+		t.Run(rigPrefix, func(t *testing.T) {
+			st, graph, city, rig := relocatedGraphRouteState(t)
+			st.cfg.Rigs[0].Prefix = rigPrefix
+			memRig, isMem := rig.(*beads.MemStore)
+			if !isMem {
+				t.Fatalf("fixture rig store is %T, want *beads.MemStore so the test can pin its minted prefix", rig)
+			}
+			memRig.IDPrefix = rigPrefix
+			created, err := memRig.Create(beads.Bead{Title: "rig work bead in the class namespace"})
+			if err != nil {
+				t.Fatalf("seeding the rig store: %v", err)
+			}
+			for name, other := range map[string]beads.Store{"graph": graph, "city": city} {
+				if _, err := other.Get(created.ID); err == nil {
+					t.Fatalf("the %s store also holds %s; the fixture proves nothing", name, created.ID)
+				}
+			}
+
+			out, err := New(st).humaHandleBeadGet(context.Background(), &BeadGetInput{ID: created.ID})
+			if err != nil {
+				t.Fatalf("GET bead %s: %v — a shadowing rig's bead is unreachable by id on a relocated city", created.ID, err)
+			}
+			if out.Body.ID != created.ID {
+				t.Fatalf("resolved bead id = %q, want %q", out.Body.ID, created.ID)
+			}
+		})
 	}
 }
 

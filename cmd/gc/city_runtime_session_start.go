@@ -748,31 +748,31 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 	controller := cr.sessionStartController
 	cr.sessionStartMu.Unlock()
 
-	// The D-DEADLINE yield is deliberately NOT folded into the start predicate:
-	// that one answers "does keyed own this row's START family", which is true
-	// for rows legacy must stay free to idle-kill. This one answers the narrow
-	// question the deadline arms need — is a D-DEADLINE stop for this exact key
-	// in flight right now — and it is installed whenever a controller exists,
-	// including the bounded handoff windows where the start predicate stands
-	// down, because an admitted key outlives those windows.
-	var deadlineOption startExecutionOption
+	// The detector-family yields are deliberately NOT folded into the start
+	// predicate: that one answers "does keyed own this row's START family",
+	// which is true for rows legacy must stay free to idle-kill and false for
+	// the lifecycle-terminal rows a stale create leaves behind. Each family's
+	// bridge answers its own narrow question — is an effect for this exact key
+	// in flight right now — and they are installed whenever a controller
+	// exists, including the bounded handoff windows where the start predicate
+	// stands down, because an admitted key outlives those windows.
+	var familyOptions []startExecutionOption
 	if controller != nil {
-		deadlineOption = withLegacyDeadlineStopExclusion(func(info sessionpkg.Info) bool {
-			return controller.ownsDeadlineStop(info.ID)
-		})
+		familyOptions = append(familyOptions,
+			withLegacyDeadlineStopExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsDeadlineStop(info.ID)
+			}),
+			withLegacyStaleCreateRollbackExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsStaleCreateRollback(info.ID)
+			}),
+		)
 	}
+	familyOption := combineStartExecutionOptions(familyOptions...)
 	excluded := cr.sessionStartLegacyExclusionPredicate()
 	if excluded == nil {
-		return deadlineOption
+		return familyOption
 	}
-	startOption := withLegacyStartExclusion(excluded)
-	if deadlineOption != nil {
-		startExclusion := startOption
-		startOption = func(opts *startExecutionOptions) {
-			startExclusion(opts)
-			deadlineOption(opts)
-		}
-	}
+	startOption := combineStartExecutionOptions(withLegacyStartExclusion(excluded), familyOption)
 	if state != sessionStartOwnershipKeyed {
 		return startOption
 	}
@@ -792,10 +792,7 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 					controller.ownsStrictDefaultPoolWakeStart(info.ID) ||
 					controller.ownsConfiguredNamedWakeStart(info.ID))))
 	})
-	return func(opts *startExecutionOptions) {
-		startOption(opts)
-		statusOption(opts)
-	}
+	return combineStartExecutionOptions(startOption, statusOption)
 }
 
 // sessionStartLegacyExclusionPredicate is the single ownership predicate used

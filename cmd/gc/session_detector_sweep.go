@@ -61,14 +61,16 @@ const (
 // A constant flips only when that family's keyed handler AND its legacy yield
 // have both landed — an acting family beside a non-yielding legacy double-acts
 // by construction. D-DEADLINE crossed at WD.2 (handler:
-// session_deadline_reconcile.go; yield: withLegacyDeadlineStopExclusion). The
-// rest flip in the WE cutover commit, one family at a time, once the WD.15
-// parity window has cleared their must-match bar. They are compile-time
-// constants on purpose: this is not a config surface.
+// session_deadline_reconcile.go; yield: withLegacyDeadlineStopExclusion);
+// D-STALE-CREATE at WD.7 (handler: session_stale_create_reconcile.go; yield:
+// withLegacyStaleCreateRollbackExclusion). The rest flip in the WE cutover
+// commit, one family at a time, once the WD.15 parity window has cleared their
+// must-match bar. They are compile-time constants on purpose: this is not a
+// config surface.
 const (
 	detectorActDeadline                = true
 	detectorActOrphan                  = false
-	detectorActStaleCreate             = false
+	detectorActStaleCreate             = true
 	detectorActDrift                   = false
 	detectorActSleep                   = false
 	detectorActDrain                   = false
@@ -1075,6 +1077,8 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 	switch cond.Family { //nolint:gocritic // the seam is a table, not a branch: WD.3-14 each add one case
 	case detectorFamilyDeadline:
 		return sessionStartAdmissionDeadline, detectorActDeadline && cond.Outcome == TraceOutcomeStop
+	case detectorFamilyStaleCreate:
+		return sessionStartAdmissionStaleCreate, detectorActStaleCreate && cond.Outcome == TraceOutcomeRollback
 	}
 	return "", false
 }

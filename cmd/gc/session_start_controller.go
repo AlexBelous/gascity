@@ -34,6 +34,10 @@ const (
 	// (DETECTOR.md §3): an idle-timeout or max-session-age stop for one exact
 	// durable session ID. Later WD slices add one value per condition family.
 	sessionStartAdmissionDeadline sessionStartAdmissionSource = "deadline"
+	// sessionStartAdmissionStaleCreate is the detector sweep's D-STALE-CREATE
+	// key: a crash-stranded pending create whose lease has expired with no
+	// runtime, for one exact durable session ID.
+	sessionStartAdmissionStaleCreate sessionStartAdmissionSource = "stale_create"
 )
 
 type sessionStartAdmission struct {
@@ -669,7 +673,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionSocket,
 		sessionStartAdmissionAntiEntropy,
 		sessionStartAdmissionWaitDependency,
-		sessionStartAdmissionDeadline:
+		sessionStartAdmissionDeadline,
+		sessionStartAdmissionStaleCreate:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -868,6 +873,26 @@ func (c *sessionStartController) ownsDeadlineStop(sessionID string) bool {
 	defer c.mu.Unlock()
 	admission, ok := c.admissions[sessionID]
 	return ok && admission.Source == sessionStartAdmissionDeadline
+}
+
+// ownsStaleCreateRollback reports whether the keyed controller currently holds
+// ANY admission for this exact key. Deliberately not gated on
+// admission.Source == stale_create: the handler-dispatch seam guards on the
+// DURABLE ROW, so any admission that reaches it on a row whose pending-create
+// lease has expired runs the keyed rollback — and the controller coalesces
+// admissions on a key while keeping the earlier source, which on this family is
+// routinely the ordinary pending_create start. Gating the yield on the source
+// would reproduce the ga-f7v2ft.125 hole on legacy's side. The other half of the
+// yield — "and the row really is a rollback candidate" — is the caller's, and
+// legacy already evaluates it before entering its rollback arm.
+func (c *sessionStartController) ownsStaleCreateRollback(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.admissions[sessionID]
+	return ok
 }
 
 // YieldPoolDrainAck releases a retained agent drain acknowledgement only when

@@ -560,6 +560,54 @@ not improvised.
    from a narrowed-input call site buys nothing a coalesced key does not already
    give.
 
+### §3 D-STALE-CREATE deltas (recorded at WD.7)
+
+Where the rollback family as built diverges from §3 as written. Reported, not
+improvised.
+
+1. **The legacy yield is a NEW narrow exclusion, and it is keyed on ANY
+   in-flight admission rather than on the family's admission source.**
+   `withLegacyStaleCreateRollbackExclusion` /
+   `sessionStartController.ownsStaleCreateRollback` mirror WD.2's deadline
+   bridge, for the mirror-image of WD.2's reason: reusing
+   `sessionStartLegacyExclusionPredicate` would have left exactly these rows
+   unyielded, because a stranded create is usually lifecycle-terminal
+   (`staleCreatingStateTimeout`) or named/pool-managed, and
+   `classifyExactSessionStartOwnership` hands both of those to legacy — while
+   simultaneously disabling legacy rollback on rows keyed never admitted. The
+   source is not consulted because the handler seam guards on the durable row
+   (seam rule 1), so any admission that reaches it on an expired-lease row runs
+   the keyed rollback; a source-gated yield would reproduce the ga-f7v2ft.125
+   coalescing hole on legacy's side. The predicate's other half —
+   "and the row really is a rollback candidate" — is re-derived at the legacy
+   call site with `pendingCreateLeaseExpiredForRollbackInfo`, which keeps
+   legacy's "live runtime belongs to another session" arm (:2390), an arm the
+   keyed guard does not claim, running unchanged.
+2. **The handler re-pays absence per key; the sweep's absence bit stays as
+   WD.1 built it.** `detectStaleCreate` still raises its rollback arm on a
+   cycle whose `ListRunning` failed, unlike D-ORPHAN. That shape is left alone
+   so the WD.1 shadow population the campaign joins does not move; the handler
+   re-observes with `workerSessionTargetRunningWithConfig` (legacy's own leg,
+   :1841) and fails CLOSED on an unreadable provider, so the enqueue is a
+   scheduling hint and the row is the authority.
+3. **D-STALE-CREATE inherits the D2 provider screen from its destructive
+   classification.** A rollback stops no runtime, but
+   `routeDetectorConditions` screens the whole destructive class on
+   `detectorProviderStopCapable`, and the family is `Destructive: true` for the
+   storeQueryPartial guard (pinned by WD.1's frontier test). Consequence: on a
+   D2-incapable city the family records `refused_provider_incapable` and legacy
+   keeps the rollback for the WD wave. Reported rather than special-cased,
+   because carving one family out of the shared screen is a change to a
+   surface every sibling slice is extending.
+4. **The reused effect is `rollbackPendingCreate`, not
+   `rollbackPendingCreateClearingClaim`.** §3 asks for a rollback that clears
+   the claim; both variants clear `pending_create_claim` in the store, inside
+   `closeFailedCreateBeadInTx`'s single Tx. They differ only in the metadata
+   batch they mirror back for legacy's tick snapshot fold, which a keyed
+   handler has no use for — so the family reuses the exact call
+   `commitStartFailure` makes for its own failed starts, and no second
+   rollback implementation exists.
+
 ## 3b. Campaign judgment (WE sign-off bar)
 
 Per-family parity level and expected classifications. "Detection" = the shadow record

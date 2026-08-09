@@ -1716,6 +1716,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// store-only, so a raw re-projection of *session still sees it open — the fold
 	// must match that.
 	attemptRollbackPendingCreate := func(info sessionpkg.Info, templateName, name, action, detail string, clearClaim bool) map[string]string {
+		// Coexistence seam for the acting D-STALE-CREATE family: while the keyed
+		// controller holds this exact key AND the row still satisfies the keyed
+		// handler's own dispatch predicate, this arm yields entirely — no Tx
+		// close, no retired-session cleanup, no budget consumed. Both writers
+		// read the SAME durable lease on the same tick, so an un-yielding legacy
+		// would double-roll-back by construction. Re-deriving the predicate here
+		// keeps the yield narrow: legacy's "live runtime belongs to another
+		// session" arm, which the keyed guard does not claim, still runs.
+		// Retired at WE with the god function, like the keyed_start_owner arms.
+		if reconcileOpts.legacyStaleCreateRollbackExcluded != nil &&
+			reconcileOpts.legacyStaleCreateRollbackExcluded(info) &&
+			pendingCreateLeaseExpiredForRollbackInfo(info, clk, sessionStartupTimeoutForConfig(cfg)) {
+			if trace != nil {
+				trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonCode("keyed_stale_create_owner"), TraceOutcomeSkipped, templateName, name, traceRecordPayload{
+					"session_id":     info.ID,
+					"effect_owner":   "keyed",
+					"effect_applied": false,
+				})
+			}
+			return nil
+		}
 		if rollbacksThisTick >= maxRollbacksPerTick {
 			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
 			if trace != nil {

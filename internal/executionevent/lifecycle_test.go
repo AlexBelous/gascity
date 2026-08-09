@@ -279,6 +279,164 @@ func (p *countingEventProvider) List(filter events.Filter) ([]events.Event, erro
 	return p.Provider.List(filter)
 }
 
+// countingGraphStore counts the per-root step walk a reconcile pass performs.
+type countingGraphStore struct {
+	beads.Store
+	getCalls  int
+	listCalls int
+}
+
+func (s *countingGraphStore) Get(id string) (beads.Bead, error) {
+	s.getCalls++
+	return s.Store.Get(id)
+}
+
+func (s *countingGraphStore) ListByMetadata(match map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.Store.ListByMetadata(match, limit, opts...)
+}
+
+// A steady-state patrol tick must not re-read the whole completion journal and
+// re-walk every retained closed root. Once a closed root's steps are all closed
+// and projected, the memo settles it: nothing else can produce a completion
+// fact for it short of the root row changing.
+func TestReconcileCompletedStoresMemoSkipsSettledClosedRoots(t *testing.T) {
+	backingGraph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, backingGraph, "")
+	step := mustCreateProjectionStep(t, backingGraph, "gcg-memo-attempt", root.ID, "build", "[]")
+	closed := "closed"
+	if err := backingGraph.Update(step.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backingGraph.Close(root.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	graph := &countingGraphStore{Store: backingGraph}
+	stores := []beads.GraphStore{{Store: graph}}
+	provider := &countingEventProvider{Provider: events.NewFake()}
+	memo := NewCompletionMemo()
+
+	if got := ReconcileCompletedStoresMemo(provider, stores, "execution-reconcile", memo); got != 1 {
+		t.Fatalf("first ReconcileCompletedStoresMemo = %d, want one repaired fact", got)
+	}
+	if provider.listCalls != 1 {
+		t.Fatalf("journal reads on the first pass = %d, want 1", provider.listCalls)
+	}
+	if graph.getCalls == 0 {
+		t.Fatal("first pass performed no step Gets; fixture does not exercise the walk")
+	}
+	listsAfterFirst := provider.listCalls
+	getsAfterFirst := graph.getCalls
+	rootListsAfterFirst := graph.listCalls
+
+	if got := ReconcileCompletedStoresMemo(provider, stores, "execution-reconcile", memo); got != 0 {
+		t.Fatalf("second ReconcileCompletedStoresMemo = %d, want exact-fact no-op", got)
+	}
+	if provider.listCalls != listsAfterFirst {
+		t.Fatalf("journal reads after a no-change tick = %d, want %d (zero re-reads)", provider.listCalls, listsAfterFirst)
+	}
+	if graph.getCalls != getsAfterFirst {
+		t.Fatalf("step Gets after a no-change tick = %d, want %d (zero per-root Gets)", graph.getCalls, getsAfterFirst)
+	}
+	if graph.listCalls != rootListsAfterFirst+1 {
+		t.Fatalf("root list calls = %d, want %d; the root sweep itself stays", graph.listCalls, rootListsAfterFirst+1)
+	}
+
+	// Boot / crash restart: the memo is process-local, so a fresh one always
+	// replays the full pass — including the journal read and the step walk.
+	if got := ReconcileCompletedStoresMemo(provider, stores, "execution-reconcile", NewCompletionMemo()); got != 0 {
+		t.Fatalf("boot pass with a fresh memo = %d, want exact-fact no-op", got)
+	}
+	if provider.listCalls != listsAfterFirst+1 {
+		t.Fatalf("journal reads after a fresh-memo boot pass = %d, want %d", provider.listCalls, listsAfterFirst+1)
+	}
+	if graph.getCalls <= getsAfterFirst {
+		t.Fatalf("step Gets after a fresh-memo boot pass = %d, want more than %d", graph.getCalls, getsAfterFirst)
+	}
+
+	// A nil memo keeps the pre-memo contract for the plain entry points.
+	listsBeforeNil := provider.listCalls
+	if got := ReconcileCompletedStores(provider, stores, "execution-reconcile"); got != 0 {
+		t.Fatalf("ReconcileCompletedStores = %d, want exact-fact no-op", got)
+	}
+	if provider.listCalls != listsBeforeNil+1 {
+		t.Fatalf("journal reads without a memo = %d, want %d", provider.listCalls, listsBeforeNil+1)
+	}
+}
+
+// The crash window this scan exists for is an open root whose step closed
+// event-silently. Such a root must never settle, however many ticks run.
+func TestReconcileCompletedStoresMemoKeepsScanningUnsettledRoots(t *testing.T) {
+	backingGraph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, backingGraph, "")
+	first := mustCreateProjectionStep(t, backingGraph, "gcg-open-root-first", root.ID, "build", "[]")
+	closed := "closed"
+	if err := backingGraph.Update(first.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	graph := &countingGraphStore{Store: backingGraph}
+	stores := []beads.GraphStore{{Store: graph}}
+	provider := &countingEventProvider{Provider: events.NewFake()}
+	memo := NewCompletionMemo()
+
+	if got := ReconcileCompletedStoresMemo(provider, stores, "execution-reconcile", memo); got != 1 {
+		t.Fatalf("first pass = %d, want one repaired fact", got)
+	}
+	getsAfterFirst := graph.getCalls
+
+	// The root is still open, so the pass keeps walking it.
+	if got := ReconcileCompletedStoresMemo(provider, stores, "execution-reconcile", memo); got != 0 {
+		t.Fatalf("second pass = %d, want exact-fact no-op", got)
+	}
+	if graph.getCalls <= getsAfterFirst {
+		t.Fatalf("step Gets on an open root = %d, want more than %d", graph.getCalls, getsAfterFirst)
+	}
+
+	// A later event-silent close under the still-open root is repaired.
+	second := mustCreateProjectionStep(t, backingGraph, "gcg-open-root-second", root.ID, "test", "[]")
+	if err := backingGraph.Update(second.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReconcileCompletedStoresMemo(provider, stores, "execution-reconcile", memo); got != 1 {
+		t.Fatalf("pass after a later event-silent close = %d, want one repaired fact", got)
+	}
+}
+
+// A settled root that is touched again (its row changes) must be re-walked.
+func TestReconcileCompletedStoresMemoRescansChangedSettledRoot(t *testing.T) {
+	backingGraph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, backingGraph, "")
+	step := mustCreateProjectionStep(t, backingGraph, "gcg-resettle-attempt", root.ID, "build", "[]")
+	closed := "closed"
+	if err := backingGraph.Update(step.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backingGraph.Close(root.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	graph := &countingGraphStore{Store: backingGraph}
+	stores := []beads.GraphStore{{Store: graph}}
+	provider := &countingEventProvider{Provider: events.NewFake()}
+	memo := NewCompletionMemo()
+	if got := ReconcileCompletedStoresMemo(provider, stores, "execution-reconcile", memo); got != 1 {
+		t.Fatalf("first pass = %d, want one repaired fact", got)
+	}
+	getsAfterFirst := graph.getCalls
+
+	if err := backingGraph.Update(root.ID, beads.UpdateOpts{Metadata: map[string]string{"gc.touched": "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReconcileCompletedStoresMemo(provider, stores, "execution-reconcile", memo); got != 0 {
+		t.Fatalf("pass after root row change = %d, want exact-fact no-op", got)
+	}
+	if graph.getCalls <= getsAfterFirst {
+		t.Fatalf("step Gets after root row change = %d, want more than %d (memo must not go blind)", graph.getCalls, getsAfterFirst)
+	}
+}
+
 func TestCompletedFactKeyDistinguishesUnknownFromKnownEmptyTopology(t *testing.T) {
 	base := events.Event{Subject: "gcg-attempt", RunID: "gcg-run", SessionID: "gcs-session", StepID: "build"}
 	var nilSlice []string

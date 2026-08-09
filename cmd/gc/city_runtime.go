@@ -157,6 +157,12 @@ type CityRuntime struct {
 	// publishes: controlDispatcherTick and `gc start` build narrowed desired
 	// states, and a narrowed view would read as fleet-wide undesiredness.
 	desiredSessionNames map[string]bool
+	// orphanSuspendDeferrals is the detector's own #3630 named spec-absence
+	// confirmation window (DETECTOR.md §3, D-ORPHAN). Guarded by sessionStartMu
+	// and created on first use; only beadReconcileTick supplies it to the sweep,
+	// because it is the one call site with a cross-tick identity and the one
+	// that routes.
+	orphanSuspendDeferrals *detectorSuspendDeferralTracker
 	// guarded by sessionStartMu; startup retries reuse this runtime's one
 	// controller-state admission owner.
 	readyRoutedWorkEventAdmissionInstalled bool
@@ -2874,10 +2880,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// Detector sweep, beside legacy (WD.1). Detection itself is read-only and
 	// reuses this tick's already-loaded inputs; the routing seam then hands the
 	// ACTING families' exact keys to the session-start controller (WD.2:
-	// D-DEADLINE; WD.3: D-ORPHAN's close arms). Admit is nil in a legacy-owned
-	// city, which keeps the whole sweep read-only there. The desired view is
-	// published first so the keyed close handler re-derives undesiredness from
-	// the same view that raised the condition.
+	// D-DEADLINE; WD.3: D-ORPHAN's close arms; WD.4: its live-orphan drain
+	// arm). Admit is nil in a legacy-owned city, which keeps the whole sweep
+	// read-only there. The desired view is published first so the keyed close
+	// handler re-derives undesiredness from the same view that raised the
+	// condition.
 	cr.publishDesiredSessionNames(desiredState)
 	runDetectorSweep(ctx, trace, detectorSweepInput{
 		CityPath:           cr.cityPath,
@@ -2899,6 +2906,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		Drains:             cr.sessionDrains,
 		Idle:               cr.it,
 		MaxAge:             cr.mat,
+		SuspendDeferrals:   cr.detectorSuspendDeferrals(),
 		Clock:              clock.Real{},
 		StartupTimeout:     cr.cfg.Session.StartupTimeoutDuration(),
 		StoreQueryPartial:  result.snapshotQueryPartial(),

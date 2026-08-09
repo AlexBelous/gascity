@@ -47,8 +47,15 @@ func reconcileExactSessionDetectorFamily(
 	// Case order mirrors legacy's forward pass, where the not-desired block runs
 	// before the deadline arms and early-continues: an undesired row past its
 	// idle deadline is the orphan family's, not the deadline family's.
+	//
+	// D-ORPHAN has one case for its two effect arms because their durable-row
+	// guard is identical — an undesired open row — and the fact that splits them
+	// (is the runtime alive) is provider I/O, not durable state. Splitting the
+	// case would mean two guards that can never disagree, so whichever came
+	// second would be dead code.
 	switch {
-	case detectorActOrphan && exactSessionOrphanCloseCandidate(params, info, response, clk) != "":
+	case (detectorActOrphanClose || detectorActOrphanDrain) &&
+		exactSessionOrphanCloseCandidate(params, info, response, clk) != "":
 		owner, err := reconcileExactSessionOrphanClose(ctx, admission, params, info, response, clk)
 		return true, owner, err
 	case detectorActDeadline && exactSessionDeadlineStopCandidate(params, info, response, clk.Now().UTC()):

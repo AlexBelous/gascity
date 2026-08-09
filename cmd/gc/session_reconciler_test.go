@@ -6236,6 +6236,10 @@ func TestReconcileSessionBeads_PoolDependencyUnblocksWake(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_OrphanSessionDrained is DETECTOR.md §1's anchor for
+// the Orphaned drain site. Its CONTRACT is re-pointed keyed at WD.4 by
+// TestExactOrphanLiveRowDrainsOnceByKey; this legacy form stays green until the
+// god function dies at WE, because a city with no keyed owner still drains here.
 func TestReconcileSessionBeads_OrphanSessionDrained(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
@@ -6254,6 +6258,10 @@ func TestReconcileSessionBeads_OrphanSessionDrained(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen is the
+// kept-open negative for the same site. Its CONTRACT is re-pointed keyed at WD.4
+// by TestDetectorOrphanLiveAssignedWorkNeverEnqueuesOrDrains, where suppression
+// happens before the key is ever enqueued; this legacy form stays green until WE.
 func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}

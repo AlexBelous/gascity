@@ -307,6 +307,9 @@ func TestExactOrphanUnprovenAbsenceRefusesWithZeroEffect(t *testing.T) {
 				t.Fatalf("authoritative read: %v", err)
 			}
 			params := newExactOrphanCloseParams(env, provider, map[string]bool{})
+			// WD.4: the possibly-alive case is handed to the drain arm from inside
+			// this observation, and the drain arm needs somewhere to record intent.
+			params.DrainTracker = env.dt
 			handled, owner, err := reconcileExactSessionDetectorFamily(
 				t.Context(), orphanCloseAdmission(bead.ID), params, info, response, env.clk)
 			if !handled {
@@ -318,8 +321,16 @@ func TestExactOrphanUnprovenAbsenceRefusesWithZeroEffect(t *testing.T) {
 			if tc.incomplete && err == nil {
 				t.Fatal("incomplete liveness observation produced no typed refusal")
 			}
-			if tc.running && err != nil {
-				t.Fatalf("a possibly-alive row is the WD.4 drain arm's, not an error: %v", err)
+			if tc.incomplete && env.dt.get(bead.ID) != nil {
+				t.Fatal("an incomplete observation began a drain; an unproven row belongs to neither arm")
+			}
+			if tc.running {
+				if err != nil {
+					t.Fatalf("a possibly-alive row is the WD.4 drain arm's, not an error: %v", err)
+				}
+				if env.dt.get(bead.ID) == nil {
+					t.Fatal("a possibly-alive row was released by the close arm and no drain arm picked it up")
+				}
 			}
 
 			after, err := env.store.Get(bead.ID)

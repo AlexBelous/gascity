@@ -328,6 +328,7 @@ type startExecutionOptions struct {
 	legacyStatusHealExcluded       func(sessionpkg.Info) bool
 	legacyDeadlineStopExcluded     func(sessionpkg.Info) bool
 	legacyOrphanCloseExcluded      func(sessionpkg.Info) bool
+	legacyOrphanDrainExcluded      func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
 	// session-bead closes during the synchronous boot reconcile. Those closes
 	// gate on a per-session open-work probe that reads the wisp tier
@@ -480,6 +481,21 @@ func withLegacyDeadlineStopExclusion(excluded func(sessionpkg.Info) bool) startE
 func withLegacyOrphanCloseExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacyOrphanCloseExcluded = excluded
+	}
+}
+
+// withLegacyOrphanDrainExclusion installs the keyed-ownership bridge for the
+// D-ORPHAN DRAIN arm. Returning true keeps the fleet loop's Orphaned drain out
+// of beginSessionDrainInfo entirely, because the keyed handler already owns
+// that exact key and writes its intent into the SAME in-memory tracker. That
+// shared tracker is why the yield is mandatory rather than best-effort: an
+// un-yielding legacy would either double-begin or, worse, win the race and
+// stamp its own reason on the keyed arm's drain. It is a sibling of
+// withLegacyOrphanCloseExclusion — the close arm's predicate is false for every
+// drain admission, and vice versa. Retired at WE with the god function.
+func withLegacyOrphanDrainExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyOrphanDrainExcluded = excluded
 	}
 }
 

@@ -1525,6 +1525,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	legacyDrainAckStopExcluded := reconcileOpts.legacyStartExcluded
 	legacyDeadlineStopExcluded := reconcileOpts.legacyDeadlineStopExcluded
 	legacyOrphanCloseExcluded := reconcileOpts.legacyOrphanCloseExcluded
+	legacyOrphanDrainExcluded := reconcileOpts.legacyOrphanDrainExcluded
 	// Coexistence seam for the acting D-ORPHAN close family: while the keyed
 	// controller holds this exact key, both legacy close arms yield entirely —
 	// no ClosePatch, no status close, no work-release cascade. Like the deadline
@@ -2276,6 +2277,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							fmt.Fprintf(stdout, "Deferring drain for named session '%s': awaiting spec-absence confirmation (%d/%d) — transient enumeration-collapse guard (#3630)\n", name, n, namedSuspendConfirmTicks) //nolint:errcheck
 							continue
 						}
+					}
+					// Coexistence seam for the acting D-ORPHAN drain arm. Placed at
+					// the effect, exactly where the close arm's yield sits: legacy
+					// keeps raising and tracing its own deferred-confirm window above
+					// (the two counters are duplicated by design, §3b), and only the
+					// drain BEGIN stands down. Both writers share one in-memory
+					// tracker on one tick, so this is not a race to lose.
+					if legacyOrphanDrainExcluded != nil && legacyOrphanDrainExcluded(infoByID[id]) {
+						if trace != nil {
+							template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
+							if template == "" {
+								template = infoPostHeal.Template
+							}
+							trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode("keyed_orphan_drain_owner"), TraceOutcomeSkipped, template, name, traceRecordPayload{
+								"session_id":     id,
+								"effect_owner":   "keyed",
+								"effect_applied": false,
+							})
+						}
+						continue
 					}
 					if beginSessionDrainInfo(infoPostHeal, sp, dt, reason, clk, defaultDrainTimeout) {
 						if trace != nil {

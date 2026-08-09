@@ -58,21 +58,24 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // TestDetectorFamiliesStayShadowOnlyDuringWD pins the act frontier: exactly the
 // families whose keyed handler AND legacy yield have landed may act, and every
 // other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
-// arm crossed at WD.3. A family that flips its act constant without an arm in
-// detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
-// before it can double-act beside a non-yielding legacy.
+// arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4. A family that flips
+// an act constant without an arm in detectorAdmissionSourceFor — or with an arm
+// but no landed handler — fails here before it can double-act beside a
+// non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
-	// The outcome each acting family's EFFECT arm carries. A family absent from
-	// this table must not route under any outcome.
-	acting := map[detectorFamily]TraceOutcomeCode{
-		detectorFamilyDeadline: TraceOutcomeStop,
-		detectorFamilyOrphan:   TraceOutcomeClosed,
+	// The outcomes each acting family's EFFECT arms carry, one entry per landed
+	// handler+yield pair. A family absent from this table must not route under
+	// any outcome, and an outcome absent from a listed family's set must not
+	// route either.
+	acting := map[detectorFamily]map[TraceOutcomeCode]bool{
+		detectorFamilyDeadline: {TraceOutcomeStop: true},
+		detectorFamilyOrphan:   {TraceOutcomeClosed: true, TraceOutcomeDrain: true},
 	}
 	if !detectorAnyFamilyActs() {
 		t.Fatal("detectorAnyFamilyActs() = false; D-DEADLINE acts from WD.2 onward")
 	}
 	for _, spec := range detectorFamilySpecs {
-		effect, acts := acting[spec.Family]
+		effects, acts := acting[spec.Family]
 		if spec.Acts != acts || detectorFamilyActs(spec.Family) != acts {
 			t.Errorf("family %q acts=%v, want %v", spec.Family, spec.Acts, acts)
 		}
@@ -84,22 +87,31 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 			}
 			continue
 		}
-		source, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: effect})
-		if !routed {
-			t.Errorf("family %q did not route its effect arm (outcome %q)", spec.Family, effect)
-		}
-		if source == "" {
-			t.Errorf("family %q routes with an empty admission source", spec.Family)
-		}
-		if err := validateSessionStartAdmission("ga-detector", source); err != nil {
-			t.Errorf("family %q admission source %q is not accepted by the controller: %v", spec.Family, source, err)
+		sources := make(map[sessionStartAdmissionSource]TraceOutcomeCode, len(effects))
+		for effect := range effects {
+			source, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: effect})
+			if !routed {
+				t.Errorf("family %q did not route its effect arm (outcome %q)", spec.Family, effect)
+			}
+			if source == "" {
+				t.Errorf("family %q routes outcome %q with an empty admission source", spec.Family, effect)
+			}
+			if err := validateSessionStartAdmission("ga-detector", source); err != nil {
+				t.Errorf("family %q admission source %q is not accepted by the controller: %v", spec.Family, source, err)
+			}
+			// One arm, one source: two effect arms sharing a source would make
+			// each arm's legacy yield stand down for the other arm's rows.
+			if prior, seen := sources[source]; seen {
+				t.Errorf("family %q routes outcomes %q and %q under the same source %q", spec.Family, prior, effect, source)
+			}
+			sources[source] = effect
 		}
 		for _, outcome := range detectorShadowOutcomes {
-			if outcome == effect {
+			if effects[outcome] {
 				continue
 			}
 			if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: outcome}); routed {
-				t.Errorf("family %q routed non-effect outcome %q; only its effect arm may enqueue", spec.Family, outcome)
+				t.Errorf("family %q routed non-effect outcome %q; only its effect arms may enqueue", spec.Family, outcome)
 			}
 		}
 	}

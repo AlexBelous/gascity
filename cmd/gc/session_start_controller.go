@@ -36,9 +36,13 @@ const (
 	sessionStartAdmissionDeadline sessionStartAdmissionSource = "deadline"
 	// sessionStartAdmissionOrphanClose is the detector sweep's D-ORPHAN CLOSE
 	// key (DETECTOR.md §3): an undesired row whose runtime is provably absent,
-	// or a failed-create row whose create lease has expired. The live-orphan
-	// drain arm of the same family gets its own source at WD.4.
+	// or a failed-create row whose create lease has expired.
 	sessionStartAdmissionOrphanClose sessionStartAdmissionSource = "orphan_close"
+	// sessionStartAdmissionOrphanDrain is the same family's DRAIN key: an
+	// undesired row whose runtime is still live. It is a separate source from
+	// the close because each arm has its own legacy yield, and one source
+	// serving both would make each yield stand down for the other arm's rows.
+	sessionStartAdmissionOrphanDrain sessionStartAdmissionSource = "orphan_drain"
 )
 
 type sessionStartAdmission struct {
@@ -675,7 +679,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionAntiEntropy,
 		sessionStartAdmissionWaitDependency,
 		sessionStartAdmissionDeadline,
-		sessionStartAdmissionOrphanClose:
+		sessionStartAdmissionOrphanClose,
+		sessionStartAdmissionOrphanDrain:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -893,6 +898,24 @@ func (c *sessionStartController) ownsOrphanClose(sessionID string) bool {
 	defer c.mu.Unlock()
 	admission, ok := c.admissions[sessionID]
 	return ok && admission.Source == sessionStartAdmissionOrphanClose
+}
+
+// ownsOrphanDrain reports whether the keyed controller currently holds a
+// D-ORPHAN drain admission for this exact key. Legacy's Orphaned drain arm
+// consults it and yields. It is a SIBLING of ownsOrphanClose, not a widening of
+// it, for the reason WD.2 and WD.3 both recorded: each predicate answers "is
+// THIS arm's effect in flight", and one predicate answering for both arms would
+// make legacy's close arm stand down for rows the drain arm owns — and the drain
+// arm's yield stand down for rows the close arm owns. Retired at WE with the god
+// function.
+func (c *sessionStartController) ownsOrphanDrain(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admission, ok := c.admissions[sessionID]
+	return ok && admission.Source == sessionStartAdmissionOrphanDrain
 }
 
 // YieldPoolDrainAck releases a retained agent drain acknowledgement only when

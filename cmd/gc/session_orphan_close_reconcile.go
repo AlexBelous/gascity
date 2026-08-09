@@ -149,8 +149,16 @@ func reconcileExactSessionOrphanClose(
 		return yieldOrPark(errors.New("exact orphan close liveness observation is incomplete"))
 	}
 	if liveness.Running || liveness.Alive {
-		// A live undesired row is the DRAIN arm's, which lands at WD.4. Record the
-		// refusal for the parity join and release the key with zero effect.
+		// A live undesired row is the DRAIN arm's (WD.4). It is handed over from
+		// INSIDE this observation rather than released for a second admission:
+		// the two arms split on exactly one fact — is the runtime alive — and a
+		// second probe could disagree with the first, leaving the row owned by
+		// neither arm. The drain arm records its own outcome at legacy's Orphaned
+		// site; a live failed-create row is nobody's drain target and keeps the
+		// kept-open refusal here.
+		if exactSessionOrphanDrainReasons(reason) {
+			return reconcileExactSessionOrphanDrain(ctx, admission, params, latest, reason, clk)
+		}
 		recordExactSessionOrphanCloseTrace(params, admission, latest, site, reason, TraceOutcomeKeptOpen, 0, false)
 		return exactSessionStartKeyedOwner, nil
 	}

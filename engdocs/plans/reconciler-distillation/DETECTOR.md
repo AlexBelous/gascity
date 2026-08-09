@@ -636,6 +636,87 @@ WD.4 lands their handler and yield.
    handler-dispatch switch mirrors that order so the two paths cannot disagree
    about which family owns such a row.
 
+### §3 D-ORPHAN drain deltas (recorded at WD.4)
+
+Where the family's live-orphan DRAIN arm as built diverges from §3 as written.
+Reported, not improvised. Q4 is resolved on ga-f7v2ft.110 in the KEEP direction,
+so drain intent stays in the in-memory `drainTracker` with the one-tick
+deferred-interrupt rescue window — today's semantics, and WD.6 inherits it.
+
+1. **One act constant per EFFECT ARM, not per family.** §3's shared shadow
+   shape says "one compile-time constant per family". D-ORPHAN has two
+   effect arms with two handlers and two legacy yields, which landed a slice
+   apart, so one constant would have crossed the drain arm at WD.3 — beside
+   a legacy drain that did not yet yield. WD.4 splits `detectorActOrphan`
+   into `detectorActOrphanClose` and `detectorActOrphanDrain`, and
+   `detectorFamilySpecs` ORs them back into the family's single `Acts` bit,
+   so the family-spec structure the rule is expressed in is unchanged. The
+   act-frontier pin now maps a family to a SET of routing outcomes and
+   additionally asserts that no two effect arms share an admission source.
+2. **The two arms split by OUTCOME in `detectorAdmissionSourceFor` and by
+   LIVENESS in the handler — and the handler's split happens inside the
+   close arm's single observation.** Detection can separate them from the
+   running set; the per-key handler cannot, because the fact that separates
+   them is provider I/O. A second admission under the drain source would
+   re-probe, and a second probe may disagree with the first, leaving the row
+   owned by neither arm. So `reconcileExactSessionDetectorFamily` keeps ONE
+   orphan case (its guard is the shared durable-row candidate) and
+   `reconcileExactSessionOrphanClose` hands a live row straight to
+   `reconcileExactSessionOrphanDrain` from inside its own liveness
+   observation. The sources still differ because the two LEGACY yields
+   differ.
+3. **The named deferred-confirm counter is a SECOND counter, and it gates
+   the ENQUEUE, not the handler.** §3 says the counter "moves into bounded
+   in-memory detector state"; it moves as `detectorSuspendDeferralTracker`,
+   a detector-owned map pruned at the end of every sweep so it counts
+   CONSECUTIVE candidacy and stays bounded by the live fleet. Legacy keeps
+   its own `drainTracker.suspendDeferrals` window, which is what §3b's
+   "deferred-confirm off-by-one (duplicated counters)" already anticipates;
+   sharing one counter would have coupled the windows and made the join
+   unable to tell the paths apart. The handler does NOT re-derive it: like
+   undesiredness it is fleet-tick state — a count of consecutive sweeps — so
+   the detector simply withholds the key until the window elapses, and no
+   key inside the window ever reaches a handler. Only the patrol/boot call
+   site supplies a tracker (the publish half of WD.2's delta 6 again); a nil
+   tracker fails CLOSED, deferring rather than draining.
+4. **A6 becomes an explicit handler rung, and it is a STRENGTHENING of
+   legacy.** Legacy's orphan drain has no attachment check, so it will
+   interrupt a session a human is attached to on the tick after it begins.
+   Attached-user safety is a KEEP invariant of the whole redesign
+   (DESIGN.md §2), not a D-DRIFT-local policy, so the keyed arm refuses with
+   zero effect while `IsAttached` or a pending interaction says a person is
+   engaged. It deliberately stops at those two rungs:
+   `namedSessionActiveUseReasonInfo`'s remaining rungs (`activity_unknown`,
+   `recent_activity`) are config-drift policy and would defer orphan drains
+   indefinitely on every provider that cannot report activity. The refusal is
+   level-triggered, so the drain proceeds once the human detaches. **This is a
+   new expected-divergence class for §3b's D-ORPHAN row** — keyed defers where
+   legacy drains an attached row — and it must be triaged into that cell
+   rather than counted as a mismatch.
+5. **The legacy yield sits at the drain BEGIN, not at the top of the arm.**
+   Legacy keeps raising and tracing its own kept-open and deferred-confirm
+   records above the yield, so the join keeps both populations on the
+   deferring ticks; only `beginSessionDrainInfo` stands down. Both writers
+   share ONE in-memory tracker on one tick, which makes the yield mandatory
+   rather than best-effort: an un-yielding legacy would not merely
+   double-begin, it could win and stamp its own reason on the keyed arm's
+   drain. `withLegacyOrphanDrainExclusion`/`ownsOrphanDrain` are siblings of
+   the close pair for the reason WD.2 and WD.3 both recorded.
+6. **A LIVE failed-create row is not a drain target.** The shared candidate
+   returns `failed_create` for such a row, and legacy's failed-create arm is
+   dead-only, so the drain arm accepts only the `orphaned` and `suspended`
+   reasons and a live failed-create row keeps WD.3's kept-open refusal.
+   Detection never routes one here anyway — `detectOrphan` classifies
+   failed-create before the running-set split — so this is the handler
+   agreeing with the detector rather than a second opinion.
+7. **Exactly-once is enforced by family precedence, not by a handler
+   latch.** Once intent is recorded, `detectDrain` claims the row before
+   `detectOrphan` runs (WD.1's delta 4 ordering) and D-DRAIN does not act,
+   so the orphan family never re-enqueues a key it just drained: no
+   treadmill and no second intent, with no new state. A key carried back in
+   by some other admission still lands on WD.3's active-drain refusal, which
+   is correct — advancing a drain is D-DRAIN's (WD.6).
+
 ## 3b. Campaign judgment (WE sign-off bar)
 
 Per-family parity level and expected classifications. "Detection" = the shadow record
@@ -649,7 +730,7 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 |---|---|---|---|
 | start families (already keyed) | act | existing shadow-worker + comparator evidence | per existing comparators |
 | D-DEADLINE | decision | deadline firing + hold/quarantine/work blockers | legacy pending-interaction deferral (probe-only signal, unpredicted) |
-| D-ORPHAN | decision | close/drain/kept-open arm choice | deferred-confirm off-by-one (duplicated counters); liveness-error arm incomparable |
+| D-ORPHAN | decision | close/drain/kept-open arm choice | deferred-confirm off-by-one (duplicated counters); liveness-error arm incomparable; **keyed A6 attached/pending-interaction deferral against a legacy drain** (WD.4 delta 4) |
 | D-STALE-CREATE | decision | rollback vs preserved | legacy defers rollback #6+ (R6 budget retired) |
 | D-DRIFT | detection | hash-mismatch firing per session | entire 5-arm ladder handler-side (attached probe is provider I/O — excluded, sign-off required) |
 | D-SLEEP | decision | awake-set membership (incl. winner identity, R3) | probe/pending arms unpredicted |
@@ -777,3 +858,10 @@ Only after the WD.15 evidence campaign is archived (D4):
    controller restart, today's semantics. RECOMMEND keep (a durable-intent redesign
    adds metadata writes and fencing for a crash window nobody has reported); WD.4
    starts only on owner sign-off or a directive for the durable variant.
+   **RESOLVED — keep** (architect sign-off under the owner's standing
+   simplest-correct directive, 2026-08-09, recorded on ga-f7v2ft.110 and flagged
+   for veto): in-memory IS the parity-faithful choice for the D4 campaign, since
+   legacy's drain intent is also in-memory and a durable redesign mid-campaign
+   would be a behavior change confounding the joins. WD.4's entry gate is
+   satisfied and WD.6 inherits; a durable variant becomes a normal post-WE bead
+   if a real crash-window incident ever surfaces.

@@ -746,6 +746,23 @@ func (cr *CityRuntime) publishDesiredSessionNames(desired map[string]TemplatePar
 	cr.sessionStartMu.Unlock()
 }
 
+// detectorSuspendDeferrals returns this runtime's named spec-absence
+// confirmation window for the detector sweep, creating it on first use. Only
+// the patrol/boot tick calls it: the control dispatcher and `gc start` run
+// narrowed sweeps, and a second sweep counting the same window on the same tick
+// would confirm a suspend twice as fast as legacy does.
+func (cr *CityRuntime) detectorSuspendDeferrals() *detectorSuspendDeferralTracker {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	if cr.orphanSuspendDeferrals == nil {
+		cr.orphanSuspendDeferrals = newDetectorSuspendDeferralTracker()
+	}
+	return cr.orphanSuspendDeferrals
+}
+
 // desiredSessionNamesView returns the last published desired-session view, or
 // nil before the first patrol/boot tick has published one.
 func (cr *CityRuntime) desiredSessionNamesView() map[string]bool {
@@ -786,9 +803,10 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 	// in flight right now — and it is installed whenever a controller exists,
 	// including the bounded handoff windows where the start predicate stands
 	// down, because an admitted key outlives those windows.
-	// The D-ORPHAN close yield rides the same reasoning and the same window, on
-	// its own predicate: one predicate covering both families would make each
-	// family's legacy arm stand down for rows the OTHER keyed family owns.
+	// The D-ORPHAN close and drain yields ride the same reasoning and the same
+	// window, each on its OWN predicate: one predicate covering several arms
+	// would make each arm's legacy counterpart stand down for rows another keyed
+	// arm owns.
 	var deadlineOption startExecutionOption
 	if controller != nil {
 		stopExclusion := withLegacyDeadlineStopExclusion(func(info sessionpkg.Info) bool {
@@ -797,9 +815,13 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 		closeExclusion := withLegacyOrphanCloseExclusion(func(info sessionpkg.Info) bool {
 			return controller.ownsOrphanClose(info.ID)
 		})
+		drainExclusion := withLegacyOrphanDrainExclusion(func(info sessionpkg.Info) bool {
+			return controller.ownsOrphanDrain(info.ID)
+		})
 		deadlineOption = func(opts *startExecutionOptions) {
 			stopExclusion(opts)
 			closeExclusion(opts)
+			drainExclusion(opts)
 		}
 	}
 	excluded := cr.sessionStartLegacyExclusionPredicate()

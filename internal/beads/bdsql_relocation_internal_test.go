@@ -45,18 +45,27 @@ func TestRelocatedClassRefusalNamesEverythingAnOperatorNeeds(t *testing.T) {
 }
 
 // TestRelocatedClassRefusalDoesNotRecommendABlindVerb pins the correction that
-// mattered most: `gc bd show` and `gc bd dep tree` are raw bd passthroughs
-// (cmd/gc/cmd_bd.go ends at exec.Command(bdPath, bdArgs...) with no class
-// routing), so recommending them sent the operator to a command carrying the
-// exact bug this refusal warns about. The message must name them as blind
-// rather than as the escape hatch.
+// mattered most: a verb this message names as the way out must not answer from
+// the same ledger the message just said cannot hold the rows. Recommending one
+// sent the operator to a command carrying the exact bug this refusal warns
+// about.
+//
+// The set of blind verbs shrank once. `gc bd show` and `gc bd dep list` acquired
+// in-process class routing (cmd/gc/cmd_bd_by_id.go) and are now the read this
+// message names first. `gc bd dep tree` did not acquire routing, but it is no
+// longer blind either: on a relocated id that surface refuses it. The pin moved
+// with the fact rather than being deleted, because a message that offered a
+// verb which cannot answer would be the original defect returning.
 func TestRelocatedClassRefusalDoesNotRecommendABlindVerb(t *testing.T) {
 	msg := RelocatedClassRefusal("bd sql", []RelocatedClass{graphRelocated()}).Error()
 	if strings.Contains(msg, "Use the federated `gc bd") {
 		t.Errorf("refusal still recommends a raw bd passthrough as federated:\n%s", msg)
 	}
-	if !strings.Contains(msg, "`gc bd show` and `gc bd dep tree` are raw bd passthroughs") {
-		t.Errorf("refusal does not warn that the bd read verbs answer from this same ledger:\n%s", msg)
+	if !strings.Contains(msg, "`gc bd dep tree <id>` is not served in process") {
+		t.Errorf("refusal does not say dep tree is unavailable on a relocated id:\n%s", msg)
+	}
+	if !strings.Contains(msg, "`gc bd show <id>`") {
+		t.Errorf("refusal does not name the by-ID read that IS class-routed:\n%s", msg)
 	}
 }
 

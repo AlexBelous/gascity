@@ -40,7 +40,12 @@ start_command = "sleep 3600"
 `, `patrol_interval = "1m"
 	`, `conditional_writes = "auto"`)
 	waitForExpectedTmuxSessions(t, cityDir, []string{"worker"})
-	out, err := gc(cityDir, "session", "new", "worker", "--no-attach", "--json")
+	// The reconciler harness injects a [[named_session]] for every non-pool
+	// agent block, so a bare "gc session new worker" would claim that
+	// configured identity (session_origin=named) instead of creating the
+	// manual session this journey observes. A distinct alias keeps the two
+	// identities separate.
+	out, err := gc(cityDir, "session", "new", "worker", "--alias", "manual-status", "--no-attach", "--json")
 	if err != nil {
 		t.Fatalf("create manual session: %v\n%s", err, out)
 	}

@@ -1780,7 +1780,6 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	// parked with "recovered drain acknowledgement authorization no longer holds
 	// before provenance write" forever.
 	t.Run("routed_work_drain_finalize", func(t *testing.T) {
-		t.Skip("ga-f7v2ft.112 (WD.6): the leg carries two ruled-but-unbuilt behaviors — the :1779 purity respec (assert no legacy drain EFFECT on the drained row, not fleet silence) and ga-f7v2ft.131 (Live-handle stale open for a closed trigger exhausts the finalize budget); ga-2oboq's canonicalizer mechanism is independently proven (unit REDs + the attempt16 finalize log)")
 		if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
 			if removeErr := removeExitedPaneProcess(firstPool.panePID); removeErr != nil {
 				return false, removeErr
@@ -1829,18 +1828,32 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			t.Fatalf("exact routed-work drain final state = info %+v bead %+v at %s, want post-command closed/drained with a fresh nonzero revision token",
 				firstPoolFinalInfo, firstPoolFinalBead, drainFinalizedAt)
 		}
+		// Purity, ROW-SCOPED (ga-f7v2ft.112 architect ruling, 2026-08-09). The
+		// invariant this leg exists to prove is "no legacy drain EFFECT on the
+		// drained row", not "no legacy cycle anywhere in the fleet": a
+		// poke-triggered legacy cycle that runs inside the finalize window and
+		// touches nothing of this row is background activity, exactly as the
+		// sibling-isolation respec (ruling 3) already concluded for background
+		// bookkeeping. Assert the effect, tolerate the cycle.
 		postDrainTrace, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
 		if err != nil {
 			t.Fatalf("read trace after routed-work drain acknowledgement: %v", err)
 		}
+		drainedRows := map[string]bool{
+			firstPool.info.ID: true, secondPool.info.ID: true,
+			firstPool.info.SessionName: true, secondPool.info.SessionName: true,
+		}
 		for _, record := range postDrainTrace {
-			if record.Seq <= traceSeqBeforeDrain || record.Ts.Before(drainAckCommandAt) || record.Ts.After(drainFinalizedAt) ||
-				record.RecordType != TraceRecordCycleStart {
+			if record.Seq <= traceSeqBeforeDrain || record.Ts.Before(drainAckCommandAt) || record.Ts.After(drainFinalizedAt) {
 				continue
 			}
-			if record.TickTrigger == TraceTickTriggerPatrol || record.TickTrigger == TraceTickTriggerPoke {
-				t.Fatalf("legacy reconciliation cycle ran during exact routed-work drain: %+v", record)
+			if !legacyDrainEffectRecord(record) {
+				continue
 			}
+			if !drainedRows[strings.TrimSpace(record.SessionName)] && !drainedRows[strings.TrimSpace(record.SessionBeadID)] {
+				continue
+			}
+			t.Fatalf("legacy applied a drain effect to the drained row during the exact routed-work drain: %+v", record)
 		}
 	})
 
@@ -1895,7 +1908,6 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			secondDrainAck, secondPool.info.Alias, secondPool.info.SessionName)
 	}
 	t.Run("routed_work_sibling_retirement", func(t *testing.T) {
-		t.Skip("ga-f7v2ft.112 (WD.6): stalls in the same drain-finalize family as routed_work_drain_finalize (:1779 purity respec + ga-f7v2ft.131 live-read staleness); re-lands with WD.6's deadline-bounded drain-ack admissions")
 		if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
 			if removeErr := removeExitedPaneProcess(secondPool.panePID); removeErr != nil {
 				return false, removeErr

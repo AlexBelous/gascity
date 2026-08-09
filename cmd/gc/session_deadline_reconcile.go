@@ -105,9 +105,32 @@ func reconcileExactSessionDetectorFamily(
 	// is a property of today's guards and not of the family boundary. If either
 	// guard widens, this order is what keeps a row legacy would have repaired
 	// from being drained as an ordinary no-wake row instead.
+	//
+	// D-DRAIN sits SECOND, directly below D-DUP and above every other family.
+	// Legacy's Phase-0b duplicate retire is the only arm that genuinely precedes
+	// drain handling; from the forward pass on, the acknowledgement decision is
+	// the FIRST thing legacy does with a row. Its undesired block opens with
+	// isDrainAcked (session_reconciler.go:2195) before either orphan arm, and the
+	// desired path's acknowledgement block (:2548) `continue`s past progress
+	// stall, drift, the deadline arms and the whole wake/sleep phase. The
+	// end-of-tick advance scan (:4282) runs last only because it is a SEPARATE
+	// loop over the tracker, re-walking rows the forward pass already claimed —
+	// it is not a lower-precedence arm on the same row.
+	//
+	// The slot is also the only one that composes. Every landed family's handler
+	// already refuses a row with an active drain — D-ORPHAN close
+	// (session_orphan_close_reconcile.go), D-DEADLINE, D-STALE-CREATE and
+	// D-STRANDED all yieldOrPark on params.DrainTracker.get(info.ID) != nil, and
+	// D-SLEEP records a quiet no-change — because every one of those refusals was
+	// written to mean "advancing a drain is D-DRAIN's". Placing D-DRAIN lower
+	// would let those refusals swallow the key and starve the advance the moment
+	// this family began acting.
 	switch {
 	case detectorActDup && exactSessionDuplicateNamedCandidate(params, info, response):
 		owner, err := reconcileExactSessionDuplicateNamedRetire(admission, params, info, response, clk)
+		return true, owner, err
+	case detectorActDrain && exactSessionDrainAdvanceCandidate(params, info, response):
+		owner, err := reconcileExactSessionDrainAdvance(ctx, admission, params, info, response, clk)
 		return true, owner, err
 	case (detectorActOrphanClose || detectorActOrphanDrain) &&
 		exactSessionOrphanCloseCandidate(params, info, response, clk) != "":

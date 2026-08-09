@@ -207,6 +207,22 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				result.Err != nil && result.Err.Error() != errSessionStartPoolDrainAckPending.Error() {
 				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation retrying for %s: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // non-exhausting safety retries must retain their cause
 			}
+			// ga-f7v2ft.112 ruling 1b. Repeated refusals are indistinguishable from
+			// transient by construction, so this classifies nothing and changes
+			// nothing — it is the one throttled observability escalation, and the
+			// deadline release below is what actually bounds the obligation.
+			if result.Outcome == sessionStartReconcileRetrying && result.DrainAckRefusals > 0 &&
+				result.DrainAckRefusals%drainAckRefusalDiagnosticInterval == 0 {
+				cr.recordDrainAckAdmissionBoundTrace(stateSnapshot.Config, result, TraceOutcomeRetry)
+			}
+			if result.Outcome == sessionStartReconcileDeadlineExceeded {
+				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation released %s at the drain deadline after %d consecutive refusals: %v; authoritative audit requested\n", //nolint:errcheck // the release must be visible: legacy re-owns the row from here
+					cr.sessionStartLogPrefix(), result.Admission.SessionID, result.DrainAckRefusals, result.Err)
+				cr.recordDrainAckAdmissionBoundTrace(stateSnapshot.Config, result, TraceOutcomeDeadlineExceeded)
+				if mode == rollout.Auto {
+					cr.requestLegacySessionStartFallback()
+				}
+			}
 			if result.Outcome == sessionStartReconcileSucceeded && result.LegacyFallback {
 				if result.Err != nil {
 					fmt.Fprintf(cr.sessionStartStderr(), "%s: exact session reconciliation yielded %s to priority legacy fallback: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // fallback cause must remain visible
@@ -850,6 +866,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			}),
 			withLegacySleepDrainExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsSleepDrain(info.ID)
+			}),
+			withLegacyDrainAdvanceExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsDrainAdvance(info.ID)
 			}),
 			withLegacyProgressStallRecycleExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsProgressStallRecycle(info.ID)

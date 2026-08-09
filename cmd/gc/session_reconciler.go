@@ -1527,6 +1527,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	legacyOrphanCloseExcluded := reconcileOpts.legacyOrphanCloseExcluded
 	legacyOrphanDrainExcluded := reconcileOpts.legacyOrphanDrainExcluded
 	legacySleepDrainExcluded := reconcileOpts.legacySleepDrainExcluded
+	legacyDrainAdvanceExcluded := reconcileOpts.legacyDrainAdvanceExcluded
 	legacyProgressStallExcluded := reconcileOpts.legacyProgressStallExcluded
 	legacyStrandedRepairExcluded := reconcileOpts.legacyStrandedRepairExcluded
 	// Coexistence seam for the acting D-ORPHAN close family: while the keyed
@@ -2191,7 +2192,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				continue
 			default:
-				if dops != nil {
+				// Coexistence seam for the acting D-DRAIN family (WD.6). While the
+				// keyed controller holds this exact key, legacy's undesired-row
+				// acknowledgement arm stands down: no stop-pending mark, no
+				// assigned-work cancel, no finalize. Both writers mutate the same
+				// drainState pointer on the same tick, so this is not a race to
+				// lose. The yield is scoped to THIS arm, exactly as legacy scopes
+				// it: an unacknowledged row still falls through to the orphan arms
+				// below, which is what legacy does today. Retired at WE.
+				if dops != nil && (legacyDrainAdvanceExcluded == nil || !legacyDrainAdvanceExcluded(infoPostHeal)) {
 					if acked, _ := dops.isDrainAcked(name); acked {
 						// gc-hz0nu: every drain-acked decision below depends on the
 						// store-derived desired-state / assigned-work view. During a
@@ -2545,7 +2554,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Honor the ack even if the agent exited before this tick; otherwise
 		// the session falls through to orphan handling and can block the next
 		// worker wave until the stale awake bead ages out.
-		if dops != nil {
+		//
+		// Coexistence seam for the acting D-DRAIN family (WD.6). The keyed
+		// handler pays this same GetMeta for the one key it holds and applies the
+		// same single effect, so legacy stands this block down for that row
+		// rather than re-deciding it. The yield is source-gated on the keyed side,
+		// so an agent acknowledgement on a row with NO tracker intent — never
+		// routed under drain_advance — keeps this block. It gates only the
+		// acknowledgement block: the stall, drift and deadline arms below run for
+		// the row exactly as they do today. Retired at WE.
+		if dops != nil && (legacyDrainAdvanceExcluded == nil || !legacyDrainAdvanceExcluded(infoByID[id])) {
 			if acked, _ := dops.isDrainAcked(name); acked {
 				if !alive && staleOrLegacyDrainAckBeforeStartInfo(infoByID[id], sp, name) {
 					_ = clearReconcilerDrainAckMetadata(sp, name)
@@ -4279,7 +4297,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
+	advanceSessionDrainsExcluding(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace, legacyDrainAdvanceExcluded)
 	clearMissingIdleProbes(dt, infoByID)
 	recordPhase(TraceSiteSessionReconcileDrainAdvance, "session_reconcile.advance_drains", phaseStart, map[string]any{
 		"ordered_session_count": len(orderedRows),

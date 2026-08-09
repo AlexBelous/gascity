@@ -94,7 +94,12 @@ const (
 // session_stranded_reconcile.go; yield: withLegacyStrandedRepairExclusion),
 // gating only the DESTRUCTIVE half of legacy's block: the diagnostic above it
 // keeps stamping the confirmation marker, because that marker is the keyed
-// family's own entry condition. The rest flip in the WE cutover commit,
+// family's own entry condition. D-DRAIN crossed at WD.6 (handler:
+// session_drain_reconcile.go; yield: withLegacyDrainAdvanceExclusion) with ONE
+// constant for a family that straddles two legacy positions — the forward-pass
+// acknowledgement block and the end-of-tick advance scan — because both are one
+// ladder over one in-memory intent, and a constant per position would gate
+// halves of a single decision. The rest flip in the WE cutover commit,
 // one family at a time, once the WD.15 parity window has cleared their
 // must-match bar. They are compile-time constants on purpose: this is not a
 // config surface.
@@ -106,7 +111,7 @@ const (
 	detectorActDriftConverge           = true
 	detectorActDriftDefer              = true
 	detectorActSleep                   = true
-	detectorActDrain                   = false
+	detectorActDrain                   = true
 	detectorActWake                    = false
 	detectorActZombie                  = false
 	detectorActStall                   = true
@@ -1617,6 +1622,12 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// positive, so the handler can pay the per-session claim lookup legacy
 		// pays at session_reconciler.go:2696.
 		return sessionStartAdmissionProgressStall, detectorActStall && cond.Outcome == TraceOutcomeStop
+	case detectorFamilyDrain:
+		// One arm, one source. detectDrain raises exactly one condition per row
+		// carrying drain intent, and every one of them predicts an advance of that
+		// drain — the arm is named by its outcome anyway so a future second arm has
+		// to come here and declare itself rather than ride in on the family gate.
+		return sessionStartAdmissionDrainAdvance, detectorActDrain && cond.Outcome == TraceOutcomeDrain
 	case detectorFamilyStranded:
 		// Only the CONFIRMED arm predicts an effect: a marker-bearing row that
 		// is still inside its confirmation window, or that no longer satisfies

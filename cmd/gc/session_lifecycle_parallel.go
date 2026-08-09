@@ -334,6 +334,7 @@ type startExecutionOptions struct {
 	legacyConfigDriftDeferExcluded    func(sessionpkg.Info) bool
 	legacyDuplicateRetireExcluded     func(sessionpkg.Info) bool
 	legacySleepDrainExcluded          func(sessionpkg.Info) bool
+	legacyDrainAdvanceExcluded        func(sessionpkg.Info) bool
 	legacyProgressStallExcluded       func(sessionpkg.Info) bool
 	legacyStrandedRepairExcluded      func(sessionpkg.Info) bool
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
@@ -615,6 +616,30 @@ func withLegacyDuplicateRetireExclusion(excluded func(sessionpkg.Info) bool) sta
 func withLegacySleepDrainExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.legacySleepDrainExcluded = excluded
+	}
+}
+
+// withLegacyDrainAdvanceExclusion installs the keyed-ownership bridge for the
+// D-DRAIN family. Returning true keeps the fleet loop out of BOTH halves of
+// legacy's drain handling for that row — the forward-pass acknowledgement block
+// (its stop-pending transition, its cancel arms and its finalize) and the
+// end-of-tick advance scan (the deferred acknowledgement write, completeDrain,
+// the cancels and the timeout stop) — because the keyed handler already owns
+// that exact key and drives the same intent out of the same in-memory tracker.
+//
+// One option covers both halves because they are one ladder: legacy splits the
+// decision across a forward-pass block and a trailing scan purely because the
+// scan needs the tick's wake evaluation, and a yield installed at only one half
+// would leave the other half advancing a drain the keyed handler is holding.
+//
+// Like the sleep and orphan drain seams and unlike the start seam, this is not a
+// race to lose. Both writers read and mutate the SAME drainState pointer on the
+// same tick, so an un-yielding legacy would set the acknowledgement the keyed
+// handler is waiting on, or complete a drain the keyed cancel arms had just
+// decided to spare. Retired at WE with the god function.
+func withLegacyDrainAdvanceExclusion(excluded func(sessionpkg.Info) bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.legacyDrainAdvanceExcluded = excluded
 	}
 }
 

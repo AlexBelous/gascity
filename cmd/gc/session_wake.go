@@ -605,6 +605,27 @@ func advanceSessionDrainsWithSessionsTraced(
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
 ) {
+	advanceSessionDrainsExcluding(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace, nil)
+}
+
+// advanceSessionDrainsExcluding is the fleet drain scan with the D-DRAIN
+// coexistence seam (WD.6). A row the keyed controller currently holds a
+// drain-advance admission for is skipped entirely: the keyed handler advances
+// the same intent out of the same tracker, and a second writer on the same tick
+// would set the acknowledgement it is waiting on or complete a drain its cancel
+// arms had just decided to spare. A nil predicate is today's behavior verbatim,
+// which is what keeps every existing caller unchanged. Retired at WE.
+func advanceSessionDrainsExcluding(
+	dt *drainTracker,
+	sp runtime.Provider,
+	store beads.Store,
+	infoLookup func(id string) (sessions.Info, bool),
+	wakeEvals map[string]wakeEvaluation,
+	cfg *config.City,
+	clk clock.Clock,
+	trace *sessionReconcilerTraceCycle,
+	excluded func(sessions.Info) bool,
+) {
 	// wakeEvals is required. The reconciler builds it from the coherent infoByID
 	// snapshot via ComputeAwakeSet -> awakeSetToWakeEvals; tests supply explicit
 	// wakeEvals encoding the premise they exercise. Step 5d dropped the raw-bead
@@ -621,6 +642,9 @@ func advanceSessionDrainsWithSessionsTraced(
 		if !ok {
 			dt.clearIdleProbe(id)
 			dt.remove(id)
+			continue
+		}
+		if excluded != nil && excluded(info) {
 			continue
 		}
 		// The whole scan runs off the typed Info: decision reads (session_name,

@@ -3104,11 +3104,60 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if bp == nil || bp.beadStore == nil {
 		return info.ApplyPatch(patch), nil
 	}
+	superseded, err := poolTriggerRepointSuperseded(bp, info, patch)
+	if err != nil {
+		return info, err
+	}
+	if superseded {
+		return info, nil
+	}
 	boundInfo, err := sessionFrontDoor(bp.beadStore).UpdateMetadataInfo(info, patch)
 	if err != nil {
 		return info, err
 	}
 	return boundInfo, nil
+}
+
+// poolTriggerRepointSuperseded re-validates a planned trigger RE-POINT against
+// the CURRENT durable row immediately before it is committed — the ga-l1j53 P2
+// doctrine applied to the third legacy effect boundary, the trigger-binding
+// write.
+//
+// The re-point is decided from a per-tick session snapshot. A member that has
+// acknowledged its drain is still `active` in that snapshot and only reaches
+// stop-pending afterwards, so legacy re-targets a member that is already
+// retiring — and the trigger binding is load-bearing on the keyed stop path, so
+// that re-point stranded the acknowledged drain outright (ga-f7v2ft.131). This
+// narrows the window to ack → stop-pending stamp; the pre-stamp remainder is
+// irreducible here, which is why the acknowledgement carries its own trigger.
+//
+// Sibling re-targeting stays intended: a genuinely free member still re-points.
+// Only a member whose CURRENT row is draining (of which drain-ack-stop-pending
+// is one reason) is skipped — the same class reusablePoolSessionInfo already
+// excludes, which is why this only ever fires on a snapshot that straddled the
+// transition.
+//
+// The read is durable and row-scoped — zero provider GetMeta — so WD.6's
+// detection cost model is untouched: this is the WRITE boundary, and it runs
+// only when a re-point is about to commit.
+func poolTriggerRepointSuperseded(bp *agentBuildParams, info session.Info, patch session.MetadataPatch) (bool, error) {
+	workBeadID := strings.TrimSpace(patch[beadmeta.TriggerBeadIDMetadataKey])
+	if workBeadID == "" {
+		return false, nil
+	}
+	readStore := authoritativeSessionStartReadStore{Store: bp.beadStore, live: beads.HandlesFor(bp.beadStore).Live}
+	current, err := sessionFrontDoor(readStore).Get(info.ID)
+	if err != nil {
+		return false, fmt.Errorf("re-validating trigger re-point for %q: %w", info.ID, err)
+	}
+	if strings.TrimSpace(current.MetadataState) != string(session.StateDraining) {
+		return false, nil
+	}
+	if bp.stderr != nil {
+		fmt.Fprintf(bp.stderr, "buildDesiredState: session %s trigger re-point to %s superseded: current row is draining (%s)\n", //nolint:errcheck
+			info.ID, workBeadID, strings.TrimSpace(current.StateReason))
+	}
+	return true, nil
 }
 
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {

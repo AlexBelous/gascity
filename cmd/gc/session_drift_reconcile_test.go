@@ -877,3 +877,148 @@ func TestLegacyConfigDriftDeferralArmsStillRunForKeyedOwnedRow(t *testing.T) {
 		t.Fatalf("legacy drained an attached row (reason=%q)", ds.reason)
 	}
 }
+
+// TestExactConfigDriftYieldsToADurableRestartRequest pins the seam ordering
+// D-DRIFT inherited from legacy's forward pass and lost when it landed
+// (ga-f7v2ft.138). Legacy runs the restart-requested block
+// (session_reconciler.go:2806) ABOVE the config-drift block (:3050) and
+// `continue`s the row past it once the kill lands (:2906); the one path that
+// falls through has already applied RestartRequestPatch, which clears
+// started_config_hash, so legacy's drift compare never sees a drifted row that
+// carries the durable marker. Claiming it here inverts that order and swallows
+// the restart whole: a public `gc session reset` reaches
+// reconcileExactSessionDetectorFamily, D-DRIFT answers first, and the reset arm
+// below never runs.
+//
+// The drain-tracker leg is the sharper half. The reset family refuses under an
+// active legacy drain — that is ga-f7v2ft.103's own park fence — and D-DRIFT
+// carries no such gate, so a claim here also acts on a row a legacy drain owns.
+func TestExactConfigDriftYieldsToADurableRestartRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(runtime.Config) runtime.Config
+		extra  map[string]string
+	}{
+		{
+			// The shape a public `gc session reset` persists on a row whose
+			// baseline predates fingerprint versioning: the rebaseline rung.
+			name: "public_reset_over_a_version_artifact",
+			extra: map[string]string{
+				"started_config_hash":        "old-core-hash",
+				"restart_requested":          "true",
+				"continuation_reset_pending": "true",
+			},
+		},
+		{
+			// The same reset over REAL provision drift: the drain rung.
+			name: "public_reset_over_real_core_drift",
+			mutate: func(cfg runtime.Config) runtime.Config {
+				cfg.PreStart = append([]string{"echo stale"}, cfg.PreStart...)
+				return cfg
+			},
+			extra: map[string]string{
+				"restart_requested":          "true",
+				"continuation_reset_pending": "true",
+			},
+		},
+		{
+			// A bare restart request with no reset pending — `gc runtime
+			// request-restart` and the progress-stall recycle both land here.
+			// Legacy `continue`s it past the drift block on the same marker.
+			name:   "bare_restart_request_over_real_core_drift",
+			mutate: func(cfg runtime.Config) runtime.Config { cfg.Command = "stale-" + cfg.Command; return cfg },
+			extra:  map[string]string{"restart_requested": "true"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "current-cmd"}},
+			}
+			provider := &unattendedStopProvider{Fake: env.sp}
+			params := driftParams(env, cityPath, provider)
+			session, _ := seedOrdinaryDriftedSession(t, env, params, tc.mutate, tc.extra)
+
+			before, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("read seeded row: %v", err)
+			}
+			callsBefore := len(env.sp.Calls)
+			info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, session.ID)
+			if err != nil {
+				t.Fatalf("authoritative read: %v", err)
+			}
+			// Guard the fixture: without the restart marker this row IS drifted,
+			// so a passing test cannot be an accident of a stale baseline.
+			unmarked := info
+			unmarked.RestartRequested = ""
+			if _, drifted := resolveExactSessionConfigDrift(params, unmarked, env.clk); !drifted {
+				t.Fatal("fixture is not drifted; the yield under test is unreachable")
+			}
+
+			// The sweep half. Legacy's early-continue makes this row
+			// legacy-ABSENT at the drift site, and an enqueued config_drift
+			// admission would overwrite the source a pending public reset was
+			// admitted under (admit(), session_start_controller.go:383), so the
+			// source-gated reset arm (session_start_reconcile.go:1920) declines
+			// and the reset is dropped.
+			admitter := &recordingDetectorAdmitter{}
+			in := driftSweepInput(env, cityPath, provider, info, admitter.admit)
+			result := detectSessionConditions(context.Background(), in)
+			routeDetectorConditions(in, &result)
+			for _, cond := range result.Conditions {
+				if cond.Family == detectorFamilyDrift {
+					t.Fatalf("the sweep raised D-DRIFT on a restart-requested row: %#v", cond)
+				}
+			}
+			if len(admitter.keys) != 0 {
+				t.Fatalf("a restart-requested row enqueued %v; want zero D-DRIFT enqueues", admitter.keys)
+			}
+
+			if exactSessionConfigDriftCandidate(params, info, response, env.clk) {
+				t.Fatal("a restart-requested row satisfied the D-DRIFT seam guard; legacy runs the restart block above the drift block")
+			}
+			handled, owner, err := reconcileExactSessionDetectorFamily(
+				t.Context(),
+				sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionSocket},
+				params, info, response, env.clk,
+			)
+			if handled {
+				t.Fatalf("the detector family claimed a restart-requested row (owner=%v err=%v); the reset arm below never runs", owner, err)
+			}
+			// And the handler itself refuses with zero effect if another
+			// admission carries the key into it anyway.
+			if owner, err := reconcileExactSessionConfigDrift(
+				t.Context(),
+				sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionConfigDrift},
+				params, info, response, env.clk,
+			); err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("handler returned owner=%v err=%v, want keyed ownership and no error", owner, err)
+			}
+
+			after, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("re-read seeded row: %v", err)
+			}
+			for _, key := range []string{
+				"started_config_hash", "started_provision_hash", "started_launch_hash",
+				"restart_requested", "continuation_reset_pending", "state", "session_key",
+			} {
+				if after.Metadata[key] != before.Metadata[key] {
+					t.Errorf("D-DRIFT mutated %s on a restart-requested row: %q -> %q", key, before.Metadata[key], after.Metadata[key])
+				}
+			}
+			if ds := env.dt.get(session.ID); ds != nil {
+				t.Errorf("D-DRIFT drained a restart-requested row (reason=%q)", ds.reason)
+			}
+			for _, call := range env.sp.Calls[callsBefore:] {
+				switch call.Method {
+				case "Relaunch", "Stop", "Start", "RunLive", "Kill", "Interrupt":
+					t.Errorf("D-DRIFT called provider %s(%q) on a restart-requested row", call.Method, call.Name)
+				}
+			}
+		})
+	}
+}

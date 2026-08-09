@@ -86,6 +86,27 @@ func resolveExactSessionConfigDrift(
 	if info.PendingCreateClaim || pendingCreateQueuedOrCreatingState(info.MetadataState) {
 		return exactSessionConfigDrift{}, false
 	}
+	// A restart already requested on the row is the RESTART family's, never this
+	// one, and the rung is legacy's own pass order: the restart-requested block
+	// (session_reconciler.go:2806, reading the same durable marker at :2819) runs
+	// ABOVE the config-drift block (:3050) and `continue`s the row past it once
+	// the kill lands (:2906). The single path that falls through has already
+	// applied RestartRequestPatch, which clears started_config_hash — so legacy's
+	// drift compare cannot see a drifted row carrying this marker by either
+	// route. The restart is also what converges the drift: the fresh start
+	// re-stamps all four fingerprints, so yielding here costs no convergence.
+	//
+	// Claiming it inverted that order and swallowed a public `gc session reset`
+	// whole (ga-f7v2ft.138): the keyed ordinary reset arm lives BELOW the
+	// detector-family seam in reconcileExactSessionStartWithOwner, so a D-DRIFT
+	// answer here consumed the admission and the reset never ran — and, because
+	// this family carries no drain-tracker gate, it acted on rows ga-f7v2ft.103's
+	// legacy-drain park fence exists to leave alone. The marker is the whole
+	// predicate: named and pool rows keyed does not own belong to legacy's block
+	// above, which this yield leaves untouched.
+	if strings.TrimSpace(info.RestartRequested) == "true" {
+		return exactSessionConfigDrift{}, false
+	}
 	template := normalizedSessionTemplateInfo(info, params.Config)
 	if template == "" {
 		template = strings.TrimSpace(info.Template)

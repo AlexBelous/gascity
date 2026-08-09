@@ -518,12 +518,35 @@ func (cr *CityRuntime) sessionWaitDependencyPoolWitnessCurrent(snapshot controll
 		namedTemplates[snapshot.Config.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
 	}
 	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates)
-	if policy.reason != poolAllocationShadowEligibleAgentCap || policy.maxActiveSessions <= 1 || agent.EffectiveMinActiveSessions() != 0 {
+	// Eligibility is supported() at every pool-family site (the uniform
+	// predicate contract, ga-f7v2ft.116 Q1). Narrowing by policy REASON encodes
+	// one slice's scope into eligibility and silently makes the excluded arm
+	// unreachable, which is exactly what kept this shipped resume from ever
+	// engaging on an unlimited pool. The one genuine exclusion is the
+	// canonical-singleton identity -- max==1 IS that identity
+	// (config.UsesCanonicalSingletonPoolIdentity) and its rows ride other
+	// families -- so it is named honestly instead of hidden in a reason test.
+	// The min-floor check is a redundant belt: min>0 yields reason=MinFloor,
+	// which supported() already rejects.
+	if !policy.supported() ||
+		(policy.reason == poolAllocationShadowEligibleAgentCap && policy.maxActiveSessions == 1) ||
+		agent.EffectiveMinActiveSessions() != 0 {
 		return false
 	}
 	observation, memberIDs, exact := cr.poolMembershipShadow.observeMemberIDs(lease.PoolTarget)
-	return exact && observation.certified && observation.revision == lease.PoolMembershipRevision &&
-		observation.members == 1 && observation.occupied == 0 && len(memberIDs) == 1 && memberIDs[0] == lease.SessionID
+	if !exact || !observation.certified || observation.revision != lease.PoolMembershipRevision ||
+		observation.members != 1 || len(memberIDs) != 1 || memberIDs[0] != lease.SessionID {
+		return false
+	}
+	if observation.occupied == 0 {
+		return true
+	}
+	// Resuming an EXISTING member never adds a member, so its own occupancy must
+	// not be counted against the pool (contract clause 2): the resume scenario by
+	// construction has the member still holding its own open trigger. Occupancy
+	// held by anything other than this member still refuses.
+	occupancy, selfOccupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)
+	return selfOccupied && occupancy.revision == observation.revision && occupancy.occupied == 1
 }
 
 func (cr *CityRuntime) handleSessionWaitDependencyAdmissionFailure(hint sessionWaitDependencyStartHint, mode rollout.Mode, err error) {

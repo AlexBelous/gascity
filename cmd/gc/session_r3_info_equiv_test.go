@@ -59,6 +59,10 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 
 	cases := []healOracleCase{
 		{name: "asleep-alive", meta: map[string]string{"state": "asleep"}, alive: true, rollback: true, want: map[string]string{"state": "awake"}},
+		// The post-create row a live session carries until the first reconcile
+		// pass settles it. The nudge cold-enable journey's preserved-successor
+		// transition proof rests on this batch being exactly one key.
+		{name: "active-alive", meta: map[string]string{"state": "active"}, alive: true, rollback: true, want: map[string]string{"state": "awake"}},
 		{name: "active-dead-drains", meta: map[string]string{"state": "active"}, alive: false, rollback: true, want: map[string]string{"state": "asleep"}},
 		{name: "asleep-dead-noop", meta: map[string]string{"state": "asleep", "sleep_reason": "idle"}, alive: false, rollback: true, want: nil},
 		{

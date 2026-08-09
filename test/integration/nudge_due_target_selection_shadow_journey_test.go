@@ -304,10 +304,17 @@ nudge_shadow = "off"
 	nudgeDueTargetSelectionShadowJourneyWaitForDelivery(t, cityDir, session, initialOffToken)
 	nudgeDueTargetSelectionShadowJourneyWaitForTraceStability(t, cityDir, initialCursor, false)
 
-	beforeEnableBead := nudgeDueTargetSelectionShadowJourneyReadBead(t, cityDir, session.ID)
 	beforeEnableTrace := nudgeDueTargetSelectionShadowJourneyTrace(t, cityDir)
 	beforeEnableCursor := nudgeDueTargetSelectionShadowJourneyLastSeq(t, beforeEnableTrace)
 	nudgeDueTargetSelectionShadowJourneyStopPreserving(t, env)
+	// Observation point: the pre-heal lifecycle state is staged here, after the
+	// predecessor is gone and before the successor exists, so no tick can move
+	// it between the write and the snapshot. Reading the naturally-created
+	// "active" row earlier was a race against the first reconcile tick, and the
+	// city has nothing left that keeps ticks out of that window.
+	beforeEnableBead := nudgeDueTargetSelectionShadowJourneyStageLifecycleState(
+		t, cityDir, session.ID, "active",
+	)
 	nudgeDueTargetSelectionShadowJourneyInstallMode(t, cityDir, "off", "required")
 	nudgeDueTargetSelectionShadowJourneyAssertSessionUnchanged(
 		t, cityDir, session, initialIdentity, beforeEnableBead, initialOffToken, false,
@@ -324,6 +331,11 @@ nudge_shadow = "off"
 	transitionTrace := nudgeDueTargetSelectionShadowJourneyWaitForQueueCount(
 		t, cityDir, probeCursor, 0, false,
 	)
+	// The heal is the successor's, so wait for it on the successor's clock
+	// instead of assuming it landed before the nudge shadow cycle above. A row
+	// that never leaves "active" fails here; one that leaves it for anything
+	// other than "awake" fails in the assertion below.
+	nudgeDueTargetSelectionShadowJourneyWaitForLifecycleState(t, cityDir, session.ID, "awake")
 	nudgeDueTargetSelectionShadowJourneyAssertSessionUnchanged(
 		t, cityDir, session, initialIdentity, beforeEnableBead, initialOffToken, true,
 	)
@@ -536,6 +548,55 @@ func nudgeDueTargetSelectionShadowJourneyReadBead(
 		t.Fatalf("durable session bead ID = %q, want %q", bead.ID, sessionID)
 	}
 	return bead
+}
+
+// nudgeDueTargetSelectionShadowJourneyStageLifecycleState writes the durable
+// lifecycle state through the same file-bd shim the journey reads with, then
+// returns the resulting bead. Call it only while no controller is running for
+// the city: that is what makes the returned snapshot a stable pre-state rather
+// than a value the next reconcile tick can move out from under the caller.
+func nudgeDueTargetSelectionShadowJourneyStageLifecycleState(
+	t *testing.T,
+	cityDir string,
+	sessionID string,
+	state string,
+) nudgeDueTargetSelectionShadowJourneyBead {
+	t.Helper()
+	out, err := runCommand(
+		cityDir,
+		replaceEnv(commandEnvForDir(cityDir, false), "GC_BEADS", "file"),
+		integrationBDCommandTimeout,
+		bdBinary, "update", sessionID, "--set-metadata", "state="+state,
+	)
+	if err != nil {
+		t.Fatalf("stage durable lifecycle state %q on %s: %v\n%s", state, sessionID, err, out)
+	}
+	staged := nudgeDueTargetSelectionShadowJourneyReadBead(t, cityDir, sessionID)
+	if got := staged.Metadata["state"]; got != state {
+		t.Fatalf("staged durable lifecycle state = %q, want %q: %+v", got, state, staged.Metadata)
+	}
+	return staged
+}
+
+// nudgeDueTargetSelectionShadowJourneyWaitForLifecycleState blocks until the
+// durable row reports the wanted lifecycle state, so a transition assertion
+// runs on the writer's schedule rather than the caller's.
+func nudgeDueTargetSelectionShadowJourneyWaitForLifecycleState(
+	t *testing.T,
+	cityDir string,
+	sessionID string,
+	state string,
+) {
+	t.Helper()
+	nudgeDueTargetSelectionShadowJourneyPoll(
+		t,
+		nudgeDueTargetSelectionShadowJourneyWitnessTimeout,
+		fmt.Sprintf("durable lifecycle state %q on session %s", state, sessionID),
+		func() (bool, string) {
+			got := nudgeDueTargetSelectionShadowJourneyReadBead(t, cityDir, sessionID).Metadata["state"]
+			return got == state, "state=" + got
+		},
+	)
 }
 
 func nudgeDueTargetSelectionShadowJourneyTrace(

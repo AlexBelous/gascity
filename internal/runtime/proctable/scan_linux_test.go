@@ -297,6 +297,41 @@ func TestScanWithRootSinceIgnoresUnreadableProcessProvenOlderThanIncarnation(t *
 	}
 }
 
+// TestScanWithRootSinceWithoutBootTimeCannotClassifyUnreadableProcess pins the
+// affordance a controlled scan root has to provide before it can host an entry
+// the scanner may fail to read. Without <root>/stat the age proof cannot run at
+// all, so an entry that provably predates the incarnation still costs the whole
+// scan its completeness — the shape a journey fixture builds when it registers
+// PID directories and no boot time.
+func TestScanWithRootSinceWithoutBootTimeCannotClassifyUnreadableProcess(t *testing.T) {
+	root := t.TempDir()
+	boot := time.Unix(1_700_000_000, 0).UTC()
+
+	dir := filepath.Join(root, "406")
+	if err := os.MkdirAll(filepath.Join(dir, "environ"), 0o755); err != nil {
+		t.Fatalf("create unreadable environ fixture: %v", err)
+	}
+	writeFakeProcessUID(t, dir, os.Geteuid())
+	writeFakeProcessStat(t, dir, 406, 1, 800)
+
+	got, err := scanWithRootSince(root, "ga-target", boot.Add(10*time.Second))
+	if err == nil {
+		t.Fatalf("scanWithRootSince = %v, nil error; want incomplete without a root boot time", got)
+	}
+	if len(got) != 0 {
+		t.Fatalf("scanWithRootSince returned %d runtimes, want no unverified result", len(got))
+	}
+
+	writeFakeBootTime(t, root, boot)
+	got, err = scanWithRootSince(root, "ga-target", boot.Add(10*time.Second))
+	if err != nil {
+		t.Fatalf("root boot time did not make the old unreadable entry classifiable: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("classified scan returned %d runtimes, want 0", len(got))
+	}
+}
+
 func TestScanWithRootSinceUnreadableProcessInsideStartTimeUncertaintyRemainsIncomplete(t *testing.T) {
 	root := t.TempDir()
 	boot := time.Unix(1_700_000_000, 0).UTC()

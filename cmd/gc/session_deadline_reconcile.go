@@ -58,6 +58,11 @@ func reconcileExactSessionDetectorFamily(
 	// (is the runtime alive) is provider I/O, not durable state. Splitting the
 	// case would mean two guards that can never disagree, so whichever came
 	// second would be dead code.
+	//
+	// D-STRANDED goes LAST for the mirror-image reason the others go first:
+	// legacy repairs a stranded pool slot in the wake/sleep phase, after the
+	// whole forward pass, so a row that is also undesired or also past its idle
+	// deadline belongs to those families here too.
 	switch {
 	case detectorActDup && exactSessionDuplicateNamedCandidate(params, info, response):
 		owner, err := reconcileExactSessionDuplicateNamedRetire(admission, params, info, response, clk)
@@ -71,6 +76,9 @@ func reconcileExactSessionDetectorFamily(
 		return true, owner, err
 	case detectorActStaleCreate && exactSessionStaleCreateRollbackCandidate(params, info, response, clk):
 		owner, err := reconcileExactSessionStaleCreateRollback(ctx, admission, params, info, response, clk)
+		return true, owner, err
+	case detectorActStranded && exactSessionStrandedRepairCandidate(params, info, response, clk):
+		owner, err := reconcileExactSessionStrandedRepair(ctx, admission, params, info, response, clk)
 		return true, owner, err
 	}
 	return false, exactSessionStartUnowned, nil

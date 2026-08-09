@@ -839,6 +839,129 @@ improvised.
    yields a zero revision, which every downstream fence reads as "refuse" rather
    than fencing against a revision that no longer exists.
 
+### §3 D-STRANDED deltas (recorded at WD.14)
+
+Where the D-STRANDED family as built diverges from §3 as written. Reported, not
+improvised. Line anchors are HEAD at the slice; §3's `:3897-3979` for the repair
+helpers had drifted to `session_reconciler.go:4051-4073` (arm) plus
+`session_beads.go:1240-1273` (`repairStrandedPoolWorkerBead`).
+
+1. **The arm has NO legacy decision trace site, and the one it fires is the
+   WakeSleep PHASE constant (minting ambiguity 3, resolved).** §1's row 26
+   names `TraceSiteSessionReconcileWakeSleep` for the phase, and §3 never named
+   a decision site for the dead-pool arm — because legacy has none.
+   `emitSessionStrandedDiagnostic` records an EVENT (`events.SessionStranded`)
+   on the event bus, not a trace record, and `repairStrandedPoolWorkerBead`
+   traces nothing at all; the constant's only production use is the
+   phase-timing `recordPhase` at session_reconciler.go:4120. WD.1 seated
+   `detectStranded` on it and WD.14's handler stays there, so `gc trace` stays
+   continuous. **Consequence for WD.15:** this family has no legacy
+   record-with-effect to join against. Its §3b "detection" parity is
+   candidacy agreement between the detector-shadow record and the phase
+   record's own cycle plus the `session.stranded` event stream — not the
+   record-to-record join every other family uses. State it in the harness
+   rather than counting an unmatched cell.
+2. **The confirmation window is DURABLE and SHARED, so §3b's "confirmation-window
+   off-by-one (duplicated counters)" divergence does not exist.** The design
+   row asserts the confirmation counter is bounded in-memory detector state. It
+   is not: it is the `stranded_event_emitted_at` marker on the session bead,
+   compared against `strandedRepairConfirmGrace`, and BOTH the detector and
+   `repairStrandedPoolWorkerBead` read that one marker. There is no second
+   counter to skew, unlike D-ORPHAN's genuinely duplicated suspend-deferral
+   window. The expected-divergence cell should be narrowed at WD.15 to
+   marker-STAMPING skew (delta 3), not counter skew.
+3. **The stranded DIAGNOSTIC stays legacy-owned this wave: it is the family's
+   entry CONDITION, not its effect.** §3 and the slice AC both list "emit the
+   stranded diagnostic" as a handler step. It cannot be one.
+   `detectStranded` keys on the marker, the marker is stamped only by
+   `emitSessionStrandedDiagnostic`, and that helper early-returns while the
+   marker is set — so a keyed handler calling it on a detected row is a
+   guaranteed no-op, and a zero-write sweep cannot stamp it either. The keyed
+   arm therefore INHERITS the marker, and the legacy yield fences only the
+   destructive half of the arm. Same shape as WD.1's delta 1 for the
+   unknown-state diagnostic. **WE-ledger debt:** the emit-once stamp, its
+   `snapshot.ApplyOpenInfoPatch` carrier, and `clearStrandedEventMarker`'s
+   alive-tick clear must move with the god function or this family loses the
+   fact it keys on.
+4. **The close reason is `stranded-repair`, not the preserved `sleep_reason`.**
+   §3's entry and the slice AC say "close bead preserving sleep_reason as the
+   close reason". That is the SIBLING arm's behavior — legacy's
+   `poolFreeable && !hasAssignedWork` clean close, which has no detector and
+   stays legacy's for this wave. The repair arm has always stamped
+   `strandedRepairCloseReason` on purpose, so ops can tell a repaired strand
+   from a natural idle recycle in the closed record. "Reuse the existing repair
+   helpers unchanged — no new repair path" wins over the prose; changing the
+   constant would have been a behavior change to a proven arm. The clean-close
+   arm's porting is a WE-ledger item.
+5. **Detection SPLITS the arm on the confirmation window, and only the confirmed
+   arm routes.** WD.1's `detectStranded` raised one `TraceOutcomeClosed`
+   condition for every marker-bearing not-alive row, regardless of the window or
+   the pool rungs. Acting on that shape would enqueue a key the handler refuses
+   on every patrol — the 30-second treadmill D-DUP's delta 1 names. WD.14 keeps
+   the whole WD.1 population in the join (every such row still records) and
+   gives the unconfirmed rows `detector_stranded_confirm_deferred` /
+   `TraceOutcomeDeferredConfirm`; `detectorAdmissionSourceFor` routes
+   `TraceOutcomeClosed` alone.
+6. **Non-liveness is a HANDLER rung, and it is the load-bearing one.** Legacy
+   gates the repair on its fleet-wide `!target.alive`. The sweep cannot mirror
+   that: `detectorLiveness` probes bead-awake rows only, and a stranded slot is
+   durably asleep, so its liveness bits are unprobed-and-false by construction.
+   Detection therefore enqueues rows whose runtime may still be up, and the
+   handler's per-key `ObserveFreshLiveness` is the only thing between a running
+   worker and a cleared claim. Incomplete observation → typed refusal (legacy's
+   fail-closed direction); live → a `kept_open` record with zero effect. RED:
+   `TestExactStrandedRepairRefusesWhenTheRuntimeIsStillUp`.
+7. **The assigned-work rung is a live per-key query in the GUARD, and it fails
+   closed the OTHER way from legacy.** `sessionHasOpenAssignedWorkForReachableStore`
+   runs after the cheap durable rungs, so only marker-bearing, pool-freeable,
+   past-window rows pay it — declared on the same footing as D-DUP's bounded
+   sibling list. It is a rung rather than an afterthought because a row with no
+   assigned work belongs to the sibling clean-close arm (delta 4), not here. On
+   a read ERROR legacy sets `hasAssignedWork = true` and enters the repair
+   branch; the keyed guard refuses the family outright. Keyed is strictly safer
+   and the condition is level-triggered. Detection deliberately does NOT mirror
+   this rung from `AssignedWorkBeads` the way D-ORPHAN mirrors its kept-open
+   suppressor: the polarity is inverted here (work is REQUIRED, not
+   disqualifying), so an unpopulated snapshot input would silently disable the
+   whole family rather than fail safe. No treadmill forms without it — a
+   marker-bearing row that has since lost its work is closed by the sibling
+   clean-close arm on that same tick, and that arm does not yield.
+8. **The legacy yield is source-BLIND, and shares WD.7's predicate shape.**
+   `ownsStrandedRepair` answers on ANY in-flight admission, like
+   `ownsStaleCreateRollback` and unlike `ownsDeadlineStop`. The seam guards on
+   the durable row, the controller coalesces admissions on a key while keeping
+   the EARLIER source, and a stranded pool member is routinely already held by a
+   pool-wake admission when the sweep finds it — which is exactly how the
+   acked-member re-point residual (delta 9) arrives. A source-gated yield would
+   let the keyed handler repair through the coalesced admission while legacy
+   raced a second release at the same work beads: the ga-f7v2ft.125 hole on
+   legacy's side. The two source-blind predicates now share one
+   `holdsAnyAdmission` body so they cannot drift apart.
+9. **The family keeps the shared D2 screen even though its effect stops
+   nothing.** The runtime is already gone by definition here, so the handler
+   asserts only `FreshLivenessObserver`; `routeDetectorConditions` still screens
+   it on the full stop-capable pair because it is `Destructive` and not
+   `StopCapabilityExempt`. Unlike D-DUP (WD.13 delta 3) this costs no capability:
+   on a D2-incapable city the family simply records
+   `refused_provider_incapable` and legacy keeps the repair for the WD wave,
+   because legacy only yields while an admission is in flight and none is
+   raised. WD.3's delta 4 reasoning applies unchanged — the over-strict
+   direction is a traced refusal, never an unproven claim clear.
+10. **The round-5 AC addendum's producer needs no new detection.** The
+   acked-member re-point residual — new work legacy bound to a member that then
+   completed its acknowledged drain and stopped, the ga-f7v2ft.131 window
+   `poolTriggerRepointSuperseded` narrowed to ack → stop-pending but declared
+   irreducible past that — lands as an ORDINARY stranded slot: pool-managed,
+   drained, not alive, still holding the re-pointed work. The heal is the same
+   single fenced effect. What the residual DOES pin is the release shape:
+   `unclaimWorkAssignedToRetiredSessionInfo` returns the bead to `open` and
+   unassigned AND stamps the retired member's fallback `run_target` when the
+   bead is otherwise unrouted — which is the residual's shape, because work that
+   arrived through a trigger binding carries no route of its own. Without that
+   stamp the reopened bead leaves the routed-ready census and ga-f7v2ft.117's
+   re-detection premise breaks: the strand would merely move from a dead member
+   to an unroutable bead.
+
 ## 3b. Campaign judgment (WE sign-off bar)
 
 Per-family parity level and expected classifications. "Detection" = the shadow record
@@ -861,7 +984,7 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | D-ZOMBIE | detection | running ∧ !alive candidacy | classification arm handler-side |
 | D-STALL | decision | claim-less stall + floor exemption | claim-check-error fail-safe arm incomparable |
 | D-DUP | decision | winner + loser set | none expected |
-| D-STRANDED | detection | dead-slot candidacy | confirmation-window off-by-one (duplicated counters) |
+| D-STRANDED | detection | dead-slot candidacy (no legacy decision record exists — WD.14 delta 1) | marker-stamping skew only; the confirmation window itself is one DURABLE marker read by both paths, so the "duplicated counters" off-by-one does not arise (WD.14 delta 2) |
 | (global) | — | — | storeQueryPartial cycles: legacy records Closed-without-closing (:1987-1991, :2284-2288); detector suppresses — expected, bounded to partial-view cycles |
 
 **Legacy-at-0 residual** (WC council advisory): rows a pre-fix writer left at revision

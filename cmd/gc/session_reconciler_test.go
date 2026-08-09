@@ -3254,7 +3254,7 @@ func strandedRepairReconcileEnv(t *testing.T) (*reconcilerTestEnv, beads.Bead, b
 
 // runStrandedReconcileTick drives one full reconcile tick through the real
 // call site with the standard stranded-repair fixture arguments.
-func runStrandedReconcileTick(t *testing.T, env *reconcilerTestEnv, sessions []beads.Bead) {
+func runStrandedReconcileTick(t *testing.T, env *reconcilerTestEnv, sessions []beads.Bead, opts ...startExecutionOption) {
 	t.Helper()
 	reconcileSessionBeadsAtPath(
 		context.Background(),
@@ -3281,6 +3281,7 @@ func runStrandedReconcileTick(t *testing.T, env *reconcilerTestEnv, sessions []b
 		0,
 		&env.stdout,
 		&env.stderr,
+		opts...,
 	)
 }
 

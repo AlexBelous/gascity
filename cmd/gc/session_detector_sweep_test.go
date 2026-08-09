@@ -59,7 +59,7 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // families whose keyed handler AND legacy yield have landed may act, and every
 // other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
 // arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4; D-STALE-CREATE at
-// WD.7; D-DUP at WD.13. A family that flips an act constant without an arm in
+// WD.7; D-DUP at WD.13; D-STRANDED at WD.14. A family that flips an act constant without an arm in
 // detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
 // before it can double-act beside a non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
@@ -74,6 +74,7 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 		detectorFamilyOrphan:      {TraceOutcomeClosed: true, TraceOutcomeDrain: true},
 		detectorFamilyStaleCreate: {TraceOutcomeRollback: true},
 		detectorFamilyDup:         {TraceOutcomeNoChange: true},
+		detectorFamilyStranded:    {TraceOutcomeClosed: true},
 	}
 	if !detectorAnyFamilyActs() {
 		t.Fatal("detectorAnyFamilyActs() = false; D-DEADLINE acts from WD.2 onward")

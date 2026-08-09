@@ -1526,6 +1526,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	legacyDeadlineStopExcluded := reconcileOpts.legacyDeadlineStopExcluded
 	legacyOrphanCloseExcluded := reconcileOpts.legacyOrphanCloseExcluded
 	legacyOrphanDrainExcluded := reconcileOpts.legacyOrphanDrainExcluded
+	legacyStrandedRepairExcluded := reconcileOpts.legacyStrandedRepairExcluded
 	// Coexistence seam for the acting D-ORPHAN close family: while the keyed
 	// controller holds this exact key, both legacy close arms yield entirely —
 	// no ClosePatch, no status close, no work-release cascade. Like the deadline
@@ -4057,7 +4058,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// fire the repair on the first episode's stale timestamp. Reuses
 			// unclaimWorkAssignedToRetiredSessionInfo, the Info form of the same detach primitive
 			// named-session retirement uses.
+			//
+			// The keyed D-STRANDED handler owns this repair for any key the
+			// session-start controller currently holds an admission for
+			// (withLegacyStrandedRepairExclusion). Only the DESTRUCTIVE half
+			// yields: the diagnostic above keeps stamping the confirmation
+			// marker, because that marker is the keyed family's own entry
+			// condition. Retired at WE with the god function.
 			if !storeQueryPartial &&
+				(legacyStrandedRepairExcluded == nil || !legacyStrandedRepairExcluded(infoByID[target.info.ID])) &&
 				repairStrandedPoolWorkerBead(store, rigStores, infoByID[target.info.ID], retiredSessionFallbackRouteInfo(infoByID[target.info.ID]), clk, stderr) {
 				tick.markClosed(target.info.ID)
 				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)

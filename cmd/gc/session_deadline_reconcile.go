@@ -74,8 +74,9 @@ func reconcileExactSessionDetectorFamily(
 		exactSessionOrphanCloseCandidate(params, info, response, clk) != "":
 		owner, err := reconcileExactSessionOrphanClose(ctx, admission, params, info, response, clk)
 		return true, owner, err
-	case detectorActDriftConverge && exactSessionConfigDriftConvergeCandidate(params, info, response, clk):
-		owner, err := reconcileExactSessionConfigDriftConverge(ctx, admission, params, info, response, clk)
+	case (detectorActDriftConverge || detectorActDriftDefer) &&
+		exactSessionConfigDriftCandidate(params, info, response, clk):
+		owner, err := reconcileExactSessionConfigDrift(ctx, admission, params, info, response, clk)
 		return true, owner, err
 	case detectorActDeadline && exactSessionDeadlineStopCandidate(params, info, response, clk.Now().UTC()):
 		owner, err := reconcileExactSessionDeadlineStop(ctx, admission, params, info, response, clk)

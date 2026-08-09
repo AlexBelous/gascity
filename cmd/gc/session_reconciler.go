@@ -1545,30 +1545,56 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		return true
 	}
-	// Coexistence seam for the acting D-DRIFT convergence arms. Placed at each
-	// CONVERGENCE effect, never at the top of the drift block: legacy keeps
-	// raising, stamping and tracing its own deferral arms above it, because
-	// WD.8's handler applies nothing on those rungs (WD.9 owns them) and
-	// attached-user safety may not stand down for a handler that has not landed.
-	// The ownership predicate answers "is ANY admission in flight for this key"
-	// — the seam guards on the durable row, and a config edit drifts the fleet
-	// onto keys that already carry other admissions — so the second half of the
-	// yield is re-derived here: the row must still be the drift candidate the
-	// keyed handler converges. Retired at WE with the god function.
-	legacyConfigDriftConvergeKeyed := func(info sessionpkg.Info, tp TemplateParams, site TraceSiteCode, name string) bool {
+	// Coexistence seam for the acting D-DRIFT arms. The ownership predicates
+	// answer "is ANY admission in flight for this key" — the seam guards on the
+	// durable row, and a config edit drifts the fleet onto keys that already
+	// carry other admissions — so the second half of each yield is re-derived
+	// here: the row must still be the drift candidate the keyed handler acts on.
+	// Retired at WE with the god function.
+	legacyConfigDriftKeyedOwned := func(info sessionpkg.Info, tp TemplateParams) bool {
 		if reconcileOpts.legacyConfigDriftConvergeExcluded == nil || !reconcileOpts.legacyConfigDriftConvergeExcluded(info) {
 			return false
 		}
-		if sessionConfigDriftKey(info, cfg, tp) == "" && sessionLiveDriftKey(info, cfg, tp) == "" {
-			return false
-		}
+		return sessionConfigDriftKey(info, cfg, tp) != "" || sessionLiveDriftKey(info, cfg, tp) != ""
+	}
+	recordLegacyConfigDriftYield := func(info sessionpkg.Info, tp TemplateParams, site TraceSiteCode, name string, reason TraceReasonCode) {
 		if trace != nil {
-			trace.RecordDecision(site, TraceReasonCode("keyed_config_drift_owner"), TraceOutcomeSkipped, tp.TemplateName, name, traceRecordPayload{
+			trace.RecordDecision(site, reason, TraceOutcomeSkipped, tp.TemplateName, name, traceRecordPayload{
 				"session_id":     info.ID,
 				"effect_owner":   "keyed",
 				"effect_applied": false,
 			})
 		}
+	}
+	// Placed at each CONVERGENCE effect, never at the top of the drift block, so
+	// that a keyed handler which lands on a deferral rung does not silently
+	// disable legacy's convergence for rows it never converges.
+	legacyConfigDriftConvergeKeyed := func(info sessionpkg.Info, tp TemplateParams, site TraceSiteCode, name string) bool {
+		if !legacyConfigDriftKeyedOwned(info, tp) {
+			return false
+		}
+		recordLegacyConfigDriftYield(info, tp, site, name, TraceReasonCode("keyed_config_drift_owner"))
+		return true
+	}
+	// Placed at each DEFERRAL effect, and conjunctive with the convergence
+	// ownership on purpose. Legacy's ladder falls THROUGH a skipped deferral arm
+	// into the convergence arms below it, so standing a deferral arm down while
+	// the convergence arms still ran would hand an attached session to a relaunch
+	// or a drain — the one outcome A6 forbids. Requiring both makes "legacy
+	// skipped the deferral" imply "legacy will skip every effect below it", so
+	// there is no tick on which neither writer defends the human.
+	//
+	// It takes no site: every deferral rung lives at the ConfigDrift site, because
+	// the live half re-applies session_live without stopping or interrupting the
+	// agent and therefore carries no deferral arms at all.
+	legacyConfigDriftDeferKeyed := func(info sessionpkg.Info, tp TemplateParams, name string) bool {
+		if reconcileOpts.legacyConfigDriftDeferExcluded == nil || !reconcileOpts.legacyConfigDriftDeferExcluded(info) {
+			return false
+		}
+		if !legacyConfigDriftKeyedOwned(info, tp) {
+			return false
+		}
+		recordLegacyConfigDriftYield(info, tp, TraceSiteReconcilerConfigDrift, name, TraceReasonCode("keyed_config_drift_defer_owner"))
 		return true
 	}
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
@@ -3089,6 +3115,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						if attached {
+							if legacyConfigDriftDeferKeyed(infoByID[id], tp, name) {
+								continue
+							}
 							if err := recordSessionAttachedConfigDriftDeferral(infoByID[id], sessFront, clk, driftKey); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 							}
@@ -3102,6 +3131,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						if recentlyDeferredSessionAttachedConfigDrift(infoByID[id], clk, driftKey) {
+							if legacyConfigDriftDeferKeyed(infoByID[id], tp, name) {
+								continue
+							}
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredAttached, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 									"active_reason": "attached_recently",
@@ -3115,6 +3147,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// tmux-attached, or recent activity). This prevents
 							// draining a working agent mid-task without graceful
 							// handoff. See gastownhall/gascity#119.
+							//
+							// The yield lands at the arm's ENTRY rather than beside
+							// its effect because shouldDeferNamedSessionConfigDrift
+							// writes as it reads — the bounded window's stamp IS
+							// part of the answer — so there is no point between the
+							// probe and the write to stand down at.
+							if legacyConfigDriftDeferKeyed(infoByID[id], tp, name) {
+								continue
+							}
 							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(infoByID[id], sessFront, sp, name, clk, driftKey)
 							if deferErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
@@ -3177,6 +3218,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// user is attached. Named-session config drift is
 							// deferred when actively in use (see above).
 							if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
+								if legacyConfigDriftDeferKeyed(infoByID[id], tp, name) {
+									continue
+								}
 								drainCancelled := false
 								if dt != nil {
 									drainCancelled = cancelSessionDrainForPendingInfo(infoByID[id], sp, dt)
@@ -3206,6 +3250,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								continue
 							}
 							if hasAssignedWork {
+								if legacyConfigDriftDeferKeyed(infoByID[id], tp, name) {
+									continue
+								}
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredActive, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 										"active_reason": "live_assigned_work",
@@ -5328,21 +5375,11 @@ func boundedNamedSessionConfigDriftDeferral(
 		return reason, true, nil
 	}
 	now := clk.Now().UTC()
-	if info.ConfigDriftDeferredKey != driftKey {
-		if err := recordNamedSessionConfigDriftDeferredAt(info, sessFront, now, driftKey); err != nil {
-			return "", false, err
-		}
-		return reason, true, nil
-	}
-	raw := info.ConfigDriftDeferredAt
-	if raw == "" {
-		if err := recordNamedSessionConfigDriftDeferredAt(info, sessFront, now, driftKey); err != nil {
-			return "", false, err
-		}
-		return reason, true, nil
-	}
-	deferredAt, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
+	// No usable stamp for this drift key yet: start the window and defer. The
+	// read is shared with the keyed handler (configDriftDeferralWindowStart) so
+	// both writers agree on when a window has started and when it has elapsed.
+	deferredAt, started := configDriftDeferralWindowStart(info, driftKey)
+	if !started {
 		if err := recordNamedSessionConfigDriftDeferredAt(info, sessFront, now, driftKey); err != nil {
 			return "", false, err
 		}

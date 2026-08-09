@@ -888,6 +888,108 @@ deferral rungs stay shadow behind `detectorActDriftDefer` until WD.9.
    the same tick, and the keyed rung reads what legacy wrote. When WD.9 lands the
    write, the read-only mirror becomes the handler's own.
 
+### §3 D-DRIFT deferral deltas (recorded at WD.9)
+
+Where the family's A6 (DEFERRAL) arms as built diverge from §3 as written.
+Reported, not improvised. WD.9 flips `detectorActDriftDefer`, which is the last
+of the family's two constants; the ladder is now keyed end to end except the
+asleep-named repair (WD.8 delta 7).
+
+1. **The deferral yield is CONJUNCTIVE with the convergence yield, and that is
+   the no-lapse guarantee.** The obvious reading of "install the bridge at the
+   deferral effects" is a bridge that stands legacy's deferral arm down whenever
+   keyed owns the key. That is unsafe, and not subtly: legacy's ladder falls
+   THROUGH a skipped deferral arm into the convergence arms below it, so a
+   deferral-only yield does not stop legacy from acting on an attached row — it
+   promotes it, from a deferral into a relaunch or a drift drain. So
+   `legacyConfigDriftDeferKeyed` requires BOTH predicates, making "legacy skipped
+   the deferral arm" imply "legacy will skip every effect below it". The
+   guarantee is structural rather than a wiring convention, and the pathological
+   wiring (defer-yield true, converge-yield false) is pinned by
+   `TestLegacyConfigDriftDeferralNeverYieldsWithoutTheConvergenceYield`. This is
+   the answer to the question the two-slice handoff raises: there is no tick on
+   which an attached session is defended by neither writer.
+2. **The RUNG selects the effect; the reason does not.** §3 names the deferral
+   arms by their reasons ("attached, recently-attached, active, pending"), but
+   two different arms report the SAME reason: `namedSessionActiveUseReasonInfo`
+   answers `pending_interaction` for a named row, and the ordinary lane answers
+   `pending_interaction` for a pool row — and legacy applies a window stamp to
+   the first and a drain cancel to the second. The deferral therefore carries a
+   typed `Rung` beside legacy's verbatim `active_reason` payload, and the effect
+   switch is on the rung. Five rungs, six shapes: `pinned` and the named
+   active-use reasons share `named_active` because they share the stamp.
+3. **Only three of the five rungs write anything, and that asymmetry is
+   legacy's.** `attached` stamps the attached window and cancels a queued
+   config-drift drain; `named_active` starts the bounded window (only for
+   `pinned`, `activity_unknown`, `recent_activity` — the unconditional reasons
+   bind forever and legacy writes nothing for them); `pending_interaction`
+   cancels a pending-cancelable drain. `attached_recently` and
+   `live_assigned_work` apply nothing at all: the first is already held by the
+   stamp that created it, and re-stamping would extend the false-negative guard
+   indefinitely rather than letting it expire. The keyed record still carries
+   `effect_applied=true` on all five — the EFFECT of a deferral arm is the
+   deferral, which is applied on every rung — with `deferral_stamped` and
+   `drain_canceled` reported as their own fields, exactly as legacy reports
+   `drain_canceled`.
+4. **The pending rung traces under `TraceReasonPending`, not
+   `TraceReasonConfigDrift`.** Legacy's ordinary-lane pending arm is the one
+   deferral in the block that changes the trace REASON as well as the outcome.
+   The keyed record carries the same pair, because the WD.15 join keys on
+   (site, reason, outcome) and a keyed record under the drift reason would read
+   as a legacy deferral that never fired.
+5. **Two drain-cancel helpers, not one.** The attached rung cancels only a
+   `config-drift` drain (`cancelSessionConfigDriftDrainInfo`); the pending rung
+   cancels the whole pending-cancelable set (`cancelSessionDrainForPendingInfo`).
+   Unifying them would widen the attached rung into cancelling drains — orphan,
+   no-wake — that attachment is not a reason to cancel.
+6. **The named window's "has it started" read is now ONE predicate shared by
+   both writers, and it retires a WD.8 divergence.**
+   `configDriftDeferralWindowStart` is asked by legacy's
+   `boundedNamedSessionConfigDriftDeferral` before it stamps, by the keyed
+   handler before it stamps, and by `namedSessionConfigDriftDeferralStillBinding`
+   before it expires. Folding the three together fixed a real skew: WD.8's mirror
+   parsed the stamp with `parseRFC3339Metadata`, which rejects a zero time, where
+   legacy used a bare `time.Parse`, which accepts it — so a zero-valued stamp
+   made the mirror re-defer forever while legacy expired the window immediately.
+   Legacy's spelling won.
+7. **The deferral CLEAR stays legacy's, unyielded.**
+   `clearSessionConfigDriftDeferral` runs on the NOT-drifted path, which the
+   keyed handler by construction never reaches — a row whose hashes match is not
+   a candidate, so the family is never admitted for it. There is no arm to yield
+   and no second implementation to add; the clear is a convergent, idempotent
+   metadata write that two writers cannot disagree about.
+8. **The shadow-deferral record is retired rather than kept.** WD.8 delta 8
+   introduced `detectorReasonConfigDriftDeferred` so a landed handler could
+   predict an arm a later slice owned without its record being able to auto-arm.
+   That window is closed, so the reason constant and the shadow recorder are
+   deleted rather than left as a branch no build can reach. The three deferral
+   outcomes STAY in `detectorShadowOutcomes`: that list is also the act-frontier
+   test's enumeration of outcomes a family must not enqueue under, and D-DRIFT's
+   deferral outcomes are exactly the ones that must never open a second
+   admission path.
+9. **The seam guard and the handler entry lost "Converge" from their names.**
+   One durable-row guard (`exactSessionConfigDriftCandidate`) admits the key and
+   one entry (`reconcileExactSessionConfigDrift`) runs the ladder, because the
+   fact that forks the halves is attachment and the detector may not pay it. The
+   names now say so. The two act constants gate their own halves INSIDE the
+   entry — the version-artifact and live lanes on converge, the deferral rungs on
+   defer — rather than the whole handler on one of them.
+10. **The admission gate is `converge || defer`, not `converge`.** WD.8 gated
+    `detectorAdmissionSourceFor`'s D-DRIFT case on the convergence constant
+    alone, which was correct only while the deferral half applied nothing. Both
+    halves ride ONE source (`config_drift`) and one legacy-yield family, so
+    either half having landed is reason enough to enqueue the key; the handler
+    is the only thing that knows which arm the row takes. The family's `Acts`
+    bit was already the OR, and the seam's dispatch case now matches it.
+
+The legacy corpus's two A6 anchors have keyed twins as of this slice:
+`AttachedSessionNeverRestartedOnConfigDrift` →
+`TestExactConfigDriftAttachedRowDefersInsteadOfConverging`, and
+`AttachedSessionCancelsQueuedConfigDriftDrain` →
+`TestExactConfigDriftAttachedRowCancelsQueuedDriftDrainByKey`. The legacy
+originals stay green and stay meaningful for the whole WD wave: they cover the
+rows the keyed controller does not own.
+
 ### §3 D-DUP deltas (recorded at WD.13)
 
 Where the D-DUP family as built diverges from §3 as written. Reported, not
@@ -977,7 +1079,7 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | D-DEADLINE | decision | deadline firing + hold/quarantine/work blockers | legacy pending-interaction deferral (probe-only signal, unpredicted) |
 | D-ORPHAN | decision | close/drain/kept-open arm choice | deferred-confirm off-by-one (duplicated counters); liveness-error arm incomparable; **keyed A6 attached/pending-interaction deferral against a legacy drain** (WD.4 delta 4) |
 | D-STALE-CREATE | decision | rollback vs preserved | legacy defers rollback #6+ (R6 budget retired) |
-| D-DRIFT | detection | hash-mismatch firing per session, per HALF (core arm at ConfigDrift, live arm at LiveDrift — WD.8 delta 2) | entire 5-arm ladder handler-side (attached probe is provider I/O — excluded, sign-off required); **keyed `no_change` refusal against a legacy `repair_in_place` on an asleep-named row** (WD.8 delta 7) |
+| D-DRIFT | detection | hash-mismatch firing per session, per HALF (core arm at ConfigDrift, live arm at LiveDrift — WD.8 delta 2) | entire 5-arm ladder handler-side (attached probe is provider I/O — excluded, sign-off required); **keyed `no_change` refusal against a legacy `repair_in_place` on an asleep-named row** (WD.8 delta 7); the A6 deferral rungs are keyed and legacy yields them from WD.9, so on an owned key the deferral appears once under `effect_owner=keyed` with no legacy twin (WD.9 delta 1) |
 | D-SLEEP | decision | awake-set membership (incl. winner identity, R3) | probe/pending arms unpredicted |
 | D-DRAIN | detection | tracker-state candidacy (drain intent / draining) | ack-timing skew (handler-side ack read vs legacy's in-tick poll); advance arms journey-proven |
 | D-WAKE | decision | wake-target set | legacy quarantine skip is UNTRACED (:3702-3705) → detector-present/legacy-absent, expected |

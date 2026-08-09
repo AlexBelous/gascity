@@ -59,7 +59,7 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // families whose keyed handler AND legacy yield have landed may act, and every
 // other family stays shadow-only. D-DEADLINE crossed at WD.2; D-ORPHAN's CLOSE
 // arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4; D-STALE-CREATE at
-// WD.7; D-DRIFT's CONVERGENCE arms at WD.8 (its deferral arms wait for WD.9);
+// WD.7; D-DRIFT's CONVERGENCE arms at WD.8 and its DEFERRAL arms at WD.9;
 // D-DUP at WD.13. A family that flips an act constant without an arm in
 // detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
 // before it can double-act beside a non-yielding legacy.
@@ -126,18 +126,26 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	}
 	// D-DRIFT's split is CONVERGE vs DEFER, and it is invisible to detection:
 	// attachment is provider I/O, so both arms ride one condition and one source.
-	// The deferral half therefore cannot be pinned by an outcome — it is pinned
-	// by its own constant, which stays false until WD.9 lands the deferral write
-	// and the legacy yield for those arms. Flipping it early would apply an
-	// attached-user deferral beside a legacy deferral that has not stood down.
-	if detectorActDriftDefer {
-		t.Error("detectorActDriftDefer must stay false until WD.9 lands the deferral handler and its legacy yield")
-	}
+	// Neither half can therefore be pinned by an outcome — each is pinned by its
+	// own constant, and each constant may only be true once BOTH that half's
+	// handler and that half's legacy yield have landed. Flipping one early would
+	// apply a keyed effect beside a legacy arm that has not stood down.
 	if !detectorActDriftConverge {
 		t.Error("detectorActDriftConverge must be true from WD.8: the convergence handler and withLegacyConfigDriftConvergeExclusion have landed")
 	}
+	if !detectorActDriftDefer {
+		t.Error("detectorActDriftDefer must be true from WD.9: applyExactSessionConfigDriftDeferral and withLegacyConfigDriftDeferExclusion have landed")
+	}
 	if source, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyDrift, Outcome: TraceOutcomeDrain}); !routed || source != sessionStartAdmissionConfigDrift {
-		t.Errorf("D-DRIFT routed=%v under source %q, want its single convergence arm under %q", routed, source, sessionStartAdmissionConfigDrift)
+		t.Errorf("D-DRIFT routed=%v under source %q, want both its halves under the single source %q", routed, source, sessionStartAdmissionConfigDrift)
+	}
+	// The deferral outcomes are the family's own, and they must NOT open a second
+	// enqueue path: a deferral is decided inside the handler, off the same
+	// admission the convergence arms ride.
+	for _, outcome := range []TraceOutcomeCode{TraceOutcomeDeferredAttached, TraceOutcomeDeferredActive, TraceOutcomeDeferredPending} {
+		if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyDrift, Outcome: outcome}); routed {
+			t.Errorf("D-DRIFT routed deferral outcome %q; its A6 half rides the convergence admission, not a second one", outcome)
+		}
 	}
 	// One source per family arm: D-DRIFT's two SITES (ConfigDrift, LiveDrift)
 	// are one arm behind one legacy yield, so they must not have grown a second

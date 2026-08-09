@@ -77,12 +77,12 @@ const (
 // D-DRIFT splits like D-ORPHAN but along a different seam: its CONVERGENCE
 // arms (silent rebaseline, launch-only relaunch, restart-in-place, drift drain,
 // live re-apply) crossed at WD.8 (handler: session_drift_reconcile.go; yield:
-// withLegacyConfigDriftConvergeExclusion), while its DEFERRAL arms — attached,
-// recently-attached, named-active, pending-interaction, live-assigned-work —
-// stay shadow until WD.9 lands their handler and their own legacy yield. One
-// constant cannot express that split because the DETECTOR cannot see it:
-// attachment is provider I/O, so both arms ride one detected condition and the
-// ladder forks inside the handler. The rest flip in the WE cutover commit, one
+// withLegacyConfigDriftConvergeExclusion) and its DEFERRAL arms — attached,
+// recently-attached, named-active, pending-interaction, live-assigned-work — at
+// WD.9 (same handler; yield: withLegacyConfigDriftDeferExclusion). One constant
+// cannot express that split because the DETECTOR cannot see it: attachment is
+// provider I/O, so both arms ride one detected condition and the ladder forks
+// inside the handler. The rest flip in the WE cutover commit, one
 // family at a time, once the WD.15 parity window has cleared their must-match
 // bar. They are compile-time constants on purpose: this is not a config surface.
 const (
@@ -91,7 +91,7 @@ const (
 	detectorActOrphanDrain             = true
 	detectorActStaleCreate             = true
 	detectorActDriftConverge           = true
-	detectorActDriftDefer              = false
+	detectorActDriftDefer              = true
 	detectorActSleep                   = false
 	detectorActDrain                   = false
 	detectorActWake                    = false
@@ -139,7 +139,6 @@ const (
 	detectorReasonPendingCreatePreserved  TraceReasonCode = "detector_pending_create_preserved"
 	detectorReasonConfigDrift             TraceReasonCode = "detector_config_drift"
 	detectorReasonLiveDrift               TraceReasonCode = "detector_live_drift"
-	detectorReasonConfigDriftDeferred     TraceReasonCode = "detector_config_drift_deferred"
 	detectorReasonNoWake                  TraceReasonCode = "detector_no_wake"
 	detectorReasonDrainInFlight           TraceReasonCode = "detector_drain_in_flight"
 	detectorReasonWakeTarget              TraceReasonCode = "detector_wake_target"
@@ -171,7 +170,6 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonPendingCreatePreserved,
 	detectorReasonConfigDrift,
 	detectorReasonLiveDrift,
-	detectorReasonConfigDriftDeferred,
 	detectorReasonNoWake,
 	detectorReasonDrainInFlight,
 	detectorReasonWakeTarget,
@@ -189,11 +187,12 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonProviderLivenessUnknown,
 }
 
-// detectorShadowOutcomes is the closed predicted-outcome vocabulary of the
-// detector-shadow population: the sweep's own records, plus the shadow-only
-// predictions a landed handler writes for an arm a LATER slice owns (WD.8's
-// handler predicts WD.9's three deferral outcomes without applying them). It
-// may never contain TraceOutcomeFailed, TraceOutcomeProviderError, or
+// detectorShadowOutcomes is the closed outcome vocabulary of the detector-owned
+// record populations — the sweep's own shadow records plus the outcomes a landed
+// handler records, including the three deferral outcomes D-DRIFT's A6 half
+// carries (WD.9). It doubles as the routing frontier's enumeration: every
+// outcome a family must NOT enqueue under is drawn from here. It may never
+// contain TraceOutcomeFailed, TraceOutcomeProviderError, or
 // TraceOutcomeDeadlineExceeded: shouldAutoArmForTrace's OUTCOME leg fires on
 // those regardless of reason, which would let a shadow record write arms.
 var detectorShadowOutcomes = []TraceOutcomeCode{
@@ -1333,11 +1332,12 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// D-DRIFT's two SITES (ConfigDrift, LiveDrift) are one effect arm under
 		// one outcome, so they take one admission source and one legacy yield.
 		// The split this family needs is the one detection cannot make —
-		// converge versus defer — so it lives in the handler and is gated on
-		// detectorActDriftConverge here: the key is enqueued from WD.8 onward,
-		// and the handler applies nothing on a row whose ladder lands on a
-		// deferral rung until WD.9 flips detectorActDriftDefer.
-		return sessionStartAdmissionConfigDrift, detectorActDriftConverge && cond.Outcome == TraceOutcomeDrain
+		// converge versus defer — so it lives in the handler, and EITHER half
+		// having landed is reason enough to enqueue the key: the same admission
+		// carries a row to a rebaseline, a relaunch, or an attached-user
+		// deferral, and only the handler knows which.
+		return sessionStartAdmissionConfigDrift,
+			(detectorActDriftConverge || detectorActDriftDefer) && cond.Outcome == TraceOutcomeDrain
 	case detectorFamilyDup:
 		// D-DUP has a single arm: detectDuplicateNamed raises one condition per
 		// LOSER row and nothing else, so every condition here predicts the retire

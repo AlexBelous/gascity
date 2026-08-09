@@ -37,10 +37,17 @@ func driftParams(env *reconcilerTestEnv, cityPath string, provider runtime.Provi
 // driftAgentConfig resolves the executable-config-for-hash form the keyed family
 // compares against, through the SAME production resolution the handler uses. A
 // fixture that seeded hashes from a hand-built config would prove only that the
-// test and the handler agree with each other.
-func driftAgentConfig(t *testing.T, env *reconcilerTestEnv, params exactSessionStartParams, id, template string) runtime.Config {
+// test and the handler agree with each other. The template is read off the row
+// rather than passed in, for the same reason: the handler resolves against the
+// row's own template, and a fixture free to name a different one could seed a
+// baseline the handler never compares against.
+func driftAgentConfig(t *testing.T, env *reconcilerTestEnv, params exactSessionStartParams, id string) runtime.Config {
 	t.Helper()
 	info := env.sessionInfo(id)
+	template := normalizedSessionTemplateInfo(info, env.cfg)
+	if template == "" {
+		template = info.Template
+	}
 	cfgAgent := findAgentByTemplate(env.cfg, template)
 	if cfgAgent == nil {
 		t.Fatalf("config has no agent for template %q", template)
@@ -111,7 +118,7 @@ func seedOrdinaryDriftedSession(
 	if err := env.sp.Start(context.Background(), name, runtime.Config{Command: "current-cmd"}); err != nil {
 		t.Fatalf("start fake runtime for %q: %v", name, err)
 	}
-	agentCfg := driftAgentConfig(t, env, params, session.ID, name)
+	agentCfg := driftAgentConfig(t, env, params, session.ID)
 	baseline := map[string]string{}
 	if mutate != nil {
 		old := mutate(agentCfg)
@@ -238,7 +245,7 @@ func TestExactConfigDriftRestartsNamedSessionInPlace(t *testing.T) {
 	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "current-cmd"}); err != nil {
 		t.Fatalf("start fake runtime: %v", err)
 	}
-	agentCfg := driftAgentConfig(t, env, params, session.ID, "worker")
+	agentCfg := driftAgentConfig(t, env, params, session.ID)
 	// A provision-half field moves, so the box itself is stale: not launch-only.
 	oldCfg := agentCfg
 	oldCfg.PreStart = append([]string{"echo stale-prestart"}, agentCfg.PreStart...)
@@ -252,7 +259,7 @@ func TestExactConfigDriftRestartsNamedSessionInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authoritative read: %v", err)
 	}
-	if !exactSessionConfigDriftConvergeCandidate(params, info, response, env.clk) {
+	if !exactSessionConfigDriftCandidate(params, info, response, env.clk) {
 		t.Fatal("seeded named row is not a D-DRIFT candidate; the fixture no longer reproduces the condition")
 	}
 	handled, owner, err := reconcileExactSessionDetectorFamily(
@@ -314,7 +321,7 @@ func TestExactConfigDriftRestartInPlaceKeepsResumeAcrossTheNextLegacyPass(t *tes
 	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "current-cmd"}); err != nil {
 		t.Fatalf("start fake runtime: %v", err)
 	}
-	agentCfg := driftAgentConfig(t, env, params, session.ID, "worker")
+	agentCfg := driftAgentConfig(t, env, params, session.ID)
 	oldCfg := agentCfg
 	oldCfg.PreStart = append([]string{"echo stale-prestart"}, agentCfg.PreStart...)
 	env.setSessionMetadata(&session, map[string]string{
@@ -327,7 +334,7 @@ func TestExactConfigDriftRestartInPlaceKeepsResumeAcrossTheNextLegacyPass(t *tes
 	if err != nil {
 		t.Fatalf("authoritative read: %v", err)
 	}
-	if owner, err := reconcileExactSessionConfigDriftConverge(
+	if owner, err := reconcileExactSessionConfigDrift(
 		t.Context(),
 		sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionConfigDrift},
 		params, info, response, env.clk,
@@ -395,7 +402,7 @@ func TestExactConfigDriftDrainsOrdinarySession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authoritative read: %v", err)
 	}
-	if owner, err := reconcileExactSessionConfigDriftConverge(
+	if owner, err := reconcileExactSessionConfigDrift(
 		t.Context(),
 		sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionConfigDrift},
 		params, info, response, env.clk,
@@ -446,7 +453,7 @@ func TestExactConfigDriftRebaselinesVersionArtifactSilently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authoritative read: %v", err)
 	}
-	if owner, err := reconcileExactSessionConfigDriftConverge(
+	if owner, err := reconcileExactSessionConfigDrift(
 		t.Context(),
 		sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionConfigDrift},
 		params, info, response, env.clk,
@@ -533,7 +540,7 @@ func TestExactLiveDriftReapplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authoritative read: %v", err)
 	}
-	if owner, err := reconcileExactSessionConfigDriftConverge(
+	if owner, err := reconcileExactSessionConfigDrift(
 		t.Context(),
 		sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionConfigDrift},
 		params, info, response, env.clk,
@@ -588,7 +595,7 @@ func TestExactLaunchAndLiveDriftRelaunchThenLiveNextCycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("authoritative read: %v", err)
 		}
-		if owner, err := reconcileExactSessionConfigDriftConverge(
+		if owner, err := reconcileExactSessionConfigDrift(
 			t.Context(),
 			sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionConfigDrift},
 			params, info, response, env.clk,
@@ -666,12 +673,12 @@ func TestDetectorConfigDriftCurrentConfigRowIsNeverEnqueued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authoritative read: %v", err)
 	}
-	if exactSessionConfigDriftConvergeCandidate(params, info, response, env.clk) {
+	if exactSessionConfigDriftCandidate(params, info, response, env.clk) {
 		t.Fatal("a current-config row satisfied the D-DRIFT seam guard")
 	}
 	// And the handler itself refuses with zero effect if some other admission
 	// carries the key into it anyway.
-	if owner, err := reconcileExactSessionConfigDriftConverge(
+	if owner, err := reconcileExactSessionConfigDrift(
 		t.Context(),
 		sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionConfigDrift},
 		params, info, response, env.clk,
@@ -694,14 +701,15 @@ func TestDetectorConfigDriftCurrentConfigRowIsNeverEnqueued(t *testing.T) {
 	}
 }
 
-// TestExactConfigDriftAttachedRowIsNotConvergedByThisArm is the second negative
-// and the WD.9 handoff proof. An attached session's drift is detected and
-// enqueued exactly like any other — attachment is provider I/O the sweep may not
-// pay — but the handler's ladder lands on the deferral rung, which this slice
-// does not own: it applies NOTHING (no relaunch, no restart, no drain, no
-// deferral stamp) and records the predicted deferral shadow-only, released to
-// WD.9 when detectorActDriftDefer flips.
-func TestExactConfigDriftAttachedRowIsNotConvergedByThisArm(t *testing.T) {
+// TestExactConfigDriftAttachedRowDefersInsteadOfConverging is the convergence
+// half's second negative, now read from the far side of the WD.9 handoff. An
+// attached session's drift is detected and enqueued exactly like any other —
+// attachment is provider I/O the sweep may not pay — but the handler's ladder
+// lands on the deferral rung, so NONE of the convergence effects run (no
+// relaunch, no restart, no drain, no hash rebaseline) and the attached window is
+// stamped instead. It is the keyed re-point of
+// TestReconcileSessionBeads_AttachedSessionNeverRestartedOnConfigDrift.
+func TestExactConfigDriftAttachedRowDefersInsteadOfConverging(t *testing.T) {
 	cityPath := t.TempDir()
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -725,7 +733,7 @@ func TestExactConfigDriftAttachedRowIsNotConvergedByThisArm(t *testing.T) {
 		t.Fatalf("authoritative read: %v", err)
 	}
 	// Detection is attachment-blind on purpose: the row IS a candidate.
-	if !exactSessionConfigDriftConvergeCandidate(params, info, response, env.clk) {
+	if !exactSessionConfigDriftCandidate(params, info, response, env.clk) {
 		t.Fatal("an attached drifted row must still be a D-DRIFT candidate; the split is handler-side")
 	}
 	drift, ok := resolveExactSessionConfigDrift(params, info, env.clk)
@@ -736,11 +744,11 @@ func TestExactConfigDriftAttachedRowIsNotConvergedByThisArm(t *testing.T) {
 	if deferErr != nil {
 		t.Fatalf("deferral probe: %v", deferErr)
 	}
-	if deferral.Reason != "attached" || deferral.Outcome != TraceOutcomeDeferredAttached {
+	if deferral.Rung != driftDeferralAttached || deferral.Outcome != TraceOutcomeDeferredAttached {
 		t.Fatalf("deferral = %+v, want the attached rung", deferral)
 	}
 
-	if owner, err := reconcileExactSessionConfigDriftConverge(
+	if owner, err := reconcileExactSessionConfigDrift(
 		t.Context(),
 		sessionStartAdmission{SessionID: session.ID, Source: sessionStartAdmissionConfigDrift},
 		params, info, response, env.clk,
@@ -760,12 +768,15 @@ func TestExactConfigDriftAttachedRowIsNotConvergedByThisArm(t *testing.T) {
 	}
 	if after.Metadata["started_config_hash"] != before.Metadata["started_config_hash"] ||
 		after.Metadata["state"] != before.Metadata["state"] {
-		t.Fatalf("WD.8 converged an attached row: %#v", after.Metadata)
+		t.Fatalf("the convergence ladder ran on an attached row: %#v", after.Metadata)
 	}
-	// The deferral WRITE is WD.9's effect, not this slice's: the handler records
-	// the prediction and stamps nothing.
-	if after.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] != before.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] {
-		t.Fatalf("WD.8 applied WD.9's deferral stamp: %q", after.Metadata[sessionAttachedConfigDriftDeferredAtMetadata])
+	// The row is held by a durable stamp, not by luck: the deferral write is the
+	// handler's own from WD.9 onward.
+	if after.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] == "" {
+		t.Fatalf("the attached rung left no deferral stamp: %#v", after.Metadata)
+	}
+	if got, want := after.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata], drift.DriftKey; got != want {
+		t.Fatalf("attached deferral key = %q, want the drift key %q", got, want)
 	}
 }
 
@@ -829,12 +840,13 @@ func TestLegacyConfigDriftArmsStillConvergeUnownedRows(t *testing.T) {
 }
 
 // TestLegacyConfigDriftDeferralArmsStillRunForKeyedOwnedRow pins the yield's
-// PLACEMENT, which is the whole reason this family needed two act constants.
-// The bridge sits at the CONVERGENCE effects, below the deferral arms: while the
-// keyed controller owns an attached row's key, legacy still stamps the
-// attached-deferral window and traces it, because WD.8's handler applies nothing
-// on that rung and attached-user safety may not stand down for a handler that
-// has not landed.
+// PLACEMENT, which is the whole reason this family needed two act constants and
+// two bridges. The convergence bridge sits at the CONVERGENCE effects only:
+// installed alone, it stands legacy down from relaunching and draining an
+// attached row while leaving legacy's deferral arms live to stamp the window.
+// That is what let the two halves cross in two slices — a convergence handler
+// that lands on a deferral rung and applies nothing must not silently disable
+// the only writer that was defending the human.
 func TestLegacyConfigDriftDeferralArmsStillRunForKeyedOwnedRow(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

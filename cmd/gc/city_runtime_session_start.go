@@ -825,6 +825,9 @@ func (cr *CityRuntime) sessionStartLegacyExclusionOption() startExecutionOption 
 			withLegacyConfigDriftConvergeExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsConfigDriftConverge(info.ID)
 			}),
+			withLegacyConfigDriftDeferExclusion(func(info sessionpkg.Info) bool {
+				return controller.ownsConfigDriftDefer(info.ID)
+			}),
 			withLegacyDuplicateRetireExclusion(func(info sessionpkg.Info) bool {
 				return controller.ownsDuplicateNamedRetire(info.ID)
 			}),

@@ -971,11 +971,8 @@ func (c *sessionStartController) ownsStaleCreateRollback(sessionID string) bool 
 //
 // The predicate's other half — "and this arm is really keyed's" — is the
 // CALLER's, and it is answered twice at each legacy site: the site re-derives
-// the drift key it is about to act on, and the yield is installed only at the
-// CONVERGENCE effects. Legacy's deferral arms (attached, recently-attached,
-// named-active, pending-interaction, live-assigned-work) sit ABOVE the yield and
-// keep running, because WD.8's handler applies nothing on those rungs and
-// attached-user safety (A6) may not depend on a handler that has not landed.
+// the drift key it is about to act on, and the yield is installed at the
+// CONVERGENCE effects only, with the deferral arms carrying their own bridge.
 // Retired at WE with the god function.
 func (c *sessionStartController) ownsConfigDriftConverge(sessionID string) bool {
 	if c == nil || sessionID == "" {
@@ -985,6 +982,20 @@ func (c *sessionStartController) ownsConfigDriftConverge(sessionID string) bool 
 	defer c.mu.Unlock()
 	_, ok := c.admissions[sessionID]
 	return ok
+}
+
+// ownsConfigDriftDefer reports whether the keyed controller currently holds an
+// admission that will run the D-DRIFT ladder's A6 half for this exact key. It
+// answers identically to ownsConfigDriftConverge, and that is not an accident to
+// be collapsed: the family's converge and defer arms ride ONE detected
+// condition and ONE admission source because the fact that forks them —
+// attachment — is provider I/O the detector may not pay, so an admitted key is
+// an admission to the whole ladder. What is genuinely separate is the YIELD:
+// each half's legacy counterpart stands down through its own option, which is
+// what let the two halves cross in two slices without ever leaving an attached
+// session undefended.
+func (c *sessionStartController) ownsConfigDriftDefer(sessionID string) bool {
+	return c.ownsConfigDriftConverge(sessionID)
 }
 
 // ownsDuplicateNamedRetire reports whether the keyed controller currently holds

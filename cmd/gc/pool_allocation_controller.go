@@ -466,6 +466,12 @@ func (cr *CityRuntime) enqueueRoutedWorkPoolAllocation(contribution readyRoutedW
 	}
 	select {
 	case cr.routedWorkPoolAllocationCh <- hint:
+		// The allocation-ownership seam opens HERE, at the moment the exact key
+		// enters the keyed lane — not at create, where the durable claim lands.
+		// That is what makes keyed the winner of the materialization instead of
+		// merely the second creator to notice (ga-f7v2ft.126's cutover arm).
+		keyedRoutedWorkAllocations.reserve(
+			routedWorkAllocationKeyFor(hint.WorkID, hint.PoolTarget, hint.SourceStore), time.Now())
 		return true
 	default:
 		return false
@@ -473,6 +479,12 @@ func (cr *CityRuntime) enqueueRoutedWorkPoolAllocation(contribution readyRoutedW
 }
 
 func (cr *CityRuntime) handleRoutedWorkPoolAllocation(ctx context.Context, hint routedWorkPoolAllocationHint) {
+	// Close the allocation-ownership seam on EVERY path — materialized, refused,
+	// or failed. A retained reservation would fence the legacy pool builder off
+	// a work item nobody is allocating; releasing here is what makes the
+	// stand-down lease-triggered and leaves legacy free on its next pass.
+	defer keyedRoutedWorkAllocations.release(
+		routedWorkAllocationKeyFor(hint.WorkID, hint.PoolTarget, hint.SourceStore))
 	result, err := cr.reconcileRoutedWorkPoolAllocation(ctx, hint)
 	if err != nil || !result.Handled {
 		if cr.sessionStartRolloutMode() == rollout.Require {

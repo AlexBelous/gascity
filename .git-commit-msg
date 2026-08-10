@@ -1,32 +1,43 @@
-feat(reconciler): promote the ready-demand scan to the sweep's routed-work view
+fix(reconciler): make the keyed allocation win pool-member materialization
 
-Q2 resolved yes-with-promotion (WC council, ga-f7v2ft.117). The per-store
-ReadyLive read stops being a fingerprint hash input and becomes the detector
-sweep's DECLARED routed-work view: one bounded read per store per patrol,
-serving two consumers off one read - the demand snapshot's invalidation and
-(next commit) the pool-allocation enqueue by exact
-(workID, poolTarget, sourceStore) key.
+The allocation-ownership seam (ga-f7v2ft.126's cutover arm), built with the
+ga-ij8mh round-6 stand-down template at its own effect boundary.
 
-Deleted together per the WE ledger, each verified to have no remaining live
-caller: readyDemandSnapshotFingerprint, writeReadyDemandFingerprintBead,
-flooredReadyDemandSnapshotFingerprint, readyDemandFingerprintFloor, the
-runtimeDemandSnapshot.readyDemandFingerprint field, and
-requestReadyRoutedWorkLegacyFallback with its readyRoutedWorkPokePending flag.
+Before this, the two pool builders were only mutually exclusive AFTER a member
+existed: revalidatePlannedPoolMemberDemand re-reads the durable claim the keyed
+allocation stamps at CREATE, so first-creator-wins - and legacy, planning from
+a per-tick snapshot and creating immediately, was usually the creator. That is
+the 0/0 keyed materialization both arms of the :469 proof recorded, and it is
+why the keyed side's ownership was never a yield.
 
-Invalidation moves from a fingerprint carried on the snapshot to a change edge
-detected at the read and consumed exactly once by the next refresh; the first
-observation raises no edge, because a runtime with no snapshot rebuilds for
-that reason alone. The view's hash input is the declared projection
-(store, id, resolved pool target, status, type, kind, contract, assigned), not
-the raw bead: UpdatedAt is deliberately gone, since it rebuilt desired state on
-every touch for a change no demand decision could see.
+The reservation moves ownership to the moment the exact
+(workID, poolTarget, sourceStore) key enters the keyed lane
+(enqueueRoutedWorkPoolAllocation), and closes it on every path out of
+handleRoutedWorkPoolAllocation - materialized, refused, or failed. The legacy
+builder consults the installed seam on CURRENT state at its member-creation
+boundary, ahead of the durable claim read, with full-supersede semantics: no
+member, no demand.
 
-Pool-allocation overflow and unhandled/failed allocations are now census-owed
-re-detection: recordRoutedWorkPoolAllocationOverflow traces the dropped key and
-returns. The legacy poke is retired at all four sites, so a routed key never
-crosses back to the legacy pool builder.
+The one real lapse hazard the round-6 ruling names is bounded structurally
+rather than by hope: a reservation carries its reservedAt and retires itself
+past routedWorkAllocationReservationLapse, so a controller that stops between
+enqueue and handling costs one patrol instead of fencing legacy forever.
+Replayed hints coalesce by count so a replay's release cannot retire the
+original owner's fence early.
 
-WD.16's cadence-floor tests move onto the promoted read (readyRoutedWorkViewFloor
-/ readyRoutedWorkViewAt), keeping the same cadence contract.
+REDs (cmd/gc/pool_allocation_ownership_test.go), the behavioural one proven
+non-vacuous by reverting only the consult hunk - legacy materialized worker
+gc-1 for the reserved work item:
+
+  - StandsDownForKeyedAllocationReservation: reservation held, no durable claim
+    (the exact window first-creator-wins gave legacy) => supersede, zero members
+  - ProceedsAfterKeyedAllocationReleases: the no-lapse RED - released
+    reservation => legacy materializes on its very next pass
+  - ReservationLapsesRatherThanFencingForever: a reservation past the bound is
+    retired on read
+  - ReservationIsExactKeyed: a different work id, pool target, or source store
+    is untouched
+  - ReservationCoalescesReplays / LaneReservesAndReleasesAroundTheHandler: the
+    seam is driven by the real lane, not by the tests
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

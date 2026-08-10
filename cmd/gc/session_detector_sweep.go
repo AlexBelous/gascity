@@ -190,6 +190,7 @@ const (
 	detectorReasonWakeTargetNamed         TraceReasonCode = "detector_wake_target_named"
 	detectorReasonWakeTargetDependency    TraceReasonCode = "detector_wake_target_dependency"
 	detectorReasonWakePoolFill            TraceReasonCode = "detector_wake_pool_fill"
+	detectorReasonWakeBlocked             TraceReasonCode = "detector_wake_blocked"
 	detectorReasonZombie                  TraceReasonCode = "detector_zombie"
 	detectorReasonProgressStall           TraceReasonCode = "detector_progress_stall"
 	detectorReasonProgressStallExempt     TraceReasonCode = "detector_progress_stall_exempt"
@@ -229,6 +230,7 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonWakeTargetNamed,
 	detectorReasonWakeTargetDependency,
 	detectorReasonWakePoolFill,
+	detectorReasonWakeBlocked,
 	detectorReasonZombie,
 	detectorReasonProgressStall,
 	detectorReasonProgressStallExempt,
@@ -1386,6 +1388,21 @@ func detectWakeOrSleep(
 		cond := base
 		cond.Family = detectorFamilyWake
 		cond.Site = TraceSiteReconcilerWakeDecision
+		// The traced refusal that replaces legacy's UNTRACED quarantine skip
+		// (§3 D-WAKE, delta-8 arm 3). A row inside a live quarantine or hold
+		// window is a wake target legacy silently drops, which is a trace lie:
+		// the campaign join sees a wake that never happened and no record
+		// saying why. Refusing here records the blocker and enqueues nothing.
+		// It cannot double-act: legacy already skips these rows, and the keyed
+		// admission chain blocks them again at the handler, so the refusal is a
+		// non-action on both sides.
+		if blocker := lifecycleTimerBlockerInfo(info, clk.Now()); blocker != "" {
+			cond.Reason = detectorReasonWakeBlocked
+			cond.Outcome = TraceOutcomeSkipped
+			cond.Fields = map[string]any{"predicted_effect": "none", "wake_reason": decision.Reason, "blocker": blocker}
+			emit.add(cond, false)
+			return
+		}
 		cond.Reason = detectorWakeTargetReason(info, in.Cfg)
 		cond.Outcome = TraceOutcomeStartCandidate
 		cond.Fields = map[string]any{"predicted_effect": "start", "wake_reason": decision.Reason}

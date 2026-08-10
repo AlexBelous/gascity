@@ -271,3 +271,61 @@ func poolFillConditions(result detectorSweepResult) []detectorCondition {
 	}
 	return fills
 }
+
+// TestDetectorRefusesQuarantinedWakeTargetWithATrace is delta-8 arm 3: legacy
+// drops a wake target inside a live quarantine window with NO trace record at
+// all, so the parity join sees a wake that never happened and nothing saying
+// why. The detector records the blocker and enqueues nothing. It cannot
+// double-act -- legacy already skips the row and the keyed admission chain
+// blocks it again at the handler -- so the refusal is a non-action on both
+// sides.
+func TestDetectorRefusesQuarantinedWakeTargetWithATrace(t *testing.T) {
+	now := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name        string
+		quarantined string
+		held        string
+		wantBlocker string
+	}{
+		{name: "quarantine", quarantined: now.Add(time.Hour).Format(time.RFC3339), wantBlocker: "quarantine"},
+		{name: "hold", held: now.Add(time.Hour).Format(time.RFC3339), wantBlocker: "user_hold"},
+		{name: "expired quarantine routes", quarantined: now.Add(-time.Hour).Format(time.RFC3339)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			info := sessionpkg.Info{
+				ID:                  "gc-held",
+				Template:            "worker",
+				SessionNameMetadata: "worker",
+				MetadataState:       string(sessionpkg.StateAsleep),
+				QuarantinedUntil:    test.quarantined,
+				HeldUntil:           test.held,
+			}
+			base := detectorCondition{SessionID: info.ID, SessionName: info.SessionNameMetadata, Template: "worker"}
+			emit := newDetectorConditionSink(false)
+			in := poolFillSweepInput(nil, nil, nil, nil)
+			awake := map[string]AwakeDecision{"worker": {ShouldWake: true, Reason: "assigned-work"}}
+
+			detectWakeOrSleep(in, emit, base, info, awake, nil, detectorLivenessBits{}, nil, &clock.Fake{Time: now})
+
+			if len(emit.conditions) != 1 {
+				t.Fatalf("wake conditions = %+v, want exactly one", emit.conditions)
+			}
+			cond := emit.conditions[0]
+			if test.wantBlocker == "" {
+				if cond.Outcome != TraceOutcomeStartCandidate {
+					t.Fatalf("expired blocker condition = %+v, want an ordinary start candidate", cond)
+				}
+				return
+			}
+			if cond.Reason != detectorReasonWakeBlocked || cond.Outcome != TraceOutcomeSkipped {
+				t.Fatalf("blocked wake condition = %+v, want a traced refusal", cond)
+			}
+			if cond.Fields["blocker"] != test.wantBlocker {
+				t.Fatalf("recorded blocker = %v, want %q", cond.Fields["blocker"], test.wantBlocker)
+			}
+			if _, routed := detectorAdmissionSourceFor(cond); routed {
+				t.Fatalf("a blocked wake target was routed: %+v", cond)
+			}
+		})
+	}
+}

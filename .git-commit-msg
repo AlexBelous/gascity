@@ -1,52 +1,33 @@
-fix(reconciler): hoist wait-dependency reservation onto the bead.closed admission
+feat(reconciler): trace the quarantine wake refusal and record the WD.10b deltas
 
-ga-zo9h3 option (b), architect-approved 2026-08-10.
+Delta-8 arm 3, taken here because it is the one arm of the three that needs no
+stand-down of its own: legacy drops a wake target inside a live quarantine or
+hold window with NO trace record at all, so the parity join sees a wake that
+never happened and nothing saying why. detectWakeOrSleep now records
+detector_wake_blocked with the blocker and enqueues nothing. It cannot
+double-act - legacy already skips the row and the keyed admission chain blocks
+it again at the handler - so the refusal is a non-action on both sides. RED
+proven non-vacuous by reverting only the blocker hunk: the quarantined row came
+back as an ordinary routed start candidate.
 
-The instrumented run's "reserve dep=zn-r54 targets=0" was the CACHED index
-answering. sessionWaitDependencyTargetsForDependency reads the index built from
-observeSessionWaitCensus, which is a CACHE observation, so a wait registered
-since that observation is invisible at the dependency's bead.closed - no
-certificate is minted, no reservation is installed, and the poke's legacy tick
-then advances the durable wait into legacy shape. The round-6 stand-down landed
-at e4fcb01f5f had nothing to stand down for.
+DETECTOR.md:
 
-reserveSessionWaitDependencyTargets now falls back to resolving the closed
-bead's WAITING DEPENDENTS from the durable wait rows. It is bounded, not a
-fleet scan: one label-scoped gc:wait listing under the same
-SessionWaitLookupLimit the cached census already pays, filtered to the exact
-dependency before anything is certified, and skipped entirely whenever the
-index can answer. A city with no pending waits at all collapses to one listing
-per 250ms floor, because with none no bead.closed can ever name a dependent.
-
-A durable-resolved target carries its own provenance
-(sessionWaitDependencyDurableGeneration) instead of a published index
-generation: the index cannot certify it - the index missing the wait is exactly
-why the path exists - and certifySessionWaitDependencyStartLease already
-re-reads BOTH durable rows before the lease is minted. The provenance survives
-the backstop redrive, so a durable-resolved reservation is not downgraded on
-its next pass. The patrol redrive is thereby demoted to the anti-entropy
-backstop it should always have been; it is not deleted.
-
-REDs (cmd/gc/city_runtime_wait_dependency_event_hoist_test.go), all failing
-before the fallback:
-
-  - ReservesWaitingDependentWithoutTheCachedIndex: the journey's exact state -
-    empty index, pending wait, dependency closed => one reserved target, a
-    keyed start reservation, and a certified durable wait AT THE EVENT
-  - ReservationComposesWithTheWaitAdvanceStandDown: the round-6 twins compose -
-    the hoisted reservation makes keyedWaitAdvanceExcluded answer true, and
-    retiring it leaves legacy free on its very next pass (one starter either
-    way)
-  - WarmIndexPathStillReservesAndSkipsTheLiveRead: the hoist ADDS a path, it
-    does not replace the cached one, and pays no durable read when the index
-    can answer
-  - LiveDependentResolveIsThrottledOnACityWithNoPendingWaits: the cost bound
-
-UN-SKIPS. keyed_wait_dependency_commit is un-skipped (its citation retired
-rather than re-pointed - the blocker it named is fixed), and the :469
-keyed_materialization proof is un-skipped on BOTH arms WITH
-wantPoolMaterializations armed to 1 inside the subtest, per council F10: the
-old zero was first-creator-wins bookkeeping, and un-skipping without arming
-would have proved nothing.
+  - §2 declares the routed-work read as LANDED and records the discharged WE
+    ledger entry symbol by symbol, plus where invalidation moved and where
+    WD.16's cadence floor now rides;
+  - §2's degradation rule drops the legacy-fallback crutch and states the
+    census-owed rule for both overflow and unhandled allocations;
+  - WD.1 delta 7 records the ready-demand scan as ABSORBED rather than
+    inventoried;
+  - WD.10a delta 8 is updated with which of its three handoffs WD.10b took;
+  - a new WD.10b delta section records: the FILL arm carrying no session key and
+    therefore no admission source; its yield being an ALLOCATION seam against a
+    different legacy engine than the start seam; open-member counting answering
+    from the planner's one spelling; the :583/:614 family resolved by
+    construction on the keyed path with the residual refill belonging to
+    legacy's ungated FLOOR path until WE; and exactly which delta-8 work is
+    deferred, why moving the churn/wake-failure accounting without a
+    forward-pass stand-down would double-count wake_attempts, and that the
+    :4873/:6927 anchors stay pointed at legacy until that arm lands.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

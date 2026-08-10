@@ -260,6 +260,28 @@ func (cr *CityRuntime) ownsSessionWaitDependencyStart(sessionID string) bool {
 	return controller != nil && controller.ownsWaitDependencyStart(sessionID)
 }
 
+// keyedWaitAdvanceExcluded is the legacy wait-advance boundary's stand-down
+// predicate: the same template the legacy start family uses at its own effect
+// boundary (ga-ij8mh, sixth round), applied one family over.
+//
+// The wait-identity arm alone is not enough (ga-zo9h3). It certifies the exact
+// durable wait the keyed lease was minted for, and legacy's own advance is what
+// moves that identity — MarkWaitReady clears ready_owner and ready_operation,
+// and a session may hold a wait the certificate does not name at all. The
+// moment the row drifts, the arm falls open while the keyed claim on the
+// SESSION is still live, so legacy advances the wait and the same tick's
+// forward pass starts a row the keyed family owns the start of. Consulting
+// ownsSessionWaitDependencyStart — the arm the start boundary already consults
+// — asks the question that actually decides the race, on current state.
+//
+// The stand-down is a full supersede: the boundary applies no effect for the
+// wait and contributes no start demand for its session. It is live-claim
+// triggered, never candidacy triggered, so a released or retired reservation
+// leaves the wait advanceable on the next pass.
+func (cr *CityRuntime) keyedWaitAdvanceExcluded(wait sessionpkg.WaitInfo) bool {
+	return cr.ownsSessionWaitDependencyWait(wait) || cr.ownsSessionWaitDependencyStart(wait.SessionID)
+}
+
 func (cr *CityRuntime) ownsSessionWaitDependencyWait(wait sessionpkg.WaitInfo) bool {
 	if cr.ownsReservedSessionWaitDependencyWait(wait) {
 		return true

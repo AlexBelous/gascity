@@ -2851,7 +2851,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	keyedWaitOwned := cr.ownsSessionWaitDependencyWait
+	keyedWaitOwned := cr.keyedWaitAdvanceExcluded
 	readyWaitSet, err := func() (map[string]bool, error) {
 		releaseWaitDependencyVisibility := cr.cs.acquireSessionWaitDependencyLegacyVisibility()
 		defer releaseWaitDependencyVisibility()

@@ -66,6 +66,7 @@ type sessionWaitDependencyShadowJourneyTraceRecord struct {
 		SessionID                     string `json:"session_id"`
 		InstanceToken                 string `json:"instance_token"`
 		Admission                     string `json:"admission"`
+		StartLease                    string `json:"start_lease"`
 		StatusOutcome                 string `json:"status_outcome"`
 		StatusReason                  string `json:"status_reason"`
 		EffectApplied                 *bool  `json:"effect_applied"`
@@ -309,28 +310,22 @@ depends_on = ["database", "cache"]
 	if manualSession.Metadata["session_origin"] != "manual" {
 		t.Fatalf("manual session after the dependency-ready start metadata = %+v, want preserved session_origin=manual", manualSession.Metadata)
 	}
-	// The two assertions that the KEYED controller owned this start are excised
-	// and skipped, not deleted: the dependency's bead.closed poke reaches
-	// cs.Poke() (api_state.go:741) as an ordinary poke, so a full legacy tick
-	// runs inside the dependency-ready window. Legacy's
-	// prepareWaitWakeStateWithSnapshot (city_runtime.go:2818) advances the wait
-	// and the same tick's forward pass starts the row, so the keyed
-	// wait_dependency commit never lands and the durable wait is left in
-	// legacy's terminal shape rather than ready/open. Every leg above -- the
-	// session starting, becoming active, leaving both configured singletons
-	// untouched, and keeping session_origin=manual -- is the real convergence
-	// this journey still proves, and keeps running.
+	// The two assertions that the KEYED controller owned this start (ga-zo9h3,
+	// un-skipped here). The dependency's bead.closed poke reaches cs.Poke()
+	// (api_state.go:741) as an ordinary poke, so a full legacy tick still runs
+	// inside the dependency-ready window -- but legacy's wait-advance boundary
+	// now stands down for a session the keyed wait-dependency family has
+	// claimed, so it neither advances the wait nor contributes start demand for
+	// the row, and the keyed commit is the one that lands.
 	t.Run("keyed_wait_dependency_commit", func(t *testing.T) {
-		t.Skip("ga-zo9h3: an ordinary bead.closed poke (api_state.go:741) runs a full legacy tick inside the dependency-ready window, so legacy's prepareWaitWakeStateWithSnapshot (city_runtime.go:2818) advances the wait and its forward pass starts the row before the keyed controller can commit; the keyed wait_dependency admission never lands and the durable wait never rests at ready/open. Split out of ga-ij8mh at WD.10a: that slice closes the pre-lease ownership seam for the WAKE families, and this manual wait-hold row carries no wake cause, so the race it loses is on the wait-ADVANCE path and needs its own legacy yield")
-
 		commit, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
 			t.Context(), cityDir, session, started, sessionWaitDependencyShadowJourneyWitnessTimeout,
 		)
 		if err != nil {
 			t.Fatalf("dependency-ready keyed start did not commit: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID))
 		}
-		if commit.Fields.Admission != "wait_dependency" || commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
-			t.Fatalf("dependency start commit = %+v, want applied wait_dependency admission", commit)
+		if commit.Fields.StartLease != "wait_dependency" || commit.Fields.EffectApplied == nil || !*commit.Fields.EffectApplied {
+			t.Fatalf("dependency start commit = %+v, want an applied start authorized by the wait_dependency lease", commit)
 		}
 		durableWait, err := sessionWaitDependencyShadowJourneyInspectWait(cityDir, waitID)
 		if err != nil {
@@ -624,8 +619,8 @@ max_active_sessions = %d
 	if err != nil {
 		t.Fatalf("pool member keyed resume did not commit: %v\n%s", err, sessionWaitDependencyShadowJourneyDiagnostics(cityDir, waitID, dependencyID))
 	}
-	if resumeCommit.Fields.Admission != "wait_dependency" || resumeCommit.Fields.EffectApplied == nil || !*resumeCommit.Fields.EffectApplied {
-		t.Fatalf("pool member resume commit = %+v, want one applied wait_dependency admission", resumeCommit)
+	if resumeCommit.Fields.StartLease != "wait_dependency" || resumeCommit.Fields.EffectApplied == nil || !*resumeCommit.Fields.EffectApplied {
+		t.Fatalf("pool member resume commit = %+v, want one applied start authorized by the wait_dependency lease", resumeCommit)
 	}
 	if err := sessionWaitDependencyShadowJourneyWaitForSessionState(
 		t.Context(), cityDir, session.ID, "active", sessionWaitDependencyShadowJourneyWitnessTimeout,
@@ -1201,7 +1196,13 @@ func sessionWaitDependencyShadowJourneyWaitDependencyStartCommitRecords(
 ) []sessionWaitDependencyShadowJourneyTraceRecord {
 	var matches []sessionWaitDependencyShadowJourneyTraceRecord
 	for _, record := range sessionWaitDependencyShadowJourneyPoolStartCommitRecords(trace, session) {
-		if record.Fields.Admission == "wait_dependency" {
+		// The LEASE, not the admission source, is the ownership proof. The
+		// source is sticky to whichever entry admitted the key FIRST
+		// (sessionStartController.admit), so a dependency-ready start whose
+		// BeadUpdated admission landed first traces as `in_process` even though
+		// the wait-dependency lease is what authorized it (ga-f7v2ft.116 finding
+		// 3, ratified on ga-ij8mh).
+		if record.Fields.StartLease == "wait_dependency" {
 			matches = append(matches, record)
 		}
 	}

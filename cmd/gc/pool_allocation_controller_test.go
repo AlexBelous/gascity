@@ -4786,3 +4786,38 @@ func (s *poolAllocationFailSessionCreateStore) Create(bead beads.Bead) (beads.Be
 	}
 	return s.Store.Create(bead)
 }
+
+// TestValidateRoutedWorkPoolStartLeaseAcceptsASignedRecoveryRevision is the
+// ga-f7v2ft.141 red for the recovery lease. SessionRevision is copied verbatim
+// off persisted.Revision and is only ever tested for equality against a later
+// re-read, so it must be admitted whenever it is KNOWN. Gating it on `> 0`
+// refused every recovery admission on the negative half of every city's bd rows
+// — the active-runtime recovery start could not be certified at all there.
+func TestValidateRoutedWorkPoolStartLeaseAcceptsASignedRecoveryRevision(t *testing.T) {
+	base := routedWorkPoolStartLease{
+		SessionID:            "gcs-pool1",
+		InstanceToken:        "instance-token",
+		ControllerGeneration: 7,
+		PoolTarget:           "worker",
+		WorkID:               "ga-work",
+		SourceStore:          "city:test-city",
+		MembershipRevision:   11,
+		RecoverActive:        true,
+	}
+	for _, tc := range []struct {
+		name     string
+		revision int64
+		wantErr  bool
+	}{
+		{"positive", 5434260017027113294, false},
+		{"negative", -1655629893108404930, false},
+		{"unavailable", 0, true},
+	} {
+		lease := base
+		lease.SessionRevision = tc.revision
+		err := validateRoutedWorkPoolStartLease(lease)
+		if gotErr := err != nil; gotErr != tc.wantErr {
+			t.Errorf("validateRoutedWorkPoolStartLease(revision %d) [%s] = %v, wantErr %v", tc.revision, tc.name, err, tc.wantErr)
+		}
+	}
+}

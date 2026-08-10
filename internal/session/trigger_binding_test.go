@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -85,6 +86,108 @@ func TestRebindTriggerIfMatchFailsClosedOnStaleRevision(t *testing.T) {
 	}
 }
 
+// TestRebindTriggerIfMatchAcceptsASignedRevision is the ga-f7v2ft.141 red for
+// this fence. RebindTriggerIfMatch gated its CAS on `persisted.Revision <= 0`
+// and never falls back to an unconditional write, so on a bd row carrying a
+// NEGATIVE revision — roughly half of every city's — the rebind refused every
+// time with "not an open revisioned row" and the trigger provenance cluster was
+// never replaced. The revision contract permits equality only; the sign says
+// nothing about whether the row is revisioned.
+func TestRebindTriggerIfMatchAcceptsASignedRevision(t *testing.T) {
+	const negativeRevision = int64(-444891346261809656) // observed live, v59 journey
+	front, store, id := signedRevisionTriggerBindingStore(t, negativeRevision)
+	pre, persisted, err := front.GetPersistedResponse(id)
+	if err != nil {
+		t.Fatalf("read preimage: %v", err)
+	}
+	if persisted.Revision != negativeRevision {
+		t.Fatalf("test premise: persisted revision = %d, want the seeded signed revision %d", persisted.Revision, negativeRevision)
+	}
+	binding := TriggerBinding{
+		WorkID:   "ga-next",
+		StoreRef: "city:test-city",
+		WorkDir:  "/city/worker",
+	}
+
+	got, err := front.RebindTriggerIfMatch(pre, persisted, binding)
+	if err != nil {
+		t.Fatalf("rebind on revision %d: %v: the fence is gated on the revision's SIGN, so a real revision reads as unrevisioned", negativeRevision, err)
+	}
+	if !binding.Matches(got) {
+		t.Fatalf("returned Info does not match binding: %+v", got)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("read rebound row: %v", err)
+	}
+	if after.Metadata[beadmeta.TriggerBeadIDMetadataKey] != binding.WorkID {
+		t.Fatalf("rebound trigger = %q, want %q", after.Metadata[beadmeta.TriggerBeadIDMetadataKey], binding.WorkID)
+	}
+}
+
+// TestRebindTriggerIfMatchFailsClosedOnAStaleSignedRevision is the other arm:
+// accepting a negative revision must not weaken the fence. A concurrent writer
+// that moved the same signed-revision row still wins.
+func TestRebindTriggerIfMatchFailsClosedOnAStaleSignedRevision(t *testing.T) {
+	front, store, id := signedRevisionTriggerBindingStore(t, -1700993557661895454)
+	pre, persisted, err := front.GetPersistedResponse(id)
+	if err != nil {
+		t.Fatalf("read preimage: %v", err)
+	}
+	if err := store.SetMetadata(id, "unrelated", "newer"); err != nil {
+		t.Fatalf("advance row revision: %v", err)
+	}
+
+	got, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
+		WorkID:   "ga-next",
+		StoreRef: "city:test-city",
+		WorkDir:  "/city/worker",
+	})
+	if !beads.IsPreconditionFailed(err) {
+		t.Fatalf("stale signed-revision rebind error = %v, want precondition failure", err)
+	}
+	if !reflect.DeepEqual(got, pre) {
+		t.Fatalf("stale rebind returned changed Info\n got=%+v\nwant=%+v", got, pre)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("read row after stale rebind: %v", err)
+	}
+	if after.Metadata[beadmeta.TriggerBeadIDMetadataKey] != "ga-old" {
+		t.Fatalf("stale rebind changed durable trigger to %q", after.Metadata[beadmeta.TriggerBeadIDMetadataKey])
+	}
+}
+
+// TestRebindTriggerIfMatchRefusesAnUnrevisionedRow keeps the zero sentinel a
+// refusal: zero means the store did not supply a revision, so there is nothing
+// to fence on and this call must never degrade to an unconditional write.
+func TestRebindTriggerIfMatchRefusesAnUnrevisionedRow(t *testing.T) {
+	front, store, id := signedRevisionTriggerBindingStore(t, 0)
+	pre, persisted, err := front.GetPersistedResponse(id)
+	if err != nil {
+		t.Fatalf("read preimage: %v", err)
+	}
+
+	got, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
+		WorkID:   "ga-next",
+		StoreRef: "city:test-city",
+		WorkDir:  "/city/worker",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not an open revisioned row") {
+		t.Fatalf("unrevisioned rebind error = %v, want the revisioned-row refusal", err)
+	}
+	if !reflect.DeepEqual(got, pre) {
+		t.Fatalf("refused rebind returned changed Info\n got=%+v\nwant=%+v", got, pre)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("read row after refused rebind: %v", err)
+	}
+	if after.Metadata[beadmeta.TriggerBeadIDMetadataKey] != "ga-old" {
+		t.Fatalf("refused rebind changed durable trigger to %q", after.Metadata[beadmeta.TriggerBeadIDMetadataKey])
+	}
+}
+
 func TestRebindTriggerIfMatchRefusesStoreWithoutResolvedConditionalWrites(t *testing.T) {
 	store := beads.NewMemStore()
 	created, err := store.Create(triggerBindingSessionBead())
@@ -163,6 +266,29 @@ func conditionalTriggerBindingStore(t *testing.T) (*Store, beads.Store, string) 
 	created, err := opened.Store.Create(triggerBindingSessionBead())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
+	}
+	return NewStore(beads.SessionStore{Store: opened.Store}), opened.Store, created.ID
+}
+
+// signedRevisionTriggerBindingStore is conditionalTriggerBindingStore for a row
+// whose revision is a SIGNED bd token rather than the native stores' small
+// positive counter. The row is minted through the ordinary Create path first so
+// its shape is identical, then re-seeded verbatim under the given revision.
+func signedRevisionTriggerBindingStore(t *testing.T, revision int64) (*Store, beads.Store, string) {
+	t.Helper()
+	scratch := beads.NewMemStore()
+	created, err := scratch.Create(triggerBindingSessionBead())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	created.Revision = revision
+	opened, err := beads.OpenStoreAtForCity(t.Context(), beads.StoreOpenOptions{
+		Provider:          "file",
+		OpenFileStore:     func() (beads.Store, error) { return beads.NewMemStoreFrom(1, []beads.Bead{created}, nil), nil },
+		ConditionalWrites: gate.Auto,
+	})
+	if err != nil {
+		t.Fatalf("open conditional-write store: %v", err)
 	}
 	return NewStore(beads.SessionStore{Store: opened.Store}), opened.Store, created.ID
 }

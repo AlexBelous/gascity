@@ -42,7 +42,8 @@ var errPreWakeSuperseded = errors.New("pre-wake commit superseded")
 // signals) — every field a verbatim raw mirror — so no raw bead crosses in.
 //
 // The write is FENCED on loadedRevision — the revision of the genuine re-read
-// info came from. The legacy and keyed start families share this executor, and
+// info came from, tested with beads.RevisionKnown. The legacy and keyed start
+// families share this executor, and
 // `gc start` runs the same wave in a SECOND process beside a controller, so the
 // per-session mutation lock cannot serialize every entrant. Unfenced, the loser
 // re-rotates on top of the winner and the durable instance_token ends up naming
@@ -77,10 +78,13 @@ func preWakeCommit(
 // applyPreWakePatchFenced persists the pre-wake incarnation and reports whether
 // it landed, mirroring applyHealPatchFenced (ga-797vy F1). A CAS miss returns
 // (false, nil): another writer rotated the row since the re-read, so this
-// incarnation must not be committed at all. A non-positive revision, or a
-// deployment with conditional writes off, keeps the unconditional write — unlike
-// the advisory heal, the pre-wake commit cannot fail closed without making the
-// start unreachable.
+// incarnation must not be committed at all. An UNKNOWN revision (the store's
+// zero sentinel), or a deployment with conditional writes off, keeps the
+// unconditional write — unlike the advisory heal, the pre-wake commit cannot
+// fail closed without making the start unreachable. The known-revision test is
+// beads.RevisionKnown and not a sign comparison: bd revisions are signed, and
+// gating on `> 0` made this fence a no-op on the negative half of every city's
+// rows — the split-brain ga-l1j53 closed was wide open there (ga-f7v2ft.141).
 func applyPreWakePatchFenced(
 	sessFront *sessions.Store,
 	id string,
@@ -91,7 +95,7 @@ func applyPreWakePatchFenced(
 	if resolveErr != nil {
 		return false, fmt.Errorf("resolving conditional writer for pre-wake commit %q: %w", id, resolveErr)
 	}
-	if writer != nil && loadedRevision > 0 {
+	if writer != nil && beads.RevisionKnown(loadedRevision) {
 		if err := writer.UpdateIfMatch(id, loadedRevision, beads.UpdateOpts{Metadata: batch}); err != nil {
 			if beads.IsPreconditionFailed(err) {
 				return false, nil

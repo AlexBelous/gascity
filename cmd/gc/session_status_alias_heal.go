@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -45,7 +46,7 @@ func healExactSessionActiveAlias(params exactSessionStartParams, sessionID strin
 		clk = clock.Real{}
 	}
 	info, response, err := getAuthoritativeSessionStartPersistedRecord(params.Store, sessionID)
-	if err != nil || info.ID != sessionID || info.Closed || !fenceRevisionKnown(response.Revision) {
+	if err != nil || info.ID != sessionID || info.Closed || !beads.RevisionKnown(response.Revision) {
 		return false
 	}
 	if strings.TrimSpace(info.MetadataState) != string(sessionpkg.StateActive) {

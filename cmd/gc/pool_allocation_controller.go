@@ -84,8 +84,12 @@ func validateRoutedWorkPoolStartLease(lease routedWorkPoolStartLease) error {
 	if lease.ControllerGeneration == 0 || lease.MembershipRevision == 0 {
 		return fmt.Errorf("admitting pool allocation %q: generation and membership revision must be positive", lease.SessionID)
 	}
-	if lease.RecoverActive && lease.SessionRevision <= 0 {
-		return fmt.Errorf("admitting pool allocation %q: recovery session revision must be positive", lease.SessionID)
+	// The revision is an opaque bd token tested only for equality (against
+	// persisted.Revision in authorizeRoutedWorkPoolStart), so the lease requires
+	// it to be KNOWN, not positive: bd revisions are signed and a sign test
+	// refused recovery on the negative half of every city's rows (ga-f7v2ft.141).
+	if lease.RecoverActive && !beads.RevisionKnown(lease.SessionRevision) {
+		return fmt.Errorf("admitting pool allocation %q: recovery session revision is unknown", lease.SessionID)
 	}
 	if lease.RecoveryPreWakeCommitted && !lease.RecoverActive {
 		return fmt.Errorf("admitting pool allocation %q: committed recovery pre-wake requires active recovery", lease.SessionID)

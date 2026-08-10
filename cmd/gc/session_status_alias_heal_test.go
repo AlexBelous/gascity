@@ -107,27 +107,6 @@ func TestKeyedPassHealsTheActiveAliasWhenADetectorFamilyClaimsTheRow(t *testing.
 	})
 }
 
-// TestFenceRevisionKnownAcceptsSignedRevisions pins the sign rule the F1 fence
-// depends on. bd revisions are signed and about half of a city's rows carry a
-// negative one; treating those as unknown makes the advisory heal fail closed
-// on half the fleet, which is what left the v59 journey's row stranded at
-// `active` even once its heal had an owner again (ga-f7v2ft.140).
-func TestFenceRevisionKnownAcceptsSignedRevisions(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		revision int64
-		want     bool
-	}{
-		{"positive", 8834124395982504135, true},
-		{"negative", -1655629893108404930, true},
-		{"unknown", 0, false},
-	} {
-		if got := fenceRevisionKnown(tc.revision); got != tc.want {
-			t.Errorf("fenceRevisionKnown(%d) [%s] = %v, want %v", tc.revision, tc.name, got, tc.want)
-		}
-	}
-}
-
 // TestKeyedPassLeavesADeadRowsAliasToLegacy pins the fence the heal must keep:
 // `active` on a row whose runtime is gone projects to asleep, not awake, and
 // that transition changes the base state, so it stays with the lane that owns

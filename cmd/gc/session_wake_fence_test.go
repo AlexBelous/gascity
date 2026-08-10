@@ -29,6 +29,36 @@ func newPreWakeFenceStore(t *testing.T, mode gate.Mode) beads.Store {
 	return result.Store
 }
 
+// newSignedRevisionPreWakeFenceStore is newPreWakeFenceStore for a row whose
+// revision is a SIGNED bd token rather than the native stores' small positive
+// counter. The native Mem/File stores mint 1, 2, 3…, so every fence test that
+// stands on them exercises only half the value space; bd hands out signed
+// revisions and roughly half of every city's rows carry a negative one. The row
+// is minted through the ordinary front door first so its shape is byte-identical
+// to createPreWakeFenceSession's, then re-seeded verbatim under the given
+// revision.
+func newSignedRevisionPreWakeFenceStore(t *testing.T, revision int64, preWakeToken string) (beads.Store, string) {
+	t.Helper()
+	scratch := beads.NewMemStore()
+	id := createPreWakeFenceSession(t, scratch, preWakeToken)
+	row, err := scratch.Get(id)
+	if err != nil {
+		t.Fatalf("read seeded session row: %v", err)
+	}
+	row.Revision = revision
+	seeded := beads.NewMemStoreFrom(1, []beads.Bead{row}, nil)
+	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot:         t.TempDir(),
+		Provider:          "file",
+		ConditionalWrites: gate.Require,
+		OpenFileStore:     func() (beads.Store, error) { return seeded, nil },
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity: %v", err)
+	}
+	return result.Store, id
+}
+
 // createPreWakeFenceSession persists one asleep manual session bead carrying a
 // pre-wake incarnation token and returns its id.
 func createPreWakeFenceSession(t *testing.T, store beads.Store, preWakeToken string) string {
@@ -97,6 +127,82 @@ func TestPreWakeCommitFenceRefusesSupersededRotation(t *testing.T) {
 	if durable != winnerToken {
 		t.Fatalf("durable instance token = %q, want the winning rotation %q (pre_wake=%q loser=%q): the row names an incarnation with no runtime behind it",
 			durable, winnerToken, preWakeToken, loserToken)
+	}
+}
+
+// TestPreWakeCommitFenceRefusesSupersededRotationOnASignedRevision is the
+// ga-f7v2ft.141 red. It is TestPreWakeCommitFenceRefusesSupersededRotation's
+// double-rotation shape run on a row whose revision is a NEGATIVE bd token — the
+// only difference between the two, and the reason the ga-l1j53 fence proved
+// nothing about half of every city. With the sign gate in place the fence does
+// not fence at all: the loser falls through to the unconditional write, rotates
+// on top of the winner, and the durable row ends on a THIRD token naming an
+// incarnation with no runtime behind it.
+func TestPreWakeCommitFenceRefusesSupersededRotationOnASignedRevision(t *testing.T) {
+	const negativeRevision = int64(-1655629893108404930) // observed live, v59 journey
+	const preWakeToken = "1f5f0b9c7bb64a1ab6b0d8f7ef3c2a15"
+	store, id := newSignedRevisionPreWakeFenceStore(t, negativeRevision, preWakeToken)
+	sessFront := sessionFrontDoor(store)
+	clk := clock.Real{}
+
+	winnerInfo, winnerRead, err := sessFront.GetPersistedResponse(id)
+	if err != nil {
+		t.Fatalf("winner re-read: %v", err)
+	}
+	loserInfo, loserRead, err := sessFront.GetPersistedResponse(id)
+	if err != nil {
+		t.Fatalf("loser re-read: %v", err)
+	}
+	if winnerRead.Revision != negativeRevision || loserRead.Revision != negativeRevision {
+		t.Fatalf("test premise: revisions = %d/%d, want the seeded signed revision %d", winnerRead.Revision, loserRead.Revision, negativeRevision)
+	}
+
+	_, winnerToken, _, err := preWakeCommit(winnerInfo, winnerRead.Revision, sessFront, clk)
+	if err != nil {
+		t.Fatalf("winning pre-wake commit: %v", err)
+	}
+
+	_, loserToken, _, loserErr := preWakeCommit(loserInfo, loserRead.Revision, sessFront, clk)
+
+	latest, err := sessFront.Get(id)
+	if err != nil {
+		t.Fatalf("read row after both commits: %v", err)
+	}
+	if !errors.Is(loserErr, errPreWakeSuperseded) {
+		t.Fatalf("superseded pre-wake commit on revision %d = token %q err %v, want errPreWakeSuperseded: the fence is gated on the revision's SIGN, so it never ran — the durable row now reads %q, a THIRD token behind neither incarnation (pre_wake=%q winner=%q)",
+			negativeRevision, loserToken, loserErr, strings.TrimSpace(latest.InstanceToken), preWakeToken, winnerToken)
+	}
+	if durable := strings.TrimSpace(latest.InstanceToken); durable != winnerToken {
+		t.Fatalf("durable instance token = %q, want the winning rotation %q (pre_wake=%q loser=%q): the row names an incarnation with no runtime behind it",
+			durable, winnerToken, preWakeToken, loserToken)
+	}
+}
+
+// TestPreWakeCommitFenceKeepsSingleWriterUnchangedOnASignedRevision is the other
+// arm of the differential: the same signed-revision row with only ONE writer must
+// still rotate. It separates "the fence engaged" from "the write stopped landing".
+func TestPreWakeCommitFenceKeepsSingleWriterUnchangedOnASignedRevision(t *testing.T) {
+	const preWakeToken = "6b8c4b0a1d6f4d3e9a2c7b5e8f0a1d3c"
+	store, id := newSignedRevisionPreWakeFenceStore(t, -763273861394134104, preWakeToken)
+	sessFront := sessionFrontDoor(store)
+
+	info, read, err := sessFront.GetPersistedResponse(id)
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	gen, token, fold, err := preWakeCommit(info, read.Revision, sessFront, clock.Real{})
+	if err != nil {
+		t.Fatalf("single-writer pre-wake commit on a signed revision: %v", err)
+	}
+	if gen != 2 || token == "" || token == preWakeToken || len(fold) == 0 {
+		t.Fatalf("single-writer pre-wake commit = gen %d token %q fold %d, want a fresh rotation", gen, token, len(fold))
+	}
+	latest, err := sessFront.Get(id)
+	if err != nil {
+		t.Fatalf("read row after commit: %v", err)
+	}
+	if strings.TrimSpace(latest.InstanceToken) != token || latest.MetadataState != string(sessionpkg.StateCreating) {
+		t.Fatalf("durable row = token %q state %q, want %q/creating", latest.InstanceToken, latest.MetadataState, token)
 	}
 }
 

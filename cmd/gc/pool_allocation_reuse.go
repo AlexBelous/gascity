@@ -176,7 +176,7 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 		if err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: %w", lease.SessionID, err)
 		}
-		if currentPersisted.Revision <= 0 || currentPersisted.Revision != expectedReboundRevision {
+		if !beads.RevisionKnown(currentPersisted.Revision) || currentPersisted.Revision != expectedReboundRevision {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: revision %d, want %d", lease.SessionID, currentPersisted.Revision, expectedReboundRevision)
 		}
 		currentAssignedBusy, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{current})
@@ -211,7 +211,7 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 			if err != nil {
 				return fmt.Errorf("rereading rebound pool member after idle wait: %w", err)
 			}
-			if latestPersisted.Revision <= 0 || latestPersisted.Revision != expectedReboundRevision {
+			if !beads.RevisionKnown(latestPersisted.Revision) || latestPersisted.Revision != expectedReboundRevision {
 				return fmt.Errorf("rereading rebound pool member after idle wait: revision %d, want %d", latestPersisted.Revision, expectedReboundRevision)
 			}
 			assigned, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{latest})
@@ -312,7 +312,7 @@ func (cr *CityRuntime) revalidateRoutedWorkPoolSkippedBusy(
 		if err != nil {
 			return false, fmt.Errorf("rereading skipped busy pool member %q: %w", candidate.info.ID, err)
 		}
-		if candidate.persisted.Revision <= 0 || persisted.Revision != candidate.persisted.Revision ||
+		if !beads.RevisionKnown(candidate.persisted.Revision) || persisted.Revision != candidate.persisted.Revision ||
 			persisted.Status != candidate.persisted.Status || !maps.Equal(persisted.Metadata, candidate.persisted.Metadata) {
 			return false, nil
 		}

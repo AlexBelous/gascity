@@ -73,7 +73,7 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 	// conditions therefore have to carry a reason, and the arm WD.10b still owns
 	// must stay unrouted under the same outcome its landed siblings route on.
 	actingReasons := map[detectorFamily][]TraceReasonCode{
-		detectorFamilyWake: {detectorReasonWakeTargetNamed, detectorReasonWakeTargetDependency},
+		detectorFamilyWake: {detectorReasonWakeTargetNamed, detectorReasonWakeTargetDependency, detectorReasonWakeTarget},
 	}
 	probes := func(family detectorFamily, outcome TraceOutcomeCode) []detectorCondition {
 		reasons, split := actingReasons[family]
@@ -169,17 +169,19 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 			}
 		}
 	}
-	// D-WAKE's remaining arm is WD.10b's, and it carries the SAME outcome its
-	// landed siblings route on — so only the reason separates them. Pin that the
-	// pool-fill reason stays unrouted, or WD.10b's fill would ride in on the
-	// named/dependency gate before its own yield exists.
+	// D-WAKE's arms carry the SAME outcome and are separated only by reason, so
+	// this family's act frontier is a reason frontier. All three landed as of
+	// WD.10b. The FILL arm is the one with no session key at all -- the member
+	// does not exist yet -- so it must NOT claim a session-start admission
+	// source: its sink is the pool-allocation admission, and routeDetectorPoolFill
+	// dispatches it on the reason.
 	if _, routed := detectorAdmissionSourceFor(detectorCondition{
-		Family: detectorFamilyWake, Reason: detectorReasonWakeTarget, Outcome: TraceOutcomeStartCandidate,
+		Family: detectorFamilyWake, Reason: detectorReasonWakePoolFill, Outcome: TraceOutcomeStartCandidate,
 	}); routed {
-		t.Error("D-WAKE routed its pool-fill arm; that arm and its legacy yield land at WD.10b")
+		t.Error("D-WAKE's pool-under-min FILL arm claimed a session-start admission source; it has no session key")
 	}
-	if detectorActWakePoolFill {
-		t.Error("detectorActWakePoolFill must stay false until WD.10b lands pool-under-min fill with its own legacy yield")
+	if !detectorActWakePoolFill {
+		t.Error("detectorActWakePoolFill must be true from WD.10b: pool-under-min fill landed with the allocation-ownership seam as its legacy yield")
 	}
 	if !detectorActWakeNamedDependency {
 		t.Error("detectorActWakeNamedDependency must be true from WD.10a: the certified named/dependency wake admissions have landed behind the existing start-family legacy yield")

@@ -1,43 +1,47 @@
-fix(reconciler): make the keyed allocation win pool-member materialization
+feat(reconciler): fill pool-under-min demand by exact key (D-WAKE part 2)
 
-The allocation-ownership seam (ga-f7v2ft.126's cutover arm), built with the
-ga-ij8mh round-6 stand-down template at its own effect boundary.
+detectorActWakePoolFill flips, which crosses D-WAKE's last two arms:
 
-Before this, the two pool builders were only mutually exclusive AFTER a member
-existed: revalidatePlannedPoolMemberDemand re-reads the durable claim the keyed
-allocation stamps at CREATE, so first-creator-wins - and legacy, planning from
-a per-tick snapshot and creating immediately, was usually the creator. That is
-the 0/0 keyed materialization both arms of the :469 proof recorded, and it is
-why the keyed side's ownership was never a yield.
+  - the slotized pool member's re-wake routes through the SAME certified-lease
+    entry its named/dependency siblings use (AdmitStrictDefaultPoolWake), whose
+    legacy yield already existed in sessionStartLegacyExclusionPredicate;
+  - the pool-under-min FILL - the family's one arm with no session row, because
+    the member does not exist yet - routes its exact
+    (workID, poolTarget, sourceStore) key into the pool-allocation admission,
+    whose legacy yield is the allocation-ownership seam landed in the previous
+    commit.
 
-The reservation moves ownership to the moment the exact
-(workID, poolTarget, sourceStore) key enters the keyed lane
-(enqueueRoutedWorkPoolAllocation), and closes it on every path out of
-handleRoutedWorkPoolAllocation - materialized, refused, or failed. The legacy
-builder consults the installed seam on CURRENT state at its member-creation
-boundary, ahead of the durable claim read, with full-supersede semantics: no
-member, no demand.
+detectPoolFill reads only what the tick already carries: the desired counts
+ComputePoolDesiredStates precomputed, and the promoted routed-work view's
+unallocated entries. Open members are counted the way the pool planner counts
+them, so demand a member has already spent is never re-raised, and the arm
+accrues its own fills so one sweep never overfills a pool short by one.
 
-The one real lapse hazard the round-6 ruling names is bounded structurally
-rather than by hope: a reservation carries its reservedAt and retires itself
-past routedWorkAllocationReservationLapse, so a controller that stops between
-enqueue and handling costs one patrol instead of fencing legacy forever.
-Replayed hints coalesce by count so a replay's release cannot retire the
-original owner's fence early.
+The ready-demand scan is now ABSORBED rather than inventoried: Q2 resolved
+yes-with-promotion, so detectorFamilyReadyDemandScan and its act constant
+retire - the sweep owns the read, so there is no foreign scan left to observe.
 
-REDs (cmd/gc/pool_allocation_ownership_test.go), the behavioural one proven
-non-vacuous by reverting only the consult hunk - legacy materialized worker
-gc-1 for the reserved work item:
+REDs (cmd/gc/session_detector_pool_fill_test.go):
 
-  - StandsDownForKeyedAllocationReservation: reservation held, no durable claim
-    (the exact window first-creator-wins gave legacy) => supersede, zero members
-  - ProceedsAfterKeyedAllocationReleases: the no-lapse RED - released
-    reservation => legacy materializes on its very next pass
-  - ReservationLapsesRatherThanFencingForever: a reservation past the bound is
-    retired on read
-  - ReservationIsExactKeyed: a different work id, pool target, or source store
-    is untouched
-  - ReservationCoalescesReplays / LaneReservesAndReleasesAroundTheHandler: the
-    seam is driven by the real lane, not by the tests
+  - FillsPoolUnderMinByExactKey: the primary - under-filled pool + unallocated
+    routed work => one start-candidate with no session key, handed to the
+    pool-allocation admission under its exact key
+  - StartsARealSession: the AC's upgrade of the request-count-only legacy
+    assertion - the key the sweep produced, driven through the unchanged
+    handler, materializes a member with a new instance token, the routed
+    trigger, and exactly one live provider Start
+  - NeverFillsPoolAtOrAboveMin (negative): a filled pool is never enqueued and
+    starts nothing however much work waits
+  - NeverOverfillsOneSweep: a pool short by one gets one member, not three
+  - OverflowIsCensusOwedAndRefills (negative): a saturated channel drops the
+    hint, the seam records refused_overflow and returns - no retry, no block,
+    no legacy fallback, not counted as keyed-owned - and the NEXT sweep
+    re-detects the same durable condition and fills it
+  - RefusesWithoutAnAdmissionSeam: a keyed city with no pool-allocation
+    admission records the traced refusal and enqueues nothing
+
+Act-frontier repin: the D-WAKE reason frontier now lists all three routing
+arms, and the FILL arm is pinned to claim NO session-start admission source.
+This was D-WAKE's last family arm - the act map is complete.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

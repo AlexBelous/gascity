@@ -43,12 +43,17 @@ const (
 	// condition family: it never predicts an effect, so it is never destructive
 	// and never suppressed by the partial-store guard.
 	detectorFamilyUnknownState detectorFamily = "d-unknown-state"
-	// The two families below are OBSERVED-ONLY patrol members added to main
-	// after the WD design was written (WC merge 71d1dad702). They are
-	// unbounded per-tick patrol scans that contradict A1; the sweep inventories
-	// them so the campaign readout sees them, but does not run, absorb, or
-	// duplicate them. Absorption-or-retirement is adjudicated at WD.10b and WE.
-	detectorFamilyReadyDemandScan         detectorFamily = "d-ready-demand-scan"
+	// detectorFamilyExecutionCompletionScan is an OBSERVED-ONLY patrol member
+	// added to main after the WD design was written (WC merge 71d1dad702). It is
+	// an unbounded per-tick patrol scan that contradicts A1; the sweep
+	// inventories it so the campaign readout sees it, but does not run, absorb,
+	// or duplicate it. Absorption-or-retirement is adjudicated at WE.
+	//
+	// Its sibling, the ready-demand scan, was ABSORBED at WD.10b: Q2 resolved
+	// yes-with-promotion, so the scan is now the sweep's own declared
+	// routed-work view (readyRoutedWorkView) rather than a foreign scan to
+	// inventory. It stopped being an observed-only family when the sweep started
+	// owning the read.
 	detectorFamilyExecutionCompletionScan detectorFamily = "d-execution-completion-scan"
 )
 
@@ -109,10 +114,14 @@ const (
 // arms of sessionStartLegacyExclusionPredicate, which drive the SAME
 // withLegacyStartExclusion bridge legacy's start family already honors — no new
 // exclusion helper, because the gap ga-ij8mh found was entirely PRE-lease and
-// the pre-lease seam closes it). Its POOL-FILL arm stays shadow-only until
-// WD.10b brings pool-under-min fill and its own yield. One constant could not
-// express that split: the arms have different admission leases and land a slice
-// apart, which is exactly the double-act the per-family rule exists to prevent.
+// the pre-lease seam closes it). Its POOL-FILL arm crossed at WD.10b with a
+// yield of its own: the ALLOCATION-OWNERSHIP seam
+// (keyedRoutedWorkAllocations, consulted at legacy's member-creation boundary
+// in revalidatePlannedPoolMemberDemand), because the arm that materializes a
+// member races the legacy pool builder rather than legacy's start family. One
+// constant could not express that split: the arms have different admission
+// leases, different sinks, and land a slice apart, which is exactly the
+// double-act the per-family rule exists to prevent.
 // The rest flip in the WE cutover commit,
 // one family at a time, once the WD.15 parity window has cleared their
 // must-match bar. They are compile-time constants on purpose: this is not a
@@ -127,12 +136,11 @@ const (
 	detectorActSleep                   = true
 	detectorActDrain                   = true
 	detectorActWakeNamedDependency     = true
-	detectorActWakePoolFill            = false
+	detectorActWakePoolFill            = true
 	detectorActZombie                  = true
 	detectorActStall                   = true
 	detectorActDup                     = true
 	detectorActStranded                = true
-	detectorActReadyDemandScan         = false
 	detectorActExecutionCompletionScan = false
 )
 
@@ -293,7 +301,6 @@ var detectorFamilySpecs = []detectorFamilySpec{
 	{Family: detectorFamilyUnknownState, Acts: false},
 	{Family: detectorFamilyWake, Acts: detectorActWakeNamedDependency || detectorActWakePoolFill},
 	{Family: detectorFamilyZombie, Acts: detectorActZombie},
-	{Family: detectorFamilyReadyDemandScan, ObservedOnly: true, Acts: detectorActReadyDemandScan},
 	{Family: detectorFamilyExecutionCompletionScan, ObservedOnly: true, Acts: detectorActExecutionCompletionScan},
 }
 
@@ -1996,12 +2003,19 @@ func detectorProviderStopCapable(sp runtime.Provider) bool {
 // sweep is allowed to leave read-only mode, and it still writes nothing itself:
 // the handler behind the key owns every effect.
 func routeDetectorConditions(in detectorSweepInput, result *detectorSweepResult) {
-	if in.Admit == nil || result == nil || !detectorAnyFamilyActs() {
+	// The seam runs when SOME sink exists. Admit is the session-keyed families'
+	// sink; D-WAKE's pool-under-min FILL arm has its own, because its key is a
+	// routed work item rather than a session, so a city with only the allocation
+	// admission still routes that arm.
+	if result == nil || !detectorAnyFamilyActs() || (in.Admit == nil && in.EnqueuePoolAllocation == nil) {
 		return
 	}
 	for i := range result.Conditions {
 		cond := &result.Conditions[i]
 		if routeDetectorPoolFill(in, cond) {
+			continue
+		}
+		if in.Admit == nil {
 			continue
 		}
 		source, routable := detectorAdmissionSourceFor(*cond)

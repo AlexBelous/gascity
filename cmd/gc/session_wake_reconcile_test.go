@@ -342,15 +342,18 @@ func TestPoolSweepPreservesCanonicalSingletonWithCurrentWake(t *testing.T) {
 	}
 }
 
-// TestDetectorWakeRoutesNamedAndDependencyArmsOnly pins the WD.10a act frontier:
-// the named and configured-dependency arms route through the certified wake
-// leases, and the pool-fill arm stays shadow-only until WD.10b.
+// TestDetectorWakeRoutesNamedAndDependencyArmsOnly pins the D-WAKE act frontier.
+// The named and configured-dependency arms crossed at WD.10a; the slotized
+// pool-member wake arm crossed at WD.10b behind the SAME certified-lease entry
+// (AdmitStrictDefaultPoolWake, already covered by the existing start-family
+// yield). All three route under one admission source, because all three are one
+// arm behind one lease surface and one yield.
 func TestDetectorWakeRoutesNamedAndDependencyArmsOnly(t *testing.T) {
 	if !detectorActWakeNamedDependency {
 		t.Fatal("detectorActWakeNamedDependency must be true from WD.10a: the certified named/dependency wake admissions and the legacy wake yield have both landed")
 	}
-	if detectorActWakePoolFill {
-		t.Fatal("detectorActWakePoolFill must stay false until WD.10b lands pool-under-min fill with its own legacy yield")
+	if !detectorActWakePoolFill {
+		t.Fatal("detectorActWakePoolFill must be true from WD.10b: pool-under-min fill landed with the allocation-ownership seam as its legacy yield")
 	}
 	for _, tc := range []struct {
 		name       string
@@ -361,7 +364,8 @@ func TestDetectorWakeRoutesNamedAndDependencyArmsOnly(t *testing.T) {
 	}{
 		{name: "named", reason: detectorReasonWakeTargetNamed, outcome: TraceOutcomeStartCandidate, wantSource: sessionStartAdmissionWakeFill, wantRoute: true},
 		{name: "dependency", reason: detectorReasonWakeTargetDependency, outcome: TraceOutcomeStartCandidate, wantSource: sessionStartAdmissionWakeFill, wantRoute: true},
-		{name: "pool-fill", reason: detectorReasonWakeTarget, outcome: TraceOutcomeStartCandidate, wantRoute: false},
+		{name: "slotized-pool-member", reason: detectorReasonWakeTarget, outcome: TraceOutcomeStartCandidate, wantSource: sessionStartAdmissionWakeFill, wantRoute: true},
+		{name: "pool-under-min-fill", reason: detectorReasonWakePoolFill, outcome: TraceOutcomeStartCandidate, wantRoute: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source, routable := detectorAdmissionSourceFor(detectorCondition{
@@ -629,8 +633,8 @@ func TestDetectorWakeRoutesDemandThroughCertifiedLeases(t *testing.T) {
 			continue
 		}
 		routed[cond.SessionID] = cond.Reason
-		if cond.Reason == detectorReasonWakeTarget && cond.AdmissionSource != "" {
-			t.Fatalf("pool-fill wake arm was routed before WD.10b: %#v", cond)
+		if cond.Reason == detectorReasonWakeTarget && cond.AdmissionSource != sessionStartAdmissionWakeFill {
+			t.Fatalf("slotized pool-member wake arm did not route under the certified wake lease: %#v", cond)
 		}
 	}
 	for id, want := range map[string]TraceReasonCode{
@@ -645,7 +649,7 @@ func TestDetectorWakeRoutesDemandThroughCertifiedLeases(t *testing.T) {
 	if len(admitter.bareKeys) != 0 {
 		t.Fatalf("wake keys reached the bare Admit entry without a certificate: %v", admitter.bareKeys)
 	}
-	wantWake := map[string]bool{named.ID: true, dependent.ID: true}
+	wantWake := map[string]bool{named.ID: true, dependent.ID: true, slotized.ID: true}
 	if len(admitter.wakeKeys) != len(wantWake) {
 		t.Fatalf("certified wake admissions = %v, want exactly %v", admitter.wakeKeys, wantWake)
 	}

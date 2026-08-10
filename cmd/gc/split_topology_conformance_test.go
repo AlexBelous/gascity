@@ -56,8 +56,8 @@ import (
 // paragraph naming the divergence, the assertions that move when it closes, and
 // the slice that closes it — I1 and I2 (the HQ work store is in neither arm of
 // the controller's cross-store scan on a split city), I5 (`gc hook --claim`
-// does not consume the shared resolver yet) and I10 (the wake filter has no
-// coordination-class reachability arm). Leaving such a leg UNSEEDED is the
+// fans out over work scopes with no coordination-class arm) and I10 (the wake
+// filter has no coordination-class reachability arm). Leaving such a leg UNSEEDED is the
 // failure mode this convention exists to prevent: the invariant then reads as
 // coverage of a path it never touches.
 //
@@ -413,25 +413,44 @@ func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 // no other leg.
 //
 // KNOWN GAP, pinned rather than asserted as desirable — `gc hook --claim` does
-// not consume the resolver yet. It resolves its stores as hookStore{dir, env}
-// pairs (hook_cross_store.go) and execs bd in a work directory; the fan-out is
-// city + rigs, all WORK scopes, so a claim it issues for a relocated class id
-// still runs against a ledger that cannot see the bead. claimByID's own
-// fallback IS that fan-out, so the rows below state both answers side by side:
-// a class id routes, a work id keeps the legacy path byte-for-byte. Rewiring
-// the command is ga-k8pzw (by-id routing through the shared resolver); when it
-// lands, this paragraph goes and the assertions move from claimByID to the
-// command. ga-xo8ch — class-routed WRITES from one-shot commands — landed
-// without touching it: it routes where a coordination-class bead is BORN
+// not consume the resolver. It resolves its stores as hookStore{dir, env} pairs
+// (hook_cross_store.go) and execs bd in a work directory; the fan-out is city +
+// rigs, all WORK scopes, so a claim it issues for a relocated class id still
+// runs against a ledger that cannot see the bead. claimByID's own fallback IS
+// that fan-out, so the rows below state both answers side by side: a class id
+// routes, a work id keeps the legacy path byte-for-byte.
+//
+// ga-k8pzw — by-id routing through the shared resolver — landed WITHOUT closing
+// this, and the reason is worth stating because the earlier version of this
+// paragraph named it as the slice that would. The gap is a QUERY-federation
+// gap, not a by-id one: the hook only ever claims ids its OWN work query
+// returned, and that query never reaches the binding, so a by-id-routed claim
+// mutation would never be handed a class id to route. The two halves it needs
+// are a coordination-class arm in the work-query fan-out — the shape `gc ready`
+// got in ga-oxsyu (#5158) — and an in-process claim for the ids that arm
+// returns, because a relocated binding is not a bd workspace and cannot be
+// expressed as a hookStore{dir, env} at all. That is ga-x0oyt; when it lands,
+// this paragraph goes and the assertions move from claimByID to the command.
+// ga-xo8ch — class-routed WRITES from one-shot commands — landed without
+// touching it either: it routes where a coordination-class bead is BORN
 // (`gc order run`'s wisp, `gc formula cook`'s graph pour), and a claim is a
 // by-id mutation of a bead that already exists somewhere.
 //
 // The gap is ASSERTED and not merely described, the way I1, I2 and I10 assert
-// theirs: hookQueryEnv is the production seam that decides which store the
-// hook's claim runs against, and the row below pins that it answers a WORK scope
-// rooted at the city path on BOTH topologies — identically on a city whose graph
-// class lives in a binding of its own. A gap stated in prose and nowhere else
-// can close, or widen, without a single test moving.
+// theirs — and it is asserted on the seam the CLOSURE has to change, not on one
+// that survives it. hookWorkQueryStores is the whole fan-out the hook queries,
+// and the rows below pin that every leg of it is a bd WORKSPACE naming a WORK
+// scope, on BOTH topologies: relocating graph adds no leg, so no leg can answer
+// for a bead the binding owns. Half (a) of ga-x0oyt is a coordination-class arm
+// IN THIS LIST, so it cannot land without reddening them.
+//
+// The earlier version of this pin asserted only hookQueryEnv's GC_STORE_SCOPE
+// for the primary leg. That row is kept — the primary leg staying a work scope
+// is part of the claim — but on its own it was not a tripwire at all: the
+// closure ADDS an arm and changes nothing about the city leg, so it would have
+// stayed green through the very change it claimed to watch. A gap stated in
+// prose and nowhere else can close, or widen, without a single test moving; a
+// gap pinned on the wrong seam does the same thing while looking watched.
 //
 // `gc bd update --claim` is already routed (#5132, cmd_bd_by_id.go) and probes
 // the same way, so the resolver is not the only class-aware claim path — it is
@@ -457,10 +476,32 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 		t.Fatalf("build the hook's work-query env: %v", err)
 	}
 	if got := hookEnv["GC_STORE_SCOPE"]; got != "city" {
-		t.Errorf("`gc hook --claim` resolves store scope %q, want \"city\" — if it now names a coordination class, the ga-k8pzw rewire has landed: drop this invariant's KNOWN GAP paragraph and move the claim assertions from claimByID onto the command", got)
+		t.Errorf("`gc hook --claim` resolves store scope %q, want \"city\" — if it now names a coordination class, the ga-x0oyt fan-out arm has landed: drop this invariant's KNOWN GAP paragraph and move the claim assertions from claimByID onto the command", got)
 	}
 	if got := hookEnv["GC_STORE_ROOT"]; got != e.cityPath {
 		t.Errorf("`gc hook --claim` resolves store root %q, want the city work root %q — a claim it issues for a relocated class id runs against the work ledger, and that is the gap this row pins", got, e.cityPath)
+	}
+
+	// The tripwire: the WHOLE fan-out, which is what ga-x0oyt has to change.
+	// Every leg is a (dir, env) pair pointing a bd subprocess at a work
+	// workspace, and there are exactly as many as the city has work scopes —
+	// relocating graph adds none.
+	hookAgent := &config.Agent{Name: splitEnvPoolAgent}
+	fanout := hookWorkQueryStores(e.cityPath, e.cfg, hookAgent,
+		hookAgent.QualifiedName(),
+		agentCommandDir(e.cityPath, hookAgent, e.cfg.Rigs),
+		mergeRuntimeEnv(nil, hookEnv), hookEnv)
+	if want := 1 + len(e.cfg.Rigs); len(fanout) != want {
+		t.Errorf("`gc hook --claim` fans out over %d store(s), want %d (city + %d rig) — a leg appeared or vanished; if it is the coordination-class arm, ga-x0oyt has landed: drop this invariant's KNOWN GAP paragraph and move the claim assertions from claimByID onto the command", len(fanout), want, len(e.cfg.Rigs))
+	}
+	for i, leg := range fanout {
+		scope := hookStoreEnvValue(leg, "GC_STORE_SCOPE")
+		if scope != "city" && scope != "rig" {
+			t.Errorf("`gc hook --claim` fan-out leg %d names store scope %q, want a WORK scope (\"city\" or \"rig\") — a leg that names a coordination class is the ga-x0oyt arm landing, and the claim mutation has to stop being a bd subprocess call with it", i, scope)
+		}
+		if root := hookStoreEnvValue(leg, "GC_STORE_ROOT"); root == "" {
+			t.Errorf("`gc hook --claim` fan-out leg %d names no GC_STORE_ROOT; every leg here is a bd workspace, and a relocated binding cannot be expressed as one", i)
+		}
 	}
 
 	if !e.split {
@@ -582,6 +623,18 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 		}
 		e.assertClaimedIn(t, tt.id, assignee, want)
 	}
+}
+
+// hookStoreEnvValue reads one variable out of a hook fan-out leg's subprocess
+// environment. Last assignment wins, matching exec's own resolution.
+func hookStoreEnvValue(leg hookStore, key string) string {
+	value := ""
+	for _, entry := range leg.env {
+		if name, v, ok := strings.Cut(entry, "="); ok && name == key {
+			value = v
+		}
+	}
+	return value
 }
 
 // conformanceStrictCrossStoreDeps (I6) guards the cross-store dependency class:

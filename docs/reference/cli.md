@@ -272,6 +272,15 @@ city (HQ) store. An explicit --city is a true scope override: it forces the
 city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
+On a city that serves a coordination class from its own [storage] binding,
+a by-id read or write of a bead that binding owns is answered in process
+from the binding, not by bd against a work store that does not hold it.
+--rig is refused for those beads rather than ignored or honored: it names a
+work scope, and a relocated class is not partitioned by rig, so there is
+nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
+scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
+binding answers.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
@@ -1631,6 +1640,15 @@ With --attach on a v2 formula — one declaring
 per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
 conflicting live workflow from the same source is an error.
+
+On a city that serves a coordination class from its own [storage] binding,
+--attach follows the ATTACH BEAD: the sub-DAG and the blocking dependency
+are written to the store that holds it, so the two ends of the edge stay in
+one store. A v2 (graph.v2) formula is the exception and is refused for an
+attach bead the binding owns: it normalizes its target into a synthetic
+input convoy, which is a work bead that can live neither in the binding nor
+in the work ledger, whose membership edge to the target would be
+cross-class. Attach a v1 formula to that bead instead.
 
 ```
 gc formula cook <formula-name> [flags]

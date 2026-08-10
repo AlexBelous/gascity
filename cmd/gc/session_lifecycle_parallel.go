@@ -1228,13 +1228,28 @@ func (e *legacyStartPreWakeSkip) Unwrap() error { return errPreWakeSuperseded }
 // Under the already-held per-session mutation lock, after the current row is
 // loaded, the candidate is skipped as superseded when:
 //
-//	(i)   the keyed-ownership seam is installed AND
-//	      classifyExactSessionStartOwnership says the CURRENT row is keyed-owned.
-//	      This is the F4 exclusion generalized off the snapshot onto current
-//	      state: once wake_request=explicit lands, legacy aborts and the keyed
-//	      admission is the sole starter. It is gated on the seam because a city
-//	      without keyed reconciliation has no other starter — skipping there
+//	(i)   the keyed-ownership seam is installed AND it excludes the CURRENT row,
+//	      or classifyExactSessionStartOwnership says the CURRENT row is
+//	      keyed-owned. This is the F4 exclusion generalized off the snapshot onto
+//	      current state: once wake_request=explicit lands, legacy aborts and the
+//	      keyed admission is the sole starter. It is gated on the seam because a
+//	      city without keyed reconciliation has no other starter — skipping there
 //	      would strand every explicit wake.
+//
+//	      The seam consult is the half classification cannot do (ga-ij8mh, sixth
+//	      round). The certified wake families own rows the classifier hands to
+//	      legacy — a canonical singleton is pool-managed, and every pool-managed
+//	      row classifies legacy — so a candidate that passed its loop-top
+//	      exclusion before the lease landed reached this boundary unfenced and
+//	      started the row a second time (run 13: "op=start wave=0
+//	      session=dependent outcome=success" beside the keyed start, then an
+//	      orphan close and a reaped runtime). The seam already carries the wake
+//	      leases' ownsX arms and is already passed in here; asking it on current
+//	      state is the whole fix. Certification cannot move into the classifier:
+//	      that is a pure projection with no provider, store, or membership
+//	      context. Standing down on mere CANDIDACY would strand a row no family
+//	      can certify, so the answer must come from a live lease, never from the
+//	      row's shape.
 //	(ii)  a wake-relevant premise drifted between the snapshot the candidate was
 //	      decided on and current. Drift means the decision was made against a row
 //	      that no longer exists; the next tick re-decides from a fresh snapshot.
@@ -1257,10 +1272,8 @@ func legacyStartInfoBeforeWake(
 		if err != nil {
 			return sessionpkg.Info{}, 0, err
 		}
-		if keyedStartExcluded != nil {
-			if _, _, owner := classifyExactSessionStartOwnership(current, cfg, clk.Now().UTC()); owner == exactSessionStartKeyedOwner {
-				return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "keyed_start_owner"}
-			}
+		if keyedStartExcluded != nil && keyedStartOwnsCurrentStart(current, cfg, clk, keyedStartExcluded) {
+			return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "keyed_start_owner"}
 		}
 		if key, drifted := wakeStartPremiseDrift(snapshot, current); drifted {
 			return sessionpkg.Info{}, 0, &legacyStartPreWakeSkip{reason: "premise_drift:" + key}
@@ -1270,6 +1283,22 @@ func legacyStartInfoBeforeWake(
 		}
 		return current, persisted.Revision, nil
 	}
+}
+
+// keyedStartOwnsCurrentStart answers clause (i) on the current row: the
+// installed seam first, because it is the only arm that can see a certified wake
+// lease, then the classification for the rows no lease covers.
+func keyedStartOwnsCurrentStart(
+	current sessionpkg.Info,
+	cfg *config.City,
+	clk clock.Clock,
+	keyedStartExcluded func(sessionpkg.Info) bool,
+) bool {
+	if keyedStartExcluded(current) {
+		return true
+	}
+	_, _, owner := classifyExactSessionStartOwnership(current, cfg, clk.Now().UTC())
+	return owner == exactSessionStartKeyedOwner
 }
 
 // wakeStartPremiseDrift reports the first wake-relevant field that moved between

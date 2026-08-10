@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -487,6 +488,40 @@ func TestKeyedWakeSeamClosesPreLeaseOwnershipWindow(t *testing.T) {
 			}
 		})
 	}
+
+	// The other half of amendment 2 (ga-ij8mh, sixth round). The seam above
+	// narrows the window from the keyed side, but run 13 proved it does not
+	// close it: legacy still owns the classification, and a tick already past
+	// its loop-top exclusion when the lease lands is not fenced by it. Both
+	// writers entered and the row was orphan-closed. The legacy side must stand
+	// down on the certified lease at its own effect boundary.
+	t.Run("run-13-legacy-stands-down-after-the-lease-lands", func(t *testing.T) {
+		f := newWakeStandDownFixture(t)
+		snapshot := f.env.sessionInfo(f.targetID)
+
+		params := exactSessionStartTestParams(t, f.env)
+		params.Generation = 1
+		params.RolloutMode = rollout.Auto
+		params.CertifyWakeFamilyStart = func(sessionpkg.Info, int64) bool {
+			f.admitCertifiedWake(t)
+			return true
+		}
+		owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+			SessionID: f.targetID,
+			Source:    sessionStartAdmissionInProcess,
+		}, params)
+		if err != nil || owner != exactSessionStartKeyedOwner {
+			t.Fatalf("pre-lease seam = (%v, %v), want the keyed owner", owner, err)
+		}
+
+		prepared, prepareErr := f.prepareLegacyStart(snapshot, f.legacyExclusion(t))
+		if !errors.Is(prepareErr, errPreWakeSuperseded) || prepared != nil {
+			t.Fatalf("legacy prepare after the lease landed = %v (prepared=%t), want errPreWakeSuperseded", prepareErr, prepared != nil)
+		}
+		if got := f.env.sp.CountCalls("Start", "dependent"); got != 0 {
+			t.Fatalf("second provider start after the certified lease = %d, want 0", got)
+		}
+	})
 }
 
 // TestStrictDefaultPoolWakeWitnessExcludesOwnOccupancy is the capacity half of

@@ -1444,8 +1444,18 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		socketWakeCommitCandidates = records
 		socketWakeCommitRecords = socketWakeCommitRecords[:0]
 		for _, record := range records {
+			// The admission SOURCE cannot answer who authorized this start: it
+			// is sticky to whichever entry admitted the key FIRST
+			// (sessionStartController.admit), so a socket-triggered wake whose
+			// BeadUpdated admission landed first traces as `in_process` and this
+			// leg failed on ordering it does not own (ga-ij8mh ruling 3, run 13).
+			// `start_lease` names the certified family instead, and this manual
+			// worker row belongs to no wake family — an ordinary keyed start owns
+			// it — so the proof is that NO certified lease authorized the commit.
+			if _, hijacked := record.Fields["start_lease"]; hijacked {
+				continue
+			}
 			if record.SessionBeadID == created.SessionID &&
-				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
 				record.Fields["session_id"] == created.SessionID &&
 				record.Fields["instance_token"] == woken.InstanceToken &&
 				record.Fields["effect_applied"] == true {
@@ -1453,7 +1463,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			}
 		}
 		if len(socketWakeCommitRecords) > 1 {
-			return false, fmt.Errorf("socket wake commit traces = %d, want exactly one", len(socketWakeCommitRecords))
+			return false, fmt.Errorf("keyed wake commit traces = %d, want exactly one", len(socketWakeCommitRecords))
 		}
 		return len(socketWakeCommitRecords) == 1, nil
 	}); err != nil {

@@ -1929,6 +1929,15 @@ func reconcileExactSessionStartWithOwner(
 		return exactSessionStartKeyedOwner, nil
 	}
 	if handled, owner, familyErr := reconcileExactSessionDetectorFamily(ctx, admission, params, info, initialResponse, clk); handled {
+		// Claiming the key ends the pass here, above the ordinary lane's status
+		// heal, and legacy's desired-site heal is already excluded for a
+		// keyed-owned row — so without this the advisory alias has no owner at
+		// all for as long as a family holds the key (ga-f7v2ft.140). Only the
+		// projection-neutral alias is healed, and only after a clean family
+		// completion: a parked family leaves the row's disposition uncertain.
+		if familyErr == nil {
+			healExactSessionActiveAlias(params, admission.SessionID, clk)
+		}
 		return owner, familyErr
 	}
 	var drainAckRollback *drainAckStopPendingRollback

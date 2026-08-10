@@ -990,6 +990,20 @@ func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sess
 	return batch, nil
 }
 
+// fenceRevisionKnown reports whether a loaded revision can carry a CAS.
+//
+// Zero is the store's "unknown" sentinel and the only value that cannot; every
+// other int64 is a real revision, INCLUDING a negative one. bd hands out signed
+// revisions and roughly half of every city's rows carry a negative value, so a
+// `> 0` test silently reclassifies half the fleet as unfenceable — which, for
+// the advisory heal, means it fails closed and the row's state metadata never
+// converges at all (ga-f7v2ft.140). Every other revision guard in the reconciler
+// already tests against zero; this names the rule so the fence sites cannot
+// drift back to the sign.
+func fenceRevisionKnown(loadedRevision int64) bool {
+	return loadedRevision != 0
+}
+
 // applyHealPatchFenced persists an advisory status heal and reports whether it
 // landed. The heal is computed from a per-tick snapshot, so an unconditional
 // write is a lost update: `gc session suspend` writes {state, sleep_intent,
@@ -1012,7 +1026,7 @@ func applyHealPatchFenced(sessFront *sessionpkg.Store, id string, loadedRevision
 		return false, fmt.Errorf("resolving conditional writer for status heal %q: %w", id, resolveErr)
 	}
 	if writer != nil {
-		if loadedRevision > 0 {
+		if fenceRevisionKnown(loadedRevision) {
 			if err := writer.UpdateIfMatch(id, loadedRevision, beads.UpdateOpts{Metadata: batch}); err != nil {
 				if beads.IsPreconditionFailed(err) {
 					return false, nil

@@ -400,6 +400,24 @@ func poolDrainAckSupersedesPoolStart(start routedWorkPoolStartLease, drain route
 		drain.RequesterInstanceToken == start.InstanceToken
 }
 
+// sessionStartAdmissionIsDemand reports whether a source names a DEMAND
+// admission — the in-process event path or the socket command — as opposed to
+// the anti-entropy census sweep or any detector-sweep key.
+//
+// This is the only source-shaped fact that survives coalescing. Which of the two
+// demand keys is recorded does not: a socket admission folded onto a pending
+// in_process one keeps the in_process source (see admit's coalescing rule, and
+// TestSessionStartControllerPreservesInProcessAdmissionAcrossAntiEntropy), so
+// whether a given commit trace reads "socket" or "in_process" depends on arrival
+// order alone. Membership in the pair does survive, because nothing outside the
+// pair can ever displace a member of it. ga-f7v2ft.125 ruled that arms must
+// dispatch on the durable row and never on the source; this predicate is for the
+// observers that legitimately ask the weaker question "did demand drive this,
+// or a sweep" (ga-f7v2ft.142).
+func sessionStartAdmissionIsDemand(source sessionStartAdmissionSource) bool {
+	return source == sessionStartAdmissionInProcess || source == sessionStartAdmissionSocket
+}
+
 func (c *sessionStartController) admitAuthoritative(id string, censusGeneration uint64, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
 	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil, poolDrainAck, poolDrainAckUncertain, nil, nil, nil, nil)
 }

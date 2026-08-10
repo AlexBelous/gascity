@@ -1012,7 +1012,7 @@ func applyHealPatchFenced(sessFront *sessionpkg.Store, id string, loadedRevision
 		return false, fmt.Errorf("resolving conditional writer for status heal %q: %w", id, resolveErr)
 	}
 	if writer != nil {
-		if loadedRevision > 0 {
+		if beads.RevisionKnown(loadedRevision) {
 			if err := writer.UpdateIfMatch(id, loadedRevision, beads.UpdateOpts{Metadata: batch}); err != nil {
 				if beads.IsPreconditionFailed(err) {
 					return false, nil

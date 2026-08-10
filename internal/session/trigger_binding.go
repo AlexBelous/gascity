@@ -48,7 +48,10 @@ func (s *Store) RebindTriggerIfMatch(info Info, persisted PersistedResponse, bin
 	if strings.TrimSpace(info.ID) == "" || strings.TrimSpace(info.ID) != info.ID {
 		return info, fmt.Errorf("rebinding trigger: session ID %q is not canonical", info.ID)
 	}
-	if info.Closed || persisted.Status != "open" || persisted.Revision <= 0 {
+	// beads.RevisionKnown, not a sign test: a revision is opaque and only zero
+	// means "unavailable". Gating on `> 0` refused the rebind outright on the
+	// negative half of every city's bd rows (ga-f7v2ft.141).
+	if info.Closed || persisted.Status != "open" || !beads.RevisionKnown(persisted.Revision) {
 		return info, fmt.Errorf("rebinding trigger for %q: persisted session is not an open revisioned row", info.ID)
 	}
 	if !triggerPreimageMatchesPersisted(info, persisted.Metadata) {

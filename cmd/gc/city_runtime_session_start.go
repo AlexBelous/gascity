@@ -108,7 +108,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				}
 			}()
 			startOptions := cr.sessionStartOptions
-			if admission.Source == sessionStartAdmissionInProcess || admission.Source == sessionStartAdmissionSocket {
+			if sessionStartAdmissionIsDemand(admission.Source) {
 				startOptions = append([]startExecutionOption(nil), startOptions...)
 				startOptions = append(startOptions, withAdditionalExactSessionLifecycleStatusObserver(func(result exactSessionLifecycleStatusResult) {
 					cr.recordExactSessionLifecycleStatusApplied(snapshot.Config, result)
@@ -346,8 +346,7 @@ func withAdditionalExactSessionLifecycleStatusObserver(observer exactSessionLife
 }
 
 func (cr *CityRuntime) recordExactSessionLifecycleStatusApplied(cfg *config.City, result exactSessionLifecycleStatusResult) {
-	if cr == nil || cr.trace == nil ||
-		(result.Admission.Source != sessionStartAdmissionInProcess && result.Admission.Source != sessionStartAdmissionSocket) ||
+	if cr == nil || cr.trace == nil || !sessionStartAdmissionIsDemand(result.Admission.Source) ||
 		!result.RuntimeLive || result.Disposition != exactSessionLifecycleStatusDispositionCandidate || result.Plan == nil ||
 		result.Plan.Outcome != sessionLifecycleStatusHeal || !result.EffectApplied {
 		return
@@ -377,8 +376,7 @@ func (cr *CityRuntime) recordExactSessionLifecycleStatusApplied(cfg *config.City
 }
 
 func (cr *CityRuntime) recordExactSessionLifecycleStatusShadow(cfg *config.City, result exactSessionLifecycleStatusResult) {
-	if cr == nil || cr.trace == nil ||
-		(result.Admission.Source != sessionStartAdmissionInProcess && result.Admission.Source != sessionStartAdmissionSocket) ||
+	if cr == nil || cr.trace == nil || !sessionStartAdmissionIsDemand(result.Admission.Source) ||
 		!result.RuntimeLive || result.Disposition != exactSessionLifecycleStatusDispositionCandidate || result.Plan == nil ||
 		result.Plan.Outcome != sessionLifecycleStatusNoop || result.Plan.Reason != sessionLifecycleStatusReasonConverged || result.EffectApplied {
 		return

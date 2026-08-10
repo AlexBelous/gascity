@@ -239,6 +239,44 @@ func TestSessionStartControllerPreservesInProcessAdmissionAcrossAntiEntropy(t *t
 	}
 }
 
+// TestSessionStartAdmissionIsDemandCoversExactlyTheCoalescingPair pins the
+// invariant the v59 exact-wake commit leg was respec'd onto (ga-f7v2ft.142).
+// in_process and socket are the demand admissions, and they are exactly the pair
+// the coalescing rule above can substitute for one another — which is why
+// membership in the pair survives coalescing while the individual value does
+// not. Every sweep and detector key must stay outside the set, or the leg would
+// stop distinguishing "demand drove this wake" from "a background sweep found
+// it".
+func TestSessionStartAdmissionIsDemandCoversExactlyTheCoalescingPair(t *testing.T) {
+	for _, source := range []sessionStartAdmissionSource{
+		sessionStartAdmissionInProcess,
+		sessionStartAdmissionSocket,
+	} {
+		if !sessionStartAdmissionIsDemand(source) {
+			t.Errorf("sessionStartAdmissionIsDemand(%q) = false, want true", source)
+		}
+	}
+	for _, source := range []sessionStartAdmissionSource{
+		sessionStartAdmissionPendingCreate,
+		sessionStartAdmissionExplicitWake,
+		sessionStartAdmissionAntiEntropy,
+		sessionStartAdmissionWaitDependency,
+		sessionStartAdmissionDeadline,
+		sessionStartAdmissionOrphanClose,
+		sessionStartAdmissionOrphanDrain,
+		sessionStartAdmissionStaleCreate,
+		sessionStartAdmissionConfigDrift,
+		sessionStartAdmissionDuplicateNamed,
+		sessionStartAdmissionSleepDrain,
+		sessionStartAdmissionProgressStall,
+		"",
+	} {
+		if sessionStartAdmissionIsDemand(source) {
+			t.Errorf("sessionStartAdmissionIsDemand(%q) = true, want false", source)
+		}
+	}
+}
+
 func TestSessionStartControllerRetainsPoolDrainAckLeaseAcrossGenericCoalescing(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})

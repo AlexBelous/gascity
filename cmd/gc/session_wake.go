@@ -42,12 +42,13 @@ var errPreWakeSuperseded = errors.New("pre-wake commit superseded")
 // signals) — every field a verbatim raw mirror — so no raw bead crosses in.
 //
 // The write is FENCED on loadedRevision — the revision of the genuine re-read
-// info came from. The legacy and keyed start families share this executor, and
-// `gc start` runs the same wave in a SECOND process beside a controller, so the
-// per-session mutation lock cannot serialize every entrant. Unfenced, the loser
-// re-rotates on top of the winner and the durable instance_token ends up naming
-// an incarnation with no runtime behind it — a permanent split-brain, since
-// every token-fenced operation then refuses forever (ga-l1j53). A lost CAS
+// info came from, tested with beads.RevisionKnown. The legacy and keyed start
+// families share this executor, and `gc start` runs the same wave in a SECOND
+// process beside a controller, so the per-session mutation lock cannot
+// serialize every entrant. Unfenced, the loser re-rotates on top of the winner
+// and the durable instance_token ends up naming an incarnation with no runtime
+// behind it — a permanent split-brain, since every token-fenced operation then
+// refuses forever (ga-l1j53). A lost CAS
 // returns errPreWakeSuperseded. Deployments with conditional writes off keep the
 // unconditional write (the ga-797vy F1 precedent): there is no revision contract
 // to fence on there, and a mandatory lifecycle write must not fail closed.
@@ -83,10 +84,18 @@ func preWakeCommit(
 //
 // A CAS miss returns (false, nil): another writer moved the row since the
 // re-read, so this write must not be committed at all and the caller re-derives
-// from a fresh read. A non-positive revision, or a deployment with conditional
-// writes off, keeps the unconditional write — unlike the advisory heal, a
-// mandatory lifecycle write must not fail closed, because doing so makes the
-// operation permanently unreachable on stores with no revision contract.
+// from a fresh read. An UNKNOWN revision (the store's zero sentinel), or a
+// deployment with conditional writes off, keeps the unconditional write — unlike
+// the advisory heal, a mandatory lifecycle write must not fail closed, because
+// doing so makes the operation permanently unreachable on stores with no
+// revision contract.
+//
+// The known-revision test is beads.RevisionKnown and not a sign comparison: bd
+// revisions are signed, and gating on `> 0` made this fence a no-op on the
+// negative half of every city's rows — the split-brain ga-l1j53 closed was wide
+// open there (ga-f7v2ft.141). Extracting this body gave that defect a second
+// caller rather than fixing it, so the correction lands once here and covers
+// both.
 //
 // Callers: preWakeCommit (a lost fence there leaves the durable instance_token
 // naming an incarnation with no runtime, ga-l1j53) and
@@ -103,7 +112,7 @@ func applyFencedSessionLifecyclePatch(
 	if resolveErr != nil {
 		return false, fmt.Errorf("resolving conditional writer for %s %q: %w", purpose, id, resolveErr)
 	}
-	if writer != nil && loadedRevision > 0 {
+	if writer != nil && beads.RevisionKnown(loadedRevision) {
 		if err := writer.UpdateIfMatch(id, loadedRevision, beads.UpdateOpts{Metadata: batch}); err != nil {
 			if beads.IsPreconditionFailed(err) {
 				return false, nil

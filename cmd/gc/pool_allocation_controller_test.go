@@ -4608,6 +4608,14 @@ func prepareIdleGenericPoolMemberForReuse(t *testing.T, conditional bool, maximu
 		}
 		store = opened.Store
 	}
+	return prepareIdleGenericPoolMemberForReuseWithStore(t, store, maximum)
+}
+
+// prepareIdleGenericPoolMemberForReuseWithStore is prepareIdleGenericPoolMember
+// ForReuse over a caller-supplied store, so a fixture can vary the backend's
+// revision minting without duplicating the cold-start choreography.
+func prepareIdleGenericPoolMemberForReuseWithStore(t *testing.T, store beads.Store, maximum int) (routedWorkPoolAllocationFixture, beads.Bead, sessionpkg.Info) {
+	t.Helper()
 	fixture := newRoutedWorkPoolAllocationFixture(t, store)
 	fixture.cr.cfg.Agents[0].MaxActiveSessions = &maximum
 	fixture.cr.cfg.Agents[0].Provider = "claude"

@@ -2294,6 +2294,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if template == "" {
 								template = infoPostHeal.Template
 							}
+							// Conjunctive stand-down (ga-f7v2ft.147), read ONCE before any
+							// effect. The orphan copy of the acknowledgement arm applies
+							// three effects — the durable stop-pending mark, the tracker
+							// clear, and the async process stop — and gating only the stop
+							// left legacy WRITING a row it had already yielded.
+							if legacyDrainAckStopExcluded != nil && legacyDrainAckStopExcluded(infoByID[id]) {
+								if trace != nil {
+									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonCode("keyed_drain_ack_owner"), TraceOutcomeSkipped, template, name, traceRecordPayload{
+										"session_id": id,
+									})
+								}
+								continue
+							}
 							if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
 								// markDrainAckStopPending persisted the stop-pending transition and
 								// returned the folded snapshot Info (write-returns-Info, Step 6d) —
@@ -2304,9 +2317,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Token fence off the typed snapshot: the stop-pending fold
 								// preserves instance_token, so infoByID[id].InstanceToken is the
 								// token we intend to stop (mirrors verifiedStop).
-								if legacyDrainAckStopExcluded == nil || !legacyDrainAckStopExcluded(infoByID[id]) {
-									queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
-								}
+								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
@@ -2726,6 +2737,28 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					if alive {
+						// Conjunctive stand-down (ga-f7v2ft.147). The keyed owner takes
+						// the WHOLE acknowledgement, not just its process stop. The
+						// ownership predicate is live keyed-lease state, so legacy's two
+						// reads for one row inside one tick can disagree: the row can be
+						// unowned at the top-of-loop start exclusion and owned by the time
+						// this arm runs. Gating only queueDrainAckAsyncStop left legacy
+						// marking the row stop-pending and dropping its drain tracker for a
+						// row it had already yielded — a partial stand-down that still
+						// writes is worse than none, because the keyed owner's fenced
+						// transition then lands on a row legacy already moved and the
+						// drained row carries a legacy drain effect with no effect_owner
+						// stamp (session_start_real_bd_tmux_integration_test.go:1961). Read
+						// the predicate ONCE, before any effect, so all three stand or fall
+						// together. Retired at WE with the god function.
+						if legacyDrainAckStopExcluded != nil && legacyDrainAckStopExcluded(infoByID[id]) {
+							if trace != nil {
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonCode("keyed_drain_ack_owner"), TraceOutcomeSkipped, tp.TemplateName, name, traceRecordPayload{
+									"session_id": id,
+								})
+							}
+							continue
+						}
 						if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
 							// markDrainAckStopPending persisted + folded the stop-pending
 							// transition (write-returns-Info, Step 6d) — assign the returned Info,
@@ -2734,9 +2767,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							clearDrainTrackerForStopPending(id, dt)
 							// Token fence off the typed snapshot (mirrors verifiedStop); the
 							// stop-pending fold preserves instance_token.
-							if legacyDrainAckStopExcluded == nil || !legacyDrainAckStopExcluded(infoByID[id]) {
-								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
-							}
+							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}

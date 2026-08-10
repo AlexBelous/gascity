@@ -161,23 +161,33 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, nil
 		}
 		preRebindPersisted := persistedByID[info.ID]
-		expectedReboundRevision := preRebindPersisted.Revision + 1
-		if expectedReboundRevision <= preRebindPersisted.Revision {
-			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rebinding reusable pool member %q: persisted revision cannot advance", lease.SessionID)
-		}
-		_, err = sessionFrontDoor(snapshot.Store).RebindTriggerIfMatch(info, preRebindPersisted, lease.Binding)
+		_, committedPatch, err := sessionFrontDoor(snapshot.Store).RebindTriggerIfMatch(info, preRebindPersisted, lease.Binding)
 		if err != nil {
 			if beads.IsPreconditionFailed(err) {
 				return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rebinding reusable pool member %q lost its revision fence: %w", lease.SessionID, err)
 			}
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, err
 		}
+		// The rebind's exact durable image: the fenced pre-image plus the patch
+		// the write committed. This is what proves nothing else landed on the row
+		// between the CAS and this re-read. Predicting the post-write REVISION
+		// instead (`preRebindPersisted.Revision + 1`) was a contract violation —
+		// revisions are opaque tokens testable only for equality, and bd mints
+		// signed row_lock values, so the prediction named a row no bd-backed city
+		// could ever produce and refused every reusable member (ga-f7v2ft.144).
+		expectedReboundMetadata := committedPatch.Apply(preRebindPersisted.Metadata)
 		current, currentPersisted, err := getAuthoritativeSessionStartPersistedRecord(snapshot.Store, lease.SessionID)
 		if err != nil {
 			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: %w", lease.SessionID, err)
 		}
-		if !beads.RevisionKnown(currentPersisted.Revision) || currentPersisted.Revision != expectedReboundRevision {
-			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: revision %d, want %d", lease.SessionID, currentPersisted.Revision, expectedReboundRevision)
+		if currentPersisted.Status != preRebindPersisted.Status || !maps.Equal(currentPersisted.Metadata, expectedReboundMetadata) {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: durable image is not the committed rebind", lease.SessionID)
+		}
+		// The revision the rebind LANDED on, read back from the row rather than
+		// derived. It fences the post-idle-wait re-read below by equality only.
+		reboundRevision := currentPersisted.Revision
+		if !beads.RevisionKnown(reboundRevision) {
+			return routedWorkPoolAllocationResult{}, routedWorkPoolReuseRefused, fmt.Errorf("rereading rebound pool member %q: revision is unavailable", lease.SessionID)
 		}
 		currentAssignedBusy, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{current})
 		if err != nil {
@@ -211,8 +221,8 @@ func (cr *CityRuntime) reuseIdleRoutedWorkPoolMember(
 			if err != nil {
 				return fmt.Errorf("rereading rebound pool member after idle wait: %w", err)
 			}
-			if !beads.RevisionKnown(latestPersisted.Revision) || latestPersisted.Revision != expectedReboundRevision {
-				return fmt.Errorf("rereading rebound pool member after idle wait: revision %d, want %d", latestPersisted.Revision, expectedReboundRevision)
+			if !beads.RevisionKnown(latestPersisted.Revision) || latestPersisted.Revision != reboundRevision {
+				return fmt.Errorf("rereading rebound pool member after idle wait: revision %d, want %d", latestPersisted.Revision, reboundRevision)
 			}
 			assigned, err := cr.routedWorkPoolReuseAssignedWork(snapshot, agent, []sessionpkg.Info{latest})
 			if err != nil {

@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
@@ -26,7 +27,7 @@ func TestRebindTriggerIfMatchCommitsCompleteProvenanceUnderOneRevisionFence(t *t
 		WorkDir:        "/city/worker-root/review-pack/workspace-b",
 	}
 
-	got, err := front.RebindTriggerIfMatch(pre, persisted, binding)
+	got, committed, err := front.RebindTriggerIfMatch(pre, persisted, binding)
 	if err != nil {
 		t.Fatalf("rebind trigger: %v", err)
 	}
@@ -34,8 +35,14 @@ func TestRebindTriggerIfMatchCommitsCompleteProvenanceUnderOneRevisionFence(t *t
 	if err != nil {
 		t.Fatalf("read rebound row: %v", err)
 	}
-	if after.Revision != persisted.Revision+1 {
-		t.Fatalf("rebound revision = %d, want %d", after.Revision, persisted.Revision+1)
+	// Equality and inequality only. `persisted.Revision+1` held on the native
+	// counter stores and on nothing else; the contract promises a FRESH opaque
+	// token, not the next one (ga-f7v2ft.144).
+	if !beads.RevisionKnown(after.Revision) || after.Revision == persisted.Revision {
+		t.Fatalf("rebound revision = %d, want a fresh token off the fenced %d", after.Revision, persisted.Revision)
+	}
+	if !maps.Equal(after.Metadata, committed.Apply(persisted.Metadata)) {
+		t.Fatalf("returned patch does not name the durable image\n durable=%#v\n  patch=%#v", after.Metadata, committed)
 	}
 	want := map[string]string{
 		beadmeta.TriggerBeadIDMetadataKey:       binding.WorkID,
@@ -66,7 +73,7 @@ func TestRebindTriggerIfMatchFailsClosedOnStaleRevision(t *testing.T) {
 		t.Fatalf("advance row revision: %v", err)
 	}
 
-	got, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
+	got, _, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
 		WorkID:   "ga-next",
 		StoreRef: "city:test-city",
 		WorkDir:  "/city/worker",
@@ -109,7 +116,7 @@ func TestRebindTriggerIfMatchAcceptsASignedRevision(t *testing.T) {
 		WorkDir:  "/city/worker",
 	}
 
-	got, err := front.RebindTriggerIfMatch(pre, persisted, binding)
+	got, _, err := front.RebindTriggerIfMatch(pre, persisted, binding)
 	if err != nil {
 		t.Fatalf("rebind on revision %d: %v: the fence is gated on the revision's SIGN, so a real revision reads as unrevisioned", negativeRevision, err)
 	}
@@ -138,7 +145,7 @@ func TestRebindTriggerIfMatchFailsClosedOnAStaleSignedRevision(t *testing.T) {
 		t.Fatalf("advance row revision: %v", err)
 	}
 
-	got, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
+	got, _, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
 		WorkID:   "ga-next",
 		StoreRef: "city:test-city",
 		WorkDir:  "/city/worker",
@@ -168,7 +175,7 @@ func TestRebindTriggerIfMatchRefusesAnUnrevisionedRow(t *testing.T) {
 		t.Fatalf("read preimage: %v", err)
 	}
 
-	got, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
+	got, _, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
 		WorkID:   "ga-next",
 		StoreRef: "city:test-city",
 		WorkDir:  "/city/worker",
@@ -200,7 +207,7 @@ func TestRebindTriggerIfMatchRefusesStoreWithoutResolvedConditionalWrites(t *tes
 		t.Fatalf("read preimage: %v", err)
 	}
 
-	got, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
+	got, _, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
 		WorkID:   "ga-next",
 		StoreRef: "city:test-city",
 		WorkDir:  "/city/worker",
@@ -233,7 +240,7 @@ func TestRebindTriggerIfMatchExactReplayIsNoOp(t *testing.T) {
 		t.Fatalf("read preimage: %v", err)
 	}
 
-	got, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
+	got, committed, err := front.RebindTriggerIfMatch(pre, persisted, TriggerBinding{
 		WorkID:   "ga-next",
 		StoreRef: "city:test-city",
 		WorkDir:  "/city/worker",
@@ -243,6 +250,12 @@ func TestRebindTriggerIfMatchExactReplayIsNoOp(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, pre) {
 		t.Fatalf("exact replay changed Info\n got=%+v\nwant=%+v", got, pre)
+	}
+	// The no-op replay commits nothing, so the patch is empty and the row keeps
+	// its token. A caller that demanded the revision MOVE would refuse its own
+	// idempotent replay; the committed patch is what tells the two apart.
+	if len(committed) != 0 {
+		t.Fatalf("exact replay committed patch = %#v, want empty", committed)
 	}
 	after, err := store.Get(created.ID)
 	if err != nil {

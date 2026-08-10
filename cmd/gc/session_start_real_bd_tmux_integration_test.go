@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"debug/buildinfo"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -217,6 +218,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if info, err := os.Stat(bdPath); err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
 		t.Fatalf("GC_TEST_BD_BIN %q is not an executable file: info=%v err=%v", bdPath, info, err)
 	}
+	requirePinnedJourneyBD(t, bdPath)
 	shimDir := t.TempDir()
 	if err := os.Symlink(bdPath, filepath.Join(shimDir, "bd")); err != nil {
 		t.Fatalf("install bd PATH shim: %v", err)
@@ -2413,6 +2415,68 @@ func waitExactStartStopState(ctx context.Context, timeout time.Duration, conditi
 		case <-ticker.C:
 		}
 	}
+}
+
+// requirePinnedJourneyBD refuses a GC_TEST_BD_BIN that is not the bd build
+// deps.env pins this journey to (BD_CURRENT_REF, which CI clones and builds for
+// the equipped cmd/gc integration shard). Any other bd on the host is a
+// different beads era, and the two ways that goes wrong both surface hundreds
+// of lines away from their cause: a post-BD_CURRENT_REF bd carries the
+// legacy-upgrade guard, which reads gc's managed-Dolt city layout
+// (.beads/dolt beside dolt_mode=server, no .local_version witness on a
+// first-ever init) as a legacy Dolt server workspace and aborts `gc init`;
+// and it initializes a schema past the v59 this journey speaks. Name the wrong
+// binary here rather than let it masquerade as a product regression
+// (ga-f7v2ft.145).
+// It identifies the binary from its embedded Go build info rather than by
+// running it: the stamp is what CI's `go build` of that checkout produced, and
+// reading it costs no subprocess and cannot touch whatever store the test
+// happens to be running inside.
+func requirePinnedJourneyBD(t *testing.T, bdPath string) {
+	t.Helper()
+	ref := depsEnvValue(t, "BD_CURRENT_REF")
+	if len(ref) < 12 {
+		t.Fatalf("deps.env BD_CURRENT_REF = %q, want a beads commit SHA", ref)
+	}
+	info, err := buildinfo.ReadFile(bdPath)
+	if err != nil {
+		t.Fatalf("GC_TEST_BD_BIN %q: read Go build info: %v", bdPath, err)
+	}
+	// Builds record the checkout in different places: CI's plain `go build` of
+	// a git clone stamps vcs.revision and a module pseudo-version, while a
+	// release build passes the commit through -ldflags and leaves the module
+	// at (devel). Any of them identifies the pin, so search the whole stamp
+	// and report the parts an operator can act on.
+	stamp := info.Main.Version
+	identity := []string{"module " + info.Main.Version}
+	for _, setting := range info.Settings {
+		stamp += " " + setting.Value
+		if setting.Key == "vcs.revision" || setting.Key == "-ldflags" {
+			identity = append(identity, setting.Key+"="+setting.Value)
+		}
+	}
+	if !strings.Contains(stamp, ref[:12]) {
+		t.Fatalf("GC_TEST_BD_BIN %q is stamped [%s], want the deps.env-pinned bd built from BD_CURRENT_REF %s.\n"+
+			"Build it the way CI does: git clone https://github.com/gastownhall/beads && git -C <src> checkout --detach %s && go -C <src> build -tags gms_pure_go -o <bin> ./cmd/bd",
+			bdPath, strings.Join(identity, "; "), ref, ref)
+	}
+}
+
+// depsEnvValue reads a single KEY=value line out of the repo-root deps.env.
+func depsEnvValue(t *testing.T, key string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "deps.env"))
+	if err != nil {
+		t.Fatalf("read repo-root deps.env: %v", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(line, key+"="); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	t.Fatalf("deps.env is missing %s", key)
+	return ""
 }
 
 func exactStartBDCommand(t *testing.T, cityPath string, args ...string) string {

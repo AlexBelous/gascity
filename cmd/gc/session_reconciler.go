@@ -1530,6 +1530,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	legacyDrainAdvanceExcluded := reconcileOpts.legacyDrainAdvanceExcluded
 	legacyProgressStallExcluded := reconcileOpts.legacyProgressStallExcluded
 	legacyStrandedRepairExcluded := reconcileOpts.legacyStrandedRepairExcluded
+	legacyZombieMarkExcluded := reconcileOpts.legacyZombieMarkExcluded
 	// Coexistence seam for the acting D-ORPHAN close family: while the keyed
 	// controller holds this exact key, both legacy close arms yield entirely —
 	// no ClosePatch, no status close, no work-release cascade. Like the deadline
@@ -1694,6 +1695,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
 	var cb *sessionCircuitBreaker
 	var circuitIDByIdentity map[string]string
+	// circuitStateByIdentity carries each identity's PERSISTED cluster alongside
+	// its bead ID so the two persist arms below can answer their convergence
+	// question ("is the durable row behind the model?") from the row feed the
+	// tick already holds, with no extra store read.
+	var circuitStateByIdentity map[string]sessionpkg.CircuitState
 	if cbEnabled {
 		// Phase 0.5: Feed the respawn circuit breaker persisted state and the
 		// current progress signature for every named-session identity. A change
@@ -1703,12 +1709,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		cb = defaultSessionCircuitBreaker()
 		cb.configure(cbCfg)
 		circuitIDByIdentity = make(map[string]string, len(orderedInfos))
+		circuitStateByIdentity = make(map[string]sessionpkg.CircuitState, len(orderedInfos))
 		for i := range orderedInfos {
 			identity := namedSessionIdentityInfo(orderedInfos[i])
 			if identity == "" {
 				continue
 			}
 			circuitIDByIdentity[identity] = orderedInfos[i].ID
+			circuitStateByIdentity[identity] = orderedRows[i].Circuit
 			// The persisted breaker cluster rides the row feed: orderedRows[i].Circuit
 			// is CircuitStateFromMetadata(bead) captured once at snapshot construction
 			// (the circuit cluster is a distinct typed projection off Info). Reading it
@@ -1724,9 +1732,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if identity == "" {
 				continue
 			}
-			if reset, err := cb.restoreFromMetadata(identity, orderedRows[i].Circuit, cbNow); err != nil {
+			if _, err := cb.restoreFromMetadata(identity, orderedRows[i].Circuit, cbNow); err != nil {
 				fmt.Fprintf(stderr, "session reconciler: loading session circuit breaker state for %s: %v\n", identity, err) //nolint:errcheck // best-effort stderr
-			} else if reset {
+				continue
+			}
+			// LEVEL-triggered, not edge-triggered on restoreFromMetadata's own
+			// `reset` return (WD.11). That return is a once-per-identity edge —
+			// restoreFromMetadata is a no-op the moment an entry exists — and the
+			// detector sweep now hydrates the SAME singleton earlier in the same
+			// tick, so gating on the edge would silently stop persisting
+			// cooldown auto-resets and strand a durable "open" string that
+			// nothing clears. Asking the convergent question instead ("does the
+			// row still say OPEN while the model says CLOSED?") is identical on
+			// the un-swept path and correct on the swept one, and it is the same
+			// predicate the keyed wake gate answers before it refuses.
+			if sessionCircuitBreakerResetOwed(cb, identity, orderedRows[i].Circuit, cbNow) {
 				if err := persistSessionCircuitBreakerMetadata(sessFront, orderedInfos[i].ID, cb, identity, cbNow); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 				}
@@ -1737,12 +1757,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// orderedInfos snapshot directly, retiring the transitional boundary
 		// re-projection.
 		for identity, sig := range computeNamedSessionProgressSignatures(orderedInfos, assignedWorkBeads) {
-			if cb.ObserveProgressSignature(identity, sig, cbNow) {
-				if id := circuitIDByIdentity[identity]; id != "" {
-					if err := persistSessionCircuitBreakerMetadata(sessFront, id, cb, identity, cbNow); err != nil {
-						fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
-					}
-				}
+			cb.ObserveProgressSignature(identity, sig, cbNow)
+			// LEVEL-triggered for the same reason the restore arm above is
+			// (WD.11): ObserveProgressSignature's return is a consume-once edge
+			// on a shared singleton the detector sweep now also observes earlier
+			// in the tick, so the first observer would swallow this persist.
+			// Comparing the model's signature against the one the row carries is
+			// edge-identical — a first observation and a real change both
+			// diverge, an unchanged one does not — with no extra store read and
+			// no extra steady-state write.
+			id := circuitIDByIdentity[identity]
+			if id == "" || !sessionCircuitBreakerProgressPersistOwed(cb, identity, circuitStateByIdentity[identity]) {
+				continue
+			}
+			if err := persistSessionCircuitBreakerMetadata(sessFront, id, cb, identity, cbNow); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
 		}
 		cb.pruneIdle(cbNow)
@@ -2470,7 +2499,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// step (write-returns-Info); on a persist error or empty reason it returns the
 		// snapshot Info unchanged, so this assignment is a no-op exactly when the raw
 		// bead was left untouched.
-		if running && !alive {
+		//
+		// Coexistence seam for the acting D-ZOMBIE family (WD.11). The whole
+		// block stands down while the keyed controller holds this exact key:
+		// unlike the stranded and stall seams there is no observational half to
+		// keep — the mark, the SessionCrashed event and the crash telemetry are
+		// all effects, and a duplicated crash event is precisely the alarm ops
+		// read one-per-incarnation.
+		if running && !alive && legacyZombieMarkExcluded != nil && legacyZombieMarkExcluded(infoByID[id]) {
+			if trace != nil {
+				trace.RecordDecision(TraceSiteReconcilerTerminalProviderError, TraceReasonCode("keyed_zombie_mark_owner"), TraceOutcomeSkipped, tp.TemplateName, name, traceRecordPayload{
+					"session_bead_id": id,
+				})
+			}
+		} else if running && !alive {
 			if output, err := peek(rateLimitPeekLines); err == nil && output != "" {
 				if reason := runtime.ProviderTerminalErrorReason(output); reason != "" {
 					markInfo, markErr := markProviderTerminalError(infoByID[id], sessFront, clk, reason)

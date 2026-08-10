@@ -156,6 +156,33 @@ func reconcileExactSessionDetectorFamily(
 		owner, err := reconcileExactSessionStrandedRepair(ctx, admission, params, info, response, clk)
 		return true, owner, err
 	}
+	// D-ZOMBIE is LAST, and it is an `if` rather than a switch case. Both
+	// choices are recorded §3 deltas.
+	//
+	// Last, because legacy's zombie arm is the one arm in the forward pass that
+	// does NOT claim its row: it marks and falls through, so every sibling still
+	// evaluates the same row on the same tick. A switch case returns handled and
+	// therefore claims, and there is no position in legacy's textual order that
+	// reproduces "claims nothing" — so the closest achievable analog is the
+	// position where a claim preempts least. Placing it above D-DRIFT or
+	// D-DEADLINE, where legacy's block textually sits, would starve those
+	// families of a row on every sweep for the sake of an ordering that legacy
+	// never actually enforces.
+	//
+	// An `if` rather than a case, because the guard's single liveness
+	// observation has to reach the handler. This family's whole condition is
+	// provider I/O, and a bool-returning case would make the handler probe a
+	// second time; a second probe may disagree with the first and leave the row
+	// owned by neither arm — WD.4 delta 2's rule, applied to the family that
+	// meets it hardest.
+	if detectorActZombie {
+		if candidate, ok := exactSessionZombieMarkCandidate(params, info, response); ok {
+			// The arm is unconditionally keyed-owned: every refusal inside it is
+			// a zero-effect release of the key, never a legacy handback.
+			return true, exactSessionStartKeyedOwner,
+				reconcileExactSessionZombieMark(ctx, admission, params, info, response, candidate, clk)
+		}
+	}
 	return false, exactSessionStartUnowned, nil
 }
 

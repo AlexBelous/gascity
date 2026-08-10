@@ -84,6 +84,13 @@ const (
 	// in a terminal sleep state, and whose confirmed stranding episode has
 	// outlived strandedRepairConfirmGrace while it still holds assigned work.
 	sessionStartAdmissionStrandedRepair sessionStartAdmissionSource = "stranded_repair"
+	// sessionStartAdmissionZombieMark is the detector sweep's D-ZOMBIE key
+	// (DETECTOR.md §3): a session whose runtime is still PRESENT while its agent
+	// process is gone — `running ∧ !alive` from the sweep's two-bit liveness
+	// probe, which is legacy's own zombie predicate. It is deliberately not
+	// "absent from the running set": a zombie IS in that names-only set, which
+	// is why absence belongs to D-ORPHAN and D-WAKE instead.
+	sessionStartAdmissionZombieMark sessionStartAdmissionSource = "zombie_mark"
 )
 
 type sessionStartAdmission struct {
@@ -763,7 +770,8 @@ func validateSessionStartAdmission(id string, source sessionStartAdmissionSource
 		sessionStartAdmissionSleepDrain,
 		sessionStartAdmissionProgressStall,
 		sessionStartAdmissionStrandedRepair,
-		sessionStartAdmissionDrainAdvance:
+		sessionStartAdmissionDrainAdvance,
+		sessionStartAdmissionZombieMark:
 		return nil
 	default:
 		return fmt.Errorf("admitting session start %q: unknown source %q", id, source)
@@ -1033,6 +1041,24 @@ func (c *sessionStartController) ownsStaleCreateRollback(sessionID string) bool 
 // legacy evaluates pool-freeability, non-liveness, assigned work and the
 // partial-store guard before it ever reaches the repair.
 func (c *sessionStartController) ownsStrandedRepair(sessionID string) bool {
+	return c.holdsAnyAdmission(sessionID)
+}
+
+// ownsZombieMark reports whether the keyed controller currently holds ANY
+// admission for this exact key. Legacy's zombie-capture block consults it and
+// stands down its whole effect — the markProviderTerminalError write, the
+// SessionCrashed event and the crash telemetry — because the keyed handler
+// already owns that key.
+//
+// It takes the source-blind shape of ownsStaleCreateRollback and
+// ownsStrandedRepair rather than D-DEADLINE's source-gated one, and this family
+// meets that case constantly: a zombie row is awake and desired, so it is
+// routinely already held by an ordinary wake, drift or deadline admission when
+// the sweep finds it, and the controller coalesces on the key while keeping the
+// EARLIER source. A source-gated yield would let the keyed handler mark through
+// the coalesced admission while legacy raced the same write and fired a second
+// SessionCrashed for one incarnation.
+func (c *sessionStartController) ownsZombieMark(sessionID string) bool {
 	return c.holdsAnyAdmission(sessionID)
 }
 

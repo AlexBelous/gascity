@@ -162,6 +162,21 @@ type CityRuntime struct {
 	// publishes: controlDispatcherTick and `gc start` build narrowed desired
 	// states, and a narrowed view would read as fleet-wide undesiredness.
 	desiredSessionNames map[string]bool
+	// providerHealthSnap is the ADR-0013 registry view the patrol/boot tick
+	// loaded ONCE for its detector sweep and republishes for the keyed gates,
+	// so a start, wake or stall admission answers the respawn gate from the
+	// tick's snapshot instead of re-reading provider-health.json per key
+	// (DETECTOR.md §3, circuit/health: the sweep is the hydration point).
+	// Guarded by sessionStartMu; nil until the first tick publishes, which
+	// falls the gates back to their own file read — today's behavior.
+	providerHealthSnap *providerHealthSnapshot
+	// sessionLiveness is the two-bit provider observation the patrol/boot tick's
+	// detector sweep already made over the bead-awake fleet, published for the
+	// keyed D-ZOMBIE guard. That family's whole condition is provider I/O, so
+	// without a fleet view every admission on a healthy awake row would pay a
+	// probe just to be declined. Guarded by sessionStartMu; nil until the first
+	// patrol sweep publishes, which declines the family rather than probing.
+	sessionLiveness map[string]detectorLivenessBits
 	// orphanSuspendDeferrals is the detector's own #3630 named spec-absence
 	// confirmation window (DETECTOR.md §3, D-ORPHAN). Guarded by sessionStartMu
 	// and created on first use; only beadReconcileTick supplies it to the sweep,
@@ -2896,6 +2911,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// handler re-derives undesiredness from the same view that raised the
 	// condition.
 	cr.publishDesiredSessionNames(desiredState)
+	// One provider-health file read per tick, shared by the sweep and by every
+	// key it produces (WD.11). Before this the keyed gates each re-read the file
+	// per admission.
+	providerHealth := loadProviderHealthSnapshot(cr.cityPath)
+	cr.publishProviderHealthSnapshot(providerHealth)
 	runDetectorSweep(ctx, trace, detectorSweepInput{
 		CityPath:           cr.cityPath,
 		CityName:           cityName,
@@ -2912,7 +2932,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		ReadyWaitSet:       readyWaitSet,
 		AssignedWorkBeads:  awakeAssignedWorkBeads,
 		ReadyAssignedFlags: readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs),
-		ProviderHealth:     loadProviderHealthSnapshot(cr.cityPath),
+		ProviderHealth:     providerHealth,
 		Drains:             cr.sessionDrains,
 		Idle:               cr.it,
 		MaxAge:             cr.mat,
@@ -2924,6 +2944,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		DeferSessionCloses: bootReconcile,
 		Trigger:            detectorSweepTriggerFor(bootReconcile),
 		Admit:              cr.detectorAdmitFunc(),
+		PublishLiveness:    cr.publishSessionLiveness,
 	})
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,

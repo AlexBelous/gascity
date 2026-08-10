@@ -84,6 +84,114 @@ type exactSessionStartParams struct {
 	// O(1) handler into an O(fleet) one. Nil — or a view no tick has published
 	// yet — fails the close closed.
 	DesiredSessionNames func() map[string]bool
+
+	// ProviderHealth returns the ADR-0013 provider-health snapshot the tick's
+	// detector sweep already loaded — one file read per sweep, shared by every
+	// key the sweep produced, instead of one file read per key inside each
+	// gate (DETECTOR.md §3, circuit/health: the sweep is the hydration point).
+	// A nil accessor, or one no tick has published yet, falls back to the
+	// per-call file read so a controller-free entry point keeps today's
+	// behavior.
+	ProviderHealth func() *providerHealthSnapshot
+
+	// SessionLiveness returns the two-bit provider observation the tick's
+	// detector sweep already made over the bead-awake fleet, keyed by bead ID.
+	// The keyed D-ZOMBIE guard consults it instead of probing: that family's
+	// whole condition is provider I/O, so without a fleet view every admission
+	// on a healthy awake row would pay a probe only to be declined. It is a
+	// scheduling filter, never authority — the handler re-observes before it
+	// writes. A nil accessor, or a view no tick has published yet, declines the
+	// family rather than probing.
+	SessionLiveness func() map[string]detectorLivenessBits
+}
+
+// exactSessionProviderHealth resolves the provider-health snapshot a keyed gate
+// must answer from. The sweep's published snapshot wins; an unpublished view
+// falls back to the file read the gate performed before WD.11.
+func exactSessionProviderHealth(params exactSessionStartParams) *providerHealthSnapshot {
+	if params.ProviderHealth != nil {
+		if snap := params.ProviderHealth(); snap != nil {
+			return snap
+		}
+	}
+	return loadProviderHealthSnapshot(params.CityPath)
+}
+
+// exactSessionProviderUnavailable is the keyed half of the ADR-0013 respawn
+// gate: true only when the registry has a fresh entry for this provider AND
+// that entry is red. An absent registry or a stale entry fails OPEN, exactly as
+// the fleet arm's `!phPresent` branch does.
+func exactSessionProviderUnavailable(params exactSessionStartParams, providerName string) bool {
+	if strings.TrimSpace(providerName) == "" {
+		return false
+	}
+	healthy, present := exactSessionProviderHealth(params).check(providerName)
+	return present && !healthy
+}
+
+// exactSessionCircuitOpen answers the keyed start gate's respawn-breaker
+// question, and it is where WD.11 moved reset persistence to.
+//
+// The rule is: where the in-memory MODEL knows this identity, the model is the
+// authority; where it does not, the durable string is, and the gate fails
+// closed on it.
+//
+// That split is the whole fix. The breaker's cooldown auto-reset happens in
+// memory (maybeAutoReset, applied inside restoreFromMetadata and IsOpen) while
+// the durable cluster keeps saying "open" until somebody writes. Before WD.11
+// this gate simply OR-ed the raw persisted string into its answer and refused
+// with zero writes — which was survivable only because legacy's Phase 0.5
+// persisted the reset every tick. With the sweep as the hydration point, and
+// with legacy gone at WE, that OR would strand a durable "open" string the
+// refusing handler never clears and auto-recovery would be lost. So the gate
+// converges the row onto the model — one idempotent write through
+// persistSessionCircuitBreakerMetadata — BEFORE it evaluates the gate, and only
+// then answers.
+//
+// The cold-model branch is not a fallback, it is the fail-closed direction: a
+// controller that has just restarted and not yet swept has no grounds to
+// believe a persisted OPEN breaker has cooled down, so it refuses and the next
+// sweep's hydration converges it. Trip accounting is untouched and stays at the
+// shared start-failure write (session_lifecycle_parallel.go).
+func exactSessionCircuitOpen(params exactSessionStartParams, info sessionpkg.Info, now time.Time) bool {
+	open, identity, resetOwed := exactSessionCircuitOpenObserved(params, info, now)
+	if !resetOwed {
+		return open
+	}
+	cb := defaultSessionCircuitBreaker()
+	if err := persistSessionCircuitBreakerMetadata(sessionFrontDoor(params.Store), info.ID, cb, identity, now); err != nil && params.Stderr != nil {
+		fmt.Fprintf(params.Stderr, "session reconciler: persisting exact circuit breaker reset for %q: %v\n", info.ID, err) //nolint:errcheck // best-effort stderr
+	}
+	return open
+}
+
+// exactSessionCircuitOpenObserved is the read-only half of the gate: it answers
+// the question and reports whether the durable row owes a reset, without writing
+// anything. The effect-free dependency shadow uses it directly — that plan is
+// contractually side-effect-free, so it may observe the divergence but never
+// converge it; the real gate above pays that debt on the next admission for the
+// same key.
+func exactSessionCircuitOpenObserved(
+	params exactSessionStartParams,
+	info sessionpkg.Info,
+	now time.Time,
+) (open bool, identity string, resetOwed bool) {
+	durableOpen := strings.TrimSpace(info.SessionCircuitState) == sessionpkg.SessionCircuitStateOpen
+	cbCfg, enabled := sessionCircuitBreakerConfigFromCity(params.Config)
+	if !enabled {
+		return durableOpen, "", false
+	}
+	identity = namedSessionIdentityInfo(info)
+	if identity == "" {
+		return durableOpen, "", false
+	}
+	cb := defaultSessionCircuitBreaker()
+	cb.configure(cbCfg)
+	if !cb.snapshotIdentity(identity).hadEntry {
+		return durableOpen, identity, false
+	}
+	open = cb.IsOpen(identity, now)
+	return open, identity, !open && durableOpen
 }
 
 type configuredDependencyStartLease struct {
@@ -311,6 +419,28 @@ func commitExactSessionResetHandoff(
 	if currentResponse.Revision != initialResponse.Revision || !exactOrdinaryResetAuthorityMatches(current, info) ||
 		!exactOrdinaryResetRequested(current) {
 		return info, initialResponse, errors.New("exact reset authority changed before the restart handoff")
+	}
+	// The named circuit-breaker clear travels with the recycle (WD.11, closing
+	// WD.12 delta 9). Legacy's restart block clears the breaker for a named
+	// identity between the kill and the handoff commit; .103's reset machinery —
+	// which this body is — did not, so until now a named row recycled through
+	// the keyed lane kept whatever breaker state it had. That is not cosmetic: a
+	// deliberate recycle is exactly the intervention whose restart must not
+	// count against a breaker that is one restart from tripping, and leaving the
+	// count in place makes the fleet stop respawning the session the recycle
+	// just asked it to restart.
+	//
+	// It sits BELOW the authority re-read rather than at legacy's textual
+	// position, because the clear is itself a store write: above the fence its
+	// own revision bump would fail the very authority check that licenses the
+	// handoff. Below it the ordering legacy actually depends on still holds —
+	// the breaker is clear before the restart is committed. It is a no-op for
+	// .103's own arm, whose ownership lattice excludes named rows, so the shared
+	// body stays behavior-identical there.
+	if identity := namedSessionIdentityInfo(current); identity != "" {
+		if err := resetSessionCircuitBreakerState(params.Store, current.ID, identity, defaultSessionCircuitBreaker()); err != nil {
+			return info, initialResponse, fmt.Errorf("clearing session circuit breaker for exact reset %q: %w", current.ID, err)
+		}
 	}
 	sessionKey, hasCapability := freshRestartSessionKeyInfo(tp, current)
 	batch := sessionpkg.RestartRequestPatch(sessionKey, clk.Now().UTC())
@@ -1057,18 +1187,13 @@ func planExactSessionWaitDependencyStartShadow(
 		}), nil
 	}
 	now := clk.Now().UTC()
-	circuitOpen := strings.TrimSpace(info.SessionCircuitState) == sessionpkg.SessionCircuitStateOpen
-	if cbCfg, enabled := sessionCircuitBreakerConfigFromCity(params.Config); enabled {
-		cb := defaultSessionCircuitBreaker()
-		cb.configure(cbCfg)
-		if identity := namedSessionIdentityInfo(info); identity != "" && cb.IsOpen(identity, now) {
-			circuitOpen = true
-		}
-	}
+	// Observed, not converged: this plan is contractually effect-free, so it
+	// reads the hydrated model without paying the row's reset debt. The real
+	// gate settles that on the next admission for the same key.
+	circuitOpen, _, _ := exactSessionCircuitOpenObserved(params, info, now)
 	providerUnavailable := false
 	if resolvedProvider != nil {
-		healthy, present := loadProviderHealthSnapshot(params.CityPath).check(resolvedProvider.Name)
-		providerUnavailable = present && !healthy
+		providerUnavailable = exactSessionProviderUnavailable(params, resolvedProvider.Name)
 	}
 	return planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
 		Info:                 info,
@@ -2136,18 +2261,10 @@ func reconcileExactSessionStartWithOwner(
 	}
 
 	startupTimeout := params.Config.Session.StartupTimeoutDuration()
-	circuitOpen := strings.TrimSpace(info.SessionCircuitState) == sessionpkg.SessionCircuitStateOpen
-	if cbCfg, enabled := sessionCircuitBreakerConfigFromCity(params.Config); enabled {
-		cb := defaultSessionCircuitBreaker()
-		cb.configure(cbCfg)
-		if identity := namedSessionIdentityInfo(info); identity != "" && cb.IsOpen(identity, ownershipNow) {
-			circuitOpen = true
-		}
-	}
+	circuitOpen := exactSessionCircuitOpen(params, info, ownershipNow)
 	providerUnavailable := false
 	if tp.ResolvedProvider != nil {
-		healthy, present := loadProviderHealthSnapshot(params.CityPath).check(tp.ResolvedProvider.Name)
-		providerUnavailable = present && !healthy
+		providerUnavailable = exactSessionProviderUnavailable(params, tp.ResolvedProvider.Name)
 	}
 	plan := planSessionLifecycleStartSelection(sessionLifecycleStartShadowInput{
 		Info:                 info,

@@ -99,7 +99,10 @@ const (
 // constant for a family that straddles two legacy positions — the forward-pass
 // acknowledgement block and the end-of-tick advance scan — because both are one
 // ladder over one in-memory intent, and a constant per position would gate
-// halves of a single decision. The rest flip in the WE cutover commit,
+// halves of a single decision. D-ZOMBIE crossed at WD.11 (handler:
+// session_zombie_reconcile.go; yield: withLegacyZombieMarkExclusion) with ONE
+// constant: its single arm is one condition, one handler and one yield.
+// The rest flip in the WE cutover commit,
 // one family at a time, once the WD.15 parity window has cleared their
 // must-match bar. They are compile-time constants on purpose: this is not a
 // config surface.
@@ -113,7 +116,7 @@ const (
 	detectorActSleep                   = true
 	detectorActDrain                   = true
 	detectorActWake                    = false
-	detectorActZombie                  = false
+	detectorActZombie                  = true
 	detectorActStall                   = true
 	detectorActDup                     = true
 	detectorActStranded                = true
@@ -373,6 +376,21 @@ type detectorSweepResult struct {
 	// RunningSetKnown is false when the single ListRunning probe failed; every
 	// absence-dependent family fails closed for the cycle.
 	RunningSetKnown bool
+	// CircuitHydrated is true when the sweep restored the respawn-breaker
+	// singleton from this cycle's snapshot rows. It is false on a city with the
+	// breaker disabled, which is the default.
+	CircuitHydrated bool
+	// CircuitIdentities counts the named identities the hydration pass walked.
+	CircuitIdentities int
+	// CircuitResetsOwed counts the identities whose durable cluster still says
+	// OPEN while the hydrated model has auto-reset to CLOSED. The sweep is
+	// zero-write, so it only reports the debt; the wake handler pays it.
+	CircuitResetsOwed int
+	// Liveness is the sweep's two-bit provider observation, keyed by bead ID.
+	// It is the fleet probe the tick already pays (O(awake)), published so a
+	// per-key guard whose whole condition is provider I/O can decide whether to
+	// pay a probe of its own instead of probing on every admission.
+	Liveness map[string]detectorLivenessBits
 	// FamilyOverflow counts, per family, the conditions dropped past the
 	// per-family record budget. recordDetectorShadow turns each entry into one
 	// summary record so a truncated family is visible rather than silent.
@@ -443,6 +461,16 @@ type detectorSweepInput struct {
 	// `gc start`, the control dispatcher, and any legacy-owned city — so those
 	// entry points stay read-only no matter which family has flipped to act.
 	Admit func(sessionID string, source sessionStartAdmissionSource) (sessionStartAdmissionOutcome, error)
+
+	// PublishLiveness hands this sweep's two-bit observation back to the
+	// runtime so the keyed D-ZOMBIE guard can consult it instead of probing on
+	// every admission. Only the patrol/boot call site supplies one (WD.2 delta
+	// 6 again): the control dispatcher and `gc start` sweep NARROWED row sets,
+	// and publishing one of those would overwrite the fleet view with a partial
+	// one and mask a real zombie for a tick. A nil hook publishes nothing,
+	// which makes the guard decline — level-triggered, so the next sweep
+	// re-detects.
+	PublishLiveness func(map[string]detectorLivenessBits)
 }
 
 // detectSessionConditions classifies every session row in the snapshot into
@@ -464,6 +492,23 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 	now := clk.Now()
 
 	rows := detectorOrderedRows(in.Rows)
+
+	// Circuit hydration (DETECTOR.md §3, circuit/health). The sweep is the
+	// hydration point for the respawn breaker: it restores the process-wide
+	// singleton from the Circuit projection the row feed already carries, so
+	// every downstream keyed gate answers from a MODEL that has applied
+	// maybeAutoReset rather than from a raw persisted string. Zero store reads,
+	// zero store writes — the reset debt it discovers is reported, not paid.
+	//
+	// It runs over the WHOLE row feed, above the unknown-state guard, because
+	// that is where legacy's Phase 0.5 runs: the breaker is keyed on named
+	// identity and knows nothing about lifecycle state, so excluding
+	// unknown-state rows here would make the two paths derive different progress
+	// signatures for the same fleet.
+	hydration := detectorHydrateCircuitBreaker(in, rows, now)
+	result.CircuitHydrated = hydration.Hydrated
+	result.CircuitIdentities = hydration.Identities
+	result.CircuitResetsOwed = hydration.ResetsOwed
 
 	// One names-only ListRunning per sweep. It proves ABSENCE but not
 	// liveness: a zombie is in this set. When it fails, every family that
@@ -507,6 +552,7 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 	// D-ZOMBIE, D-WAKE, and D-SLEEP key on; names-only membership alone would
 	// leave zombies permanently stuck.
 	liveness := detectorLiveness(in.Provider, in.Cfg, known)
+	result.Liveness = liveness
 
 	infoByID := make(map[string]sessionpkg.Info, len(known))
 	for _, row := range known {
@@ -642,6 +688,83 @@ func detectorLiveness(sp runtime.Provider, cfg *config.City, rows []sessionpkg.R
 		running, alive := observeRuntimeProviderLiveness(sp, name, detectorProcessNames(cfg, info))
 		out[info.ID] = detectorLivenessBits{Probed: true, Running: running, Alive: alive}
 	}
+	return out
+}
+
+// detectorCircuitHydration is what one sweep's breaker pass observed. It is
+// reported, never acted on: the sweep is zero-write, so a reset the cooldown
+// produced is a DEBT the wake handler settles on its next admission for that
+// key (exactSessionCircuitOpen).
+type detectorCircuitHydration struct {
+	Hydrated   bool
+	Identities int
+	ResetsOwed int
+}
+
+// detectorHydrateCircuitBreaker restores the respawn-breaker singleton from the
+// snapshot rows this tick already loaded, observes each named identity's
+// progress signature, and prunes idle entries — the whole of legacy's Phase 0.5
+// minus its two persistence call sites (DETECTOR.md §3, circuit/health).
+//
+// Three properties are load-bearing.
+//
+// It costs NO store read. The persisted cluster rides the row feed as
+// ReconcileSession.Circuit, the same projection legacy's restore phase reads at
+// session_reconciler.go's Phase 0.5, so hydrating here is byte-identical to
+// hydrating there.
+//
+// It costs no store WRITE either, which is what makes the sweep safe to run
+// beside legacy on the same tick. Legacy's Phase 0.5 keeps both of its persists;
+// this pass only reports the debt (ResetsOwed) so the cycle rollup shows it.
+//
+// And it must not SWALLOW anything legacy still owns. restoreFromMetadata and
+// ObserveProgressSignature are both consume-once edges on a shared singleton,
+// and the sweep runs FIRST on every tick — so before this pass could exist,
+// legacy's two `if edge { persist }` gates had to become level-triggered
+// (sessionCircuitBreakerResetOwed / sessionCircuitBreakerProgressPersistOwed).
+// Those two arms are READ-SHARED with this pass, not effect-competing: they
+// converge the durable row onto the model with an idempotent, provider-free
+// write, so no yield is required and the order of hydration does not matter.
+func detectorHydrateCircuitBreaker(in detectorSweepInput, rows []sessionpkg.ReconcileSession, now time.Time) detectorCircuitHydration {
+	cbCfg, enabled := sessionCircuitBreakerConfigFromCity(in.Cfg)
+	if !enabled {
+		return detectorCircuitHydration{}
+	}
+	cb := defaultSessionCircuitBreaker()
+	cb.configure(cbCfg)
+
+	out := detectorCircuitHydration{Hydrated: true}
+	infos := make([]sessionpkg.Info, 0, len(rows))
+	// The stale-snapshot floor is observed for every identity BEFORE any
+	// restore, exactly as legacy orders its two loops: a reset generation
+	// observed after a restore could not reject the snapshot it just installed.
+	for i := range rows {
+		identity := namedSessionIdentityInfo(rows[i].Info)
+		if identity == "" {
+			continue
+		}
+		infos = append(infos, rows[i].Info)
+		if err := cb.observeResetGenerationFromMetadata(identity, rows[i].Circuit); err != nil {
+			continue
+		}
+	}
+	for i := range rows {
+		identity := namedSessionIdentityInfo(rows[i].Info)
+		if identity == "" {
+			continue
+		}
+		out.Identities++
+		if _, err := cb.restoreFromMetadata(identity, rows[i].Circuit, now); err != nil {
+			continue
+		}
+		if sessionCircuitBreakerResetOwed(cb, identity, rows[i].Circuit, now) {
+			out.ResetsOwed++
+		}
+	}
+	for identity, sig := range computeNamedSessionProgressSignatures(infos, in.AssignedWorkBeads) {
+		cb.ObserveProgressSignature(identity, sig, now)
+	}
+	cb.pruneIdle(now)
 	return out
 }
 
@@ -1634,6 +1757,15 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// the durable pool-freeable rungs, records the deferred outcome for the
 		// parity join and never enqueues (WD.14).
 		return sessionStartAdmissionStrandedRepair, detectorActStranded && cond.Outcome == TraceOutcomeClosed
+	case detectorFamilyZombie:
+		// One arm: detectZombie raises a condition only for `running ∧ !alive`
+		// and nothing else, so every condition here predicts the mark of its own
+		// key. It carries TraceOutcomeNoChange — the mark is the predicted
+		// EFFECT while the sweep applies nothing — and the gate names that
+		// outcome explicitly rather than routing on the act constant alone, for
+		// the reason D-DUP's arm records: a future second arm under some other
+		// outcome has to come here and declare itself.
+		return sessionStartAdmissionZombieMark, detectorActZombie && cond.Outcome == TraceOutcomeNoChange
 	}
 	return "", false
 }
@@ -1747,6 +1879,9 @@ func recordDetectorShadow(cycle *sessionReconcilerTraceCycle, in detectorSweepIn
 			"unknown_state_skipped":       result.UnknownStateSkipped,
 			"suppressed_by_partial_store": result.SuppressedByPartialStore,
 			"running_set_known":           result.RunningSetKnown,
+			"circuit_hydrated":            result.CircuitHydrated,
+			"circuit_identities":          result.CircuitIdentities,
+			"circuit_resets_owed":         result.CircuitResetsOwed,
 			"store_query_partial":         in.StoreQueryPartial,
 			"any_family_acts":             detectorAnyFamilyActs(),
 			"duration_ms":                 result.Duration.Milliseconds(),
@@ -1769,6 +1904,11 @@ func detectorSweepTriggerFor(bootReconcile bool) string {
 // that need the conditions call detectSessionConditions directly.
 func runDetectorSweep(ctx context.Context, cycle *sessionReconcilerTraceCycle, in detectorSweepInput) {
 	result := detectSessionConditions(ctx, in)
+	// Publish BEFORE routing: the keys this sweep is about to enqueue are
+	// handled against the observation this sweep made, not the previous one.
+	if in.PublishLiveness != nil {
+		in.PublishLiveness(result.Liveness)
+	}
 	routeDetectorConditions(in, &result)
 	recordDetectorShadow(cycle, in, result)
 }

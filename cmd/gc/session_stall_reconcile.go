@@ -143,7 +143,10 @@ func decideExactSessionProgressStall(
 	providerHealthy := true
 	if !exempt && (!decision.FloorExempt || holdsClaim) {
 		if provider := exactSessionProgressStallProviderName(params, info); provider != "" {
-			if healthy, present := loadProviderHealthSnapshot(params.CityPath).check(provider); present {
+			// The sweep's once-per-sweep snapshot, not a per-key file read
+			// (WD.11): this guard runs on every candidate admission, so a file
+			// read here is a read per key rather than per tick.
+			if healthy, present := exactSessionProviderHealth(params).check(provider); present {
 				providerHealthy = healthy
 			}
 		}

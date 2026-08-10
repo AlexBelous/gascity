@@ -1016,6 +1016,143 @@ func TestExactResetSessionUnderLegacyDrainRetainsIntentWithoutStopping(t *testin
 	}
 }
 
+// assertResetSessionRestarted asserts the whole reset ran in the pass just
+// taken: the durable markers are consumed, exactly one token-bound stop fired
+// against the incarnation the reset was admitted against, and the same bead and
+// name came back up.
+func assertResetSessionRestarted(t *testing.T, env *reconcilerTestEnv, provider *unattendedStopProvider, before session.Info) {
+	t.Helper()
+	after := env.sessionInfo(before.ID)
+	if after.RestartRequested != "" || after.ContinuationResetPending != "" || after.ResetCommittedAt != "" {
+		t.Fatalf("reset markers survived the pass: %+v", after)
+	}
+	if after.ID != before.ID || after.SessionNameMetadata != before.SessionNameMetadata {
+		t.Fatalf("reset session = %+v, want the same bead and name as %+v", after, before)
+	}
+	if after.InstanceToken == before.InstanceToken {
+		t.Fatalf("instance token = %q, want a fresh incarnation", after.InstanceToken)
+	}
+	if calls := provider.stopSnapshot(); len(calls) != 1 ||
+		calls[0].name != before.SessionNameMetadata || calls[0].expectedToken != before.InstanceToken {
+		t.Fatalf("unattended stop calls = %#v, want exactly one token-bound stop", calls)
+	}
+	if got := env.sp.CountCalls("Start", before.SessionNameMetadata); got != 2 {
+		t.Fatalf("provider Start calls = %d, want the fixture start plus exactly one restart", got)
+	}
+	if !provider.IsRunning(before.SessionNameMetadata) {
+		t.Fatal("reset session has no live runtime after the restart")
+	}
+}
+
+// TestExactResetSessionRunsUnderAnyAdmissionSource pins ga-f7v2ft.139: the
+// ordinary reset arm dispatches on the durable row, not on how the admission
+// arrived. This is F2's rule (ga-f7v2ft.125) applied to the family that still
+// carried the source gate. The controller coalesces admissions on a key and
+// keeps ONE source — the earlier one when a pending in_process or an incoming
+// anti_entropy folds, the later one otherwise (session_start_controller.go:435)
+// — so any family that lands on a reset-carrying key before the reset arm sees
+// it consumed the admission, and a source-gated arm then declines with no
+// effect and nothing left to re-detect until the next anti-entropy pass.
+//
+// Each source below reaches the arm on the SAME durable row, and no detector
+// family claims it: the seam's guards are row predicates, so the row that falls
+// through under socket falls through under all of them.
+func TestExactResetSessionRunsUnderAnyAdmissionSource(t *testing.T) {
+	for _, source := range []sessionStartAdmissionSource{
+		sessionStartAdmissionDeadline,
+		sessionStartAdmissionInProcess,
+		sessionStartAdmissionSleepDrain,
+		sessionStartAdmissionExplicitWake,
+		sessionStartAdmissionZombieMark,
+	} {
+		t.Run(string(source), func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+			}
+			provider := &unattendedStopProvider{Fake: env.sp}
+			bead := resetSessionFixture(t, env, provider)
+			before := env.sessionInfo(bead.ID)
+			params := exactSessionStartTestParams(t, env)
+			params.Provider = provider
+			params.Generation = 1
+			params.RolloutMode = rollout.Require
+
+			owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+				SessionID: bead.ID, Source: source,
+			}, params)
+			if owner != exactSessionStartKeyedOwner || err != nil {
+				t.Fatalf("reset under source %q = (owner=%v, err=%v), want the keyed owner to run it", source, owner, err)
+			}
+			assertResetSessionRestarted(t, env, provider, before)
+		})
+	}
+}
+
+// TestExactResetSessionUnderConfigDriftRunsTheResetNotTheConvergence pins the
+// three-way interaction ga-f7v2ft.139 opens up: a row carrying BOTH the durable
+// reset markers and real config drift, admitted under the drift family's own
+// source. The pinned dispatch order resolves it in one direction only —
+// reconcileExactSessionDetectorFamily runs first, D-DRIFT declines any row
+// carrying restart_requested (ga-f7v2ft.138, legacy's own pass order), the key
+// falls through to the reset arm, and de-source-gating that arm is what lets it
+// act on the admission it was handed instead of deferring to anti-entropy.
+//
+// The restart is also what converges the drift: the fresh start re-stamps all
+// four fingerprints, so the yield above costs no convergence.
+func TestExactResetSessionUnderConfigDriftRunsTheResetNotTheConvergence(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := resetSessionFixture(t, env, provider)
+	params := exactSessionStartTestParams(t, env)
+	params.Provider = provider
+	params.Generation = 1
+	params.RolloutMode = rollout.Require
+
+	// Real provision drift, resolved through the same production path the drift
+	// family compares against, so the baseline is one the handler can actually
+	// see rather than a hand-built stub.
+	stale := driftAgentConfig(t, env, params, bead.ID)
+	stale.PreStart = append([]string{"echo stale"}, stale.PreStart...)
+	env.setSessionMetadata(&bead, map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(stale),
+		"started_provision_hash": runtime.ProvisionFingerprint(stale),
+		"started_launch_hash":    runtime.LaunchFingerprint(stale),
+	})
+	before := env.sessionInfo(bead.ID)
+	if strings.TrimSpace(before.RestartRequested) != "true" {
+		t.Fatalf("fixture lost the reset marker: %+v", before)
+	}
+	// The drift is REAL: strip the marker the .138 yield keys on and D-DRIFT
+	// claims this row. Without this leg the test would pass on a fixture that
+	// simply carries no drift at all.
+	undriftedProbe := before
+	undriftedProbe.RestartRequested = ""
+	if !exactSessionConfigDriftCandidate(params, undriftedProbe, session.PersistedResponse{Revision: 1}, env.clk) {
+		t.Fatal("fixture is not the three-way shape: the seeded baseline is not drift D-DRIFT would claim")
+	}
+	if exactSessionConfigDriftCandidate(params, before, session.PersistedResponse{Revision: 1}, env.clk) {
+		t.Fatal("D-DRIFT claimed a restart-requested row; the ga-f7v2ft.138 yield regressed")
+	}
+
+	owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID, Source: sessionStartAdmissionConfigDrift,
+	}, params)
+	if owner != exactSessionStartKeyedOwner || err != nil {
+		t.Fatalf("drifted reset result = (owner=%v, err=%v), want the keyed owner to run the reset", owner, err)
+	}
+	assertResetSessionRestarted(t, env, provider, before)
+	after := env.sessionInfo(bead.ID)
+	if after.StartedConfigHash == before.StartedConfigHash {
+		t.Fatalf("started_config_hash = %q, want the restart to have re-stamped the drifted baseline", after.StartedConfigHash)
+	}
+}
+
 // killedPinnedOnDemandFixture persists the durable shape gc session kill leaves
 // behind on a live pinned on-demand configured named session: asleep with a
 // killed reason, the pin retained, and no synthesized wake request.

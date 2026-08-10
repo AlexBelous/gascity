@@ -2225,8 +2225,19 @@ func reconcileExactSessionStartWithOwner(
 
 	ownershipNow := clk.Now().UTC()
 	lifecycle, cfgAgent, owner := classifyExactSessionStartOwnership(info, params.Config, ownershipNow)
-	resetAdmitted := (admission.Source == sessionStartAdmissionSocket || admission.Source == sessionStartAdmissionAntiEntropy) &&
-		initialResponse.Revision != 0 && exactOrdinaryResetCurrent(info, params.Config, ownershipNow)
+	// The ordinary reset family dispatches on the durable row, not on how the
+	// admission arrived — F2's rule (ga-f7v2ft.125) applied to the last family
+	// that still carried the gate (ga-f7v2ft.139). The controller keeps ONE
+	// source per key: the earlier one when a pending in_process or an incoming
+	// anti_entropy folds, the later one otherwise (session_start_controller.go
+	// admit(), :435). So ANY family that lands on a reset-carrying key before
+	// this arm sees it consumes the admission, and a source gate here answers
+	// with no effect and nothing left to re-detect until the next anti-entropy
+	// pass. exactOrdinaryResetCurrent is the whole authority: it is this
+	// family's ownership lattice (live, ordinary, awake, no dependencies, not
+	// held or quarantined), so no source can widen what it admits.
+	resetAdmitted := initialResponse.Revision != 0 &&
+		exactOrdinaryResetCurrent(info, params.Config, ownershipNow)
 	if resetAdmitted {
 		cfgAgent = findAgentByTemplate(params.Config, resolvedSessionTemplateInfo(info, params.Config))
 		owner = exactSessionStartKeyedOwner

@@ -707,7 +707,7 @@ func TestStrictDefaultPoolWakeInFlightCoalescingReleasesRetainedAdmissionAfterSt
 		t.Fatalf("start session-start controller: %v", err)
 	}
 	t.Cleanup(controller.Stop)
-	if outcome, err := controller.AdmitStrictDefaultPoolWake(lease); err != nil || outcome != sessionStartAdmissionAccepted {
+	if outcome, err := controller.AdmitStrictDefaultPoolWake(lease, sessionStartAdmissionSocket); err != nil || outcome != sessionStartAdmissionAccepted {
 		t.Fatalf("admit strict-default pool wake = (%q, %v), want accepted", outcome, err)
 	}
 	awaitClose(t, entered, "strict-default pool wake pre-wake entry")

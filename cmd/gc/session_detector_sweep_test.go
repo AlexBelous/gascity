@@ -61,11 +61,31 @@ func TestDetectorShadowVocabularyNeverAutoArms(t *testing.T) {
 // arm crossed at WD.3 and its live-orphan DRAIN arm at WD.4; D-STALE-CREATE at
 // WD.7; D-SLEEP at WD.5; D-DRIFT's CONVERGENCE arms at WD.8 and its DEFERRAL
 // arms at WD.9; D-STALL at WD.12; D-DUP at WD.13; D-STRANDED at WD.14;
-// D-DRAIN at WD.6; D-ZOMBIE at WD.11. A family
-// that flips an act constant without an arm in
+// D-DRAIN at WD.6; D-ZOMBIE at WD.11; D-WAKE's NAMED and CONFIGURED-DEPENDENCY
+// arms at WD.10a, with its pool-fill arm still shadow-only until WD.10b. A
+// family that flips an act constant without an arm in
 // detectorAdmissionSourceFor — or with an arm but no landed handler — fails here
 // before it can double-act beside a non-yielding legacy.
 func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
+	// D-WAKE is the one family whose arms split by REASON rather than by
+	// outcome: every arm predicts a start under TraceOutcomeStartCandidate, and
+	// what differs is which certified lease can own the row. Its probe
+	// conditions therefore have to carry a reason, and the arm WD.10b still owns
+	// must stay unrouted under the same outcome its landed siblings route on.
+	actingReasons := map[detectorFamily][]TraceReasonCode{
+		detectorFamilyWake: {detectorReasonWakeTargetNamed, detectorReasonWakeTargetDependency},
+	}
+	probes := func(family detectorFamily, outcome TraceOutcomeCode) []detectorCondition {
+		reasons, split := actingReasons[family]
+		if !split {
+			return []detectorCondition{{Family: family, Outcome: outcome}}
+		}
+		conditions := make([]detectorCondition, 0, len(reasons))
+		for _, reason := range reasons {
+			conditions = append(conditions, detectorCondition{Family: family, Outcome: outcome, Reason: reason})
+		}
+		return conditions
+	}
 	// The outcomes each acting family's EFFECT arms carry, one entry per landed
 	// handler+yield pair. A family absent from this table must not route under
 	// any outcome, and an outcome absent from a listed family's set must not
@@ -93,6 +113,9 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 		// while the keep-alive escape, the in-flight probe, the budget-deferred
 		// probe slot and the fleet-only no-wake verdict all predict nothing.
 		detectorFamilySleep: {TraceOutcomeDrain: true},
+		// D-WAKE's landed arms (WD.10a) share TraceOutcomeStartCandidate and are
+		// separated by reason; see actingReasons above.
+		detectorFamilyWake: {TraceOutcomeStartCandidate: true},
 	}
 	if !detectorAnyFamilyActs() {
 		t.Fatal("detectorAnyFamilyActs() = false; D-DEADLINE acts from WD.2 onward")
@@ -104,39 +127,62 @@ func TestDetectorFamiliesStayShadowOnlyDuringWD(t *testing.T) {
 		}
 		if !acts {
 			for _, outcome := range detectorShadowOutcomes {
-				if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: outcome}); routed {
-					t.Errorf("shadow-only family %q routed outcome %q", spec.Family, outcome)
+				for _, cond := range probes(spec.Family, outcome) {
+					if _, routed := detectorAdmissionSourceFor(cond); routed {
+						t.Errorf("shadow-only family %q routed outcome %q", spec.Family, outcome)
+					}
 				}
 			}
 			continue
 		}
 		sources := make(map[sessionStartAdmissionSource]TraceOutcomeCode, len(effects))
 		for effect := range effects {
-			source, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: effect})
-			if !routed {
-				t.Errorf("family %q did not route its effect arm (outcome %q)", spec.Family, effect)
+			for _, cond := range probes(spec.Family, effect) {
+				source, routed := detectorAdmissionSourceFor(cond)
+				if !routed {
+					t.Errorf("family %q did not route its effect arm (outcome %q reason %q)", spec.Family, effect, cond.Reason)
+				}
+				if source == "" {
+					t.Errorf("family %q routes outcome %q with an empty admission source", spec.Family, effect)
+				}
+				if err := validateSessionStartAdmission("ga-detector", source); err != nil {
+					t.Errorf("family %q admission source %q is not accepted by the controller: %v", spec.Family, source, err)
+				}
+				// One arm, one source: two effect arms sharing a source would make
+				// each arm's legacy yield stand down for the other arm's rows. A
+				// reason-split family is ONE arm behind one lease surface and one
+				// yield, so its reasons share a source by design.
+				if prior, seen := sources[source]; seen && prior != effect {
+					t.Errorf("family %q routes outcomes %q and %q under the same source %q", spec.Family, prior, effect, source)
+				}
+				sources[source] = effect
 			}
-			if source == "" {
-				t.Errorf("family %q routes outcome %q with an empty admission source", spec.Family, effect)
-			}
-			if err := validateSessionStartAdmission("ga-detector", source); err != nil {
-				t.Errorf("family %q admission source %q is not accepted by the controller: %v", spec.Family, source, err)
-			}
-			// One arm, one source: two effect arms sharing a source would make
-			// each arm's legacy yield stand down for the other arm's rows.
-			if prior, seen := sources[source]; seen {
-				t.Errorf("family %q routes outcomes %q and %q under the same source %q", spec.Family, prior, effect, source)
-			}
-			sources[source] = effect
 		}
 		for _, outcome := range detectorShadowOutcomes {
 			if effects[outcome] {
 				continue
 			}
-			if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: spec.Family, Outcome: outcome}); routed {
-				t.Errorf("family %q routed non-effect outcome %q; only its effect arms may enqueue", spec.Family, outcome)
+			for _, cond := range probes(spec.Family, outcome) {
+				if _, routed := detectorAdmissionSourceFor(cond); routed {
+					t.Errorf("family %q routed non-effect outcome %q; only its effect arms may enqueue", spec.Family, outcome)
+				}
 			}
 		}
+	}
+	// D-WAKE's remaining arm is WD.10b's, and it carries the SAME outcome its
+	// landed siblings route on — so only the reason separates them. Pin that the
+	// pool-fill reason stays unrouted, or WD.10b's fill would ride in on the
+	// named/dependency gate before its own yield exists.
+	if _, routed := detectorAdmissionSourceFor(detectorCondition{
+		Family: detectorFamilyWake, Reason: detectorReasonWakeTarget, Outcome: TraceOutcomeStartCandidate,
+	}); routed {
+		t.Error("D-WAKE routed its pool-fill arm; that arm and its legacy yield land at WD.10b")
+	}
+	if detectorActWakePoolFill {
+		t.Error("detectorActWakePoolFill must stay false until WD.10b lands pool-under-min fill with its own legacy yield")
+	}
+	if !detectorActWakeNamedDependency {
+		t.Error("detectorActWakeNamedDependency must be true from WD.10a: the certified named/dependency wake admissions have landed behind the existing start-family legacy yield")
 	}
 	if _, routed := detectorAdmissionSourceFor(detectorCondition{Family: detectorFamilyStaleCreate, Outcome: TraceOutcomeNoChange}); routed {
 		t.Error("D-STALE-CREATE routed its preserved arm; only its rollback arm may enqueue")

@@ -321,7 +321,7 @@ depends_on = ["database", "cache"]
 	// untouched, and keeping session_origin=manual -- is the real convergence
 	// this journey still proves, and keeps running.
 	t.Run("keyed_wait_dependency_commit", func(t *testing.T) {
-		t.Skip("ga-ij8mh: an ordinary bead.closed poke (api_state.go:741) runs a full legacy tick inside the dependency-ready window, so legacy's prepareWaitWakeStateWithSnapshot (city_runtime.go:2818) advances the wait and its forward pass starts the row before the keyed controller can commit; the keyed wait_dependency admission never lands and the durable wait never rests at ready/open. Re-lands with ga-f7v2ft.116 (WD.10a) once dependency wake demand is filled through certified wake leases")
+		t.Skip("ga-zo9h3: an ordinary bead.closed poke (api_state.go:741) runs a full legacy tick inside the dependency-ready window, so legacy's prepareWaitWakeStateWithSnapshot (city_runtime.go:2818) advances the wait and its forward pass starts the row before the keyed controller can commit; the keyed wait_dependency admission never lands and the durable wait never rests at ready/open. Split out of ga-ij8mh at WD.10a: that slice closes the pre-lease ownership seam for the WAKE families, and this manual wait-hold row carries no wake cause, so the race it loses is on the wait-ADVANCE path and needs its own legacy yield")
 
 		commit, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
 			t.Context(), cityDir, session, started, sessionWaitDependencyShadowJourneyWitnessTimeout,

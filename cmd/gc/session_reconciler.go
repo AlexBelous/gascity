@@ -2221,6 +2221,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				continue
 			default:
+				// WD.10a sweep rule (ga-f7v2ft.116): a canonical singleton row with a
+				// CURRENT explicit wake is the wake family's live target, and no
+				// configured single-session agent generates desired-state demand of
+				// its own, so this undesired arm would drain or close the very row
+				// `gc session wake` just asked to start. Same predicate the detector,
+				// the keyed orphan-close handler and the pool sweep answer from.
+				//
+				// It sits ABOVE the D-DRAIN yield because the two guards are
+				// different widths: this one `continue`s the row past the WHOLE
+				// undesired arm, while the yield below scopes to the acknowledgement
+				// block alone. Ordering it second would let the ack block run on a
+				// row the wake family owns before the preserve could fire.
+				if wakeCurrentSingletonPreservesUndesiredRow(infoPostHeal, cfg, clk.Now().UTC()) {
+					continue
+				}
 				// Coexistence seam for the acting D-DRAIN family (WD.6). While the
 				// keyed controller holds this exact key, legacy's undesired-row
 				// acknowledgement arm stands down: no stop-pending mark, no

@@ -69,6 +69,35 @@ type exactSessionStartParams struct {
 	ValidateConfiguredNamedWakeStart   func(sessionpkg.Info, configuredNamedWakeStartLease) bool
 	EnterConfiguredNamedWakeStart      func(configuredNamedWakeStartLease) bool
 
+	// CertifyWakeFamilyStart closes the PRE-LEASE ownership seam — WD.10a's
+	// second entry gate beside Q1 (ga-ij8mh ruling 4, amendment 2).
+	//
+	// The losing interleave it removes: a wake write fires BeadUpdated, the
+	// in-process admission lands here with no lease,
+	// classifyExactSessionStartOwnership sends every pool-managed row to legacy,
+	// the yield asks for a legacy fallback poke, and that poke's tick runs
+	// legacy's PreWakePatch — which consumes wake_request
+	// (internal/session/lifecycle_transition.go:203-207) before any certified
+	// lease exists. The held-lease exclusion protects only AFTER admission, so
+	// the window is held open by the classifier itself.
+	//
+	// The carve-out is placed HERE, at the yield, rather than inside
+	// classifyExactSessionStartOwnership, for two reasons. The classifier is a
+	// pure projection over (row, config, now) and certification needs the store,
+	// the provider, and the controller generation. And re-classifying pool-managed
+	// rows as keyed would ROUTE them past the socket handler's certification arm
+	// (city_runtime_session_start.go, which certifies only when owner != keyed)
+	// into the ordinary keyed start path, which has no dependency gate. Certifying
+	// at the yield reuses the read the classification already paid for, so the
+	// window is closed by construction: the same read that would have surrendered
+	// the row is the one that certifies it.
+	//
+	// Returning true means the implementation certified a wake-family lease and
+	// re-admitted this exact key under it; the handler then reports keyed
+	// ownership with no effect, so no fallback poke fires and the durable wake
+	// cause survives for the re-admitted pass.
+	CertifyWakeFamilyStart func(info sessionpkg.Info, sessionRevision int64) bool
+
 	// The lifecycle-timer trackers the D-DEADLINE handler re-derives its
 	// condition from. They are the same singletons the fleet loop uses, so the
 	// keyed and legacy deadline arms can never disagree about a threshold.
@@ -669,13 +698,46 @@ func strictDefaultPoolWakeIdentityMatches(info sessionpkg.Info, cfg *config.City
 	for i := range cfg.NamedSessions {
 		namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
 	}
-	if newPoolAllocationShadowPolicy(cfg, agent, namedTemplates).reason != poolAllocationShadowEligible {
+	// Q1, RESOLVED (ga-f7v2ft.116): eligibility is supported() at EVERY
+	// pool-family site. This predicate used to demand reason == Eligible, which
+	// accepted unlimited pools ONLY, while its sibling at
+	// city_runtime_wait_dependency_index.go demanded EligibleAgentCap and
+	// accepted bounded pools only — two strict sites, inverted relative to each
+	// other, each encoding one slice's scope into the eligibility REASON. Reason
+	// narrowing makes eligibility site-dependent and silently unsatisfiable; the
+	// inversion was the proof.
+	//
+	// The one genuinely deliberate exclusion survives with an honest name: max==1
+	// IS the canonical-singleton identity
+	// (config.Agent.UsesCanonicalSingletonPoolIdentity), whose rows ride the
+	// configured-named and configured-dependency families, not this one.
+	//
+	// Capacity is a SEPARATE explicit check, not an eligibility test: it lives at
+	// strictDefaultPoolWakeStartWitnessCurrent, where the fleet's certified
+	// membership view is reachable, because a wake CAN change the active count.
+	policy := newPoolAllocationShadowPolicy(cfg, agent, namedTemplates)
+	if !policy.supported() ||
+		(policy.reason == poolAllocationShadowEligibleAgentCap && policy.maxActiveSessions == 1) {
 		return false
 	}
 	slot, _ := strconv.Atoi(lease.PoolSlot)
 	return existingPoolSlotWithConfigInfo(cfg, agent, info) == slot &&
 		info.AgentName == agent.QualifiedInstanceName(poolInstanceName(agent.Name, slot, agent)) &&
 		lease.SessionName == PoolSessionName(agent.QualifiedName(), info.ID)
+}
+
+// strictDefaultPoolWakeCapacityAvailable is clause 2 of the uniform predicate
+// contract: capacity is checked exactly where the action can change the ACTIVE
+// count, and the session performing the action never counts against the cap it
+// is re-entering. An unlimited policy (maximum < 0) passes trivially.
+func strictDefaultPoolWakeCapacityAvailable(maximum, occupied int, selfOccupied bool) bool {
+	if maximum < 0 {
+		return true
+	}
+	if selfOccupied && occupied > 0 {
+		occupied--
+	}
+	return occupied < maximum
 }
 
 func strictDefaultPoolWakeStartMatches(info sessionpkg.Info, cfg *config.City, lease strictDefaultPoolWakeStartLease, now time.Time) bool {
@@ -783,15 +845,45 @@ func validateConfiguredDependencyStartLease(lease configuredDependencyStartLease
 
 func configuredDependencyStartTargetMatches(info sessionpkg.Info, cfg *config.City, lease configuredDependencyStartLease) bool {
 	if cfg == nil || info.ID != lease.SessionID || info.Closed || info.PendingCreateClaim || info.DependencyOnly ||
-		isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) {
+		isNamedSessionInfo(info) {
 		return false
 	}
 	target := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
 	if target == nil || target.QualifiedName() != lease.TargetTemplate || isManualSessionInfoForAgent(info, target) || len(target.DependsOn) != 1 {
 		return false
 	}
+	if !configuredDependencyWakeShapeMatches(info, target) {
+		return false
+	}
 	dependency := findAgentByTemplate(cfg, target.DependsOn[0])
 	return dependency != nil && dependency.QualifiedName() == lease.DependencyTemplate && !isMultiSessionCfgAgent(dependency)
+}
+
+// configuredDependencyWakeShapeMatches partitions the two keyed wake families on
+// SLOT markers, not on `pool_managed` (ga-ij8mh ruling 4, amendment 1).
+//
+// The family was born refusing every pool-managed row, which reads as "leave the
+// pool lattice alone" but is not what it does: syncSessionBeads stamps
+// session_origin=ephemeral AND pool_managed=true on the row of every configured
+// single-session agent within one tick (session_beads.go:1625/:1636-1637 at
+// create, :1834-1839 on update), and a dependency-bearing agent is exactly that
+// shape — poolAllocationShadowDependencies (pool_allocation_shadow.go:82-86)
+// categorically excludes it from the strict-pool lattice, so no other family can
+// own it either. The refusal therefore excluded the only shape production
+// sustains, leaving "clean legacy ownership classification" as the sole outcome.
+//
+// The honest partition is the slot: a row carrying a pool_slot (with its trigger
+// bead and PoolSessionName naming) is a strict-default pool member and stays with
+// that family; a pool-managed row WITHOUT a slot is the canonical singleton
+// identity (config.Agent.UsesCanonicalSingletonPoolIdentity) and belongs here.
+// The origin-less legacy shape is still accepted for rows a sync has not yet
+// touched.
+func configuredDependencyWakeShapeMatches(info sessionpkg.Info, target *config.Agent) bool {
+	if !isPoolManagedSessionInfo(info) {
+		return true
+	}
+	return target.UsesCanonicalSingletonPoolIdentity() &&
+		isCanonicalPoolManagedSessionInfoForTemplate(info, target.QualifiedName())
 }
 
 func configuredDependencyStartDependencyIdentity(
@@ -853,6 +945,72 @@ func configuredDependencyExplicitWakeCurrent(info sessionpkg.Info, now time.Time
 	input := sessionpkg.LifecycleInputFromInfo(info)
 	input.Now = now
 	input.CreatedAt = info.CreatedAt
+	input.StaleCreatingAfter = staleCreatingStateTimeout
+	lifecycle := sessionpkg.ProjectLifecycle(input)
+	return lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) &&
+		!lifecycle.HasWakeCause(sessionpkg.WakeCausePendingCreate) && !lifecycle.Terminal
+}
+
+// wakeCurrentSingletonPreservesUndesiredRow is WD.10a's sweep rule (ga-ij8mh
+// ruling 4, amendment 4), in ONE spelling for every reaper.
+//
+// A canonical singleton row carrying a CURRENT explicit wake is not garbage: it
+// is the wake family's live target. Sync stamps that shape
+// (pool_managed + ephemeral origin, no slot) on every configured
+// single-session agent's row within one tick, and no such agent generates pool
+// demand of its own — `poolAllocationShadowDependencies` excludes the
+// dependency-bearing ones outright, and the pool desired state is driven by
+// assigned WORK — so the row an operator just asked to wake is, to every
+// undesiredness test in the fleet, an orphan. Reaping it is how the
+// born-unreachable dependency wake ended Closed=true.
+//
+// The guard is deliberately narrow in three ways. It requires a CURRENT wake
+// cause, so a stale or already-consumed one still reaps and no row can be
+// stranded by it. It does not cover slotized pool members, whose freeing is the
+// pool lattice's own business. And it preserves only — it never makes a row
+// desired, so nothing here creates work, starts a session, or feeds demand; the
+// certified wake lease remains the only thing that can start the row.
+//
+// Amendment 4 named `sweepUndesiredPoolSessions`/`GCSweepSessionBeads`, which
+// was the observed reaper on the pre-WD.3 evidence. Post-batch-3 the acting
+// D-ORPHAN close family reaps the same row first, and legacy's sync and
+// forward-pass arms reap it when neither keyed family holds the key. The rule is
+// about the ROW, not about one reaper, so it is applied at each of them from
+// this predicate — detection and re-derivation answering from one spelling, the
+// rule WD.13 recorded.
+func wakeCurrentSingletonPreservesUndesiredRow(info sessionpkg.Info, cfg *config.City, now time.Time) bool {
+	if cfg == nil || info.Closed || info.DependencyOnly || isNamedSessionInfo(info) {
+		return false
+	}
+	agent := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	if agent == nil || !agent.UsesCanonicalSingletonPoolIdentity() ||
+		isManualSessionInfoForAgent(info, agent) ||
+		!configuredDependencyWakeShapeMatches(info, agent) {
+		return false
+	}
+	return configuredDependencyExplicitWakeCurrent(info, now)
+}
+
+// wakeCurrentSingletonPreservesUndesiredBead is the beads.Bead mirror of
+// wakeCurrentSingletonPreservesUndesiredRow, for legacy's sync close pass, which
+// works over raw rows. Same three rungs, same narrowness.
+func wakeCurrentSingletonPreservesUndesiredBead(b beads.Bead, cfg *config.City, now time.Time) bool {
+	if cfg == nil || b.Status == "closed" || isNamedSessionBead(b) {
+		return false
+	}
+	template := normalizedSessionTemplate(b, cfg)
+	if template == "" {
+		template = sessionBeadStoredTemplate(b)
+	}
+	agent := findAgentByTemplate(cfg, template)
+	if agent == nil || !agent.UsesCanonicalSingletonPoolIdentity() || isManualSessionBeadForAgent(b, agent) {
+		return false
+	}
+	if isPoolManagedSessionBead(b) && !isCanonicalPoolManagedSessionBeadForTemplate(b, agent.QualifiedName()) {
+		return false
+	}
+	input := sessionpkg.LifecycleInputFromMetadata(b.Status, b.Metadata)
+	input.Now = now
 	input.StaleCreatingAfter = staleCreatingStateTimeout
 	lifecycle := sessionpkg.ProjectLifecycle(input)
 	return lifecycle.HasWakeCause(sessionpkg.WakeCauseExplicit) &&
@@ -1043,6 +1201,19 @@ func certifySessionWaitDependencyStartLease(
 	return lease, exactSessionStartKeyedOwner, nil
 }
 
+// waitDependencyBoundedPoolTarget names the pool a dependency-wait resume owes a
+// membership witness for.
+//
+// Folded onto the uniform predicate contract at WD.10a (council F13) — as a
+// RE-SPELLING, not a behavior change, and the distinction matters. Unlike the
+// two sites the Q1 adjudication indicted, this one's `reason ==
+// EligibleAgentCap` was never a scope narrowing: under `supported()` the reason
+// is EligibleAgentCap if and ONLY if the policy carries a cap, so the test was
+// already the contract's CAPACITY clause wearing a reason's clothes. Spelling it
+// as the capacity clause makes that visible and keeps the answer identical:
+// unlimited pools owe no witness because there is no cap for membership to
+// witness against (clause 2's "trivially pass when unlimited"), and the
+// canonical singleton is excluded by its own identity.
 func waitDependencyBoundedPoolTarget(info sessionpkg.Info, cfg *config.City) (string, bool) {
 	if cfg == nil || !isPoolManagedSessionInfo(info) {
 		return "", false
@@ -1056,8 +1227,13 @@ func waitDependencyBoundedPoolTarget(info sessionpkg.Info, cfg *config.City) (st
 		namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
 	}
 	policy := newPoolAllocationShadowPolicy(cfg, agent, namedTemplates)
-	return agent.QualifiedName(), policy.reason == poolAllocationShadowEligibleAgentCap &&
-		policy.maxActiveSessions > 1 && agent.EffectiveMinActiveSessions() == 0
+	return agent.QualifiedName(), policy.supported() &&
+		// Capacity clause: a witness is owed only where there is a cap to prove
+		// the resume stays inside, and only above the canonical singleton, whose
+		// rows ride the wake families instead. The min-floor test is a redundant
+		// belt — min>0 yields reason=MinFloor, which supported() already rejects.
+		policy.maxActiveSessions > 1 &&
+		agent.EffectiveMinActiveSessions() == 0
 }
 
 // waitDependencyConfiguredTemplateEligible admits ordinary configured sessions
@@ -1090,9 +1266,16 @@ func waitDependencyConfiguredTemplateEligible(
 		for i := range cfg.NamedSessions {
 			namedTemplates[cfg.NamedSessions[i].TemplateQualifiedName()] = struct{}{}
 		}
+		// Same contract, same re-spelling (council F13), same non-change: the
+		// two-reason disjunction this replaces was eligibility AND capacity fused
+		// into one expression. Split apart, eligibility is supported() and the
+		// capacity clause admits an unlimited pool or a cap above the canonical
+		// singleton. A future eligibility reason now reaches every pool-family
+		// site at once instead of dropping out of the ones spelled by reason.
 		policy := newPoolAllocationShadowPolicy(cfg, cfgAgent, namedTemplates)
-		return policy.reason == poolAllocationShadowEligible ||
-			policy.reason == poolAllocationShadowEligibleAgentCap && policy.maxActiveSessions > 1 && cfgAgent.EffectiveMinActiveSessions() == 0
+		return policy.supported() &&
+			(policy.maxActiveSessions < 0 || policy.maxActiveSessions > 1) &&
+			cfgAgent.EffectiveMinActiveSessions() == 0
 	}
 	if len(cfgAgent.DependsOn) == 0 {
 		return true
@@ -2165,6 +2348,18 @@ func reconcileExactSessionStartWithOwner(
 			poolStartAuthorized = true
 		}
 	}
+	if owner == exactSessionStartLegacyOwner && exactSessionStartWakeFamilyCandidate(info, params.Config) &&
+		params.CertifyWakeFamilyStart != nil && params.CertifyWakeFamilyStart(info, initialResponse.Revision) {
+		// The pre-lease seam took the row: a certified wake lease now names this
+		// exact key, so the family's legacy exclusion is live and no fallback poke
+		// may fire. This pass applies no effect — the re-admitted, lease-bearing
+		// pass does — so the status read is retained unchanged.
+		retainStatusFromInitialRead(exactSessionLifecycleStatusInput{
+			Context:           exactSessionLifecycleStatusContextUnavailable,
+			UnavailableReason: exactSessionLifecycleStatusReasonNotObserved,
+		})
+		return exactSessionStartKeyedOwner, nil
+	}
 	if owner != exactSessionStartKeyedOwner {
 		reason := exactSessionLifecycleStatusReasonNotObserved
 		if owner == exactSessionStartLegacyOwner {
@@ -2904,6 +3099,32 @@ func reconcileExactPoolRecoveryStart(
 	return exactSessionStartKeyedOwner, nil
 }
 
+// sessionStartAdmissionLeaseFamily names the certified lease an admission is
+// carrying, or "" for an ordinary keyed start.
+//
+// The admission SOURCE cannot answer this. It is deliberately sticky — a key
+// first admitted in-process keeps that source across later admissions
+// (sessionStartController.admit) — so a start driven by a certificate minted at
+// the pre-lease seam or the detector's routing seam still traces as
+// `in_process`. The lease is the ownership proof, so the commit records it by
+// name: the WD.15 parity join and the v59 journey both need to distinguish "the
+// keyed wake family started this row" from "some keyed admission did".
+func sessionStartAdmissionLeaseFamily(admission sessionStartAdmission) string {
+	switch {
+	case admission.ConfiguredDependency != nil:
+		return "configured_dependency"
+	case admission.ConfiguredNamedWake != nil:
+		return "configured_named_wake"
+	case admission.StrictDefaultPoolWake != nil:
+		return "strict_default_pool_wake"
+	case admission.WaitDependency != nil:
+		return "wait_dependency"
+	case admission.PoolAllocation != nil:
+		return "pool_allocation"
+	}
+	return ""
+}
+
 func recordExactSessionStartCommit(params exactSessionStartParams, admission sessionStartAdmission, result startResult) {
 	if params.Trace == nil {
 		return
@@ -2919,6 +3140,9 @@ func recordExactSessionStartCommit(params exactSessionStartParams, admission ses
 		payload := result.phases.tracePayload(info.ID, duration)
 		payload["admission"] = string(admission.Source)
 		payload["admission_version"] = admission.Version
+		if lease := sessionStartAdmissionLeaseFamily(admission); lease != "" {
+			payload["start_lease"] = lease
+		}
 		payload["generation"] = params.Generation
 		payload["instance_token"] = info.InstanceToken
 		payload["effect_applied"] = true
@@ -2984,6 +3208,32 @@ func resolveExactSessionStartOrDrainAckStopOwnership(
 ) bool {
 	return isDrainAckStopPendingInfo(info) || exactUserHoldSuspendCurrent(info, now) ||
 		exactOrdinaryResetCurrent(info, cfg, now) || resolveExactSessionStartOwnership(info, cfg, now)
+}
+
+// exactSessionStartWakeFamilyCandidate is the cheap screen in front of the
+// pre-lease ownership seam: it names the rows classifyExactSessionStartOwnership
+// hands to legacy PURELY because of their identity shape — a named row or a
+// pool-managed row (:2893's fleet-invariant arm) — and that a certified wake
+// lease could therefore own. It reads nothing but the row, so a city with no
+// wake demand pays one struct test per admission and never reaches certification.
+func exactSessionStartWakeFamilyCandidate(info sessionpkg.Info, cfg *config.City) bool {
+	if cfg == nil || info.Closed || info.PendingCreateClaim || info.DependencyOnly {
+		return false
+	}
+	if strings.TrimSpace(info.WakeRequest) == "" && strings.TrimSpace(info.PinAwake) != "true" {
+		return false
+	}
+	if isNamedSessionInfo(info) || isPoolManagedSessionInfo(info) {
+		return true
+	}
+	// The classifier's OTHER identity-shaped legacy arm: a dependency-bearing
+	// template (:2908). It matters because the wake write lands in the sub-tick
+	// window BEFORE sync stamps the row's pool markers, so screening on the
+	// stamped shape alone would miss the row at exactly the moment the race is
+	// decided — the row would be surrendered, the fallback poke would fire, and
+	// the tick it starts would both stamp the markers and consume the wake.
+	agent := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	return agent != nil && len(agent.DependsOn) > 0
 }
 
 func classifyExactSessionStartOwnership(

@@ -43,7 +43,7 @@ D-SLEEP, D-DRAIN, D-WAKE, D-ZOMBIE, D-STALL, D-DUP, D-STRANDED.
 | 16 | ReconcilerCircuitOpen | KEYED-OWNED ALREADY as gate (session_start_reconcile.go:819-821, :1848-1850); persist+LogOpenOnce move to handler | :3719-3745 | `TestReconciler_CircuitOpenBlocksSpawn` session_circuit_breaker_test.go:956 (+ `CircuitClosedAllowsSpawn` :995) |
 | 17 | ProviderHealthGate | KEYED-OWNED ALREADY as gate (:1846-1858); episode accounting → sweep. NEW RED required — legacy respawn-gate `continue` at :3755-3766 has NO integration test | :3746-3769; snapshot load :1508 | unit-only `TestGate_NoRespawnWhileRed` provider_health_gate_test.go:120; nearest real: session_reconciler_progress_test.go:405 |
 | 18 | UnknownState | MERGE-INTO sweep guard (skip + throttled diagnostic; no handler) | :1802-1814 | `TestEmitSessionUnknownStateDiagnostic_ThrottlesAndEscalates` :2871; known-state pins :11727/:11733 |
-| 19 | WakeDecision | PORT → D-WAKE via EXISTING lease admissions (`AdmitConfiguredNamedWake`/`AdmitStrictDefaultPoolWake`/`AdmitConfiguredDependency`, session_start_controller.go:255-277); `keyed_start_owner` seam arms (:1735-1745, :3766-3775) RETIRE at WE | positive arm :3777-3795; quarantine skip :3702-3705 (untraced) | `AlwaysNamedSessionWakesAfterLiveChurnSequence` :4873 (multi-tick churn→wake) |
+| 19 | WakeDecision | PORTED (WD.10a, named + dependency arms) → D-WAKE via the EXISTING lease admissions (`AdmitConfiguredNamedWake`/`AdmitStrictDefaultPoolWake`/`AdmitConfiguredDependency`), certified at the routing seam under `AdmitWake`; pool-fill arm and the quarantine/rate-limit/preserve accounting stay legacy's until WD.10b; `keyed_start_owner` seam arms (:1735-1745, :3766-3775) RETIRE at WE | positive arm :3777-3795; quarantine skip :3702-3705 (untraced) | `AlwaysNamedSessionWakesAfterLiveChurnSequence` :4873 (multi-tick churn→wake) |
 | 20 | BuildDeps (phase) | RETIRE (arg. R3) | :1531-1538; buildDepsMap :911 | none behavioral — feeds TopoOrder only |
 | 21 | TopoOrder (phase) | RETIRE (arg. R3) | :1565-1571; topoOrderRows session_reconcile.go:1142-1200 | none behavioral (cycles already degrade to input order) |
 | 22 | HealRetire (phase) | PORT split: expired hold/quarantine heal → wake-handler admission clear; duplicate retire → D-DUP | :1545-1562; retire impl session_beads.go:609-678 | duplicate-retire session_beads_test.go:1849 (winner kept, loser archived, work re-pointed); trace-site coverage is wiring-only (session_reconciler_trace_test.go:637) |
@@ -1263,6 +1263,117 @@ The legacy corpus's two A6 anchors have keyed twins as of this slice:
 originals stay green and stay meaningful for the whole WD wave: they cover the
 rows the keyed controller does not own.
 
+### §3 D-WAKE deltas (recorded at WD.10a)
+
+Where the named/dependency half of D-WAKE as built diverges from §3 as written.
+Reported, not improvised. Q1 is discharged by the uniform predicate contract (§6
+question 1); the five ga-ij8mh amendments above are implemented rather than
+amended.
+
+1. **Certification runs at the ROUTING seam, not in detection, and it is the one
+   family that cannot ride the bare `Admit(id, source)` entry.** Every other
+   acting family hands the key over bare because its handler re-derives the
+   condition from the row. A wake cannot: a wake IS a start, and the keyed start
+   path fences a start behind a certified lease
+   (`AdmitConfiguredNamedWake` / `AdmitStrictDefaultPoolWake` /
+   `AdmitConfiguredDependency`), so the key has to arrive already carrying one.
+   The sweep therefore gains a SECOND admission entry, `AdmitWake`, and a traced
+   refusal (`refused_uncertifiable`) for any call site that cannot mint a
+   certificate. Cost: detection itself stays read-only and pays no new reads, and
+   the seam pays ONE authoritative row read per ROUTED wake key — the same read
+   the CLI socket pays for the same decision, bounded by the wake-target set
+   (awake-set rows the liveness probe found dead), not by the fleet.
+2. **The family splits on REASON, not on outcome, and takes TWO act constants.**
+   D-ORPHAN and D-DRIFT split by outcome and by handler. D-WAKE's arms share one
+   outcome (`start_candidate`) and one handler; what differs is which certified
+   lease can own the row. `detectorWakeTargetReason` classifies the arm from the
+   ROW SHAPE — the only split detection can see — and
+   `detectorActWakeNamedDependency` (true at WD.10a) /
+   `detectorActWakePoolFill` (false until WD.10b) gate the two. Routing on the
+   family-wide gate alone would have carried pool-fill keys in unnoticed the
+   moment either half landed.
+3. **The legacy yield is the EXISTING start exclusion, and no new helper was
+   added.** `sessionStartLegacyExclusionPredicate` already stands legacy down for
+   a held `ownsConfiguredNamedWakeStart` / `ownsStrictDefaultPoolWakeStart` /
+   `ownsConfiguredDependencyStart` lease, and that predicate drives
+   `withLegacyStartExclusion`, which leaves the durable wake cause untouched and
+   keeps the fleet loop out of `prepareStartCandidateForCity` — i.e. out of
+   `PreWakePatch`. The gap ga-ij8mh found was entirely PRE-lease, so the fix is
+   the seam in delta 4, not a fourth exclusion.
+4. **The pre-lease ownership seam (amendment 2) is answered by carving certified
+   wake targets out of the yield, NOT out of `classifyExactSessionStartOwnership`
+   and NOT by making detection the sole keyed entry.** The classifier stays a pure
+   projection over (row, config, now) — certification needs the store, the
+   provider and the controller generation — and re-classifying pool-managed rows
+   as keyed would route them past the socket handler's certification arm (which
+   runs only when `owner != keyed`) into the ordinary keyed start path, which has
+   no dependency gate. Detection-alone was rejected too: the race is won or lost
+   on the BeadUpdated admission that the wake write itself fires, which is before
+   any sweep. So `exactSessionStartParams.CertifyWakeFamilyStart` is invoked at
+   the moment the handler would have returned `exactSessionStartLegacyOwner`,
+   reusing the read the classification already paid for; a successful
+   certification re-admits the same key under the lease and the handler reports
+   keyed ownership with no effect, so no fallback poke fires and the durable wake
+   cause survives. RED for the losing interleave:
+   `TestKeyedWakeSeamClosesPreLeaseOwnershipWindow`.
+5. **Capacity landed at the WITNESS, not in the eligibility predicate.** Q1's
+   contract puts eligibility at `supported()` and capacity in a separate explicit
+   check "exactly where the action can change the ACTIVE count". The identity
+   predicate `strictDefaultPoolWakeIdentityMatches` is pure and fleet-blind, so
+   the check lives in `strictDefaultPoolWakeStartWitnessCurrent`, where the
+   certified membership view is reachable — the same placement the shipped
+   bounded wait-dependency resume uses. Occupancy is self-excluding: re-waking an
+   existing member adds no member.
+6. **The two remaining pool-predicate spellings folded onto the contract
+   (council F13) as a RE-SPELLING, and the attempt to fold them as a WIDENING was
+   falsified by test.** `waitDependencyBoundedPoolTarget` and the pool arm of
+   `waitDependencyConfiguredTemplateEligible` were the third and fourth spellings
+   of "which pool identities may resume". They are NOT the anti-pattern the two
+   Q1-indicted sites were: under `supported()` the reason is `EligibleAgentCap` if
+   and only if the policy carries a cap, so their `reason ==` test was the
+   contract's CAPACITY clause wearing a reason's clothes, not a scope narrowing.
+   Rewriting them as supported()-minus-the-singleton — which reads correct in the
+   abstract — widened the WITNESS REQUIREMENT to unlimited pools and broke the
+   shipped resume (`TestSessionWaitDependencyReadyStartsExactSleepingSessionThroughKeyedController/strict-default-pool-member`,
+   whose fixture models the witness as owed only for a cap above 1). An unlimited
+   pool is ELIGIBLE to resume but owes no membership witness, because there is no
+   cap for membership to witness against — clause 2's "trivially pass when
+   unlimited". Both sites now spell eligibility and capacity separately with the
+   same answers as before. **Correction to the Q1 disposition's premise:** the
+   unlimited arm of the shipped resume was never blocked; it simply never took the
+   witness route, so `sessionWaitDependencyPoolWitnessCurrent`'s unlimited arm was
+   unreachable rather than the resume being unreachable. The :521 fix is still
+   right (a site must not narrow by reason); its stated consequence was one seam
+   too broad.
+7. **The sweep rule (amendment 4) is a narrow non-candidacy applied at EVERY
+   reaper, not just the one the amendment named.** The amendment cited
+   `sweepUndesiredPoolSessions`/`GCSweepSessionBeads`, the reaper the pre-WD.3
+   evidence caught. The re-landed journey leg proved that post-batch-3 the row is
+   reaped first by the acting D-ORPHAN close family (it ended
+   `Closed=true, MetadataState=orphaned`, not `gc_swept`), and by legacy's sync and
+   forward-pass arms when no keyed family holds the key. The cause is the same at
+   all four: NO configured single-session agent generates desired-state demand of
+   its own — pool demand is driven by assigned work, and
+   `poolAllocationShadowDependencies` excludes the dependency-bearing ones — so a
+   row an operator just asked to wake is, to every undesiredness test in the fleet,
+   an orphan. `wakeCurrentSingletonPreservesUndesiredRow` (plus its bead mirror for
+   legacy's sync pass) is therefore ONE predicate answered at all four sites, which
+   is also the WD.13 delta-1 rule: detection and re-derivation answer from one
+   spelling. It preserves only — it never makes a row desired, so it creates no
+   demand and starts nothing; it requires a CURRENT wake cause, so a consumed or
+   stale one still reaps; and it does not cover slotized members, whose freeing is
+   the pool lattice's business.
+8. **What WD.10a does NOT take, and why it is not silent.** §3's D-WAKE entry also
+   lists preserve-configured-named as a detection-side non-enqueue, the rate-limit
+   screen peek moving into the handler's failure path, and the traced refusal
+   replacing legacy's untraced quarantine skip (:3702-3705). Those three ride the
+   PRESERVE/accounting half of the family, not the demand-fill half this slice
+   owns, and each needs legacy's corresponding arm to stand down in the same
+   commit or it double-acts. They travel with WD.10b's accounting arm; WD.5's
+   fleet-only no-wake rows (`detector_no_wake_fleet_only`) likewise still record
+   without routing, because the rung that would re-home them is pool demand, which
+   is WD.10b's.
+
 ### §3 D-ZOMBIE + circuit/health deltas (recorded at WD.11)
 
 Where the zombie family and the circuit/health hydration as built diverge from
@@ -1884,6 +1995,29 @@ Only after the WD.15 evidence campaign is archived (D4):
    vs `supported()` at all 5 sibling sites) deliberate? If deliberate, D-WAKE
    preserves and documents it; if drift, agent-capped pools gain strict-default wakes
    at cutover — a behavior change needing its own test.
+   **RESOLVED — deliberate-in-intent, incoherent-in-contract** (architect, 2026-08-09,
+   recorded verbatim on ga-f7v2ft.116). The strict wake predicate and the bounded
+   wait-dependency witness were INVERTED relative to each other — one accepted only
+   unlimited pools, the other only bounded ones — because each slice encoded its own
+   scope into the eligibility REASON. **The uniform predicate contract, binding at
+   every pool-family site:** (1) eligibility is `supported()` — `{Eligible,
+   EligibleAgentCap}`; encoding scope or capacity by excluding a reason is the
+   anti-pattern, because it makes eligibility site-dependent and silently
+   unsatisfiable. (2) Capacity is a separate explicit check exactly where the action
+   can change the ACTIVE count, trivially passing when unlimited, with the acting
+   session's own occupancy excluded (resuming or re-waking an existing member adds
+   no member). (3) Identity-model exclusions — the canonical singleton, `max==1` —
+   are expressed through the shape predicates or an explicit `maxActiveSessions == 1`
+   guard naming the singleton identity, never by reason narrowing. Landed at WD.10a
+   across all four spellings (see the D-WAKE deltas, items 5 and 6); the behavior
+   change Q1 predicted is pinned by
+   `TestStrictDefaultPoolWakeEligibilityIsSupported` and
+   `TestStrictDefaultPoolWakeWitnessExcludesOwnOccupancy`. **One correction from
+   implementation:** only two of the four sites were narrowing ELIGIBILITY. The
+   other two fused eligibility with the capacity clause, so folding them is a
+   re-spelling with identical answers — D-WAKE delta 6 records the falsification
+   (a widening fold broke the shipped resume) and what it means for the `:521`
+   disposition's stated consequence.
 2. **Q2 (entry gate of WD.10b, blocks WE):** The pool-allocation hint channel drops on
    overflow and recovers via legacy fallback (pool_allocation_controller.go:393-398).
    Post-WE recovery = sweep re-detection of unallocated routed work, or conversion to

@@ -102,6 +102,17 @@ const (
 // halves of a single decision. D-ZOMBIE crossed at WD.11 (handler:
 // session_zombie_reconcile.go; yield: withLegacyZombieMarkExclusion) with ONE
 // constant: its single arm is one condition, one handler and one yield.
+// D-WAKE splits like D-ORPHAN, along the seam its
+// two slices divide on: its NAMED and CONFIGURED-DEPENDENCY demand crossed at
+// WD.10a (handler: the existing reconcileExactSessionStartWithOwner admission
+// chain, entered under the certified wake leases; yield: the three wake-lease
+// arms of sessionStartLegacyExclusionPredicate, which drive the SAME
+// withLegacyStartExclusion bridge legacy's start family already honors — no new
+// exclusion helper, because the gap ga-ij8mh found was entirely PRE-lease and
+// the pre-lease seam closes it). Its POOL-FILL arm stays shadow-only until
+// WD.10b brings pool-under-min fill and its own yield. One constant could not
+// express that split: the arms have different admission leases and land a slice
+// apart, which is exactly the double-act the per-family rule exists to prevent.
 // The rest flip in the WE cutover commit,
 // one family at a time, once the WD.15 parity window has cleared their
 // must-match bar. They are compile-time constants on purpose: this is not a
@@ -115,7 +126,8 @@ const (
 	detectorActDriftDefer              = true
 	detectorActSleep                   = true
 	detectorActDrain                   = true
-	detectorActWake                    = false
+	detectorActWakeNamedDependency     = true
+	detectorActWakePoolFill            = false
 	detectorActZombie                  = true
 	detectorActStall                   = true
 	detectorActDup                     = true
@@ -167,6 +179,8 @@ const (
 	detectorReasonIdleProbeBudget         TraceReasonCode = "detector_idle_probe_budget"
 	detectorReasonDrainInFlight           TraceReasonCode = "detector_drain_in_flight"
 	detectorReasonWakeTarget              TraceReasonCode = "detector_wake_target"
+	detectorReasonWakeTargetNamed         TraceReasonCode = "detector_wake_target_named"
+	detectorReasonWakeTargetDependency    TraceReasonCode = "detector_wake_target_dependency"
 	detectorReasonZombie                  TraceReasonCode = "detector_zombie"
 	detectorReasonProgressStall           TraceReasonCode = "detector_progress_stall"
 	detectorReasonProgressStallExempt     TraceReasonCode = "detector_progress_stall_exempt"
@@ -203,6 +217,8 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonIdleProbeBudget,
 	detectorReasonDrainInFlight,
 	detectorReasonWakeTarget,
+	detectorReasonWakeTargetNamed,
+	detectorReasonWakeTargetDependency,
 	detectorReasonZombie,
 	detectorReasonProgressStall,
 	detectorReasonProgressStallExempt,
@@ -273,7 +289,7 @@ var detectorFamilySpecs = []detectorFamilySpec{
 	{Family: detectorFamilyDup, Destructive: true, Acts: detectorActDup, StopCapabilityExempt: true},
 	{Family: detectorFamilyStranded, Destructive: true, Acts: detectorActStranded},
 	{Family: detectorFamilyUnknownState, Acts: false},
-	{Family: detectorFamilyWake, Acts: detectorActWake},
+	{Family: detectorFamilyWake, Acts: detectorActWakeNamedDependency || detectorActWakePoolFill},
 	{Family: detectorFamilyZombie, Acts: detectorActZombie},
 	{Family: detectorFamilyReadyDemandScan, ObservedOnly: true, Acts: detectorActReadyDemandScan},
 	{Family: detectorFamilyExecutionCompletionScan, ObservedOnly: true, Acts: detectorActExecutionCompletionScan},
@@ -357,6 +373,11 @@ const (
 	// detectorAdmissionRefusedError is a rejected Admit call. Detector
 	// conditions are level-triggered, so the next sweep re-detects.
 	detectorAdmissionRefusedError detectorRouteOutcome = "refused_error"
+	// detectorAdmissionRefusedUncertifiable is D-WAKE's traced refusal for a
+	// call site that has no certified-lease admission entry. A wake key may not
+	// ride the bare Admit, so the row stays legacy's and is re-detected next
+	// sweep rather than admitted without its ownership proof.
+	detectorAdmissionRefusedUncertifiable detectorRouteOutcome = "refused_uncertifiable"
 )
 
 // detectorSweepResult is the sweep's whole output. During the WD wave it is
@@ -471,6 +492,16 @@ type detectorSweepInput struct {
 	// which makes the guard decline — level-triggered, so the next sweep
 	// re-detects.
 	PublishLiveness func(map[string]detectorLivenessBits)
+	// AdmitWake is D-WAKE's own admission entry (WD.10a). Every other acting
+	// family hands its key to the bare Admit above, because its handler
+	// re-derives the condition from the row. A wake cannot: a wake IS a start,
+	// and the keyed start path fences a start behind a certified lease, so the
+	// key has to arrive already carrying one. This closure certifies the row
+	// under the same three wake families the CLI socket certifies and admits the
+	// winner. Nil wherever Admit is nil, and additionally nil whenever no keyed
+	// controller can mint a certificate, so a sweep that cannot certify simply
+	// records and leaves the row to legacy.
+	AdmitWake func(sessionID string) (sessionStartAdmissionOutcome, error)
 }
 
 // detectSessionConditions classifies every session row in the snapshot into
@@ -600,7 +631,7 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 		if detectDrain(in, emit, base, info) {
 			continue
 		}
-		if detectOrphan(in, emit, base, info, desired, runningSet, runningKnown) {
+		if detectOrphan(in, emit, base, info, desired, runningSet, runningKnown, now) {
 			continue
 		}
 		if detectStaleCreate(in, emit, base, info, runningSet, runningKnown, clk) {
@@ -1103,8 +1134,15 @@ func detectorNamedSuspendConfirmed(tr *detectorSuspendDeferralTracker, sessionID
 }
 
 // detectOrphan reports whether the row was claimed by the orphan family.
-func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, desired bool, runningSet map[string]bool, runningKnown bool) bool {
+func detectOrphan(in detectorSweepInput, emit *detectorConditionSink, base detectorCondition, info sessionpkg.Info, desired bool, runningSet map[string]bool, runningKnown bool, now time.Time) bool {
 	if desired || in.DeferSessionCloses {
+		return false
+	}
+	// WD.10a sweep rule, detection side: a wake-current canonical singleton is
+	// D-WAKE's target, so this family neither claims nor enqueues it. The
+	// handler re-derives the same rule from the same predicate, which is what
+	// keeps the two sides from disagreeing about the row.
+	if wakeCurrentSingletonPreservesUndesiredRow(info, in.Cfg, now) {
 		return false
 	}
 	// Legacy's kept-open suppressor (session_reconciler.go:2193-2204), evaluated
@@ -1307,7 +1345,7 @@ func detectWakeOrSleep(
 		cond := base
 		cond.Family = detectorFamilyWake
 		cond.Site = TraceSiteReconcilerWakeDecision
-		cond.Reason = detectorReasonWakeTarget
+		cond.Reason = detectorWakeTargetReason(info, in.Cfg)
 		cond.Outcome = TraceOutcomeStartCandidate
 		cond.Fields = map[string]any{"predicted_effect": "start", "wake_reason": decision.Reason}
 		emit.add(cond, false)
@@ -1318,6 +1356,34 @@ func detectWakeOrSleep(
 		return
 	}
 	detectSleep(in, emit, base, info, decision, evals[info.ID], probes, clk)
+}
+
+// detectorWakeTargetReason splits D-WAKE's target arm by ROW SHAPE, which is the
+// same seam WD.10a and WD.10b divide on and the only one detection can see.
+//
+// A named row and a canonical singleton row (pool-managed, NO slot) are the two
+// shapes the certified named-wake and configured-dependency leases own, so they
+// carry the routing reasons. Everything else — slotized pool members, and the
+// pool-under-min fill that has no row of its own yet — keeps the original
+// shadow-only reason and waits for WD.10b. The partition is on SLOT markers, not
+// on pool_managed, for the reason ga-ij8mh recorded: sync stamps pool_managed on
+// every configured single-session agent's row, so pool_managed alone would put
+// the singleton shape back on the family that cannot own it.
+func detectorWakeTargetReason(info sessionpkg.Info, cfg *config.City) TraceReasonCode {
+	if isNamedSessionInfo(info) {
+		return detectorReasonWakeTargetNamed
+	}
+	if cfg == nil {
+		return detectorReasonWakeTarget
+	}
+	agent := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+	if agent == nil || len(agent.DependsOn) == 0 {
+		return detectorReasonWakeTarget
+	}
+	if isPoolManagedSessionInfo(info) && !configuredDependencyWakeShapeMatches(info, agent) {
+		return detectorReasonWakeTarget
+	}
+	return detectorReasonWakeTargetDependency
 }
 
 // detectSleep raises D-SLEEP for one ALIVE row. It runs the sleep-policy pass
@@ -1751,6 +1817,18 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		// drain — the arm is named by its outcome anyway so a future second arm has
 		// to come here and declare itself rather than ride in on the family gate.
 		return sessionStartAdmissionDrainAdvance, detectorActDrain && cond.Outcome == TraceOutcomeDrain
+	case detectorFamilyWake:
+		// D-WAKE's arms split by REASON rather than by outcome: every arm predicts
+		// the same effect (a start) on the same outcome, and what differs is which
+		// certified lease can own the row. The named and configured-dependency
+		// arms route at WD.10a; the pool-fill arm keeps recording for the parity
+		// join until WD.10b lands its handler and its yield.
+		switch cond.Reason {
+		case detectorReasonWakeTargetNamed, detectorReasonWakeTargetDependency:
+			return sessionStartAdmissionWakeFill,
+				detectorActWakeNamedDependency && cond.Outcome == TraceOutcomeStartCandidate
+		}
+		return "", false
 	case detectorFamilyStranded:
 		// Only the CONFIRMED arm predicts an effect: a marker-bearing row that
 		// is still inside its confirmation window, or that no longer satisfies
@@ -1805,9 +1883,26 @@ func routeDetectorConditions(in detectorSweepInput, result *detectorSweepResult)
 			continue
 		}
 		cond.AdmissionSource = source
-		outcome, err := in.Admit(cond.SessionID, source)
+		// D-WAKE is the one family that may not ride the bare Admit: a wake is a
+		// start, and a start is fenced by a certified lease, so its key has to
+		// arrive already carrying one. Without a certifying entry — or when no
+		// family can own the row — it records a refusal and stays legacy's.
+		outcome, err := sessionStartAdmissionOutcome(""), error(nil)
+		if source == sessionStartAdmissionWakeFill {
+			if in.AdmitWake == nil {
+				cond.AdmissionOutcome = detectorAdmissionRefusedUncertifiable
+				continue
+			}
+			outcome, err = in.AdmitWake(cond.SessionID)
+		} else {
+			outcome, err = in.Admit(cond.SessionID, source)
+		}
 		if err != nil {
 			cond.AdmissionOutcome = detectorAdmissionRefusedError
+			continue
+		}
+		if outcome == "" {
+			cond.AdmissionOutcome = detectorAdmissionRefusedUncertifiable
 			continue
 		}
 		cond.AdmissionOutcome = detectorRouteOutcome(outcome)

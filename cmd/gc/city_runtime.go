@@ -237,6 +237,11 @@ type CityRuntime struct {
 	// A certified dependency-ready result upgrades the next coalesced poke so
 	// it does not wait behind the ordinary fleet-tick debounce.
 	sessionWaitDependencyReadyPokePending atomic.Bool
+	// waitDependencyLiveResolve* throttle the bead.closed live dependent lookup
+	// on a city with no pending waits at all (ga-zo9h3 option (b)). Guarded by
+	// sessionWaitDependencyMu.
+	waitDependencyLiveResolveAt    time.Time
+	waitDependencyLiveResolveEmpty bool
 	// A certified ready routed-work result uses the same legacy tick, but keeps
 	// an independent bit so either exact source can consume its own request.
 	// Stable exact-key hints enter the serialized runtime loop through this

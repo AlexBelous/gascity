@@ -310,19 +310,16 @@ depends_on = ["database", "cache"]
 	if manualSession.Metadata["session_origin"] != "manual" {
 		t.Fatalf("manual session after the dependency-ready start metadata = %+v, want preserved session_origin=manual", manualSession.Metadata)
 	}
-	// The two assertions that the KEYED controller owned this start. ga-zo9h3's
-	// ruled stand-down has landed -- legacy's wait-advance boundary now consults
-	// the session-level wait-dependency claim on current state -- but an
-	// instrumented run of this journey proved the leg has a SECOND, upstream
-	// blocker that the stand-down cannot reach: at the dependency's bead.closed,
-	// reserveSessionWaitDependencyTargets finds zero targets for the dependency,
-	// so no certificate is minted, no reservation or admission exists, and there
-	// is no keyed claim for legacy to stand down for. Every leg above -- the
-	// session starting, becoming active, leaving both configured singletons
-	// byte-identical, and keeping session_origin=manual -- keeps running.
+	// The two assertions that the KEYED controller owned this start. Both halves
+	// of ga-zo9h3 have landed: the ruled wait-advance stand-down (legacy's
+	// boundary consults the session-level wait-dependency claim on current
+	// state), and option (b) -- reservation plus certification hoisted onto the
+	// bead.closed admission itself. The instrumented run's targets=0 was the
+	// CACHED index answering for a wait registered after its census; the
+	// admission now resolves the closed bead's waiting dependents from the
+	// durable rows, so the certificate exists before the poke ever runs a tick.
+	// The patrol redrive stays as the anti-entropy backstop.
 	t.Run("keyed_wait_dependency_commit", func(t *testing.T) {
-		t.Skip("ga-zo9h3: the ruled wait-advance stand-down has landed, but this leg is blocked upstream of it. Instrumented run 2026-08-10: reserveSessionWaitDependencyTargets reports targets=0 for the dependency at bead.closed, so certifySessionWaitDependencyStartLease never runs, no reservation or admission is installed, and ownsSessionWaitDependencyStart is false when the poke's legacy tick reaches the wait. The durable wait then advances in legacy shape (ready_owner and ready_operation empty) and is canceled continuation-stale once the row restarts. The remaining half is ga-zo9h3's own option (b) -- hoist certification onto the bead.closed admission so the certificate exists before the poke ever runs a tick, and take the reservation redrive off patrol-only (city_runtime.go reservation redrive) -- which is a detection-side mechanism change needing an architect call, not an implementer patch")
-
 		commit, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
 			t.Context(), cityDir, session, started, sessionWaitDependencyShadowJourneyWitnessTimeout,
 		)
@@ -474,15 +471,15 @@ max_active_sessions = %d
 	if liveWorkerSessions != 1 {
 		t.Fatalf("unclosed worker sessions = %d, want exactly 1: %+v", liveWorkerSessions, current.Sessions)
 	}
-	// Neither arm is keyed-materialized today. Under coexistence first-creator-
-	// wins is the settled doctrine -- legacy wins, keyed adopts, zero duplicates,
-	// which :458 above proves in BOTH arms -- and the gating HEAD run recorded on
-	// ga-f7v2ft.117 measured the unlimited arm at 0/0 too, with the member created
-	// by actor cache-reconcile. ga-f7v2ft.117 owns the allocation-ownership seam
-	// that makes keyed the winner, and its acceptance un-skips BOTH arms.
-	wantPoolMaterializations := 0
+	// WD.10b landed the allocation-ownership seam, so the KEYED allocation is the
+	// winner of the materialization on both arms: the reservation opens the moment
+	// the exact (workID, poolTarget, sourceStore) key enters the keyed lane, and
+	// legacy's member-creation boundary stands down for it on CURRENT state. The
+	// count is ARMED here rather than left at the old first-creator-wins zero --
+	// un-skipping without arming would prove nothing (council F10), because the
+	// post-resume assertion below compares against this variable.
+	wantPoolMaterializations := 1
 	t.Run("keyed_materialization", func(t *testing.T) {
-		t.Skip("ga-f7v2ft.117: the member is legacy-materialized under first-creator-wins on BOTH arms, so no keyed materialization or in-process start commit exists; this proof re-lands with the WD.10b allocation-ownership seam")
 		trace, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForPoolStartCommit(
 			t.Context(),
 			cityDir,

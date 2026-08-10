@@ -9,6 +9,14 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
+// sessionWaitDependencyDurableGeneration is the provenance marker a target
+// resolved from the DURABLE wait rows carries in place of a published index
+// generation. It is deliberately non-zero: the lease provenance validation
+// rejects a zero generation, and a durable-resolved target has provenance -- it
+// is simply the rows themselves rather than a census of them (ga-zo9h3 option
+// (b)).
+const sessionWaitDependencyDurableGeneration uint64 = 1<<64 - 1
+
 // sessionWaitDependencyTarget is the detached durable identity needed to
 // reread one dependency wait. It contains no store or runtime capability.
 type sessionWaitDependencyTarget struct {
@@ -17,6 +25,12 @@ type sessionWaitDependencyTarget struct {
 	DepIDs     []string
 	DepMode    string
 	generation uint64
+	// authoritative marks a target resolved from the DURABLE wait rows rather
+	// than from the observed index. The index cannot certify such a target --
+	// the index missing the wait is exactly why the live path exists -- so its
+	// freshness comes from the live read plus the lease certification that
+	// re-reads both durable rows (ga-zo9h3 option (b)).
+	authoritative bool
 }
 
 // sessionWaitDependencyIndex maps each pending dependency wait to the session

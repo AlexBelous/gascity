@@ -466,18 +466,46 @@ func commitExactSessionResetHandoff(
 	// the breaker is clear before the restart is committed. It is a no-op for
 	// .103's own arm, whose ownership lattice excludes named rows, so the shared
 	// body stays behavior-identical there.
+	handoffRevision := currentResponse.Revision
 	if identity := namedSessionIdentityInfo(current); identity != "" {
 		if err := resetSessionCircuitBreakerState(params.Store, current.ID, identity, defaultSessionCircuitBreaker()); err != nil {
 			return info, initialResponse, fmt.Errorf("clearing session circuit breaker for exact reset %q: %w", current.ID, err)
 		}
+		// The clear is OUR OWN write on this row, so it may have moved the very
+		// revision the handoff below fences on. Re-read and re-verify rather than
+		// fencing on a revision we know we invalidated — a fence that its own
+		// caller reliably breaks is worse than none, because it fails on exactly
+		// the rows the clear ran for while still admitting every real race.
+		refreshed, refreshedResponse, refreshErr := getAuthoritativeSessionStartPersistedRecord(params.Store, current.ID)
+		if refreshErr != nil {
+			return info, initialResponse, fmt.Errorf("re-reading exact reset session %q after the circuit-breaker clear: %w", current.ID, refreshErr)
+		}
+		if !exactOrdinaryResetAuthorityMatches(refreshed, info) || !exactOrdinaryResetRequested(refreshed) {
+			return info, initialResponse, errors.New("exact reset authority changed during the circuit-breaker clear")
+		}
+		current, handoffRevision = refreshed, refreshedResponse.Revision
 	}
 	sessionKey, hasCapability := freshRestartSessionKeyInfo(tp, current)
 	batch := sessionpkg.RestartRequestPatch(sessionKey, clk.Now().UTC())
 	if hasCapability && sessionKey == "" {
 		batch["session_key"] = ""
 	}
-	if writeErr := sessionFrontDoor(params.Store).ApplyPatch(current.ID, batch); writeErr != nil {
+	// The authority check above and this write are one decision, so they are
+	// fenced as one (the ga-l1j53 P1 rule). Unfenced, the window between them
+	// admits any writer — the public reset path, a legacy arm, another
+	// controller — and the handoff commits a fresh-conversation restart on top
+	// of a row whose reset intent, identity or token has already moved. A lost
+	// fence is a REFUSAL with zero effect, never a silent overwrite: the stop
+	// already landed and the durable reset markers are retained, so the next
+	// admission re-derives the same handoff from the row the winner left.
+	applied, writeErr := applyFencedSessionLifecyclePatch(
+		sessionFrontDoor(params.Store), "exact reset handoff", current.ID, handoffRevision, batch,
+	)
+	if writeErr != nil {
 		return info, initialResponse, fmt.Errorf("recording exact reset handoff for %q: %w", current.ID, writeErr)
+	}
+	if !applied {
+		return info, initialResponse, errors.New("exact reset handoff was superseded before it committed")
 	}
 	committed, committedResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, current.ID)
 	if readErr != nil {
@@ -710,14 +738,16 @@ func strictDefaultPoolWakeIdentityMatches(info sessionpkg.Info, cfg *config.City
 	// The one genuinely deliberate exclusion survives with an honest name: max==1
 	// IS the canonical-singleton identity
 	// (config.Agent.UsesCanonicalSingletonPoolIdentity), whose rows ride the
-	// configured-named and configured-dependency families, not this one.
+	// configured-named and configured-dependency families, not this one. It is
+	// spelled as the capacity clause it is: under supported(), max==1 already
+	// implies reason==EligibleAgentCap (poolAllocationShadowPolicy's type doc),
+	// so the reason half this used to carry said nothing the cap did not.
 	//
-	// Capacity is a SEPARATE explicit check, not an eligibility test: it lives at
+	// The pool's own CAP is a separate explicit check: it lives at
 	// strictDefaultPoolWakeStartWitnessCurrent, where the fleet's certified
 	// membership view is reachable, because a wake CAN change the active count.
 	policy := newPoolAllocationShadowPolicy(cfg, agent, namedTemplates)
-	if !policy.supported() ||
-		(policy.reason == poolAllocationShadowEligibleAgentCap && policy.maxActiveSessions == 1) {
+	if !policy.supported() || policy.maxActiveSessions == 1 {
 		return false
 	}
 	slot, _ := strconv.Atoi(lease.PoolSlot)
@@ -2414,6 +2444,27 @@ func reconcileExactSessionStartWithOwner(
 	if resetAdmitted {
 		committed, committedResponse, resetErr := commitExactOrdinaryResetHandoff(params, info, initialResponse, tp, clk, stderr)
 		if resetErr != nil {
+			// The Auto handback is LIVE but does only one of the two things its
+			// shape suggests (evaluated for ga-f7v2ft.133 item 2; it dies with the
+			// flag at WE, not before). It transfers the row exactly when the
+			// handoff refused because the AUTHORITY CHANGED — the pre-stop reread,
+			// the pre-handoff reread, the post-breaker-clear reread, or a lost
+			// write fence — because a row that left exactOrdinaryResetCurrent is a
+			// row legacy is no longer excluded from, and legacy is then its
+			// rightful owner.
+			//
+			// On every OTHER refusal it is a release, not a transfer, and the same
+			// predicate is why: exactOrdinaryResetCurrent is BOTH this family's
+			// ownership lattice and legacy's exclusion test
+			// (resolveExactSessionStartOrDrainAckStopOwnership, consulted by
+			// sessionStartLegacyExclusionPredicate under Auto and Require alike).
+			// The refusals that leave the row untouched — a capability gap, an
+			// incomplete liveness observation, a failed stop or confirm-dead, a
+			// read error — leave the row still reset-current, so legacy declines
+			// it and the reset waits for the next anti-entropy admission to
+			// re-take the key. The stop itself writes nothing durable
+			// (Manager.StopUnattendedSession is a pure provider call), so a
+			// post-stop refusal does not move the row out of the lattice either.
 			if params.RolloutMode == rollout.Auto {
 				return exactSessionStartLegacyOwner, fmt.Errorf("%w: %w", errSessionStartLegacyFallbackRequired, resetErr)
 			}

@@ -100,6 +100,75 @@ func TestPoolAllocationShadowPolicyClassifiesPoolShapes(t *testing.T) {
 	}
 }
 
+// TestPoolAllocationShadowPolicyCapacityIsTheOnlyCapSpelling holds the
+// biconditional the uniform predicate contract's capacity clause rests on
+// (poolAllocationShadowPolicy's type doc): under supported(), reason ==
+// EligibleAgentCap if and only if maxActiveSessions >= 0, and reason ==
+// Eligible if and only if maxActiveSessions == -1.
+//
+// That is what makes `policy.maxActiveSessions == 1` behavior-identical to the
+// `reason == EligibleAgentCap && maxActiveSessions == 1` conjunction the
+// pool-family sites used to carry, and it is a property of the CONSTRUCTOR --
+// maxActiveSessions is assigned on exactly one branch -- not of the sites. If a
+// later reason ever carries a cap of its own, or the Eligible branch ever
+// stops meaning "unlimited", this fails here rather than silently widening
+// every capacity clause in the fleet.
+func TestPoolAllocationShadowPolicyCapacityIsTheOnlyCapSpelling(t *testing.T) {
+	newCap := func(n int) *int { return &n }
+	for _, test := range []struct {
+		name    string
+		mutate  func(*config.City, *config.Agent) map[string]struct{}
+		wantCap int
+	}{
+		{name: "unlimited pool", wantCap: -1},
+		{name: "explicit unlimited", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.MaxActiveSessions = newCap(-1)
+			return nil
+		}, wantCap: -1},
+		{name: "canonical singleton", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.MaxActiveSessions = newCap(1)
+			return nil
+		}, wantCap: 1},
+		{name: "bounded agent cap", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.MaxActiveSessions = newCap(4)
+			return nil
+		}, wantCap: 4},
+		{name: "ineligible carries no cap", mutate: func(_ *config.City, agent *config.Agent) map[string]struct{} {
+			agent.MaxActiveSessions = newCap(4)
+			agent.DependsOn = []string{"database"}
+			return nil
+		}, wantCap: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "rig"}},
+				Agents:    []config.Agent{{Name: "worker", Dir: "rig"}},
+			}
+			var namedTemplates map[string]struct{}
+			if test.mutate != nil {
+				namedTemplates = test.mutate(cfg, &cfg.Agents[0])
+			}
+			policy := newPoolAllocationShadowPolicy(cfg, &cfg.Agents[0], namedTemplates)
+			if policy.maxActiveSessions != test.wantCap {
+				t.Fatalf("maxActiveSessions = %d, want %d (policy %+v)", policy.maxActiveSessions, test.wantCap, policy)
+			}
+			if !policy.supported() {
+				if policy.maxActiveSessions != -1 {
+					t.Fatalf("ineligible policy %+v carries a cap; capacity clauses would read it", policy)
+				}
+				return
+			}
+			if hasCap := policy.maxActiveSessions >= 0; hasCap != (policy.reason == poolAllocationShadowEligibleAgentCap) {
+				t.Fatalf("policy %+v breaks the capacity biconditional: a cap is present = %t but reason = %q", policy, hasCap, policy.reason)
+			}
+			if policy.reason == poolAllocationShadowEligible && policy.maxActiveSessions != -1 {
+				t.Fatalf("policy %+v: reason Eligible must mean unlimited", policy)
+			}
+		})
+	}
+}
+
 func TestPoolAllocationShadowPolicyRejectsUnreachableSourceStore(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},

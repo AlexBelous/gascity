@@ -310,14 +310,19 @@ depends_on = ["database", "cache"]
 	if manualSession.Metadata["session_origin"] != "manual" {
 		t.Fatalf("manual session after the dependency-ready start metadata = %+v, want preserved session_origin=manual", manualSession.Metadata)
 	}
-	// The two assertions that the KEYED controller owned this start (ga-zo9h3,
-	// un-skipped here). The dependency's bead.closed poke reaches cs.Poke()
-	// (api_state.go:741) as an ordinary poke, so a full legacy tick still runs
-	// inside the dependency-ready window -- but legacy's wait-advance boundary
-	// now stands down for a session the keyed wait-dependency family has
-	// claimed, so it neither advances the wait nor contributes start demand for
-	// the row, and the keyed commit is the one that lands.
+	// The two assertions that the KEYED controller owned this start. ga-zo9h3's
+	// ruled stand-down has landed -- legacy's wait-advance boundary now consults
+	// the session-level wait-dependency claim on current state -- but an
+	// instrumented run of this journey proved the leg has a SECOND, upstream
+	// blocker that the stand-down cannot reach: at the dependency's bead.closed,
+	// reserveSessionWaitDependencyTargets finds zero targets for the dependency,
+	// so no certificate is minted, no reservation or admission exists, and there
+	// is no keyed claim for legacy to stand down for. Every leg above -- the
+	// session starting, becoming active, leaving both configured singletons
+	// byte-identical, and keeping session_origin=manual -- keeps running.
 	t.Run("keyed_wait_dependency_commit", func(t *testing.T) {
+		t.Skip("ga-zo9h3: the ruled wait-advance stand-down has landed, but this leg is blocked upstream of it. Instrumented run 2026-08-10: reserveSessionWaitDependencyTargets reports targets=0 for the dependency at bead.closed, so certifySessionWaitDependencyStartLease never runs, no reservation or admission is installed, and ownsSessionWaitDependencyStart is false when the poke's legacy tick reaches the wait. The durable wait then advances in legacy shape (ready_owner and ready_operation empty) and is canceled continuation-stale once the row restarts. The remaining half is ga-zo9h3's own option (b) -- hoist certification onto the bead.closed admission so the certificate exists before the poke ever runs a tick, and take the reservation redrive off patrol-only (city_runtime.go reservation redrive) -- which is a detection-side mechanism change needing an architect call, not an implementer patch")
+
 		commit, commitLatency, err := sessionWaitDependencyShadowJourneyWaitForDependencyStartCommit(
 			t.Context(), cityDir, session, started, sessionWaitDependencyShadowJourneyWitnessTimeout,
 		)

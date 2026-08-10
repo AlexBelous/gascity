@@ -204,7 +204,7 @@ func TestRoutedWorkPoolAllocationMaterializesOneDurableSessionAndUsesExactStart(
 				authorized, authorizeErr = fixture.cr.authorizeRoutedWorkPoolStart(t.Context(), snapshot, first.Session, lease)
 			}
 		}
-		t.Fatalf("directly materialized pool session %q is not running; current=%+v snapshot=%v lease=%+v lease_err=%v authorized=%t authorize_err=%v membership=%+v fallback=%t controller stderr:\n%s\nruntime calls: %+v", first.Session.SessionName, current, snapshotErr, lease, leaseErr, authorized, authorizeErr, fixture.cr.poolMembershipShadow.observe("worker"), fixture.cr.readyRoutedWorkPokePending.Load(), fixture.stderr.String(), fixture.provider.SnapshotCalls())
+		t.Fatalf("directly materialized pool session %q is not running; current=%+v snapshot=%v lease=%+v lease_err=%v authorized=%t authorize_err=%v membership=%+v controller stderr:\n%s\nruntime calls: %+v", first.Session.SessionName, current, snapshotErr, lease, leaseErr, authorized, authorizeErr, fixture.cr.poolMembershipShadow.observe("worker"), fixture.stderr.String(), fixture.provider.SnapshotCalls())
 	}
 }
 
@@ -391,8 +391,8 @@ func TestRoutedWorkPoolAllocationGrowsOccupiedUnlimitedPoolForDistinctRoutedWork
 	if starts := fixture.provider.CountCalls("Start", first.Session.SessionName); starts != 1 {
 		t.Fatalf("provider Start calls for active duplicate = %d, want 1", starts)
 	}
-	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-		t.Fatalf("legacy fallback after active duplicate = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	if len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after active duplicate = %d pokes, want none", len(fixture.cr.pokeCh))
 	}
 
 	secondWork, err := fixture.store.Create(beads.Bead{
@@ -510,7 +510,7 @@ func TestRoutedWorkPoolAllocationStartsBelowBoundedAgentCapAndFallsBackAtCap(t *
 		PoolTarget:  "worker",
 		SourceStore: "city:test-city",
 	})
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 
 	infos, err := loadSessionBeadSnapshot(fixture.store)
 	if err != nil {
@@ -577,7 +577,7 @@ func TestRoutedWorkPoolAllocationStartsColdCanonicalSingletonAndFallsBackAtCap(t
 		PoolTarget:  "worker",
 		SourceStore: "city:test-city",
 	})
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 
 	infos, err := loadSessionBeadSnapshot(fixture.store)
 	if err != nil {
@@ -678,8 +678,8 @@ func TestRoutedWorkPoolAllocationReusesIdleCanonicalSingletonForNewWork(t *testi
 		stored.Metadata[beadmeta.PackWorkspaceMetadataKey] != "workspace-b" ||
 		stored.Metadata[beadmeta.WorkDirMetadataKey] != wantWorkDir ||
 		stored.Metadata[beadmeta.LegacyWorkDirMetadataKey] != wantWorkDir {
-		t.Fatalf("rebound singleton trigger metadata = %+v, want exact second-work provenance; fallback=(%t,%d) stderr=%q",
-			stored.Metadata, fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh), fixture.stderr.String())
+		t.Fatalf("rebound singleton trigger metadata = %+v, want exact second-work provenance; pokes=%d stderr=%q",
+			stored.Metadata, len(fixture.cr.pokeCh), fixture.stderr.String())
 	}
 	if got := fixture.provider.CountCalls("Start", first.Session.SessionName); got != 1 {
 		t.Fatalf("provider Start calls after singleton reuse = %d, want 1", got)
@@ -690,8 +690,8 @@ func TestRoutedWorkPoolAllocationReusesIdleCanonicalSingletonForNewWork(t *testi
 	if got := providerNudgeCalls(fixture.provider, first.Session.SessionName); got != baselineNudges+1 {
 		t.Fatalf("claim nudge calls after singleton reuse = %d, want %d", got, baselineNudges+1)
 	}
-	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-		t.Fatalf("legacy fallback after singleton reuse = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	if len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after singleton reuse = %d pokes, want none", len(fixture.cr.pokeCh))
 	}
 
 	reboundRevision := stored.Revision
@@ -706,8 +706,8 @@ func TestRoutedWorkPoolAllocationReusesIdleCanonicalSingletonForNewWork(t *testi
 	if got := providerNudgeCalls(fixture.provider, first.Session.SessionName); got != baselineNudges+1 {
 		t.Fatalf("claim nudge calls after replay = %d, want %d", got, baselineNudges+1)
 	}
-	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-		t.Fatalf("legacy fallback after singleton replay = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	if len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after singleton replay = %d pokes, want none", len(fixture.cr.pokeCh))
 	}
 }
 
@@ -770,8 +770,8 @@ func TestRoutedWorkPoolAllocationReusesSoleIdleGenericMemberForNewWork(t *testin
 				t.Fatalf("generic nudge calls = %d, want %d", got, baselineNudges+1)
 			}
 			assertExactProviderNudgeSince(t, fixture.provider, baselineCalls, info.SessionNameMetadata, "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [routed-work-pool-reuse] Run gc hook --claim --json now.\n\nHandle them after this turn.\n</system-reminder>\n")
-			if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-				t.Fatalf("legacy fallback after generic reuse = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+			if len(fixture.cr.pokeCh) != 0 {
+				t.Fatalf("legacy fallback after generic reuse = %d pokes, want none", len(fixture.cr.pokeCh))
 			}
 
 			reboundRevision := stored.Revision
@@ -791,8 +791,8 @@ func TestRoutedWorkPoolAllocationReusesSoleIdleGenericMemberForNewWork(t *testin
 			if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges+1 {
 				t.Fatalf("generic replay nudge calls = %d, want %d", got, baselineNudges+1)
 			}
-			if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-				t.Fatalf("legacy fallback after generic replay = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+			if len(fixture.cr.pokeCh) != 0 {
+				t.Fatalf("legacy fallback after generic replay = %d pokes, want none", len(fixture.cr.pokeCh))
 			}
 		})
 	}
@@ -846,8 +846,8 @@ func TestRoutedWorkPoolAllocationReusesLaterIdleMemberOfMultiMemberPool(t *testi
 				t.Fatalf("global provider Stop calls after multi-member reuse = %d, want 0", got)
 			}
 			assertExactProviderNudgeSince(t, fixture.provider, baselineCalls, newer.SessionNameMetadata, "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [routed-work-pool-reuse] Run gc hook --claim --json now.\n\nHandle them after this turn.\n</system-reminder>\n")
-			if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-				t.Fatalf("legacy fallback after multi-member reuse = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+			if len(fixture.cr.pokeCh) != 0 {
+				t.Fatalf("legacy fallback after multi-member reuse = %d pokes, want none", len(fixture.cr.pokeCh))
 			}
 		})
 	}
@@ -896,8 +896,8 @@ func TestRoutedWorkPoolAllocationReusesOldestIdleMemberOfMultiMemberPool(t *test
 		t.Fatalf("global provider Stop calls after deterministic multi-member reuse = %d, want 0", got)
 	}
 	assertExactProviderNudgeSince(t, fixture.provider, baselineCalls, older.SessionNameMetadata, "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [routed-work-pool-reuse] Run gc hook --claim --json now.\n\nHandle them after this turn.\n</system-reminder>\n")
-	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-		t.Fatalf("legacy fallback after deterministic multi-member reuse = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	if len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after deterministic multi-member reuse = %d pokes, want none", len(fixture.cr.pokeCh))
 	}
 	infos, err := loadSessionBeadSnapshot(fixture.store)
 	if err != nil {
@@ -998,8 +998,8 @@ func TestRoutedWorkPoolAllocationRebindEventDoesNotInvalidateItsLease(t *testing
 	if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges+1 {
 		t.Fatalf("nudges after rebind event = %d, want %d", got, baselineNudges+1)
 	}
-	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-		t.Fatalf("legacy fallback after rebind event = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	if len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after rebind event = %d pokes, want none", len(fixture.cr.pokeCh))
 	}
 }
 
@@ -1051,7 +1051,7 @@ func TestRoutedWorkPoolAllocationCanonicalReuseRequiresExactSoleMember(t *testin
 	if got := providerNudgeCalls(fixture.provider, canonical.SessionNameMetadata); got != baselineNudges {
 		t.Fatalf("canonical nudges with conflicting member = %d, want unchanged %d", got, baselineNudges)
 	}
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 }
 
 func TestRoutedWorkPoolAllocationRefusesMemberSetAdditionDuringSelection(t *testing.T) {
@@ -1120,7 +1120,7 @@ func TestRoutedWorkPoolAllocationRefusesMemberSetAdditionDuringSelection(t *test
 	if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
 		t.Fatalf("nudges after member-set drift = %d, want unchanged %d", got, baselineNudges)
 	}
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 }
 
 func TestRoutedWorkPoolAllocationRefusesLaterReuseAfterBusyCandidateDrifts(t *testing.T) {
@@ -1169,7 +1169,7 @@ func TestRoutedWorkPoolAllocationRefusesLaterReuseAfterBusyCandidateDrifts(t *te
 	if got := providerNudgeCalls(fixture.provider, newer.SessionNameMetadata); got != baselineNudges {
 		t.Fatalf("later-member nudges after busy drift = %d, want unchanged %d", got, baselineNudges)
 	}
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 }
 
 func TestRoutedWorkPoolAllocationRefusesReuseDriftAfterIdleWait(t *testing.T) {
@@ -1249,7 +1249,7 @@ func TestRoutedWorkPoolAllocationRefusesReuseDriftAfterIdleWait(t *testing.T) {
 			if got := providerCallCount(fixture.provider, "Stop"); got != 0 {
 				t.Fatalf("stops after %s = %d, want 0", test.name, got)
 			}
-			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+			assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 		})
 	}
 }
@@ -1299,7 +1299,7 @@ func TestRoutedWorkPoolAllocationRefusesReboundRevisionDriftBeforeIdleWait(t *te
 	if got := providerCallCount(fixture.provider, "Start"); got != baselineStarts {
 		t.Fatalf("starts after rebound revision drift = %d, want unchanged %d", got, baselineStarts)
 	}
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 }
 
 func TestRoutedWorkPoolAllocationRefusesUnavailableReboundRevision(t *testing.T) {
@@ -1365,7 +1365,7 @@ func TestRoutedWorkPoolAllocationRefusesUnavailableReboundRevision(t *testing.T)
 			if stored.Revision <= 0 {
 				t.Fatalf("underlying durable revision = %d, want test seam only to hide it", stored.Revision)
 			}
-			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+			assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 		})
 	}
 }
@@ -1406,7 +1406,7 @@ func TestRoutedWorkPoolAllocationBoundsAssignedWorkReadsToExactMemberKeys(t *tes
 
 			fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
 
-			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+			assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 			queries := counted.snapshot()
 			if len(queries) != 4*members {
 				t.Fatalf("assigned-work List calls for %d members = %d, want one exact query per canonical and compatibility identity for classification and revalidation: %+v", members, len(queries), queries)
@@ -1441,7 +1441,7 @@ func TestRoutedWorkPoolAllocationAllBusyMultiMemberPoolKeepsExistingGrowthAndFal
 
 			if test.wantFallback {
 				fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: thirdWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
-				assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+				assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 				if got := providerCallCount(fixture.provider, "Start"); got != 2 {
 					t.Fatalf("global provider Start calls after all-busy cap fallback = %d, want 2", got)
 				}
@@ -1495,7 +1495,7 @@ func TestRoutedWorkPoolAllocationUncertainEarlierMemberDoesNotRouteAroundToLater
 
 	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), routedWorkPoolAllocationHint{WorkID: thirdWork.ID, PoolTarget: "worker", SourceStore: "city:test-city"})
 
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 	for _, before := range []beads.Bead{beforeOlder, beforeNewer} {
 		after, err := fixture.store.Get(before.ID)
 		if err != nil {
@@ -1624,8 +1624,8 @@ func TestRoutedWorkPoolAllocationBusyGenericReuseGrowsWithoutRebinding(t *testin
 			if open := infos.OpenInfos(); len(open) != 2 {
 				t.Fatalf("open generic sessions after busy growth = %+v, want two", open)
 			}
-			if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-				t.Fatalf("legacy fallback after proven-busy growth = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+			if len(fixture.cr.pokeCh) != 0 {
+				t.Fatalf("legacy fallback after proven-busy growth = %d pokes, want none", len(fixture.cr.pokeCh))
 			}
 			if got := providerCallCount(fixture.provider, "Start"); got != 2 {
 				t.Fatalf("global provider Start calls after busy growth = %d, want 2", got)
@@ -1699,7 +1699,7 @@ func TestRoutedWorkPoolAllocationRefusesManualAndDependencyOnlySoleMembers(t *te
 			if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 				t.Fatalf("protected member nudge calls = %d, want unchanged %d", got, baselineNudges)
 			}
-			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+			assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 		})
 	}
 }
@@ -1781,7 +1781,7 @@ func TestRoutedWorkPoolAllocationRefusedGenericReuseFallsBackWithoutGrowth(t *te
 			if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 				t.Fatalf("refused generic reuse nudge calls = %d, want %d", got, baselineNudges)
 			}
-			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+			assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 		})
 	}
 }
@@ -1790,11 +1790,15 @@ func TestRoutedWorkPoolAllocationReuseUncertaintyRespectsRolloutMode(t *testing.
 	for _, failure := range []struct {
 		name      string
 		wantBound bool
+		// wantErr marks the refusals that surface an error. Only those carry an
+		// auto-mode diagnostic: a clean non-handled refusal is silent and simply
+		// waits for the next patrol census.
+		wantErr bool
 	}{
 		{name: "authorization refusal"},
-		{name: "assignment read error"},
-		{name: "unsupported fenced provider", wantBound: true},
-		{name: "post-idle authorization drift", wantBound: true},
+		{name: "assignment read error", wantErr: true},
+		{name: "unsupported fenced provider", wantBound: true, wantErr: true},
+		{name: "post-idle authorization drift", wantBound: true, wantErr: true},
 	} {
 		for _, mode := range []rollout.Mode{rollout.Auto, rollout.Require} {
 			t.Run(failure.name+"/"+string(mode), func(t *testing.T) {
@@ -1873,13 +1877,13 @@ func TestRoutedWorkPoolAllocationReuseUncertaintyRespectsRolloutMode(t *testing.
 					t.Fatalf("stops after %s = %d, want 0", failure.name, got)
 				}
 				if mode == rollout.Auto {
-					assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
-					if !strings.Contains(fixture.stderr.String(), "falling back to legacy reconciliation") {
-						t.Fatalf("auto diagnostic = %q, want visible legacy fallback", fixture.stderr.String())
+					assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
+					if failure.wantErr && !strings.Contains(fixture.stderr.String(), "re-detection owed to the next patrol census") {
+						t.Fatalf("auto diagnostic = %q, want a visible census-owed re-detection", fixture.stderr.String())
 					}
 				} else {
-					if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-						t.Fatalf("require fallback after %s = (pending=%t, pokes=%d), want parked", failure.name, fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+					if len(fixture.cr.pokeCh) != 0 {
+						t.Fatalf("require fallback after %s = %d pokes, want parked", failure.name, len(fixture.cr.pokeCh))
 					}
 					if fixture.cr.sessionStartOwnershipState() != sessionStartOwnershipKeyed ||
 						!strings.Contains(fixture.stderr.String(), "parked in required keyed reconciliation") {
@@ -1892,7 +1896,7 @@ func TestRoutedWorkPoolAllocationReuseUncertaintyRespectsRolloutMode(t *testing.
 						if got := providerAllNudgeCalls(fixture.provider); got != baselineNudges {
 							t.Fatalf("parked binding replay nudges = %d, want unchanged %d", got, baselineNudges)
 						}
-						if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
+						if len(fixture.cr.pokeCh) != 0 {
 							t.Fatal("parked binding replay escaped to legacy")
 						}
 					}
@@ -1955,7 +1959,7 @@ func TestRoutedWorkPoolAllocationStaleGenericReuseRevisionFallsBackWithoutGrowth
 	if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 		t.Fatalf("stale generic reuse nudge calls = %d, want unchanged %d", got, baselineNudges)
 	}
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 }
 
 func TestRoutedWorkPoolSingletonReuseLeavesAmbiguousStatesLegacyOwned(t *testing.T) {
@@ -2087,7 +2091,7 @@ func TestRoutedWorkPoolSingletonReuseLeavesAmbiguousStatesLegacyOwned(t *testing
 			if got := fixture.provider.CountCalls("Stop", info.SessionNameMetadata); got != 0 {
 				t.Fatalf("refused reuse Stop calls = %d, want 0", got)
 			}
-			assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+			assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 		})
 	}
 }
@@ -2123,7 +2127,7 @@ func TestRoutedWorkPoolSingletonReuseFallsBackAfterUnconfirmedIdleDelivery(t *te
 	if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 		t.Fatalf("unconfirmed delivery nudge calls = %d, want unchanged %d", got, baselineNudges)
 	}
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 }
 
 func TestRoutedWorkPoolGenericReuseDoesNotStartAfterCommittedBindingLosesAuthorization(t *testing.T) {
@@ -2172,7 +2176,7 @@ func TestRoutedWorkPoolGenericReuseDoesNotStartAfterCommittedBindingLosesAuthori
 	if got := providerNudgeCalls(fixture.provider, info.SessionNameMetadata); got != baselineNudges {
 		t.Fatalf("nudges after lost reuse authorization = %d, want unchanged %d", got, baselineNudges)
 	}
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 }
 
 func TestRoutedWorkPoolAllocationCanonicalSingletonRetiresByExactDrainAck(t *testing.T) {
@@ -2250,8 +2254,8 @@ func TestRoutedWorkPoolAllocationCanonicalSingletonRetiresByExactDrainAck(t *tes
 	if got := fixture.provider.CountCalls("Stop", info.SessionName); got != 1 {
 		t.Fatalf("canonical singleton provider Stop calls = %d, want 1", got)
 	}
-	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-		t.Fatalf("legacy fallback after canonical singleton retirement = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	if len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after canonical singleton retirement = %d pokes, want none", len(fixture.cr.pokeCh))
 	}
 }
 
@@ -2307,7 +2311,7 @@ func TestRoutedWorkPoolAllocationFailsClosedOnAmbiguousBinding(t *testing.T) {
 		t.Fatalf("find ambiguous routed-work bindings = (%+v, %t, %v), want ambiguity error", got, found, err)
 	}
 	fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), hint)
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 	if got := fixture.provider.CountCalls("Start", first.SessionName) + fixture.provider.CountCalls("Start", second.SessionName); got != 0 {
 		t.Fatalf("provider starts for ambiguous bindings = %d, want 0", got)
 	}
@@ -2348,7 +2352,7 @@ func TestRoutedWorkPoolAllocationLeavesUnsafeExistingBindingsLegacyOwned(t *test
 		fixture, hint, _ := newActiveBinding(t)
 		fixture.cr.cfg.Agents[0].DependsOn = []string{"another-template"}
 		fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), hint)
-		assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 	})
 
 	t.Run("asleep existing binding", func(t *testing.T) {
@@ -2357,7 +2361,7 @@ func TestRoutedWorkPoolAllocationLeavesUnsafeExistingBindingsLegacyOwned(t *test
 			t.Fatalf("mark existing binding asleep: %v", err)
 		}
 		fixture.cr.handleRoutedWorkPoolAllocation(t.Context(), hint)
-		assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 	})
 }
 
@@ -2468,8 +2472,8 @@ func TestRoutedWorkPoolAllocationEventCoalescingDoesNotActivateLegacyFallback(t 
 	if got := fixture.provider.CountCalls("Start", open[0].SessionName); got != 1 {
 		t.Fatalf("provider Start calls for %q = %d, want exactly 1", open[0].SessionName, got)
 	}
-	if fixture.cr.readyRoutedWorkPokePending.Load() || len(fixture.cr.pokeCh) != 0 {
-		t.Fatalf("legacy fallback after allocator-owned events = (pending=%t, pokes=%d), want none", fixture.cr.readyRoutedWorkPokePending.Load(), len(fixture.cr.pokeCh))
+	if len(fixture.cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback after allocator-owned events = %d pokes, want none", len(fixture.cr.pokeCh))
 	}
 }
 
@@ -2638,10 +2642,9 @@ func TestRoutedWorkPoolAllocationExhaustionReleasesLeaseForLegacyFallback(t *tes
 		WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
 	})
 	awaitCond(t, func() bool {
-		return fixture.cr.sessionStartController.Pending() == 0 &&
-			fixture.cr.readyRoutedWorkPokePending.Load() && len(fixture.cr.pokeCh) == 1
-	}, "production observer to request priority legacy fallback")
-	assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		return fixture.cr.sessionStartController.Pending() == 0
+	}, "production observer to drain the exhausted allocation")
+	assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 
 	snapshot, err := loadSessionBeadSnapshot(fixture.store)
 	if err != nil {
@@ -2695,7 +2698,7 @@ func TestRoutedWorkPoolAllocationFallsBackWithoutCreatingOnUncertainty(t *testin
 			WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
 		})
 
-		assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 		assertNoPoolAllocationSession(t, fixture.store)
 	})
 
@@ -2717,7 +2720,7 @@ func TestRoutedWorkPoolAllocationFallsBackWithoutCreatingOnUncertainty(t *testin
 			WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
 		})
 
-		assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 		assertNoPoolAllocationSession(t, fixture.store)
 	})
 
@@ -2738,7 +2741,7 @@ func TestRoutedWorkPoolAllocationFallsBackWithoutCreatingOnUncertainty(t *testin
 			WorkID: work.ID, PoolTarget: "worker", SourceStore: "city:test-city",
 		})
 
-		assertRoutedWorkPoolAllocationFallback(t, fixture.cr)
+		assertRoutedWorkPoolAllocationCensusOwed(t, fixture.cr)
 		infos, err := loadSessionBeadSnapshot(fixture.store)
 		if err != nil {
 			t.Fatalf("load durable session after admission failure: %v", err)
@@ -4677,10 +4680,14 @@ func setRoutedWorkPoolRuntimeIdentity(t testing.TB, fixture routedWorkPoolAlloca
 	}
 }
 
-func assertRoutedWorkPoolAllocationFallback(t *testing.T, cr *CityRuntime) {
+// assertRoutedWorkPoolAllocationCensusOwed pins Q2's resolution: a routed-work
+// key the keyed allocation could not handle is NOT converted into a legacy poke.
+// Recovery is re-detection by the next patrol's declared routed-work view, so the
+// legacy pool builder never sees the key and only discovery latency is lost.
+func assertRoutedWorkPoolAllocationCensusOwed(t *testing.T, cr *CityRuntime) {
 	t.Helper()
-	if !cr.readyRoutedWorkPokePending.Load() || len(cr.pokeCh) != 1 {
-		t.Fatalf("legacy fallback = (pending=%t, pokes=%d), want one priority poke", cr.readyRoutedWorkPokePending.Load(), len(cr.pokeCh))
+	if len(cr.pokeCh) != 0 {
+		t.Fatalf("legacy fallback pokes after an unhandled routed-work allocation = %d, want none: recovery is census-owed re-detection", len(cr.pokeCh))
 	}
 }
 

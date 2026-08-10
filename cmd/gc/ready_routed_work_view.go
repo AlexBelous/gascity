@@ -1,0 +1,232 @@
+package main
+
+import (
+	"fmt"
+	"hash/fnv"
+	"io"
+	"log"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+// readyRoutedWorkEntry is one bead of the detector sweep's DECLARED routed-work
+// view: the exact key the pool-allocation admission is enqueued under, plus the
+// demand-relevant projection the demand snapshot invalidates on.
+//
+// PoolTarget is the resolved pool template — the same resolution
+// admitReadyRoutedWorkEvent performs for event-carried work — and is empty for a
+// ready bead no pool template answers for. Those beads stay in the view because
+// their appearance and disappearance still moves named-session and
+// control-dispatcher demand; only the enqueue is target-gated.
+type readyRoutedWorkEntry struct {
+	SourceStore string
+	WorkID      string
+	PoolTarget  string
+	Assigned    bool
+	Status      string
+	Type        string
+	Kind        string
+	Contract    string
+}
+
+// readyRoutedWorkView is one bounded ReadyLive read per store per patrol,
+// promoted from the retired ready-demand fingerprint scan to the sweep's
+// declared routed-work input (DETECTOR.md §2, Q2 resolved yes-with-promotion).
+//
+// It serves two consumers off ONE read: the demand snapshot invalidates when the
+// view's fingerprint moves, and the sweep enqueues the unallocated entries by
+// exact (workID, poolTarget, sourceStore) key. Event-carried routed work is
+// already exact-key covered by admitReadyRoutedWorkEvent, so the view's residual
+// value is event-silent raw-bd writes — the census-owed re-detection that
+// replaces the pool-allocation channel's legacy overflow crutch.
+type readyRoutedWorkView struct {
+	Entries     []readyRoutedWorkEntry
+	Fingerprint string
+	Stores      int
+	ObservedAt  time.Time
+}
+
+// unallocated returns the entries carrying a resolved pool target and no
+// assignee — the routed work a pool member would have to be materialized for.
+func (v readyRoutedWorkView) unallocated() []readyRoutedWorkEntry {
+	entries := make([]readyRoutedWorkEntry, 0, len(v.Entries))
+	for _, entry := range v.Entries {
+		if entry.PoolTarget == "" || entry.Assigned {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// readyRoutedWorkViewFloor bounds how often consecutive patrol ticks re-run the
+// cache-bypassing routed-work read. The read queries every store, so a
+// sub-second patrol_interval reproduces exactly the query storm
+// scaleCheckDemandMinInterval was introduced to stop. Reusing the previous view
+// inside the floor is a no-op at any patrol_interval at or above it (the 30s
+// default included) and bounds routed-work discovery latency to the floor only
+// on pathologically fast cadences. Non-patrol triggers — including
+// certified-readiness routed-work and wait-dependency pokes — carry their own
+// exact keys and never wait on this path.
+const readyRoutedWorkViewFloor = scaleCheckDemandMinInterval
+
+// flooredReadyRoutedWorkView returns the memoized routed-work view when the
+// previous read is younger than readyRoutedWorkViewFloor, and otherwise re-reads
+// and re-memoizes. Every consumer inside one tick therefore shares ONE read per
+// store, which is what makes the declared cost per patrol rather than per
+// consumer.
+func (cr *CityRuntime) flooredReadyRoutedWorkView() readyRoutedWorkView {
+	if cr == nil {
+		return readyRoutedWorkView{}
+	}
+	if !cr.readyRoutedWorkViewAt.IsZero() && time.Since(cr.readyRoutedWorkViewAt) < readyRoutedWorkViewFloor {
+		return cr.readyRoutedWorkView
+	}
+	view := cr.readReadyRoutedWorkView()
+	if !cr.readyRoutedWorkViewAt.IsZero() && cr.readyRoutedWorkView.Fingerprint != view.Fingerprint {
+		// Edge-detect the change at the READ rather than comparing a fingerprint
+		// carried on the demand snapshot. The snapshot no longer holds one: the
+		// view is the declared input, so the view is where the change lives, and
+		// the flag is consumed exactly once by the next refresh decision. The
+		// FIRST observation raises no edge — there is nothing to have changed
+		// from, and a runtime with no snapshot yet rebuilds for that reason
+		// alone.
+		cr.readyRoutedWorkViewChanged = true
+	}
+	cr.readyRoutedWorkView = view
+	cr.readyRoutedWorkViewAt = time.Now()
+	return view
+}
+
+// takeReadyRoutedWorkViewChanged reports whether the routed-work view has moved
+// since the last demand-snapshot refresh consumed it, and clears the edge.
+func (cr *CityRuntime) takeReadyRoutedWorkViewChanged() bool {
+	if cr == nil {
+		return false
+	}
+	changed := cr.readyRoutedWorkViewChanged
+	cr.readyRoutedWorkViewChanged = false
+	return changed
+}
+
+// readReadyRoutedWorkView performs the declared read: one bounded ReadyLive per
+// store, in a stable store order, resolving each ready bead's pool target
+// against the current config.
+func (cr *CityRuntime) readReadyRoutedWorkView() readyRoutedWorkView {
+	view := readyRoutedWorkView{ObservedAt: time.Now().UTC()}
+	if cr == nil {
+		return view
+	}
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+	templates := poolRouteTemplateSet(cfg)
+
+	type storeEntry struct {
+		ref   string
+		store beads.Store
+	}
+	stores := []storeEntry{{ref: cr.cityName, store: cr.cityBeadStore()}}
+	rigStores := cr.rigBeadStores()
+	refs := make([]string, 0, len(rigStores))
+	for ref := range rigStores {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	for _, ref := range refs {
+		stores = append(stores, storeEntry{ref: ref, store: rigStores[ref]})
+	}
+	view.Stores = len(stores)
+
+	h := fnv.New64a()
+	for _, entry := range stores {
+		_, _ = io.WriteString(h, entry.ref)
+		_, _ = io.WriteString(h, "\x00")
+		if entry.store == nil {
+			_, _ = io.WriteString(h, "<nil>")
+			_, _ = io.WriteString(h, "\x00")
+			continue
+		}
+		ready, err := beads.ReadyLive(entry.store, beads.ReadyQuery{TierMode: beads.TierBoth})
+		if err != nil {
+			// Fold a stable marker, never the error text. A real outage reports
+			// varying connection ids, retry counts, or timestamps, and hashing
+			// that text turns the outage into a changed fingerprint — and so a
+			// full buildDesiredState rebuild — on every patrol tick. The marker
+			// keeps an unreachable store distinguishable from an empty one while
+			// degrading the outage to view reuse. The error itself is logged.
+			log.Printf("readyRoutedWorkView: store %s: %v", entry.ref, err)
+			_, _ = io.WriteString(h, "error")
+			_, _ = io.WriteString(h, "\x00")
+			continue
+		}
+		sort.Slice(ready, func(i, j int) bool {
+			return ready[i].ID < ready[j].ID
+		})
+		for _, bead := range ready {
+			row := readyRoutedWorkEntry{
+				SourceStore: entry.ref,
+				WorkID:      bead.ID,
+				PoolTarget:  controllerDemandRouteTarget(cfg, bead, templates),
+				Assigned:    strings.TrimSpace(bead.Assignee) != "",
+				Status:      bead.Status,
+				Type:        bead.Type,
+				Kind:        strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]),
+				Contract:    strings.TrimSpace(bead.Metadata[beadmeta.FormulaContractMetadataKey]),
+			}
+			view.Entries = append(view.Entries, row)
+			writeReadyRoutedWorkViewEntry(h, row)
+		}
+	}
+	view.Fingerprint = fmt.Sprintf("%x", h.Sum64())
+	return view
+}
+
+// writeReadyRoutedWorkViewEntry folds one view row into the invalidation hash.
+//
+// The hash input is the DECLARED view, not the raw bead: the route target is the
+// resolved value of gc.routed_to / gc.run_target, and kind + formula_contract are
+// the two remaining metadata keys demand routing reads (control-dispatcher and
+// workflow-root demand). A bead's UpdatedAt is deliberately absent — it moved the
+// retired fingerprint on every touch and rebuilt desired state for a change no
+// demand decision could see.
+func writeReadyRoutedWorkViewEntry(w io.Writer, entry readyRoutedWorkEntry) {
+	for _, field := range []string{
+		entry.WorkID,
+		entry.PoolTarget,
+		entry.Status,
+		entry.Type,
+		entry.Kind,
+		entry.Contract,
+	} {
+		_, _ = io.WriteString(w, field)
+		_, _ = io.WriteString(w, "\x00")
+	}
+	if entry.Assigned {
+		_, _ = io.WriteString(w, "assigned")
+	}
+	_, _ = io.WriteString(w, "\x00")
+}
+
+// poolRouteTemplateSet is the set of pool templates routed work may name. It is
+// the same eligibility admitReadyRoutedWorkEvent applies to event-carried work,
+// so the sweep's view and the event path resolve identical targets.
+func poolRouteTemplateSet(cfg *config.City) map[string]struct{} {
+	if cfg == nil {
+		return nil
+	}
+	templates := make(map[string]struct{}, len(cfg.Agents))
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		templates[agent.QualifiedName()] = struct{}{}
+	}
+	return templates
+}

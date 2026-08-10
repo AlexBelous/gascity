@@ -2471,13 +2471,19 @@ func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
 	}
 }
 
-func TestReadyRoutedWorkPriorityPokesRequireKeyedOwnershipAndCoalesce(t *testing.T) {
+// TestReadyRoutedWorkOverflowIsCensusOwedNotLegacyFallback is Q2's second
+// negative: the pool-allocation hint channel is saturated (nil here — the same
+// non-blocking drop), so the exact key is lost. The admission records the
+// overflow and RETURNS: it never retries, never blocks, and never converts the
+// key into a priority legacy poke. Recovery is re-detection by the next patrol's
+// declared routed-work view, which is what preserves the work and loses only
+// latency (DETECTOR.md §2, degradation rules).
+func TestReadyRoutedWorkOverflowIsCensusOwedNotLegacyFallback(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		ownership sessionStartOwnership
-		want      bool
 	}{
-		{name: "keyed", ownership: sessionStartOwnershipKeyed, want: true},
+		{name: "keyed", ownership: sessionStartOwnershipKeyed},
 		{name: "legacy", ownership: sessionStartOwnershipLegacy},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2511,11 +2517,8 @@ func TestReadyRoutedWorkPriorityPokesRequireKeyedOwnershipAndCoalesce(t *testing
 			cs.applyBeadEventToStores(evt)
 			cs.applyBeadEventToStores(evt)
 
-			if got := cr.readyRoutedWorkPokePending.Load(); got != test.want {
-				t.Fatalf("priority poke pending = %t, want %t", got, test.want)
-			}
 			if got := len(pokeCh); got != 1 {
-				t.Fatalf("buffered poke count = %d, want 1 after duplicate events", got)
+				t.Fatalf("buffered poke count = %d, want only the ordinary bead-event poke after duplicate events", got)
 			}
 		})
 	}
@@ -2601,8 +2604,8 @@ func TestReadyRoutedWorkAdmissionRecordsExactEffectFreeDemandShadow(t *testing.T
 	if !ok || decisionLatency < 0 {
 		t.Fatalf("observation-to-shadow latency = %#v, want non-negative nanoseconds", record.Fields["observation_to_shadow_decision_ns"])
 	}
-	if !cr.readyRoutedWorkPokePending.Load() || len(pokeCh) != 1 {
-		t.Fatalf("legacy fallback = (pending=%t, pokes=%d), want unchanged priority ownership", cr.readyRoutedWorkPokePending.Load(), len(pokeCh))
+	if len(pokeCh) != 1 {
+		t.Fatalf("ordinary bead-event pokes = %d, want the one the event path already fires", len(pokeCh))
 	}
 }
 

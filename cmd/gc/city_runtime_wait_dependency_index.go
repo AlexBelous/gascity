@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -182,6 +183,18 @@ func (cr *CityRuntime) reserveSessionWaitDependencyTargets(ctx context.Context, 
 	}
 	targets := cr.sessionWaitDependencyTargetsForDependency(dependencyID)
 	if len(targets) == 0 {
+		// ga-zo9h3 option (b), architect-ruled 2026-08-10. The cached index is
+		// built from a CACHE observation (observeSessionWaitCensus), so a wait
+		// registered since the last observation is invisible here and the
+		// dependency's bead.closed found targets=0 — no reservation, no
+		// certificate, and legacy's poke tick then advanced the wait in legacy
+		// shape. Resolving the dependents live at the EVENT is what makes the
+		// certificate exist before the poke runs a tick; the patrol redrive
+		// below is demoted to the anti-entropy backstop it should always have
+		// been.
+		targets = cr.authoritativeSessionWaitDependencyTargetsForDependency(dependencyID)
+	}
+	if len(targets) == 0 {
 		return nil
 	}
 	snapshot, release, err := cr.cs.acquireSessionStartSnapshot()
@@ -221,6 +234,70 @@ func (cr *CityRuntime) reserveSessionWaitDependencyTargets(ctx context.Context, 
 	return reserved
 }
 
+// sessionWaitDependencyLiveResolveFloor throttles the live dependent lookup on a
+// city that has NO pending waits at all. With none, no bead.closed can ever
+// name a waiting dependent, so repeating the lookup per close buys nothing; the
+// moment one pending wait exists the lookup runs on every close again, which is
+// what keeps "targets at the event, not the next patrol" true where it matters.
+const sessionWaitDependencyLiveResolveFloor = 250 * time.Millisecond
+
+// authoritativeSessionWaitDependencyTargetsForDependency resolves the closed
+// bead's WAITING DEPENDENTS from the durable wait rows rather than from the
+// cached index.
+//
+// It is bounded, not a fleet scan: one label-scoped `gc:wait` listing capped at
+// SessionWaitLookupLimit — the same bound the cached census already pays — and
+// it is filtered down to the exact dependency before anything is certified. A
+// city with no pending waits collapses to one listing per floor window.
+func (cr *CityRuntime) authoritativeSessionWaitDependencyTargetsForDependency(depID string) []sessionWaitDependencyTarget {
+	if cr == nil || strings.TrimSpace(depID) == "" {
+		return nil
+	}
+	cr.sessionWaitDependencyMu.Lock()
+	if cr.waitDependencyLiveResolveEmpty && !cr.waitDependencyLiveResolveAt.IsZero() &&
+		time.Since(cr.waitDependencyLiveResolveAt) < sessionWaitDependencyLiveResolveFloor {
+		cr.sessionWaitDependencyMu.Unlock()
+		return nil
+	}
+	cr.sessionWaitDependencyMu.Unlock()
+
+	store := cr.sessionsBeadStore()
+	if store.Store == nil {
+		return nil
+	}
+	waits, err := sessionFrontDoor(store.Store).ListWaits("pending", "")
+	if err != nil && len(waits) == 0 {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: resolving waiting dependents of %s: %v\n", cr.sessionStartLogPrefix(), depID, err) //nolint:errcheck // the backstop redrive still covers this dependency
+		return nil
+	}
+
+	cr.sessionWaitDependencyMu.Lock()
+	cr.waitDependencyLiveResolveAt = time.Now()
+	cr.waitDependencyLiveResolveEmpty = len(waits) == 0
+	cr.sessionWaitDependencyMu.Unlock()
+
+	var targets []sessionWaitDependencyTarget
+	for _, wait := range waits {
+		if !slices.Contains(wait.DepIDs, depID) {
+			continue
+		}
+		registration, indexable, regErr := waitDependencyRegistrationFrom(wait)
+		if regErr != nil || !indexable {
+			continue
+		}
+		targets = append(targets, sessionWaitDependencyTarget{
+			WaitID:        wait.ID,
+			SessionID:     registration.sessionID,
+			DepIDs:        append([]string(nil), registration.depIDs...),
+			DepMode:       registration.depMode,
+			generation:    sessionWaitDependencyDurableGeneration,
+			authoritative: true,
+		})
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].WaitID < targets[j].WaitID })
+	return targets
+}
+
 func sameDurableWaitDependencyCertificate(a, b sessionWaitDependencyStartLease) bool {
 	return a.WaitID == b.WaitID && a.SessionID == b.SessionID && a.DepMode == b.DepMode &&
 		a.RegisteredEpoch == b.RegisteredEpoch && a.WaitRevision == b.WaitRevision && a.SessionRevision == b.SessionRevision &&
@@ -258,6 +335,28 @@ func (cr *CityRuntime) ownsSessionWaitDependencyStart(sessionID string) bool {
 	controller := cr.sessionStartController
 	cr.sessionStartMu.Unlock()
 	return controller != nil && controller.ownsWaitDependencyStart(sessionID)
+}
+
+// keyedWaitAdvanceExcluded is the legacy wait-advance boundary's stand-down
+// predicate: the same template the legacy start family uses at its own effect
+// boundary (ga-ij8mh, sixth round), applied one family over.
+//
+// The wait-identity arm alone is not enough (ga-zo9h3). It certifies the exact
+// durable wait the keyed lease was minted for, and legacy's own advance is what
+// moves that identity — MarkWaitReady clears ready_owner and ready_operation,
+// and a session may hold a wait the certificate does not name at all. The
+// moment the row drifts, the arm falls open while the keyed claim on the
+// SESSION is still live, so legacy advances the wait and the same tick's
+// forward pass starts a row the keyed family owns the start of. Consulting
+// ownsSessionWaitDependencyStart — the arm the start boundary already consults
+// — asks the question that actually decides the race, on current state.
+//
+// The stand-down is a full supersede: the boundary applies no effect for the
+// wait and contributes no start demand for its session. It is live-claim
+// triggered, never candidacy triggered, so a released or retired reservation
+// leaves the wait advanceable on the next pass.
+func (cr *CityRuntime) keyedWaitAdvanceExcluded(wait sessionpkg.WaitInfo) bool {
+	return cr.ownsSessionWaitDependencyWait(wait) || cr.ownsSessionWaitDependencyStart(wait.SessionID)
 }
 
 func (cr *CityRuntime) ownsSessionWaitDependencyWait(wait sessionpkg.WaitInfo) bool {
@@ -342,6 +441,9 @@ func (cr *CityRuntime) redriveSessionWaitDependencyReservations(ctx context.Cont
 		targets = append(targets, sessionWaitDependencyTarget{
 			WaitID: lease.WaitID, SessionID: lease.SessionID, DepIDs: append([]string(nil), lease.DepIDs...),
 			DepMode: lease.DepMode, generation: lease.IndexGeneration,
+			// A durable-resolved reservation keeps its provenance across the
+			// backstop redrive: the observed index still may not carry the wait.
+			authoritative: lease.IndexGeneration == sessionWaitDependencyDurableGeneration,
 		})
 	}
 	cr.sessionWaitDependencyMu.RUnlock()
@@ -832,6 +934,14 @@ func (cr *CityRuntime) submitSessionWaitDependencyProducerRequests(requests []se
 }
 
 func (cr *CityRuntime) sessionWaitDependencyTargetCertifiedLocked(target sessionWaitDependencyTarget) bool {
+	if target.authoritative {
+		// A live-resolved target carries its own authority: the durable wait row
+		// was read live at the event, and certifySessionWaitDependencyStartLease
+		// re-read BOTH durable rows before this point. Asking the observed index
+		// to certify it would re-impose the staleness this path exists to route
+		// around.
+		return true
+	}
 	index, generation := cr.sessionWaitDependencyIndex, cr.sessionWaitDependencyIndexGeneration
 	rejected := cr.sessionWaitDependencyRejectedCensusIDs != nil
 	if rejected || index == nil || generation != target.generation {

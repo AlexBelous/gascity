@@ -3961,6 +3961,10 @@ func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualified
 // serve is already served by a live member of the same pool.
 var errPoolMemberAlreadyClaimed = errors.New("routed work already has a live pool member")
 
+// errKeyedPoolAllocationOwnsWork reports that the keyed pool allocation holds
+// the work item's exact key, so the legacy pool builder stands down for it.
+var errKeyedPoolAllocationOwnsWork = errors.New("routed work is owned by the keyed pool allocation")
+
 // revalidatePlannedPoolMemberDemand re-checks a planned member's demand against
 // CURRENT open rows immediately before it is materialized.
 //
@@ -3991,10 +3995,22 @@ func revalidatePlannedPoolMemberDemand(bp *agentBuildParams, template string, pl
 	if workID == "" {
 		return nil
 	}
+	sourceStore := strings.TrimSpace(plan.metadata[beadmeta.TriggerBeadStoreRefMetadataKey])
+	// The allocation-ownership stand-down (WD.10b). Consulted on CURRENT state
+	// at this boundary, ahead of the durable claim read below, because the claim
+	// only exists once a member has been CREATED: by then first-creator-wins has
+	// already decided, and legacy — planning from a per-tick snapshot and
+	// creating immediately — is usually the creator. A key inside the keyed
+	// allocation lane belongs to that lane; full supersede, no member, no
+	// demand. The reservation's own lapse bound is what keeps this from fencing
+	// legacy off work nobody is allocating.
+	if keyedRoutedWorkAllocations.owns(routedWorkAllocationKeyFor(workID, template, sourceStore), time.Now()) {
+		return fmt.Errorf("%w: %s is reserved by the keyed pool allocation", errKeyedPoolAllocationOwnsWork, workID)
+	}
 	claims, err := routedWorkPoolSessionClaims(bp.beadStore, bp.city, routedWorkPoolAllocationHint{
 		WorkID:      workID,
 		PoolTarget:  template,
-		SourceStore: strings.TrimSpace(plan.metadata[beadmeta.TriggerBeadStoreRefMetadataKey]),
+		SourceStore: sourceStore,
 	})
 	if err != nil {
 		return fmt.Errorf("re-validating routed-work demand for %q: %w", workID, err)

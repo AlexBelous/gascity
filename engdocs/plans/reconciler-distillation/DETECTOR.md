@@ -147,20 +147,25 @@ carve-outs below).**
 - assigned-work beads + store refs (:2715-2731), ready-wait set (:2820-2824)
 - provider-health snapshot `loadProviderHealthSnapshot` — one file read per sweep
   (moves from god-function prologue :1508)
-- routed-work view — **one bounded `ReadyLive` read per store per patrol**, arriving
+- routed-work view — **one bounded `ReadyLive` read per store per patrol**, LANDED
   at WD.10b (Q2 resolved yes-with-promotion). This is not a new read: it is
-  `readyDemandSnapshotFingerprint`'s existing per-patrol enumeration
-  (city_runtime.go:4058) *promoted* from hash input to the sweep's DECLARED
-  routed-work view, where it both invalidates the demand snapshot and enqueues exact
-  `(workID, poolTarget, sourceStore)` keys into pool-allocation admission.
-  Event-carried routed work is already exact-key covered (`admitReadyRoutedWorkEvent`
-  → `LiveReadyByID` → keyed admission, api_state.go:801-884), so the scan's residual
-  value is event-silent raw-bd writes only — exactly the re-detection WD.10b owes.
-  Declared on the same footing as the provider-health file read above: bounded and
-  per sweep, not zero. WD.10b then deletes `readyDemandSnapshotFingerprint` +
-  `writeReadyDemandFingerprintBead` (~70 LOC, :4058-4125), the snapshot field, and
-  `requestReadyRoutedWorkLegacyFallback` together (WE ledger entry); the interim
-  floor lands separately as WD.16 before that slice
+  `readyDemandSnapshotFingerprint`'s former per-patrol enumeration *promoted* from
+  hash input to the sweep's DECLARED routed-work view (`readyRoutedWorkView`,
+  cmd/gc/ready_routed_work_view.go), which both invalidates the demand snapshot and
+  enqueues exact `(workID, poolTarget, sourceStore)` keys into pool-allocation
+  admission. Event-carried routed work is already exact-key covered
+  (`admitReadyRoutedWorkEvent` → `LiveReadyByID` → keyed admission,
+  api_state.go:801-884), so the view's residual value is event-silent raw-bd writes
+  only — exactly the re-detection WD.10b owes. Declared on the same footing as the
+  provider-health file read above: bounded and per sweep, not zero. The WE ledger
+  entry is DISCHARGED: `readyDemandSnapshotFingerprint`,
+  `writeReadyDemandFingerprintBead`, `flooredReadyDemandSnapshotFingerprint`,
+  `readyDemandFingerprintFloor`, the `runtimeDemandSnapshot.readyDemandFingerprint`
+  field and `requestReadyRoutedWorkLegacyFallback` (with its
+  `readyRoutedWorkPokePending` flag) are all deleted. Invalidation moved from a
+  fingerprint carried on the snapshot to a change edge detected at the read and
+  consumed exactly once by the next refresh; WD.16's cadence floor rides the
+  promoted read as `readyRoutedWorkViewFloor`, its tests moved with it
 - liveness, two tiers: ONE `sp.ListRunning` per sweep — names-only
   (`internal/runtime/runtime.go:203`), so it can prove absence but NOT zombie-ness —
   for dead-orphan candidacy (the tick already pays it in `reconcilePoolDeaths` :1357);
@@ -216,10 +221,13 @@ so overflow loses no work, only latency. Session-start overflow already returns
 `sessionStartAdmissionOverflow` and arms `auditPending` + authoritative reseed
 (session_start_controller.go:324-329, city_runtime_session_start.go:247-259) — the
 sweep traces the overflow and moves on. It must NOT block, retry-loop, or fall back to
-acting itself. (The pool-allocation 256-slot channel silently drops hints and today
-recovers via `requestReadyRoutedWorkLegacyFallback` (pool_allocation_controller.go:
-393-398, city_runtime.go:501-503) — that legacy crutch becomes census-owed
-re-detection, owned by slice WD.10b with Q2 resolution as its entry gate.)
+acting itself. (The pool-allocation 256-slot channel silently drops hints. Before WD.10b it
+recovered via `requestReadyRoutedWorkLegacyFallback`; that legacy crutch is DELETED
+and recovery is census-owed re-detection — `recordRoutedWorkPoolAllocationOverflow`
+traces the dropped key and returns, and the next patrol's declared routed-work view
+re-raises the same durable condition. The same rule now governs an unhandled or
+failed keyed allocation: no fallback poke, so a routed key never crosses back to the
+legacy pool builder.)
 
 **Global guards (fail-closed, fixing two legacy trace lies).** On
 `storeQueryPartial`, the sweep suppresses every destructive family (close, stop, drain,
@@ -495,7 +503,10 @@ bb36c285f4, 60c0d9d2a0, f0c525dae9).
    members (`detectorFamilyReadyDemandScan`, `detectorFamilyExecutionCompletionScan`,
    `ObservedOnly: true`), so they are counted and traced but never enqueue;
    absorption-or-retirement is adjudicated at WD.10b (see the §2 routed-work input)
-   and WE.
+   and WE. **WD.10b ABSORBED the ready-demand scan**: the sweep now owns that read as
+   its declared routed-work view, so `detectorFamilyReadyDemandScan` and
+   `detectorActReadyDemandScan` are retired — there is no foreign scan left to
+   observe. `detectorFamilyExecutionCompletionScan` stays observed-only for WE.
 
 ### §3 D-DEADLINE deltas (recorded at WD.2)
 
@@ -1372,7 +1383,81 @@ amended.
    commit or it double-acts. They travel with WD.10b's accounting arm; WD.5's
    fleet-only no-wake rows (`detector_no_wake_fleet_only`) likewise still record
    without routing, because the rung that would re-home them is pool demand, which
-   is WD.10b's.
+   is WD.10b's. **Update at WD.10b:** the traced quarantine refusal landed there
+   (arm 3 needs no stand-down — it is a non-action on both sides); the other two
+   and the churn/wake-failure accounting did not, for the reason recorded in the
+   WD.10b deltas below.
+
+### §3 D-WAKE deltas (recorded at WD.10b)
+
+Where the pool half of D-WAKE as built diverges from §3 as written. Reported, not
+improvised. Q2 is discharged by the promotion recorded in §2.
+
+1. **The FILL arm has no session key, so it does not ride any admission source.**
+   Every other acting arm in every family hands a bare or certified SESSION id to
+   the session-start controller. Pool-under-min fill cannot: the member does not
+   exist yet, so the thing being admitted is the routed WORK item. Its exact key
+   is the `(workID, poolTarget, sourceStore)` triple, its sink is the existing
+   pool-allocation admission (`enqueueRoutedWorkPoolAllocation`), and
+   `routeDetectorPoolFill` dispatches it on the REASON before the session-keyed
+   loop runs. `detectorAdmissionSourceFor` deliberately answers "not routable" for
+   it, and the act-frontier test pins that: an arm with no session must never
+   claim a session-start source. Its disposition is carried on the route outcome
+   (`queued_pool_allocation` / `refused_overflow`) instead, and `routedToKeyed()`
+   is what keeps the shadow record's `effect_owner` honest for both shapes.
+2. **The FILL arm's legacy yield is an ALLOCATION seam, not a start seam.** The
+   slotized pool member's re-wake shares the start-family yield its named and
+   dependency siblings use (`ownsStrictDefaultPoolWakeStart` inside
+   `sessionStartLegacyExclusionPredicate`), which is why both crossed under one
+   act constant. The FILL arm races a different legacy engine entirely — the pool
+   BUILDER in `build_desired_state.go`, not the start family — so it needed its
+   own stand-down: `keyedRoutedWorkAllocations`, consulted at
+   `revalidatePlannedPoolMemberDemand` on CURRENT state, full-supersede (no
+   member, no demand), with a bounded lapse so a stranded reservation costs one
+   patrol rather than fencing legacy forever. Before it, ga-f7v2ft.126's
+   first-creator-wins made legacy the winner in practice: the durable claim the
+   keyed side stamps exists only AFTER a member is created, and legacy plans from
+   a per-tick snapshot and creates immediately. The reservation moves keyed
+   ownership to the moment the exact key enters the lane, which is what the :469
+   keyed-materialization proof needed on both arms.
+3. **Open-member counting is the planner's, not the detector's own.** The arm
+   counts every open pool-managed row, including one already in
+   creating/start-pending and one asleep on a wait, because that is
+   `poolSessionConsumesNewDemandInfo`'s definition of spent demand. Detection and
+   re-derivation answering from one spelling is the WD.13 delta-1 rule; a second
+   spelling here would have the sweep asking for a member the planner has already
+   committed to. The arm also accrues its own fills against the desired count as
+   it walks the view, so one sweep never overfills a pool short by one.
+4. **The :583/:614 family (catalogued on ga-f7v2ft.117) is resolved by
+   construction on the KEYED path and stays legacy's until WE.** The signature was
+   a tracked pool member asleep on its wait while its routed trigger stayed open,
+   `poolDesired` still reading 1, and legacy refilling. The keyed FILL arm cannot
+   reproduce it: it counts the asleep member as open, so it raises no fill. The
+   residual refill is legacy's FLOOR path, which carries no work item and is
+   therefore gated by neither the durable claim nor the reservation — by design
+   ("floor refills carry no work item and are never gated here"). That engine dies
+   at WE; until then the journey's fixture premise remains the one the .117
+   catalogue named, and no keyed-side change can close it.
+5. **Delta-8 arm 3 is taken; arms 1 and 2 and the churn/wake-failure accounting
+   are NOT, and this says where they go.** The traced quarantine/hold refusal
+   (`detector_wake_blocked`) landed here: legacy drops a wake target inside a live
+   quarantine window with no record at all, which is a trace lie the parity join
+   cannot read past, and refusing at detection is a non-action on both sides
+   (legacy already skips; the keyed admission chain blocks again at the handler),
+   so it needs no stand-down of its own. The other two arms —
+   preserve-configured-named as a detection-side non-enqueue, and the rate-limit
+   screen peek moving into the handler's failure path — plus the churn and
+   wake-failure accounting (`checkStability` / `checkChurn`,
+   session_reconcile.go:478/:714, driven from the god function's forward pass) do
+   NOT ride this slice. `recordWakeFailure` is already keyed-covered on the START
+   failure path through `commitStartFailure`, but the post-mortem accounting for a
+   row that DIED is not, and moving it keyed without a legacy stand-down at that
+   forward-pass block would DOUBLE-COUNT `wake_attempts` and quarantine rows
+   early. Per the ga-ij8mh round-6 Ruling 2 each of those arms owes its own
+   stand-down at its own effect boundary plus a no-lapse RED, which is a slice of
+   its own size. The §1 anchors `AlwaysNamedSessionWakesAfterLiveChurnSequence`
+   (:4873) and `PreservedConfiguredNamedRateLimitRunsBeforeHeal` (:6927) therefore
+   stay pointed at legacy until that accounting arm lands.
 
 ### §3 D-ZOMBIE + circuit/health deltas (recorded at WD.11)
 
@@ -1942,7 +2027,7 @@ WD.3-9/13-14 parallelize across worktrees after WD.2, at one-line rebase cost.
 | WD.8 | Detached drift converges: rebaseline / launch-relaunch / restart-in-place (D-DRIFT 1) | relaunch helper :5948 | SERIAL |
 | WD.9 | Attached/active drift defers + cancels drains (D-DRIFT 2, A6) | deferral records | SERIAL |
 | WD.10a | Named + dependency wake demand filled through certified wake leases (D-WAKE part 1) incl. preserve-named + rate-limit screen; **resolves Q1 first** | Admit* leases :255-277 | SERIAL |
-| WD.10b | Pool-under-min fill + churn/wake-failure accounting (D-WAKE part 2) + pool-channel overflow recovery becomes census-owed re-detection; **Q2 resolution is the entry gate** | ComputePoolDesiredStates, pool-allocation admission | SERIAL, after WD.10a |
+| WD.10b | Pool-under-min fill (D-WAKE part 2) + pool-channel overflow recovery becomes census-owed re-detection + the allocation-ownership seam; **Q2 discharged**. Churn/wake-failure accounting and delta-8 arms 1-2 deferred with their own stand-downs owed (WD.10b deltas, item 5) | ComputePoolDesiredStates, pool-allocation admission | SERIAL, after WD.10a |
 | WD.11 | Zombie marked unhealthy keyed (D-ZOMBIE) + circuit/health sweep hydration + NEW respawn-gate integration RED | breaker :329-389, phSnap | sweep part INDEP of seam; handler SERIAL |
 | WD.12 | Progress-stall recycle with bounded min-floor exemption (D-STALL) | .103 reset machinery | SERIAL, after .103 |
 | WD.13 | Duplicate named rows retired keyed + expired-timer heal at wake admission (D-DUP) | retire logic session_beads.go:609 | SERIAL |

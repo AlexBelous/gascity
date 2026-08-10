@@ -94,31 +94,103 @@ func bdRelocatedClassOverrideEnabled() bool {
 	}
 }
 
-// bdRelocatedClassGuardedVerbs are the bd read verbs whose positional text
-// names ids in a dialect this guard can classify.
+// bdRelocatedClassGuardedVerbs are the bd read verbs whose argument text names
+// ids in a dialect this guard can classify.
 //
 // `sql` and `query` are the two ad-hoc ones: both take an expression an
 // operator or agent wrote by hand, both resolve it against the bd ledger alone,
 // and both answer no-match with an empty result and exit 0.
 //
-// list/ready are left alone — they answer about the ledger they are scoped to
-// and claim nothing more. show/dep tree are left alone too, but NOT because
-// they are safe: they are raw bd passthroughs against the same blind ledger
-// (doBd ends at exec.Command(bdPath, bdArgs...) with no class routing). They
-// stay unguarded because a bare id is not a dialect this scan can read without
-// refusing every work-store id that starts with the same letters, and because
-// the refusal now steers to `gc beads show` instead of to them.
+// `list`, `ready` and `search` are here for the same reason and they were the
+// ones that took longest to see, because the flag the id arrives through does
+// not look like an id position. `gc bd list --metadata-field
+// gc.root_bead_id=<gcg root>` answered `[]` with exit 0 on a converged split
+// city: --metadata-field is not id-VALUED, so the by-id door in cmd_bd_by_id.go
+// correctly declined it (a quoted id decides nothing about ownership), and bd
+// then ran the projection successfully against the one ledger that holds no
+// gcg- row. The value named an id but the VERB is a PROJECTION over a class
+// this ledger cannot see, and a projection that cannot see a class must fail
+// loudly rather than answer with the empty set. That is the whole of ga-iaj7k's
+// Invariant 0, and it is what makes `list` COHERENT with `dep tree`, which
+// already refuses a relocated id — two projections over the same data with
+// opposite failure semantics is worse than either one alone, because an
+// operator who learned the loud one trusts the quiet one.
+//
+// `ready` and `search` are the same projection over the same flag: bdflags
+// lists --metadata-field for `ready`, bd registers it for `search`, and both
+// answer no-match with `[]` and exit 0. Guarding `list` alone would have minted
+// the asymmetry it retired — one verb over, on the same molecule, through the
+// same selector — and inside `gc bd ready` itself, whose --parent/--mol
+// spellings the by-id door already refuses loudly. They share `list`'s scan
+// because they share bd's selector dialect, so the negatives that keep a
+// free-text search answerable hold for all three unchanged.
+//
+// The other verbs are unguarded because they are no longer blind, not because
+// they were ever safe:
+//
+//   - `show`, `update` (including `--claim`), `release-if-current` and
+//     `dep list` are answered IN PROCESS from the binding their class is served
+//     from — cmd_bd_by_id.go, wired into doBd immediately after this scan — so
+//     they never reach the subprocess for a class-owned bead.
+//   - `dep tree` is not served in process, and on a class-owned id that same
+//     surface REFUSES it (exit 1, naming the bead and the binding) rather than
+//     forwarding it.
+//   - Every other bd subcommand that ADDRESSES a reserved-prefix id — in a
+//     positional or an id-valued flag — is refused there too, by ownership
+//     rather than by servability.
+//
+// The selector surface is COMPLETE, and that is checkable rather than hopeful:
+// --metadata-field — the only bd flag whose value side is a key=value predicate
+// on a read — is registered on exactly three subcommands (list.go, ready.go,
+// search.go in the pinned beads module), and all three are in this map.
+// TestBdRelocatedClassGuardCoversEverySelectorVerb pins that against bdflags so
+// a fourth cannot appear unguarded.
 var bdRelocatedClassGuardedVerbs = map[string]bdRelocatedClassScan{
-	"sql":   beads.RelocatedClassesInSQL,
-	"query": beads.RelocatedClassesInQueryExpr,
+	"sql":    beads.RelocatedClassesInSQL,
+	"query":  beads.RelocatedClassesInQueryExpr,
+	"list":   beads.RelocatedClassesInSelector,
+	"ready":  beads.RelocatedClassesInSelector,
+	"search": beads.RelocatedClassesInSelector,
 }
 
-// bdRelocatedClassScan classifies one positional argument in one bd dialect.
+// bdRelocatedClassScan classifies one argument's text in one bd dialect.
 type bdRelocatedClassScan func([]beads.RelocatedClass, string) []beads.RelocatedClass
+
+// bdRelocatedClassScanText returns the part of an argument a dialect scan
+// should read, and whether there is one.
+//
+// A separated flag value arrives as its own token (`--metadata-field
+// gc.root_bead_id=gcg-1`) and is scanned as a positional. The INLINE spelling
+// of the same selector (`--metadata-field=gc.root_bead_id=gcg-1`) is one token
+// that begins with a dash, and skipping it wholesale — which is what this scan
+// used to do — let a single `=` switch the guard off on the exact query it was
+// added for. So the flag NAME is dropped and everything after the first `=` is
+// scanned, which is the value bd itself parses out of that token.
+//
+// A flag carrying no value (`--json`, `-q`) has no value text and is skipped,
+// which is what keeps `bd sql --json 'select 1'` from classifying its own flags.
+func bdRelocatedClassScanText(arg string) (string, bool) {
+	if !strings.HasPrefix(arg, "-") {
+		return arg, true
+	}
+	_, value, inline := strings.Cut(arg, "=")
+	if !inline {
+		return "", false
+	}
+	return value, true
+}
 
 // bdSQLRelocatedClassRefusal reports whether a `gc bd` invocation is an ad-hoc
 // read that names the id namespace of a class this city serves elsewhere, and
 // returns the operator-facing refusal when it is.
+//
+// The override is named HERE rather than inside beads.RelocatedClassRefusal
+// because this is the only seam where it works: the same error text is returned
+// by BdStore's id-scoped guard, which honors no env var, and a message that
+// offers an escape the reader cannot take is worse than one that offers none.
+// An escape hatch nobody can find is not an escape hatch — the scan classifies
+// TEXT, so a false positive is always possible, and the operator holding one
+// needs the way out in the message that stopped them.
 func bdSQLRelocatedClassRefusal(cfg *config.City, bdArgs []string) (string, bool) {
 	relocated := relocatedBeadClasses(cfg)
 	if len(relocated) == 0 {
@@ -132,11 +204,12 @@ func bdSQLRelocatedClassRefusal(cfg *config.City, bdArgs []string) (string, bool
 	var matched []beads.RelocatedClass
 	seen := make(map[string]bool, len(relocated))
 	for _, arg := range verbArgs {
-		if strings.HasPrefix(arg, "-") {
+		text, scannable := bdRelocatedClassScanText(arg)
+		if !scannable {
 			continue
 		}
 		for _, namedIn := range scans {
-			for _, class := range namedIn(relocated, arg) {
+			for _, class := range namedIn(relocated, text) {
 				if seen[class.Class] {
 					continue
 				}
@@ -149,6 +222,25 @@ func bdSQLRelocatedClassRefusal(cfg *config.City, bdArgs []string) (string, bool
 		return "", false
 	}
 	return beads.RelocatedClassRefusal(op, matched).Error(), true
+}
+
+// bdRelocatedClassEscapeHint is the sentence appended to a refusal that is
+// actually being ENFORCED, naming the knob that lifts it.
+//
+// It is not part of beads.RelocatedClassRefusal because that same text is
+// returned by BdStore's id-scoped guard, which honors no env var: a message
+// that offers an escape its reader cannot take is worse than one that offers
+// none. And it is not appended when the override is already set, because there
+// the operator is being told what they overrode, not how.
+//
+// The scan classifies TEXT, so a false positive is always possible — a work-row
+// query whose value legitimately holds a relocated id (gc.drain_control_id) is
+// indistinguishable from a class-scoped one. An escape hatch nobody can find is
+// not an escape hatch, so it travels with the refusal that stopped them.
+func bdRelocatedClassEscapeHint() string {
+	return fmt.Sprintf(" If this read is about work rows that merely REFERENCE such an id — a metadata comparison on "+
+		"gc.drain_control_id, say — it is a question this ledger can answer, and %s=1 runs it anyway.",
+		bdRelocatedClassOverrideEnvVar)
 }
 
 // bdRelocatedClassScans returns the dialect scans to run over an invocation's

@@ -1428,8 +1428,21 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("exact wake tmux incarnation reused server/session identity: server=%d session=%q all=%v",
 			wakeTmuxServerPID, wakeTmuxID, wakeIDs)
 	}
-	var socketWakeCommitRecords []SessionReconcilerTraceRecord
-	var socketWakeCommitCandidates []SessionReconcilerTraceRecord
+	// The leg proves that DEMAND — not the anti-entropy census sweep or a
+	// detector key — drove this wake to exactly one committed provider start on
+	// the woken incarnation. It deliberately does NOT assert which demand key,
+	// because the controller discards that: a socket admission folded onto a
+	// pending in_process one keeps the in_process source (admit's coalescing
+	// rule, pinned by
+	// TestSessionStartControllerPreservesInProcessAdmissionAcrossAntiEntropy),
+	// and this test's own ApplyPatch fires bead.updated, which admits in_process.
+	// Asserting `admission == socket` therefore passed or failed on scheduling
+	// alone — it did not prove what it claimed (ga-f7v2ft.142). ga-f7v2ft.125
+	// already ruled the source is a hint and the durable row is the authority;
+	// sessionStartAdmissionIsDemand is the part of the hint that survives
+	// coalescing, and the identity/token/exactly-once assertions carry the rest.
+	var demandWakeCommitRecords []SessionReconcilerTraceRecord
+	var demandWakeCommitCandidates []SessionReconcilerTraceRecord
 	if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {
 		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 			RecordType:  TraceRecordOperation,
@@ -1441,24 +1454,25 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		if readErr != nil {
 			return false, readErr
 		}
-		socketWakeCommitCandidates = records
-		socketWakeCommitRecords = socketWakeCommitRecords[:0]
+		demandWakeCommitCandidates = records
+		demandWakeCommitRecords = demandWakeCommitRecords[:0]
 		for _, record := range records {
+			admissionSource, _ := record.Fields["admission"].(string)
 			if record.SessionBeadID == created.SessionID &&
-				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+				sessionStartAdmissionIsDemand(sessionStartAdmissionSource(admissionSource)) &&
 				record.Fields["session_id"] == created.SessionID &&
 				record.Fields["instance_token"] == woken.InstanceToken &&
 				record.Fields["effect_applied"] == true {
-				socketWakeCommitRecords = append(socketWakeCommitRecords, record)
+				demandWakeCommitRecords = append(demandWakeCommitRecords, record)
 			}
 		}
-		if len(socketWakeCommitRecords) > 1 {
-			return false, fmt.Errorf("socket wake commit traces = %d, want exactly one", len(socketWakeCommitRecords))
+		if len(demandWakeCommitRecords) > 1 {
+			return false, fmt.Errorf("demand wake commit traces = %d, want exactly one", len(demandWakeCommitRecords))
 		}
-		return len(socketWakeCommitRecords) == 1, nil
+		return len(demandWakeCommitRecords) == 1, nil
 	}); err != nil {
 		t.Fatalf("exact wake commit trace did not converge: %v; matching=%#v read=%#v woken_token=%q controller stderr=%q",
-			err, socketWakeCommitRecords, socketWakeCommitCandidates, woken.InstanceToken, controllerStderr.String())
+			err, demandWakeCommitRecords, demandWakeCommitCandidates, woken.InstanceToken, controllerStderr.String())
 	}
 	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
 		count := strings.Count(controllerStderr.String(), startSuccessLog)

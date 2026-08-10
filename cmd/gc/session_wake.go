@@ -61,7 +61,7 @@ func preWakeCommit(
 	if err != nil {
 		return 0, "", nil, err
 	}
-	applied, writeErr := applyPreWakePatchFenced(sessFront, info.ID, loadedRevision, batch)
+	applied, writeErr := applyFencedSessionLifecyclePatch(sessFront, "pre-wake commit", info.ID, loadedRevision, batch)
 	if writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
@@ -74,22 +74,34 @@ func preWakeCommit(
 	return newGen, token, batch, nil
 }
 
-// applyPreWakePatchFenced persists the pre-wake incarnation and reports whether
-// it landed, mirroring applyHealPatchFenced (ga-797vy F1). A CAS miss returns
-// (false, nil): another writer rotated the row since the re-read, so this
-// incarnation must not be committed at all. A non-positive revision, or a
-// deployment with conditional writes off, keeps the unconditional write — unlike
-// the advisory heal, the pre-wake commit cannot fail closed without making the
-// start unreachable.
-func applyPreWakePatchFenced(
+// applyFencedSessionLifecyclePatch is the one spelling of a MANDATORY lifecycle
+// write fenced on the revision its caller read, mirroring applyHealPatchFenced
+// (ga-797vy F1) for the writes that cannot fail closed. `purpose` names the
+// write in the resolve error; everything else is identical for every caller,
+// which is the point — a per-caller copy of this body is how two sites end up
+// disagreeing about what a CAS miss means.
+//
+// A CAS miss returns (false, nil): another writer moved the row since the
+// re-read, so this write must not be committed at all and the caller re-derives
+// from a fresh read. A non-positive revision, or a deployment with conditional
+// writes off, keeps the unconditional write — unlike the advisory heal, a
+// mandatory lifecycle write must not fail closed, because doing so makes the
+// operation permanently unreachable on stores with no revision contract.
+//
+// Callers: preWakeCommit (a lost fence there leaves the durable instance_token
+// naming an incarnation with no runtime, ga-l1j53) and
+// commitExactSessionResetHandoff (a lost fence there commits a restart handoff
+// on top of a row some other writer already moved).
+func applyFencedSessionLifecyclePatch(
 	sessFront *sessions.Store,
+	purpose string,
 	id string,
 	loadedRevision int64,
 	batch sessions.MetadataPatch,
 ) (bool, error) {
 	writer, _, resolveErr := beads.ResolveConditionalWriter(sessFront.Store())
 	if resolveErr != nil {
-		return false, fmt.Errorf("resolving conditional writer for pre-wake commit %q: %w", id, resolveErr)
+		return false, fmt.Errorf("resolving conditional writer for %s %q: %w", purpose, id, resolveErr)
 	}
 	if writer != nil && loadedRevision > 0 {
 		if err := writer.UpdateIfMatch(id, loadedRevision, beads.UpdateOpts{Metadata: batch}); err != nil {

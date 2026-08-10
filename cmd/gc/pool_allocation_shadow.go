@@ -39,12 +39,44 @@ const (
 	poolAllocationShadowOccupiedGrowth        poolAllocationShadowReason = "occupied_growth"
 )
 
+// poolAllocationShadowPolicy answers ONE question — is this agent's pool the
+// keyed lane's to allocate — in exactly two fields, and the split between them
+// is the uniform predicate contract every pool-family site obeys
+// (ga-f7v2ft.116 Q1, folded at WD.10a / council F13):
+//
+//	clause 1, ELIGIBILITY, is supported() and nothing else. A caller that
+//	instead compares `reason` to a specific eligible value encodes its own
+//	slice's scope into the shared vocabulary: the excluded arm becomes silently
+//	unsatisfiable at that site while every sibling still accepts it, and a
+//	future eligibility reason reaches only the sites spelled by supported().
+//	Both indicted sites were exactly that, inverted relative to each other —
+//	one demanded Eligible and took unlimited pools only, the other demanded
+//	EligibleAgentCap and took bounded pools only.
+//
+//	clause 2, CAPACITY, is a test on maxActiveSessions, spelled as such. This
+//	is the ONLY honest reading of a cap, because reason and maxActiveSessions
+//	are not independent: the constructor sets maxActiveSessions exactly once,
+//	on the EligibleAgentCap branch, and poolAllocationShadowHasCap admits only
+//	non-negative caps. So under supported(), reason == EligibleAgentCap if and
+//	only if maxActiveSessions >= 0, and reason == Eligible if and only if
+//	maxActiveSessions == -1. Any `reason == EligibleAgentCap && max <op> N`
+//	conjunction is therefore a capacity clause wearing a reason's clothes —
+//	behavior-identical to the capacity half alone, and readable only by someone
+//	who has re-derived this paragraph. TestPoolAllocationShadowPolicyCapacity
+//	IsTheOnlyCapSpelling holds the biconditional so the shorter spelling stays
+//	true.
+//
+// Identity-model exclusions (the canonical singleton, max == 1, whose rows ride
+// the configured-named and configured-dependency families) are capacity-shaped
+// and belong in clause 2 under their own name — never smuggled into clause 1.
 type poolAllocationShadowPolicy struct {
 	reason              poolAllocationShadowReason
 	contributionPresent bool
 	maxActiveSessions   int
 }
 
+// supported is clause 1 of the uniform predicate contract: the single
+// eligibility spelling for every pool-family site. See the type doc.
 func (p poolAllocationShadowPolicy) supported() bool {
 	return p.reason == poolAllocationShadowEligible || p.reason == poolAllocationShadowEligibleAgentCap
 }

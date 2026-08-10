@@ -627,11 +627,12 @@ func (cr *CityRuntime) sessionWaitDependencyPoolWitnessCurrent(snapshot controll
 	// engaging on an unlimited pool. The one genuine exclusion is the
 	// canonical-singleton identity -- max==1 IS that identity
 	// (config.UsesCanonicalSingletonPoolIdentity) and its rows ride other
-	// families -- so it is named honestly instead of hidden in a reason test.
-	// The min-floor check is a redundant belt: min>0 yields reason=MinFloor,
-	// which supported() already rejects.
-	if !policy.supported() ||
-		(policy.reason == poolAllocationShadowEligibleAgentCap && policy.maxActiveSessions == 1) ||
+	// families -- so it is named honestly, as the capacity clause it is: under
+	// supported(), max==1 already implies reason==EligibleAgentCap
+	// (poolAllocationShadowPolicy's type doc), so the reason half this used to
+	// carry said nothing the cap did not. The min-floor check is a redundant
+	// belt: min>0 yields reason=MinFloor, which supported() already rejects.
+	if !policy.supported() || policy.maxActiveSessions == 1 ||
 		agent.EffectiveMinActiveSessions() != 0 {
 		return false
 	}

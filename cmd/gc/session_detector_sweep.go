@@ -1314,12 +1314,10 @@ func detectDrift(in detectorSweepInput, emit *detectorConditionSink, base detect
 	// carrying the durable marker is legacy-ABSENT at this site. Raising it is
 	// the detector-present/legacy-absent mismatch the family precedence above
 	// exists to prevent, and it is not free: the enqueued config_drift admission
-	// overwrites the source a pending public reset was admitted under
-	// (admit(), :383 keeps the earlier source only for anti_entropy and
-	// in_process), so the source-gated keyed reset arm
-	// (session_start_reconcile.go:1920) declines and the reset is dropped
-	// (ga-f7v2ft.138). The seam guard in resolveExactSessionConfigDrift makes the
-	// same call from the row; this keeps the sweep from spending the key at all.
+	// claims the key for a family that will decline it (ga-f7v2ft.138), spending
+	// a sweep slot on a row whose reset the arm below the seam owns. The seam
+	// guard in resolveExactSessionConfigDrift makes the same call from the row;
+	// this keeps the sweep from spending the key at all.
 	if strings.TrimSpace(info.RestartRequested) == "true" {
 		return
 	}

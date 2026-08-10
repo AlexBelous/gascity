@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -1013,6 +1015,307 @@ func TestExactResetSessionUnderLegacyDrainRetainsIntentWithoutStopping(t *testin
 	}
 	if got := env.sp.CountCalls("Start", after.SessionNameMetadata); got != 1 {
 		t.Fatalf("provider Start calls = %d, want only the fixture start", got)
+	}
+}
+
+// assertResetSessionRestarted asserts the whole reset ran in the pass just
+// taken: the durable markers are consumed, exactly one token-bound stop fired
+// against the incarnation the reset was admitted against, and the same bead and
+// name came back up.
+func assertResetSessionRestarted(t *testing.T, env *reconcilerTestEnv, provider *unattendedStopProvider, before session.Info) {
+	t.Helper()
+	after := env.sessionInfo(before.ID)
+	if after.RestartRequested != "" || after.ContinuationResetPending != "" || after.ResetCommittedAt != "" {
+		t.Fatalf("reset markers survived the pass: %+v", after)
+	}
+	if after.ID != before.ID || after.SessionNameMetadata != before.SessionNameMetadata {
+		t.Fatalf("reset session = %+v, want the same bead and name as %+v", after, before)
+	}
+	if after.InstanceToken == before.InstanceToken {
+		t.Fatalf("instance token = %q, want a fresh incarnation", after.InstanceToken)
+	}
+	if calls := provider.stopSnapshot(); len(calls) != 1 ||
+		calls[0].name != before.SessionNameMetadata || calls[0].expectedToken != before.InstanceToken {
+		t.Fatalf("unattended stop calls = %#v, want exactly one token-bound stop", calls)
+	}
+	if got := env.sp.CountCalls("Start", before.SessionNameMetadata); got != 2 {
+		t.Fatalf("provider Start calls = %d, want the fixture start plus exactly one restart", got)
+	}
+	if !provider.IsRunning(before.SessionNameMetadata) {
+		t.Fatal("reset session has no live runtime after the restart")
+	}
+}
+
+// TestExactResetSessionRunsUnderAnyAdmissionSource pins ga-f7v2ft.139: the
+// ordinary reset arm dispatches on the durable row, not on how the admission
+// arrived. This is F2's rule (ga-f7v2ft.125) applied to the family that still
+// carried the source gate. The controller coalesces admissions on a key and
+// keeps ONE source — the earlier one when a pending in_process or an incoming
+// anti_entropy folds, the later one otherwise (session_start_controller.go:435)
+// — so any family that lands on a reset-carrying key before the reset arm sees
+// it consumed the admission, and a source-gated arm then declines with no
+// effect and nothing left to re-detect until the next anti-entropy pass.
+//
+// Each source below reaches the arm on the SAME durable row, and no detector
+// family claims it: the seam's guards are row predicates, so the row that falls
+// through under socket falls through under all of them.
+func TestExactResetSessionRunsUnderAnyAdmissionSource(t *testing.T) {
+	for _, source := range []sessionStartAdmissionSource{
+		sessionStartAdmissionDeadline,
+		sessionStartAdmissionInProcess,
+		sessionStartAdmissionSleepDrain,
+		sessionStartAdmissionExplicitWake,
+		sessionStartAdmissionZombieMark,
+	} {
+		t.Run(string(source), func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+			}
+			provider := &unattendedStopProvider{Fake: env.sp}
+			bead := resetSessionFixture(t, env, provider)
+			before := env.sessionInfo(bead.ID)
+			params := exactSessionStartTestParams(t, env)
+			params.Provider = provider
+			params.Generation = 1
+			params.RolloutMode = rollout.Require
+
+			owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+				SessionID: bead.ID, Source: source,
+			}, params)
+			if owner != exactSessionStartKeyedOwner || err != nil {
+				t.Fatalf("reset under source %q = (owner=%v, err=%v), want the keyed owner to run it", source, owner, err)
+			}
+			assertResetSessionRestarted(t, env, provider, before)
+		})
+	}
+}
+
+// TestExactResetSessionUnderConfigDriftRunsTheResetNotTheConvergence pins the
+// three-way interaction ga-f7v2ft.139 opens up: a row carrying BOTH the durable
+// reset markers and real config drift, admitted under the drift family's own
+// source. The pinned dispatch order resolves it in one direction only —
+// reconcileExactSessionDetectorFamily runs first, D-DRIFT declines any row
+// carrying restart_requested (ga-f7v2ft.138, legacy's own pass order), the key
+// falls through to the reset arm, and de-source-gating that arm is what lets it
+// act on the admission it was handed instead of deferring to anti-entropy.
+//
+// The restart is also what converges the drift: the fresh start re-stamps all
+// four fingerprints, so the yield above costs no convergence.
+func TestExactResetSessionUnderConfigDriftRunsTheResetNotTheConvergence(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := resetSessionFixture(t, env, provider)
+	params := exactSessionStartTestParams(t, env)
+	params.Provider = provider
+	params.Generation = 1
+	params.RolloutMode = rollout.Require
+
+	// Real provision drift, resolved through the same production path the drift
+	// family compares against, so the baseline is one the handler can actually
+	// see rather than a hand-built stub.
+	stale := driftAgentConfig(t, env, params, bead.ID)
+	stale.PreStart = append([]string{"echo stale"}, stale.PreStart...)
+	env.setSessionMetadata(&bead, map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(stale),
+		"started_provision_hash": runtime.ProvisionFingerprint(stale),
+		"started_launch_hash":    runtime.LaunchFingerprint(stale),
+	})
+	before := env.sessionInfo(bead.ID)
+	if strings.TrimSpace(before.RestartRequested) != "true" {
+		t.Fatalf("fixture lost the reset marker: %+v", before)
+	}
+	// The drift is REAL: strip the marker the .138 yield keys on and D-DRIFT
+	// claims this row. Without this leg the test would pass on a fixture that
+	// simply carries no drift at all.
+	undriftedProbe := before
+	undriftedProbe.RestartRequested = ""
+	if !exactSessionConfigDriftCandidate(params, undriftedProbe, session.PersistedResponse{Revision: 1}, env.clk) {
+		t.Fatal("fixture is not the three-way shape: the seeded baseline is not drift D-DRIFT would claim")
+	}
+	if exactSessionConfigDriftCandidate(params, before, session.PersistedResponse{Revision: 1}, env.clk) {
+		t.Fatal("D-DRIFT claimed a restart-requested row; the ga-f7v2ft.138 yield regressed")
+	}
+
+	owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
+		SessionID: bead.ID, Source: sessionStartAdmissionConfigDrift,
+	}, params)
+	if owner != exactSessionStartKeyedOwner || err != nil {
+		t.Fatalf("drifted reset result = (owner=%v, err=%v), want the keyed owner to run the reset", owner, err)
+	}
+	assertResetSessionRestarted(t, env, provider, before)
+	after := env.sessionInfo(bead.ID)
+	if after.StartedConfigHash == before.StartedConfigHash {
+		t.Fatalf("started_config_hash = %q, want the restart to have re-stamped the drifted baseline", after.StartedConfigHash)
+	}
+}
+
+// resetHandoffRaceStore lands one concurrent writer in the window between the
+// reset handoff's authority re-read and its own write. The handoff's Get on the
+// row IS that re-read (with the runtime already dead the stop block never runs,
+// so the first Get inside the body is the authority read), and the interloper
+// fires the moment it returns.
+//
+// It declares its conditional-writes resolution target so the fenced write
+// resolves through to the stamped store exactly as it does in production; a
+// wrapper that declared nothing would collapse resolution to unset->legacy and
+// the test would prove only that its own plumbing suppressed the fence.
+// sawRawWrite records the unconditional spelling reaching the store after the
+// race, which is the regression itself.
+type resetHandoffRaceStore struct {
+	beads.Store
+	target      string
+	interloper  map[string]string
+	reads       int
+	fired       bool
+	sawRawWrite bool
+}
+
+func (s *resetHandoffRaceStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+func (s *resetHandoffRaceStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.Store.Get(id)
+	if err != nil || id != s.target {
+		return bead, err
+	}
+	s.reads++
+	if s.reads == 1 && !s.fired {
+		s.fired = true
+		if raceErr := s.Store.SetMetadataBatch(id, s.interloper); raceErr != nil {
+			return bead, fmt.Errorf("seeding the concurrent reset-handoff writer: %w", raceErr)
+		}
+	}
+	return bead, nil
+}
+
+func (s *resetHandoffRaceStore) SetMetadataBatch(id string, metadata map[string]string) error {
+	if _, handoff := metadata[session.ResetCommittedAtKey]; handoff && id == s.target {
+		s.sawRawWrite = true
+	}
+	return s.Store.SetMetadataBatch(id, metadata)
+}
+
+// TestExactResetHandoffRefusesAWriterThatRacedTheAuthorityRead pins the
+// ga-l1j53 P1 fence on commitExactSessionResetHandoff's check-then-write
+// (council F14). The handoff re-reads the row, verifies the reset authority
+// still holds, and then writes RestartRequestPatch; unfenced, anything that
+// lands in that window is silently overwritten and a fresh-conversation restart
+// commits on top of a row whose identity has already moved -- the same class of
+// split-brain ga-l1j53 proved for the pre-wake commit.
+//
+// A lost fence must be a REFUSAL with zero effect: the durable reset markers
+// are retained, so the next admission re-derives the handoff from whatever the
+// winner left.
+func TestExactResetHandoffRefusesAWriterThatRacedTheAuthorityRead(t *testing.T) {
+	env := newReconcilerTestEnv()
+	// The fence only exists on a store stamped with conditional writes, so the
+	// fixture opens one through the real factory rather than the bare memstore.
+	env.store = newPreWakeFenceStore(t, gate.Require)
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := resetSessionFixture(t, env, provider)
+	// The runtime is already dead, so the handoff skips the stop block entirely
+	// and its first Get on the row is the authority re-read the fence protects.
+	if err := provider.Stop(bead.Metadata["session_name"]); err != nil {
+		t.Fatalf("stop fixture runtime: %v", err)
+	}
+	before := env.sessionInfo(bead.ID)
+	if writer, _, err := beads.ResolveConditionalWriter(env.store); err != nil || writer == nil {
+		t.Fatalf("test store resolved no conditional writer (writer=%v, err=%v); there is no fence to prove", writer, err)
+	}
+
+	const racedToken = "raced-token"
+	if before.InstanceToken == racedToken {
+		t.Fatal("fixture seeded the raced token; the assertions below would prove nothing")
+	}
+	race := &resetHandoffRaceStore{
+		Store:  env.store,
+		target: bead.ID,
+		// The shape that makes an overwrite unsafe: another writer rotated the
+		// incarnation this reset was admitted against.
+		interloper: map[string]string{"instance_token": racedToken, "generation": "9"},
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.Provider = provider
+	params.Generation = 1
+	params.RolloutMode = rollout.Require
+	params.Store = race
+
+	tp, err := resolveExactSessionStartTemplate(params, before, &env.cfg.Agents[0], env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve reset template: %v", err)
+	}
+	info, initial, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("read reset row: %v", err)
+	}
+	_, response, err := commitExactOrdinaryResetHandoff(params, info, initial, tp, env.clk, io.Discard)
+	if !race.fired {
+		t.Fatal("the concurrent writer never raced the handoff; the fixture proves nothing")
+	}
+	if race.sawRawWrite {
+		t.Fatal("the reset handoff wrote unconditionally after the race; the ga-l1j53 fence is not applied")
+	}
+	if err == nil {
+		t.Fatalf("raced reset handoff committed (response=%+v), want a refusal", response)
+	}
+	after := env.sessionInfo(bead.ID)
+	if after.InstanceToken != racedToken {
+		t.Fatalf("instance token = %q, want the concurrent writer's %q preserved", after.InstanceToken, racedToken)
+	}
+	if after.ResetCommittedAt != "" {
+		t.Fatalf("reset_committed_at = %q, want no handoff committed on top of the race", after.ResetCommittedAt)
+	}
+	if after.RestartRequested != "true" || after.ContinuationResetPending != "true" {
+		t.Fatalf("durable reset intent = %+v, want the requested marker pair retained for the next admission", after)
+	}
+}
+
+// TestExactResetHandoffCommitsWhenNothingRacesIt pins that the fence is
+// invisible to the ordinary single-writer reset: the handoff on the revision
+// its own authority re-read carried lands and consumes the requested marker.
+func TestExactResetHandoffCommitsWhenNothingRacesIt(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.store = newPreWakeFenceStore(t, gate.Require)
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := resetSessionFixture(t, env, provider)
+	if err := provider.Stop(bead.Metadata["session_name"]); err != nil {
+		t.Fatalf("stop fixture runtime: %v", err)
+	}
+	params := exactSessionStartTestParams(t, env)
+	params.Provider = provider
+	params.Generation = 1
+	params.RolloutMode = rollout.Require
+
+	info, initial, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("read reset row: %v", err)
+	}
+	tp, err := resolveExactSessionStartTemplate(params, info, &env.cfg.Agents[0], env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve reset template: %v", err)
+	}
+	committed, response, err := commitExactOrdinaryResetHandoff(params, info, initial, tp, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("unraced reset handoff: %v", err)
+	}
+	if response.Revision == 0 || response.Revision == initial.Revision {
+		t.Fatalf("committed revision = %d, want a moved revision (was %d)", response.Revision, initial.Revision)
+	}
+	if !exactOrdinaryResetCommitted(committed) {
+		t.Fatalf("committed row = %+v, want the requested marker consumed and the handoff durable", committed)
 	}
 }
 

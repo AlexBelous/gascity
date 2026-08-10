@@ -199,6 +199,10 @@ const (
 	TraceReasonUserHold              TraceReasonCode = "user_hold"
 	TraceReasonQuarantine            TraceReasonCode = "quarantine"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
+	// TraceReasonAdmissionOverflow marks a key a bounded admission channel
+	// dropped. Recovery is census-owed re-detection, never a retry or a legacy
+	// poke (DETECTOR.md §2, degradation rules).
+	TraceReasonAdmissionOverflow TraceReasonCode = "admission_overflow"
 )
 
 type TraceOutcomeCode string

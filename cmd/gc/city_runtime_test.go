@@ -791,11 +791,11 @@ func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
 		t.Fatalf("Create routed work: %v", err)
 	}
 
-	// The ready-demand scan is floored at readyDemandFingerprintFloor, so put
+	// The declared routed-work read is floored at readyRoutedWorkViewFloor, so put
 	// this second tick where a real patrol tick always is — past the floor.
 	// Every patrol_interval at or above the floor (the 30s default included)
-	// lands here; see TestCityRuntimeReadyDemandFingerprintFloorsPatrolRescan.
-	cr.readyDemandFingerprintAt = time.Now().Add(-2 * readyDemandFingerprintFloor)
+	// lands here; see TestCityRuntimeReadyRoutedWorkViewFloorsPatrolRescan.
+	cr.readyRoutedWorkViewAt = time.Now().Add(-2 * readyRoutedWorkViewFloor)
 	second := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	if buildCalls != 2 {
 		t.Fatalf("buildDesiredState call count = %d, want 2 after ready-demand change", buildCalls)
@@ -2214,9 +2214,8 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 		stderr: io.Discard,
 	}
 	cr.demandSnapshot = &runtimeDemandSnapshot{
-		createdAt:              time.Now(),
-		sessionFingerprint:     sessionBeadSnapshotFingerprint(nil),
-		readyDemandFingerprint: cr.readyDemandSnapshotFingerprint(),
+		createdAt:          time.Now(),
+		sessionFingerprint: sessionBeadSnapshotFingerprint(nil),
 		result: DesiredStateResult{State: map[string]TemplateParams{
 			"headless-agent": {
 				SessionName: "headless-agent",
@@ -2232,7 +2231,7 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 	}
 }
 
-func TestCityRuntimeReadyDemandFingerprintLogsStableStoreError(t *testing.T) {
+func TestCityRuntimeReadyRoutedWorkViewLogsStableStoreError(t *testing.T) {
 	var logBuf bytes.Buffer
 	oldLogOutput := log.Writer()
 	log.SetOutput(&logBuf)
@@ -2252,17 +2251,17 @@ func TestCityRuntimeReadyDemandFingerprintLogsStableStoreError(t *testing.T) {
 		stderr: io.Discard,
 	}
 
-	first := cr.readyDemandSnapshotFingerprint()
-	second := cr.readyDemandSnapshotFingerprint()
+	first := cr.readReadyRoutedWorkView().Fingerprint
+	second := cr.readReadyRoutedWorkView().Fingerprint
 
 	if first != second {
-		t.Fatalf("readyDemandSnapshotFingerprint changed across stable store errors: %q != %q", first, second)
+		t.Fatalf("routed-work view fingerprint changed across stable store errors: %q != %q", first, second)
 	}
 	if store.readyCalls != 2 {
 		t.Fatalf("Ready calls = %d, want 2", store.readyCalls)
 	}
-	if got := logBuf.String(); !strings.Contains(got, "readyDemandSnapshotFingerprint: store test-city: backing ready should not be used") {
-		t.Fatalf("log output = %q, want readyDemandSnapshotFingerprint store error", got)
+	if got := logBuf.String(); !strings.Contains(got, "readyRoutedWorkView: store test-city: backing ready should not be used") {
+		t.Fatalf("log output = %q, want readyRoutedWorkView store error", got)
 	}
 }
 
@@ -2310,7 +2309,7 @@ func (s *unstableErrorReadyStore) Ready(...beads.ReadyQuery) ([]beads.Bead, erro
 	return nil, fmt.Errorf("dial dolt: connection %d refused at %d", s.readyCalls, s.readyCalls*7)
 }
 
-func TestCityRuntimeReadyDemandFingerprintFloorsPatrolRescan(t *testing.T) {
+func TestCityRuntimeReadyRoutedWorkViewFloorsPatrolRescan(t *testing.T) {
 	store := &readyStaticStore{Store: beads.NewMemStore(), ready: []beads.Bead{{ID: "work-1", Status: "open"}}}
 	buildCalls := 0
 	cr := &CityRuntime{
@@ -2361,14 +2360,14 @@ func TestCityRuntimeReadyDemandFingerprintFloorsPatrolRescan(t *testing.T) {
 
 	// Once the floor elapses the scan runs again: at the default 30s patrol
 	// cadence every tick is past the floor, so behavior is unchanged.
-	cr.readyDemandFingerprintAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
+	cr.readyRoutedWorkViewAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
 	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	if store.readyCalls != 2 {
 		t.Fatalf("Ready calls after floor elapsed = %d, want 2", store.readyCalls)
 	}
 }
 
-func TestCityRuntimeReadyDemandFingerprintDefaultCadenceScansEveryTick(t *testing.T) {
+func TestCityRuntimeReadyRoutedWorkViewDefaultCadenceScansEveryTick(t *testing.T) {
 	store := &readyStaticStore{Store: beads.NewMemStore(), ready: []beads.Bead{{ID: "work-1", Status: "open"}}}
 	cr := &CityRuntime{
 		cityName: "test-city",
@@ -2392,7 +2391,7 @@ func TestCityRuntimeReadyDemandFingerprintDefaultCadenceScansEveryTick(t *testin
 	for i := range ticks {
 		if i > 0 {
 			// Advance the clock by one default patrol interval.
-			cr.readyDemandFingerprintAt = cr.readyDemandFingerprintAt.Add(-runtimeDemandSnapshotMaxAge)
+			cr.readyRoutedWorkViewAt = cr.readyRoutedWorkViewAt.Add(-runtimeDemandSnapshotMaxAge)
 		}
 		_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	}
@@ -2401,7 +2400,7 @@ func TestCityRuntimeReadyDemandFingerprintDefaultCadenceScansEveryTick(t *testin
 	}
 }
 
-func TestCityRuntimeReadyDemandFingerprintStableAcrossUnstableStoreErrors(t *testing.T) {
+func TestCityRuntimeReadyRoutedWorkViewStableAcrossUnstableStoreErrors(t *testing.T) {
 	oldLogOutput := log.Writer()
 	log.SetOutput(io.Discard)
 	t.Cleanup(func() { log.SetOutput(oldLogOutput) })
@@ -2426,10 +2425,10 @@ func TestCityRuntimeReadyDemandFingerprintStableAcrossUnstableStoreErrors(t *tes
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	first := cr.readyDemandSnapshotFingerprint()
-	second := cr.readyDemandSnapshotFingerprint()
+	first := cr.readReadyRoutedWorkView().Fingerprint
+	second := cr.readReadyRoutedWorkView().Fingerprint
 	if first != second {
-		t.Fatalf("readyDemandSnapshotFingerprint changed across an unstable store outage: %q != %q", first, second)
+		t.Fatalf("routed-work view fingerprint changed across an unstable store outage: %q != %q", first, second)
 	}
 
 	// The outage must degrade to cache reuse, not a per-tick buildDesiredState
@@ -2437,7 +2436,7 @@ func TestCityRuntimeReadyDemandFingerprintStableAcrossUnstableStoreErrors(t *tes
 	sessionBeads := newSessionBeadSnapshot(nil)
 	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	for range 3 {
-		cr.readyDemandFingerprintAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
+		cr.readyRoutedWorkViewAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
 		_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	}
 	if buildCalls != 1 {

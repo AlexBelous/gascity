@@ -1,0 +1,32 @@
+feat(reconciler): promote the ready-demand scan to the sweep's routed-work view
+
+Q2 resolved yes-with-promotion (WC council, ga-f7v2ft.117). The per-store
+ReadyLive read stops being a fingerprint hash input and becomes the detector
+sweep's DECLARED routed-work view: one bounded read per store per patrol,
+serving two consumers off one read - the demand snapshot's invalidation and
+(next commit) the pool-allocation enqueue by exact
+(workID, poolTarget, sourceStore) key.
+
+Deleted together per the WE ledger, each verified to have no remaining live
+caller: readyDemandSnapshotFingerprint, writeReadyDemandFingerprintBead,
+flooredReadyDemandSnapshotFingerprint, readyDemandFingerprintFloor, the
+runtimeDemandSnapshot.readyDemandFingerprint field, and
+requestReadyRoutedWorkLegacyFallback with its readyRoutedWorkPokePending flag.
+
+Invalidation moves from a fingerprint carried on the snapshot to a change edge
+detected at the read and consumed exactly once by the next refresh; the first
+observation raises no edge, because a runtime with no snapshot rebuilds for
+that reason alone. The view's hash input is the declared projection
+(store, id, resolved pool target, status, type, kind, contract, assigned), not
+the raw bead: UpdatedAt is deliberately gone, since it rebuilt desired state on
+every touch for a change no demand decision could see.
+
+Pool-allocation overflow and unhandled/failed allocations are now census-owed
+re-detection: recordRoutedWorkPoolAllocationOverflow traces the dropped key and
+returns. The legacy poke is retired at all four sites, so a routed key never
+crosses back to the legacy pool builder.
+
+WD.16's cadence-floor tests move onto the promoted read (readyRoutedWorkViewFloor
+/ readyRoutedWorkViewAt), keeping the same cadence contract.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

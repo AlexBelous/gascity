@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -18,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -119,11 +117,14 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
-	// readyDemandFingerprint memoizes the last ready-demand scan so consecutive
-	// patrol ticks inside readyDemandFingerprintFloor reuse it instead of
-	// re-running a cache-bypassing ReadyLive query against every store.
-	readyDemandFingerprint   string
-	readyDemandFingerprintAt time.Time
+	// readyRoutedWorkView memoizes the declared routed-work read so every
+	// consumer inside one patrol tick — the demand snapshot's invalidation and
+	// the detector sweep's pool-fill enqueue — shares ONE bounded ReadyLive per
+	// store. readyRoutedWorkViewChanged is the edge the refresh decision
+	// consumes (see flooredReadyRoutedWorkView).
+	readyRoutedWorkView        readyRoutedWorkView
+	readyRoutedWorkViewAt      time.Time
+	readyRoutedWorkViewChanged bool
 
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
@@ -238,7 +239,6 @@ type CityRuntime struct {
 	sessionWaitDependencyReadyPokePending atomic.Bool
 	// A certified ready routed-work result uses the same legacy tick, but keeps
 	// an independent bit so either exact source can consume its own request.
-	readyRoutedWorkPokePending atomic.Bool
 	// Stable exact-key hints enter the serialized runtime loop through this
 	// bounded channel. Overflow remains legacy-owned.
 	routedWorkPoolAllocationCh chan routedWorkPoolAllocationHint
@@ -269,10 +269,9 @@ const runtimeDemandSnapshotMaxAge = 30 * time.Second
 const scaleCheckDemandMinInterval = 1 * time.Second
 
 type runtimeDemandSnapshot struct {
-	createdAt              time.Time
-	sessionFingerprint     string
-	readyDemandFingerprint string
-	result                 DesiredStateResult
+	createdAt          time.Time
+	sessionFingerprint string
+	result             DesiredStateResult
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -595,7 +594,12 @@ func (cr *CityRuntime) installReadyRoutedWorkEventAdmission() error {
 		}
 		cr.recordReadyRoutedWorkDemandContribution(contribution)
 		if !cr.enqueueRoutedWorkPoolAllocation(contribution) {
-			cr.requestReadyRoutedWorkLegacyFallback()
+			// Census-owed re-detection (Q2): the 256-slot hint channel drops on
+			// overflow, and the drop is recorded and dropped rather than
+			// converted into a legacy poke. The condition is level-triggered off
+			// durable state, so the next patrol's declared routed-work view
+			// re-detects the same unallocated key. Only latency is lost.
+			cr.recordRoutedWorkPoolAllocationOverflow(contribution)
 		}
 	}); err != nil {
 		return err
@@ -1160,7 +1164,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// certified readiness is waiting on a tick; the tick that services
 			// the poke consumes them so they never latch true.
 			cr.sessionWaitDependencyReadyPokePending.Store(false)
-			cr.readyRoutedWorkPokePending.Store(false)
 			runTick("poke")
 		case <-cr.nudgeWakeCh:
 			cr.safeTick(func() {
@@ -2917,35 +2920,37 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	providerHealth := loadProviderHealthSnapshot(cr.cityPath)
 	cr.publishProviderHealthSnapshot(providerHealth)
 	runDetectorSweep(ctx, trace, detectorSweepInput{
-		CityPath:           cr.cityPath,
-		CityName:           cityName,
-		Cfg:                cr.cfg,
-		Provider:           cr.sp,
-		Rows:               sessionBeads.OpenForReconcile(),
-		Snapshot:           sessionBeads,
-		Desired:            desiredState,
-		CfgNames:           cfgNames,
-		PoolDesired:        poolDesired,
-		NamedDemand:        result.NamedSessionDemand,
-		NamedRoutedDemand:  result.NamedSessionRoutedDemand,
-		WorkSet:            workSet,
-		ReadyWaitSet:       readyWaitSet,
-		AssignedWorkBeads:  awakeAssignedWorkBeads,
-		ReadyAssignedFlags: readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs),
-		ProviderHealth:     providerHealth,
-		Drains:             cr.sessionDrains,
-		Idle:               cr.it,
-		MaxAge:             cr.mat,
-		SuspendDeferrals:   cr.detectorSuspendDeferrals(),
-		IdleProbes:         cr.detectorIdleProbes(),
-		Clock:              clock.Real{},
-		StartupTimeout:     cr.cfg.Session.StartupTimeoutDuration(),
-		StoreQueryPartial:  result.snapshotQueryPartial(),
-		DeferSessionCloses: bootReconcile,
-		Trigger:            detectorSweepTriggerFor(bootReconcile),
-		Admit:              cr.detectorAdmitFunc(),
-		PublishLiveness:    cr.publishSessionLiveness,
-		AdmitWake:          cr.detectorWakeAdmitFunc(),
+		CityPath:              cr.cityPath,
+		CityName:              cityName,
+		Cfg:                   cr.cfg,
+		Provider:              cr.sp,
+		Rows:                  sessionBeads.OpenForReconcile(),
+		Snapshot:              sessionBeads,
+		Desired:               desiredState,
+		CfgNames:              cfgNames,
+		PoolDesired:           poolDesired,
+		RoutedWork:            cr.flooredReadyRoutedWorkView().unallocated(),
+		NamedDemand:           result.NamedSessionDemand,
+		NamedRoutedDemand:     result.NamedSessionRoutedDemand,
+		WorkSet:               workSet,
+		ReadyWaitSet:          readyWaitSet,
+		AssignedWorkBeads:     awakeAssignedWorkBeads,
+		ReadyAssignedFlags:    readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs),
+		ProviderHealth:        providerHealth,
+		Drains:                cr.sessionDrains,
+		Idle:                  cr.it,
+		MaxAge:                cr.mat,
+		SuspendDeferrals:      cr.detectorSuspendDeferrals(),
+		IdleProbes:            cr.detectorIdleProbes(),
+		Clock:                 clock.Real{},
+		StartupTimeout:        cr.cfg.Session.StartupTimeoutDuration(),
+		StoreQueryPartial:     result.snapshotQueryPartial(),
+		DeferSessionCloses:    bootReconcile,
+		Trigger:               detectorSweepTriggerFor(bootReconcile),
+		Admit:                 cr.detectorAdmitFunc(),
+		PublishLiveness:       cr.publishSessionLiveness,
+		AdmitWake:             cr.detectorWakeAdmitFunc(),
+		EnqueuePoolAllocation: cr.detectorPoolAllocationEnqueueFunc(),
 	})
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
@@ -3978,18 +3983,20 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	configChanged bool,
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
-	readyDemandFingerprint := ""
 	refresh := cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint)
-	if !refresh && trigger == "patrol" && cr.demandSnapshotsEnabled() {
-		readyDemandFingerprint = cr.flooredReadyDemandSnapshotFingerprint()
-		refresh = cr.demandSnapshot.readyDemandFingerprint != readyDemandFingerprint
+	if trigger == "patrol" && cr.demandSnapshotsEnabled() {
+		// The declared routed-work view IS the invalidation signal: one bounded
+		// read per store per patrol (floored), shared with the detector sweep,
+		// and a moved view means routed demand moved.
+		cr.flooredReadyRoutedWorkView()
+		if cr.takeReadyRoutedWorkViewChanged() {
+			refresh = true
+		}
 	}
 	if refresh {
-		if trigger == "patrol" && cr.demandSnapshotsEnabled() && readyDemandFingerprint == "" {
-			readyDemandFingerprint = cr.flooredReadyDemandSnapshotFingerprint()
-		} else if cr.demandSnapshot != nil {
-			readyDemandFingerprint = cr.demandSnapshot.readyDemandFingerprint
-		}
+		// A rebuild for any cause absorbs a pending view edge: leaving it set
+		// would refresh again next tick for a change this build already saw.
+		cr.takeReadyRoutedWorkViewChanged()
 		result := cr.buildDesiredState(sessionBeads, trace)
 		var openSessionInfos []sessionpkg.Info
 		if sessionBeads != nil {
@@ -4009,10 +4016,9 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
 		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
-			createdAt:              time.Now(),
-			sessionFingerprint:     sessionFingerprint,
-			readyDemandFingerprint: readyDemandFingerprint,
-			result:                 result,
+			createdAt:          time.Now(),
+			sessionFingerprint: sessionFingerprint,
+			result:             result,
 		}
 	}
 	if cr.demandSnapshot == nil {
@@ -4070,104 +4076,6 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	// bites sub-second patrol_intervals, where it stops the probe subprocess
 	// from running on every tick.
 	return scaleCheckDemandMinInterval
-}
-
-// readyDemandFingerprintFloor bounds how often consecutive patrol ticks re-run
-// the cache-bypassing ready-demand scan. The scan queries every store on every
-// tick, so a sub-second patrol_interval reproduces exactly the query storm
-// scaleCheckDemandMinInterval was introduced to stop. Reusing the previous
-// fingerprint inside the floor is a no-op at any patrol_interval at or above it
-// (the 30s default included) and bounds ready-work discovery latency to the
-// floor only on pathologically fast cadences. Non-patrol triggers — including
-// certified-readiness routed-work and wait-dependency pokes — never reach this
-// path (see shouldRefreshDemandSnapshot), so an event-driven wake still
-// rebuilds immediately.
-const readyDemandFingerprintFloor = scaleCheckDemandMinInterval
-
-// flooredReadyDemandSnapshotFingerprint returns the memoized ready-demand
-// fingerprint when the previous scan is younger than readyDemandFingerprintFloor,
-// and otherwise rescans and re-memoizes.
-func (cr *CityRuntime) flooredReadyDemandSnapshotFingerprint() string {
-	if !cr.readyDemandFingerprintAt.IsZero() && time.Since(cr.readyDemandFingerprintAt) < readyDemandFingerprintFloor {
-		return cr.readyDemandFingerprint
-	}
-	cr.readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
-	cr.readyDemandFingerprintAt = time.Now()
-	return cr.readyDemandFingerprint
-}
-
-func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
-	stores := []struct {
-		ref   string
-		store beads.Store
-	}{{ref: cr.cityName, store: cr.cityBeadStore()}}
-	rigStores := cr.rigBeadStores()
-	refs := make([]string, 0, len(rigStores))
-	for ref := range rigStores {
-		refs = append(refs, ref)
-	}
-	sort.Strings(refs)
-	for _, ref := range refs {
-		stores = append(stores, struct {
-			ref   string
-			store beads.Store
-		}{ref: ref, store: rigStores[ref]})
-	}
-
-	h := fnv.New64a()
-	for _, entry := range stores {
-		_, _ = io.WriteString(h, entry.ref)
-		_, _ = io.WriteString(h, "\x00")
-		if entry.store == nil {
-			_, _ = io.WriteString(h, "<nil>")
-			_, _ = io.WriteString(h, "\x00")
-			continue
-		}
-		ready, err := beads.ReadyLive(entry.store, beads.ReadyQuery{TierMode: beads.TierBoth})
-		if err != nil {
-			// Fold a stable marker, never the error text. A real outage reports
-			// varying connection ids, retry counts, or timestamps, and hashing
-			// that text turns the outage into a changed fingerprint — and so a
-			// full buildDesiredState rebuild — on every patrol tick. The marker
-			// keeps an unreachable store distinguishable from an empty one while
-			// degrading the outage to cache reuse. The error itself is logged.
-			log.Printf("readyDemandSnapshotFingerprint: store %s: %v", entry.ref, err)
-			_, _ = io.WriteString(h, "error")
-			_, _ = io.WriteString(h, "\x00")
-			continue
-		}
-		sort.Slice(ready, func(i, j int) bool {
-			return ready[i].ID < ready[j].ID
-		})
-		for _, bead := range ready {
-			writeReadyDemandFingerprintBead(h, bead)
-		}
-	}
-	return fmt.Sprintf("%x", h.Sum64())
-}
-
-func writeReadyDemandFingerprintBead(w io.Writer, bead beads.Bead) {
-	_, _ = io.WriteString(w, bead.ID)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Status)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Type)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Assignee)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.UpdatedAt.Format(time.RFC3339Nano))
-	_, _ = io.WriteString(w, "\x00")
-	for _, key := range []string{
-		beadmeta.RoutedToMetadataKey,
-		beadmeta.RunTargetMetadataKey,
-		beadmeta.KindMetadataKey,
-		beadmeta.FormulaContractMetadataKey,
-	} {
-		_, _ = io.WriteString(w, key)
-		_, _ = io.WriteString(w, "\x00")
-		_, _ = io.WriteString(w, bead.Metadata[key])
-		_, _ = io.WriteString(w, "\x00")
-	}
 }
 
 func (cr *CityRuntime) demandSnapshotsEnabled() bool {

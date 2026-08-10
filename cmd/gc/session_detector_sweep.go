@@ -181,6 +181,7 @@ const (
 	detectorReasonWakeTarget              TraceReasonCode = "detector_wake_target"
 	detectorReasonWakeTargetNamed         TraceReasonCode = "detector_wake_target_named"
 	detectorReasonWakeTargetDependency    TraceReasonCode = "detector_wake_target_dependency"
+	detectorReasonWakePoolFill            TraceReasonCode = "detector_wake_pool_fill"
 	detectorReasonZombie                  TraceReasonCode = "detector_zombie"
 	detectorReasonProgressStall           TraceReasonCode = "detector_progress_stall"
 	detectorReasonProgressStallExempt     TraceReasonCode = "detector_progress_stall_exempt"
@@ -219,6 +220,7 @@ var detectorShadowReasons = []TraceReasonCode{
 	detectorReasonWakeTarget,
 	detectorReasonWakeTargetNamed,
 	detectorReasonWakeTargetDependency,
+	detectorReasonWakePoolFill,
 	detectorReasonZombie,
 	detectorReasonProgressStall,
 	detectorReasonProgressStallExempt,
@@ -353,6 +355,11 @@ type detectorCondition struct {
 	Outcome     TraceOutcomeCode
 	Fields      map[string]any
 
+	// Work carries the routed-work key for the one D-WAKE arm that has no
+	// session row of its own: the pool-under-min FILL. Its zero value means the
+	// condition is keyed on a session, which every other family's is.
+	Work readyRoutedWorkEntry
+
 	// AdmissionSource and AdmissionOutcome are filled by routeDetectorConditions
 	// for the arms of an ACTING family. They stay zero for every shadow-only
 	// family, which is what keeps a shadow record's effect_owner honest.
@@ -378,6 +385,16 @@ const (
 	// ride the bare Admit, so the row stays legacy's and is re-detected next
 	// sweep rather than admitted without its ownership proof.
 	detectorAdmissionRefusedUncertifiable detectorRouteOutcome = "refused_uncertifiable"
+	// detectorAdmissionQueuedPoolAllocation is D-WAKE's pool-under-min FILL
+	// disposition: the exact (workID, poolTarget, sourceStore) key was handed to
+	// the pool-allocation admission. That arm has no session-start admission
+	// source, so this outcome is what marks it keyed-owned.
+	detectorAdmissionQueuedPoolAllocation detectorRouteOutcome = "queued_pool_allocation"
+	// detectorAdmissionRefusedOverflow is the traced refusal for a bounded
+	// admission channel that dropped the key. Recovery is census-owed: the
+	// condition is derived from durable state, so the next sweep re-detects it.
+	// The seam must not retry, block, or fall back to acting itself.
+	detectorAdmissionRefusedOverflow detectorRouteOutcome = "refused_overflow"
 )
 
 // detectorSweepResult is the sweep's whole output. During the WD wave it is
@@ -433,6 +450,13 @@ type detectorSweepInput struct {
 	Desired     map[string]TemplateParams
 	CfgNames    map[string]bool
 	PoolDesired map[string]int
+
+	// RoutedWork is the declared routed-work view's UNALLOCATED entries: one
+	// bounded ReadyLive read per store per patrol, promoted from the retired
+	// ready-demand fingerprint scan (DETECTOR.md §2, Q2 resolved
+	// yes-with-promotion). Only the patrol/boot call site supplies one — it is
+	// the site that owns the read and the only site that routes.
+	RoutedWork []readyRoutedWorkEntry
 
 	NamedDemand        map[string]bool
 	NamedRoutedDemand  map[string]bool
@@ -502,6 +526,15 @@ type detectorSweepInput struct {
 	// controller can mint a certificate, so a sweep that cannot certify simply
 	// records and leaves the row to legacy.
 	AdmitWake func(sessionID string) (sessionStartAdmissionOutcome, error)
+
+	// EnqueuePoolAllocation is D-WAKE's pool-under-min FILL sink (WD.10b). The
+	// arm has no session row to admit — the member does not exist yet — so its
+	// exact key is the routed work's (workID, poolTarget, sourceStore) triple
+	// and its handler is the existing pool-allocation admission. It reports
+	// false when the bounded hint channel drops the key, which the sweep traces
+	// and leaves to the next census rather than retrying. Nil wherever no keyed
+	// controller owns pool allocation.
+	EnqueuePoolAllocation func(readyRoutedWorkEntry) bool
 }
 
 // detectSessionConditions classifies every session row in the snapshot into
@@ -649,6 +682,7 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 
 	detectorGrantIdleProbeSlots(in, emit, idleProbeCandidates)
 	detectDuplicateNamed(in, emit, namedIdentityRows)
+	detectPoolFill(in, emit, known)
 	// Retire every confirmation window this sweep did not count. A row that
 	// stopped raising named live-orphan candidacy — its spec came back, it went
 	// dead, it picked up work — gets a fresh window next time, which is what
@@ -1497,6 +1531,87 @@ func detectSleep(
 // — fail-closed, in the direction of not draining — because the narrowed sweeps
 // have no cross-tick identity and a second sweep spending the same budget on the
 // same tick would double the fleet's probe rate.
+// detectPoolFill raises D-WAKE's pool-under-min FILL arm (WD.10b): a template
+// whose open pool member count is under its desired count, plus routed work with
+// no allocation. Both halves come from data the tick already carries — the
+// desired counts ComputePoolDesiredStates precomputed in loadDemandSnapshot, and
+// the declared routed-work view's unallocated entries — so detection itself
+// still pays no read of its own.
+//
+// It is the family's only arm without a session row: there is nothing asleep to
+// wake, the member does not exist yet. That is why its key is the routed work's
+// (workID, poolTarget, sourceStore) triple and its sink is the pool-allocation
+// admission rather than the session-start controller. It is also what makes the
+// arm census-owed re-detection: a hint the 256-slot channel dropped, an
+// allocation that failed, or an event nobody fired all leave the same durable
+// condition — unallocated routed work under an under-filled pool — which this
+// arm re-raises on the next sweep.
+//
+// Demand already spent is never re-raised: a member the planner counts as
+// serving new demand (pending create, creating, start-pending, wait-held) is an
+// open member here too, which is the same accounting
+// poolSessionConsumesNewDemandInfo gives the legacy planner.
+func detectPoolFill(in detectorSweepInput, emit *detectorConditionSink, rows []sessionpkg.ReconcileSession) {
+	if len(in.RoutedWork) == 0 || len(in.PoolDesired) == 0 {
+		return
+	}
+	open := detectorOpenPoolMembersByTemplate(in.Cfg, rows)
+	filled := make(map[string]int, len(in.PoolDesired))
+	for _, entry := range in.RoutedWork {
+		target := strings.TrimSpace(entry.PoolTarget)
+		if target == "" || entry.Assigned {
+			continue
+		}
+		desired := in.PoolDesired[target]
+		if desired <= 0 {
+			continue
+		}
+		if open[target]+filled[target] >= desired {
+			continue
+		}
+		filled[target]++
+		emit.add(detectorCondition{
+			Family:   detectorFamilyWake,
+			Template: target,
+			Site:     TraceSiteReconcilerWakeDecision,
+			Reason:   detectorReasonWakePoolFill,
+			Outcome:  TraceOutcomeStartCandidate,
+			Work:     entry,
+			Fields: map[string]any{
+				"predicted_effect": "start",
+				"work_id":          entry.WorkID,
+				"pool_target":      target,
+				"source_store":     entry.SourceStore,
+				"pool_open":        open[target],
+				"pool_desired":     desired,
+			},
+		}, false)
+	}
+}
+
+// detectorOpenPoolMembersByTemplate counts the open pool-managed rows per
+// template the way the pool planner counts them: a row that already represents
+// spent demand counts, so the sweep never asks for a member the planner has
+// already committed to.
+func detectorOpenPoolMembersByTemplate(cfg *config.City, rows []sessionpkg.ReconcileSession) map[string]int {
+	open := make(map[string]int)
+	for _, row := range rows {
+		info := row.Info
+		if info.Closed || !isPoolManagedSessionInfo(info) {
+			continue
+		}
+		template := normalizedSessionTemplateInfo(info, cfg)
+		if template == "" {
+			template = strings.TrimSpace(info.Template)
+		}
+		if template == "" {
+			continue
+		}
+		open[template]++
+	}
+	return open
+}
+
 func detectorGrantIdleProbeSlots(in detectorSweepInput, emit *detectorConditionSink, candidates []detectorCondition) {
 	if len(candidates) == 0 {
 		return
@@ -1827,6 +1942,18 @@ func detectorAdmissionSourceFor(cond detectorCondition) (sessionStartAdmissionSo
 		case detectorReasonWakeTargetNamed, detectorReasonWakeTargetDependency:
 			return sessionStartAdmissionWakeFill,
 				detectorActWakeNamedDependency && cond.Outcome == TraceOutcomeStartCandidate
+		case detectorReasonWakeTarget:
+			// The slotized pool member's re-wake: an existing asleep row under a
+			// strict-default pool, owned by AdmitStrictDefaultPoolWake through
+			// the same certified-lease entry its siblings use.
+			return sessionStartAdmissionWakeFill,
+				detectorActWakePoolFill && cond.Outcome == TraceOutcomeStartCandidate
+		case detectorReasonWakePoolFill:
+			// The one arm with no session key. It routes through
+			// EnqueuePoolAllocation instead of an admission source, so it
+			// reports no source here — routeDetectorConditions dispatches it on
+			// the reason.
+			return "", false
 		}
 		return "", false
 	case detectorFamilyStranded:
@@ -1874,6 +2001,9 @@ func routeDetectorConditions(in detectorSweepInput, result *detectorSweepResult)
 	}
 	for i := range result.Conditions {
 		cond := &result.Conditions[i]
+		if routeDetectorPoolFill(in, cond) {
+			continue
+		}
 		source, routable := detectorAdmissionSourceFor(*cond)
 		if !routable || cond.SessionID == "" {
 			continue
@@ -1909,6 +2039,42 @@ func routeDetectorConditions(in detectorSweepInput, result *detectorSweepResult)
 	}
 }
 
+// routeDetectorPoolFill hands D-WAKE's pool-under-min FILL arm to the existing
+// pool-allocation admission by exact (workID, poolTarget, sourceStore) key. It
+// reports whether the condition belongs to that arm, so the session-keyed
+// routing below never sees a condition with no session.
+//
+// A dropped key is a traced refusal and nothing else: the condition is derived
+// from durable state, so the next sweep re-detects it. That is the whole of
+// Q2's census-owed recovery — no retry, no block, no legacy poke.
+func routeDetectorPoolFill(in detectorSweepInput, cond *detectorCondition) bool {
+	if cond.Family != detectorFamilyWake || cond.Reason != detectorReasonWakePoolFill {
+		return false
+	}
+	if !detectorActWakePoolFill || cond.Outcome != TraceOutcomeStartCandidate {
+		return true
+	}
+	if in.EnqueuePoolAllocation == nil || cond.Work.WorkID == "" || cond.Work.PoolTarget == "" {
+		cond.AdmissionOutcome = detectorAdmissionRefusedUncertifiable
+		return true
+	}
+	if !in.EnqueuePoolAllocation(cond.Work) {
+		cond.AdmissionOutcome = detectorAdmissionRefusedOverflow
+		return true
+	}
+	cond.AdmissionOutcome = detectorAdmissionQueuedPoolAllocation
+	return true
+}
+
+// routedToKeyed reports whether the routing seam handed this condition to the
+// keyed population. Every session-keyed family answers on its admission source;
+// D-WAKE's pool-fill arm has no source because its sink is the pool-allocation
+// admission rather than the session-start controller, so it answers on the
+// outcome the seam recorded.
+func (c detectorCondition) routedToKeyed() bool {
+	return c.AdmissionSource != "" || c.AdmissionOutcome == detectorAdmissionQueuedPoolAllocation
+}
+
 // recordDetectorShadow writes the sweep's conditions to the trace cycle as
 // detector-shadow records: the LEGACY site codes, effect_applied=false,
 // effect_owner=detector-shadow, and a detector_-prefixed reason. A condition
@@ -1928,7 +2094,7 @@ func recordDetectorShadow(cycle *sessionReconcilerTraceCycle, in detectorSweepIn
 	}
 	for _, cond := range conditions {
 		owner := detectorShadowEffectOwner
-		if cond.AdmissionSource != "" {
+		if cond.routedToKeyed() {
 			owner = detectorKeyedEffectOwner
 		}
 		fields := traceRecordPayload{

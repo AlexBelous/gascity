@@ -232,9 +232,10 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				if result.Err != nil {
 					fmt.Fprintf(cr.sessionStartStderr(), "%s: exact session reconciliation yielded %s to priority legacy fallback: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // fallback cause must remain visible
 				}
-				if result.Admission.PoolAllocation != nil {
-					cr.requestReadyRoutedWorkLegacyFallback()
-				} else {
+				if result.Admission.PoolAllocation == nil {
+					// Pool allocations have no legacy fallback from Q2 onward:
+					// the yielded key is re-detected by the next patrol's
+					// declared routed-work view (census-owed re-detection).
 					cr.requestLegacySessionStartFallback()
 				}
 			}
@@ -246,9 +247,8 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			}
 			if result.Outcome == sessionStartReconcileExhausted {
 				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start reconciliation exhausted for %s: %v; authoritative audit requested\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // terminal retry diagnostic
-				if result.Admission.PoolAllocation != nil {
-					cr.requestReadyRoutedWorkLegacyFallback()
-				} else if result.Admission.PoolDrainAck != nil && mode == rollout.Auto {
+				if result.Admission.PoolAllocation == nil &&
+					result.Admission.PoolDrainAck != nil && mode == rollout.Auto {
 					cr.requestLegacySessionStartFallback()
 				}
 			}
@@ -857,6 +857,41 @@ func (cr *CityRuntime) detectorWakeAdmitFunc() func(string) (sessionStartAdmissi
 		return admitted.Outcome, admitErr
 	}
 }
+
+// detectorPoolAllocationEnqueueFunc hands the detector sweep the existing
+// pool-allocation admission. It is D-WAKE's pool-under-min FILL sink: the arm
+// has no session row to admit, so its exact key is the routed work's
+// (workID, poolTarget, sourceStore) triple and the handler behind it is
+// handleRoutedWorkPoolAllocation, unchanged.
+//
+// Nil unless keyed ownership is live and the hint channel exists, which keeps a
+// legacy-owned city's sweep read-only whatever its act constants say.
+func (cr *CityRuntime) detectorPoolAllocationEnqueueFunc() func(readyRoutedWorkEntry) bool {
+	if cr == nil || cr.routedWorkPoolAllocationCh == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	owned := cr.sessionStartOwnership == sessionStartOwnershipKeyed
+	cr.sessionStartMu.Unlock()
+	if !owned {
+		return nil
+	}
+	return func(entry readyRoutedWorkEntry) bool {
+		return cr.enqueueRoutedWorkPoolAllocation(readyRoutedWorkDemandContribution{
+			WorkID:      entry.WorkID,
+			PoolTarget:  entry.PoolTarget,
+			SourceStore: entry.SourceStore,
+			SourceActor: detectorSweepDemandActor,
+			DecidedAt:   time.Now().UTC(),
+		})
+	}
+}
+
+// detectorSweepDemandActor names the sweep as the origin of a routed-work
+// contribution. Event-carried work names the writing actor; census-owed
+// re-detection has none, and naming the sweep is what lets the WD.15 parity join
+// separate the two populations.
+const detectorSweepDemandActor = "detector-sweep"
 
 // detectorAdmitFunc hands the detector sweep the existing session-start
 // controller's Admit entry. It is nil unless keyed ownership is live, so a

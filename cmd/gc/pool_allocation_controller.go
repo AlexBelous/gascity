@@ -481,13 +481,12 @@ func (cr *CityRuntime) handleRoutedWorkPoolAllocation(ctx context.Context, hint 
 			} else {
 				fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s was not handled; parked in required keyed reconciliation\n", cr.sessionStartLogPrefix(), hint.WorkID) //nolint:errcheck // required-mode park must remain visible
 			}
-		} else {
-			if err != nil {
-				fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s: %v; falling back to legacy reconciliation\n", cr.sessionStartLogPrefix(), hint.WorkID, err) //nolint:errcheck // fallback must remain visible
-			} else {
-				fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s was not handled; falling back to legacy reconciliation\n", cr.sessionStartLogPrefix(), hint.WorkID) //nolint:errcheck // fallback must remain visible
-			}
-			cr.requestReadyRoutedWorkLegacyFallback()
+		} else if err != nil {
+			// Census-owed re-detection (Q2): an unhandled or failed allocation
+			// is re-detected by the next patrol's declared routed-work view. The
+			// legacy poke this used to fire is retired, so a routed key never
+			// crosses back to the legacy pool builder.
+			fmt.Fprintf(cr.sessionStartStderr(), "%s: routed-work pool allocation for %s: %v; re-detection owed to the next patrol census\n", cr.sessionStartLogPrefix(), hint.WorkID, err) //nolint:errcheck // failure cause must remain visible
 		}
 	}
 	if !result.Handled {
@@ -1018,12 +1017,45 @@ func (cr *CityRuntime) admitRoutedWorkPoolSession(lease routedWorkPoolStartLease
 	return nil
 }
 
-func (cr *CityRuntime) requestReadyRoutedWorkLegacyFallback() {
-	if cr == nil {
+// recordRoutedWorkPoolAllocationOverflow traces a routed-work key the
+// pool-allocation hint channel dropped. Q2's resolution retires the legacy
+// fallback poke this used to fire: the detector sweep's declared routed-work
+// view re-detects an unallocated key on the next patrol, so an overflow costs
+// discovery latency and never work. The sweep must not block, retry-loop, or
+// act itself (DETECTOR.md §2, degradation rules).
+func (cr *CityRuntime) recordRoutedWorkPoolAllocationOverflow(contribution readyRoutedWorkDemandContribution) {
+	if cr == nil || cr.trace == nil {
 		return
 	}
-	cr.readyRoutedWorkPokePending.Store(true)
-	cr.requestLegacySessionStartFallback()
+	workID := strings.TrimSpace(contribution.WorkID)
+	if workID == "" {
+		return
+	}
+	cr.serviceStateMu.RLock()
+	cfg := cr.cfg
+	cr.serviceStateMu.RUnlock()
+	now := time.Now().UTC()
+	cycle := cr.trace.BeginCycle(TraceTickTriggerControl, "pool_allocation.overflow", now, cfg)
+	if cycle == nil {
+		return
+	}
+	cycle.RecordControllerOperation(
+		TraceSitePoolAllocationMaterialize,
+		TraceReasonAdmissionOverflow,
+		TraceOutcomeSkipped,
+		"pool_allocation.overflow",
+		0,
+		map[string]any{
+			"effect_applied": false,
+			"effect_owner":   detectorKeyedEffectOwner,
+			"work_id":        workID,
+			"pool_target":    strings.TrimSpace(contribution.PoolTarget),
+			"source_store":   strings.TrimSpace(contribution.SourceStore),
+			"census_owed":    true,
+		})
+	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {
+		fmt.Fprintf(shadowWorkerStderr(cr.stderr), "%s: routed-work pool allocation overflow trace: %v\n", cr.logPrefix, err) //nolint:errcheck // tracing must not affect reconciliation
+	}
 }
 
 func (cr *CityRuntime) sessionStartRolloutMode() rollout.Mode {

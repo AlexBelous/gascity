@@ -47,11 +47,15 @@ import (
 //
 //   - work: BdSemantics, minting "gc-" — bd/Dolt, which hard-fails a mismatched
 //     --id and an unresolvable dep endpoint.
-//   - class: SQLiteSemantics, minting the graph class's reserved "gcg-" — the
-//     store internal/storebinding/sqlite's OpenEngine opens for the whole split
-//     (ONE engine serving all five infrastructure classes, opened with
+//   - class: a REAL beads.SQLiteStore behind SQLiteSemantics, minting the graph
+//     class's reserved "gcg-" — the store internal/storebinding/sqlite's
+//     OpenEngine opens for the whole split (ONE engine serving all five
+//     infrastructure classes, opened with
 //     config.ReservedClassPrefix(BeadClassGraph)). It ACCEPTS a residence
-//     violation and records it, because SQLite does.
+//     violation and records it, because SQLite does — and it carries the two
+//     capabilities the binding really has and a MemStore leaf does not: the
+//     compare-and-swap assignment claim a routed claim acquires through, and
+//     the graph applier. See newSplitEnvClassLeaf.
 //
 // The wrapping is asymmetric on purpose, and the asymmetry is production's, not
 // the fixture's: main.go and api_state.go put every WORK store (city and rig)
@@ -68,8 +72,8 @@ import (
 // production no longer serves, because nothing else in cmd/gc asserts the
 // wrapping of the store that function returns.
 //
-// Accepted fidelity gap, the same one every cmd/gc split fixture takes: the
-// leaves are in-memory, not real Dolt/SQLite behind CachingStore. The real
+// Accepted fidelity gap: the WORK leaf is in-memory rather than real bd/Dolt
+// behind CachingStore (the class leaf is a real SQLite store on disk). The real
 // openers are covered by the managed-Dolt and storage-boot integration tests.
 
 // splitEnv is the two-topology store fixture. Every field carries the production
@@ -163,8 +167,7 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 			BDCompatibility: config.BeadsBDCompatibility105,
 		},
 	}
-	workLeaf, classLeaf := splittest.NewSplitStores(t)
-	work := wrapStoreWithBeadPolicies(workLeaf, cfg)
+	work := wrapStoreWithBeadPolicies(splittest.NewWorkStore(t, config.EffectiveHQPrefix(cfg)), cfg)
 	e := splitEnv{cityPath: cityPath, cfg: cfg, work: work, store: work, split: split}
 	if split {
 		// Config and routes state the same relocation. The config half is what
@@ -175,14 +178,49 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 		cfg.Storage = splitEnvStorageConfig()
 		// The class store is NOT policy-wrapped: openStorageRoutes keys the class
 		// map straight to the value OpenEngine returned. See the file header.
-		e.class = classLeaf
-		e.routes = splitEnvRoutes(classLeaf)
+		e.class = newSplitEnvClassLeaf(t)
+		e.routes = splitEnvRoutes(e.class)
 	}
 	writeSplitTopologyCityConfig(t, cityPath, rigPath, split)
 	if opts.rig {
 		e.attachRigLeg(t, rigPath)
 	}
 	return e
+}
+
+// newSplitEnvClassLeaf opens the class leg on the store a split city is really
+// served from: a real beads.SQLiteStore under the graph class's reserved prefix,
+// which is what internal/storebinding/sqlite's OpenEngine opens, behind the
+// kit's SQLiteSemantics strictness so a residence violation is still recorded.
+//
+// It is the real backend rather than the kit's MemStore leaf because the two
+// differ in exactly the ways this suite exists to catch: the SQLite store has
+// the compare-and-swap assignment claim a routed claim acquires through, and it
+// has the graph applier whose reverse-of-a-parent-child guard is the one thing
+// the binding enforces that a MemStore does not. A suite whose class leaf has
+// neither cannot see a divergence in either.
+//
+// (The claim rows were briefly scoped to a per-row helper because materializing
+// conformanceGraphRecipe on this leaf failed the graph-apply guard. That was the
+// fixture recipe carrying a hand-written parent-child dep no graph.v2 compiler
+// emits — see conformanceGraphRecipe — not a property of graph.v2 on a split
+// city.)
+func newSplitEnvClassLeaf(t *testing.T) beads.Store {
+	t.Helper()
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("config.ReservedClassPrefix(graph) = ok:false; the fixture has no reserved namespace to open a class store under")
+	}
+	leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix(prefix))
+	if err != nil {
+		t.Fatalf("opening the SQLite class store the split binding serves from: %v", err)
+	}
+	t.Cleanup(func() {
+		if closer, ok := leaf.(interface{ CloseStore() error }); ok {
+			_ = closer.CloseStore()
+		}
+	})
+	return splittest.Strict(t, leaf, splittest.SQLiteSemantics)
 }
 
 // splitEnvStorageConfig is the [storage] section of a converged split city: work

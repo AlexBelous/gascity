@@ -454,7 +454,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
 		}
-		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }
@@ -584,8 +584,26 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // claimHookWork claims routed work for gc hook --claim from the federated store
 // set, binding the production shell work-query runner and real claim ops. See
 // claimHookWorkWithRunner for the federation and lost-claim-race semantics.
-func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, hookClaimOps{}, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+//
+// The claim ops carry the CLASS axis (claim_class_route.go): every store in the
+// federated set is a bd WORKSPACE, and a relocated coordination class is not
+// one, so the binding is reached through the ops rather than through a leg. On a
+// city that relocates nothing the route is nil and the ops value is the one this
+// function has always passed.
+func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	// The city relocates a class and its front door could not be projected.
+	// Claiming through the work store anyway would write ownership into a
+	// ledger that does not hold the bead, which is the wrong-answer lane this
+	// routing exists to close — so every failure but one is fatal here. The
+	// exception, a binding with no claim CAS, degrades to unrouted claiming;
+	// see hookClaimRouteVerdict.
+	opened, err := hookClaimClassRouteForCity(cityPath)
+	route, proceed := hookClaimRouteVerdict(opened, err, stderr)
+	if !proceed {
+		return 1
+	}
+	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
@@ -603,8 +621,17 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 // has been exhausted; the drain reason is claims_errored when any exhausted
 // store's eligible claims errored rather than merely lost the race, else no_work.
 // emitFailure surfaces a work-query timeout on the event bus when eligible.
+//
+// The store set is also what the claim-time class escalation is measured
+// against: only the PRIMARY leg runs the city-wide reader, so it is the only leg
+// whose query can serve a bead it does not itself hold, and a not-found there
+// says nothing about the work legs behind it. observeWorkLegs hands the route
+// the whole fan-out so it can prove "no WORK store holds this bead" before it
+// writes ownership into the binding (claim_class_route.go). Nil on a city that
+// relocates nothing.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
+	ops.ClassRoute.observeWorkLegs(stores)
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
 	// work-query error as a fatal claim failure. Once the primary loses its

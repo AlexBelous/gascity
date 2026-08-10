@@ -93,17 +93,29 @@ func TestExactOrphanLiveRowDrainsOnceByKey(t *testing.T) {
 	}
 
 	// Exactly once against the same canonical bead, proven where production
-	// enforces it: the sweep's family precedence hands a row with drain intent
-	// to D-DRAIN, which does not act, so the orphan family never re-enqueues the
-	// key it just drained. No treadmill, no second intent.
+	// enforces it: the sweep's family precedence hands a row with drain intent to
+	// D-DRAIN, so the ORPHAN family never re-enqueues the key it just drained. No
+	// treadmill, no second intent.
+	//
+	// Before WD.6 that was visible as an empty admitter, because D-DRAIN did not
+	// act and nobody claimed the row. Now the key IS carried back in — under
+	// drain_advance, which is the whole point of the family: legacy's end-of-tick
+	// advance scan re-walks exactly these rows to drive the drain it began. The
+	// invariant is unchanged, so it is asserted on the SOURCE rather than on
+	// silence, and asserting the source is strictly the stronger form — an empty
+	// admitter could never have caught an orphan-sourced re-enqueue arriving
+	// beside a legitimate one.
 	admitter := &recordingDetectorAdmitter{}
 	in := orphanSweepInput(env, provider, env.sessionInfo(bead.ID), map[string]TemplateParams{}, env.clk.Now().UTC(), admitter.admit)
 	in.Drains = env.dt
 	in.SuspendDeferrals = newDetectorSuspendDeferralTracker()
 	result := detectSessionConditions(context.Background(), in)
 	routeDetectorConditions(in, &result)
-	if len(admitter.keys) != 0 {
-		t.Fatalf("the sweep re-enqueued %v for a row whose drain is already in flight", admitter.keys)
+	for i, source := range admitter.sources {
+		if source != sessionStartAdmissionDrainAdvance {
+			t.Fatalf("the sweep re-enqueued %q under %q for a row whose drain is already in flight; only D-DRAIN's advance may carry it back",
+				admitter.keys[i], source)
+		}
 	}
 	for _, cond := range result.Conditions {
 		if cond.Family == detectorFamilyOrphan {

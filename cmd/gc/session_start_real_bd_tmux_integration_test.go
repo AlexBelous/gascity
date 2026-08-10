@@ -1805,11 +1805,28 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		}
 		return result
 	}
+	// Serialized on purpose (ga-f7v2ft.149). The allocator's reuse contract makes
+	// a member bound to an OPEN prior routed work BUSY (pool_allocation_reuse.go:
+	// `previous.Status != "closed"` sets busy), so a second routed work grows a
+	// second member rather than rebinding the first — the exact promise pinned at
+	// unit level by TestRoutedWorkPoolAllocationBusyGenericReuseGrowsWithoutRebinding's
+	// "open prior trigger" case. Creating and emitting BOTH works up front raced
+	// that contract instead of exercising it: until the first member's trigger
+	// binding is durable it has NO prior work, so the second hint could find an
+	// unbound idle member and legitimately rebind it — one member serving two
+	// works, observed 1 of 3 runs once ga-f7v2ft.144 made reuse reachable on a real
+	// bd store. Waiting for the first member to be started, live and bound before
+	// the second work exists closes that window, so the leg asserts the contract
+	// deterministically instead of depending on which hint wins the start race.
+	//
+	// This does NOT weaken the assertion: the growth expectation below IS the
+	// contract, not a workaround for it, and the exactly-one-member-per-routed-bead
+	// property proven at :458 is untouched.
 	firstRoutedWork := createRoutedWork("first exact routed-work drain fixture")
-	secondRoutedWork := createRoutedWork("second exact routed-work drain fixture")
 	emitRoutedWorkCreated(firstRoutedWork)
-	emitRoutedWorkCreated(secondRoutedWork)
 	firstPool := waitRoutedPoolStart(firstRoutedWork)
+	secondRoutedWork := createRoutedWork("second exact routed-work drain fixture")
+	emitRoutedWorkCreated(secondRoutedWork)
 	secondPool := waitRoutedPoolStart(secondRoutedWork)
 	if firstPool.bead.Status != "open" || firstPool.bead.Revision == 0 ||
 		secondPool.bead.Status != "open" || secondPool.bead.Revision == 0 {

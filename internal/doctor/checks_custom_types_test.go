@@ -68,19 +68,43 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	}
 }
 
-// retryRemoveAllForTest retries os.RemoveAll briefly to absorb a lingering
-// embedded-dolt background writer that can hold files open a few dozen ms
-// past the owning bd subprocess's apparent exit — which otherwise races
+// tempDirRemoveAllRetries and tempDirRemoveAllRetryDelay bound
+// retryRemoveAllForTest's total retry budget. Originally 10x50ms=500ms,
+// tuned for an isolated lingering-writer window of "a few dozen ms"; that
+// proved insufficient under real fleet contention (make test-fast-parallel
+// shards run many concurrent bd/dolt subprocess trees), where this test's
+// t.TempDir cleanup failed gate criterion 3 for ga-0t1lfm even though the
+// gated diff never touched this test. Widened per ga-6pnurv.
+const (
+	tempDirRemoveAllRetries    = 100
+	tempDirRemoveAllRetryDelay = 100 * time.Millisecond
+)
+
+// TestRetryRemoveAllForTestBudget guards against the retry budget silently
+// shrinking back to a window too short for real fleet contention. See
+// ga-6pnurv (this budget's own widening), ga-aik16g and ga-qf4mo2 (same
+// eventkit-lock race class, different call sites).
+func TestRetryRemoveAllForTestBudget(t *testing.T) {
+	const floor = 8 * time.Second
+	total := time.Duration(tempDirRemoveAllRetries) * tempDirRemoveAllRetryDelay
+	if total < floor {
+		t.Fatalf("retryRemoveAllForTest budget = %s, want >= %s", total, floor)
+	}
+}
+
+// retryRemoveAllForTest retries os.RemoveAll to absorb a lingering embedded
+// bd eventkit-store writer that can hold .beads/eventsData/eventkit.lock
+// open past the owning bd subprocess's apparent exit — which otherwise races
 // t.TempDir()'s single-shot RemoveAll cleanup with an intermittent
 // "directory not empty" error. Falls through silently on final failure so
 // TempDir's own best-effort cleanup still gets the last word.
 func retryRemoveAllForTest(t *testing.T, dir string) {
 	t.Helper()
-	for i := 0; i < 10; i++ {
+	for i := 0; i < tempDirRemoveAllRetries; i++ {
 		if err := os.RemoveAll(dir); err == nil {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(tempDirRemoveAllRetryDelay)
 	}
 }
 

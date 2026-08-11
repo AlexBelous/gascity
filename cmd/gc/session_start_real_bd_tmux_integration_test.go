@@ -1805,11 +1805,43 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		}
 		return result
 	}
+	// Serialized, and the first member is made GENUINELY BUSY, on purpose
+	// (ga-f7v2ft.149). This leg asserts that two routed works get two members in
+	// two slots, which every allocator path promises only for a member that is
+	// actually occupied: legacy declines to re-point a member with assigned work
+	// (reusablePoolSessionInfo → sessionBeadHasAssignedWorkInfo) and the keyed
+	// reuse path marks the same member busy
+	// (routedWorkPoolReuseAssignedWork → authorizeRoutedWorkPoolReuse), so the
+	// second work grows instead of taking the first member. That is the promise
+	// pinned at unit level by
+	// TestRoutedWorkPoolAllocationBusyGenericReuseGrowsWithoutRebinding.
+	//
+	// The old fixture met neither precondition. It created and emitted both works
+	// up front, so the second hint could arrive while the first member was still
+	// unbound and idle, and its pool command is `sleep 600`, so the member never
+	// claims anything and stays free forever to every "is this member occupied"
+	// read there is. A real routed agent claims the bead it was routed; this
+	// fixture now does the same, which is what makes the leg exercise the
+	// contract rather than race it. The claim is released by the same
+	// backingStore.Close(firstRoutedWork.ID) the drain leg below already performs,
+	// so the drain-ack arm still sees no assigned work and does not cancel.
+	//
+	// This does NOT weaken the assertion: the growth expectation below IS the
+	// contract, not a workaround for it, and the exactly-one-member-per-routed-bead
+	// property proven at :458 is untouched.
+	claimRoutedWork := func(work beads.Bead, sessionID string) {
+		t.Helper()
+		assignee := sessionID
+		if err := backingStore.Update(work.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			t.Fatalf("claim routed work %s for %s: %v", work.ID, sessionID, err)
+		}
+	}
 	firstRoutedWork := createRoutedWork("first exact routed-work drain fixture")
-	secondRoutedWork := createRoutedWork("second exact routed-work drain fixture")
 	emitRoutedWorkCreated(firstRoutedWork)
-	emitRoutedWorkCreated(secondRoutedWork)
 	firstPool := waitRoutedPoolStart(firstRoutedWork)
+	claimRoutedWork(firstRoutedWork, firstPool.info.ID)
+	secondRoutedWork := createRoutedWork("second exact routed-work drain fixture")
+	emitRoutedWorkCreated(secondRoutedWork)
 	secondPool := waitRoutedPoolStart(secondRoutedWork)
 	if firstPool.bead.Status != "open" || firstPool.bead.Revision == 0 ||
 		secondPool.bead.Status != "open" || secondPool.bead.Revision == 0 {

@@ -9,7 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // siblingPoolIsolationLiveStateClass is the one lifecycle class a sibling must
@@ -38,14 +42,38 @@ var siblingPoolIsolationLiveStateClass = map[string]struct{}{
 //     (cmd/gc/session_beads.go) on every tick that touches a row and by the
 //     lifecycle patch builders (internal/session/lifecycle_transition.go).
 //     Neither writer carries drain intent.
+//   - requested_sleep_after_idle, effective_sleep_after_idle, sleep_capability,
+//     sleep_policy_source, sleep_policy_fingerprint: sleep-policy hydration,
+//     written by persistSleepPolicyMetadataInfo (cmd/gc/session_sleep.go:295)
+//     from the wake-target loop (cmd/gc/session_reconciler.go:3923). It diffs the
+//     resolved policy against the row's own mirrors and folds any difference; on
+//     a row's FIRST hydration every mirror is empty, so all five land at once.
+//     The write is level-triggered config hydration with no drain input and no
+//     drain output -- it runs for every wake target on every tick, and its
+//     landing inside a drain window is coincidence, not causation
+//     (ga-f7v2ft.148).
+//
+// The five sleep-policy keys are DELIBERATELY not the writer's whole batch. It
+// diffs seven; sleep_policy_adjustment_reason and config_wake_suppressed were
+// empty on both sides in the evidence run, so admitting them would widen the
+// allowlist past its citation. If one ever lands it is a fresh finding for
+// adjudication, which is exactly what this rule is for.
 //
 // The nudge keys are taken from the production constants rather than respelled
-// so a rename cannot silently widen this allowlist into a stale no-op.
+// so a rename cannot silently widen this allowlist into a stale no-op. The
+// sleep-policy keys have no production constants to take, so
+// TestSiblingPoolIsolationToleratesSleepPolicyHydration drives the real writer
+// instead of respelling them, and a rename fails there.
 var siblingPoolIsolationAllowedChurn = []string{
 	idleClaimNudgeTriggerKey,
 	idleClaimNudgeCountKey,
 	idleClaimNudgeAtKey,
 	"synced_at",
+	"requested_sleep_after_idle",
+	"effective_sleep_after_idle",
+	"sleep_capability",
+	"sleep_policy_source",
+	"sleep_policy_fingerprint",
 }
 
 // legacyDrainEffectSites are the trace sites at which a WRITE to a session row
@@ -212,6 +240,16 @@ func TestSiblingPoolIsolationMetadataDiff(t *testing.T) {
 			after:   mutate(map[string]string{"quarantined_until": "2026-08-09T00:00:00Z"}),
 			wantErr: true,
 		},
+		{
+			name:    "sleep intent still has teeth after the policy-hydration allowlist",
+			after:   mutate(map[string]string{"sleep_intent": "idle-stop-pending"}),
+			wantErr: true,
+		},
+		{
+			name:    "sleep reason still has teeth after the policy-hydration allowlist",
+			after:   mutate(map[string]string{"sleep_reason": "idle"}),
+			wantErr: true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := siblingPoolIsolationMetadataDiff(base(), test.after)
@@ -219,5 +257,56 @@ func TestSiblingPoolIsolationMetadataDiff(t *testing.T) {
 				t.Fatalf("siblingPoolIsolationMetadataDiff = %v, wantErr=%t", err, test.wantErr)
 			}
 		})
+	}
+}
+
+// TestSiblingPoolIsolationToleratesSleepPolicyHydration pins ga-f7v2ft.148: the
+// sleep-policy hydration writer is the THIRD writer that legitimately lands on a
+// sibling inside a drain window, and it is background behavior rather than a
+// drain effect.
+//
+// The fixture drives the REAL writer instead of respelling its keys, for the
+// same reason the nudge entries are taken from production constants: a rename
+// must fail this test rather than silently widen the allowlist into a stale
+// no-op. It also asserts the writer actually wrote, so the tolerance can never
+// be proven by a vacuous no-op fold.
+func TestSiblingPoolIsolationToleratesSleepPolicyHydration(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker-gc-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"state":              "active",
+			"template":           "worker",
+			"session_name":       "worker-gc-1",
+			"instance_token":     "tok-1",
+			"generation":         "3",
+			"continuation_epoch": "7",
+			"pool_managed":       "true",
+			"pool_slot":          "2",
+			"gc.trigger_bead_id": "gc-work-2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create sibling row: %v", err)
+	}
+	before := maps.Clone(bead.Metadata)
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	sp := runtime.NewFake()
+	info := sessiontest.SeedBead(t, bead)
+	policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
+	persistSleepPolicyMetadataInfo(info, sessionFrontDoor(store), policy, false)
+
+	stored, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read sibling row after hydration: %v", err)
+	}
+	if reflect.DeepEqual(before, stored.Metadata) {
+		t.Fatalf("sleep-policy hydration wrote nothing, so this proves no tolerance: %v", stored.Metadata)
+	}
+	if err := siblingPoolIsolationMetadataDiff(before, stored.Metadata); err != nil {
+		t.Fatalf("sleep-policy hydration read as a drain effect on a sibling: %v\nbefore=%v after=%v", err, before, stored.Metadata)
 	}
 }

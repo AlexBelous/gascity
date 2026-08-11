@@ -150,11 +150,21 @@ type CityRuntime struct {
 	// by exact session ID; the retained lease also binds the wait identity.
 	sessionWaitDependencyReservations map[string]sessionWaitDependencyStartLease
 
-	sessionStartMu         sync.Mutex
-	sessionStartController *sessionStartController
-	sessionStartOwnership  sessionStartOwnership
-	sessionStartMode       rollout.Mode
-	poolMembershipShadow   *poolMembershipIndex
+	// sessionStartLifecycleMu serializes the two keyed session-start lifecycle
+	// entry points, ensureSessionStartController and stopSessionStartController,
+	// against each other. It exists so neither of them has to hold
+	// sessionStartMu across a controller.Stop(): Stop drains the workqueue and
+	// blocks until every in-flight worker finishes, and those workers take
+	// sessionStartMu to read the published fleet views, so draining under that
+	// lock deadlocks by construction (ga-f7v2ft.143). Lock ordering is always
+	// sessionStartLifecycleMu → sessionStartMu, never the reverse, and no
+	// controller worker ever takes the lifecycle lock.
+	sessionStartLifecycleMu sync.Mutex
+	sessionStartMu          sync.Mutex
+	sessionStartController  *sessionStartController
+	sessionStartOwnership   sessionStartOwnership
+	sessionStartMode        rollout.Mode
+	poolMembershipShadow    *poolMembershipIndex
 	// desiredSessionNames is the desired-session view the patrol/boot bead
 	// reconcile tick publishes for the keyed D-ORPHAN close handler, which has
 	// to re-derive undesiredness per key and cannot recompute a fleet-shaped

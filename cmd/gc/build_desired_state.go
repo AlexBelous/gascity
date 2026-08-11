@@ -3121,25 +3121,41 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 // poolTriggerRepointSuperseded re-validates a planned trigger RE-POINT against
 // the CURRENT durable row immediately before it is committed — the ga-l1j53 P2
 // doctrine applied to the third legacy effect boundary, the trigger-binding
-// write.
+// write. It screens two independent supersede classes, both decided on state
+// that postdates the planning snapshot.
 //
-// The re-point is decided from a per-tick session snapshot. A member that has
-// acknowledged its drain is still `active` in that snapshot and only reaches
-// stop-pending afterwards, so legacy re-targets a member that is already
-// retiring — and the trigger binding is load-bearing on the keyed stop path, so
-// that re-point stranded the acknowledged drain outright (ga-f7v2ft.131). This
-// narrows the window to ack → stop-pending stamp; the pre-stamp remainder is
+// MEMBER class (ga-f7v2ft.131). The re-point is decided from a per-tick session
+// snapshot. A member that has acknowledged its drain is still `active` in that
+// snapshot and only reaches stop-pending afterwards, so legacy re-targets a
+// member that is already retiring — and the trigger binding is load-bearing on
+// the keyed stop path, so that re-point stranded the acknowledged drain outright.
+// This narrows the window to ack → stop-pending stamp; the pre-stamp remainder is
 // irreducible here, which is why the acknowledgement carries its own trigger.
-//
-// Sibling re-targeting stays intended: a genuinely free member still re-points.
-// Only a member whose CURRENT row is draining (of which drain-ack-stop-pending
-// is one reason) is skipped — the same class reusablePoolSessionInfo already
+// Only a member whose CURRENT row is draining (of which drain-ack-stop-pending is
+// one reason) is skipped — the same class reusablePoolSessionInfo already
 // excludes, which is why this only ever fires on a snapshot that straddled the
 // transition.
 //
-// The read is durable and row-scoped — zero provider GetMeta — so WD.6's
-// detection cost model is untouched: this is the WRITE boundary, and it runs
-// only when a re-point is about to commit.
+// WORK class (ga-vumr7). The snapshot is equally blind to what happened to the
+// TARGET work item. The freedom test that nominated this member
+// (reusablePoolSessionInfo) reads the member's own row and nothing else, so a
+// member whose previous trigger work is merely started-but-unclaimed reads as
+// free — while the keyed allocator, which refuses to reuse exactly that member,
+// grows a second one for the same work. Committing the re-point then leaves TWO
+// rows stamped with one work item, and every later routedWorkPoolSessionClaims
+// read fails "ambiguous routed-work pool sessions". Fixing this on the freedom
+// test would change legacy fleet semantics for every pool and still leave the
+// snapshot race open, so it is screened HERE, where the effect commits, with
+// revalidatePlannedPoolMemberDemand's two checks in that function's order.
+//
+// Sibling re-targeting stays intended: an uncontended member still re-points onto
+// the next ready item, which is the intended system response (ga-f7v2ft.112
+// round-4 ruling 3).
+//
+// The reads are durable and provider-free — zero GetMeta — so WD.6's detection
+// cost model is untouched: this is the WRITE boundary, not the sweep, and the
+// only read that is not row-scoped (the metadata-filtered claim List) runs after
+// the reservation check has already stood the common contended case down.
 func poolTriggerRepointSuperseded(bp *agentBuildParams, info session.Info, patch session.MetadataPatch) (bool, error) {
 	workBeadID := strings.TrimSpace(patch[beadmeta.TriggerBeadIDMetadataKey])
 	if workBeadID == "" {
@@ -3150,14 +3166,93 @@ func poolTriggerRepointSuperseded(bp *agentBuildParams, info session.Info, patch
 	if err != nil {
 		return false, fmt.Errorf("re-validating trigger re-point for %q: %w", info.ID, err)
 	}
-	if strings.TrimSpace(current.MetadataState) != string(session.StateDraining) {
+	if strings.TrimSpace(current.MetadataState) == string(session.StateDraining) {
+		if bp.stderr != nil {
+			fmt.Fprintf(bp.stderr, "buildDesiredState: session %s trigger re-point to %s superseded: current row is draining (%s)\n", //nolint:errcheck
+				info.ID, workBeadID, strings.TrimSpace(current.StateReason))
+		}
+		return true, nil
+	}
+	// This member already carries the target work — some other writer bound it
+	// after the snapshot, or the durable row simply never diverged. There is no
+	// contention to screen for: the member IS the claimant, and superseding here
+	// would drop the rest of the cluster (pack, workspace, work dir) the patch
+	// still carries and make every such re-point supersede itself.
+	if strings.TrimSpace(current.TriggerBeadID) == workBeadID {
 		return false, nil
 	}
+	reason, superseded, err := routedWorkRepointClaimedElsewhere(bp, current, workBeadID, plannedTriggerWorkStoreRef(info, patch))
+	if err != nil || !superseded {
+		return false, err
+	}
 	if bp.stderr != nil {
-		fmt.Fprintf(bp.stderr, "buildDesiredState: session %s trigger re-point to %s superseded: current row is draining (%s)\n", //nolint:errcheck
-			info.ID, workBeadID, strings.TrimSpace(current.StateReason))
+		fmt.Fprintf(bp.stderr, "buildDesiredState: session %s trigger re-point to %s superseded: %s\n", info.ID, workBeadID, reason) //nolint:errcheck
 	}
 	return true, nil
+}
+
+// plannedTriggerWorkStoreRef is the store ref the re-point is about to stamp.
+// computePoolTriggerBindingPatch emits the key only when it CHANGES, so an
+// absent key means the request's already-canonicalized ref equals the one on the
+// planning snapshot — which is the spelling both keyed seams and the durable
+// claim compare against.
+func plannedTriggerWorkStoreRef(info session.Info, patch session.MetadataPatch) string {
+	if storeRef, ok := patch[beadmeta.TriggerBeadStoreRefMetadataKey]; ok {
+		return strings.TrimSpace(storeRef)
+	}
+	return strings.TrimSpace(info.TriggerBeadStoreRef)
+}
+
+// routedWorkRepointClaimedElsewhere answers whether the work item a re-point
+// would bind is already SOMEONE ELSE'S, and returns the traceable reason when it
+// is. It is revalidatePlannedPoolMemberDemand's pair of checks, in that
+// function's order and with its semantics, applied at the re-point write instead
+// of the member create — the two boundaries where one work item can acquire a
+// second pool member.
+//
+// The allocation-ownership stand-down comes first because it covers the window
+// the durable claim cannot: the keyed lane reserves the exact key when the work
+// ENTERS it, and the claim only exists once a member has been created. That
+// pre-create window is precisely where the ga-vumr7 re-point lands. The
+// reservation's own lapse bound keeps it from fencing legacy off work nobody is
+// allocating.
+//
+// A claim counts only when the claiming member still ABSORBS this demand
+// (poolSessionConsumesNewDemandInfo — the planner's own definition): a member
+// asleep on a missing runtime, drained, or failed at create no longer serves its
+// work item, and the fleet materializes a replacement for it. A claim by THIS
+// member never counts — the re-point would otherwise supersede itself. A failed
+// claim read blocks this re-point for one tick rather than risking the duplicate;
+// the binding is level-triggered and the next tick re-decides.
+func routedWorkRepointClaimedElsewhere(bp *agentBuildParams, current session.Info, workBeadID, workStoreRef string) (string, bool, error) {
+	if bp.city == nil {
+		return "", false, nil
+	}
+	// The pool target is the member's own normalized template, which is the exact
+	// value routedWorkPoolSessionClaims matches rows on and the keyed lane keys
+	// its reservation with.
+	template := strings.TrimSpace(normalizedSessionTemplateInfo(current, bp.city))
+	if template == "" {
+		return "", false, nil
+	}
+	if keyedRoutedWorkAllocations.owns(routedWorkAllocationKeyFor(workBeadID, template, workStoreRef), time.Now()) {
+		return "the keyed pool allocation holds the work item", true, nil
+	}
+	claims, err := routedWorkPoolSessionClaims(bp.beadStore, bp.city, routedWorkPoolAllocationHint{
+		WorkID:      workBeadID,
+		PoolTarget:  template,
+		SourceStore: workStoreRef,
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("re-validating routed-work demand for the re-point of %q: %w", workBeadID, err)
+	}
+	for _, claim := range claims {
+		if claim.ID == current.ID || !poolSessionConsumesNewDemandInfo(claim) {
+			continue
+		}
+		return fmt.Sprintf("session %s already serves the work item", claim.ID), true, nil
+	}
+	return "", false, nil
 }
 
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {

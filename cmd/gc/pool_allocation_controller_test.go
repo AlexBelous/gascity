@@ -2232,12 +2232,12 @@ func TestRoutedWorkPoolAllocationCanonicalSingletonRetiresByExactDrainAck(t *tes
 	if err != nil {
 		t.Fatalf("acquire singleton stop snapshot: %v", err)
 	}
-	lease, agentAck, leaseErr := fixture.cr.newRoutedWorkPoolDrainAckLease(snapshot, info)
+	lease, agentAck, _, leaseErr := fixture.cr.newRoutedWorkPoolDrainAckLease(snapshot, info)
 	if leaseErr != nil || !agentAck {
 		release()
 		t.Fatalf("create singleton drain-ack lease = (%+v, %t, %v), want exact agent lease", lease, agentAck, leaseErr)
 	}
-	authorized, authorizeErr := fixture.cr.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
+	authorized, _, authorizeErr := fixture.cr.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
 	release()
 	if authorizeErr != nil || !authorized {
 		t.Fatalf("authorize canonical singleton drain acknowledgement = (%t, %v), want true", authorized, authorizeErr)
@@ -3615,7 +3615,7 @@ func TestAuthorizeRoutedWorkPoolDrainAckRequiresExactLiveEvidence(t *testing.T) 
 				t.Fatalf("read row before authorization: %v", err)
 			}
 
-			authorized, authorizeErr := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, fixture.lease)
+			authorized, _, authorizeErr := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, fixture.lease)
 			if authorized {
 				t.Fatal("stale or unsafe drain acknowledgement retained stop authority")
 			}
@@ -3649,7 +3649,7 @@ func TestAuthorizeRoutedWorkPoolDrainAckAcceptsExactStopPendingRow(t *testing.T)
 		t.Fatal("fixture did not enter drain-ack stop-pending")
 	}
 
-	authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, fixture.lease)
+	authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, fixture.lease)
 	if err != nil || !authorized {
 		t.Fatalf("authorize exact stop-pending drain acknowledgement = (%t, %v), want true", authorized, err)
 	}
@@ -3696,14 +3696,14 @@ func TestRoutedWorkPoolDrainAckCanonicalizesLegacyBareStoreRefs(t *testing.T) {
 	t.Run("bare city ref reaches the provider-meta checks", func(t *testing.T) {
 		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
 		info := stampLegacyBareTriggerStoreRef(t, fixture, "city")
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
 		if err != nil || !agentAck {
 			t.Fatalf("legacy-stamped drain acknowledgement lease = (%+v, %t, %v), want an admitted lease", lease, agentAck, err)
 		}
 		if lease.SourceStore != "city:test-city" {
 			t.Fatalf("lease source store = %q, want the canonical HQ spelling %q", lease.SourceStore, "city:test-city")
 		}
-		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+		authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
 		if err != nil || !authorized {
 			t.Fatalf("legacy bare-city drain acknowledgement authorization = (%t, %v), want true", authorized, err)
 		}
@@ -3712,14 +3712,14 @@ func TestRoutedWorkPoolDrainAckCanonicalizesLegacyBareStoreRefs(t *testing.T) {
 	t.Run("bare rig ref reaches the provider-meta checks", func(t *testing.T) {
 		fixture := newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(t, routedWorkPoolAuthorizationFixtureOptions{rigName: "packs"})
 		info := stampLegacyBareTriggerStoreRef(t, fixture, "packs")
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
 		if err != nil || !agentAck {
 			t.Fatalf("legacy-stamped drain acknowledgement lease = (%+v, %t, %v), want an admitted lease", lease, agentAck, err)
 		}
 		if lease.SourceStore != "rig:packs" {
 			t.Fatalf("lease source store = %q, want the canonical rig spelling %q", lease.SourceStore, "rig:packs")
 		}
-		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+		authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
 		if err != nil || !authorized {
 			t.Fatalf("legacy bare-rig drain acknowledgement authorization = (%t, %v), want true", authorized, err)
 		}
@@ -3728,14 +3728,14 @@ func TestRoutedWorkPoolDrainAckCanonicalizesLegacyBareStoreRefs(t *testing.T) {
 	t.Run("unknown bare ref still refuses", func(t *testing.T) {
 		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
 		info := stampLegacyBareTriggerStoreRef(t, fixture, "not-a-configured-store")
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, info)
 		if err != nil || !agentAck {
 			t.Fatalf("unknown-ref drain acknowledgement lease = (%+v, %t, %v), want an admitted lease", lease, agentAck, err)
 		}
 		if lease.SourceStore != "not-a-configured-store" {
 			t.Fatalf("lease source store = %q, want the unknown ref left verbatim", lease.SourceStore)
 		}
-		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
+		authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, info, lease)
 		if authorized || err != nil {
 			t.Fatalf("unknown bare-ref drain acknowledgement authorization = (%t, %v), want a clean refusal", authorized, err)
 		}
@@ -3830,19 +3830,38 @@ func TestRecoverRoutedWorkPoolDrainAckLeaseDistinguishesLegacyFromUnknownProvena
 	}
 }
 
-func TestRecoverRoutedWorkPoolDrainAckLeaseRejectsUnadmittedAgentAcknowledgement(t *testing.T) {
+// TestRecoverRoutedWorkPoolDrainAckLeaseHoldsMemberOutsideKeyedMembership is
+// the recovery half of council R1. Keyed pool membership is allocation
+// lineage, and the member shape the whole fleet has at cutover is one LEGACY
+// created — so a member the keyed index never held used to fail recovery
+// outright, handing a stamp-provable acknowledgement back to the legacy
+// reconciler, which then applied the very drain effect the routed-work drain
+// leg asserts nobody but the keyed owner applies.
+func TestRecoverRoutedWorkPoolDrainAckLeaseHoldsMemberOutsideKeyedMembership(t *testing.T) {
 	fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
 	fixture.cr.poolMembershipShadow.remove(fixture.info.ID)
 	lease, agent, legacy, err := fixture.cr.recoverRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
-	if err == nil || agent || legacy || lease != (routedWorkPoolDrainAckLease{}) {
-		t.Fatalf("recover unadmitted agent acknowledgement = (%+v, agent=%t, legacy=%t, err=%v), want zero/false/false/error", lease, agent, legacy, err)
+	if err != nil || !agent || legacy {
+		t.Fatalf("recover legacy-created member = (agent=%t, legacy=%t, err=%v), want an agent lease", agent, legacy, err)
+	}
+	if lease.SessionID != fixture.info.ID || lease.MembershipOccupied ||
+		lease.RequesterSessionID != fixture.info.ID || lease.RequesterInstanceToken != fixture.info.InstanceToken {
+		t.Fatalf("recovered lease = %+v, want the row's own ack stamps with MembershipOccupied=false", lease)
+	}
+	// The stamps are still the fence: strip the agent source and recovery must
+	// stop claiming an agent acknowledgement.
+	if err := fixture.provider.RemoveMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey); err != nil {
+		t.Fatalf("remove drain acknowledgement source: %v", err)
+	}
+	if _, agent, legacy, err = fixture.cr.recoverRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info); err == nil || agent || legacy {
+		t.Fatalf("recover unstamped member = (agent=%t, legacy=%t, err=%v), want false/false/error", agent, legacy, err)
 	}
 }
 
 func TestNewRoutedWorkPoolDrainAckLeaseDistinguishesAgentAckFromOrdinaryStart(t *testing.T) {
 	t.Run("certified agent acknowledgement", func(t *testing.T) {
 		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
 		if err != nil || !agentAck || lease != fixture.lease {
 			t.Fatalf("new drain acknowledgement lease = (%+v, %t, %v), want %+v", lease, agentAck, err, fixture.lease)
 		}
@@ -3853,7 +3872,7 @@ func TestNewRoutedWorkPoolDrainAckLeaseDistinguishesAgentAckFromOrdinaryStart(t 
 		store := &poolDrainAckAdmissionReadRejectStore{Store: fixture.store}
 		fixture.snapshot.Store = store
 		fixture.cr.cs.cityBeadStore = store
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
 		if err != nil || !agentAck || lease != fixture.lease {
 			t.Fatalf("new drain acknowledgement lease = (%+v, %t, %v), want cheap lease %+v", lease, agentAck, err, fixture.lease)
 		}
@@ -3867,7 +3886,7 @@ func TestNewRoutedWorkPoolDrainAckLeaseDistinguishesAgentAckFromOrdinaryStart(t 
 		if err := fixture.provider.RemoveMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey); err != nil {
 			t.Fatalf("clear acknowledgement source: %v", err)
 		}
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
 		if err != nil || agentAck || lease != (routedWorkPoolDrainAckLease{}) {
 			t.Fatalf("ordinary session drain lease = (%+v, %t, %v), want no acknowledgement", lease, agentAck, err)
 		}
@@ -3879,7 +3898,7 @@ func TestNewRoutedWorkPoolDrainAckLeaseDistinguishesAgentAckFromOrdinaryStart(t 
 			t.Fatalf("clear acknowledgement source: %v", err)
 		}
 		fixture.cr.poolMembershipShadow = nil
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
 		if err != nil || agentAck || lease != (routedWorkPoolDrainAckLease{}) {
 			t.Fatalf("ordinary session drain lease = (%+v, %t, %v), want no acknowledgement", lease, agentAck, err)
 		}
@@ -3888,7 +3907,7 @@ func TestNewRoutedWorkPoolDrainAckLeaseDistinguishesAgentAckFromOrdinaryStart(t 
 	t.Run("agent acknowledgement without membership index", func(t *testing.T) {
 		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
 		fixture.cr.poolMembershipShadow = nil
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
 		if err == nil || !agentAck || lease != (routedWorkPoolDrainAckLease{}) || !strings.Contains(err.Error(), "keyed state is unavailable") {
 			t.Fatalf("uncertain drain lease = (%+v, %t, %v), want visible acknowledged uncertainty", lease, agentAck, err)
 		}
@@ -3899,18 +3918,26 @@ func TestNewRoutedWorkPoolDrainAckLeaseDistinguishesAgentAckFromOrdinaryStart(t 
 		if err := fixture.provider.RemoveMeta(fixture.info.SessionName, drainAckRequesterInstanceTokenKey); err != nil {
 			t.Fatalf("clear acknowledgement requester token: %v", err)
 		}
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
 		if err != nil || !agentAck || lease != (routedWorkPoolDrainAckLease{}) {
 			t.Fatalf("unbound drain lease = (%+v, %t, %v), want acknowledged but unadmitted", lease, agentAck, err)
 		}
 	})
 
-	t.Run("uncertified occupied member", func(t *testing.T) {
+	// Council R1: a member outside keyed pool membership — every legacy-created
+	// member, which is the whole fleet at cutover — still gets a lease. The
+	// acknowledgement stamps are the fence, not the allocation lineage, and the
+	// lease records the lineage it did not find so the fence it dropped is
+	// visible in the trace rather than silent.
+	t.Run("member outside keyed membership", func(t *testing.T) {
 		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
 		fixture.cr.poolMembershipShadow.remove(fixture.info.ID)
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
-		if err != nil || !agentAck || lease != (routedWorkPoolDrainAckLease{}) {
-			t.Fatalf("uncertified drain lease = (%+v, %t, %v), want acknowledged but unadmitted", lease, agentAck, err)
+		lease, agentAck, refusal, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		if err != nil || !agentAck || refusal != drainAckRefusalNone {
+			t.Fatalf("legacy-created member drain lease = (%t, %q, %v), want an admitted agent acknowledgement", agentAck, refusal, err)
+		}
+		if lease.SessionID != fixture.info.ID || lease.MembershipOccupied || !lease.TriggerFromAck {
+			t.Fatalf("legacy-created member drain lease = %+v, want the stamped lease with MembershipOccupied=false", lease)
 		}
 	})
 
@@ -3920,7 +3947,7 @@ func TestNewRoutedWorkPoolDrainAckLeaseDistinguishesAgentAckFromOrdinaryStart(t 
 			Provider: fixture.provider,
 			err:      errors.New("runtime metadata unavailable"),
 		}
-		lease, agentAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		lease, agentAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
 		if err == nil || !agentAck || lease != (routedWorkPoolDrainAckLease{}) || !strings.Contains(err.Error(), "runtime metadata unavailable") {
 			t.Fatalf("uncertain drain lease = (%+v, %t, %v), want visible acknowledged uncertainty", lease, agentAck, err)
 		}
@@ -4265,9 +4292,15 @@ func newRoutedWorkPoolDrainAckAuthorizationFixtureWithOptions(
 		WorkID:                 base.work.ID,
 		SourceStore:            base.sourceStore,
 		MembershipRevision:     observation.revision,
-		TriggerFromAck:         true,
+		// This fixture's member IS keyed-occupied (asserted just above), so its
+		// lease says so and keeps the membership monotonicity fence live. A
+		// legacy-created member carries MembershipOccupied=false and is fenced
+		// by its ack stamps and row binding instead — see
+		// TestAuthorizeRoutedWorkPoolDrainAckHoldsLegacyCreatedMember.
+		MembershipOccupied: true,
+		TriggerFromAck:     true,
 	}
-	authorized, err := base.cr.authorizeRoutedWorkPoolDrainAck(base.snapshot, info, lease)
+	authorized, _, err := base.cr.authorizeRoutedWorkPoolDrainAck(base.snapshot, info, lease)
 	if err != nil || !authorized {
 		t.Fatalf("baseline drain acknowledgement authorization = (%t, %v), want true", authorized, err)
 	}

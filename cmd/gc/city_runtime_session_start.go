@@ -173,7 +173,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				AuthorizePoolStart: func(authorizeCtx context.Context, info sessionpkg.Info, lease routedWorkPoolStartLease) (bool, error) {
 					return cr.authorizeRoutedWorkPoolStart(authorizeCtx, snapshot, info, lease)
 				},
-				AuthorizePoolDrainAck: func(info sessionpkg.Info, lease routedWorkPoolDrainAckLease) (bool, error) {
+				AuthorizePoolDrainAck: func(info sessionpkg.Info, lease routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
 					return cr.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
 				},
 				RecoverPoolDrainAck: func(info sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error) {
@@ -715,13 +715,13 @@ func (cr *CityRuntime) admitSessionStartSocketKey(sessionID string) sessionStart
 		}
 		return cr.sessionStartSocketFallback(sessionID, fmt.Sprintf("reading authoritative session row: %v", err))
 	}
-	lease, agentDrainAck, leaseErr := cr.newRoutedWorkPoolDrainAckLease(snapshot, info)
+	lease, agentDrainAck, leaseRefusal, leaseErr := cr.newRoutedWorkPoolDrainAckLease(snapshot, info)
 	if leaseErr != nil {
 		if mode == rollout.Require {
-			fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting exact pool drain acknowledgement for %s: %v; required path refused closed\n", cr.sessionStartLogPrefix(), sessionID, leaseErr) //nolint:errcheck // required refusal must remain visible
+			fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting exact pool drain acknowledgement for %s: %v (refusal=%s); required path refused closed\n", cr.sessionStartLogPrefix(), sessionID, leaseErr, leaseRefusal) //nolint:errcheck // required refusal must remain visible
 			return sessionStartSocketReplyBlocked
 		}
-		fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting exact pool drain acknowledgement for %s: %v; priority legacy fallback requested\n", cr.sessionStartLogPrefix(), sessionID, leaseErr) //nolint:errcheck // admission uncertainty must remain visible
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: admitting exact pool drain acknowledgement for %s: %v (refusal=%s); priority legacy fallback requested\n", cr.sessionStartLogPrefix(), sessionID, leaseErr, leaseRefusal) //nolint:errcheck // admission uncertainty must remain visible
 		return cr.sessionStartSocketFallback(sessionID, "pool drain acknowledgement admission uncertainty")
 	}
 	if agentDrainAck {

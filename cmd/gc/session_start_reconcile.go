@@ -59,7 +59,7 @@ type exactSessionStartParams struct {
 	DrainTracker                       *drainTracker
 	Trace                              *SessionReconcilerTracer
 	AuthorizePoolStart                 func(context.Context, sessionpkg.Info, routedWorkPoolStartLease) (bool, error)
-	AuthorizePoolDrainAck              func(sessionpkg.Info, routedWorkPoolDrainAckLease) (bool, error)
+	AuthorizePoolDrainAck              func(sessionpkg.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error)
 	RecoverPoolDrainAck                func(sessionpkg.Info) (routedWorkPoolDrainAckLease, bool, bool, error)
 	ValidateWaitDependencyPoolWitness  func(sessionpkg.Info, sessionWaitDependencyStartLease) bool
 	ValidateConfiguredDependencyStart  func(sessionpkg.Info, configuredDependencyStartLease) bool
@@ -1559,6 +1559,45 @@ func (f drainAckStopPendingFence) matches(info sessionpkg.Info, response session
 	return true
 }
 
+// recordDrainAckHandbackTrace records why the keyed drain-ack fence gave a row
+// back, at the same site and with the same effect_owner as every other keyed
+// drain record so `gc trace` shows the refusal beside the drain it refused.
+//
+// It exists because a stderr-only yield is a trace lie by the program's own
+// delta-8 standard: the controller log for the failing journey runs carried no
+// drain-ack diagnostics at all for the drained row, so the one question the
+// evidence had to answer — why does the keyed family not hold this key at the
+// moment legacy sweeps it — could not be read out of a run at all.
+//
+// The outcome is deliberately outside legacyDrainEffectOutcomes and the record
+// carries effect_owner=keyed, so the row-scoped drain purity assertion cannot
+// mistake the refusal for the effect it is refusing to apply.
+func recordDrainAckHandbackTrace(
+	params exactSessionStartParams,
+	admission sessionStartAdmission,
+	info sessionpkg.Info,
+	lease *routedWorkPoolDrainAckLease,
+	refusal drainAckRefusal,
+	cause error,
+) {
+	if refusal == drainAckRefusalNone {
+		refusal = drainAckRefusalLeaseInvalid
+	}
+	extra := map[string]any{"handed_back": true}
+	if cause != nil {
+		extra["error"] = cause.Error()
+	}
+	if lease != nil {
+		extra["membership_occupied"] = lease.MembershipOccupied
+		extra["membership_revision"] = lease.MembershipRevision
+		extra["trigger_from_ack"] = lease.TriggerFromAck
+		extra["durable_agent_provenance"] = lease.DurableAgentProvenance
+		extra["work_id"] = lease.WorkID
+	}
+	recordExactSessionDrainTrace(params, admission, info, strings.TrimSpace(info.StateReason),
+		TraceSiteReconcilerDrainAck, TraceReasonCode(refusal), TraceOutcomeRejected, 0, false, extra)
+}
+
 func (f drainAckStopPendingFence) hasAgentProvenance(expectedID, expectedToken string) bool {
 	return f.values[sessionpkg.DrainAckSourceMetadataKey] == sessionpkg.DrainAckSourceAgentValue &&
 		f.values[sessionpkg.DrainAckRequesterSessionIDMetadataKey] == expectedID &&
@@ -1980,30 +2019,31 @@ func reconcileExactSessionStartWithOwner(
 		}
 	}
 	if admission.PoolDrainAck != nil && !isDrainAckStopPendingInfo(info) {
-		transitionFailure := func(cause error) (exactSessionStartOwner, error) {
+		transitionFailure := func(refusal drainAckRefusal, cause error) (exactSessionStartOwner, error) {
+			recordDrainAckHandbackTrace(params, admission, info, admission.PoolDrainAck, refusal, cause)
 			if params.RolloutMode == rollout.Require {
 				return exactSessionStartKeyedOwner, fmt.Errorf("required exact pool drain acknowledgement refused closed: %w", cause)
 			}
 			return exactSessionStartLegacyOwner, fmt.Errorf("%w: %w", errSessionStartLegacyFallbackRequired, cause)
 		}
 		if _, ok := beads.AtomicConditionalCloserFor(params.Store); !ok {
-			return transitionFailure(errors.New("drain acknowledgement atomic terminal closer is unavailable"))
+			return transitionFailure(drainAckRefusalUnavailable, errors.New("drain acknowledgement atomic terminal closer is unavailable"))
 		}
 		if params.AuthorizePoolDrainAck == nil {
-			return transitionFailure(errors.New("drain acknowledgement authorization is unavailable"))
+			return transitionFailure(drainAckRefusalUnavailable, errors.New("drain acknowledgement authorization is unavailable"))
 		}
-		authorized, authorizeErr := params.AuthorizePoolDrainAck(info, *admission.PoolDrainAck)
+		authorized, refusal, authorizeErr := params.AuthorizePoolDrainAck(info, *admission.PoolDrainAck)
 		if authorizeErr != nil {
-			return transitionFailure(fmt.Errorf("drain acknowledgement authorization: %w", authorizeErr))
+			return transitionFailure(refusal, fmt.Errorf("drain acknowledgement authorization: %w", authorizeErr))
 		}
 		if !authorized {
-			return transitionFailure(errors.New("drain acknowledgement authorization no longer holds"))
+			return transitionFailure(refusal, errors.New("drain acknowledgement authorization no longer holds"))
 		}
 		if params.StatusWriterError != nil {
-			return transitionFailure(fmt.Errorf("drain acknowledgement conditional writer: %w", params.StatusWriterError))
+			return transitionFailure(drainAckRefusalUnavailable, fmt.Errorf("drain acknowledgement conditional writer: %w", params.StatusWriterError))
 		}
 		if params.StatusWriter == nil {
-			return transitionFailure(errors.New("drain acknowledgement conditional writer is unavailable"))
+			return transitionFailure(drainAckRefusalUnavailable, errors.New("drain acknowledgement conditional writer is unavailable"))
 		}
 		if initialResponse.Status != "open" || loadedRevision == 0 {
 			return exactSessionStartKeyedOwner, fmt.Errorf("%w: drain acknowledgement initial row is not an exact open revisioned record", errSessionStartPoolDrainAckPending)
@@ -2013,7 +2053,8 @@ func reconcileExactSessionStartWithOwner(
 			clk.Now().UTC(), admission.PoolDrainAck.RequesterSessionID, admission.PoolDrainAck.RequesterInstanceToken,
 		)
 		writeErr := params.StatusWriter.UpdateIfMatch(info.ID, loadedRevision, beads.UpdateOpts{Metadata: patch})
-		postTransitionFailure := func(cause error) (exactSessionStartOwner, error) {
+		postTransitionFailure := func(refusal drainAckRefusal, cause error) (exactSessionStartOwner, error) {
+			recordDrainAckHandbackTrace(params, admission, info, admission.PoolDrainAck, refusal, cause)
 			if params.RolloutMode == rollout.Require {
 				return exactSessionStartKeyedOwner, fmt.Errorf("required exact pool drain acknowledgement refused closed after stop-pending transition: %w", cause)
 			}
@@ -2034,23 +2075,30 @@ func reconcileExactSessionStartWithOwner(
 					unchanged = unchanged && postResponse.Metadata[key] == initialResponse.Metadata[key]
 				}
 				if unchanged {
-					return transitionFailure(fmt.Errorf("marking drain acknowledgement stop-pending: %w", writeErr))
+					return transitionFailure(drainAckRefusalUnavailable, fmt.Errorf("marking drain acknowledgement stop-pending: %w", writeErr))
 				}
 				return exactSessionStartKeyedOwner, fmt.Errorf("marking drain acknowledgement stop-pending: %w; authoritative reread does not prove unchanged or committed transition", writeErr)
 			}
 			return exactSessionStartKeyedOwner, fmt.Errorf("%w: stop-pending transition no longer owns the exact session row", errSessionStartPoolDrainAckPending)
 		}
 		rollback.revision = postResponse.Revision
-		authorized, authorizeErr = params.AuthorizePoolDrainAck(postInfo, *admission.PoolDrainAck)
+		// The transition just committed the agent's stamps onto the row and
+		// rollback.matches re-proved every one of them over the committed
+		// revision, so from here the acknowledgement is proven DURABLY. The
+		// re-authorization is told so, and stops asking the runtime — which
+		// this very acknowledgement is about to stop — to prove it again.
+		fence := newDrainAckStopPendingFence(postResponse)
+		postLease := *admission.PoolDrainAck
+		postLease.DurableAgentProvenance = fence.hasAgentProvenance(info.ID, admission.PoolDrainAck.InstanceToken)
+		authorized, refusal, authorizeErr = params.AuthorizePoolDrainAck(postInfo, postLease)
 		if authorizeErr != nil {
-			return postTransitionFailure(fmt.Errorf("authorizing stop-pending transition: %w", authorizeErr))
+			return postTransitionFailure(refusal, fmt.Errorf("authorizing stop-pending transition: %w", authorizeErr))
 		}
 		if !authorized {
-			return postTransitionFailure(errors.New("drain acknowledgement authorization no longer holds after stop-pending transition"))
+			return postTransitionFailure(refusal, errors.New("drain acknowledgement authorization no longer holds after stop-pending transition"))
 		}
 		drainAckRollback = &rollback
 		drainAckStopPendingPatch = patch
-		fence := newDrainAckStopPendingFence(postResponse)
 		drainAckStopPendingFence = &fence
 		info = postInfo
 		loadedRevision = postResponse.Revision
@@ -2078,6 +2126,13 @@ func reconcileExactSessionStartWithOwner(
 				if params.RolloutMode == rollout.Require {
 					return park(errors.New("required drain acknowledgement lease recovery did not prove an agent acknowledgement"))
 				}
+				// The one genuinely unprovable acknowledgement: a reconciler
+				// marker with no agent stamps anywhere. Auto mode still hands
+				// it to legacy, but no longer silently — this is the record
+				// that lets the divergence taxonomy classify the fallback
+				// instead of guessing at it (council R1).
+				recordDrainAckHandbackTrace(params, admission, info, nil, drainAckRefusalNotAgentStamped,
+					errors.New("drain acknowledgement is a legacy marker with no agent provenance"))
 				return exactSessionStartLegacyOwner, nil
 			}
 			if !agentDrainAck {
@@ -2162,12 +2217,14 @@ func reconcileExactSessionStartWithOwner(
 			if params.StatusWriter == nil {
 				return park(errors.New("drain acknowledgement provenance writer is unavailable"))
 			}
-			authorized, authorizeErr := params.AuthorizePoolDrainAck(info, *drainAckLease)
+			authorized, refusal, authorizeErr := params.AuthorizePoolDrainAck(info, *drainAckLease)
 			if authorizeErr != nil || !authorized {
+				cause := errors.New("recovered drain acknowledgement authorization no longer holds before provenance write")
 				if authorizeErr != nil {
-					return park(fmt.Errorf("authorizing recovered drain acknowledgement before provenance write: %w", authorizeErr))
+					cause = fmt.Errorf("authorizing recovered drain acknowledgement before provenance write: %w", authorizeErr)
 				}
-				return park(errors.New("recovered drain acknowledgement authorization no longer holds before provenance write"))
+				recordDrainAckHandbackTrace(params, admission, info, drainAckLease, refusal, cause)
+				return park(cause)
 			}
 			provenance := sessionpkg.MetadataPatch{
 				sessionpkg.DrainAckSourceMetadataKey:                 sessionpkg.DrainAckSourceAgentValue,
@@ -2193,12 +2250,20 @@ func reconcileExactSessionStartWithOwner(
 				}
 				return park(errors.New("recovered drain acknowledgement provenance did not persist exactly"))
 			}
-			authorized, authorizeErr = params.AuthorizePoolDrainAck(upgradedInfo, *drainAckLease)
+			// Same durable-first rule as the stop-pending transition: the
+			// provenance write above committed the agent stamps and
+			// upgradedFence.hasAgentProvenance re-proved them, so this
+			// re-authorization reads the row, not the runtime.
+			upgradedLease := *drainAckLease
+			upgradedLease.DurableAgentProvenance = true
+			authorized, refusal, authorizeErr = params.AuthorizePoolDrainAck(upgradedInfo, upgradedLease)
 			if authorizeErr != nil || !authorized {
+				cause := errors.New("recovered drain acknowledgement authorization no longer holds after provenance write")
 				if authorizeErr != nil {
-					return park(fmt.Errorf("authorizing recovered drain acknowledgement after provenance write: %w", authorizeErr))
+					cause = fmt.Errorf("authorizing recovered drain acknowledgement after provenance write: %w", authorizeErr)
 				}
-				return park(errors.New("recovered drain acknowledgement authorization no longer holds after provenance write"))
+				recordDrainAckHandbackTrace(params, admission, upgradedInfo, &upgradedLease, refusal, cause)
+				return park(cause)
 			}
 			info = upgradedInfo
 			drainAckStopPendingFence = &upgradedFence
@@ -2218,7 +2283,14 @@ func reconcileExactSessionStartWithOwner(
 				(!drainAckRollback.matches(current, response, info.ID, drainAckLease.InstanceToken, drainAckStopPendingPatch) || response.Revision != drainAckRollback.revision) {
 				return errors.New("drain acknowledgement stop-pending rollback fence no longer matches")
 			}
-			authorized, authorizeErr := params.AuthorizePoolDrainAck(current, *drainAckLease)
+			// By this point the row carries the agent's committed stamps and
+			// the fence above has just re-proved them, so the last gate before
+			// the STOP is durable too. Re-reading the runtime here was the
+			// narrowest and worst of the re-derivations: it ran with the
+			// acknowledged agent already on its way out.
+			stopLease := *drainAckLease
+			stopLease.DurableAgentProvenance = drainAckStopPendingFence.hasAgentProvenance(current.ID, strings.TrimSpace(current.InstanceToken))
+			authorized, refusal, authorizeErr := params.AuthorizePoolDrainAck(current, stopLease)
 			if authorizeErr == nil && authorized {
 				return nil
 			}
@@ -2226,6 +2298,7 @@ func reconcileExactSessionStartWithOwner(
 			if authorizeErr != nil {
 				cause = fmt.Errorf("drain acknowledgement authorization before stop: %w", authorizeErr)
 			}
+			recordDrainAckHandbackTrace(params, admission, current, &stopLease, refusal, cause)
 			if params.RolloutMode == rollout.Require || drainAckRollback == nil {
 				return cause
 			}

@@ -706,14 +706,14 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 		Store:      store,
 		Recorder:   events.Discard,
 	}
-	lease, agentDrainAck, err := cityRuntime.newRoutedWorkPoolDrainAckLease(snapshot, info)
+	lease, agentDrainAck, _, err := cityRuntime.newRoutedWorkPoolDrainAckLease(snapshot, info)
 	if err != nil {
 		return nil, fmt.Errorf("creating production drain-ack lease: %w", err)
 	}
 	if !agentDrainAck {
 		return nil, errors.New("creating production drain-ack lease: requester was not authorized")
 	}
-	authorized, err := cityRuntime.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
+	authorized, _, err := cityRuntime.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
 	if err != nil {
 		return nil, fmt.Errorf("authorizing production drain-ack lease: %w", err)
 	}
@@ -729,7 +729,7 @@ func newReconcilerPerfStopFixture(cityPath, pairID string) (*reconcilerPerfStopF
 func (f *reconcilerPerfStopFixture) authorizePoolDrainAck(
 	info sessionpkg.Info,
 	lease routedWorkPoolDrainAckLease,
-) (bool, error) {
+) (bool, drainAckRefusal, error) {
 	return f.cityRuntime.authorizeRoutedWorkPoolDrainAck(f.snapshot, info, lease)
 }
 

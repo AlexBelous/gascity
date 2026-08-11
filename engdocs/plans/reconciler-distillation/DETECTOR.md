@@ -2059,13 +2059,21 @@ evidence/`; reviewed by the Fable council before WE per DESIGN.md §4 (wave gate
 
 ### Evidence hygiene (council F5 — binding)
 
-**No proof-bearing journey run on a saturated host.** A run started at a load
-average above ~40 counts as proof of nothing, reds or greens alike. A red on a
-saturated host cannot be distinguished from contention (this is exactly how
-ga-lnkbg's `:1598` reset leg was first observed — one failure in four, on a box
-at load 73), and a green on a saturated host proves only that the timing
-happened to work out. Check `uptime` before every run and record the load
-average with the result; a run whose load was not recorded is not evidence.
+**No proof-bearing journey run on a saturated host.** A run is citable only if
+the load average was under ~40 **at start AND at finish**. A red on a saturated
+host cannot be distinguished from contention (this is exactly how ga-lnkbg's
+`:1598` reset leg was first observed — one failure in four, on a box at load
+73), and a green on a saturated host proves only that the timing happened to
+work out. Record both load samples with every run; a run whose load was not
+recorded is not evidence.
+
+The start-only form of this rule is NOT sufficient, and the first run under it
+proved so: rec/r7 run 1 began at load 37.06 and finished at 106.19, and its log
+carries the signature of a host that fell over underneath it — `slow_storage_
+degraded` traces, `[mysql] packets.go:58 unexpected EOF`, `source store %q is
+unavailable`, `rigStores=0`, and a tmux server that was unreachable at adoption.
+Legs failed there that no keyed change touches (`configured_dependency_wake` at
+`:1049`). Sample both ends.
 
 This is not a licence to widen latency budgets. `:1598` asserts a 30s absolute
 bound by design (§4 absolute-bound rule) and stays there. The rule governs which

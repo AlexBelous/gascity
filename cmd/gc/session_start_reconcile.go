@@ -2021,6 +2021,11 @@ func reconcileExactSessionStartWithOwner(
 	if admission.PoolDrainAck != nil && !isDrainAckStopPendingInfo(info) {
 		transitionFailure := func(refusal drainAckRefusal, cause error) (exactSessionStartOwner, error) {
 			recordDrainAckHandbackTrace(params, admission, info, admission.PoolDrainAck, refusal, cause)
+			// The refusal rides the error as well as the trace. A handback that
+			// only says "authorization no longer holds" costs a trace query to
+			// diagnose, and the controller log is what a journey run actually
+			// prints on failure.
+			cause = fmt.Errorf("%w (refusal=%s)", cause, refusal)
 			if params.RolloutMode == rollout.Require {
 				return exactSessionStartKeyedOwner, fmt.Errorf("required exact pool drain acknowledgement refused closed: %w", cause)
 			}

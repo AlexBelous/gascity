@@ -127,6 +127,7 @@ cmd_gc_integration_tests=(
   TestRigAddIncludeResolvesScopedRegistryPackName
   TestSessionLifecycleStartShadowRealTmuxJourney
   TestSiblingPoolIsolationMetadataDiff
+  TestSiblingPoolIsolationToleratesSleepPolicyHydration
 )
 
 join_regex() {

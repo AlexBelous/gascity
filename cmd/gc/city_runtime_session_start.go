@@ -34,6 +34,9 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 	if cr == nil {
 		return fmt.Errorf("city runtime is nil")
 	}
+	cr.sessionStartLifecycleMu.Lock()
+	defer cr.sessionStartLifecycleMu.Unlock()
+
 	cr.sessionStartMu.Lock()
 	defer cr.sessionStartMu.Unlock()
 
@@ -259,7 +262,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 		return cr.sessionStartActivationFailure(mode, fmt.Errorf("creating child: %w", err))
 	}
 	if err := controller.Start(ctx); err != nil {
-		controller.Stop()
+		cr.stopAbandonedSessionStartController(controller)
 		return cr.sessionStartActivationFailure(mode, fmt.Errorf("starting child: %w", err))
 	}
 	admit := func(id string) {
@@ -284,7 +287,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 		}
 	}
 	if err := cr.cs.installSessionStartEventAdmission(admit); err != nil {
-		controller.Stop()
+		cr.stopAbandonedSessionStartController(controller)
 		if mode == rollout.Require {
 			cr.sessionStartOwnership = sessionStartOwnershipRequiredBlocked
 		}
@@ -294,7 +297,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 	}
 	if err := cr.seedSessionStartController(controller, seed); err != nil {
 		cr.cs.stopSessionStartEventAdmission()
-		controller.Stop()
+		cr.stopAbandonedSessionStartController(controller)
 		return cr.sessionStartActivationFailure(mode, fmt.Errorf("seeding child: %w", err))
 	}
 
@@ -485,6 +488,28 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 	})
 }
 
+// stopAbandonedSessionStartController drains a child ensureSessionStartController
+// started but will not publish, from inside that call's sessionStartMu critical
+// section.
+//
+// It releases the state lock for the drain and re-takes it before returning, so
+// the caller's remaining state writes and its deferred unlock are unchanged.
+// Stop waits for in-flight workers, and those workers take sessionStartMu to
+// read the published fleet views, so draining under it deadlocks
+// (ga-f7v2ft.143). Draining here rather than after the caller returns also keeps
+// the old ordering intact: the abandoned child is fully joined BEFORE ownership
+// is handed to legacy, so the two can never act on one key at once.
+// sessionStartLifecycleMu is held across the gap, so no concurrent ensure or
+// stop can observe the released lock.
+func (cr *CityRuntime) stopAbandonedSessionStartController(controller *sessionStartController) {
+	if controller == nil {
+		return
+	}
+	cr.sessionStartMu.Unlock()
+	controller.Stop()
+	cr.sessionStartMu.Lock()
+}
+
 func (cr *CityRuntime) seedActiveSessionStartController(snapshot *sessionBeadSnapshot) {
 	if cr == nil {
 		return
@@ -507,19 +532,45 @@ func (cr *CityRuntime) seedActiveSessionStartController(snapshot *sessionBeadSna
 	}
 }
 
+// stopSessionStartController shuts the keyed child down and hands session-start
+// ownership back to legacy.
+//
+// The drain runs OUTSIDE sessionStartMu (ga-f7v2ft.143). controller.Stop()
+// blocks in ShutDownWithDrain until every in-flight worker finishes, and those
+// workers take sessionStartMu to read the published fleet views
+// (desiredSessionNamesView, providerHealthSnapshotView, sessionLivenessView), so
+// holding it across the drain is a lock-order inversion: cleanup waits for the
+// worker, the worker waits for the lock. Snapshot what the shutdown needs under
+// the lock, release, drain, then re-take it to retire the pointer and flip
+// ownership.
+//
+// The ownership flip stays AFTER the drain on purpose. Legacy must not re-own a
+// key while a keyed worker is still finishing it, so the yield is published only
+// once nothing keyed is in flight. sessionStartLifecycleMu is what keeps that
+// safe without the state lock: it holds ensure out for the whole shutdown, so
+// releasing sessionStartMu around the drain cannot let a second controller be
+// built beside the one still draining.
 func (cr *CityRuntime) stopSessionStartController() {
 	if cr == nil {
 		return
 	}
+	cr.sessionStartLifecycleMu.Lock()
+	defer cr.sessionStartLifecycleMu.Unlock()
+
 	cr.sessionStartMu.Lock()
-	defer cr.sessionStartMu.Unlock()
 	controller := cr.sessionStartController
-	if cr.cs != nil {
-		cr.cs.stopSessionStartEventAdmission()
+	cs := cr.cs
+	cr.sessionStartMu.Unlock()
+
+	if cs != nil {
+		cs.stopSessionStartEventAdmission()
 	}
 	if controller != nil {
 		controller.Stop()
 	}
+
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
 	cr.sessionStartController = nil
 	if cr.sessionStartMode == rollout.Require {
 		cr.sessionStartOwnership = sessionStartOwnershipRequiredBlocked

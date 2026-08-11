@@ -2811,13 +2811,18 @@ func TestCityRuntimeSessionStartOverflowDoesNotDeadlockControllerStop(t *testing
 		cr.stopSessionStartController()
 		close(stopDone)
 	}()
+	// "Stop is underway" is now the LIFECYCLE lock, which stop holds for its
+	// whole body. It used to be sessionStartMu, which stop no longer holds
+	// across its drain — ga-f7v2ft.143 moved the drain out from under the very
+	// lock its in-flight workers need, which is the inversion this test's own
+	// name is about.
 	awaitCond(t, func() bool {
-		if cr.sessionStartMu.TryLock() {
-			cr.sessionStartMu.Unlock()
+		if cr.sessionStartLifecycleMu.TryLock() {
+			cr.sessionStartLifecycleMu.Unlock()
 			return false
 		}
 		return true
-	}, "controller stop ownership lock")
+	}, "controller stop to take the lifecycle lock")
 
 	close(store.release)
 	awaitClose(t, eventDone, "overflow event during controller stop")

@@ -120,8 +120,8 @@ func TestReconcileExactSessionStartPoolDrainAckTransitionFailureHonorsRolloutMod
 						params.StatusWriter = writer
 					}
 					params.StatusWriterError = test.writerSetupErr
-					params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
-						return test.authorized, test.authorizeErr
+					params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
+						return test.authorized, drainAckRefusalNone, test.authorizeErr
 					}
 					owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
 						SessionID: bead.ID,
@@ -187,8 +187,8 @@ func TestReconcileExactSessionStartPoolDrainAckUsesNegativeRevisionToken(t *test
 		Store: negativeRevisionSessionStore{Store: env.store, revision: -17},
 	}
 	params.StatusWriter = writer
-	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
-		return true, nil
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
+		return true, drainAckRefusalNone, nil
 	}
 
 	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
@@ -277,7 +277,9 @@ func TestReconcileExactSessionStartRecoversDurableAgentDrainAckAfterRuntimeMetad
 	params.StatusWriter = writer
 	params.AsyncStopTracker = &asyncStartTracker{}
 	params.AsyncStopCompletion = func(result drainAckAsyncStopCompletion) { completion <- result }
-	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) { return true, nil }
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
+		return true, drainAckRefusalNone, nil
+	}
 	lease := routedWorkPoolDrainAckLease{
 		SessionID:              bead.ID,
 		InstanceToken:          "drain-token",
@@ -392,9 +394,9 @@ func TestReconcileExactSessionStartPoolDrainAckRollbackRestoresDurableProvenance
 	params.RolloutMode = rollout.Auto
 	params.StatusWriter = writer
 	var authorizations int
-	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
 		authorizations++
-		return authorizations == 1, nil
+		return authorizations == 1, drainAckRefusalNone, nil
 	}
 	lease := routedWorkPoolDrainAckLease{
 		SessionID:              bead.ID,
@@ -465,9 +467,9 @@ func TestReconcileExactSessionStartPoolDrainAckPostCASAuthorizationHonorsRollout
 			params.RolloutMode = mode
 			params.StatusWriter = writer
 			var authorizations int
-			params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+			params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
 				authorizations++
-				return authorizations == 1, nil
+				return authorizations == 1, drainAckRefusalNone, nil
 			}
 
 			owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
@@ -544,16 +546,16 @@ func TestReconcileExactSessionStartPoolDrainAckAsyncAuthorizationChangeRollsBack
 	params.AsyncStopTracker = &asyncStartTracker{}
 	params.AsyncStopCompletion = func(result drainAckAsyncStopCompletion) { completion <- result }
 	var authorizations atomic.Int32
-	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
 		switch authorizations.Add(1) {
 		case 1, 2:
-			return true, nil
+			return true, drainAckRefusalNone, nil
 		case 3:
 			close(preStopAuthorization)
 			<-releasePreStopAuthorization
-			return false, nil
+			return false, drainAckRefusalLeaseInvalid, nil
 		default:
-			return false, errors.New("unexpected further authorization")
+			return false, drainAckRefusalUnavailable, errors.New("unexpected further authorization")
 		}
 	}
 
@@ -612,9 +614,9 @@ func TestReconcileExactSessionStartPoolDrainAckAutoRollbackConflictParks(t *test
 	params.RolloutMode = rollout.Auto
 	params.StatusWriter = &failSecondConditionalWriter{ConditionalWriter: writer}
 	var authorizations int
-	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) {
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
 		authorizations++
-		return authorizations == 1, nil
+		return authorizations == 1, drainAckRefusalNone, nil
 	}
 
 	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
@@ -665,7 +667,9 @@ func TestReconcileExactSessionStartPoolDrainAckAmbiguousCASCommitRetainsKeyedOwn
 	params.RolloutMode = rollout.Auto
 	params.Provider = &freshLivenessProvider{Fake: env.sp, fresh: runtime.Liveness{Running: true, Alive: true, Complete: true}}
 	params.StatusWriter = &ambiguousCommitConditionalWriter{ConditionalWriter: writer}
-	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) { return true, nil }
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
+		return true, drainAckRefusalNone, nil
+	}
 
 	owner, reconcileErr := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
 		SessionID: bead.ID,
@@ -1834,7 +1838,9 @@ func TestReconcileExactDrainAckRequiresAtomicCloseBeforeStop(t *testing.T) {
 			params := exactSessionStartTestParams(t, env)
 			params.RolloutMode = mode
 			params.StatusWriter = writer
-			params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) { return true, nil }
+			params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
+				return true, drainAckRefusalNone, nil
+			}
 			owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
 				SessionID: bead.ID, Source: sessionStartAdmissionInProcess,
 				PoolDrainAck: &routedWorkPoolDrainAckLease{SessionID: bead.ID, InstanceToken: "drain-token", RequesterSessionID: bead.ID, RequesterInstanceToken: "drain-token"},
@@ -1869,7 +1875,9 @@ func TestReconcileExactDrainAckAtomicTerminalCloseUsesFence(t *testing.T) {
 	params.Store = store
 	params.Provider = &reconcilerPerfStopProvider{Fake: env.sp}
 	params.StatusWriter = writer
-	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, error) { return true, nil }
+	params.AuthorizePoolDrainAck = func(session.Info, routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
+		return true, drainAckRefusalNone, nil
+	}
 	dops := newFakeDrainOps()
 	params.DrainOps = dops
 	var capturedStopPendingRevision int64

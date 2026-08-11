@@ -2342,7 +2342,17 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			originalAfterLegacyStart, originalBeadAfterLegacyStart, originalLifecycleAfterLegacyStart)
 	}
 
-	var shadowWitness SessionReconcilerTraceRecord
+	// Witness COUNT is not evidence here. A legacy start is dispatched
+	// asynchronously (seconds before tmux is live), and every reconcile pass that
+	// runs inside that window re-observes the same still-pending session and emits
+	// its own shadow record — so counting witnesses measures reconcile cadence,
+	// not behaviour. Nor can tick identity separate the two: each shadow
+	// evaluation opens its own trace cycle, so distinct tick IDs are guaranteed
+	// whatever produced the record. What the shadow owes is agreement and
+	// inertness on EVERY pass that observed it; uniqueness of the EXECUTION is
+	// anchored below on the single start_enqueued operation that owns the
+	// dispatch boundary (ga-l7k4q).
+	var shadowWitnesses []SessionReconcilerTraceRecord
 	if err := waitExactStartStopState(t.Context(), 15*time.Second, func() (bool, error) {
 		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 			SiteCode:    TraceSiteLifecycleStartSelectionShadow,
@@ -2353,33 +2363,32 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		if readErr != nil {
 			return false, readErr
 		}
-		matches := 0
+		witnesses := make([]SessionReconcilerTraceRecord, 0, len(records))
 		for _, record := range records {
 			if record.Fields["session_id"] != shadowCreated.SessionID {
 				continue
 			}
-			matches++
-			shadowWitness = record
+			witnesses = append(witnesses, record)
 		}
-		if matches > 1 {
-			return false, fmt.Errorf("legacy shadow witnesses = %d, want exactly one", matches)
-		}
-		return matches == 1, nil
+		shadowWitnesses = witnesses
+		return len(witnesses) > 0, nil
 	}); err != nil {
-		t.Fatalf("legacy START-shadow witness did not converge: %v; controller stdout=%q stderr=%q",
-			err, legacyControllerStdout.String(), legacyControllerStderr.String())
+		t.Fatalf("legacy START-shadow witness did not converge: %v; witnesses=%d%s\ncontroller stdout=%q stderr=%q",
+			err, len(shadowWitnesses), formatExactStartStopShadowWitnesses(shadowWitnesses),
+			legacyControllerStdout.String(), legacyControllerStderr.String())
 	}
-	if shadowWitness.RecordType != TraceRecordOperation ||
-		shadowWitness.OutcomeCode != TraceOutcomeNoChange ||
-		shadowWitness.Fields["admitted_template"] != "worker" ||
-		shadowWitness.Fields["admitted_source"] != string(TraceSourceManual) ||
-		shadowWitness.Fields["candidate_outcome"] != "prepare" ||
-		shadowWitness.Fields["candidate_reason"] != string(sessionLifecycleStartSelectionReasonReady) ||
-		shadowWitness.Fields["legacy_selected"] != true ||
-		shadowWitness.Fields["comparison_outcome"] != string(sessionLifecycleStartSelectionComparisonMatched) ||
-		shadowWitness.Fields["comparison_reason"] != string(sessionLifecycleStartSelectionComparisonReasonEquivalent) ||
-		shadowWitness.Fields["effect_applied"] != false {
-		t.Fatalf("legacy START-shadow witness = %#v, want matched legacy-owned no-effect evidence", shadowWitness)
+	for i, witness := range shadowWitnesses {
+		if witness.RecordType != TraceRecordOperation ||
+			witness.OutcomeCode != TraceOutcomeNoChange ||
+			witness.Fields["admitted_template"] != "worker" ||
+			witness.Fields["admitted_source"] != string(TraceSourceManual) ||
+			witness.Fields["comparison_outcome"] != string(sessionLifecycleStartSelectionComparisonMatched) ||
+			witness.Fields["comparison_reason"] != string(sessionLifecycleStartSelectionComparisonReasonEquivalent) ||
+			witness.Fields["effect_applied"] != false ||
+			!benignExactStartStopShadowSelection(witness) {
+			t.Fatalf("legacy START-shadow witness %d/%d = %#v, want matched legacy-owned no-effect evidence; all witnesses:%s",
+				i+1, len(shadowWitnesses), witness, formatExactStartStopShadowWitnesses(shadowWitnesses))
+		}
 	}
 	startRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 		RecordType:  TraceRecordOperation,
@@ -2394,8 +2403,78 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	// dispatch boundary and therefore reports start_enqueued. Exactly one
 	// enqueue plus the durable-active and exact-tmux-identity assertions above
 	// proves one successful provider execution without depending on stderr text.
+	// This is also the uniqueness anchor for the shadow witnesses above: however
+	// many passes observed the pending start, only one start was ever dispatched.
 	if len(startRecords) != 1 || startRecords[0].OutcomeCode != TraceOutcomeStartEnqueued {
 		t.Fatalf("legacy provider-start trace = %#v, want exactly one async start enqueue", startRecords)
+	}
+}
+
+// benignExactStartStopShadowSelection pins the selection shapes one legacy start
+// may legitimately produce across the passes that observe it. The pass that
+// selects the start reports prepare/ready and carries legacy_selected; every
+// later pass inside the asynchronous start window parks on the same
+// pending-create claim legacy parks on; once the runtime is up the session reads
+// as already running, or as no longer owing a wake. Each of those is a
+// not-selected agreement, and none of them can hide a missing start — the
+// durable-active, exact-tmux-identity and single-start_enqueued assertions
+// already prove the start happened. Anything else is a real signal: a degraded
+// park (quarantined, failed create, open circuit, unavailable provider), a
+// suppressed or terminal read, an incomparable plan, or a legacy_selected flag
+// that contradicts the plan.
+func benignExactStartStopShadowSelection(witness SessionReconcilerTraceRecord) bool {
+	outcome, _ := witness.Fields["candidate_outcome"].(string)
+	reason, _ := witness.Fields["candidate_reason"].(string)
+	legacySelected, _ := witness.Fields["legacy_selected"].(bool)
+	switch {
+	case outcome == "prepare" && reason == string(sessionLifecycleStartSelectionReasonReady):
+		return legacySelected
+	case outcome == "park" && reason == string(sessionLifecycleStartSelectionReasonStartInFlight),
+		outcome == "noop" && reason == string(sessionLifecycleStartSelectionReasonAlreadyRunning),
+		outcome == "noop" && reason == string(sessionLifecycleStartSelectionReasonNotNeeded):
+		return !legacySelected
+	default:
+		return false
+	}
+}
+
+// formatExactStartStopShadowWitnesses renders every START-shadow witness with
+// the identity a failure needs to tell one reconcile pass from several. TickID
+// and RecordID are always distinct because each shadow evaluation opens its own
+// trace cycle, so the discriminator is observed_at: a single pass produces
+// exactly one observation per session, so two records sharing an observation
+// stamp mean the same observation was recorded twice. The stamp is reconstructed
+// from the record timestamp minus the observed-to-completed span the emitter
+// carries; the raw span and the queue/planning latencies stay in the fields dump
+// so the enqueue provenance is readable too.
+func formatExactStartStopShadowWitnesses(witnesses []SessionReconcilerTraceRecord) string {
+	if len(witnesses) == 0 {
+		return "\n  (no witnesses)"
+	}
+	lines := make([]string, 0, len(witnesses))
+	for i, witness := range witnesses {
+		observedAt := "unknown"
+		if ns, ok := exactStartStopTraceFieldInt64(witness.Fields["observed_to_completed_ns"]); ok {
+			observedAt = witness.Ts.Add(-time.Duration(ns)).UTC().Format(time.RFC3339Nano)
+		}
+		lines = append(lines, fmt.Sprintf(
+			"  [%d] tick_id=%s record_id=%s seq=%d record_type=%s outcome=%s ts=%s observed_at=%s duration_ms=%d\n      fields=%v",
+			i+1, witness.TickID, witness.RecordID, witness.Seq, witness.RecordType, witness.OutcomeCode,
+			witness.Ts.UTC().Format(time.RFC3339Nano), observedAt, witness.DurationMS, witness.Fields))
+	}
+	return "\n" + strings.Join(lines, "\n")
+}
+
+// exactStartStopTraceFieldInt64 reads a numeric trace field. Records arrive
+// through JSON, so every number lands as float64.
+func exactStartStopTraceFieldInt64(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	default:
+		return 0, false
 	}
 }
 

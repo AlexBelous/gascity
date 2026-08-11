@@ -59,7 +59,7 @@ func TestRoutedWorkPoolDrainAckSurvivesLegacyTriggerRepoint(t *testing.T) {
 	}
 
 	// The sweep rebuilds the lease from the row, exactly as it does every tick.
-	lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
+	lease, agentDrainAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
 	if err != nil {
 		t.Fatalf("rebuild drain acknowledgement lease: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestRoutedWorkPoolDrainAckSurvivesLegacyTriggerRepoint(t *testing.T) {
 			"trigger the row carries when the sweep next runs (ga-f7v2ft.131)",
 			lease.WorkID, fixture.work.ID)
 	}
-	authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, repointed, lease)
+	authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, repointed, lease)
 	if err != nil {
 		t.Fatalf("authorize drain acknowledgement after re-point: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestRoutedWorkPoolDrainAckSurvivesCrossStoreTriggerRepoint(t *testing.T) {
 		t.Fatalf("read re-pointed member: %v", err)
 	}
 
-	lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
+	lease, agentDrainAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
 	if err != nil || !agentDrainAck {
 		t.Fatalf("rebuild drain acknowledgement lease = (%+v, %t, %v), want an admitted lease", lease, agentDrainAck, err)
 	}
@@ -122,7 +122,7 @@ func TestRoutedWorkPoolDrainAckSurvivesCrossStoreTriggerRepoint(t *testing.T) {
 		t.Fatalf("rebuilt lease = work %q store %q, want the acknowledged rig work %q in %q",
 			lease.WorkID, lease.SourceStore, fixture.work.ID, "rig:packs")
 	}
-	authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, repointed, lease)
+	authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, repointed, lease)
 	if err != nil || !authorized {
 		t.Fatalf("cross-store drain acknowledgement authorization = (%t, %v), want true", authorized, err)
 	}
@@ -140,14 +140,14 @@ func TestRoutedWorkPoolDrainAckMixedVersionTriggerEvidence(t *testing.T) {
 		fixture := newRoutedWorkPoolDrainAckAuthorizationFixture(t)
 		clearAckTriggerStamp(&fixture)
 
-		lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
+		lease, agentDrainAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
 		if err != nil || !agentDrainAck {
 			t.Fatalf("rebuild unstamped lease = (%+v, %t, %v), want an admitted lease", lease, agentDrainAck, err)
 		}
 		if lease.TriggerFromAck || lease.WorkID != fixture.work.ID {
 			t.Fatalf("unstamped lease = %+v, want the row's trigger %q in fallback mode", lease, fixture.work.ID)
 		}
-		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, lease)
+		authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, lease)
 		if err != nil || !authorized {
 			t.Fatalf("unstamped drain acknowledgement authorization = (%t, %v), want true", authorized, err)
 		}
@@ -162,14 +162,14 @@ func TestRoutedWorkPoolDrainAckMixedVersionTriggerEvidence(t *testing.T) {
 		clearAckTriggerStamp(&fixture)
 		repointed := repointDrainedMemberOntoSibling(t, fixture)
 
-		lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
+		lease, agentDrainAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
 		if err != nil || !agentDrainAck {
 			t.Fatalf("rebuild unstamped lease = (%+v, %t, %v), want an admitted lease", lease, agentDrainAck, err)
 		}
 		if lease.WorkID == fixture.work.ID {
 			t.Fatalf("unstamped lease named the acknowledged work %q; a pre-stamp ack carries no such evidence", lease.WorkID)
 		}
-		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, repointed, lease)
+		authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, repointed, lease)
 		if err != nil || authorized {
 			t.Fatalf("unstamped re-pointed authorization = (%t, %v), want a clean refusal", authorized, err)
 		}
@@ -180,7 +180,7 @@ func TestRoutedWorkPoolDrainAckMixedVersionTriggerEvidence(t *testing.T) {
 		lease := fixture.lease
 		lease.TriggerFromAck = false
 
-		authorized, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, lease)
+		authorized, _, err := fixture.cr.authorizeRoutedWorkPoolDrainAck(fixture.snapshot, fixture.info, lease)
 		if err != nil || !authorized {
 			t.Fatalf("fallback-mode lease against a stamped acknowledgement = (%t, %v), want true", authorized, err)
 		}
@@ -203,7 +203,7 @@ func TestRoutedWorkPoolDrainAckIgnoresLoneTriggerStamp(t *testing.T) {
 			}
 			repointed := repointDrainedMemberOntoSibling(t, fixture)
 
-			lease, agentDrainAck, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
+			lease, agentDrainAck, _, err := fixture.cr.newRoutedWorkPoolDrainAckLease(fixture.snapshot, repointed)
 			if err != nil || !agentDrainAck {
 				t.Fatalf("rebuild half-stamped lease = (%+v, %t, %v), want an admitted lease", lease, agentDrainAck, err)
 			}

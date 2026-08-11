@@ -982,6 +982,63 @@ for the DrainAdvance phase had drifted to `:4282-4290`.
    journey re-run on a host with a migrated bd workspace is owed before WE
    sign-off.
 
+   **DISCHARGED, and it found a defect (council R1, rec/r7).** The host block is
+   gone (rec/wd145's bd-workspace guard plus the pinned bd), the journey reaches
+   `routed_work_drain_finalize`, and the leg FAILED — deterministically where
+   reached, byte-identical signature across runs. The purity assertion at
+   `:1993` was CORRECT and stays byte-identical; the defect was the keyed
+   drain-ack fence, which derived its authorization from RUNTIME-resident state
+   and so could not hold the drain of a legacy-created or already-stopped
+   member — the member shape the whole fleet has at cutover. Fixed durable-first
+   (see ruling 12). Ruling 11's "standing proof in the meantime" list is
+   therefore superseded as *sufficient* evidence: those tests all passed while
+   the fleet-wide member shape had no keyed acting evidence at all, which is
+   precisely the hole the journey found.
+12. **The drain fence is ack stamps + row binding, not allocation lineage
+   (council R1).** Two gates were removed from the keyed drain-ack path, and one
+   trace obligation was added.
+
+   *Occupancy.* `newRoutedWorkPoolDrainAckLease` and
+   `authorizeRoutedWorkPoolDrainAck` required
+   `poolMembershipShadow.observeOccupiedMember` to certify the row. That is
+   keyed ALLOCATION lineage, and a drain acknowledgement is always about a
+   member that already exists — so the gate refused every legacy-created member
+   outright. It is now recorded on the lease (`MembershipOccupied`,
+   `MembershipRevision`) and enforced only as a monotonicity fence for a row the
+   keyed allocator actually owns; a row it never owned has no lineage to regress
+   and is fenced by its stamps and its binding instead. `MembershipRevision` is
+   no longer required by `validateRoutedWorkPoolDrainAckLease`.
+
+   *Runtime re-derivation.* The acknowledgement stamps are read from the runtime
+   exactly ONCE, before the stop-pending transition. That transition already
+   commits them onto the row under CAS (`AgentDrainAckStopPendingPatch`, consumed
+   by `hasAgentProvenance`), so every re-authorization after it is satisfied by
+   the durable row: `routedWorkPoolDrainAckLease.DurableAgentProvenance` skips
+   the provider-meta half. Re-deriving an acknowledgement from the runtime after
+   the commit asks a process that has just announced it is finished to keep
+   answering for the drain that is about to stop it. **No fence is lost:** the
+   keyed stop runs with `strictTokenFence`, which delegates the token check and
+   the kill together to `workerStopUnattendedSessionByIDWithConfig` — the
+   instance-token proof lives at the destructive boundary, atomically, with no
+   TOCTOU gap for the dropped pre-stop read to have covered.
+
+   *Unchanged.* Admission stays SOURCE-gated: an acknowledgement whose
+   `GC_DRAIN_ACK` source is not the agent is still never admitted (delta 8's
+   stranding argument stands). The auto-mode legacy fallback survives for
+   genuinely unprovable acks — an older agent CLI, or a reconciler-authored
+   marker — and only for those.
+
+   *Traced.* Every handback now emits a `TraceSiteReconcilerDrainAck` decision
+   with `effect_owner=keyed`, `effect_applied=false`, `handed_back=true`,
+   outcome `rejected`, and a typed `drainAckRefusal` reason —
+   `not_agent_stamped`, `member_not_occupied`, `runtime_gone`, `lease_invalid`,
+   `unavailable`. A stderr-only yield is a trace lie by delta 8's own standard,
+   and the controller log for the failing runs carried no drain-ack diagnostics
+   at all for the drained row. The outcome is outside `legacyDrainEffectOutcomes`
+   and the owner is keyed, so a handback can never be mistaken by the row-scoped
+   purity scan for the effect it is refusing to apply. §3b classifies the
+   `not_agent_stamped` fallback from this record rather than by inference.
+
 ### §3 D-STALE-CREATE deltas (recorded at WD.7)
 
 Where the rollback family as built diverges from §3 as written. Reported, not
@@ -1999,6 +2056,63 @@ handle + normalized session name with bead-ID cross-check + records distinguishe
 `effect_owner` (legacy / detector-shadow / keyed). **Artifacts**: per-family counts,
 triaged mismatch log, sign-off records → `engdocs/plans/reconciler-distillation/
 evidence/`; reviewed by the Fable council before WE per DESIGN.md §4 (wave gates).
+
+### Evidence hygiene (council F5 — binding)
+
+**No proof-bearing journey run on a saturated host.** A run is citable only if
+the load average was under ~40 **at start AND at finish**. A red on a saturated
+host cannot be distinguished from contention (this is exactly how ga-lnkbg's
+`:1598` reset leg was first observed — one failure in four, on a box at load
+73), and a green on a saturated host proves only that the timing happened to
+work out. Record both load samples with every run; a run whose load was not
+recorded is not evidence.
+
+The start-only form of this rule is NOT sufficient, and the first run under it
+proved so: rec/r7 run 1 began at load 37.06 and finished at 106.19, and its log
+carries the signature of a host that fell over underneath it — `slow_storage_
+degraded` traces, `[mysql] packets.go:58 unexpected EOF`, `source store %q is
+unavailable`, `rigStores=0`, and a tmux server that was unreachable at adoption.
+Legs failed there that no keyed change touches (`configured_dependency_wake` at
+`:1049`). Sample both ends.
+
+This is not a licence to widen latency budgets. `:1598` asserts a 30s absolute
+bound by design (§4 absolute-bound rule) and stays there. The rule governs which
+runs may be CITED, not what the assertions demand.
+
+**Journey-runner log rotation.** Failure logs must be preserved, not overwritten.
+The fourth run in the ga-lnkbg series lost its `:1598` log to a reused log slot,
+which is why that bead carries a mechanism question it should already have been
+able to answer from the artifact. A run that failed keeps its log.
+
+### Coexistence-code census (council §4 — archive for the WE deletion ledger)
+
+Of ~31,100 production insertions, **~16% dies at WE** (honest band 15-20%,
+~4.8-5.4k LOC); **~84% is permanent keyed logic.** Buckets:
+
+| Bucket | LOC | Note |
+|---|---|---|
+| perf/parity CLI | 2,581 | owner directive D4 keeps it until the WE campaign |
+| shadow-parity pipeline | ~450 | |
+| legacy-file yield/stand-down edits | 819 | dies with `session_reconciler.go` |
+| 14 `withLegacy*` bridges + wiring | ~400 | |
+| rollout/latch/fallback | ~400-600 | |
+| sweep lattice | ~200-350 | |
+
+**Trap — archive this with the number.** ~894 LOC of shadow-NAMED files are LIVE
+keyed code: `session_lifecycle_shadow_plan`, `session_lifecycle_shadow_start_plan`,
+`api_state_session_wait_shadow`, `pool_allocation_shadow`. Rename them at WF;
+**never delete by filename.**
+
+**Re-point supersede survives WE (council R2).** `build_desired_state.go` is on
+§5's "survive intact" list and `DESIGN.md` §2 marks it *shared*, not
+legacy-owned; `beadReconcileTick` and `controlDispatcherTick` both call
+`buildDesiredStateWithSessionBeads` every tick, and the file carries no WE-stamp
+comments. So `poolTriggerRepointSuperseded` and `bindPoolSessionTriggerBead`
+execute post-WE, and the ga-vumr7 duplicate-claim race is NOT debt that the
+legacy deletion collects for free. Priority raised above coexistence-residue
+accordingly. (DETECTOR:1439's "that engine dies at WE" is about the legacy FLOOR
+REFILL create arm, not the file; the re-point arm is a metadata write in the
+surviving input producer.)
 
 ## 4. Slice plan
 

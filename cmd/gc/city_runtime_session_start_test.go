@@ -235,11 +235,17 @@ func (p *sequenceGetMetaProvider) StopUnattendedSession(name, expectedToken stri
 	return p.Stop(name)
 }
 
+// GetMeta fails the FIRST instance-token read and blocks the second. It is
+// keyed on GC_INSTANCE_TOKEN rather than on a call count because the keyed
+// drain-ack path no longer re-reads the runtime once the acknowledgement is
+// committed durably (council R1), so the surviving token read is the one
+// StopUnattendedSession makes at the destructive boundary — which is the fence
+// this test is actually about.
 func (p *gatedTokenReadProvider) GetMeta(name, key string) (string, error) {
-	call := p.metaCalls.Add(1)
-	if call%7 != 0 {
+	if key != "GC_INSTANCE_TOKEN" {
 		return p.Fake.GetMeta(name, key)
 	}
+	p.metaCalls.Add(1)
 	failed := false
 	p.failureOnce.Do(func() {
 		failed = true
@@ -360,8 +366,11 @@ func installRecoveredDrainAckLeaseForTest(params *exactSessionStartParams, sessi
 		}
 		return lease, true, false, nil
 	}
-	params.AuthorizePoolDrainAck = func(info session.Info, candidate routedWorkPoolDrainAckLease) (bool, error) {
-		return info.ID == sessionID && candidate == lease, nil
+	params.AuthorizePoolDrainAck = func(info session.Info, candidate routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
+		// DurableAgentProvenance is a caller-supplied mode, not lease identity:
+		// the reconciler sets it once the stamps are committed.
+		candidate.DurableAgentProvenance = false
+		return info.ID == sessionID && candidate == lease, drainAckRefusalNone, nil
 	}
 	return lease
 }
@@ -534,9 +543,10 @@ func TestReconcileExactSessionStartDrainAckUpgradesRecoveredProvenanceBeforeStop
 	params.StatusWriter = recording
 	params.AsyncStopTracker = &asyncStartTracker{}
 	lease := installRecoveredDrainAckLeaseForTest(&params, bead.ID)
-	params.AuthorizePoolDrainAck = func(info session.Info, candidate routedWorkPoolDrainAckLease) (bool, error) {
+	params.AuthorizePoolDrainAck = func(info session.Info, candidate routedWorkPoolDrainAckLease) (bool, drainAckRefusal, error) {
 		sequence = append(sequence, "authorize")
-		return info.ID == bead.ID && candidate == lease, nil
+		candidate.DurableAgentProvenance = false
+		return info.ID == bead.ID && candidate == lease, drainAckRefusalNone, nil
 	}
 
 	owner, err := reconcileExactSessionStartWithOwner(t.Context(), sessionStartAdmission{
@@ -1409,7 +1419,7 @@ func TestCityRuntimeProviderReloadDefersForKeyedDrainAckStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire drain-ack authorization snapshot: %v", err)
 	}
-	authorized, authorizeErr := cr.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
+	authorized, _, authorizeErr := cr.authorizeRoutedWorkPoolDrainAck(snapshot, info, lease)
 	release()
 	if authorizeErr != nil || !authorized {
 		t.Fatalf("baseline drain-ack authorization = (%t, %v), want true", authorized, authorizeErr)

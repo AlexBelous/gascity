@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -114,6 +115,68 @@ func (cr *CityRuntime) takeReadyRoutedWorkViewChanged() bool {
 	return changed
 }
 
+// workflowStoreEntry is one bead store paired with the canonical workflow store
+// ref its consumers speak.
+type workflowStoreEntry struct {
+	ref   string
+	store beads.Store
+}
+
+// canonicalWorkflowStoreEntries labels the runtime's bead stores with the ref
+// workflowStoreRefForDir derives from each store's DIRECTORY, walking the same
+// loop controllerState.routedWorkStore walks to resolve one. The two are
+// mirrors, so a ref produced here is resolvable there by construction.
+//
+// The store maps are keyed by BARE name — buildStores and
+// buildStandaloneRigStores index rigs by rig.Name, and BeadStores adds the city
+// under cityName — and that vocabulary is private to the maps. A routed-work
+// ref is not a label but a KEY, and every consumer of one resolves the canonical
+// spelling only: routedWorkStore, agentutil.AgentReachesWorkflowStore behind the
+// allocation policy, and the row-versus-lease scope comparisons in the
+// pool-allocation start and drain-ack effect boundaries. Handing a map key out
+// as a ref therefore emits work no allocation can act on and no acknowledgement
+// can finalize (ga-f7v2ft.155), which is why refs leave this producer canonical
+// rather than being repaired at each consumer.
+//
+// A RIG store whose ref does not resolve is dropped rather than emitted bare:
+// its identity comes from cfg.Rigs, so a store that matches no configured rig
+// has no ref any consumer could resolve and no consumer to resolve it. The CITY
+// store is never dropped — it is always present and always readable, and losing
+// its read would trade a labeling defect for a blind demand scan. Routing its
+// ref through the canonicalizer gives the canonical spelling whenever the city
+// path is known (always, in a running city) and the legacy "city" literal
+// otherwise, which downstream canonicalization still maps to this same store.
+func canonicalWorkflowStoreEntries(cfg *config.City, cityPath string, cityStore beads.Store, rigStores map[string]beads.Store) []workflowStoreEntry {
+	entries := make([]workflowStoreEntry, 0, len(rigStores)+1)
+	entries = append(entries, workflowStoreEntry{
+		ref:   canonicalizeLegacyWorkflowStoreRef(cfg, cityPath, "city"),
+		store: cityStore,
+	})
+	if cfg == nil {
+		return entries
+	}
+	cityName := loadedCityName(cfg, cityPath)
+	rigs := make([]workflowStoreEntry, 0, len(rigStores))
+	for i := range cfg.Rigs {
+		rig := &cfg.Rigs[i]
+		store, ok := rigStores[rig.Name]
+		if !ok {
+			continue
+		}
+		rigPath := rig.Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		ref := workflowStoreRefForDir(rigPath, cityPath, cityName, cfg)
+		if ref == "" {
+			continue
+		}
+		rigs = append(rigs, workflowStoreEntry{ref: ref, store: store})
+	}
+	sort.Slice(rigs, func(i, j int) bool { return rigs[i].ref < rigs[j].ref })
+	return append(entries, rigs...)
+}
+
 // readReadyRoutedWorkView performs the declared read: one bounded ReadyLive per
 // store, in a stable store order, resolving each ready bead's pool target
 // against the current config.
@@ -127,20 +190,7 @@ func (cr *CityRuntime) readReadyRoutedWorkView() readyRoutedWorkView {
 	cr.serviceStateMu.RUnlock()
 	templates := poolRouteTemplateSet(cfg)
 
-	type storeEntry struct {
-		ref   string
-		store beads.Store
-	}
-	stores := []storeEntry{{ref: cr.cityName, store: cr.cityBeadStore()}}
-	rigStores := cr.rigBeadStores()
-	refs := make([]string, 0, len(rigStores))
-	for ref := range rigStores {
-		refs = append(refs, ref)
-	}
-	sort.Strings(refs)
-	for _, ref := range refs {
-		stores = append(stores, storeEntry{ref: ref, store: rigStores[ref]})
-	}
+	stores := canonicalWorkflowStoreEntries(cfg, cr.cityPath, cr.cityBeadStore(), cr.rigBeadStores())
 	view.Stores = len(stores)
 
 	h := fnv.New64a()

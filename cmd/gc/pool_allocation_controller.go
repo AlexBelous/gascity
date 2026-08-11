@@ -972,6 +972,9 @@ func canonicalizeLegacyWorkflowStoreRef(cfg *config.City, cityPath, storeRef str
 	return storeRef
 }
 
+// routedWorkStore resolves a routed-work key's source store ref to the store it
+// names. It speaks the canonical vocabulary only; canonicalWorkflowStoreEntries
+// is its producer-side mirror and walks the same loop.
 func (cs *controllerState) routedWorkStore(cfg *config.City, sourceStore string) (beads.Store, bool) {
 	if cs == nil || cfg == nil {
 		return nil, false

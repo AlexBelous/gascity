@@ -2240,6 +2240,7 @@ func TestCityRuntimeReadyRoutedWorkViewLogsStableStoreError(t *testing.T) {
 	store := &readyFailStore{Store: beads.NewMemStore()}
 	cr := &CityRuntime{
 		cityName: "test-city",
+		cityPath: t.TempDir(),
 		cfg: &config.City{
 			Workspace: config.Workspace{Name: "test-city"},
 		},
@@ -2260,8 +2261,33 @@ func TestCityRuntimeReadyRoutedWorkViewLogsStableStoreError(t *testing.T) {
 	if store.readyCalls != 2 {
 		t.Fatalf("Ready calls = %d, want 2", store.readyCalls)
 	}
-	if got := logBuf.String(); !strings.Contains(got, "readyRoutedWorkView: store test-city: backing ready should not be used") {
+	if got := logBuf.String(); !strings.Contains(got, "readyRoutedWorkView: store city:test-city: backing ready should not be used") {
 		t.Fatalf("log output = %q, want readyRoutedWorkView store error", got)
+	}
+}
+
+// TestReadyRoutedWorkViewNeverDropsTheCityStore pins the one asymmetry in
+// canonicalWorkflowStoreEntries. A rig store with no configured rig is dropped
+// because nothing could resolve its ref, but the city store is always read even
+// when its ref cannot be derived from a path — dropping it would turn a
+// labeling defect into a blind demand scan, which is strictly worse.
+func TestReadyRoutedWorkViewNeverDropsTheCityStore(t *testing.T) {
+	store := &readyFailStore{Store: beads.NewMemStore()}
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cfg:      &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+
+	view := cr.readReadyRoutedWorkView()
+
+	if view.Stores != 1 || store.readyCalls != 1 {
+		t.Fatalf("stores = %d, Ready calls = %d, want the city store read exactly once with no city path", view.Stores, store.readyCalls)
 	}
 }
 

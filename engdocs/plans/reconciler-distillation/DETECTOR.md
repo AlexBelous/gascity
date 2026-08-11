@@ -2114,6 +2114,64 @@ accordingly. (DETECTOR:1439's "that engine dies at WE" is about the legacy FLOOR
 REFILL create arm, not the file; the re-point arm is a metadata write in the
 surviving input producer.)
 
+### Evidence hygiene — citability is artifact-gated, not load-gated (F5, ga-f7v2ft.154)
+
+Council F5 originally barred proof-bearing journey runs on saturated hosts
+(load-73 class), reds OR greens. The architect amendment of 2026-08-11
+supersedes the threshold, on the owner signal that this host's load will not
+materially drop: **the load<40 gate was only ever a proxy for
+saturation-induced invalidity, and the direct standard replaces it.**
+
+A journey run is **CITABLE** iff both hold:
+
+1. its artifact shows **zero saturation signatures**, and
+2. its legs complete within their **absolute budgets**.
+
+Ambient load is **recorded as metadata on every run and never disqualifies by
+itself.** A non-citable run is VOID: it neither breaks nor extends a streak.
+
+The enumerated signature list: `newosproc` / "failed to create new OS thread";
+fork/exec `EAGAIN` / "resource temporarily unavailable"; "Cannot fork";
+`slow_storage_degraded`; mysql EOF / connection reset on the managed dolt;
+unavailable source store / `rigStores=0`; tmux server unreachable at adoption.
+
+**The list is extensible, and extension is mandatory, not optional: any new
+infrastructure-flavored failure in a red run must be classified (signature vs
+product) before the run counts either way.** Suites adapt to the
+campaign-proven serial-shard pattern — one shard at a time; the parallel
+fan-out is what dies, not the branch (ga-asley's serial discharge).
+
+**Classification rulings so far.** Applying the clause above to the first
+campaign runs retired two list entries from bare matching, because on a
+rig-less journey fixture they are product-normal in *every* run and matching
+them bare would make every run permanently VOID — i.e. would render the rule
+unrunnable:
+
+- **`rigStores=0` — PRODUCT, does not void.** `build_desired_state.go:716`
+  prints `assignedWorkBeads: 0 beads (rigStores=N)` on the else branch of "did
+  we find assigned work beads" — a per-tick census line, not an error path. The
+  journey city registers no rigs, so `N=0` is structural. The real
+  store-failure discriminator on that same path is `assignedWorkBeads: PARTIAL
+  — store query failed, drain decisions suppressed` (gated on `storePartial`),
+  and that is what a scanner must match instead.
+- **`tmux server unreachable: no tmux server running` — PRODUCT, does not
+  void.** Emitted at city startup (adoption barrier, dead cleanup, closed-bead
+  reap, pool death check) before the first session exists, when no server
+  legitimately exists yet. The signature means a server that *should* be
+  reachable and is not, so the cold-start form is excluded and every other
+  unreachable form still counts.
+- **"source store `<ref>` is unavailable" — PRODUCT DEFECT on the current
+  lane, does not void.** Proven deterministic, not saturation: the city store
+  entry is labelled with the bare city name while the canonical workflow store
+  ref is `city:<name>`, so the compare can never match. Reproduced at load 52
+  as readily as at load 82. See the regression note in §6.
+
+The general rule the three rulings share: **a signature must be something host
+pressure can cause.** If a candidate string is emitted deterministically by the
+fixture's own shape, or is a product defect reproducible at low load, it is not
+a saturation signature — classifying it as one voids the evidence and hides the
+bug, which is the exact failure mode this clause exists to prevent.
+
 ## 4. Slice plan
 
 House template (.102, commit 6296db9b68): description = the parity gap; design =
@@ -2242,3 +2300,34 @@ Only after the WD.15 evidence campaign is archived (D4):
    would be a behavior change confounding the joins. WD.4's entry gate is
    satisfied and WD.6 inherits; a durable variant becomes a normal post-WE bead
    if a real crash-window incident ever surfaces.
+
+5. **The sweep's routed-work view labels the city store with the BARE city
+   name** (open regression, found by the first artifact-gated journey campaign,
+   2026-08-11). `ready_routed_work_view.go:134` builds the city store entry as
+   `{ref: cr.cityName, ...}` — e.g. `gctest-1d689824` — but the canonical
+   workflow store ref for the city is `"city:" + cityName`
+   (`workflowStoreRefForDir`, `cmd_sling.go:1298-1310`). The detector sweep
+   forwards that ref raw into the allocation contribution
+   (`detectorPoolAllocationEnqueueFunc`, `city_runtime_session_start.go:932`),
+   and `controllerState.routedWorkStore`
+   (`pool_allocation_controller.go:975-1001`) compares it against the canonical
+   form **without canonicalizing**, so the city store never resolves:
+   `"city:<name>" == "<name>"` is false, the (empty) rig loop falls through, and
+   every city-store routed-work allocation reports *source store `<name>` is
+   unavailable*. `canonicalizeLegacyWorkflowStoreRef` does not rescue it: that
+   helper canonicalizes the bare literal `"city"` and bare RIG names, but a bare
+   city NAME falls through all three branches unchanged.
+
+   The same spelling divergence reaches the drain-ack fence. The
+   trigger-binding arm in `authorizeRoutedWorkPoolDrainAck` compares
+   `canonicalizeLegacyWorkflowStoreRef(..., info.TriggerBeadStoreRef)` against
+   `lease.SourceStore` — the ROW side is canonicalized (`city:<name>`) but the
+   LEASE side is compared raw (`<name>`), so the arm mismatches and the
+   acknowledgement is refused `lease_invalid`.
+
+   Introduced by `83049b52e8` (2026-08-10, "promote the ready-demand scan to the
+   sweep's routed-work view"), i.e. in-lane and one day old — this is the
+   bare-vs-`city:` class of the Round-4 frontier (the ga-2oboq canonicalizer)
+   resurfacing on the sweep path. It is the dominant blocker of the v59 journey:
+   five consecutive citable runs failed with zero infrastructure signatures, and
+   it is what falsified ga-f7v2ft.147's `runtime_gone` hypothesis.

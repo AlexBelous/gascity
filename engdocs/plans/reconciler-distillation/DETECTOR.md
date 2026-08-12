@@ -1038,6 +1038,64 @@ for the DrainAdvance phase had drifted to `:4282-4290`.
    and the owner is keyed, so a handback can never be mistaken by the row-scoped
    purity scan for the effect it is refusing to apply. §3b classifies the
    `not_agent_stamped` fallback from this record rather than by inference.
+13. **The drain-ack lifecycle gate asks the PROJECTION, and `lease_invalid`
+   names its arm (ga-f7v2ft.147, frontier campaign).** Ruling 12 left the fence
+   correct in substance and still unable to hold a real drain, because
+   `isRoutedWorkPoolDrainAckLifecycleShape` compared the raw state metadata
+   against one literal spelling — `active`. Nothing keeps a live member on that
+   spelling: the status heal rewrites an active row to `awake` a tick after it
+   reaches the runtime (`session_status_alias_heal.go:52`), and
+   `projectBaseState` maps BOTH to `BaseStateActive`. From the heal onward the
+   keyed family refused every one of its own members, which is why
+   `keyed_drain_ack_owner` — the traced skip the .147 stand-down emits when the
+   family owns a row — fired ZERO times in eight journey runs, and why legacy
+   applied the stop-pending effect the `:1993` purity assertion caught. The gate
+   now asks `ProjectLifecycle(...).BaseState == BaseStateActive`, which widens it
+   by exactly the second spelling of a running row, keeps every dormant and
+   terminal state out, and inherits the closed-status guard.
+
+   *Why it took two campaigns.* `lease_invalid` covered a dozen independent
+   preconditions, so a handback reading `refusal=lease_invalid` said only that
+   ONE of them failed. Each arm now carries a sub-code with `lease_invalid` as
+   its prefix (`lease_invalid/lifecycle_shape`, `/row_binding`,
+   `/work_not_closed`, `/assigned_work`, `/policy_unsupported`, …) and the
+   identity conjunction is split into one rung per fact. The instrumented run
+   read `refusal=lease_invalid/lifecycle_shape` directly off the yield line.
+   **Rule for this family: a refusal code whose cardinality is smaller than the
+   set of arms that return it is a diagnostic dead end.**
+
+   *Fixture lesson.* Every unit fixture stamped `state: active` by hand and no
+   test ever ran the status heal over one, so the whole suite agreed with the
+   defect. The `:1804`/`:1986` allowlist precedents are the same shape:
+   stale fixture versus live writer.
+
+### The legacy dead-runtime corpse pass (recorded at the .147/.156 frontier)
+
+Not a detector family — `cleanupDeadRuntimeSessionCorpses` is a legacy
+god-function pass — but it terminates rows the keyed families own, so its two
+holes are recorded here.
+
+1. **A corpse falsifies only a row that CLAIMS a live runtime.** The pass reaps
+   a session whose panes are all dead and then closes the bead, so the alias is
+   released for a successor (gastownhall/gascity#2437). A dormant row asserts no
+   incarnation: `gc session kill` stops the runtime and syncs the bead to asleep
+   precisely so a later wake can start a fresh one on the same durable session,
+   and the corpse is that sleep's expected residue. The close is now scoped by
+   `sessionBeadClaimsLiveRuntime` (the same lifecycle projection ruling 13 uses);
+   the reap is unchanged, because freeing the name is what the wake needs.
+2. **The corpse must be the row's own incarnation.** A restart rotates the
+   instance token at the pre-wake commit and starts the new runtime after it, so
+   a row mid-rebind reads `awake` — it claims a live runtime, and hole 1's guard
+   passes it — while the name still carries the previous incarnation's corpse.
+   The pass reaped it and closed the row out from under the start in flight,
+   which came back to `ignoring stale async start result`. The pass now proves
+   `GC_INSTANCE_TOKEN` against the row's token before touching anything, which
+   is where the keyed stop already proves it (ruling 12, `strictTokenFence`). An
+   unreadable token refuses; a row carrying no token keeps the old behavior.
+
+Both holes present as the same journey symptom — the exact-wake leg failing at
+`:1395` with `Closed:true MetadataState:dead-runtime` — and neither is the
+`gc_swept` sweep shape ga-ij8mh owns.
 
 ### §3 D-STALE-CREATE deltas (recorded at WD.7)
 

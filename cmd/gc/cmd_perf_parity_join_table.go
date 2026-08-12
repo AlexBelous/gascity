@@ -284,6 +284,122 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 	},
 }
 
+// parityJoinSiteAttribution says what an effect_owner-ABSENT record at a site
+// means. It is the machine-readable half of the section 1 site-disposition
+// table: which of the 28 sites the god function itself writes a per-session
+// decision at, and which it does not touch.
+//
+// The tool needs this because no line of production code stamps
+// effect_owner="legacy". Every keyed handler stamps "keyed", the sweep stamps
+// "detector-shadow" (or "keyed" for a routed condition), and legacy stamps
+// nothing — so legacy is identified by ELIMINATION, not by a stamp it will
+// never carry. The alternative, teaching the god function to stamp, is
+// scaffolding built into code scheduled for deletion at WE.
+type parityJoinSiteAttribution string
+
+const (
+	// parityJoinSiteLegacy is a section 1 DECISION site: the god function
+	// writes a per-session decision record here, unstamped. Absence of
+	// effect_owner classifies the record as legacy.
+	parityJoinSiteLegacy parityJoinSiteAttribution = "legacy"
+	// parityJoinSitePhase is a section 1 PHASE site. Legacy writes exactly one
+	// cycle-level marker per tick here (reason=retained, outcome=complete, no
+	// session identity); only the keyed and detector writers write per-session
+	// rows, and they stamp. Binning the marker as legacy would manufacture one
+	// phantom legacy-only row per cycle in D-DUP and D-STRANDED, whose only
+	// sites are phase sites.
+	parityJoinSitePhase parityJoinSiteAttribution = "phase"
+	// parityJoinSiteNonLegacy is a site with no legacy per-session writer, or
+	// one whose writer serves both engines. Absence cannot be attributed by
+	// elimination, so the record is counted and surfaced rather than binned.
+	parityJoinSiteNonLegacy parityJoinSiteAttribution = "non_legacy"
+)
+
+type parityJoinSiteDisposition struct {
+	Attribution parityJoinSiteAttribution
+	// Note is the section 1 row (or the writer) this transcribes, so a reader
+	// of the readout can check the claim without reading Go.
+	Note string
+}
+
+// parityJoinSiteDispositions covers every site the section 3b family table
+// claims. TestParityJoinSiteDispositionsCoverEveryFamilySite enforces that.
+var parityJoinSiteDispositions = map[TraceSiteCode]parityJoinSiteDisposition{
+	// start — section 1 row 27 (StartExecution) is KEYED-OWNED ALREADY, and its
+	// shared start wave serves both paths, so nothing here attributes. Section
+	// 3b routes this family to the existing shadow-worker comparators anyway.
+	TraceSiteLifecycleStartPrepare:         {parityJoinSiteNonLegacy, "s1#27 keyed-owned: the keyed start wave fires lifecycle.start.prepare"},
+	TraceSiteLifecycleStartExecute:         {parityJoinSiteNonLegacy, "s1#27 keyed-owned: the keyed start wave fires lifecycle.start.execute"},
+	TraceSiteLifecycleStartCommit:          {parityJoinSiteNonLegacy, "s1#27 keyed-owned: the keyed start wave fires lifecycle.start.commit"},
+	TraceSiteLifecycleStartRun:             {parityJoinSiteNonLegacy, "s1#27 shared start wave (session_lifecycle_parallel.go) serves both paths"},
+	TraceSiteLifecycleStartFailed:          {parityJoinSiteNonLegacy, "s1#27 shared start wave (session_lifecycle_parallel.go) serves both paths"},
+	TraceSiteLifecycleStartRollback:        {parityJoinSiteNonLegacy, "s1#27 shared start wave (session_lifecycle_parallel.go) serves both paths"},
+	TraceSiteLifecycleStartSelectionShadow: {parityJoinSiteNonLegacy, "start-selection shadow comparator, not a reconciler decision"},
+
+	// D-DEADLINE
+	TraceSiteReconcilerIdleTimeout:   {parityJoinSiteLegacy, "s1#1 IdleTimeout"},
+	TraceSiteReconcilerMaxSessionAge: {parityJoinSiteLegacy, "s1#2 MaxSessionAge"},
+
+	// D-ORPHAN
+	TraceSiteReconcilerOrphaned:          {parityJoinSiteLegacy, "s1#3 Orphaned"},
+	TraceSiteReconcilerCloseOrphan:       {parityJoinSiteLegacy, "s1#4 CloseOrphan"},
+	TraceSiteReconcilerCloseFailedCreate: {parityJoinSiteLegacy, "s1#5 CloseFailedCreate"},
+
+	// D-STALE-CREATE
+	TraceSiteReconcilerPendingCreate:          {parityJoinSiteLegacy, "s1#6 PendingCreate"},
+	TraceSiteReconcilerPendingCreatePreserved: {parityJoinSiteLegacy, "s1#7 PendingCreatePreserved"},
+
+	// D-DRIFT
+	TraceSiteReconcilerConfigDrift: {parityJoinSiteLegacy, "s1#8 ConfigDrift"},
+	TraceSiteReconcilerLiveDrift:   {parityJoinSiteLegacy, "s1#9 LiveDrift"},
+
+	// D-SLEEP
+	TraceSiteReconcilerDrainDecision: {parityJoinSiteLegacy, "s1#12 DrainDecision"},
+
+	// D-DRAIN. The legacy drain engine (session_wake.go) writes the four
+	// reconciler.drain.* sites unstamped; the keyed drain handler
+	// (session_drain_reconcile.go) writes the same sites with effect_owner=keyed.
+	TraceSiteReconcilerDrainAck:           {parityJoinSiteLegacy, "s1#10 DrainAck"},
+	TraceSiteDrainCancel:                  {parityJoinSiteLegacy, "s1#11 DrainCancel"},
+	TraceSiteDrainStale:                   {parityJoinSiteLegacy, "legacy drain engine session_wake.go, unstamped"},
+	TraceSiteDrainComplete:                {parityJoinSiteLegacy, "legacy drain engine session_wake.go, unstamped"},
+	TraceSiteDrainTimeout:                 {parityJoinSiteLegacy, "legacy drain engine session_wake.go, unstamped"},
+	TraceSiteLifecycleDrainBegin:          {parityJoinSiteNonLegacy, "no production writer"},
+	TraceSiteLifecycleDrainAdvance:        {parityJoinSiteNonLegacy, "keyed drain advance (session_start_reconcile.go)"},
+	TraceSiteSessionReconcileDrainAdvance: {parityJoinSitePhase, "s1#28 DrainAdvance (phase)"},
+
+	// D-WAKE
+	TraceSiteReconcilerWakeDecision:            {parityJoinSiteLegacy, "s1#19 WakeDecision"},
+	TraceSiteReconcilerPreserveConfiguredNamed: {parityJoinSiteLegacy, "s1#13 PreserveConfiguredNamed"},
+
+	// D-ZOMBIE
+	TraceSiteReconcilerTerminalProviderError: {parityJoinSiteLegacy, "s1#15 TerminalProviderError"},
+
+	// D-STALL
+	TraceSiteReconcilerResetStalled:        {parityJoinSiteLegacy, "legacy stall reset (session_reconciler.go), unstamped"},
+	TraceSiteReconcilerProgressStallExempt: {parityJoinSiteLegacy, "s1#14 ProgressStallExempt"},
+
+	// D-DUP / D-STRANDED: phase sites only. Legacy has no per-session decision
+	// record in either family (WD.13 / WD.14 delta 1), so their detection parity
+	// is candidacy agreement, not a record-to-record join.
+	TraceSiteSessionReconcileHealRetire: {parityJoinSitePhase, "s1#22 HealRetire (phase)"},
+	TraceSiteSessionReconcileWakeSleep:  {parityJoinSitePhase, "s1#26 WakeSleep (phase)"},
+}
+
+// parityJoinKeyedSeamYieldReasons are legacy's coexistence-seam yields: arms
+// where the god function stepped aside because the keyed controller holds the
+// key, so the EFFECT belongs to the keyed population even though legacy wrote
+// the record. Three of the four stamp effect_owner=keyed already
+// (session_reconciler.go:1547, :2436, :3595); the wake arm (:1882, :4093) does
+// not, and binning its yields as legacy would swamp D-WAKE with rows for
+// decisions legacy explicitly declined to make.
+var parityJoinKeyedSeamYieldReasons = map[TraceReasonCode]bool{
+	"keyed_start_owner":        true,
+	"keyed_deadline_owner":     true,
+	"keyed_orphan_drain_owner": true,
+	"keyed_stale_create_owner": true,
+}
+
 // parityJoinSiteFamily indexes every section 3b site to its family.
 var parityJoinSiteFamily = func() map[TraceSiteCode]*parityJoinFamilySpec {
 	index := make(map[TraceSiteCode]*parityJoinFamilySpec)

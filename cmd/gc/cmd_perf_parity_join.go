@@ -51,6 +51,28 @@ type parityJoinCycleStats struct {
 	ExcludedNoRollup     int `json:"excluded_no_cycle_rollup"`
 	WithoutDetailArms    int `json:"without_detail_arms"`
 	UnownedRecords       int `json:"unowned_records"`
+	LegacyByElimination  int `json:"legacy_by_elimination"`
+}
+
+// Dispositions for an effect_owner-absent record. Exactly one is an
+// attribution; the rest are refusals, each carrying why.
+const (
+	parityJoinAbsenceLegacy         = "legacy"
+	parityJoinAbsencePhaseMarker    = "phase_marker"
+	parityJoinAbsenceKeyedSeamYield = "keyed_seam_yield"
+	parityJoinAbsenceUnattributable = "unattributable"
+	parityJoinAbsenceNoSessionKey   = "no_session_key"
+)
+
+// parityJoinAbsenceEntry is one (site, reason, disposition) group of records
+// that carried no effect_owner stamp. Every owner-absent record lands in
+// exactly one group, so the readout accounts for all of them.
+type parityJoinAbsenceEntry struct {
+	Site        TraceSiteCode   `json:"site_code"`
+	Reason      TraceReasonCode `json:"reason_code,omitempty"`
+	Disposition string          `json:"disposition"`
+	Note        string          `json:"note,omitempty"`
+	Count       int             `json:"count"`
 }
 
 type parityJoinFamilyReport struct {
@@ -95,6 +117,7 @@ type parityJoinReport struct {
 	Cycles                 parityJoinCycleStats     `json:"cycles"`
 	Families               []parityJoinFamilyReport `json:"families"`
 	Triage                 []parityJoinTriageEntry  `json:"triage"`
+	OwnerAbsence           []parityJoinAbsenceEntry `json:"owner_absence,omitempty"`
 	Unclassified           []parityJoinSample       `json:"unclassified,omitempty"`
 	ShadowEffectViolations int                      `json:"shadow_effect_violations"`
 	NoEvidence             bool                     `json:"no_evidence"`
@@ -173,6 +196,7 @@ type parityJoinRowKey struct {
 type parityJoinAccumulator struct {
 	rows    map[string]*parityJoinFamilyReport
 	triage  map[parityJoinTriageEntry]int
+	absence map[parityJoinAbsenceEntry]int
 	samples []parityJoinSample
 	opts    parityJoinOptions
 	report  *parityJoinReport
@@ -188,10 +212,11 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 	}
 	report := parityJoinReport{SchemaVersion: parityJoinSchemaV1, Bar: opts.Bar}
 	acc := &parityJoinAccumulator{
-		rows:   make(map[string]*parityJoinFamilyReport, len(parityJoinFamilySpecs)),
-		triage: make(map[parityJoinTriageEntry]int),
-		opts:   opts,
-		report: &report,
+		rows:    make(map[string]*parityJoinFamilyReport, len(parityJoinFamilySpecs)),
+		triage:  make(map[parityJoinTriageEntry]int),
+		absence: make(map[parityJoinAbsenceEntry]int),
+		opts:    opts,
+		report:  &report,
 	}
 	for i := range parityJoinFamilySpecs {
 		spec := &parityJoinFamilySpecs[i]
@@ -203,7 +228,7 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 	}
 
 	report.Families = make([]parityJoinFamilyReport, 0, len(parityJoinFamilySpecs))
-	owned := 0
+	joined := 0
 	for i := range parityJoinFamilySpecs {
 		row := *acc.rows[parityJoinFamilySpecs[i].Family]
 		comparable := row.Matched + row.Mismatched
@@ -211,12 +236,18 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 			row.MatchRate = float64(row.Matched) / float64(comparable)
 			row.BarMet = row.MatchRate >= opts.Bar
 		}
-		owned += 2*row.Joined + row.LegacyOnly + row.DetectorOnly + row.Keyed
+		joined += row.Joined
 		report.Families = append(report.Families, row)
 	}
 	report.Triage = parityJoinTriageLog(acc.triage)
+	report.OwnerAbsence = parityJoinAbsenceLog(acc.absence)
 	report.Unclassified = acc.samples
-	report.NoEvidence = owned == 0
+	// The evidence a section 3b readout rests on is JOINED rows. A corpus can be
+	// full of owned records and still join nothing — that was exactly the day-0
+	// campaign corpus, which reported no_evidence=false beside joined=0 in every
+	// family. Counting owned records instead of joined ones made the flag read
+	// backwards on the one case it exists to catch.
+	report.NoEvidence = joined == 0
 	report.WEBlocker = len(acc.samples) > 0 || report.ShadowEffectViolations > 0
 	report.BarMet = !report.NoEvidence && !report.WEBlocker
 	for _, row := range report.Families {
@@ -262,17 +293,65 @@ func parityJoinCycles(records []SessionReconcilerTraceRecord, stats *parityJoinC
 		switch {
 		case bucket.rollup == nil:
 			stats.ExcludedNoRollup++
-		case bucket.rollup.DropReasonCounts["record_budget_exceeded"] > 0:
+		case parityJoinDropCount(bucket.rollup, "record_budget_exceeded") > 0:
 			stats.ExcludedRecordBudget++
 		default:
 			stats.Considered++
-			if bucket.rollup.DetailedTemplateCount == 0 {
+			if parityJoinRollupCount(bucket.rollup, "detailed_template_count") == 0 {
 				stats.WithoutDetailArms++
 			}
 			kept = append(kept, parityJoinOrderedCycle{key: key, bucket: bucket})
 		}
 	}
 	return kept
+}
+
+// parityJoinRollupCount reads a cycle-rollup counter from rec.Fields, which is
+// where the collector writes every rollup counter
+// (session_reconciler_trace_collector.go:970-983, serialized as the nested
+// "fields" object). The typed mirrors on the record struct are NOT all
+// maintained — nothing in the tree assigns DetailedTemplateCount — so a reader
+// of the typed field sees zero on every real rollup. Values arrive as float64
+// once the store has round-tripped them through JSON.
+func parityJoinRollupCount(rec *SessionReconcilerTraceRecord, key string) int {
+	if rec == nil {
+		return 0
+	}
+	return parityJoinInt(rec.Fields[key])
+}
+
+// parityJoinDropCount reads one drop-reason counter. This is the one rollup
+// counter the collector also mirrors onto a typed field, so either copy is
+// authoritative; the Fields copy is a map[string]int in memory and a
+// map[string]any once decoded.
+func parityJoinDropCount(rec *SessionReconcilerTraceRecord, reason string) int {
+	if rec == nil {
+		return 0
+	}
+	if count, ok := rec.DropReasonCounts[reason]; ok {
+		return count
+	}
+	switch counts := rec.Fields["drop_reason_counts"].(type) {
+	case map[string]int:
+		return counts[reason]
+	case map[string]any:
+		return parityJoinInt(counts[reason])
+	default:
+		return 0
+	}
+}
+
+// parityJoinInt reads a rollup counter in either shape it occurs in: the int the
+// collector wrote, or the float64 it becomes once the store has decoded it.
+func parityJoinInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 func (a *parityJoinAccumulator) joinCycle(key parityJoinCycleKey, bucket *parityJoinCycleBucket) {
@@ -289,12 +368,21 @@ func (a *parityJoinAccumulator) joinCycle(key parityJoinCycleKey, bucket *parity
 		if !traceTemplateMatches(rec.Template, a.opts.Template) {
 			continue
 		}
+		owner, absence := parityJoinRecordOwner(rec)
+		if absence != nil {
+			a.absence[*absence]++
+			if absence.Disposition != parityJoinAbsenceLegacy {
+				a.report.Cycles.UnownedRecords++
+				continue
+			}
+			a.report.Cycles.LegacyByElimination++
+		}
 		row := parityJoinRowKey{Site: rec.SiteCode, Session: parityJoinSessionKey(rec)}
 		if !seen[row] {
 			seen[row] = true
 			rowOrder = append(rowOrder, row)
 		}
-		switch parityJoinRecordOwner(rec) {
+		switch owner {
 		case parityJoinOwnerLegacy:
 			legacy[row] = append(legacy[row], rec)
 		case parityJoinOwnerDetectorShadow:
@@ -482,9 +570,65 @@ func parityJoinSessionKey(rec SessionReconcilerTraceRecord) string {
 	return strings.TrimSpace(rec.SessionBeadID)
 }
 
-func parityJoinRecordOwner(rec SessionReconcilerTraceRecord) string {
-	owner, _ := rec.Fields["effect_owner"].(string)
-	return strings.TrimSpace(owner)
+// parityJoinRecordOwner resolves which population wrote a record. A stamped
+// record is taken at its word. An unstamped one is classified by ELIMINATION:
+// every keyed handler stamps "keyed" and the sweep stamps "detector-shadow" (or
+// "keyed" for a condition it routed), so at a site where the god function is
+// the remaining writer, absence IS the legacy signature.
+//
+// Elimination beats teaching the god function to stamp for two reasons. The
+// stamp would be scaffolding threaded through ~19 legacy decision sites in a
+// function scheduled for deletion at WE, and it would need to survive every
+// remaining WD slice; the classification rule is one function that dies with
+// the tool. And it is sound where a log-line census would not be: a log line
+// carries no engine attribution — the correction recorded on ga-ij8mh turned on
+// exactly that, a legacy-looking line that no engine could be pinned to — while
+// a trace record carries the site code and the stamp its keyed and detector
+// writers already emit, which is enough to eliminate them.
+//
+// The guard is that absence only attributes inside the section 1 legacy
+// vocabulary. A phase site's per-cycle marker, a coexistence-seam yield whose
+// effect belongs to the keyed population, a keyed-owned or shared-writer site,
+// and a record with no session identity to join on are each refused with the
+// reason, counted, and surfaced — never silently binned as legacy.
+func parityJoinRecordOwner(rec SessionReconcilerTraceRecord) (string, *parityJoinAbsenceEntry) {
+	stamped, _ := rec.Fields["effect_owner"].(string)
+	if owner := strings.TrimSpace(stamped); owner != "" {
+		return owner, nil
+	}
+	disposition := parityJoinSiteDispositions[rec.SiteCode]
+	absence := &parityJoinAbsenceEntry{Site: rec.SiteCode, Reason: rec.ReasonCode, Note: disposition.Note}
+	switch {
+	case disposition.Attribution == parityJoinSitePhase:
+		absence.Disposition = parityJoinAbsencePhaseMarker
+	case disposition.Attribution != parityJoinSiteLegacy:
+		absence.Disposition = parityJoinAbsenceUnattributable
+	case parityJoinKeyedSeamYieldReasons[rec.ReasonCode]:
+		absence.Disposition = parityJoinAbsenceKeyedSeamYield
+		absence.Note = "legacy yielded this key to the keyed population; the effect is keyed's"
+	case parityJoinSessionKey(rec) == "":
+		absence.Disposition = parityJoinAbsenceNoSessionKey
+		absence.Note = "no session identity: not a row in a per-session join"
+	default:
+		absence.Disposition = parityJoinAbsenceLegacy
+		return parityJoinOwnerLegacy, absence
+	}
+	return "", absence
+}
+
+func parityJoinAbsenceLog(counts map[parityJoinAbsenceEntry]int) []parityJoinAbsenceEntry {
+	log := make([]parityJoinAbsenceEntry, 0, len(counts))
+	for entry, count := range counts {
+		entry.Count = count
+		log = append(log, entry)
+	}
+	sort.Slice(log, func(i, j int) bool {
+		if log[i].Site != log[j].Site {
+			return log[i].Site < log[j].Site
+		}
+		return log[i].Reason < log[j].Reason
+	})
+	return log
 }
 
 func parityJoinEffectApplied(rec SessionReconcilerTraceRecord) bool {
@@ -545,8 +689,9 @@ func writeParityJoinReport(w io.Writer, report parityJoinReport) error {
 		report.Cycles.Scanned, report.Cycles.Considered,
 		report.Cycles.ExcludedRecordBudget+report.Cycles.ExcludedNoRollup,
 		report.Cycles.ExcludedRecordBudget, report.Cycles.ExcludedNoRollup)
-	fmt.Fprintf(&b, "arms:   %d considered cycles carried no detail arm; %d records lacked an effect_owner stamp\n\n",
-		report.Cycles.WithoutDetailArms, report.Cycles.UnownedRecords)
+	fmt.Fprintf(&b, "arms:   %d considered cycles carried no detail arm\n", report.Cycles.WithoutDetailArms)
+	fmt.Fprintf(&b, "owner:  %d unstamped records classified legacy by elimination; %d refused (see OWNER-ABSENT)\n\n",
+		report.Cycles.LegacyByElimination, report.Cycles.UnownedRecords)
 
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "FAMILY\tLEVEL\tJOINED\tLEG-ONLY\tDET-ONLY\tKEYED\tMATCH\tMISMATCH\tINCOMP\tUNCLASS\tRATE\tBAR") //nolint:errcheck
@@ -568,6 +713,13 @@ func writeParityJoinReport(w io.Writer, report parityJoinReport) error {
 		b.WriteString("\nTRIAGE\n")
 		for _, entry := range report.Triage {
 			fmt.Fprintf(&b, "  %-14s %-40s %-12s %d\n", entry.Family, entry.Class, entry.Classification, entry.Count)
+		}
+	}
+	if len(report.OwnerAbsence) > 0 {
+		b.WriteString("\nOWNER-ABSENT (records carrying no effect_owner stamp)\n")
+		for _, entry := range report.OwnerAbsence {
+			fmt.Fprintf(&b, "  %-44s %-26s %-18s %6d  %s\n",
+				entry.Site, entry.Reason, entry.Disposition, entry.Count, entry.Note)
 		}
 	}
 	for _, sample := range report.Unclassified {

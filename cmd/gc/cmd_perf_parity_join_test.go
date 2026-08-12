@@ -31,6 +31,11 @@ func parityJoinTestRecord(
 	return rec
 }
 
+// parityJoinTestRollup mirrors the collector's rollup shape
+// (session_reconciler_trace_collector.go:970-983): every counter goes into
+// rec.Fields, and only the drop-reason map has a typed mirror. Setting the typed
+// DetailedTemplateCount instead — a shape nothing in the tree writes — is how
+// the mis-arming alarm shipped green while reading zero on every real rollup.
 func parityJoinTestRollup(traceID, tickID string, dropReasons map[string]int, detailedTemplates int) SessionReconcilerTraceRecord {
 	rec := newTraceRecord(TraceRecordCycleResult)
 	rec.TraceID = traceID
@@ -38,7 +43,8 @@ func parityJoinTestRollup(traceID, tickID string, dropReasons map[string]int, de
 	rec.SiteCode = TraceSiteCycleFinish
 	rec.Ts = time.Date(2026, 8, 8, 12, 0, 1, 0, time.UTC)
 	rec.DropReasonCounts = dropReasons
-	rec.DetailedTemplateCount = detailedTemplates
+	rec.Fields["detailed_template_count"] = detailedTemplates
+	rec.Fields["drop_reason_counts"] = dropReasons
 	for _, count := range dropReasons {
 		rec.DroppedRecordCount += count
 	}
@@ -306,24 +312,29 @@ func TestParityJoinFlagsShadowRecordsClaimingAppliedEffects(t *testing.T) {
 	}
 }
 
-// Records outside the join contract (no effect_owner stamp) are counted, never
-// guessed at, so a pre-WD.2 trace dir reads as no-evidence with a visible cause.
-func TestParityJoinCountsUnownedRecordsInsteadOfGuessing(t *testing.T) {
+// An unstamped record the elimination rule refuses to attribute is counted,
+// never guessed at. lifecycle.start.commit is keyed-owned (section 1 row 27), so
+// absence there says nothing about legacy and must not become a join row.
+func TestParityJoinCountsUnattributableRecordsInsteadOfGuessing(t *testing.T) {
 	unowned := newTraceRecord(TraceRecordDecision)
 	unowned.TraceID = "tr-11"
 	unowned.TickID = "1"
-	unowned.SiteCode = TraceSiteReconcilerIdleTimeout
+	unowned.SiteCode = TraceSiteLifecycleStartCommit
 	unowned.SessionName = "gc-city-worker-1"
 	unowned.SessionBeadID = "gcs-1"
 	records := []SessionReconcilerTraceRecord{unowned, parityJoinTestRollup("tr-11", "1", nil, 1)}
 
 	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
 
-	if report.Cycles.UnownedRecords != 1 {
-		t.Fatalf("unowned_records = %d, want 1", report.Cycles.UnownedRecords)
+	if report.Cycles.UnownedRecords != 1 || report.Cycles.LegacyByElimination != 0 {
+		t.Fatalf("unowned_records=%d legacy_by_elimination=%d, want 1/0 (%+v)",
+			report.Cycles.UnownedRecords, report.Cycles.LegacyByElimination, report.Cycles)
+	}
+	if row := parityJoinFamilyRow(t, report, parityJoinFamilyStart); row.LegacyOnly != 0 {
+		t.Fatalf("start legacy_only = %d, want 0 for a keyed-owned site (%+v)", row.LegacyOnly, row)
 	}
 	if !report.NoEvidence {
-		t.Fatalf("no_evidence = false for a trace dir with no owned records")
+		t.Fatalf("no_evidence = false for a trace dir with no joined rows")
 	}
 }
 
@@ -477,6 +488,34 @@ func TestParityJoinFamilyTableIsWellFormed(t *testing.T) {
 				t.Fatalf("site %q claimed by both %q and %q", site, other, spec.Family)
 			}
 			seen[site] = spec.Family
+		}
+	}
+}
+
+// The elimination rule is only as good as its guard, so every site the section
+// 3b table joins on must carry an explicit section 1 disposition. A site added
+// to a family without one would silently default to "not legacy" and drop that
+// family's whole legacy population on the floor.
+func TestParityJoinEverySection3bSiteHasASection1Disposition(t *testing.T) {
+	for _, spec := range parityJoinFamilySpecs {
+		for _, site := range spec.Sites {
+			disposition, ok := parityJoinSiteDispositions[site]
+			if !ok {
+				t.Fatalf("site %q (family %q) has no section 1 disposition", site, spec.Family)
+			}
+			switch disposition.Attribution {
+			case parityJoinSiteLegacy, parityJoinSitePhase, parityJoinSiteNonLegacy:
+			default:
+				t.Fatalf("site %q has attribution %q", site, disposition.Attribution)
+			}
+			if strings.TrimSpace(disposition.Note) == "" {
+				t.Fatalf("site %q states no section 1 evidence for its disposition", site)
+			}
+		}
+	}
+	for site := range parityJoinSiteDispositions {
+		if _, ok := parityJoinSiteFamily[site]; !ok {
+			t.Fatalf("site %q carries a disposition but no section 3b family claims it", site)
 		}
 	}
 }

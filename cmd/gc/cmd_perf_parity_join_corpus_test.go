@@ -90,8 +90,8 @@ func parityJoinDispositionCount(report parityJoinReport, site TraceSiteCode, dis
 func TestParityJoinAttributesUnstampedLegacyRecordsOnTheLiveCorpus(t *testing.T) {
 	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
 
-	if report.Cycles.LegacyByElimination != 9 {
-		t.Fatalf("legacy_by_elimination = %d, want 9 (2x drain/no-wake-reason, 3x wake_decision/wake, drain_ack/acknowledged, drain_ack/orphaned, drain.timeout/orphaned, rollback_pending_create/recovery — %+v)",
+	if report.Cycles.LegacyByElimination != 12 {
+		t.Fatalf("legacy_by_elimination = %d, want 12 (2x drain/no-wake-reason, 3x wake_decision/wake, drain_ack/acknowledged, drain_ack/orphaned, drain.timeout/orphaned, rollback_pending_create/recovery, 3x idle_timeout/stop — %+v)",
 			report.Cycles.LegacyByElimination, report.Cycles)
 	}
 
@@ -257,6 +257,68 @@ func TestParityJoinTriagesTheRemainingLegacyOnlySingletons(t *testing.T) {
 	}
 }
 
+// ga-f7v2ft.158's last survivors: three sibling pool sessions legacy idle-killed
+// in one tick with no detector record anywhere in the corpus. The fixture cycle
+// is byte-copied from the live campaign window, where its sweep evaluated all
+// three rows (rows_evaluated=7, unknown_state_skipped=3, conditions=4 — the 3
+// unknown-state skips plus one unrelated drain_ack) and raised nothing, and
+// legacy then stopped them 1.05s, 3.88s and 7.25s later in the same tick.
+//
+// They classify, and they classify as MISMATCHED: the divergence is explained,
+// not excused. Laundering a legacy-only destructive stop into `incomparable`
+// would take it out of the family's match rate, which is the only number left
+// policing this seam.
+func TestParityJoinTriagesTheDeadlineCrossingRace(t *testing.T) {
+	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
+
+	deadline := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if deadline.LegacyOnly != 3 {
+		t.Fatalf("D-DEADLINE legacy_only = %d, want 3 (%+v)", deadline.LegacyOnly, deadline)
+	}
+	if deadline.Unclassified != 0 {
+		t.Fatalf("D-DEADLINE unclassified = %d, want 0 (%+v)", deadline.Unclassified, deadline)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyDeadline, parityJoinClassDeadlineCrossedAfterSweepSample); got != 3 {
+		t.Fatalf("%s = %d, want 3 (triage=%+v)", parityJoinClassDeadlineCrossedAfterSweepSample, got, report.Triage)
+	}
+	if deadline.Mismatched != 3 {
+		t.Fatalf("D-DEADLINE mismatched = %d, want 3: an explained divergence still counts against the bar (%+v)",
+			deadline.Mismatched, deadline)
+	}
+	if deadline.Incomparable != 0 {
+		t.Fatalf("D-DEADLINE incomparable = %d, want 0: a legacy-only destructive stop must not leave the match rate (%+v)",
+			deadline.Incomparable, deadline)
+	}
+}
+
+// The rule's blast radius. It fires on legacy's idle-timeout STOP and nothing
+// else: a deferral keeps its own section 3b class, and the max-age arm — for
+// which this window produced no evidence either way — stays unclassified rather
+// than riding a rule written from the idle arm's corpus.
+func TestParityJoinDeadlineCrossingRaceDoesNotSwallowNeighbouringArms(t *testing.T) {
+	spec := parityJoinSpecFor(t, parityJoinFamilyDeadline)
+
+	deferral := SessionReconcilerTraceRecord{
+		SiteCode:    TraceSiteReconcilerIdleTimeout,
+		ReasonCode:  TraceReasonCode("idle_timeout"),
+		OutcomeCode: TraceOutcomeDeferred,
+	}
+	_, class := parityJoinClassify(spec, parityJoinSideLegacyOnly, nil, "worker-rc-tca", &deferral, nil)
+	if class != "legacy_pending_interaction_deferral" {
+		t.Fatalf("legacy idle deferral classified as %q, want legacy_pending_interaction_deferral", class)
+	}
+
+	maxAge := SessionReconcilerTraceRecord{
+		SiteCode:    TraceSiteReconcilerMaxSessionAge,
+		ReasonCode:  TraceReasonCode("max_session_age"),
+		OutcomeCode: TraceOutcomeStop,
+	}
+	_, class = parityJoinClassify(spec, parityJoinSideLegacyOnly, nil, "worker-rc-tca", &maxAge, nil)
+	if class != parityJoinClassUnclassified {
+		t.Fatalf("legacy max-age stop classified as %q, want UNCLASSIFIED — the idle arm's evidence does not cover it", class)
+	}
+}
+
 // B1's guard. Absence classifies as legacy only inside the section 1 legacy
 // vocabulary. A phase site's per-cycle marker and a keyed-owned site are each
 // counted and surfaced with the reason they were refused — never binned as
@@ -320,14 +382,14 @@ func TestParityJoinReadsRollupCountersWhereTheCollectorWritesThem(t *testing.T) 
 				rec.DetailedTemplateCount)
 		}
 	}
-	if rollups != 15 {
-		t.Fatalf("fixture carries %d cycle rollups, want 15", rollups)
+	if rollups != 16 {
+		t.Fatalf("fixture carries %d cycle rollups, want 16", rollups)
 	}
 
 	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
 
-	if report.Cycles.Considered != 15 {
-		t.Fatalf("considered = %d, want 15 (%+v)", report.Cycles.Considered, report.Cycles)
+	if report.Cycles.Considered != 16 {
+		t.Fatalf("considered = %d, want 16 (%+v)", report.Cycles.Considered, report.Cycles)
 	}
 	if report.Cycles.WithoutDetailArms != 1 {
 		t.Fatalf("without_detail_arms = %d, want 1 — fourteen fixture rollups carry fields.detailed_template_count>0 (%+v)",

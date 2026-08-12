@@ -61,6 +61,10 @@ const (
 	// the D-WAKE / D-STALE-CREATE cross-family split so the triage log shows
 	// one class, not two coincidences.
 	parityJoinClassPendingCreateFamilySplit = "pending_create_in_flight_family_split"
+	// parityJoinClassDeadlineCrossedAfterSweepSample names the idle deadline
+	// that fell between the sweep's clock sample and legacy's own, inside one
+	// tick. See the D-DEADLINE spec below for the evidence.
+	parityJoinClassDeadlineCrossedAfterSweepSample = "deadline_crossed_after_sweep_sample"
 )
 
 // legacyReasonNoWakeReason is the code legacy stamps at the drain decision when
@@ -134,10 +138,64 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 		Family: parityJoinFamilyDeadline,
 		Level:  parityJoinLevelDecision,
 		Sites:  []TraceSiteCode{TraceSiteReconcilerIdleTimeout, TraceSiteReconcilerMaxSessionAge},
-		Divergences: []parityJoinDivergenceRule{{
-			Class:          "legacy_pending_interaction_deferral",
-			LegacyOutcomes: []TraceOutcomeCode{TraceOutcomeDeferred, TraceOutcomeDeferredPending, TraceOutcomeDeferredBusy},
-		}},
+		Divergences: []parityJoinDivergenceRule{
+			{
+				Class:          "legacy_pending_interaction_deferral",
+				LegacyOutcomes: []TraceOutcomeCode{TraceOutcomeDeferred, TraceOutcomeDeferredPending, TraceOutcomeDeferredBusy},
+			},
+			{
+				// The idle deadline crossed INSIDE the tick, after the sweep
+				// looked and before legacy did.
+				//
+				// This is not a candidacy gap, and that is provable from the
+				// source rather than argued from the corpus: city_runtime.go
+				// hands the SAME *memoryIdleTracker (cr.it) to the sweep
+				// (detectorSweepInput.Idle, :2956) and to the god function
+				// (:2979) on the same tick, and both then call the same
+				// idle_tracker.go:101 checkIdle against the same provider.
+				// detectDeadline's only extra gate is live.Alive, which legacy
+				// gates on too. The one degree of freedom left is the `now`
+				// argument: the sweep captures one clk.Now() at
+				// detectSessionConditions entry and shares it across every row,
+				// while legacy takes a fresh clk.Now() per row, after the sweep
+				// and after each row's provider probes. A deadline landing in
+				// that gap is seen by legacy and not by the sweep, and legacy's
+				// stop then ends the idle episode before the next sweep, so the
+				// twin is never written at all.
+				//
+				// WD.15 window evidence (2026-08-12 03:39-07:52, 4125 cycles).
+				// All 15 legacy idle stops are the same row shape — awake pool
+				// worker, no blocker, template idle_timeout=20m — and 11 carry a
+				// same-cycle detector_idle_timeout while 4 carry none, so no
+				// shape separates them. The split is per-CYCLE, not per-row:
+				// sibling sessions minted in one tick cross within seconds of
+				// each other, and every observed cycle caught either all of its
+				// siblings (5ru+g7d; a1w+8v7+zb9; gv8+xdj; 1xj+7e0+8b1) or none
+				// (tca+v32+5rf) — the signature of one clock sample straddling a
+				// tight cluster, which a candidacy predicate cannot produce. In
+				// the four misses the sweep demonstrably evaluated the rows:
+				// cycle-f1b13717f182f0b2 reports rows_evaluated=7 against 10
+				// baselines with unknown_state_skipped=3, and its conditions=4
+				// are fully accounted for by those 3 skips plus an unrelated
+				// drain_ack — so no zombie and no orphan condition fired on the
+				// three rows either, which is what proves live.Alive was true.
+				// The window's cycles ran long (13.5s and 6.3s against a 3.77s
+				// median sweep cadence), which is what widened the gap to the
+				// observed 1.05s/1.85s/3.88s/7.25s.
+				//
+				// Classified MISMATCHED on purpose. The rule explains a
+				// legacy-only destructive stop; it does not excuse one, and
+				// `incomparable` would drop it out of the family's match rate.
+				// Scoped to the idle STOP: the max-age arm shares the mechanism
+				// but produced no record either way in this window, so it stays
+				// unclassified rather than riding evidence it does not have.
+				Class:          parityJoinClassDeadlineCrossedAfterSweepSample,
+				Side:           parityJoinSideLegacyOnly,
+				Sites:          []TraceSiteCode{TraceSiteReconcilerIdleTimeout},
+				LegacyReasons:  []TraceReasonCode{TraceReasonIdleTimeout},
+				LegacyOutcomes: []TraceOutcomeCode{TraceOutcomeStop},
+			},
+		},
 	},
 	{
 		// "deferred-confirm off-by-one (duplicated counters); liveness-error arm incomparable"

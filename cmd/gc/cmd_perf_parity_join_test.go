@@ -62,6 +62,17 @@ func parityJoinFamilyRow(t *testing.T, report parityJoinReport, family string) p
 	return parityJoinFamilyReport{}
 }
 
+func parityJoinSpecFor(t *testing.T, family string) *parityJoinFamilySpec {
+	t.Helper()
+	for i := range parityJoinFamilySpecs {
+		if parityJoinFamilySpecs[i].Family == family {
+			return &parityJoinFamilySpecs[i]
+		}
+	}
+	t.Fatalf("family %q missing from parityJoinFamilySpecs", family)
+	return nil
+}
+
 func parityJoinTriageCount(report parityJoinReport, family, class string) int {
 	for _, entry := range report.Triage {
 		if entry.Family == family && entry.Class == class {

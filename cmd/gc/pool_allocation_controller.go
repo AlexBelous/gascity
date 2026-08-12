@@ -115,11 +115,38 @@ const (
 	// session, or the session is no longer running.
 	drainAckRefusalRuntimeGone drainAckRefusal = "runtime_gone"
 	// drainAckRefusalLeaseInvalid: the lease shape, the row binding, the
-	// generation, the config or the pool policy no longer matches.
+	// generation, the config or the pool policy no longer matches. Never
+	// returned bare by the authorizer — see the sub-codes below.
 	drainAckRefusalLeaseInvalid drainAckRefusal = "lease_invalid"
 	// drainAckRefusalUnavailable: keyed state, the conditional writer or the
 	// atomic terminal closer is unavailable, so nothing was proven either way.
 	drainAckRefusalUnavailable drainAckRefusal = "unavailable"
+)
+
+// lease_invalid sub-codes. The bare code covers a dozen independent
+// preconditions, so a run that reads `refusal=lease_invalid` off a handback
+// learns only that ONE of them failed — which is what left ga-f7v2ft.147
+// undiagnosable through two campaigns after the store-ref confounder was
+// removed. Each arm names itself; the sub-code keeps `lease_invalid` as its
+// prefix so the coarse family stays readable in a log or a trace query.
+const (
+	drainAckRefusalLeaseShape        drainAckRefusal = "lease_invalid/lease_shape"
+	drainAckRefusalConfigSuperseded  drainAckRefusal = "lease_invalid/config_superseded"
+	drainAckRefusalGeneration        drainAckRefusal = "lease_invalid/generation"
+	drainAckRefusalSessionIdentity   drainAckRefusal = "lease_invalid/session_identity"
+	drainAckRefusalRowClosed         drainAckRefusal = "lease_invalid/row_closed"
+	drainAckRefusalLifecycleShape    drainAckRefusal = "lease_invalid/lifecycle_shape"
+	drainAckRefusalNotPoolManaged    drainAckRefusal = "lease_invalid/not_pool_managed"
+	drainAckRefusalNamedRow          drainAckRefusal = "lease_invalid/named_row"
+	drainAckRefusalRequesterBinding  drainAckRefusal = "lease_invalid/requester_binding"
+	drainAckRefusalInstanceToken     drainAckRefusal = "lease_invalid/instance_token"
+	drainAckRefusalPoolTarget        drainAckRefusal = "lease_invalid/pool_target"
+	drainAckRefusalRowBinding        drainAckRefusal = "lease_invalid/row_binding"
+	drainAckRefusalSessionName       drainAckRefusal = "lease_invalid/session_name"
+	drainAckRefusalAgentUnavailable  drainAckRefusal = "lease_invalid/agent_unavailable"
+	drainAckRefusalPolicyUnsupported drainAckRefusal = "lease_invalid/policy_unsupported"
+	drainAckRefusalWorkNotClosed     drainAckRefusal = "lease_invalid/work_not_closed"
+	drainAckRefusalAssignedWork      drainAckRefusal = "lease_invalid/assigned_work"
 )
 
 func validateRoutedWorkPoolStartLease(lease routedWorkPoolStartLease) error {
@@ -204,7 +231,7 @@ func (cr *CityRuntime) newRoutedWorkPoolDrainAckLease(
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	if name == "" {
-		return routedWorkPoolDrainAckLease{}, false, drainAckRefusalLeaseInvalid, nil
+		return routedWorkPoolDrainAckLease{}, false, drainAckRefusalSessionName, nil
 	}
 	source, err := snapshot.Provider.GetMeta(name, reconcilerDrainAckSourceKey)
 	if err != nil {
@@ -252,7 +279,7 @@ func (cr *CityRuntime) newRoutedWorkPoolDrainAckLease(
 		TriggerFromAck:         triggerFromAck,
 	}
 	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
-		return routedWorkPoolDrainAckLease{}, true, drainAckRefusalLeaseInvalid, nil
+		return routedWorkPoolDrainAckLease{}, true, drainAckRefusalLeaseShape, nil
 	}
 	return lease, true, drainAckRefusalNone, nil
 }
@@ -341,16 +368,35 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 		return false, drainAckRefusalUnavailable, fmt.Errorf("authorizing pool drain acknowledgement: keyed state is unavailable")
 	}
 	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
-		return false, drainAckRefusalLeaseInvalid, err
+		return false, drainAckRefusalLeaseShape, err
 	}
 	cr.serviceStateMu.RLock()
 	configCurrent := cr.cfg == snapshot.Config
 	cr.serviceStateMu.RUnlock()
-	if !configCurrent || snapshot.Generation != lease.ControllerGeneration || info.ID != lease.SessionID || info.Closed ||
-		!isRoutedWorkPoolDrainAckLifecycleShape(info) || !isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) ||
-		lease.RequesterSessionID != info.ID || lease.RequesterInstanceToken != lease.InstanceToken ||
-		strings.TrimSpace(info.InstanceToken) != lease.InstanceToken || normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget {
-		return false, drainAckRefusalLeaseInvalid, nil
+	// Kept as one rung per precondition rather than one conjunction: these are
+	// independent facts about the row, and which one failed is the whole
+	// diagnostic value of the handback.
+	switch {
+	case !configCurrent:
+		return false, drainAckRefusalConfigSuperseded, nil
+	case snapshot.Generation != lease.ControllerGeneration:
+		return false, drainAckRefusalGeneration, nil
+	case info.ID != lease.SessionID:
+		return false, drainAckRefusalSessionIdentity, nil
+	case info.Closed:
+		return false, drainAckRefusalRowClosed, nil
+	case !isRoutedWorkPoolDrainAckLifecycleShape(info):
+		return false, drainAckRefusalLifecycleShape, nil
+	case !isPoolManagedSessionInfo(info):
+		return false, drainAckRefusalNotPoolManaged, nil
+	case isNamedSessionInfo(info):
+		return false, drainAckRefusalNamedRow, nil
+	case lease.RequesterSessionID != info.ID || lease.RequesterInstanceToken != lease.InstanceToken:
+		return false, drainAckRefusalRequesterBinding, nil
+	case strings.TrimSpace(info.InstanceToken) != lease.InstanceToken:
+		return false, drainAckRefusalInstanceToken, nil
+	case normalizedSessionTemplateInfo(info, snapshot.Config) != lease.PoolTarget:
+		return false, drainAckRefusalPoolTarget, nil
 	}
 	// The row binding is the fence only for an UNSTAMPED acknowledgement, where
 	// the row is the sole evidence of what was acknowledged. A stamped ack
@@ -362,15 +408,15 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 	if !lease.TriggerFromAck &&
 		(strings.TrimSpace(info.TriggerBeadID) != lease.WorkID ||
 			canonicalizeLegacyWorkflowStoreRef(snapshot.Config, snapshot.CityPath, info.TriggerBeadStoreRef) != lease.SourceStore) {
-		return false, drainAckRefusalLeaseInvalid, nil
+		return false, drainAckRefusalRowBinding, nil
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	if name == "" {
-		return false, drainAckRefusalLeaseInvalid, nil
+		return false, drainAckRefusalSessionName, nil
 	}
 	agent := findAgentByTemplate(snapshot.Config, lease.PoolTarget)
 	if agent == nil || isAgentEffectivelySuspendedWith(snapshot.Config, snapshot.CityPath, agent, loadSuspensionStateBestEffort(snapshot.CityPath)) {
-		return false, drainAckRefusalLeaseInvalid, nil
+		return false, drainAckRefusalAgentUnavailable, nil
 	}
 	namedTemplates := make(map[string]struct{}, len(snapshot.Config.NamedSessions))
 	for i := range snapshot.Config.NamedSessions {
@@ -380,7 +426,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 		forSourceStore(snapshot.Config, agent, snapshot.CityPath, lease.SourceStore)
 	if !policy.supported() ||
 		(policy.maxActiveSessions == 1 && !isCanonicalPoolManagedSessionInfoForTemplate(info, lease.PoolTarget)) {
-		return false, drainAckRefusalLeaseInvalid, nil
+		return false, drainAckRefusalPolicyUnsupported, nil
 	}
 	// The runtime half. It proves the acknowledgement is the agent's and that
 	// the pane is not mid-interaction — both of which are questions about a
@@ -444,14 +490,14 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 		return false, drainAckRefusalUnavailable, fmt.Errorf("authorizing pool drain acknowledgement for %q: reading trigger work %q: %w", info.ID, lease.WorkID, err)
 	}
 	if work.ID != lease.WorkID || work.Status != "closed" {
-		return false, drainAckRefusalLeaseInvalid, nil
+		return false, drainAckRefusalWorkNotClosed, nil
 	}
 	hasAssigned, err := sessionHasAwakeAssignedWorkForReachableStore(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), info)
 	if err != nil {
 		return false, drainAckRefusalUnavailable, fmt.Errorf("authorizing pool drain acknowledgement for %q: checking assigned work: %w", info.ID, err)
 	}
 	if hasAssigned {
-		return false, drainAckRefusalLeaseInvalid, nil
+		return false, drainAckRefusalAssignedWork, nil
 	}
 	// Keyed membership is NOT a precondition — see the lease's
 	// MembershipRevision comment. It stays a monotonicity fence only for a row
@@ -468,11 +514,24 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolDrainAck(
 	return true, drainAckRefusalNone, nil
 }
 
+// isRoutedWorkPoolDrainAckLifecycleShape reports whether a row is in a shape a
+// drain acknowledgement can be admitted from: a member that is running, or one
+// already carrying the acknowledgement's own stop-pending mark.
+//
+// "Running" is asked of the LIFECYCLE PROJECTION, not of one literal spelling
+// of the state metadata. A live member does not stay on `active`: the status
+// heal rewrites it to `awake` a tick after it reaches the runtime
+// (session_status_alias_heal.go), and both spellings mean the same thing —
+// projectBaseState maps them to BaseStateActive. Comparing the raw string
+// against `active` therefore refused every member from the heal onward, which
+// is the whole population in a real run, and handed each acknowledgement to
+// legacy (ga-f7v2ft.147). The projection also carries the closed-status guard,
+// so a closed row can never satisfy the shape.
 func isRoutedWorkPoolDrainAckLifecycleShape(info sessionpkg.Info) bool {
 	if isDrainAckStopPendingInfo(info) {
 		return true
 	}
-	return strings.TrimSpace(info.MetadataState) == string(sessionpkg.StateActive)
+	return sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info)).BaseState == sessionpkg.BaseStateActive
 }
 
 // authoritativeReadyRoutedWorkByID verifies one work bead and its blocking

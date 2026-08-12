@@ -7,14 +7,27 @@ package main
 // perf CLI at WE (DETECTOR.md section 5).
 //
 // Join contract (section 3b): the shared trace-cycle handle (trace_id, tick_id)
-// plus the normalized session name, cross-checked on session_bead_id, with
-// records distinguished by fields.effect_owner as legacy, detector-shadow, or
-// keyed. The handle is an equality join, not a window, because section 2 runs
-// the sweep inside beadReconcileTick beside the legacy call — no new loop,
-// timer, or goroutine, therefore no cadence skew to reconcile. The one family
-// that is genuinely time-skewed, D-DRAIN, surfaces as a legacy-only record in
-// one cycle and a detector-only record in the next, which section 3b already
-// names (ack-timing skew) and this tool triages as such.
+// plus the normalized session name, cross-checked on the session bead identity.
+// The handle is an equality join, not a window, because section 2 runs the sweep
+// inside beadReconcileTick beside the legacy call — no new loop, timer, or
+// goroutine, therefore no cadence skew to reconcile. The one family that is
+// genuinely time-skewed, D-DRAIN, surfaces as a legacy-only record in one cycle
+// and a detector-only record in the next, which section 3b already names
+// (ack-timing skew) and this tool triages as such.
+//
+// The left-hand side is legacy in EITHER of the two ways an auto-mode city
+// records it (owner ruling, 2026-08-12):
+//
+//   - an ACT — a decision record the god function wrote unstamped, attributed by
+//     elimination at a section 1 legacy site; and
+//   - a YIELD — a traced stand-down at a coexistence seam, which is legacy
+//     saying "I identified this row and stepped aside for the keyed owner".
+//
+// The yield is the evidence auto mode actually produces in volume, because auto
+// mode is precisely the mode in which both writers step aside for each other:
+// over the campaign's first hours the yield-join carries three orders of
+// magnitude more pairs than the act-join. Both are joined and both are counted,
+// separately — a both-act pair remains the strongest single piece of evidence.
 
 import (
 	"fmt"
@@ -29,9 +42,13 @@ import (
 )
 
 const (
-	parityJoinSchemaV1      = "gascity.reconciler-parity-join.v1"
+	parityJoinSchemaV1      = "gascity.reconciler-parity-join.v2"
 	parityJoinDefaultBar    = 0.995
 	parityJoinDefaultSample = 10
+	// parityJoinDefaultCountBar is section 3b's window size: at least 10,000
+	// joined trace cycles. The owner's yield-join ruling keeps the figure and
+	// re-expresses what counts toward it — act-pairs plus yield-pairs.
+	parityJoinDefaultCountBar = 10000
 
 	parityJoinOwnerLegacy         = "legacy"
 	parityJoinOwnerDetectorShadow = "detector-shadow"
@@ -40,6 +57,7 @@ const (
 
 type parityJoinOptions struct {
 	Bar      float64
+	CountBar int
 	Samples  int
 	Template string
 }
@@ -52,22 +70,36 @@ type parityJoinCycleStats struct {
 	WithoutDetailArms    int `json:"without_detail_arms"`
 	UnownedRecords       int `json:"unowned_records"`
 	LegacyByElimination  int `json:"legacy_by_elimination"`
+	YieldRecords         int `json:"yield_records"`
+	// UnpairedOwnershipYields are stand-downs that assert only "the keyed
+	// controller holds this key" and had no actor beside them. They are not
+	// evidence either way, so they are counted here and detailed in the YIELDS
+	// log rather than scored as a divergence.
+	UnpairedOwnershipYields int `json:"unpaired_ownership_yields"`
 }
 
 // Dispositions for an effect_owner-absent record. Exactly one is an
 // attribution; the rest are refusals, each carrying why.
 const (
-	parityJoinAbsenceLegacy         = "legacy"
-	parityJoinAbsencePhaseMarker    = "phase_marker"
-	parityJoinAbsenceKeyedSeamYield = "keyed_seam_yield"
-	parityJoinAbsenceUnattributable = "unattributable"
-	parityJoinAbsenceNoSessionKey   = "no_session_key"
+	parityJoinDispositionLegacy         = "legacy"
+	parityJoinDispositionPhaseMarker    = "phase_marker"
+	parityJoinDispositionUnattributable = "unattributable"
+	parityJoinDispositionNoSessionKey   = "no_session_key"
 )
 
-// parityJoinAbsenceEntry is one (site, reason, disposition) group of records
+// The four populations a record at a section 3b site can belong to.
+const (
+	parityJoinRoleLegacyAct = "legacy_act"
+	parityJoinRoleYield     = "yield"
+	parityJoinRoleDetector  = "detector"
+	parityJoinRoleKeyed     = "keyed"
+	parityJoinRoleRefused   = ""
+)
+
+// parityJoinDispositionEntry is one (site, reason, disposition) group of records
 // that carried no effect_owner stamp. Every owner-absent record lands in
 // exactly one group, so the readout accounts for all of them.
-type parityJoinAbsenceEntry struct {
+type parityJoinDispositionEntry struct {
 	Site        TraceSiteCode   `json:"site_code"`
 	Reason      TraceReasonCode `json:"reason_code,omitempty"`
 	Disposition string          `json:"disposition"`
@@ -76,18 +108,36 @@ type parityJoinAbsenceEntry struct {
 }
 
 type parityJoinFamilyReport struct {
-	Family       string          `json:"family"`
-	Level        parityJoinLevel `json:"level"`
-	Joined       int             `json:"joined"`
-	LegacyOnly   int             `json:"legacy_only"`
-	DetectorOnly int             `json:"detector_only"`
-	Keyed        int             `json:"keyed"`
-	Matched      int             `json:"matched"`
-	Mismatched   int             `json:"mismatched"`
-	Incomparable int             `json:"incomparable"`
-	Unclassified int             `json:"unclassified"`
-	MatchRate    float64         `json:"match_rate"`
-	BarMet       bool            `json:"bar_met"`
+	Family string          `json:"family"`
+	Level  parityJoinLevel `json:"level"`
+	// Joined counts act-vs-act pairs: a legacy decision record beside the
+	// sweep's record for the same row in the same cycle.
+	Joined int `json:"joined"`
+	// YieldJoined counts yield-pairs: legacy's traced stand-down beside the
+	// actor's record for the same row in the same cycle.
+	YieldJoined  int     `json:"yield_joined"`
+	YieldOnly    int     `json:"yield_only"`
+	LegacyOnly   int     `json:"legacy_only"`
+	DetectorOnly int     `json:"detector_only"`
+	Keyed        int     `json:"keyed"`
+	Matched      int     `json:"matched"`
+	Mismatched   int     `json:"mismatched"`
+	Incomparable int     `json:"incomparable"`
+	Unclassified int     `json:"unclassified"`
+	MatchRate    float64 `json:"match_rate"`
+	BarMet       bool    `json:"bar_met"`
+}
+
+// parityJoinYieldEntry is one (site, reason) group of legacy stand-downs: the
+// yield-side vocabulary as the corpus actually exercised it.
+type parityJoinYieldEntry struct {
+	Site     TraceSiteCode      `json:"site_code"`
+	Reason   TraceReasonCode    `json:"reason_code"`
+	Family   string             `json:"family"`
+	Arm      parityJoinYieldArm `json:"arm"`
+	Joined   int                `json:"joined"`
+	Unpaired int                `json:"unpaired"`
+	Note     string             `json:"note,omitempty"`
 }
 
 type parityJoinTriageEntry struct {
@@ -112,24 +162,34 @@ type parityJoinSample struct {
 }
 
 type parityJoinReport struct {
-	SchemaVersion          string                   `json:"schema_version"`
-	Bar                    float64                  `json:"bar"`
-	Cycles                 parityJoinCycleStats     `json:"cycles"`
-	Families               []parityJoinFamilyReport `json:"families"`
-	Triage                 []parityJoinTriageEntry  `json:"triage"`
-	OwnerAbsence           []parityJoinAbsenceEntry `json:"owner_absence,omitempty"`
-	Unclassified           []parityJoinSample       `json:"unclassified,omitempty"`
-	ShadowEffectViolations int                      `json:"shadow_effect_violations"`
-	NoEvidence             bool                     `json:"no_evidence"`
-	BarMet                 bool                     `json:"bar_met"`
-	WEBlocker              bool                     `json:"we_blocker"`
+	SchemaVersion string               `json:"schema_version"`
+	Bar           float64              `json:"bar"`
+	CountBar      int                  `json:"count_bar"`
+	Cycles        parityJoinCycleStats `json:"cycles"`
+	// JoinedActs and JoinedYields are the two evidence populations, kept apart
+	// because they prove different things: an act-pair is two writers deciding
+	// the same row, a yield-pair is one writer deciding it and the other
+	// recording that it saw the row and stood down.
+	JoinedActs             int                          `json:"joined_acts"`
+	JoinedYields           int                          `json:"joined_yields"`
+	JoinedTotal            int                          `json:"joined_total"`
+	CountBarMet            bool                         `json:"count_bar_met"`
+	Families               []parityJoinFamilyReport     `json:"families"`
+	Triage                 []parityJoinTriageEntry      `json:"triage"`
+	Yields                 []parityJoinYieldEntry       `json:"yields,omitempty"`
+	Dispositions           []parityJoinDispositionEntry `json:"dispositions,omitempty"`
+	Unclassified           []parityJoinSample           `json:"unclassified,omitempty"`
+	ShadowEffectViolations int                          `json:"shadow_effect_violations"`
+	NoEvidence             bool                         `json:"no_evidence"`
+	BarMet                 bool                         `json:"bar_met"`
+	WEBlocker              bool                         `json:"we_blocker"`
 }
 
 // newPerfParityJoinCmd builds the hidden `gc perf parity-join` subcommand.
 func newPerfParityJoinCmd(stdout io.Writer) *cobra.Command {
-	var traceDir, since, template string
+	var traceDir, since, windowStart, template string
 	var bar float64
-	var samples int
+	var samples, countBar int
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "parity-join",
@@ -137,6 +197,9 @@ func newPerfParityJoinCmd(stdout io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			filter := TraceFilter{}
+			if strings.TrimSpace(since) != "" && strings.TrimSpace(windowStart) != "" {
+				return fmt.Errorf("gc perf parity-join: --since and --window-start are alternatives; pass one")
+			}
 			if strings.TrimSpace(since) != "" {
 				window, err := time.ParseDuration(since)
 				if err != nil {
@@ -144,11 +207,18 @@ func newPerfParityJoinCmd(stdout io.Writer) *cobra.Command {
 				}
 				filter.Since = time.Now().UTC().Add(-window)
 			}
+			if strings.TrimSpace(windowStart) != "" {
+				start, err := time.Parse(time.RFC3339, strings.TrimSpace(windowStart))
+				if err != nil {
+					return fmt.Errorf("gc perf parity-join: parsing --window-start: %w", err)
+				}
+				filter.Since = start.UTC()
+			}
 			records, err := ReadTraceRecords(traceDir, filter)
 			if err != nil {
 				return fmt.Errorf("gc perf parity-join: reading trace store %q: %w", traceDir, err)
 			}
-			report := buildParityJoinReport(records, parityJoinOptions{Bar: bar, Samples: samples, Template: template})
+			report := buildParityJoinReport(records, parityJoinOptions{Bar: bar, CountBar: countBar, Samples: samples, Template: template})
 			if jsonOut {
 				err = writeCLIJSONLine(stdout, report)
 			} else {
@@ -162,8 +232,10 @@ func newPerfParityJoinCmd(stdout io.Writer) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&traceDir, "trace-dir", "", "session-reconciler-trace store directory (the one holding segments/)")
 	cmd.Flags().StringVar(&since, "since", "", "only join records newer than this duration ago (e.g. 168h)")
+	cmd.Flags().StringVar(&windowStart, "window-start", "", "only join records at or after this RFC3339 instant; the reproducible form of --since for a fixed campaign window")
 	cmd.Flags().StringVar(&template, "template", "", "only join records for this normalized template selector")
 	cmd.Flags().Float64Var(&bar, "bar", parityJoinDefaultBar, "section 3b must-match bar per family")
+	cmd.Flags().IntVar(&countBar, "count-bar", parityJoinDefaultCountBar, "section 3b joined-row count bar for the window")
 	cmd.Flags().IntVar(&samples, "samples", parityJoinDefaultSample, "unclassified mismatch samples to report")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit versioned JSON instead of the table")
 	_ = cmd.MarkFlagRequired("trace-dir")
@@ -194,12 +266,25 @@ type parityJoinRowKey struct {
 }
 
 type parityJoinAccumulator struct {
-	rows    map[string]*parityJoinFamilyReport
-	triage  map[parityJoinTriageEntry]int
-	absence map[parityJoinAbsenceEntry]int
-	samples []parityJoinSample
-	opts    parityJoinOptions
-	report  *parityJoinReport
+	rows         map[string]*parityJoinFamilyReport
+	triage       map[parityJoinTriageEntry]int
+	dispositions map[parityJoinDispositionEntry]int
+	yields       map[parityJoinYieldKey]*parityJoinYieldEntry
+	samples      []parityJoinSample
+	opts         parityJoinOptions
+	report       *parityJoinReport
+}
+
+type parityJoinYieldKey struct {
+	Site   TraceSiteCode
+	Reason TraceReasonCode
+}
+
+// parityJoinYieldRecord is one stand-down plus the vocabulary entry that says
+// what it proves.
+type parityJoinYieldRecord struct {
+	rec  SessionReconcilerTraceRecord
+	spec parityJoinYieldSpec
 }
 
 // buildParityJoinReport joins one trace corpus per the section 3b contract.
@@ -210,13 +295,17 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 	if opts.Samples <= 0 {
 		opts.Samples = parityJoinDefaultSample
 	}
-	report := parityJoinReport{SchemaVersion: parityJoinSchemaV1, Bar: opts.Bar}
+	if opts.CountBar <= 0 {
+		opts.CountBar = parityJoinDefaultCountBar
+	}
+	report := parityJoinReport{SchemaVersion: parityJoinSchemaV1, Bar: opts.Bar, CountBar: opts.CountBar}
 	acc := &parityJoinAccumulator{
-		rows:    make(map[string]*parityJoinFamilyReport, len(parityJoinFamilySpecs)),
-		triage:  make(map[parityJoinTriageEntry]int),
-		absence: make(map[parityJoinAbsenceEntry]int),
-		opts:    opts,
-		report:  &report,
+		rows:         make(map[string]*parityJoinFamilyReport, len(parityJoinFamilySpecs)),
+		triage:       make(map[parityJoinTriageEntry]int),
+		dispositions: make(map[parityJoinDispositionEntry]int),
+		yields:       make(map[parityJoinYieldKey]*parityJoinYieldEntry),
+		opts:         opts,
+		report:       &report,
 	}
 	for i := range parityJoinFamilySpecs {
 		spec := &parityJoinFamilySpecs[i]
@@ -228,7 +317,6 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 	}
 
 	report.Families = make([]parityJoinFamilyReport, 0, len(parityJoinFamilySpecs))
-	joined := 0
 	for i := range parityJoinFamilySpecs {
 		row := *acc.rows[parityJoinFamilySpecs[i].Family]
 		comparable := row.Matched + row.Mismatched
@@ -236,18 +324,22 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 			row.MatchRate = float64(row.Matched) / float64(comparable)
 			row.BarMet = row.MatchRate >= opts.Bar
 		}
-		joined += row.Joined
+		report.JoinedActs += row.Joined
+		report.JoinedYields += row.YieldJoined
 		report.Families = append(report.Families, row)
 	}
+	report.JoinedTotal = report.JoinedActs + report.JoinedYields
+	report.CountBarMet = report.JoinedTotal >= opts.CountBar
 	report.Triage = parityJoinTriageLog(acc.triage)
-	report.OwnerAbsence = parityJoinAbsenceLog(acc.absence)
+	report.Yields = parityJoinYieldLog(acc.yields)
+	report.Dispositions = parityJoinDispositionLog(acc.dispositions)
 	report.Unclassified = acc.samples
 	// The evidence a section 3b readout rests on is JOINED rows. A corpus can be
 	// full of owned records and still join nothing — that was exactly the day-0
 	// campaign corpus, which reported no_evidence=false beside joined=0 in every
 	// family. Counting owned records instead of joined ones made the flag read
 	// backwards on the one case it exists to catch.
-	report.NoEvidence = joined == 0
+	report.NoEvidence = report.JoinedTotal == 0
 	report.WEBlocker = len(acc.samples) > 0 || report.ShadowEffectViolations > 0
 	report.BarMet = !report.NoEvidence && !report.WEBlocker
 	for _, row := range report.Families {
@@ -356,9 +448,13 @@ func parityJoinInt(v any) int {
 
 func (a *parityJoinAccumulator) joinCycle(key parityJoinCycleKey, bucket *parityJoinCycleBucket) {
 	legacy := make(map[parityJoinRowKey][]SessionReconcilerTraceRecord)
-	shadow := make(map[parityJoinRowKey][]SessionReconcilerTraceRecord)
+	detector := make(map[parityJoinRowKey][]SessionReconcilerTraceRecord)
+	yields := make(map[parityJoinRowKey][]parityJoinYieldRecord)
 	rowOrder := make([]parityJoinRowKey, 0, len(bucket.records))
 	seen := make(map[parityJoinRowKey]bool, len(bucket.records))
+	// Every reason written for a session anywhere in the cycle, so a cross-family
+	// split can be triaged against the twin it names instead of a guess.
+	coTwins := parityJoinCoTwinIndex(bucket.records)
 
 	for _, rec := range bucket.records {
 		spec, ok := parityJoinSiteFamily[rec.SiteCode]
@@ -368,10 +464,10 @@ func (a *parityJoinAccumulator) joinCycle(key parityJoinCycleKey, bucket *parity
 		if !traceTemplateMatches(rec.Template, a.opts.Template) {
 			continue
 		}
-		owner, absence := parityJoinRecordOwner(rec)
-		if absence != nil {
-			a.absence[*absence]++
-			if absence.Disposition != parityJoinAbsenceLegacy {
+		role, yield, disposition := parityJoinRecordRole(rec)
+		if disposition != nil {
+			a.dispositions[*disposition]++
+			if disposition.Disposition != parityJoinDispositionLegacy {
 				a.report.Cycles.UnownedRecords++
 				continue
 			}
@@ -382,15 +478,23 @@ func (a *parityJoinAccumulator) joinCycle(key parityJoinCycleKey, bucket *parity
 			seen[row] = true
 			rowOrder = append(rowOrder, row)
 		}
-		switch owner {
-		case parityJoinOwnerLegacy:
+		switch role {
+		case parityJoinRoleLegacyAct:
 			legacy[row] = append(legacy[row], rec)
-		case parityJoinOwnerDetectorShadow:
+		case parityJoinRoleYield:
+			a.report.Cycles.YieldRecords++
+			a.yieldEntry(rec, yield)
+			yields[row] = append(yields[row], parityJoinYieldRecord{rec: rec, spec: yield})
+		case parityJoinRoleDetector:
+			// The sweep is zero-write by design (section 2), whether it routed
+			// the condition to a keyed handler or left it in shadow. A sweep
+			// record claiming an applied effect breaks the invariant the whole
+			// campaign rests on.
 			if parityJoinEffectApplied(rec) {
 				a.report.ShadowEffectViolations++
 			}
-			shadow[row] = append(shadow[row], rec)
-		case parityJoinOwnerKeyed:
+			detector[row] = append(detector[row], rec)
+		case parityJoinRoleKeyed:
 			a.rows[spec.Family].Keyed++
 		default:
 			a.report.Cycles.UnownedRecords++
@@ -398,25 +502,125 @@ func (a *parityJoinAccumulator) joinCycle(key parityJoinCycleKey, bucket *parity
 	}
 
 	for _, row := range rowOrder {
-		left, right := legacy[row], shadow[row]
+		left, right, stood := legacy[row], detector[row], yields[row]
 		spec := parityJoinSiteFamily[row.Site]
-		for i := 0; i < len(left) || i < len(right); i++ {
-			var legacyRec, shadowRec *SessionReconcilerTraceRecord
-			if i < len(left) {
-				legacyRec = &left[i]
-			}
-			if i < len(right) {
-				shadowRec = &right[i]
-			}
-			a.classify(key, spec, row, legacyRec, shadowRec)
+
+		// Act-vs-act first: two writers deciding the same row is the strongest
+		// evidence in the corpus and it gets first claim on the sweep's record.
+		acts := min(len(left), len(right))
+		for i := range acts {
+			a.classify(key, spec, row, coTwins, &left[i], &right[i])
+		}
+		for i := acts; i < len(left); i++ {
+			a.classify(key, spec, row, coTwins, &left[i], nil)
+		}
+
+		// Then the yield-join over whatever the act-join did not consume.
+		rest := right[acts:]
+		pairs := min(len(stood), len(rest))
+		for i := range pairs {
+			a.classifyYield(key, spec, row, stood[i], &rest[i])
+		}
+		for i := pairs; i < len(stood); i++ {
+			a.classifyYield(key, spec, row, stood[i], nil)
+		}
+		for i := pairs; i < len(rest); i++ {
+			a.classify(key, spec, row, coTwins, nil, &rest[i])
 		}
 	}
+}
+
+// parityJoinCoTwinIndex maps a session key to every reason code written for it
+// anywhere in the cycle, at any site.
+func parityJoinCoTwinIndex(records []SessionReconcilerTraceRecord) map[string]map[TraceReasonCode]bool {
+	index := make(map[string]map[TraceReasonCode]bool)
+	for _, rec := range records {
+		session := parityJoinSessionKey(rec)
+		if session == "" || rec.ReasonCode == "" {
+			continue
+		}
+		reasons, ok := index[session]
+		if !ok {
+			reasons = make(map[TraceReasonCode]bool)
+			index[session] = reasons
+		}
+		reasons[rec.ReasonCode] = true
+	}
+	return index
+}
+
+// yieldEntry records one stand-down against the yield-side vocabulary log.
+func (a *parityJoinAccumulator) yieldEntry(rec SessionReconcilerTraceRecord, spec parityJoinYieldSpec) *parityJoinYieldEntry {
+	key := parityJoinYieldKey{Site: rec.SiteCode, Reason: rec.ReasonCode}
+	entry, ok := a.yields[key]
+	if !ok {
+		entry = &parityJoinYieldEntry{
+			Site:   key.Site,
+			Reason: key.Reason,
+			Family: spec.Family,
+			Arm:    spec.Arm,
+			Note:   spec.Note,
+		}
+		a.yields[key] = entry
+	}
+	return entry
+}
+
+// classifyYield scores one stand-down. A yield beside an actor is the pair the
+// owner ruling calls D4's side-by-side evidence: legacy identified the row and
+// stepped aside, the actor acted, and the two must be talking about the same
+// family. A stand-down with nothing beside it proves something only when the
+// seam that wrote it sits inside the family's arm — an ownership-arm yield says
+// "the keyed controller holds this key" and nothing about the row.
+func (a *parityJoinAccumulator) classifyYield(
+	cycle parityJoinCycleKey,
+	spec *parityJoinFamilySpec,
+	row parityJoinRowKey,
+	yield parityJoinYieldRecord,
+	actor *SessionReconcilerTraceRecord,
+) {
+	stats := a.rows[spec.Family]
+	entry := a.yieldEntry(yield.rec, yield.spec)
+	if actor == nil {
+		if yield.spec.Arm == parityJoinYieldOwnership {
+			entry.Unpaired++
+			a.report.Cycles.UnpairedOwnershipYields++
+			return
+		}
+		entry.Unpaired++
+		stats.YieldOnly++
+		classification, class := parityJoinClassify(spec, parityJoinSideLegacyOnly, nil, row.Session, &yield.rec, nil)
+		a.record(cycle, spec, row, parityJoinSideLegacyOnly, classification, class, &yield.rec, nil)
+		return
+	}
+
+	entry.Joined++
+	stats.YieldJoined++
+	switch {
+	case !parityJoinIdentitiesAgree(yield.rec, *actor):
+		a.record(cycle, spec, row, parityJoinSideBoth, parityJoinIncomparable, parityJoinClassBeadIDCrossCheck, &yield.rec, actor)
+	case parityJoinActorFamily(*actor, spec) != yield.spec.Family:
+		a.record(cycle, spec, row, parityJoinSideBoth, parityJoinMismatched, parityJoinClassYieldFamilyMismatch, &yield.rec, actor)
+	default:
+		stats.Matched++
+	}
+}
+
+// parityJoinActorFamily is the family the acting record claims: the sweep's own
+// label where it carries one, else the family that owns the site.
+func parityJoinActorFamily(rec SessionReconcilerTraceRecord, spec *parityJoinFamilySpec) string {
+	label, _ := rec.Fields["detector_family"].(string)
+	if family, ok := parityJoinDetectorFamilies[strings.TrimSpace(label)]; ok {
+		return family
+	}
+	return spec.Family
 }
 
 func (a *parityJoinAccumulator) classify(
 	cycle parityJoinCycleKey,
 	spec *parityJoinFamilySpec,
 	row parityJoinRowKey,
+	coTwins map[string]map[TraceReasonCode]bool,
 	legacyRec, shadowRec *SessionReconcilerTraceRecord,
 ) {
 	stats := a.rows[spec.Family]
@@ -432,7 +636,21 @@ func (a *parityJoinAccumulator) classify(
 		stats.Joined++
 	}
 
-	classification, class := parityJoinClassify(spec, side, legacyRec, shadowRec)
+	classification, class := parityJoinClassify(spec, side, coTwins, row.Session, legacyRec, shadowRec)
+	a.record(cycle, spec, row, side, classification, class, legacyRec, shadowRec)
+}
+
+// record books one classified row into the family counters, the triage log and
+// — for an unclassified mismatch — the sample list the WE blocker rests on.
+func (a *parityJoinAccumulator) record(
+	cycle parityJoinCycleKey,
+	spec *parityJoinFamilySpec,
+	row parityJoinRowKey,
+	side parityJoinSide,
+	classification, class string,
+	legacyRec, shadowRec *SessionReconcilerTraceRecord,
+) {
+	stats := a.rows[spec.Family]
 	switch classification {
 	case parityJoinMatched:
 		stats.Matched++
@@ -457,10 +675,12 @@ func (a *parityJoinAccumulator) classify(
 func parityJoinClassify(
 	spec *parityJoinFamilySpec,
 	side parityJoinSide,
+	coTwins map[string]map[TraceReasonCode]bool,
+	session string,
 	legacyRec, shadowRec *SessionReconcilerTraceRecord,
 ) (string, string) {
 	if side == parityJoinSideBoth {
-		if !parityJoinBeadIDsAgree(*legacyRec, *shadowRec) {
+		if !parityJoinIdentitiesAgree(*legacyRec, *shadowRec) {
 			return parityJoinIncomparable, parityJoinClassBeadIDCrossCheck
 		}
 		// Detection-level families predict only (key, condition); the decision
@@ -468,12 +688,23 @@ func parityJoinClassify(
 		if spec.Level == parityJoinLevelDetection {
 			return parityJoinMatched, ""
 		}
-		if legacyRec.ReasonCode == shadowRec.ReasonCode && legacyRec.OutcomeCode == shadowRec.OutcomeCode {
+		// Decision level compares the OUTCOME only. The two writers' reason
+		// vocabularies are disjoint by construction — every sweep condition
+		// stamps a detector_-prefixed reason (session_reconciler_trace_types.go
+		// :171-206) while legacy stamps its own strings — so a reason-equality
+		// clause can never hold on a real pair: the campaign corpus pairs
+		// idle_timeout/stop with detector_idle_timeout/stop, orphaned/drain with
+		// detector_orphan_live/drain, wake/start_candidate with
+		// detector_wake_target/start_candidate. The outcome IS the decision
+		// section 3b's must-match cells name; the reason is the why-label. The
+		// clause read green only against seeded pairs that put one reason on
+		// both sides — a shape production cannot write.
+		if legacyRec.OutcomeCode == shadowRec.OutcomeCode {
 			return parityJoinMatched, ""
 		}
 	}
 	for _, rule := range slices.Concat(spec.Divergences, parityJoinGlobalDivergences) {
-		if !parityJoinRuleMatches(rule, side, legacyRec, shadowRec) {
+		if !parityJoinRuleMatches(rule, side, coTwins[session], legacyRec, shadowRec) {
 			continue
 		}
 		if rule.Classification != "" {
@@ -487,10 +718,23 @@ func parityJoinClassify(
 func parityJoinRuleMatches(
 	rule parityJoinDivergenceRule,
 	side parityJoinSide,
+	coTwins map[TraceReasonCode]bool,
 	legacyRec, shadowRec *SessionReconcilerTraceRecord,
 ) bool {
 	if rule.Side != "" && rule.Side != side {
 		return false
+	}
+	if len(rule.CoTwinReasons) > 0 && !parityJoinAnyCoTwin(rule.CoTwinReasons, coTwins) {
+		return false
+	}
+	if len(rule.DetectorAdmissionOutcomes) > 0 {
+		if shadowRec == nil {
+			return false
+		}
+		outcome, _ := shadowRec.Fields["admission_outcome"].(string)
+		if !slices.Contains(rule.DetectorAdmissionOutcomes, strings.TrimSpace(outcome)) {
+			return false
+		}
 	}
 	site := TraceSiteUnknown
 	if legacyRec != nil {
@@ -550,14 +794,41 @@ func parityJoinAnyOutcome(outcomes []TraceOutcomeCode, recs ...*SessionReconcile
 	return false
 }
 
-// parityJoinBeadIDsAgree is the section 3b cross-check on the normalized
+func parityJoinAnyCoTwin(reasons []TraceReasonCode, coTwins map[TraceReasonCode]bool) bool {
+	for _, reason := range reasons {
+		if coTwins[reason] {
+			return true
+		}
+	}
+	return false
+}
+
+// parityJoinIdentitiesAgree is the section 3b cross-check on the normalized
 // session-name join key. Two rows that share a name but not an identity are a
 // D-DUP shape, not a comparable pair.
-func parityJoinBeadIDsAgree(left, right SessionReconcilerTraceRecord) bool {
-	if left.SessionBeadID == "" || right.SessionBeadID == "" {
+func parityJoinIdentitiesAgree(left, right SessionReconcilerTraceRecord) bool {
+	leftID, rightID := parityJoinSessionIdentity(left), parityJoinSessionIdentity(right)
+	if leftID == "" || rightID == "" {
 		return true
 	}
-	return left.SessionBeadID == right.SessionBeadID
+	return leftID == rightID
+}
+
+// parityJoinSessionIdentity is the bead identity behind a record's session
+// name. The typed field carries it on the records that have one; the reconciler
+// decision sites put it in the payload instead, under either spelling, and on
+// the campaign corpus that payload copy is the ONLY copy — a cross-check that
+// read the typed field alone would silently pass on every row.
+func parityJoinSessionIdentity(rec SessionReconcilerTraceRecord) string {
+	if id := strings.TrimSpace(rec.SessionBeadID); id != "" {
+		return id
+	}
+	for _, key := range []string{"session_bead_id", "session_id"} {
+		if id, ok := rec.Fields[key].(string); ok && strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+	}
+	return ""
 }
 
 func parityJoinSessionKey(rec SessionReconcilerTraceRecord) string {
@@ -570,11 +841,20 @@ func parityJoinSessionKey(rec SessionReconcilerTraceRecord) string {
 	return strings.TrimSpace(rec.SessionBeadID)
 }
 
-// parityJoinRecordOwner resolves which population wrote a record. A stamped
-// record is taken at its word. An unstamped one is classified by ELIMINATION:
-// every keyed handler stamps "keyed" and the sweep stamps "detector-shadow" (or
-// "keyed" for a condition it routed), so at a site where the god function is
-// the remaining writer, absence IS the legacy signature.
+// parityJoinRecordRole resolves which population wrote a record, and for a
+// legacy stand-down also which seam wrote it.
+//
+// The order matters. A YIELD is identified by its reason before anything else,
+// because most seams stamp effect_owner=keyed (the effect really is keyed's) and
+// two of them stamp nothing — so neither the stamp nor its absence can tell a
+// stand-down from an act. A SWEEP record is identified by carrying the sweep's
+// own family label under a detector_-prefixed reason, which is what separates
+// the detector's judgment from a keyed handler's own operation record, and what
+// lets a ROUTED condition (stamped keyed, not detector-shadow) join at all —
+// without that, every routed family's evidence fell on the floor.
+//
+// What is left is the pre-ruling classification: a stamped record is taken at
+// its word, and an unstamped one is classified by ELIMINATION —
 //
 // Elimination beats teaching the god function to stamp for two reasons. The
 // stamp would be scaffolding threaded through ~19 legacy decision sites in a
@@ -587,37 +867,71 @@ func parityJoinSessionKey(rec SessionReconcilerTraceRecord) string {
 // writers already emit, which is enough to eliminate them.
 //
 // The guard is that absence only attributes inside the section 1 legacy
-// vocabulary. A phase site's per-cycle marker, a coexistence-seam yield whose
-// effect belongs to the keyed population, a keyed-owned or shared-writer site,
-// and a record with no session identity to join on are each refused with the
-// reason, counted, and surfaced — never silently binned as legacy.
-func parityJoinRecordOwner(rec SessionReconcilerTraceRecord) (string, *parityJoinAbsenceEntry) {
+// vocabulary. A phase site's per-cycle marker, a keyed-owned or shared-writer
+// site, and a record with no session identity to join on are each refused with
+// the reason, counted, and surfaced — never silently binned as legacy.
+func parityJoinRecordRole(rec SessionReconcilerTraceRecord) (string, parityJoinYieldSpec, *parityJoinDispositionEntry) {
+	site := parityJoinSiteDispositions[rec.SiteCode]
+	entry := &parityJoinDispositionEntry{Site: rec.SiteCode, Reason: rec.ReasonCode, Note: site.Note}
+	// A phase site's per-cycle marker is refused before anything else: binning it
+	// would manufacture one phantom row per cycle in D-DUP and D-STRANDED, whose
+	// only sites are phase sites. What makes it a marker rather than a decision
+	// is that it carries no session identity, so a per-session record at a phase
+	// site still falls through to the normal resolution.
+	if site.Attribution == parityJoinSitePhase && parityJoinSessionKey(rec) == "" {
+		entry.Disposition = parityJoinDispositionPhaseMarker
+		return parityJoinRoleRefused, parityJoinYieldSpec{}, entry
+	}
+	// A record with no session identity is not a row in a per-session join, no
+	// matter who wrote it or whether it carries a stamp. The live case is the
+	// sweep's pool-under-min FILL condition
+	// (detectorAdmissionQueuedPoolAllocation): a wake for a session that does
+	// not exist yet, so there is no row to join it against, and scoring it as a
+	// detector-only singleton invents a divergence out of an empty key.
+	if parityJoinSessionKey(rec) == "" {
+		entry.Disposition = parityJoinDispositionNoSessionKey
+		entry.Note = "no session identity: not a row in a per-session join"
+		return parityJoinRoleRefused, parityJoinYieldSpec{}, entry
+	}
+	if yield, ok := parityJoinYieldOf(rec); ok {
+		return parityJoinRoleYield, yield, nil
+	}
+	if parityJoinIsSweepRecord(rec) {
+		return parityJoinRoleDetector, parityJoinYieldSpec{}, nil
+	}
 	stamped, _ := rec.Fields["effect_owner"].(string)
-	if owner := strings.TrimSpace(stamped); owner != "" {
-		return owner, nil
-	}
-	disposition := parityJoinSiteDispositions[rec.SiteCode]
-	absence := &parityJoinAbsenceEntry{Site: rec.SiteCode, Reason: rec.ReasonCode, Note: disposition.Note}
-	switch {
-	case disposition.Attribution == parityJoinSitePhase:
-		absence.Disposition = parityJoinAbsencePhaseMarker
-	case disposition.Attribution != parityJoinSiteLegacy:
-		absence.Disposition = parityJoinAbsenceUnattributable
-	case parityJoinKeyedSeamYieldReasons[rec.ReasonCode]:
-		absence.Disposition = parityJoinAbsenceKeyedSeamYield
-		absence.Note = "legacy yielded this key to the keyed population; the effect is keyed's"
-	case parityJoinSessionKey(rec) == "":
-		absence.Disposition = parityJoinAbsenceNoSessionKey
-		absence.Note = "no session identity: not a row in a per-session join"
+	switch strings.TrimSpace(stamped) {
+	case "":
+	case parityJoinOwnerDetectorShadow:
+		return parityJoinRoleDetector, parityJoinYieldSpec{}, nil
+	case parityJoinOwnerLegacy:
+		return parityJoinRoleLegacyAct, parityJoinYieldSpec{}, nil
 	default:
-		absence.Disposition = parityJoinAbsenceLegacy
-		return parityJoinOwnerLegacy, absence
+		return parityJoinRoleKeyed, parityJoinYieldSpec{}, nil
 	}
-	return "", absence
+	if site.Attribution != parityJoinSiteLegacy {
+		entry.Disposition = parityJoinDispositionUnattributable
+		return parityJoinRoleRefused, parityJoinYieldSpec{}, entry
+	}
+	entry.Disposition = parityJoinDispositionLegacy
+	return parityJoinRoleLegacyAct, parityJoinYieldSpec{}, entry
 }
 
-func parityJoinAbsenceLog(counts map[parityJoinAbsenceEntry]int) []parityJoinAbsenceEntry {
-	log := make([]parityJoinAbsenceEntry, 0, len(counts))
+// parityJoinIsSweepRecord identifies the detector sweep's own record: it is the
+// only writer that stamps its family label beside a detector_-prefixed reason.
+// The stamp alone cannot do it — the sweep writes effect_owner=keyed for a
+// condition it ROUTED (session_detector_sweep.go:2103-2130) and a keyed
+// handler's own operation records carry the same stamp.
+func parityJoinIsSweepRecord(rec SessionReconcilerTraceRecord) bool {
+	label, _ := rec.Fields["detector_family"].(string)
+	if strings.TrimSpace(label) == "" {
+		return false
+	}
+	return strings.HasPrefix(string(rec.ReasonCode), "detector_")
+}
+
+func parityJoinDispositionLog(counts map[parityJoinDispositionEntry]int) []parityJoinDispositionEntry {
+	log := make([]parityJoinDispositionEntry, 0, len(counts))
 	for entry, count := range counts {
 		entry.Count = count
 		log = append(log, entry)
@@ -666,6 +980,20 @@ func parityJoinSampleOf(
 	return sample
 }
 
+func parityJoinYieldLog(entries map[parityJoinYieldKey]*parityJoinYieldEntry) []parityJoinYieldEntry {
+	log := make([]parityJoinYieldEntry, 0, len(entries))
+	for _, entry := range entries {
+		log = append(log, *entry)
+	}
+	sort.Slice(log, func(i, j int) bool {
+		if log[i].Site != log[j].Site {
+			return log[i].Site < log[j].Site
+		}
+		return log[i].Reason < log[j].Reason
+	})
+	return log
+}
+
 func parityJoinTriageLog(counts map[parityJoinTriageEntry]int) []parityJoinTriageEntry {
 	log := make([]parityJoinTriageEntry, 0, len(counts))
 	for entry, count := range counts {
@@ -690,18 +1018,23 @@ func writeParityJoinReport(w io.Writer, report parityJoinReport) error {
 		report.Cycles.ExcludedRecordBudget+report.Cycles.ExcludedNoRollup,
 		report.Cycles.ExcludedRecordBudget, report.Cycles.ExcludedNoRollup)
 	fmt.Fprintf(&b, "arms:   %d considered cycles carried no detail arm\n", report.Cycles.WithoutDetailArms)
-	fmt.Fprintf(&b, "owner:  %d unstamped records classified legacy by elimination; %d refused (see OWNER-ABSENT)\n\n",
+	fmt.Fprintf(&b, "owner:  %d unstamped records classified legacy by elimination; %d refused (see OWNER-ABSENT)\n",
 		report.Cycles.LegacyByElimination, report.Cycles.UnownedRecords)
+	fmt.Fprintf(&b, "joined: %d total (%d yield-pairs, %d act-pairs) against a count bar of %d — %s\n",
+		report.JoinedTotal, report.JoinedYields, report.JoinedActs, report.CountBar,
+		parityJoinCountBarCell(report))
+	fmt.Fprintf(&b, "yields: %d stand-downs; %d unpaired ownership-arm yields carry no candidacy (see YIELDS)\n\n",
+		report.Cycles.YieldRecords, report.Cycles.UnpairedOwnershipYields)
 
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "FAMILY\tLEVEL\tJOINED\tLEG-ONLY\tDET-ONLY\tKEYED\tMATCH\tMISMATCH\tINCOMP\tUNCLASS\tRATE\tBAR") //nolint:errcheck
+	fmt.Fprintln(tw, "FAMILY\tLEVEL\tY-JOIN\tY-ONLY\tJOINED\tLEG-ONLY\tDET-ONLY\tKEYED\tMATCH\tMISMATCH\tINCOMP\tUNCLASS\tRATE\tBAR") //nolint:errcheck
 	for _, row := range report.Families {
 		rate := "-"
 		if row.Matched+row.Mismatched > 0 {
 			rate = fmt.Sprintf("%.2f%%", row.MatchRate*100)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", //nolint:errcheck
-			row.Family, row.Level, row.Joined, row.LegacyOnly, row.DetectorOnly, row.Keyed,
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", //nolint:errcheck
+			row.Family, row.Level, row.YieldJoined, row.YieldOnly, row.Joined, row.LegacyOnly, row.DetectorOnly, row.Keyed,
 			row.Matched, row.Mismatched, row.Incomparable, row.Unclassified, rate,
 			parityJoinBarCell(row))
 	}
@@ -709,15 +1042,22 @@ func writeParityJoinReport(w io.Writer, report parityJoinReport) error {
 		return err
 	}
 
+	if len(report.Yields) > 0 {
+		b.WriteString("\nYIELDS (legacy's traced stand-downs — the yield-join's left-hand side)\n")
+		for _, entry := range report.Yields {
+			fmt.Fprintf(&b, "  %-40s %-32s %-14s %-10s joined %6d  unpaired %6d  %s\n",
+				entry.Site, entry.Reason, entry.Family, entry.Arm, entry.Joined, entry.Unpaired, entry.Note)
+		}
+	}
 	if len(report.Triage) > 0 {
 		b.WriteString("\nTRIAGE\n")
 		for _, entry := range report.Triage {
 			fmt.Fprintf(&b, "  %-14s %-40s %-12s %d\n", entry.Family, entry.Class, entry.Classification, entry.Count)
 		}
 	}
-	if len(report.OwnerAbsence) > 0 {
+	if len(report.Dispositions) > 0 {
 		b.WriteString("\nOWNER-ABSENT (records carrying no effect_owner stamp)\n")
-		for _, entry := range report.OwnerAbsence {
+		for _, entry := range report.Dispositions {
 			fmt.Fprintf(&b, "  %-44s %-26s %-18s %6d  %s\n",
 				entry.Site, entry.Reason, entry.Disposition, entry.Count, entry.Note)
 		}
@@ -742,6 +1082,13 @@ func parityJoinBarCell(row parityJoinFamilyReport) string {
 	default:
 		return "BELOW"
 	}
+}
+
+func parityJoinCountBarCell(report parityJoinReport) string {
+	if report.CountBarMet {
+		return "reached"
+	}
+	return "WINDOW SHORT"
 }
 
 func parityJoinVerdict(report parityJoinReport) string {

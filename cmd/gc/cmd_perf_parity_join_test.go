@@ -492,6 +492,36 @@ func TestParityJoinFamilyTableIsWellFormed(t *testing.T) {
 	}
 }
 
+// A yield names the family legacy stood down FOR, and the join compares that
+// name against the family the actor claims. Both vocabularies must therefore
+// speak the section 3b family names: a typo would turn every pair in that family
+// into a yield_family_mismatch, which is precisely the alarm the check exists to
+// keep meaningful. Every entry must also cite the seam it transcribes.
+func TestParityJoinYieldAndDetectorVocabulariesNameRealFamilies(t *testing.T) {
+	families := map[string]bool{}
+	for _, spec := range parityJoinFamilySpecs {
+		families[spec.Family] = true
+	}
+	for reason, spec := range parityJoinYieldVocabulary {
+		if !families[spec.Family] {
+			t.Fatalf("yield %q claims family %q, which no section 3b family spec declares", reason, spec.Family)
+		}
+		switch spec.Arm {
+		case parityJoinYieldCandidacy, parityJoinYieldOwnership:
+		default:
+			t.Fatalf("yield %q has arm %q", reason, spec.Arm)
+		}
+		if strings.TrimSpace(spec.Note) == "" {
+			t.Fatalf("yield %q cites no emitting seam", reason)
+		}
+	}
+	for label, family := range parityJoinDetectorFamilies {
+		if !families[family] {
+			t.Fatalf("detector family label %q maps to %q, which no section 3b family spec declares", label, family)
+		}
+	}
+}
+
 // The elimination rule is only as good as its guard, so every site the section
 // 3b table joins on must carry an explicit section 1 disposition. A site added
 // to a family without one would silently default to "not legacy" and drop that

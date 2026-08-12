@@ -2072,11 +2072,11 @@ effect arms — that sign-off is part of the WD.15 artifact, not implied.
 | start families (already keyed) | act | existing shadow-worker + comparator evidence | per existing comparators |
 | D-DEADLINE | decision | deadline firing + hold/quarantine/work blockers | legacy pending-interaction deferral (probe-only signal, unpredicted) |
 | D-ORPHAN | decision | close/drain/kept-open arm choice | deferred-confirm off-by-one (duplicated counters); liveness-error arm incomparable; **keyed A6 attached/pending-interaction deferral against a legacy drain** (WD.4 delta 4) |
-| D-STALE-CREATE | decision | rollback vs preserved | legacy defers rollback #6+ (R6 budget retired) |
+| D-STALE-CREATE | decision | rollback vs preserved | legacy defers rollback #6+ (R6 budget retired); **`pending_create_in_flight_family_split`** — a start-pending row with a live create lease is claimed by the sweep's preserve arm (session_detector_sweep.go:1285-1289, `predicted_effect: none`) while legacy's wake pass drives the start it already began (:4101), so one row lands in two families at two sites and no same-site join can pair them (WD.15, cross-checked on the twin's presence in the cycle); **`live_runtime_recovery_excluded_from_sweep`** — legacy defers a pending-create recovery only for a row whose runtime is ALIVE (:3117-3125) and `detectStaleCreate` excludes exactly those rows (:1272-1274), so the legacy-only record is structural |
 | D-DRIFT | detection | hash-mismatch firing per session, per HALF (core arm at ConfigDrift, live arm at LiveDrift — WD.8 delta 2) | entire 5-arm ladder handler-side (attached probe is provider I/O — excluded, sign-off required); **keyed `no_change` refusal against a legacy `repair_in_place` on an asleep-named row** (WD.8 delta 7); the A6 deferral rungs are keyed and legacy yields them from WD.9, so on an owned key the deferral appears once under `effect_owner=keyed` with no legacy twin (WD.9 delta 1) |
-| D-SLEEP | decision | awake-set membership (incl. winner identity, R3) | probe/pending arms unpredicted |
-| D-DRAIN | detection | tracker-state candidacy (drain intent / draining) | ack-timing skew (handler-side ack read vs legacy's in-tick poll); advance arms journey-proven; **keyed declines the plain wake-reasons-reappeared cancel legacy applies** (WD.6 delta 6 — the fleet `len(eval.Reasons) > 0` verdict has no per-key analogue, so those rows stay legacy's for the WD wave and the detector records them without enqueueing); keyed refuses on incomplete liveness where legacy completes the drain (WD.6 delta 7) |
-| D-WAKE | decision | wake-target set | legacy quarantine skip is UNTRACED (:3702-3705) → detector-present/legacy-absent, expected |
+| D-SLEEP | decision | awake-set membership (incl. winner identity, R3) | probe/pending arms unpredicted; **`fleet_only_no_wake_left_to_legacy` fires on BOTH sides** — the class's own text is "legacy drains where the detector predicts nothing", and the fleet verdict is exactly the rung where the sweep may write nothing at all (it re-derives the awake set from its pre-tick snapshot while legacy drains on its end-of-tick pass), so the legacy-only `no-wake-reason/drain` singleton is the same WD.5 delta 1 divergence, not a new one |
+| D-DRAIN | detection | tracker-state candidacy (drain intent / draining) | ack-timing skew (handler-side ack read vs legacy's in-tick poll) — scoped to legacy's OWN acknowledgement arm; **advance arms journey-proven**, which covers two shapes WD.15 separated: the sweep's due-advance detection (`detector_drain_in_flight`, sited at DrainAck) has no legacy per-session twin at all because legacy's advance pass is the `session_reconcile.drain_advance` PHASE site (§1 row 28), and legacy's own engine arms (drain.stale/cancel/timeout, session_wake.go:686-825) sit one site away from that detection; **keyed declines the plain wake-reasons-reappeared cancel legacy applies** (WD.6 delta 6 — the fleet `len(eval.Reasons) > 0` verdict has no per-key analogue, so those rows stay legacy's for the WD wave and the detector records them without enqueueing); keyed refuses on incomplete liveness where legacy completes the drain (WD.6 delta 7) |
+| D-WAKE | decision | wake-target set | legacy quarantine skip is UNTRACED (:3702-3705) → detector-present/legacy-absent, expected; **`wake_admission_refused_row_stays_legacy`** — the sweep raised a target and its OWN admission refused to route it (`detectorAdmissionRefusedUncertifiable`, whose contract is literally "the row stays legacy's and is re-detected next sweep", session_detector_sweep.go:392-396), so comparing legacy's decision against a condition the sweep declined to route compares an act to a non-act, on either side; **`pending_create_in_flight_family_split`** — the D-WAKE half of the D-STALE-CREATE split above |
 | D-ZOMBIE | detection | running ∧ !alive candidacy | classification arm handler-side; **legacy's exit-classification lane (`checkRateLimitStability`) writes the same terminal-error cluster for the same row and does NOT yield, so on a keyed-owned row the health cluster may carry a legacy write while the crash event carries only the keyed one** (WD.11 delta 4) |
 | D-STALL | decision | claim-less stall + floor exemption | claim-check-error fail-safe arm incomparable; keyed refuses a pinned configured named row where legacy sets-then-clears the marker (WD.12 delta 2); the named circuit-breaker clear now travels with the recycle, so WD.12 delta 9's divergence is CLOSED (WD.11 delta 9) |
 | D-DUP | decision | winner + loser set | none expected |
@@ -2109,11 +2109,103 @@ each, §3). **Bar**: every must-match cell ≥99.5% matched over the window; eve
 mismatch triaged into a table class above; **one unclassified mismatch = WE blocker**
 (triage it, extend the table with evidence, or fix the detector — then re-run the
 window for that family). **Join tool**: a `parity-join` subcommand on the D4-retained
-perf CLI (~150-300 LOC, deleted with it at WE); join contract = shared trace-cycle
-handle + normalized session name with bead-ID cross-check + records distinguished by
-`effect_owner` (legacy / detector-shadow / keyed). **Artifacts**: per-family counts,
-triaged mismatch log, sign-off records → `engdocs/plans/reconciler-distillation/
-evidence/`; reviewed by the Fable council before WE per DESIGN.md §4 (wave gates).
+perf CLI (deleted with it at WE); join contract below. **Artifacts**: per-family
+counts, triaged mismatch log, sign-off records → `engdocs/plans/reconciler-
+distillation/evidence/`; reviewed by the Fable council before WE per DESIGN.md §4
+(wave gates).
+
+#### The join contract is the YIELD-JOIN (owner ruling, 2026-08-12)
+
+The join is a same-cycle-handle equality join on `(trace_id, tick_id)` plus the
+normalized session name, cross-checked on the session bead identity — the typed
+`session_bead_id` where a record carries one, else the payload's `session_bead_id`
+or `session_id`, which on a reconciler decision record is the only copy there is.
+
+What changed is the LEFT-hand side. A record distinguished only by `effect_owner`
+cannot find legacy at all: nothing in the tree stamps `effect_owner="legacy"`, and
+in `daemon.session_reconciler=auto` with `effective_owner=keyed` the god function
+mostly does not DECIDE — it **yields**. So legacy appears in two forms, and both
+join:
+
+- an **ACT** — an unstamped decision record at a §1 legacy site, attributed by
+  ELIMINATION (every keyed handler stamps `keyed`, the sweep stamps
+  `detector-shadow` or `keyed`; absence at a legacy site is the legacy signature);
+- a **YIELD** — a traced stand-down at a coexistence seam: *"I identified this row
+  and stepped aside for the keyed owner."*
+
+and the RIGHT-hand side is the **sweep's own record**, identified by carrying
+`fields.detector_family` under a `detector_`-prefixed reason — *whether or not it
+was routed*. A routed condition stamps `effect_owner=keyed`
+(session_detector_sweep.go:2103-2130), so an owner-only split dropped every routed
+family's evidence on the floor.
+
+**Pair semantics.** Agreement = both writers identified the row (the pair exists)
+AND the family the yield stood down FOR is the family that acted. A D-DEADLINE
+yield beside a D-ORPHAN act is a divergence to classify (`yield_family_mismatch`),
+not a match. **Act-vs-act pairs are counted separately** (`joined_acts`): two
+writers deciding one row is the strongest single piece of evidence in the corpus,
+and it keeps first claim on the sweep's record.
+
+**Decision-level comparison is on the OUTCOME, not the reason.** The two writers'
+reason vocabularies are disjoint by construction — every sweep condition stamps a
+`detector_`-prefixed reason while legacy stamps its own strings — so a reason
+equality clause can never hold on a real pair. The corpus pairs `idle_timeout/stop`
+with `detector_idle_timeout/stop`, `orphaned/drain` with `detector_orphan_live/drain`,
+`wake/start_candidate` with `detector_wake_target/start_candidate`. The outcome IS
+the decision the must-match cells above name; the reason is the why-label.
+
+#### The yield-side vocabulary
+
+Every traced stand-down the seams emit, and what each PROVES. A yield is
+identified by its **reason**, never by `effect_owner`: most seams stamp
+`effect_owner=keyed` (the effect really is keyed's) and two stamp nothing.
+
+| Reason | Site(s) | Family | Arm | Emitting seam |
+|---|---|---|---|---|
+| `keyed_start_owner` | WakeDecision | D-WAKE | **ownership** | :1880-1887 (row scan, pre-condition) AND :4091-4098 (wake target, post-decision) — indistinguishable in the record |
+| `start_commit_superseded` (`fields.reason=keyed_start_owner`) | WakeDecision | D-WAKE | candidacy | pre-wake CAS supersede, session_lifecycle_parallel.go:1275, :3507-3518 |
+| `keyed_deadline_owner` | IdleTimeout / MaxSessionAge | D-DEADLINE | candidacy | :3586-3600, armed tracker + live row |
+| `keyed_orphan_close_owner` | CloseOrphan / CloseFailedCreate | D-ORPHAN | candidacy | :1539-1551, inside both close arms |
+| `keyed_orphan_drain_owner` | Orphaned | D-ORPHAN | candidacy | :2428-2441, after the orphan determination |
+| `keyed_stale_create_owner` | PendingCreate | D-STALE-CREATE | candidacy | :1835-1846, keyed rollback predicate re-derived |
+| `keyed_config_drift_owner` | ConfigDrift / LiveDrift | D-DRIFT | candidacy | :1577-1583, at each convergence effect |
+| `keyed_config_drift_defer_owner` | ConfigDrift | D-DRIFT | candidacy | :1594-1605, at each deferral effect |
+| `keyed_drain_ack_owner` | DrainAck | D-DRAIN | candidacy | :2302-2309, :2754-2761 (ga-f7v2ft.147) |
+| `keyed_zombie_mark_owner` | TerminalProviderError | D-ZOMBIE | candidacy | :2535-2540, `running ∧ !alive` |
+| `keyed_sleep_owner` | DrainDecision | D-SLEEP | candidacy | :4191-4198, inside the no-wake drain block |
+
+A **candidacy** arm sits inside the family's arm: legacy had already established
+the row is actionable, so the stand-down is its judgment on the row, and a
+candidacy yield with no actor beside it is a real divergence. An **ownership** arm
+sits at the top of the row scan before any condition is evaluated (or its arms are
+indistinguishable in the record): it asserts "the keyed controller holds this key",
+not "this row is actionable". An ownership yield still JOINS when an actor is
+present — the actor carries the candidacy — but an **unpaired** one is counted and
+surfaced, never scored. This is the same discipline that keeps phase markers out of
+D-DUP and D-STRANDED: binning 11,929 blanket wake stand-downs as legacy decisions
+would have fabricated the D-WAKE readout entire.
+
+The **untraced** stand-downs are deliberately absent and contribute no yield
+evidence: D-DUP's duplicate-retire, D-STALL's recycle (:2889), D-STRANDED's repair
+(:4294) and D-DRAIN's advance (:2247, :2634, :4388) suppress their effects without
+recording anything. Those families rest on act-vs-act and journey parity instead.
+
+#### The bar, re-expressed
+
+- **Count bar — unchanged at ≥10,000 joined rows over the window**, where joined =
+  yield-pairs + act-pairs. The ruling's arithmetic holds with room to spare: the
+  campaign city produces **~1,600 yield-pairs/hour** (D-DEADLINE ~1,270/h,
+  D-ORPHAN ~320/h), so a 7-day window yields ~270k and the count bar is reached in
+  hours, not days. The ≥7-day residency requirement is unchanged and still governs
+  — the count bar is a floor on evidence, not a substitute for window length.
+- **Match bar — unchanged at ≥99.5% per must-match cell**, now computed over
+  yield-joins and act-joins together, with the expected-divergence taxonomy above
+  carried over unchanged.
+- **One unclassified mismatch = WE blocker** — unchanged.
+- **Records the join refuses to score** are counted and surfaced with the reason,
+  never binned: phase markers, keyed-owned/shared-writer sites, records with no
+  session identity (the sweep's pool-under-min FILL condition is a wake for a
+  session that does not exist yet), and unpaired ownership-arm yields.
 
 ### Evidence hygiene (council F5 — binding)
 

@@ -53,7 +53,22 @@ const (
 const (
 	parityJoinClassBeadIDCrossCheck = "bead_id_cross_check_failed"
 	parityJoinClassUnclassified     = "UNCLASSIFIED"
+	// parityJoinClassYieldFamilyMismatch fires when legacy stood down for one
+	// family and a different family acted on the same row in the same tick.
+	// Both writers saw the row; they disagree about what it IS.
+	parityJoinClassYieldFamilyMismatch = "yield_family_mismatch"
+	// parityJoinClassPendingCreateFamilySplit is shared by the two halves of
+	// the D-WAKE / D-STALE-CREATE cross-family split so the triage log shows
+	// one class, not two coincidences.
+	parityJoinClassPendingCreateFamilySplit = "pending_create_in_flight_family_split"
 )
+
+// legacyReasonNoWakeReason is the code legacy stamps at the drain decision when
+// ComputeAwakeSet found no reason to be awake. It is NOT TraceReasonNoWakeReason
+// ("no_wake_reason"): the site builds its reason code from its own hyphenated
+// drain reason string (session_reconciler.go:4210, :4228), so the corpus carries
+// the hyphenated spelling and a rule written against the constant never fires.
+const legacyReasonNoWakeReason TraceReasonCode = "no-wake-reason"
 
 // parityJoinDivergenceRule triages one expected divergence. Every non-empty
 // predicate must hold for the rule to fire; the first matching rule wins.
@@ -68,6 +83,19 @@ type parityJoinDivergenceRule struct {
 	DetectorOutcomes []TraceOutcomeCode
 	AnyReasons       []TraceReasonCode
 	AnyOutcomes      []TraceOutcomeCode
+	// DetectorAdmissionOutcomes constrains the sweep's own routing disposition
+	// (fields.admission_outcome). It is what separates "the detector raised a
+	// condition and routed it" from "the detector raised it and refused to
+	// route it", which are opposite claims about the same record.
+	DetectorAdmissionOutcomes []string
+	// CoTwinReasons requires a record for the SAME session in the SAME cycle
+	// carrying one of these reasons at ANOTHER site. It is how a CROSS-FAMILY
+	// split gets triaged without inventing a predicate: the sweep claims each
+	// row for exactly one family while legacy runs an arm per pass, so the two
+	// writers can agree on a row and still land at two sites a same-site join
+	// can never pair. A rule that names its twin fires only when the twin is
+	// actually in the corpus — the singleton stays unclassified otherwise.
+	CoTwinReasons []TraceReasonCode
 }
 
 type parityJoinFamilySpec struct {
@@ -137,10 +165,41 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 		Family: parityJoinFamilyStaleCreate,
 		Level:  parityJoinLevelDecision,
 		Sites:  []TraceSiteCode{TraceSiteReconcilerPendingCreate, TraceSiteReconcilerPendingCreatePreserved},
-		Divergences: []parityJoinDivergenceRule{{
-			Class:       "legacy_defers_rollback_beyond_budget",
-			AnyOutcomes: []TraceOutcomeCode{TraceOutcomeRollbackDeferred},
-		}},
+		Divergences: []parityJoinDivergenceRule{
+			{
+				Class:       "legacy_defers_rollback_beyond_budget",
+				AnyOutcomes: []TraceOutcomeCode{TraceOutcomeRollbackDeferred},
+			},
+			{
+				// The sweep claims a row for ONE family; legacy runs an arm per
+				// pass. A start-pending row whose create lease is still live is
+				// claimed here (detectStaleCreate's preserve arm,
+				// session_detector_sweep.go:1285-1289, predicted_effect "none")
+				// while legacy's wake pass drives the start it already began
+				// (session_reconciler.go:4101, reason "wake"). Both leave the
+				// in-flight start alone; they just say so in two families at two
+				// sites, so no same-site join can pair them. Requires the twin.
+				Class:           parityJoinClassPendingCreateFamilySplit,
+				Classification:  parityJoinIncomparable,
+				Side:            parityJoinSideDetectorOnly,
+				Sites:           []TraceSiteCode{TraceSiteReconcilerPendingCreatePreserved},
+				DetectorReasons: []TraceReasonCode{detectorReasonPendingCreatePreserved},
+				CoTwinReasons:   []TraceReasonCode{TraceReasonWake},
+			},
+			{
+				// Legacy defers a pending-create recovery only for a row whose
+				// runtime is ALIVE (session_reconciler.go:3117-3125), and
+				// detectStaleCreate excludes exactly those rows from the family
+				// (session_detector_sweep.go:1272-1274). The legacy-only record
+				// is therefore structural, not a candidacy gap.
+				Class:          "live_runtime_recovery_excluded_from_sweep",
+				Classification: parityJoinIncomparable,
+				Side:           parityJoinSideLegacyOnly,
+				Sites:          []TraceSiteCode{TraceSiteReconcilerPendingCreate},
+				LegacyReasons:  []TraceReasonCode{TraceReasonPendingCreateRecoveryInFlight},
+				LegacyOutcomes: []TraceOutcomeCode{TraceOutcomeDeferred},
+			},
+		},
 	},
 	{
 		// Detection level: the entire 5-arm ladder is handler-side, so reason and
@@ -175,6 +234,23 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 				Class:           "fleet_only_no_wake_left_to_legacy",
 				Classification:  parityJoinIncomparable,
 				DetectorReasons: []TraceReasonCode{detectorReasonNoWakeFleetOnly},
+			},
+			{
+				// The LEGACY-ONLY side of the same WD.5 delta 1 divergence. The
+				// rule above keys on the detector's reason, so it cannot fire on a
+				// row the sweep never wrote for — and the fleet verdict is exactly
+				// the rung where the sweep may write nothing at all, because it
+				// re-derives the awake set from its own pre-tick snapshot while
+				// legacy drains on the verdict its own end-of-tick pass computed.
+				// "Legacy drains where the detector predicts nothing, by design,
+				// until D-WAKE gives the fleet demand rungs a keyed home" is the
+				// class's own text; this arm lets it fire on that shape.
+				Class:          "fleet_only_no_wake_left_to_legacy",
+				Classification: parityJoinIncomparable,
+				Side:           parityJoinSideLegacyOnly,
+				Sites:          []TraceSiteCode{TraceSiteReconcilerDrainDecision},
+				LegacyReasons:  []TraceReasonCode{legacyReasonNoWakeReason},
+				LegacyOutcomes: []TraceOutcomeCode{TraceOutcomeDrain},
 			},
 			{
 				// WD.5 delta 4: the per-sweep probe budget and the probe already in
@@ -212,6 +288,25 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 		},
 		Divergences: []parityJoinDivergenceRule{
 			{
+				// The sweep's DUE-ADVANCE detection (§1 row 28), which the sweep
+				// sites at drain_ack. Legacy's advance pass has no per-session
+				// decision record at all — session_reconcile.drain_advance is a
+				// PHASE site that writes one cycle-level marker with no session
+				// identity — so this family's advance parity is candidacy
+				// agreement, not a record-to-record join, exactly as §3b's
+				// "advance arms journey-proven" says. Placed above the
+				// ack-timing-skew rule because both sit at drain_ack and this one
+				// names the record precisely.
+				Class:           "advance_arms_journey_proven",
+				Classification:  parityJoinIncomparable,
+				Sites:           []TraceSiteCode{TraceSiteReconcilerDrainAck},
+				DetectorReasons: []TraceReasonCode{detectorReasonDrainInFlight},
+			},
+			{
+				// Legacy's own acknowledgement arm. Its keyed twin reads the ack
+				// handler-side while legacy polls in-tick, so the pair lands in
+				// adjacent cycles and a same-cycle-handle join reports it as two
+				// singletons.
 				Class: "ack_timing_skew",
 				Sites: []TraceSiteCode{TraceSiteReconcilerDrainAck},
 			},
@@ -224,6 +319,25 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 					TraceSiteSessionReconcileDrainAdvance,
 				},
 			},
+			{
+				// The rest of the advance engine's arms. session_wake.go:686-825
+				// writes drain.stale / drain.cancel / drain.timeout from inside
+				// advanceSessionDrainsExcluding — the same pass §1 row 28 ports as
+				// due-advance DETECTION with the interrupt/complete effects keyed.
+				// The sweep records that detection at reconciler.session.drain_ack
+				// (detector_drain_in_flight, predicted_effect "advance"), one site
+				// away, so the pair splits. Requires the twin: an advance arm with
+				// no detection beside it is a candidacy gap, not this class.
+				Class:          "advance_arms_journey_proven",
+				Classification: parityJoinIncomparable,
+				Side:           parityJoinSideLegacyOnly,
+				Sites: []TraceSiteCode{
+					TraceSiteDrainStale,
+					TraceSiteDrainCancel,
+					TraceSiteDrainTimeout,
+				},
+				CoTwinReasons: []TraceReasonCode{detectorReasonDrainInFlight},
+			},
 		},
 	},
 	{
@@ -234,6 +348,25 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 		Sites:  []TraceSiteCode{TraceSiteReconcilerWakeDecision, TraceSiteReconcilerPreserveConfiguredNamed},
 		Divergences: []parityJoinDivergenceRule{
 			{
+				// The sweep raised a wake target and its OWN admission refused
+				// to route it: detectorAdmissionRefusedUncertifiable is D-WAKE's
+				// traced refusal for a call site with no certified-lease entry,
+				// and its contract is that "the row stays legacy's and is
+				// re-detected next sweep" (session_detector_sweep.go:392-396).
+				// The sweep therefore made no claim on the row, and comparing
+				// legacy's decision against a condition the sweep declined to
+				// route compares an act to a non-act — on EITHER side. Where
+				// legacy also wrote nothing, that is its untraced negative wake
+				// arm (§1 row 19: the positive arm at :3777-3795 is the only one
+				// traced); where it did write, the corpus pairs this refusal
+				// with legacy's own start_in_flight decline, one second later in
+				// the same tick, and both writers left the in-flight start alone.
+				Class:                     "wake_admission_refused_row_stays_legacy",
+				Classification:            parityJoinIncomparable,
+				Sites:                     []TraceSiteCode{TraceSiteReconcilerWakeDecision},
+				DetectorAdmissionOutcomes: []string{string(detectorAdmissionRefusedUncertifiable)},
+			},
+			{
 				Class:           "untraced_legacy_quarantine_skip",
 				Side:            parityJoinSideDetectorOnly,
 				DetectorReasons: []TraceReasonCode{TraceReasonQuarantine},
@@ -242,6 +375,20 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 				Class:            "untraced_legacy_quarantine_skip",
 				Side:             parityJoinSideDetectorOnly,
 				DetectorOutcomes: []TraceOutcomeCode{TraceOutcomeDeferredQuarantine},
+			},
+			{
+				// The legacy-only half of the D-STALE-CREATE cross-family split
+				// above: legacy's wake pass drives the start already in flight for
+				// a start-pending row whose create lease is live, while the sweep
+				// has claimed that row for D-STALE-CREATE's preserve arm. Same
+				// row, same tick, two families. Requires the twin.
+				Class:          parityJoinClassPendingCreateFamilySplit,
+				Classification: parityJoinIncomparable,
+				Side:           parityJoinSideLegacyOnly,
+				Sites:          []TraceSiteCode{TraceSiteReconcilerWakeDecision},
+				LegacyReasons:  []TraceReasonCode{TraceReasonWake},
+				LegacyOutcomes: []TraceOutcomeCode{TraceOutcomeStartCandidate, TraceOutcomeStartInFlight},
+				CoTwinReasons:  []TraceReasonCode{detectorReasonPendingCreatePreserved},
 			},
 		},
 	},
@@ -386,18 +533,153 @@ var parityJoinSiteDispositions = map[TraceSiteCode]parityJoinSiteDisposition{
 	TraceSiteSessionReconcileWakeSleep:  {parityJoinSitePhase, "s1#26 WakeSleep (phase)"},
 }
 
-// parityJoinKeyedSeamYieldReasons are legacy's coexistence-seam yields: arms
-// where the god function stepped aside because the keyed controller holds the
-// key, so the EFFECT belongs to the keyed population even though legacy wrote
-// the record. Three of the four stamp effect_owner=keyed already
-// (session_reconciler.go:1547, :2436, :3595); the wake arm (:1882, :4093) does
-// not, and binning its yields as legacy would swamp D-WAKE with rows for
-// decisions legacy explicitly declined to make.
-var parityJoinKeyedSeamYieldReasons = map[TraceReasonCode]bool{
-	"keyed_start_owner":        true,
-	"keyed_deadline_owner":     true,
-	"keyed_orphan_drain_owner": true,
-	"keyed_stale_create_owner": true,
+// parityJoinYieldArm records what a traced stand-down PROVES about its row.
+type parityJoinYieldArm string
+
+const (
+	// parityJoinYieldCandidacy: the seam sits INSIDE the family's arm, so
+	// legacy had already established the row is actionable when it stepped
+	// aside. The record is legacy's judgment on the row — the left-hand side
+	// of the yield-join.
+	parityJoinYieldCandidacy parityJoinYieldArm = "candidacy"
+	// parityJoinYieldOwnership: the seam sits at the top of the row scan,
+	// before any condition is evaluated — or its arms are indistinguishable in
+	// the record. It asserts "the keyed controller holds this key", NOT "this
+	// row is actionable". It still joins when an actor is present (the actor
+	// carries the candidacy), but an unpaired ownership yield is not evidence
+	// of anything and is refused rather than counted as a divergence.
+	parityJoinYieldOwnership parityJoinYieldArm = "ownership"
+)
+
+// parityJoinYieldSpec is one entry in legacy's stand-down vocabulary.
+type parityJoinYieldSpec struct {
+	Family string
+	Arm    parityJoinYieldArm
+	// Note cites the emitting seam so a reader of the readout can check the
+	// arm classification without reading Go.
+	Note string
+}
+
+// parityJoinYieldVocabulary is every traced stand-down the coexistence seams
+// emit. Under the owner's yield-join ruling these ARE legacy's decision records:
+// a stand-down is "I identified this row and stepped aside", which beside the
+// keyed actor's record is a per-row per-tick side-by-side comparison — the
+// evidence D4 asks for, and the only one auto mode produces in volume, because
+// auto mode is precisely the mode in which legacy declines rather than decides.
+//
+// A yield is identified by its REASON, never by effect_owner: most seams stamp
+// effect_owner=keyed (the effect IS keyed's), which is indistinguishable from
+// the actor's own stamp, and two of them (the wake arm at session_reconciler.go
+// :1882/:4093 and the drain-ack arms at :2304/:2756) stamp nothing at all.
+//
+// The untraced stand-downs are deliberately absent: D-DUP's duplicate-retire,
+// D-STALL's recycle (:2889), D-STRANDED's repair (:4294) and D-DRAIN's advance
+// (:2247, :2634, :4388) suppress their effects without recording anything, so
+// they contribute no yield evidence and their families rest on act-vs-act and
+// journey parity instead.
+var parityJoinYieldVocabulary = map[TraceReasonCode]parityJoinYieldSpec{
+	"keyed_start_owner": {
+		Family: parityJoinFamilyWake,
+		// TWO arms share this reason and payload shape: the row-scan skip at
+		// session_reconciler.go:1880-1887, which fires before legacy evaluates
+		// any condition, and the wake-target stand-down at :4091-4098, which
+		// fires after legacy decided the row is a start candidate. Only the
+		// second carries candidacy, and nothing in the record tells them apart
+		// (both write session_id and nothing else), so the conservative arm
+		// governs: the pair still joins, the unpaired yield is refused.
+		Arm:  parityJoinYieldOwnership,
+		Note: "s1#19 WakeDecision seam; row-scan :1882 and wake-target :4093 are indistinguishable in the record",
+	},
+	"keyed_deadline_owner": {
+		Family: parityJoinFamilyDeadline,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:3586-3600, gated on an armed idle/max-age tracker and a live row",
+	},
+	"keyed_orphan_close_owner": {
+		Family: parityJoinFamilyOrphan,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:1539-1551, inside both legacy close arms",
+	},
+	"keyed_orphan_drain_owner": {
+		Family: parityJoinFamilyOrphan,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:2428-2441, after legacy determined the row is orphaned",
+	},
+	"keyed_stale_create_owner": {
+		Family: parityJoinFamilyStaleCreate,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:1835-1846, gated on the keyed handler's own rollback predicate",
+	},
+	"keyed_config_drift_owner": {
+		Family: parityJoinFamilyDrift,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:1577-1583, at each convergence effect, drift key re-derived",
+	},
+	"keyed_config_drift_defer_owner": {
+		Family: parityJoinFamilyDrift,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:1594-1605, at each deferral effect, conjunctive with convergence",
+	},
+	"keyed_drain_ack_owner": {
+		Family: parityJoinFamilyDrain,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:2302-2309, :2754-2761, inside the stop-pending arms (ga-f7v2ft.147)",
+	},
+	"keyed_zombie_mark_owner": {
+		Family: parityJoinFamilyZombie,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:2535-2540, gated on running AND not alive",
+	},
+	"keyed_sleep_owner": {
+		Family: parityJoinFamilySleep,
+		Arm:    parityJoinYieldCandidacy,
+		Note:   "session_reconciler.go:4191-4198, inside the no-wake drain block",
+	},
+}
+
+// parityJoinReasonStartCommitSuperseded is the round-6 pre-wake supersede. It
+// is a yield only when its own "reason" field names the keyed start owner —
+// the other spellings (premise_drift:*, mid_incarnation, pre_wake_cas) are
+// convergence against a moved row, not a stand-down for another writer.
+const parityJoinReasonStartCommitSuperseded TraceReasonCode = "start_commit_superseded"
+
+// parityJoinSupersedeYieldReason is the value the supersede's reason field
+// carries when the pre-wake CAS found the keyed start owner holding the key
+// (session_lifecycle_parallel.go:1275-1277, surfaced at :3507-3518).
+const parityJoinSupersedeYieldReason = "keyed_start_owner"
+
+// parityJoinYieldOf resolves a record against the stand-down vocabulary.
+func parityJoinYieldOf(rec SessionReconcilerTraceRecord) (parityJoinYieldSpec, bool) {
+	if rec.ReasonCode == parityJoinReasonStartCommitSuperseded {
+		if reason, _ := rec.Fields["reason"].(string); reason == parityJoinSupersedeYieldReason {
+			return parityJoinYieldSpec{
+				Family: parityJoinFamilyWake,
+				Arm:    parityJoinYieldCandidacy,
+				Note:   "pre-wake CAS supersede, session_lifecycle_parallel.go:3507-3518, after the candidate was decided",
+			}, true
+		}
+		return parityJoinYieldSpec{}, false
+	}
+	spec, ok := parityJoinYieldVocabulary[rec.ReasonCode]
+	return spec, ok
+}
+
+// parityJoinDetectorFamilies maps the sweep's own family label onto the section
+// 3b family names, so the yield-join can check that the family legacy stood
+// down FOR is the family that acted. A D-DEADLINE yield beside a D-ORPHAN act is
+// a divergence to classify, not a match.
+var parityJoinDetectorFamilies = map[string]string{
+	string(detectorFamilyDeadline):    parityJoinFamilyDeadline,
+	string(detectorFamilyOrphan):      parityJoinFamilyOrphan,
+	string(detectorFamilyStaleCreate): parityJoinFamilyStaleCreate,
+	string(detectorFamilyDrift):       parityJoinFamilyDrift,
+	string(detectorFamilySleep):       parityJoinFamilySleep,
+	string(detectorFamilyDrain):       parityJoinFamilyDrain,
+	string(detectorFamilyWake):        parityJoinFamilyWake,
+	string(detectorFamilyZombie):      parityJoinFamilyZombie,
+	string(detectorFamilyStall):       parityJoinFamilyStall,
+	string(detectorFamilyDup):         parityJoinFamilyDup,
+	string(detectorFamilyStranded):    parityJoinFamilyStranded,
 }
 
 // parityJoinSiteFamily indexes every section 3b site to its family.

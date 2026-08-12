@@ -125,22 +125,35 @@ campaign/gcc perf parity-join \
   --json
 ```
 
-Or the human table without `--json`. `--since 168h` scopes to the window;
-`--template` narrows to one selector. The command exits nonzero on
-`no_evidence` or `we_blocker` and the schema is `x-gc-jsonl`, so **capture
-stdout regardless of exit code.**
+Or the human table without `--json`. **Use `--window-start` for a campaign
+readout**, not `--since`: the window's clock is backdated to a fixed instant
+(`2026-08-12T03:39:17Z`), and an RFC3339 start reproduces the same readout
+tomorrow, where a duration silently slides. `--template` narrows to one selector;
+`--count-bar` overrides §3b's 10,000-joined floor. The command exits nonzero on
+`no_evidence` or `we_blocker` and the schema is `x-gc-jsonl`, so **capture stdout
+regardless of exit code.**
+
+```bash
+campaign/gcc perf parity-join \
+  --trace-dir /data/cities/reconciler-campaign/.gc/runtime/session-reconciler-trace \
+  --window-start 2026-08-12T03:39:17Z --json
+```
 
 Read in this order:
 
 1. `shadow_effect_violations` — must be `0`. Any value breaks the read-only
-   invariant the campaign rests on and is an unconditional WE blocker.
-2. `no_evidence` — must be `false`. It is join-based: true whenever every family
-   reports `joined: 0`, however many owned records the corpus holds.
-3. `cycles.excluded_record_budget_exceeded` and `cycles.excluded_no_cycle_rollup`
+   invariant the campaign rests on and is an unconditional WE blocker. The check
+   covers every sweep record, routed or shadow: the sweep is zero-write by design.
+2. `no_evidence` — must be `false`. It is join-based: true whenever `joined_total`
+   is zero, however many owned records the corpus holds.
+3. `joined_yields`, `joined_acts`, `joined_total` against `count_bar`. The
+   yield-pairs carry the window (see below); the act-pairs are rarer and stronger.
+4. `cycles.excluded_record_budget_exceeded` and `cycles.excluded_no_cycle_rollup`
    — dropped by design (§3 operational rule / truncated evidence).
-4. `cycles.legacy_by_elimination` and `cycles.unowned_records` — see the owner
-   model below.
-5. Per family: `match_rate` against the 0.995 bar, then `triage` for the
+5. `cycles.legacy_by_elimination`, `cycles.yield_records`,
+   `cycles.unpaired_ownership_yields` and `cycles.unowned_records` — see the
+   attribution model below.
+6. Per family: `match_rate` against the 0.995 bar, then `triage` for the
    classified divergences and `unclassified` for the samples that need work.
 
 **One unclassified mismatch is a WE blocker.** Triage it, extend the §3b table
@@ -160,18 +173,39 @@ with the tool.
 
 Elimination only applies inside the §1 legacy vocabulary
 (`parityJoinSiteDispositions`, `cmd_perf_parity_join_table.go`). Everything else
-is counted and surfaced under `owner_absence`, never binned:
+is counted and surfaced under `dispositions`, never binned:
 
 | Disposition | Meaning |
 |---|---|
 | `legacy` | §1 decision site, legacy reason, has a session identity — attributed, counted in `cycles.legacy_by_elimination` |
-| `phase_marker` | §1 phase site. Legacy writes one cycle-level marker per tick with no session identity; binning it would have manufactured a phantom legacy row per cycle in D-DUP and D-STRANDED, whose only sites are phase sites |
-| `keyed_seam_yield` | legacy stepped aside for the keyed owner (`keyed_start_owner` and siblings) — the effect is keyed's, not legacy's |
+| `phase_marker` | §1 phase site, no session identity. Legacy writes one cycle-level marker per tick there; binning it would have manufactured a phantom legacy row per cycle in D-DUP and D-STRANDED, whose only sites are phase sites |
 | `unattributable` | keyed-owned or shared-writer site (§1 #27) — absence says nothing about legacy |
-| `no_session_key` | nothing to join on |
+| `no_session_key` | not a row in a per-session join, whoever wrote it. The live case is the sweep's pool-under-min FILL condition (`queued_pool_allocation`): a wake for a session that does not exist yet |
 
 `cycles.unowned_records` is the sum of the refusals. Nonzero is normal: the phase
 markers alone contribute three per cycle.
+
+### The yield-side vocabulary, and why most stand-downs are not evidence
+
+Legacy's coexistence-seam **yields** are the join's main left-hand side (§3b).
+The `yields` block lists them per (site, reason) with the arm classification:
+
+- a **candidacy** arm sits inside the family's arm — legacy had already decided
+  the row is actionable — so an unpaired candidacy yield is a real divergence and
+  surfaces as an unclassified mismatch;
+- an **ownership** arm sits at the top of the row scan before any condition is
+  evaluated, so it asserts "the keyed controller holds this key" and nothing about
+  the row. It joins when an actor is present and is **refused when unpaired**,
+  counted in `cycles.unpaired_ownership_yields`.
+
+`keyed_start_owner` is the ownership arm, and it dominates the corpus: on the live
+window ~11,900 of ~16,700 stand-downs are unpaired blanket wake skips. Scoring
+them would have fabricated the D-WAKE readout entire. They are indistinguishable
+from the *conditional* wake-target stand-down at `session_reconciler.go:4093`,
+which writes the same reason and the same payload — **if a later slice adds an arm
+discriminator to those two sites, D-WAKE's yield evidence becomes joinable and the
+arm classification should be revisited.** That is a writer change and must not be
+deployed mid-window.
 
 ### What `without_detail_arms` does and does not say
 
@@ -204,31 +238,39 @@ the mistake recurs:
   `fields.detailed_template_count: 4`.
 - **B3 — `no_evidence` was owner-presence-based.** It reported `false` beside
   `joined: 0` in every family — backwards on the one case it exists to catch.
+- **B4 — decision-level parity compared the REASON.** Found while wiring the
+  yield-join's fixtures. The two writers' reason vocabularies are disjoint by
+  construction — every sweep condition stamps a `detector_`-prefixed reason while
+  legacy stamps its own strings — so `legacyRec.ReasonCode == shadowRec.ReasonCode`
+  could only ever hold on a seeded pair. On the live corpus it turned every real
+  decision-level act-pair into an **unclassified WE blocker**. Decision level now
+  compares the OUTCOME, which is what the §3b must-match cells actually name.
 
-All three shipped green because the tests built records by setting struct fields
+All four shipped green because the tests built records by setting struct fields
 production never sets. **Any new assertion about the corpus must be written
 against a production-shaped record** — one the collector wrote and the store read
 back, or bytes copied from the live corpus. `cmd/gc/testdata/wd15_campaign_corpus.jsonl`
 is a byte-copy of the campaign store kept for exactly that purpose; the tests
 that use it are in `cmd/gc/cmd_perf_parity_join_corpus_test.go`.
 
-### Why `joined` stays small on an auto-mode city
+### Why the act-vs-act join stays small, and what carries the window instead
 
-Fixing B1 populated the legacy side but did not make the join large, and the
-reason is structural rather than a tool defect. With
-`daemon.session_reconciler = "auto"` and `effective_owner = keyed`:
+With `daemon.session_reconciler = "auto"` and `effective_owner = keyed`, the
+coexistence seams make legacy **yield** on every acting family rather than decide.
+A legacy-act ↔ sweep pair therefore only forms where legacy did *not* yield, and
+over the first three hours that happened 46 times in ~3,400 cycles. Those pairs
+are kept and reported separately (`joined_acts`) because two writers deciding one
+row is the strongest single piece of evidence in the corpus — but they are not the
+window.
 
-- the coexistence seams make legacy **yield** on every acting family rather than
-  decide (2,233 `keyed_start_owner` yields in the first 45 minutes), and
-- the sweep stamps a routed condition `"keyed"`, not `"detector-shadow"`.
+The window is the **yield-join** (owner ruling, §3b): each traced stand-down is
+legacy's recorded judgment beside keyed's action, per row per tick. The live city
+produces ~1,600 yield-pairs/hour, so §3b's ≥10,000-joined floor is reached in
+hours. The ≥7-day residency requirement is unchanged and still governs.
 
-A legacy↔detector-shadow pair therefore only forms where legacy did *not* yield
-**and** the sweep did *not* route. Over the first 45 minutes that intersection
-occurred **once** in 729 cycles. Whether §3b's ≥10,000-joined-cycle bar is
-reachable in auto mode — or whether the acting families' parity is instead
-carried by the yield plus the keyed handler's own journey evidence — is a
-campaign-design question recorded on `ga-f7v2ft.122`, not something the tool
-should paper over by widening the join.
+Two counters make the difference visible, and both belong in any readout you
+quote: `joined_yields` is the evidence; `cycles.unpaired_ownership_yields` is the
+part of the stand-down traffic that proves nothing and is deliberately not scored.
 
 ## Restart policy
 

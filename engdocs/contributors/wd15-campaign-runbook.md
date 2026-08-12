@@ -134,13 +134,12 @@ Read in this order:
 
 1. `shadow_effect_violations` — must be `0`. Any value breaks the read-only
    invariant the campaign rests on and is an unconditional WE blocker.
-2. `no_evidence` — must be `false`. If it is `true` and
-   `cycles.without_detail_arms` is nonzero, the window ran unarmed: that is
-   positive proof of a mis-armed city, not a parity result.
+2. `no_evidence` — must be `false`. It is join-based: true whenever every family
+   reports `joined: 0`, however many owned records the corpus holds.
 3. `cycles.excluded_record_budget_exceeded` and `cycles.excluded_no_cycle_rollup`
    — dropped by design (§3 operational rule / truncated evidence).
-4. `cycles.unowned_records` — records with no `effect_owner`. Nonzero on a
-   post-WD.2 corpus wants an explanation.
+4. `cycles.legacy_by_elimination` and `cycles.unowned_records` — see the owner
+   model below.
 5. Per family: `match_rate` against the 0.995 bar, then `triage` for the
    classified divergences and `unclassified` for the samples that need work.
 
@@ -148,43 +147,88 @@ Read in this order:
 with evidence, or fix the detector — then re-run the window for that family. Do
 not bucket it.
 
-### Two readout counters that lie today
+### How the readout attributes a record
 
-Both were found by the day-0 readout on 2026-08-12 and are filed on
-`ga-f7v2ft.122`. Until they are fixed, read around them:
+Nothing in the tree stamps `effect_owner = "legacy"`. Every keyed handler stamps
+`"keyed"`, the sweep stamps `"detector-shadow"` — or `"keyed"` for a condition it
+ROUTED (`session_detector_sweep.go:2103-2130`) — and the god function stamps
+nothing at all. Legacy is therefore identified by **elimination**: at a site
+where legacy is the remaining writer, absence of the stamp *is* the legacy
+signature. Teaching the god function to stamp would thread scaffolding through
+19 decision sites of a function that dies at WE; the classification rule dies
+with the tool.
 
-- **`cycles.without_detail_arms` is stuck at the considered-cycle count.** The
-  collector writes the cycle rollup counters into `rec.Fields`
-  (`session_reconciler_trace_collector.go:970-983`, serialized as the nested
-  `fields` object) and never sets the typed `rec.DetailedTemplateCount`;
-  `parity-join` reads the typed field
-  (`cmd_perf_parity_join.go:269`). So the campaign's own "did this window run
-  armed?" alarm reads 299-of-299 unarmed on a city whose same rollups carry
-  `fields.detailed_template_count: 4`. Verify arming from `gc trace status`
-  and from `fields.detailed_template_count` in the segments, not from this
-  counter. (`drop_reason_counts` is unaffected — the collector does set that one
-  typed field, so the `record_budget_exceeded` exclusion works.)
-- **`no_evidence` is owner-presence-based, not join-based**
-  (`cmd_perf_parity_join.go:219`: `owned == 0`). A corpus containing
-  detector-shadow and keyed records but no legacy ones reports
-  `no_evidence: false` beside `joined: 0` in every family. Treat all-zero
-  `joined` as no evidence regardless of the flag.
+Elimination only applies inside the §1 legacy vocabulary
+(`parityJoinSiteDispositions`, `cmd_perf_parity_join_table.go`). Everything else
+is counted and surfaced under `owner_absence`, never binned:
 
-### The join has no legacy side yet
+| Disposition | Meaning |
+|---|---|
+| `legacy` | §1 decision site, legacy reason, has a session identity — attributed, counted in `cycles.legacy_by_elimination` |
+| `phase_marker` | §1 phase site. Legacy writes one cycle-level marker per tick with no session identity; binning it would have manufactured a phantom legacy row per cycle in D-DUP and D-STRANDED, whose only sites are phase sites |
+| `keyed_seam_yield` | legacy stepped aside for the keyed owner (`keyed_start_owner` and siblings) — the effect is keyed's, not legacy's |
+| `unattributable` | keyed-owned or shared-writer site (§1 #27) — absence says nothing about legacy |
+| `no_session_key` | nothing to join on |
 
-At window open the readout joins **nothing**, in every family, and it always
-will until one gap closes: **no production code stamps
-`fields.effect_owner = "legacy"`.** `parity-join` distinguishes rows by that
-field (`cmd_perf_parity_join.go:36,298`); the keyed handlers stamp `"keyed"` and
-the sweep stamps `"detector-shadow"`, but the legacy reconciler stamps nothing,
-so every legacy row lands in `cycles.unowned_records` and is never guessed at.
-`parityJoinOwnerLegacy` has exactly one producer in the tree — the tool's own
-tests.
+`cycles.unowned_records` is the sum of the refusals. Nonzero is normal: the phase
+markers alone contribute three per cycle.
 
-Consequence for the schedule: **records written before that stamp lands can
-never join**, so the §3b seven-day clock does not start until it does. The city
-below is correct, armed, and accumulating a real keyed + detector-shadow
-corpus; it is not yet accumulating joinable evidence. Filed on `ga-f7v2ft.122`.
+### What `without_detail_arms` does and does not say
+
+It counts considered cycles whose rollup reports `detailed_template_count == 0`
+— cycles in which **no detail-mode template record landed**. That is not the same
+as "the window ran unarmed": a quiet cycle that touched no armed template reads
+identically to an unarmed one. On the live window, 88 of 729 rollups read zero —
+a contiguous run of 21 before the window-open arming pass completed, then 67
+isolated single cycles interleaved with armed neighbours seconds apart, which
+arms cannot flap fast enough to explain.
+
+So: a **contiguous run** of zeros is an arming gap worth excluding; **scattered
+singletons** are quiet ticks. Confirm either way against `gc trace status` and
+the harness narration, never from this counter alone.
+
+### Reading history: three counters that lied, and what they proved
+
+The day-0 readout (2026-08-12, `ga-f7v2ft.122`) was produced by a tool with three
+reader-side defects, all now fixed. They are recorded here because the shape of
+the mistake recurs:
+
+- **B1 — the join had no legacy side.** The tool split rows on the
+  `effect_owner` stamp alone, so every legacy record landed in
+  `unowned_records` (19,673 of them in the first 17 minutes) and every family
+  reported `joined: 0`.
+- **B2 — the mis-arming alarm was stuck on.** The collector writes rollup
+  counters into `rec.Fields`; the tool read the typed
+  `rec.DetailedTemplateCount`, which **nothing in the tree ever assigns**. The
+  alarm read 299-of-299 unarmed on a city whose same rollups carried
+  `fields.detailed_template_count: 4`.
+- **B3 — `no_evidence` was owner-presence-based.** It reported `false` beside
+  `joined: 0` in every family — backwards on the one case it exists to catch.
+
+All three shipped green because the tests built records by setting struct fields
+production never sets. **Any new assertion about the corpus must be written
+against a production-shaped record** — one the collector wrote and the store read
+back, or bytes copied from the live corpus. `cmd/gc/testdata/wd15_campaign_corpus.jsonl`
+is a byte-copy of the campaign store kept for exactly that purpose; the tests
+that use it are in `cmd/gc/cmd_perf_parity_join_corpus_test.go`.
+
+### Why `joined` stays small on an auto-mode city
+
+Fixing B1 populated the legacy side but did not make the join large, and the
+reason is structural rather than a tool defect. With
+`daemon.session_reconciler = "auto"` and `effective_owner = keyed`:
+
+- the coexistence seams make legacy **yield** on every acting family rather than
+  decide (2,233 `keyed_start_owner` yields in the first 45 minutes), and
+- the sweep stamps a routed condition `"keyed"`, not `"detector-shadow"`.
+
+A legacy↔detector-shadow pair therefore only forms where legacy did *not* yield
+**and** the sweep did *not* route. Over the first 45 minutes that intersection
+occurred **once** in 729 cycles. Whether §3b's ≥10,000-joined-cycle bar is
+reachable in auto mode — or whether the acting families' parity is instead
+carried by the yield plus the keyed handler's own journey evidence — is a
+campaign-design question recorded on `ga-f7v2ft.122`, not something the tool
+should paper over by widening the join.
 
 ## Restart policy
 

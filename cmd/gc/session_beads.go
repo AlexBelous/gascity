@@ -2647,6 +2647,27 @@ func cleanupDeadRuntimeSessionCorpses(
 		if !dead {
 			continue
 		}
+		// The corpse must be THIS row's incarnation. A restart rotates the
+		// row's instance token at the pre-wake commit and starts the new
+		// runtime after it, so a name mid-rebind carries the previous
+		// incarnation's corpse under a row that has already moved on: reaping
+		// it stops a session this pass never observed, and closing the row
+		// terminates a restart in flight (ga-f7v2ft.156). The identity proof
+		// belongs at the destructive boundary, which is the same place the
+		// keyed stop proves it (council R1). A row with no token cannot be
+		// fenced this way and keeps the pass's existing behavior.
+		if rowToken := strings.TrimSpace(info.InstanceToken); rowToken != "" {
+			runtimeToken, tokenErr := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+			if tokenErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: reading instance token of dead runtime session %s: %v\n", name, tokenErr) //nolint:errcheck
+				continue
+			}
+			if strings.TrimSpace(runtimeToken) != rowToken {
+				fmt.Fprintf(stderr, "session reconciler: dead runtime session %s belongs to another incarnation (runtime token %q, row %s token %q); leaving it to the owner\n", //nolint:errcheck
+					name, strings.TrimSpace(runtimeToken), info.ID, rowToken)
+				continue
+			}
+		}
 		if err := sp.Stop(name); err != nil {
 			if runtime.IsSessionGone(err) {
 				continue

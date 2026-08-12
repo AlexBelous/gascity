@@ -75,6 +75,57 @@ func TestCleanupDeadRuntimeSessionCorpsesKeepsAKilledAsleepRowOpen(t *testing.T)
 	}
 }
 
+// TestCleanupDeadRuntimeSessionCorpsesLeavesARebindingNameAlone is the second
+// shape the campaign found, and the one a lifecycle guard alone cannot catch.
+// A restart rotates the row's instance token at the pre-wake commit and only
+// then starts the new incarnation, so between those two the row reads awake —
+// it CLAIMS a live runtime — while the name still carries the previous
+// incarnation's corpse. The pass then reaped the corpse and closed the row that
+// had already been handed to the restart, and the async start result came back
+// to a closed row ("ignoring stale async start result").
+//
+// The corpse's own identity is the fence, exactly as the keyed stop proves the
+// instance token AT the destructive boundary (council R1): a runtime whose
+// GC_INSTANCE_TOKEN is not the row's belongs to an incarnation this row has
+// already left behind, and its death proves nothing about the row.
+func TestCleanupDeadRuntimeSessionCorpsesLeavesARebindingNameAlone(t *testing.T) {
+	const name = "worker-adhoc-2c4fa75693"
+	store, bead := newDeadRuntimeCorpseStore(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(sessionpkg.StateAwake),
+		"state_reason":   "creation_complete",
+		"session_origin": "manual",
+		"instance_token": "token-after-the-pre-wake-commit",
+	})
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-killed-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+
+	stored, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read session bead: %v", err)
+	}
+	var stderr bytes.Buffer
+	cleanupDeadRuntimeSessionCorpses(store, nil, nil, newSessionBeadSnapshot([]beads.Bead{stored}), nil, sp, nil, &stderr)
+
+	if sp.stopCalls[name] != 0 {
+		t.Fatalf("Stop calls on a re-binding name = %d, want 0; stderr=%q", sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("read session bead after cleanup: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("restarting row after corpse cleanup = status %q state %q, want the row left to its restart",
+			after.Status, after.Metadata["state"])
+	}
+}
+
 // TestCleanupDeadRuntimeSessionCorpsesStillClosesARowClaimingALiveRuntime is
 // the teeth: the #2437 case is a row that says it is RUNNING while its runtime
 // is a corpse. That row still loses its alias, which is the whole point of the

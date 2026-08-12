@@ -612,7 +612,20 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("read configured named pin pane PID: %v", err)
 	}
 	registerLivePaneProcess(pinnedPanePID)
+	// The LEASE, not the admission source, is the ownership proof — the same
+	// re-point ga-ij8mh ruling 3 ratified for the worker wake leg, applied to the
+	// pin (ga-f7v2ft.157). `gc session pin` writes pin_awake, which fires
+	// bead.updated and admits in_process; the CLI's socket admission then folds
+	// onto that pending entry and the source stays in_process
+	// (sessionStartController.admit's coalescing rule). Asserting
+	// `admission == socket` therefore passed or failed on scheduling alone —
+	// ga-f7v2ft.142's ruling — and when it lost, the leg saw zero records rather
+	// than wrong-shaped ones (/var/tmp/frontier/journey/attempt-7-*.log).
+	// `start_lease` names the family that actually authorized the start, and a
+	// pinned configured-named row is certified by the configured-named wake
+	// family (certifyConfiguredNamedWakeStartLease, cause pinned).
 	var pinCommits []SessionReconcilerTraceRecord
+	var pinCommitCandidates []SessionReconcilerTraceRecord
 	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
 		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 			RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartCommit,
@@ -621,10 +634,11 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		if readErr != nil {
 			return false, readErr
 		}
+		pinCommitCandidates = records
 		pinCommits = pinCommits[:0]
 		for _, record := range records {
 			if record.SessionBeadID == pinnedReviewer.ID &&
-				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+				record.Fields["start_lease"] == configuredNamedWakeLeaseFamily &&
 				record.Fields["session_id"] == pinnedReviewer.ID &&
 				record.Fields["instance_token"] == pinnedReviewer.InstanceToken &&
 				record.Fields["effect_applied"] == true {
@@ -636,7 +650,8 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		}
 		return len(pinCommits) == 1, nil
 	}); err != nil {
-		t.Fatalf("configured named pin socket commit did not converge: %v; matching=%#v controller stderr=%q", err, pinCommits, controllerStderr.String())
+		t.Fatalf("configured named pin start commit did not converge: %v; matching=%#v read=%#v pinned_token=%q controller stderr=%q",
+			err, pinCommits, pinCommitCandidates, pinnedReviewer.InstanceToken, controllerStderr.String())
 	}
 	pinStartRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 		RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartRun, SessionName: pinnedReviewer.SessionName,
@@ -727,7 +742,11 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("read restarted configured named pinned pane PID: %v", err)
 	}
 	registerLivePaneProcess(pinnedPanePID)
+	// Same re-point as the first pin commit above: the restart after a kill is
+	// still a pinned configured-named wake, so the certified family is the proof
+	// and the admission source is a scheduling artifact (ga-f7v2ft.157).
 	var pinnedKillCommits []SessionReconcilerTraceRecord
+	var pinnedKillCommitCandidates []SessionReconcilerTraceRecord
 	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
 		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 			RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartCommit,
@@ -736,10 +755,11 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		if readErr != nil {
 			return false, readErr
 		}
+		pinnedKillCommitCandidates = records
 		pinnedKillCommits = pinnedKillCommits[:0]
 		for _, record := range records {
 			if record.SessionBeadID == pinnedReviewer.ID &&
-				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+				record.Fields["start_lease"] == configuredNamedWakeLeaseFamily &&
 				record.Fields["session_id"] == pinnedReviewer.ID &&
 				record.Fields["instance_token"] == pinnedReviewer.InstanceToken &&
 				record.Fields["effect_applied"] == true {
@@ -751,8 +771,8 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		}
 		return len(pinnedKillCommits) == 1, nil
 	}); err != nil {
-		t.Fatalf("killed pinned restart socket commit did not converge: %v; matching=%#v controller stderr=%q",
-			err, pinnedKillCommits, controllerStderr.String())
+		t.Fatalf("killed pinned restart start commit did not converge: %v; matching=%#v read=%#v pinned_token=%q controller stderr=%q",
+			err, pinnedKillCommits, pinnedKillCommitCandidates, pinnedReviewer.InstanceToken, controllerStderr.String())
 	}
 	pinnedKillStartRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 		RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartRun, SessionName: pinnedReviewer.SessionName,
@@ -1039,18 +1059,46 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 			t.Fatalf("configured-dependency wake changed target identity: bead=%+v session=%+v", dependentBead, dependentAfter)
 		}
 		// The acceptance the re-land exists for (ga-ij8mh ruling 4, amendment 5):
-		// the row the keyed family started is the SYNC-PRODUCED canonical
-		// singleton, not the bare row the fixture handed over. syncSessionBeads
-		// stamps pool_managed + ephemeral origin on every dependency-bearing
-		// single-session agent's row, the sweep rule keeps the wake-current row out
-		// of GCSweepSessionBeads, and the wake family owns the shape because the
-		// two families partition on SLOT markers.
-		if !isCanonicalPoolManagedSessionInfoForTemplate(dependentAfter, "dependent") {
-			t.Fatalf("configured-dependency wake target is not the sync-produced canonical singleton: %+v", dependentAfter)
+		// the keyed family owns the shape production actually sustains, and the
+		// two wake families partition on SLOT markers rather than on pool_managed.
+		//
+		// This asserts the CONTRACT, not one writer's timing. The re-land
+		// originally demanded the sync-produced canonical singleton here, on
+		// `dependentAfter` — the snapshot taken at the FIRST instant the start
+		// converged. syncSessionBeads is an independent writer and nothing makes
+		// it win that race: configuredDependencyWakeShapeMatches
+		// (session_start_reconcile.go) accepts BOTH the canonical singleton AND
+		// the origin-less row "a sync has not yet touched", by design. So a bare
+		// row at this instant is the product behaving to spec, and the old
+		// assertion failed on scheduling alone — 2 of 9 runs, ga-f7v2ft.157,
+		// logs /var/tmp/frontier/journey/attempt-{2,4}-*.log.
+		//
+		// The proof that the KEYED family owned this start is the start_lease
+		// assertion below, which the race cannot touch. What this block owes is
+		// that the row is still an ordinary configured-dependency target, that it
+		// never acquired a slot (amendment 1's partition), and that when sync HAS
+		// stamped it the shape is exactly the canonical singleton ga-ij8mh was
+		// filed about — the full regression guard, applied whenever the race
+		// lands that way.
+		dependentAgent := findAgentByTemplate(loaded, "dependent")
+		if dependentAgent == nil {
+			t.Fatal("configured dependent agent is unavailable")
 		}
-		if strings.TrimSpace(dependentAfter.SessionOrigin) != "ephemeral" || !dependentAfter.PoolManaged {
-			t.Fatalf("configured-dependency wake target lost the sync-produced markers: origin=%q pool_managed=%t",
-				dependentAfter.SessionOrigin, dependentAfter.PoolManaged)
+		if isNamedSessionInfo(dependentAfter) || isManualSessionInfoForAgent(dependentAfter, dependentAgent) ||
+			dependentAfter.DependencyOnly || dependentAfter.PendingCreateClaim {
+			t.Fatalf("configured-dependency wake target left the ordinary configured shape: %+v", dependentAfter)
+		}
+		if !configuredDependencyWakeShapeMatches(dependentAfter, dependentAgent) {
+			t.Fatalf("configured-dependency wake target is not a shape the family owns: %+v", dependentAfter)
+		}
+		if isPoolManagedSessionInfo(dependentAfter) {
+			if !isCanonicalPoolManagedSessionInfoForTemplate(dependentAfter, "dependent") ||
+				strings.TrimSpace(dependentAfter.SessionOrigin) != "ephemeral" || !dependentAfter.PoolManaged {
+				t.Fatalf("sync-stamped configured-dependency wake target is not the canonical singleton: %+v", dependentAfter)
+			}
+			t.Logf("configured-dependency wake target observed as the sync-produced canonical singleton")
+		} else {
+			t.Logf("configured-dependency wake target observed pre-sync (origin-less); the keyed family owns this shape too")
 		}
 		if strings.TrimSpace(dependentAfter.PoolSlot) != "" {
 			t.Fatalf("configured-dependency wake target acquired a pool slot (%q); slotized rows belong to the strict-default pool family",
@@ -1085,7 +1133,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 				// sticky to whichever admitted the key FIRST, so asserting on it
 				// would prove only that some keyed admission ran. `start_lease` names
 				// the family that actually authorized the start.
-				if record.Fields["start_lease"] != "configured_dependency" {
+				if record.Fields["start_lease"] != configuredDependencyLeaseFamily {
 					continue
 				}
 				if record.SessionBeadID == dependentBead.ID &&

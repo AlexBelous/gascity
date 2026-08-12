@@ -3248,6 +3248,18 @@ func reconcileExactPoolRecoveryStart(
 	return exactSessionStartKeyedOwner, nil
 }
 
+// Lease-family names recorded as `start_lease` on a start-commit trace. They are
+// a wire-visible vocabulary — the WD.15 parity join and the v59 journey both
+// filter on them — so they live as constants rather than as literals scattered
+// across producers and assertions.
+const (
+	configuredDependencyLeaseFamily  = "configured_dependency"
+	configuredNamedWakeLeaseFamily   = "configured_named_wake"
+	strictDefaultPoolWakeLeaseFamily = "strict_default_pool_wake"
+	waitDependencyLeaseFamily        = "wait_dependency"
+	poolAllocationLeaseFamily        = "pool_allocation"
+)
+
 // sessionStartAdmissionLeaseFamily names the certified lease an admission is
 // carrying, or "" for an ordinary keyed start.
 //
@@ -3261,15 +3273,15 @@ func reconcileExactPoolRecoveryStart(
 func sessionStartAdmissionLeaseFamily(admission sessionStartAdmission) string {
 	switch {
 	case admission.ConfiguredDependency != nil:
-		return "configured_dependency"
+		return configuredDependencyLeaseFamily
 	case admission.ConfiguredNamedWake != nil:
-		return "configured_named_wake"
+		return configuredNamedWakeLeaseFamily
 	case admission.StrictDefaultPoolWake != nil:
-		return "strict_default_pool_wake"
+		return strictDefaultPoolWakeLeaseFamily
 	case admission.WaitDependency != nil:
-		return "wait_dependency"
+		return waitDependencyLeaseFamily
 	case admission.PoolAllocation != nil:
-		return "pool_allocation"
+		return poolAllocationLeaseFamily
 	}
 	return ""
 }

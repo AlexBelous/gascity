@@ -221,6 +221,99 @@ _pog_resolve_bead_id() {
     fi
 }
 
+# _pog_check_identity_route_hold <id> <assignee> <routed_to> <labels>
+# <identity...>: the assignee-identity, gc.routed_to, and hold-label checks
+# shared by both the primary resolved id and (if the status check below
+# substitutes one) a verified same-branch candidate. Prints a BLOCKED
+# message naming <id> and returns non-zero on the first failing check;
+# returns 0 once all three pass. Split out of assert_bead_still_claimed so a
+# substituted candidate (ga-p2kq2p) runs the identical sequence instead of a
+# duplicated copy; every message below is byte-identical to the inline
+# checks it replaced, since existing tests pin the exact wording.
+_pog_check_identity_route_hold() {
+    local id="$1" assignee="$2" routed_to="$3" labels="$4"
+    shift 4
+    local -a identities=("$@")
+
+    if [[ ${#identities[@]} -gt 0 ]]; then
+        local owned=0 ident
+        for ident in "${identities[@]}"; do
+            if [[ -n "$assignee" && "$assignee" == "$ident" ]]; then owned=1; break; fi
+        done
+        if [[ $owned -eq 0 ]]; then
+            echo "push-ownership-guard: BLOCKED — $id assignee is '$assignee', not any current-session identity (${identities[*]}); it was reassigned since this push began. Bypass with: git push --no-verify" >&2
+            return 1
+        fi
+    fi
+
+    if [[ -n "${GC_TEMPLATE:-}" && -n "$routed_to" && "$routed_to" != "$GC_TEMPLATE" ]]; then
+        echo "push-ownership-guard: BLOCKED — $id gc.routed_to is '$routed_to', not this session's config identity ($GC_TEMPLATE); it was rerouted since this push began. Bypass with: git push --no-verify" >&2
+        return 1
+    fi
+
+    if grep -qx 'hold:mayor' <<<"$labels"; then
+        echo "push-ownership-guard: BLOCKED — $id is held (hold:mayor); a mayor ruling is pending. Bypass with: git push --no-verify" >&2
+        return 1
+    fi
+    if grep -qx 'hold:external' <<<"$labels"; then
+        echo "push-ownership-guard: BLOCKED — $id is held (hold:external). Bypass with: git push --no-verify" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+# _pog_find_same_branch_candidate <exclude_id> <branch> <identity...>:
+# same-branch substitution search (ga-p2kq2p) for when the primary resolved
+# id's status check fails. A branch can be legitimately reused across two
+# independent claim lifecycles (e.g. a resumed builder/* branch after a
+# deploy-gate bounce-back): the branch-embedded id closes normally, but a
+# different in-progress bead under one of THIS session's identities is the
+# one actually live for <branch>.
+#
+# Scans each identity's in-progress beads in precedence order (bd list
+# --assignee=<identity> --status=in_progress --json, ALL entries returned —
+# not just the first), fetching a `bd show <id> --json` per candidate to
+# compare its metadata."gc.work_branch" against <branch>. The bd list
+# response is never trusted for this field — only a bd show counts, since a
+# list summary may not carry full metadata.
+#
+# Prints the id of the first candidate whose work_branch matches <branch>
+# and whose id differs from <exclude_id>, then stops — a single
+# substitution hop considers exactly one candidate and never cascades to a
+# second, even if that candidate goes on to fail its own re-verification
+# (the caller does its own fresh bd show on the id this prints; it does not
+# reuse the json read here).
+#
+# Prints nothing (not an error) when: there's no branch to match against,
+# no identity has any in-progress bead, no bead's gc.work_branch matches, or
+# every bd list/bd show call fails. The caller treats empty output as "no
+# candidate" and falls back to the original hard block — this path can only
+# turn a block into an allow on fresh, positive evidence, never the
+# reverse.
+_pog_find_same_branch_candidate() {
+    local exclude_id="$1" branch="$2"
+    shift 2
+    local -a identities=("$@")
+    [[ -z "$branch" ]] && return
+
+    local ident list_json ids cand_id cand_json cand_branch
+    for ident in "${identities[@]}"; do
+        list_json="$(_pog_read_with_retry bd list --assignee="$ident" --status=in_progress --json)" || continue
+        ids="$(jq -r '.[].id // empty' <<<"$list_json" 2>/dev/null)"
+        while IFS= read -r cand_id; do
+            [[ -z "$cand_id" || "$cand_id" == "$exclude_id" ]] && continue
+            cand_json="$(_pog_read_with_retry bd show "$cand_id" --json)" || continue
+            jq -e '.' <<<"$cand_json" >/dev/null 2>&1 || continue
+            cand_branch="$(jq -r '.[0].metadata."gc.work_branch" // empty' <<<"$cand_json")"
+            if [[ -n "$cand_branch" && "$cand_branch" == "$branch" ]]; then
+                printf '%s' "$cand_id"
+                return
+            fi
+        done <<<"$ids"
+    done
+}
+
 # assert_bead_still_claimed: the exported guard. Returns 0 to allow the
 # push, non-zero to block it. See file header for the full contract.
 assert_bead_still_claimed() {
@@ -263,47 +356,63 @@ assert_bead_still_claimed() {
     routed_to="$(jq -r '.[0].metadata."gc.routed_to" // empty' <<<"$json")"
     labels="$(jq -r '.[0].labels[]? // empty' <<<"$json")"
 
-    if [[ "$bead_status" != "in_progress" && "$bead_status" != "open" ]]; then
-        echo "push-ownership-guard: BLOCKED — $id status is '$bead_status', not in_progress/open; the claim behind this push is stale. Bypass with: git push --no-verify" >&2
-        return 1
-    fi
-
     # A session-run claim sets bead.assignee from the first non-empty of
     # GC_SESSION_NAME, GC_SESSION_ID, GC_ALIAS, GC_AGENT (see
     # cmd/gc/cmd_hook.go's firstNonEmptyHookValue). Accept ANY of this
     # session's live identities — GC_AGENT alone falsely blocks a push whose
     # bead is legitimately assigned to the session name/id. Fail-closed
     # semantics preserved: with identities present, an assignee matching none
-    # (including empty) still blocks.
+    # (including empty) still blocks. Built here, before the status check, so
+    # the same-branch substitution search below can reuse it too.
     local -a _pog_identities=()
     local _pog_ident
     for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}"; do
         [[ -n "$_pog_ident" ]] && _pog_identities+=("$_pog_ident")
     done
-    if [[ ${#_pog_identities[@]} -gt 0 ]]; then
-        local _pog_owned=0
-        for _pog_ident in "${_pog_identities[@]}"; do
-            if [[ -n "$assignee" && "$assignee" == "$_pog_ident" ]]; then _pog_owned=1; break; fi
-        done
-        if [[ $_pog_owned -eq 0 ]]; then
-            echo "push-ownership-guard: BLOCKED — $id assignee is '$assignee', not any current-session identity (${_pog_identities[*]}); it was reassigned since this push began. Bypass with: git push --no-verify" >&2
-            return 1
+
+    if [[ "$bead_status" != "in_progress" && "$bead_status" != "open" ]]; then
+        # Same-branch substitution (ga-p2kq2p): a branch can be legitimately
+        # reused across two independent claim lifecycles (e.g. a resumed
+        # builder/* branch after a deploy-gate bounce-back) — the
+        # branch-embedded id closes normally, but a different in-progress
+        # bead on this session is the one actually live for this push.
+        # Search for a verified candidate before hard-blocking. Only a
+        # status-check failure is eligible for this: a reassigned/rerouted/
+        # held primary id below never means a reused branch, so it never
+        # triggers a search.
+        local _pog_branch=""
+        _pog_branch="$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
+
+        local _pog_candidate=""
+        _pog_candidate="$(_pog_find_same_branch_candidate "$id" "$_pog_branch" "${_pog_identities[@]}")"
+
+        if [[ -n "$_pog_candidate" ]]; then
+            echo "push-ownership-guard: NOTE $id status is '$bead_status'; this session's in-progress $_pog_candidate matches gc.work_branch ($_pog_branch), substituting and re-verifying $_pog_candidate instead" >&2
+
+            local _pog_cand_json
+            if _pog_cand_json="$(_pog_read_with_retry bd show "$_pog_candidate" --json)" && [[ -n "$_pog_cand_json" ]] && jq -e '.' <<<"$_pog_cand_json" >/dev/null 2>&1; then
+                local _pog_cand_status
+                _pog_cand_status="$(jq -r '.[0].status // empty' <<<"$_pog_cand_json")"
+                if [[ "$_pog_cand_status" != "in_progress" && "$_pog_cand_status" != "open" ]]; then
+                    echo "push-ownership-guard: BLOCKED — $_pog_candidate status is '$_pog_cand_status', not in_progress/open; the claim behind this push is stale. Bypass with: git push --no-verify" >&2
+                    return 1
+                fi
+
+                local _pog_cand_assignee _pog_cand_routed _pog_cand_labels
+                _pog_cand_assignee="$(jq -r '.[0].assignee // empty' <<<"$_pog_cand_json")"
+                _pog_cand_routed="$(jq -r '.[0].metadata."gc.routed_to" // empty' <<<"$_pog_cand_json")"
+                _pog_cand_labels="$(jq -r '.[0].labels[]? // empty' <<<"$_pog_cand_json")"
+                _pog_check_identity_route_hold "$_pog_candidate" "$_pog_cand_assignee" "$_pog_cand_routed" "$_pog_cand_labels" "${_pog_identities[@]}"
+                return $?
+            fi
+            # Fresh re-read of the candidate failed (unreachable or
+            # unparseable) — fail closed on the original id below, same as
+            # any other ambiguity in this guard.
         fi
-    fi
 
-    if [[ -n "${GC_TEMPLATE:-}" && -n "$routed_to" && "$routed_to" != "$GC_TEMPLATE" ]]; then
-        echo "push-ownership-guard: BLOCKED — $id gc.routed_to is '$routed_to', not this session's config identity ($GC_TEMPLATE); it was rerouted since this push began. Bypass with: git push --no-verify" >&2
+        echo "push-ownership-guard: BLOCKED — $id status is '$bead_status', not in_progress/open; the claim behind this push is stale. Bypass with: git push --no-verify" >&2
         return 1
     fi
 
-    if grep -qx 'hold:mayor' <<<"$labels"; then
-        echo "push-ownership-guard: BLOCKED — $id is held (hold:mayor); a mayor ruling is pending. Bypass with: git push --no-verify" >&2
-        return 1
-    fi
-    if grep -qx 'hold:external' <<<"$labels"; then
-        echo "push-ownership-guard: BLOCKED — $id is held (hold:external). Bypass with: git push --no-verify" >&2
-        return 1
-    fi
-
-    return 0
+    _pog_check_identity_route_hold "$id" "$assignee" "$routed_to" "$labels" "${_pog_identities[@]}"
 }

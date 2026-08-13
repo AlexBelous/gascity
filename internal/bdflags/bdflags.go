@@ -18,7 +18,7 @@ var globalValueFlags = map[string]bool{
 // globalBoolFlags are accepted by every bd subcommand and take no value.
 var globalBoolFlags = map[string]bool{
 	"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true, "--json": true,
-	"--no-color": true, "--profile": true, "-q": true, "--quiet": true, "--readonly": true,
+	"--no-color": true, "-q": true, "--quiet": true, "--readonly": true,
 	"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
 }
 

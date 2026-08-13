@@ -172,6 +172,99 @@ write_show_json() {
         "$id" "$status" "$assignee" "$routed_to" "$labels" > "$fbd/fake-bd-state/show-json"
 }
 
+# write_show_json_for <fake-bd-dir> <id> <status> <assignee> <routed_to> [labels-json-array] [work-branch]
+#
+# Like write_show_json, but keyed by <id> so a single fake bd process can
+# answer `bd show` differently for two different ids in the same test (the
+# closed branch-embedded id vs. a distinct live candidate) — needed by
+# write_fake_bd_multi below, which write_fake_bd's single fixed show-json
+# file cannot support. Adds gc.work_branch to metadata (empty when the 7th
+# arg is omitted) — the signal the same-branch substitution search verifies
+# a candidate against.
+write_show_json_for() {
+    local fbd="$1" id="$2" status="$3" assignee="$4" routed_to="$5" labels="${6:-[]}" work_branch="${7:-}"
+    mkdir -p "$fbd/fake-bd-state"
+    local safe_id; safe_id="$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_')"
+    printf '[{"id":"%s","status":"%s","assignee":"%s","metadata":{"gc.routed_to":"%s","gc.work_branch":"%s"},"labels":%s}]' \
+        "$id" "$status" "$assignee" "$routed_to" "$work_branch" "$labels" > "$fbd/fake-bd-state/show-json.$safe_id"
+}
+
+# write_list_json_for <fake-bd-dir> <assignee> <json>: the response to
+# `bd list --assignee=<assignee> ... --json` for exactly that identity, for
+# use with write_fake_bd_multi below.
+write_list_json_for() {
+    local fbd="$1" assignee="$2" json="$3"
+    mkdir -p "$fbd/fake-bd-state"
+    local safe_a; safe_a="$(printf '%s' "$assignee" | tr -c 'A-Za-z0-9._-' '_')"
+    printf '%s' "$json" > "$fbd/fake-bd-state/list-json.$safe_a"
+}
+
+# write_fake_bd_multi <fake-bd-dir>: like write_fake_bd, but `bd show <id>`
+# answers per-id (from write_show_json_for's show-json.<id> files) and
+# `bd list --assignee=X ...` answers per-identity (from write_list_json_for's
+# list-json.<X> files) instead of one fixed response for every call. Needed
+# by the verified-same-branch-substitution tests below, which must give the
+# primary (closed) id and a distinct candidate id different `bd show`
+# answers, and different identities different `bd list` answers, within the
+# same test.
+#
+#   <dir>/fake-bd-state/show-exit  -- if present, EVERY `bd show` call exits
+#                                      with this code (no output), regardless
+#                                      of id — simulates bd/Dolt unreachable.
+#   <dir>/fake-bd-state/list-exit  -- same, for every `bd list` call.
+#   <dir>/fake-bd-state/show-calls.log -- one line per `bd show` call, the id
+#                                      requested — lets a test assert exactly
+#                                      which ids were (or weren't) read.
+#   <dir>/fake-bd-state/list-calls.log -- one line per `bd list` call, the
+#                                      --assignee value requested.
+write_fake_bd_multi() {
+    local dir="$1"
+    mkdir -p "$dir/fake-bd-state"
+    cat > "$dir/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+state="$(dirname "$0")/fake-bd-state"
+case "$1" in
+  show)
+    id="${2:-}"
+    printf '%s\n' "$id" >> "$state/show-calls.log" 2>/dev/null || true
+    if [ -f "$state/show-exit" ]; then
+      exit "$(cat "$state/show-exit")"
+    fi
+    safe_id="$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_')"
+    if [ -f "$state/show-json.$safe_id" ]; then
+      cat "$state/show-json.$safe_id"
+      exit 0
+    fi
+    exit 1
+    ;;
+  list)
+    assignee=""
+    for arg in "$@"; do
+      case "$arg" in
+        --assignee=*) assignee="${arg#--assignee=}" ;;
+      esac
+    done
+    printf '%s\n' "$assignee" >> "$state/list-calls.log" 2>/dev/null || true
+    if [ -f "$state/list-exit" ]; then
+      exit "$(cat "$state/list-exit")"
+    fi
+    safe_a="$(printf '%s' "$assignee" | tr -c 'A-Za-z0-9._-' '_')"
+    if [ -f "$state/list-json.$safe_a" ]; then
+      cat "$state/list-json.$safe_a"
+      exit 0
+    fi
+    printf '[]'
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$dir/bd"
+}
+
 # run_guard <repo> <fake-bd-dir> <gc-agent> <gc-template> [pog-timeout-seconds] [gc-session-id] [gc-session-name]
 #
 # Runs assert_bead_still_claimed with cwd=<repo>, PATH prefixed with
@@ -718,6 +811,241 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
 }
 
 # ---------------------------------------------------------------------------
+# Verified same-branch substitution (ga-p2kq2p / ga-p2kq2p.1).
+#
+# THE GAP: a branch is legitimately reused across two TDD cycles — the first
+# bead closes, a second bead claims the same branch name and is genuinely
+# in_progress — but the branch-embedded id always resolves to the FIRST
+# (now closed) bead, and assert_bead_still_claimed hard-blocks on that
+# closed status alone, even though this session's actual live claim for
+# this exact branch is one `bd list` away. Real repro: PR from branch
+# builder/ga-igcny0.1.2.1, closed id ga-igcny0.1.2.1, live in-progress
+# candidate ga-iyfdl1 whose gc.work_branch matched the branch exactly.
+#
+# THE FIX (verified same-branch substitution): ONLY when the primary
+# resolved id's *status* check fails (never for an assignee/routed_to/hold
+# failure — those are left untouched), search this session's in-progress
+# beads across all four identities (GC_SESSION_NAME, GC_SESSION_ID,
+# GC_ALIAS, GC_AGENT — same precedence order as the assignee-identity check
+# a few lines below) for one whose gc.work_branch string-equals the current
+# branch. On exactly one such candidate, re-run the COMPLETE check sequence
+# against a FRESH bd show of that candidate and return whatever that re-run
+# decides. Exactly one substitution hop — no recursion. Fails closed on
+# every ambiguity (no candidate, missing/mismatched gc.work_branch, the
+# candidate's own recheck failing, or the search itself erroring for every
+# identity) by falling straight through to today's existing BLOCKED
+# behavior for the ORIGINAL id — never a new default-allow.
+#
+# These tests exercise assert_bead_still_claimed's intended *behavior*, not
+# yet its implementation: as of this commit push-ownership-guard.sh has no
+# candidate-search logic at all, so every test below that expects an allow
+# is RED against current code (today it hard-blocks on the closed primary
+# id unconditionally — see the status check a few lines into
+# assert_bead_still_claimed, which is the insertion point this feature
+# adds to). Tests that expect a block pin current AND future behavior at
+# once (a no-candidate / wrong-branch / failed-recheck / unreachable-search
+# case must still block once this feature lands, exactly as it does today).
+# ---------------------------------------------------------------------------
+
+test_substitution_happy_path_zero_extra_list_calls() {
+    local repo fbd out rc calls
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-abc123.1" "in_progress" "agent-x" "tmpl-x" "[]"
+    write_list_json_for "$fbd" "agent-x" '[{"id":"ga-abc123.1"}]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    calls="$(wc -l < "$fbd/fake-bd-state/list-calls.log" 2>/dev/null || echo 0)"
+    if [[ $rc -eq 0 ]] && [[ "$calls" -eq 1 ]]; then
+        record_pass "substitution/happy-path-zero-extra-list-calls (rc=0, exactly 1 bd list call — resolve-phase cross-check only, candidate search never triggers when the primary status check already passes)"
+    else
+        record_fail "substitution/happy-path-zero-extra-list-calls" "expected rc=0 and exactly 1 bd list call, got rc=$rc calls=$calls, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_allows_on_verified_same_branch_candidate() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    # Branch-embedded id: this session's FIRST TDD cycle on this branch,
+    # already closed.
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    # A distinct in-progress bead — this session's SECOND cycle reusing the
+    # same branch — whose gc.work_branch matches the current branch exactly.
+    write_show_json_for "$fbd" "ga-iyfdl1" "in_progress" "agent-x" "tmpl-x" "[]" "$branch"
+    write_list_json_for "$fbd" "agent-x" '[{"id":"ga-iyfdl1"}]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-igcny0.1.2.1" <<<"$out" && grep -q "ga-iyfdl1" <<<"$out" && ! grep -qi "BLOCKED" <<<"$out"; then
+        record_pass "substitution/allows-on-verified-same-branch-candidate (rc=0, NOTE names both the closed original ga-igcny0.1.2.1 and the live candidate ga-iyfdl1)"
+    else
+        record_fail "substitution/allows-on-verified-same-branch-candidate" "expected rc=0 naming ga-igcny0.1.2.1 and ga-iyfdl1 with no BLOCKED text, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_blocks_when_no_candidate_found() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    write_list_json_for "$fbd" "agent-x" '[]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "status" <<<"$out" && grep -q "ga-igcny0.1.2.1" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "substitution/blocks-when-no-candidate-found (rc=$rc, no in-progress bead anywhere -> original id's status block unchanged)"
+    else
+        record_fail "substitution/blocks-when-no-candidate-found" "expected non-zero rc citing ga-igcny0.1.2.1 status+--no-verify, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_blocks_when_candidate_wrong_branch() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    # This session has a genuine in-progress bead, but it's unrelated work on
+    # a different branch -- not a candidate for THIS push.
+    write_show_json_for "$fbd" "ga-unrelated.2" "in_progress" "agent-x" "tmpl-x" "[]" "builder/ga-unrelated.2-other-work"
+    write_list_json_for "$fbd" "agent-x" '[{"id":"ga-unrelated.2"}]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "ga-igcny0.1.2.1" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "substitution/blocks-when-candidate-wrong-branch (rc=$rc, an unrelated live claim on another branch is never substituted)"
+    else
+        record_fail "substitution/blocks-when-candidate-wrong-branch" "expected non-zero rc citing ga-igcny0.1.2.1, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_blocks_when_candidate_missing_work_branch() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    # In-progress and otherwise plausible, but carries no gc.work_branch at
+    # all -- absence of the verifying signal must never be treated as a
+    # match.
+    write_show_json_for "$fbd" "ga-nobranch.1" "in_progress" "agent-x" "tmpl-x" "[]" ""
+    write_list_json_for "$fbd" "agent-x" '[{"id":"ga-nobranch.1"}]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "ga-igcny0.1.2.1" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "substitution/blocks-when-candidate-missing-work-branch (rc=$rc, empty gc.work_branch never counts as a match)"
+    else
+        record_fail "substitution/blocks-when-candidate-missing-work-branch" "expected non-zero rc citing ga-igcny0.1.2.1, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_blocks_when_candidate_closed_on_recheck() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    # bd list found it in_progress, but the required FRESH bd show (not a
+    # reuse of the list snapshot) reveals it closed in the interim.
+    write_show_json_for "$fbd" "ga-candidat.1" "closed" "agent-x" "tmpl-x" "[]" "$branch"
+    write_list_json_for "$fbd" "agent-x" '[{"id":"ga-candidat.1"}]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "status" <<<"$out" && grep -q "ga-candidat.1" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "substitution/blocks-when-candidate-closed-on-recheck (rc=$rc, blocks citing the CANDIDATE's own id, single substitution hop, no further search)"
+    else
+        record_fail "substitution/blocks-when-candidate-closed-on-recheck" "expected non-zero rc citing ga-candidat.1 status, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_blocks_when_candidate_reassigned_on_recheck() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    # in_progress and branch-matched, but its assignee is no longer this
+    # session by the time of the fresh recheck.
+    write_show_json_for "$fbd" "ga-candidat.2" "in_progress" "someone-else" "tmpl-x" "[]" "$branch"
+    write_list_json_for "$fbd" "agent-x" '[{"id":"ga-candidat.2"}]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "assignee" <<<"$out" && grep -q "ga-candidat.2" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "substitution/blocks-when-candidate-reassigned-on-recheck (rc=$rc, blocks citing the CANDIDATE's own id)"
+    else
+        record_fail "substitution/blocks-when-candidate-reassigned-on-recheck" "expected non-zero rc citing ga-candidat.2 assignee, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_blocks_when_candidate_held_on_recheck() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    write_show_json_for "$fbd" "ga-candidat.3" "in_progress" "agent-x" "tmpl-x" '["hold:mayor"]' "$branch"
+    write_list_json_for "$fbd" "agent-x" '[{"id":"ga-candidat.3"}]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "hold:mayor" <<<"$out" && grep -q "ga-candidat.3" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "substitution/blocks-when-candidate-held-on-recheck (rc=$rc, blocks citing the CANDIDATE's own id)"
+    else
+        record_fail "substitution/blocks-when-candidate-held-on-recheck" "expected non-zero rc citing ga-candidat.3 hold:mayor, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_blocks_when_candidate_search_unreachable() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    # Every `bd list` call fails, for every identity -- the candidate search
+    # itself is unreachable, not just empty.
+    echo 1 > "$fbd/fake-bd-state/list-exit"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "status" <<<"$out" && grep -q "ga-igcny0.1.2.1" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "substitution/blocks-when-candidate-search-unreachable (rc=$rc, search failing for every identity falls through to the ORIGINAL id's message, not a new ambiguity message)"
+    else
+        record_fail "substitution/blocks-when-candidate-search-unreachable" "expected non-zero rc citing ga-igcny0.1.2.1 status, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_substitution_finds_candidate_at_lower_precedence_identity() {
+    local repo fbd out rc
+    local branch="builder/ga-igcny0.1.2.1-resumed-cycle"
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd_multi "$fbd"
+    write_show_json_for "$fbd" "ga-igcny0.1.2.1" "closed" "agent-x" "tmpl-x" "[]"
+    # GC_SESSION_NAME is checked FIRST in the identity precedence order and
+    # has an in-progress bead -- a result, just not a match (wrong branch).
+    write_show_json_for "$fbd" "ga-unrelated.9" "in_progress" "sess-name-x" "tmpl-x" "[]" "builder/ga-unrelated.9-other"
+    write_list_json_for "$fbd" "sess-name-x" '[{"id":"ga-unrelated.9"}]'
+    # GC_AGENT is checked LAST and has the actual matching candidate. The
+    # search must not stop at the first identity that returns *any* result.
+    write_show_json_for "$fbd" "ga-iyfdl1" "in_progress" "agent-x" "tmpl-x" "[]" "$branch"
+    write_list_json_for "$fbd" "agent-x" '[{"id":"ga-iyfdl1"}]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "" "sess-name-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-iyfdl1" <<<"$out"; then
+        record_pass "substitution/finds-candidate-at-lower-precedence-identity (rc=0, search continues past a non-matching higher-precedence identity to find the real candidate under GC_AGENT)"
+    else
+        record_fail "substitution/finds-candidate-at-lower-precedence-identity" "expected rc=0 naming ga-iyfdl1, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ---------------------------------------------------------------------------
 # Hook wiring — real .githooks/pre-push, real bare remote.
 #
 # install_guard_hook copies the REAL guard lib and the REAL
@@ -861,6 +1189,16 @@ run_all() {
     test_retry_recovers_bead_id_fallback_from_transient_failure
     test_allow_when_no_bead_id_resolvable
     test_fallback_cannot_detect_staleness_after_status_leaves_in_progress
+    test_substitution_happy_path_zero_extra_list_calls
+    test_substitution_allows_on_verified_same_branch_candidate
+    test_substitution_blocks_when_no_candidate_found
+    test_substitution_blocks_when_candidate_wrong_branch
+    test_substitution_blocks_when_candidate_missing_work_branch
+    test_substitution_blocks_when_candidate_closed_on_recheck
+    test_substitution_blocks_when_candidate_reassigned_on_recheck
+    test_substitution_blocks_when_candidate_held_on_recheck
+    test_substitution_blocks_when_candidate_search_unreachable
+    test_substitution_finds_candidate_at_lower_precedence_identity
     test_hook_blocks_push_on_stale_claim
     test_hook_no_verify_bypasses_guard
     test_hook_allows_push_on_clean_claim

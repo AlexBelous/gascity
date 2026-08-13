@@ -90,6 +90,10 @@ package main
 // Every such open bead was a permanent ready-frontier polluter with no
 // supported drain path.
 //
+// A close this door serves does NOT reach the ADR-0009 work-record close gate,
+// which doBd runs later. The coverage boundary and why it is sound are recorded
+// where the gate defines itself, in work_record_gate.go's header.
+//
 // # Ownership is decided before servability
 //
 // An operation that is NOT served but whose subject the class store owns does

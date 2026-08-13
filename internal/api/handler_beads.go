@@ -185,6 +185,24 @@ func (s *Server) findStore(rig string) beads.Store {
 // returned, which is what keeps that fail-fast rule from costing availability:
 // an added store can only be probed after the previously-answering ones have
 // already missed.
+//
+// # The residency fallback
+//
+// Every arm that resolves by PREFIX ends with the relocated class store
+// appended behind whatever it resolved (appendClassResidencyFallback). Prefix
+// routing answers "which namespace is this id in", and on a relocated city that
+// is not the same question as "which store holds this bead": `gc storage
+// migrate` preserves ids, and a class store MINTS from its own binding
+// workspace's prefix, so a bead can RESIDE in the class binding under a
+// work-shaped id. Those ids are outside the class namespace, so the class arm
+// never fires for them, and without the fallback the prefix store — which never
+// held the row, or holds only the migration's retained copy — was the whole
+// candidate set.
+//
+// It is appended, never inserted, for the reason above: the head of every list
+// is byte-identical to what this resolver returned before, so no answer it
+// already served can change, and the fallback is reached only where the
+// resolver had already given up.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	id = strings.TrimSpace(id)
 	// Built once and shared by both prefix resolvers below: they answer
@@ -206,11 +224,11 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	}
 
 	if store := resolveStoreByConfiguredIDPrefix(id, configured); store != nil {
-		return []beads.Store{store}
+		return s.appendClassResidencyFallback([]beads.Store{store})
 	}
 	if prefix := beadPrefix(id); prefix != "" {
 		if store := s.resolveStoreByPrefix(prefix); store != nil {
-			return []beads.Store{store}
+			return s.appendClassResidencyFallback([]beads.Store{store})
 		}
 	}
 
@@ -223,7 +241,47 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	for _, rigName := range rigNames {
 		candidates = append(candidates, stores[rigName])
 	}
-	return candidates
+	return s.appendClassResidencyFallback(candidates)
+}
+
+// appendClassResidencyFallback appends the relocated class store behind the
+// prefix-routed candidates, so a bead that RESIDES in the class binding under a
+// work-shaped id — a migration-preserved id, or a synthetic the class store
+// minted from its own workspace prefix — stays reachable by id, reads and
+// writes alike, after every prefix-routed store has missed.
+//
+// This is the residence probe internal/api did not have. cmd/gc's by-ID door
+// has always asked the class store about EVERY id rather than only about
+// prefixed ones (cmd/gc/cmd_bd_by_id.go, bdByIDClassDoor.resolve), which is why
+// the CLI could read those beads while this path 404'd them; the two surfaces
+// now answer the same question, each in its own probe order.
+//
+// Appending BEHIND is what keeps every currently-served answer identical — the
+// added-legs-sit-behind doctrine this resolver documents about itself — and it
+// is also what bounds the cost: the extra Get happens only on a by-id operation
+// that was about to 404 anyway.
+//
+// Relocation is decided by STORE IDENTITY, never by a marker file or a
+// migration flag, which is the same rule classStoresForID and
+// storeref.ClassCandidates apply. On a city that relocates nothing this
+// function is the identity and every list stays byte-identical.
+//
+// GRAPH ONLY, exactly as classStoresForID scopes itself: the served split shape
+// is storageSplitWhole — all five infrastructure classes name one binding — so
+// the graph store IS the binding. If per-class fan-out is ever served, this has
+// to resolve per class, alongside the same change in cmd/gc's single class door
+// (openBdByIDClassFrontDoor's "one door for every reserved prefix" note).
+func (s *Server) appendClassResidencyFallback(candidates []beads.Store) []beads.Store {
+	graph := s.state.GraphBeadStore().Store
+	if graph == nil || graph == s.state.CityBeadStore() {
+		return candidates
+	}
+	for _, candidate := range candidates {
+		if candidate == graph {
+			return candidates
+		}
+	}
+	return append(candidates, graph)
 }
 
 // classStoresForID returns the by-id candidate probe list for a relocated
@@ -237,14 +295,17 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 // a work store that legitimately holds an id inside the class namespace stays
 // reachable behind the class store.
 //
-// NOT covered here: a bead `gc storage migrate` relocated with its id PRESERVED
-// (infra_class_migrate.go). That id keeps its HQ/rig-era prefix, so it is
-// outside the class namespace, the arm never fires, and the configured-prefix
-// resolver below answers it from the work store — which still holds the
-// migration's retained source copy, frozen at migration time. Covering it needs
-// a residence probe that asks the class store about every id; that is what
-// cmd/gc/cmd_bd_by_id.go's bdByIDClassDoor.resolve does, and this path has no
-// equivalent yet.
+// NOT covered by THIS arm: a bead that resides in the class binding under an id
+// outside the class namespace — one `gc storage migrate` relocated with its id
+// PRESERVED (infra_class_migrate.go), or one the class store minted from a
+// binding workspace whose own prefix is a work prefix. The namespace gate
+// declines those before a list is built, and that stays true: the arm answers a
+// question about the NAMESPACE.
+//
+// What covers them is the residence fallback beadStoresForID appends behind
+// every prefix-routed arm (appendClassResidencyFallback) — the same probe
+// cmd/gc/cmd_bd_by_id.go's bdByIDClassDoor.resolve performs, for the same
+// reason. So this arm's decline is no longer the end of the resolution.
 //
 // GRAPH ONLY. Sessions, orders and nudges have relocated-store accessors on
 // State, but adding them here would change which stores answer for gcs-/gco-/

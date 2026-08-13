@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -242,27 +244,22 @@ func TestBeadGetSurvivesAShadowingRigOutage(t *testing.T) {
 	}
 }
 
-// TestBeadStoresForIDDoesNotCoverMigratedLegacyIDs pins the limitation the
-// resolver's doc now states instead of the coverage the doc used to claim.
+// TestClassArmStillDoesNotCoverMigratedLegacyIDs pins the limitation of the
+// CLASS ARM specifically, which the residency fallback does not remove.
 //
-// `gc storage migrate` copies the work store's infrastructure slice with ids
-// PRESERVED and never deletes the source (infra_class_migrate.go). So a
-// relocated bead can carry an HQ-prefixed id — which is OUTSIDE the class
-// namespace, so the class arm never fires for it, and the configured-prefix
-// resolver answers it from the work store's retained copy. The relocated store
-// is not even a candidate.
-//
-// cmd/gc/cmd_bd_by_id.go covers this case the other way, by probing residence
-// for every id rather than routing on the prefix. This path has no equivalent;
-// the assertion exists so the gap cannot be forgotten or silently closed.
-func TestBeadStoresForIDDoesNotCoverMigratedLegacyIDs(t *testing.T) {
-	st, graph, city, _ := relocatedGraphRouteState(t)
+// storeref.ClassCandidates gates on the class NAMESPACE before it builds a
+// list, so a bead `gc storage migrate` relocated with its HQ-prefixed id kept
+// gets nil back from it — that is a property of the namespace rule and stays
+// true. What changed is that the resolver no longer STOPS there: the fallback
+// appends the class binding behind the prefix-routed candidates, which is what
+// TestBeadStoresForIDAppendsClassResidencyFallback covers. Keeping this
+// assertion separate keeps the two claims from being confused for each other.
+func TestClassArmStillDoesNotCoverMigratedLegacyIDs(t *testing.T) {
+	st, graph, _, _ := relocatedGraphRouteState(t)
 	st.cfg.Workspace.Prefix = "mc"
 
-	s := New(st)
-	got := s.beadStoresForID("mc-123")
-	if len(got) != 1 || got[0] != city {
-		t.Fatalf("beadStoresForID(mc-123) = %v (len %d), want only the city work store %p — a legacy-prefixed id is outside the class namespace; graph is %p", got, len(got), city, graph)
+	if got := New(st).classStoresForID("mc-123", nil); got != nil {
+		t.Fatalf("classStoresForID(mc-123) = %v, want nil — a legacy-prefixed id is outside the class namespace; graph is %p", got, graph)
 	}
 }
 
@@ -327,6 +324,349 @@ func TestBeadStoresForIDShadowingRigPrefixStillWinsOnDefaultCity(t *testing.T) {
 	if len(got) != 1 || got[0] != rig {
 		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want only the shadowing rig store %p", prefix, got, len(got), rig)
 	}
+}
+
+// The tests below cover the residency fallback: the leg that reaches a bead
+// RESIDENT in the class binding under a work-shaped id.
+//
+// Two populations wear that shape. `gc storage migrate` preserves ids, so every
+// row it relocated kept its HQ/rig-era prefix; and a class store MINTS from its
+// own binding workspace's prefix, so a synthetic created there with no id — an
+// input convoy, a patrol root, a wisp — is born work-shaped and class-resident.
+// Both are outside the class namespace, so the class arm never fires for them,
+// and before the fallback the prefix resolver answered them from the work store
+// alone: a 404 on every read and every write of a bead the city really holds.
+
+// classResidentWorkShapedID seeds a bead into the graph store under an id in
+// the WORK prefix's namespace, and proves no other candidate store holds it.
+func classResidentWorkShapedID(t *testing.T, graph beads.Store, id string) string {
+	t.Helper()
+	return seedWithPinnedID(t, graph, id, "class-resident under a work prefix")
+}
+
+// seedWithPinnedID creates a bead under an exact id, which is what makes these
+// fixtures able to model an id the class binding holds and a prefix store
+// routes elsewhere.
+func seedWithPinnedID(t *testing.T, store beads.Store, id, title string) string {
+	t.Helper()
+	mem, ok := store.(*beads.MemStore)
+	if !ok {
+		t.Fatalf("fixture store is %T, want *beads.MemStore so the test can pin the seeded id", store)
+	}
+	mem.HonorExplicitIDs = true
+	created, err := mem.Create(beads.Bead{ID: id, Title: title})
+	if err != nil {
+		t.Fatalf("seeding %s: %v", id, err)
+	}
+	if created.ID != id {
+		t.Fatalf("the fixture store minted %q instead of the pinned %q", created.ID, id)
+	}
+	return id
+}
+
+// TestBeadStoresForIDAppendsClassResidencyFallback is the resolver-level
+// contract, arm by arm. It replaces TestBeadStoresForIDDoesNotCoverMigratedLegacyIDs,
+// which pinned this coverage gap so it could not be forgotten; this is the
+// close-out.
+//
+// The fallback is APPENDED, never inserted: every store the resolver already
+// returned keeps its position and its precedence, so no answer this path
+// already served can change. What changes is only what happens after all of
+// them have missed.
+func TestBeadStoresForIDAppendsClassResidencyFallback(t *testing.T) {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+
+	t.Run("configured prefix arm", func(t *testing.T) {
+		st, graph, city, _ := relocatedGraphRouteState(t)
+		st.cfg.Workspace.Prefix = "mc"
+
+		got := New(st).beadStoresForID("mc-123")
+		if len(got) != 2 || got[0] != city || got[1] != graph {
+			t.Fatalf("beadStoresForID(mc-123) = %v (len %d), want [city %p, graph %p] — the prefix store keeps the lead, the class binding is the fallback", got, len(got), city, graph)
+		}
+	})
+
+	t.Run("routes.jsonl arm", func(t *testing.T) {
+		st, graph, _, rig := relocatedGraphRouteState(t)
+		st.cfg.Workspace.Prefix = "mc"
+		writeRoutesJSONL(t, st.cityPath, `{"prefix":"rt","path":"rigs/myrig"}`)
+
+		got := New(st).beadStoresForID("rt-1")
+		if len(got) != 2 || got[0] != rig || got[1] != graph {
+			t.Fatalf("beadStoresForID(rt-1) = %v (len %d), want [rig %p, graph %p]", got, len(got), rig, graph)
+		}
+	})
+
+	t.Run("legacy scan arm", func(t *testing.T) {
+		st, graph, city, rig := relocatedGraphRouteState(t)
+		st.cfg.Workspace.Prefix = "mc"
+
+		got := New(st).beadStoresForID("zz-1")
+		if len(got) != 3 || got[0] != city || got[1] != rig || got[2] != graph {
+			t.Fatalf("beadStoresForID(zz-1) = %v (len %d), want [city %p, rig %p, graph %p]", got, len(got), city, rig, graph)
+		}
+	})
+
+	t.Run("class arm is untouched", func(t *testing.T) {
+		st, graph, city, _ := relocatedGraphRouteState(t)
+
+		got := New(st).beadStoresForID(prefix + "-1")
+		if len(got) != 2 || got[0] != graph || got[1] != city {
+			t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want the class arm's own [graph %p, city %p] with no second graph leg", prefix, got, len(got), graph, city)
+		}
+	})
+
+	// A rig whose store IS the relocated class store. State hands out shared
+	// store INSTANCES in the file provider — sortedRigNames dedupes by store
+	// identity for exactly that reason — so an arm can already contain the store
+	// the fallback would add. Appending it a second time would probe the same
+	// store twice, and on the fail-fast by-id path a duplicated failing leg is a
+	// duplicated 500 attributed to a store already reported.
+	t.Run("class store already among the candidates", func(t *testing.T) {
+		st, graph, city, _ := relocatedGraphRouteState(t)
+		st.cfg.Workspace.Prefix = "mc"
+		st.cfg.Rigs[0].Prefix = "rw"
+		st.stores["myrig"] = graph
+
+		s := New(st)
+		if got := s.beadStoresForID("rw-1"); len(got) != 1 || got[0] != graph {
+			t.Fatalf("beadStoresForID(rw-1) = %v (len %d), want only the graph store %p once", got, len(got), graph)
+		}
+		if got := s.beadStoresForID("zz-1"); len(got) != 2 || got[0] != city || got[1] != graph {
+			t.Fatalf("beadStoresForID(zz-1) = %v (len %d), want [city %p, graph %p] with the graph leg listed once", got, len(got), city, graph)
+		}
+	})
+
+	t.Run("single-store city is identity", func(t *testing.T) {
+		st := newFakeState(t)
+		city := beads.NewMemStore()
+		rig := beads.NewMemStore()
+		st.cityBeadStore = city
+		st.stores = map[string]beads.Store{"myrig": rig}
+		st.cfg.Workspace.Prefix = "mc"
+		st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: filepath.Join(st.cityPath, "rigs", "myrig"), Prefix: "rw"}}
+
+		s := New(st)
+		if got := s.beadStoresForID("mc-123"); len(got) != 1 || got[0] != city {
+			t.Fatalf("beadStoresForID(mc-123) = %v (len %d), want only the city store %p", got, len(got), city)
+		}
+		if got := s.beadStoresForID("rw-1"); len(got) != 1 || got[0] != rig {
+			t.Fatalf("beadStoresForID(rw-1) = %v (len %d), want only the rig store %p", got, len(got), rig)
+		}
+		if got := s.beadStoresForID("zz-1"); len(got) != 2 || got[0] != city || got[1] != rig {
+			t.Fatalf("beadStoresForID(zz-1) = %v (len %d), want the unchanged legacy scan [city %p, rig %p]", got, len(got), city, rig)
+		}
+	})
+}
+
+// TestBeadGetServesClassResident is the read half through the real handler:
+// GET /v0/bead/{id} answered 404 for a bead the city holds, because the
+// prefix-routed work store was the only candidate.
+func TestBeadGetServesClassResident(t *testing.T) {
+	st, graph, city, _ := relocatedGraphRouteState(t)
+	st.cfg.Workspace.Prefix = "mc"
+	id := classResidentWorkShapedID(t, graph, "mc-relic1")
+	if _, err := city.Get(id); err == nil {
+		t.Fatalf("the work store also holds %s; the fixture proves nothing", id)
+	}
+
+	out, err := New(st).humaHandleBeadGet(context.Background(), &BeadGetInput{ID: id})
+	if err != nil {
+		t.Fatalf("GET bead %s: %v — a class-resident work-shaped id is unreachable by id", id, err)
+	}
+	if out.Body.ID != id {
+		t.Fatalf("resolved bead id = %q, want %q", out.Body.ID, id)
+	}
+}
+
+// TestBeadCloseLandsInClassStoreForWorkPrefixedResident is the write half,
+// across every mutating by-id handler.
+//
+// No handler changes: each one probes beadStoresForID in order, stops at the
+// first store whose Get answers, and then binds its write to THAT store —
+// "once Get succeeded in this store, treat Update-ErrNotFound as a
+// concurrent-delete race rather than try the next store". Read/write coherence
+// on this surface is therefore structural, and adding a read leg adds the write
+// leg with it.
+func TestBeadCloseLandsInClassStoreForWorkPrefixedResident(t *testing.T) {
+	const renamed = "renamed by the api"
+	for name, tc := range map[string]struct {
+		setup  func(*testing.T, beads.Store, string)
+		mutate func(*Server, string) error
+		verify func(*testing.T, beads.Bead)
+	}{
+		"close": {
+			mutate: func(s *Server, id string) error {
+				_, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: id})
+				return err
+			},
+			verify: func(t *testing.T, b beads.Bead) {
+				if b.Status != "closed" {
+					t.Errorf("status = %q, want closed", b.Status)
+				}
+			},
+		},
+		"delete": {
+			mutate: func(s *Server, id string) error {
+				_, err := s.humaHandleBeadDelete(context.Background(), &BeadDeleteInput{ID: id})
+				return err
+			},
+			verify: func(t *testing.T, b beads.Bead) {
+				if b.Status != "closed" {
+					t.Errorf("status = %q, want closed (DELETE is a soft close on this surface)", b.Status)
+				}
+			},
+		},
+		"update": {
+			mutate: func(s *Server, id string) error {
+				title := renamed
+				_, err := s.humaHandleBeadUpdate(context.Background(), &BeadUpdateInput{ID: id, Body: beadUpdateBody{Title: &title}})
+				return err
+			},
+			verify: func(t *testing.T, b beads.Bead) {
+				if b.Title != renamed {
+					t.Errorf("title = %q, want %q", b.Title, renamed)
+				}
+			},
+		},
+		"assign": {
+			setup: func(t *testing.T, graph beads.Store, id string) {
+				held := "previous-holder"
+				if err := graph.Update(id, beads.UpdateOpts{Assignee: &held}); err != nil {
+					t.Fatalf("seeding an assignee on %s: %v", id, err)
+				}
+			},
+			mutate: func(s *Server, id string) error {
+				in := &BeadAssignInput{ID: id}
+				in.Body.Assignee = ""
+				_, err := s.humaHandleBeadAssign(context.Background(), in)
+				return err
+			},
+			verify: func(t *testing.T, b beads.Bead) {
+				if b.Assignee != "" {
+					t.Errorf("assignee = %q, want the routed assign to have cleared it", b.Assignee)
+				}
+			},
+		},
+		"reopen": {
+			setup: func(t *testing.T, graph beads.Store, id string) {
+				if err := graph.Close(id); err != nil {
+					t.Fatalf("pre-closing %s: %v", id, err)
+				}
+			},
+			mutate: func(s *Server, id string) error {
+				_, err := s.humaHandleBeadReopen(context.Background(), &BeadReopenInput{ID: id})
+				return err
+			},
+			verify: func(t *testing.T, b beads.Bead) {
+				if b.Status == "closed" {
+					t.Errorf("status = %q, want reopened", b.Status)
+				}
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st, graph, city, _ := relocatedGraphRouteState(t)
+			st.cfg.Workspace.Prefix = "mc"
+			id := classResidentWorkShapedID(t, graph, "mc-relic1")
+			if tc.setup != nil {
+				tc.setup(t, graph, id)
+			}
+
+			if err := tc.mutate(New(st), id); err != nil {
+				t.Fatalf("%s %s: %v — the write 404'd on a bead resident in the class binding", name, id, err)
+			}
+			if _, err := city.Get(id); err == nil {
+				t.Errorf("the work store holds %s after the routed %s; the write must land in the store whose Get answered", id, name)
+			}
+			after, err := graph.Get(id)
+			if err != nil {
+				t.Fatalf("re-reading %s from the class binding: %v", id, err)
+			}
+			tc.verify(t, after)
+		})
+	}
+}
+
+// TestBeadWriteDualResidentPrefersPrefixStore is the ambiguity pin and the
+// control in one: for an id BOTH stores hold, the API keeps answering — and now
+// writing — from the prefix store, byte-identically to pre-fix behavior.
+//
+// The migration never deletes its source, so a relocated bead can be resident
+// in both. Appending the class leg BEHIND is what keeps that population's
+// answers unchanged; a class-first order here would silently repoint every
+// dual-resident id at the other copy.
+func TestBeadWriteDualResidentPrefersPrefixStore(t *testing.T) {
+	st, graph, city, _ := relocatedGraphRouteState(t)
+	st.cfg.Workspace.Prefix = "mc"
+	id := classResidentWorkShapedID(t, graph, "mc-dual1")
+	seedWithPinnedID(t, city, id, "the retained work copy")
+
+	s := New(st)
+	out, err := s.humaHandleBeadGet(context.Background(), &BeadGetInput{ID: id})
+	if err != nil {
+		t.Fatalf("GET bead %s: %v", id, err)
+	}
+	if out.Body.Title != "the retained work copy" {
+		t.Fatalf("GET served %q, want the prefix store's copy — the added leg must not re-answer an id the resolver already resolved", out.Body.Title)
+	}
+	if _, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: id}); err != nil {
+		t.Fatalf("close %s: %v", id, err)
+	}
+	workCopy, err := city.Get(id)
+	if err != nil {
+		t.Fatalf("re-reading the work copy: %v", err)
+	}
+	if workCopy.Status != "closed" {
+		t.Errorf("the work copy's status = %q, want closed — the write must follow the read", workCopy.Status)
+	}
+	classCopy, err := graph.Get(id)
+	if err != nil {
+		t.Fatalf("re-reading the class copy: %v", err)
+	}
+	if classCopy.Status == "closed" {
+		t.Errorf("the class copy was closed too; one id, one owner, one write")
+	}
+}
+
+// TestBeadMissThenUnreachableClassStoreIs500Not404 keeps the fail-fast doctrine
+// on the added leg: an unreachable store must not be reported as a missing
+// bead. The added leg slightly STRENGTHENS the rule — a prefix miss followed by
+// an unreachable class store used to be a confident 404, and is now a 500 — and
+// the control proves the change is about reachability, not about turning every
+// miss into an error.
+func TestBeadMissThenUnreachableClassStoreIs500Not404(t *testing.T) {
+	t.Run("unreachable class store", func(t *testing.T) {
+		st, graph, _, _ := relocatedGraphRouteState(t)
+		st.cfg.Workspace.Prefix = "mc"
+		st.graphBeadStore = getFailStore{Store: graph, err: errors.New("infra binding unreachable")}
+
+		_, err := New(st).humaHandleBeadGet(context.Background(), &BeadGetInput{ID: "mc-relic1"})
+		var statusErr huma.StatusError
+		if !errors.As(err, &statusErr) {
+			t.Fatalf("GET returned %T %v, want a Huma status error", err, err)
+		}
+		if statusErr.GetStatus() != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500 — an unreachable store reported as a missing bead is the root-loss shape", statusErr.GetStatus())
+		}
+	})
+
+	t.Run("clean miss stays 404", func(t *testing.T) {
+		st, _, _, _ := relocatedGraphRouteState(t)
+		st.cfg.Workspace.Prefix = "mc"
+
+		_, err := New(st).humaHandleBeadGet(context.Background(), &BeadGetInput{ID: "mc-relic1"})
+		var statusErr huma.StatusError
+		if !errors.As(err, &statusErr) {
+			t.Fatalf("GET returned %T %v, want a Huma status error", err, err)
+		}
+		if statusErr.GetStatus() != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 — a bead no store holds is absent, not an outage", statusErr.GetStatus())
+		}
+	})
 }
 
 // TestBeadGetResolvesARelocatedGraphID is the evidence behind the one command

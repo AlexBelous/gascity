@@ -96,11 +96,15 @@ type PrefixedStore struct {
 //
 // What covers it is a residence probe — asking the class store about EVERY id
 // rather than only about prefixed ones. cmd/gc/cmd_bd_by_id.go's
-// bdByIDClassDoor.resolve does exactly that, for exactly this reason. Nothing
-// on the internal/api by-id path does, so there a legacy-prefixed relocated
-// bead is still answered from the work store's retained pre-migration copy (the
-// migration never deletes its source). Giving that path a residence probe is
-// open work, not a property of this function.
+// bdByIDClassDoor.resolve does exactly that, for exactly this reason;
+// cmd/gc/by_id_store_route.go's classRoutedStoreForID takes the same [class,
+// work] list when this resolver declines; and internal/api's by-id resolver
+// appends the class store behind its prefix-routed candidates
+// (appendClassResidencyFallback). Each caller owns that probe, because each
+// one's fallback ORDER is a property of its own surface — the CLI door leads
+// with the class store, the API appends behind the stores it already served.
+// This function stays the NAMESPACE rule and must not be described as if it
+// were the residence rule.
 func ClassCandidates(id string, routing ClassRouting) []beads.Store {
 	id = strings.TrimSpace(id)
 	if routing.Class == nil || routing.Class == routing.Work {

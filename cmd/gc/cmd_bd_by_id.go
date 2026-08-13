@@ -74,10 +74,21 @@ package main
 //     storage and says nothing about a bead the work ledger still serves. See
 //     resolve.
 //
-// Served here: show, update (fields and metadata, including --claim),
-// release-if-current, and dep list. `gc bd heartbeat` is not — it is rewritten
-// to a metadata update before this hook runs — and neither is the general query
-// surface, which bd_relocated_classes.go refuses on its own terms.
+// Served here: show, update (fields and metadata, including --claim), close,
+// reopen, release-if-current, and dep list. `gc bd heartbeat` is not — it is
+// rewritten to a metadata update before this hook runs — and neither is the
+// general query surface, which bd_relocated_classes.go refuses on its own
+// terms.
+//
+// close and reopen are here for the same reason update is, one lifecycle step
+// further on. A class store MINTS ids from its binding workspace's own prefix,
+// so a synthetic it creates with no id — an input convoy, a patrol root, a
+// wisp — carries a WORK prefix while residing only in the binding. Reads found
+// those (the class leg is probed for every id); the close that would retire one
+// was not a by-ID verb at all, so it never opened this door, fell through to a
+// subprocess pointed at the prefix store, and died there with bd's not-found.
+// Every such open bead was a permanent ready-frontier polluter with no
+// supported drain path.
 //
 // # Ownership is decided before servability
 //
@@ -163,6 +174,14 @@ const (
 	// work ledger and left the step open in the binding forever: a molecule
 	// that stalls with no error anywhere.
 	bdByIDUpdate bdByIDVerb = "update"
+	// bdByIDClose is `gc bd close <id> [--json]`, and bdByIDReopen its undo.
+	//
+	// They are the drain verbs for a class resident: the row a class store
+	// minted under a work-shaped id has no other way to be retired, because
+	// every prefix-routed lane resolves it against a ledger that never held
+	// it. Only the bare form is served — see parseBdByIDCloseArgs.
+	bdByIDClose  bdByIDVerb = "close"
+	bdByIDReopen bdByIDVerb = "reopen"
 )
 
 // bdByIDDepDirectionUp asks for the beads that depend ON the subject; the
@@ -206,6 +225,12 @@ func parseBdByIDOp(bdArgs []string) (bdByIDOp, bool) {
 		return bdByIDOp{Verb: bdByIDShow, ID: id, JSON: jsonOut}, true
 	case "update":
 		op, _, ok := parseBdByIDUpdateArgs(bdArgs[1:])
+		return op, ok
+	case "close":
+		op, _, ok := parseBdByIDCloseArgs(bdByIDClose, bdArgs[1:])
+		return op, ok
+	case "reopen":
+		op, _, ok := parseBdByIDCloseArgs(bdByIDReopen, bdArgs[1:])
 		return op, ok
 	case "release-if-current":
 		id, assignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs)
@@ -358,13 +383,69 @@ func bdByIDUpdateWritesFields(op bdByIDOp, metadata map[string]string) bool {
 		len(metadata) > 0
 }
 
+// parseBdByIDCloseArgs parses the tail of `gc bd close` and `gc bd reopen`.
+//
+// rejected names the first flag that stopped this from being served, the same
+// way parseBdByIDUpdateArgs does, so a refusal can say WHICH spelling kept the
+// command off this surface.
+//
+// The served form is one bare id plus --json, and that is the whole of what the
+// closed contract can express: GraphStore.Close and GraphStore.Reopen take an
+// id and return an error. bd's -r/--reason/--reason-file/--session carry text
+// the contract has nowhere to put, and --claim-next/--continue/--force/
+// --no-auto/--suggest-next name workflow this arm does not run. Serving any of
+// them by ignoring it would report a command as executed after silently
+// changing what it meant — the partial write this whole surface exists to
+// remove.
+//
+// Several ids stay unrecognized for a different reason: a batch spans stores,
+// so it would need per-id routing with partial-failure semantics bd's exit
+// contract does not express. The refusal path keeps such a batch honest when
+// one of its ids is class-owned; it is never half-applied here.
+func parseBdByIDCloseArgs(verb bdByIDVerb, args []string) (op bdByIDOp, rejected string, ok bool) {
+	op = bdByIDOp{Verb: verb}
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			if op.ID != "" || arg == "" {
+				// A second positional is a batch, not a flag: there is no
+				// spelling to name, and naming the id would read as a claim
+				// about that id rather than about the shape.
+				return bdByIDOp{}, "", false
+			}
+			op.ID = arg
+			continue
+		}
+		if arg == "--json" {
+			op.JSON = true
+			continue
+		}
+		name, _, _ := strings.Cut(arg, "=")
+		return bdByIDOp{}, name, false
+	}
+	if op.ID == "" {
+		return bdByIDOp{}, "", false
+	}
+	return op, "", true
+}
+
 // bdByIDUnservedFlag names the flag that kept an otherwise-routable invocation
 // off this surface, or "" when the shape itself was never one this serves.
 func bdByIDUnservedFlag(bdArgs []string) string {
-	if len(bdArgs) == 0 || bdArgs[0] != "update" {
+	if len(bdArgs) == 0 {
 		return ""
 	}
-	_, rejected, ok := parseBdByIDUpdateArgs(bdArgs[1:])
+	var rejected string
+	var ok bool
+	switch bdArgs[0] {
+	case "update":
+		_, rejected, ok = parseBdByIDUpdateArgs(bdArgs[1:])
+	case "close":
+		_, rejected, ok = parseBdByIDCloseArgs(bdByIDClose, bdArgs[1:])
+	case "reopen":
+		_, rejected, ok = parseBdByIDCloseArgs(bdByIDReopen, bdArgs[1:])
+	default:
+		return ""
+	}
 	if ok {
 		return ""
 	}
@@ -662,6 +743,10 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return doBdByIDDepList(resolution.Graph, op, stdout, stderr), true
 	case bdByIDUpdate:
 		return doBdByIDUpdate(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+	case bdByIDClose:
+		return doBdByIDClose(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+	case bdByIDReopen:
+		return doBdByIDReopen(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	}
 	// Unreachable while the verb set and this switch agree, and a refusal
 	// rather than a fall-through because the two disagreeing is exactly the
@@ -1181,6 +1266,44 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 		return 1
 	}
 	return printBdByIDBead(updated, op.JSON, binding, stdout, stderr)
+}
+
+// doBdByIDClose retires a class-store bead through the closed graph contract.
+//
+// The already-closed answer is the STORE's: the contract's Close carries the
+// canonical no-op semantics, and a "is it closed yet" check here would be a
+// second implementation of a rule the store already has, free to drift from it.
+func doBdByIDClose(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	return doBdByIDLifecycleWrite(graph, op, "close", graph.Close, binding, stdout, stderr)
+}
+
+// doBdByIDReopen is doBdByIDClose's undo, and exists for the same reason: a
+// drain that can close a class resident but not reopen one is a one-way door.
+func doBdByIDReopen(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	return doBdByIDLifecycleWrite(graph, op, "reopen", graph.Reopen, binding, stdout, stderr)
+}
+
+// doBdByIDLifecycleWrite applies a status transition through the closed graph
+// contract, then re-reads and renders what the store now holds.
+//
+// The re-read is doBdByIDUpdate's rule, for doBdByIDUpdate's reason: bd prints
+// the row after a mutation and callers have learned to trust that output, so
+// rendering the request back would report what was asked for rather than what
+// the store now holds. On these two verbs that difference is the whole signal —
+// a binding whose read leg and write leg resolve against different tiers is
+// visible here as an error, and invisible to a caller that only echoed the
+// verb.
+func doBdByIDLifecycleWrite(graph storebinding.GraphStore, op bdByIDOp, verb string, write func(string) error, binding string, stdout, stderr io.Writer) int {
+	if err := write(op.ID); err != nil {
+		fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	written, err := graph.Get(op.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd %s: %s was written and could not be re-read: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return printBdByIDBead(written, op.JSON, binding, stdout, stderr)
 }
 
 // printBdByIDNotFound renders genuine absence in bd's own shape so existing

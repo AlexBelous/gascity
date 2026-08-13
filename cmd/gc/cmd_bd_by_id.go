@@ -97,6 +97,16 @@ package main
 // bead, and the command would hang or answer about the wrong workspace. It is
 // refused instead, before the subprocess.
 //
+// Ownership is proven two ways, and the second exists because the first covers
+// only half the population. A RESERVED prefix proves it from the argv alone —
+// that namespace is minted by the class store and nowhere else. RESIDENCE
+// proves it for everything else: a MUTATION whose positional ids are
+// unambiguous is probed against the class binding, and a hit refuses the same
+// way. Without that second proof a work-prefixed class resident got no
+// protection at all — its `--notes` update or its `delete` fell through to a
+// ledger that cannot hold it and died with bd's not-found, which reads as "the
+// bead is gone" rather than "you addressed the wrong store".
+//
 // The two questions are answered by different code on purpose, and answering
 // them with one function was a real defect rather than a hypothetical. The
 // served parsers reject every flag they do not implement, so "can this be
@@ -125,9 +135,20 @@ package main
 // binding and — on a born-split city — re-proves its invariant with a full work
 // store census. That is once per process, memoized with every other one-shot
 // command's routing, but it is not free, so it is paid only by an invocation
-// that could concern a class-owned bead: a served by-ID form, or an argv that
-// addresses a reserved-prefix id. An ordinary work mutation addresses only work
-// ids and never enters.
+// that could concern a class-owned bead: a served by-ID form, an argv that
+// addresses a reserved-prefix id, or a MUTATION with unambiguous positional
+// ids. An ordinary work READ or SELECTOR never enters; a mutation addressing
+// ids enters exactly once per process.
+//
+// The mutation arm is the widening, and the id shape is why it cannot be
+// narrower. A class store mints from its binding workspace's own prefix and
+// `gc storage migrate` preserves ids, so "gc-123" says nothing about which
+// store holds the row — only a probe does, and skipping it is what sent every
+// unserved mutation of a class resident to the ledger that cannot hold it.
+// Reads and selectors stay outside because they address no subject whose
+// residence could decide anything: a selector QUOTES ids, and a read that this
+// surface serves is already inside. An ambiguous scan stays outside too, for
+// the plainest reason — it yields no ids to probe.
 
 import (
 	"encoding/json"
@@ -647,6 +668,43 @@ func (d bdByIDClassDoor) resolve(id string) (bdByIDResolution, error) {
 	return resolution, nil
 }
 
+// firstResident returns the first id the class binding actually holds, or ""
+// when it holds none of them.
+//
+// It is bounded by construction: the ids come from one mutation argv, which is
+// a handful of tokens, and the probe stops at the first hit. Residence — not
+// the reserved-prefix rule — is the only thing that can decide ownership for
+// these, so a failure to READ is a failure to decide and surfaces as one
+// (resolve's classification, unchanged).
+func (d bdByIDClassDoor) firstResident(ids []string) (string, error) {
+	for _, id := range ids {
+		resolution, err := d.resolve(id)
+		if err != nil {
+			return "", err
+		}
+		if resolution.Found {
+			return id, nil
+		}
+	}
+	return "", nil
+}
+
+// bdByIDMutationSubjects returns the bead ids a write-mutation argv ADDRESSES,
+// or nil when the argv is not a mutation or cannot be scanned into ids.
+//
+// It reads bdMutationWriteIDs, the scanner doBd's exact-ID collision guard
+// already trusts for the same argv, so the two agree on what a mutation
+// addresses rather than each deciding it. An ambiguous scan yields nil: an
+// unrecognized flag may or may not consume the next token, and a guess here
+// would probe residence for a value rather than a subject.
+func bdByIDMutationSubjects(bdArgs []string) []string {
+	ids, ok, ambiguous := bdMutationWriteIDs(bdArgs)
+	if !ok || ambiguous {
+		return nil
+	}
+	return ids
+}
+
 // bdIDIsClassReserved reports whether id carries a reserved class id prefix.
 // Those prefixes are minted only by the relocated class stores, so such an id
 // existing anywhere else is not a thing bd can answer for.
@@ -674,16 +732,16 @@ func bdIDIsClassReserved(id string) bool {
 func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
 	named, namesClassBead := bdArgsNameClassOwnedBead(bdArgs)
-	if !served && !namesClassBead {
+	mutationIDs := bdByIDMutationSubjects(bdArgs)
+	if !served && !namesClassBead && len(mutationIDs) == 0 {
 		// Nothing here can concern a class-owned bead, so the binding is not
 		// opened and the funnel is not entered.
 		//
 		// This is also the cost gate. Entering the funnel resolves a plan and
 		// opens a database, and the born-split arm re-proves its invariant with
-		// a full work-store census; a work mutation that addresses only work
-		// ids must not pay that. A non-reserved positional id on update/close
-		// needs the exact-ID collision guard doBd already applies to it, not
-		// class routing — the class store has no claim on it.
+		// a full work-store census; a read or selector that addresses no
+		// subject must not pay that, and neither must a mutation whose argv
+		// cannot be scanned into ids at all — there would be nothing to probe.
 		return 0, false
 	}
 	door, routed, err := openBdByIDClassFrontDoor(cityPath)
@@ -695,10 +753,26 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return 0, false
 	}
 	if !served {
-		// The invocation addresses a bead only the class binding could own, in
-		// a spelling this surface does not serve. A reserved prefix is proof of
-		// ownership on its own, so no residence probe is needed to know the
-		// work store cannot answer.
+		if !namesClassBead {
+			// No reserved prefix to lean on, so ownership is proven by
+			// RESIDENCE: this is an unserved mutation, and if the class binding
+			// holds any of its subjects the work store cannot answer for it.
+			resident, err := door.firstResident(mutationIDs)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1, true
+			}
+			if resident == "" {
+				// Every subject is a work bead. bd is still their truth and the
+				// passthrough answers byte-identically — including doBd's own
+				// exact-ID collision guard, which this arm must not displace.
+				return 0, false
+			}
+			named = resident
+		}
+		// The invocation addresses a bead the class binding owns, in a spelling
+		// this surface does not serve. Forwarding it would run the command
+		// against the one ledger that cannot hold the bead.
 		return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), named, bdByIDUnservedFlag(bdArgs), stderr)
 	}
 

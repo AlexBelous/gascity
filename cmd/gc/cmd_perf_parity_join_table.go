@@ -65,6 +65,10 @@ const (
 	// that fell between the sweep's clock sample and legacy's own, inside one
 	// tick. See the D-DEADLINE spec below for the evidence.
 	parityJoinClassDeadlineCrossedAfterSweepSample = "deadline_crossed_after_sweep_sample"
+	// parityJoinClassResetStallAlarmNoDetectorArm names legacy's reset-stall
+	// alarm, which sits in D-STALL's site list but in none of its arms. See the
+	// D-STALL spec below for the evidence.
+	parityJoinClassResetStallAlarmNoDetectorArm = "reset_stall_alarm_no_detector_arm"
 )
 
 // legacyReasonNoWakeReason is the code legacy stamps at the drain decision when
@@ -233,16 +237,36 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 				// pass. A start-pending row whose create lease is still live is
 				// claimed here (detectStaleCreate's preserve arm,
 				// session_detector_sweep.go:1285-1289, predicted_effect "none")
-				// while legacy's wake pass drives the start it already began
-				// (session_reconciler.go:4101, reason "wake"). Both leave the
-				// in-flight start alone; they just say so in two families at two
-				// sites, so no same-site join can pair them. Requires the twin.
+				// while the start it already began is driven in the D-WAKE
+				// family. Both leave the in-flight start alone; they just say so
+				// in two families at two sites, so no same-site join can pair
+				// them. Requires the twin.
+				//
+				// The twin has TWO spellings, because the start's driver depends
+				// on who holds the key. Legacy drives it itself at
+				// session_reconciler.go:4101 (reason "wake") — but under keyed
+				// start ownership legacy stands down instead
+				// (keyed_start_owner, the row-scan skip at :1880-1887 and the
+				// wake-target stand-down at :4091-4098) and the keyed start
+				// controller drives it. Either record proves the same two
+				// things: legacy scanned the row this cycle, and the start
+				// family is handling it — so the preserve singleton is not the
+				// candidacy gap the twin requirement exists to catch. WD.15
+				// day-2, cycle-7edba7f31f6960ea / ed3284ee51f04cc7 /
+				// 5440d2778137242f, all three with baseline and result both
+				// state=creating.
+				//
+				// No D-STALE-CREATE yield can stand in for it: the family's own
+				// stand-down (keyed_stale_create_owner, :1835-1846) is gated on
+				// pendingCreateLeaseExpiredForRollbackInfo, i.e. the ROLLBACK
+				// arm only. A live lease — the preserve arm's whole premise —
+				// can never produce one.
 				Class:           parityJoinClassPendingCreateFamilySplit,
 				Classification:  parityJoinIncomparable,
 				Side:            parityJoinSideDetectorOnly,
 				Sites:           []TraceSiteCode{TraceSiteReconcilerPendingCreatePreserved},
 				DetectorReasons: []TraceReasonCode{detectorReasonPendingCreatePreserved},
-				CoTwinReasons:   []TraceReasonCode{TraceReasonWake},
+				CoTwinReasons:   []TraceReasonCode{TraceReasonWake, "keyed_start_owner"},
 			},
 			{
 				// Legacy defers a pending-create recovery only for a row whose
@@ -464,6 +488,41 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 		Family: parityJoinFamilyStall,
 		Level:  parityJoinLevelDecision,
 		Sites:  []TraceSiteCode{TraceSiteReconcilerResetStalled, TraceSiteReconcilerProgressStallExempt},
+		Divergences: []parityJoinDivergenceRule{{
+			// ResetStalled is in this family's site list by adjacency, not by
+			// membership: it is in NONE of D-STALL's arms, and the sweep cannot
+			// produce a record to pair with it for two independent reasons.
+			//
+			// Disjoint populations. recordResetStallIfDue returns unless the row
+			// is NOT alive (session_reconciler.go:223, `if alive || ...`) and its
+			// committed reset has outlived the startup timeout; detectStall
+			// returns unless live.Alive (session_detector_sweep.go:1710) and then
+			// gates on a last-activity gap. No row can satisfy both.
+			//
+			// Nothing to own. The site is an ALARM, not a decision: the function
+			// prints to stderr, records a SessionResetStalled event and traces.
+			// It mutates no session state, consumes no budget and enqueues
+			// nothing, so there is no effect for a keyed handler to take over or
+			// to double-apply — which is why this is INCOMPARABLE rather than an
+			// explained-but-counted mismatch like the D-DEADLINE race.
+			//
+			// Corroborating, from the WD.15 window: exactly ONE such record in
+			// 13,757 cycles (cycle-11e1730d6990ad8d, s-rc-wisp-u71tke, baseline
+			// asleep / sleep_reason killed, elapsed_s 173 vs startup_timeout_s
+			// 20), and the sweep raised its own D-WAKE condition for that same
+			// row in that same cycle, so the absent D-STALL record is not the
+			// sweep skipping the row. The whole family is also off by config in
+			// the campaign city (progress_stall_timeout unset -> gate 0 -> the
+			// early return above), which is the §6/Q3 test-only-parity case the
+			// owner signed off on ga-f7v2ft.122 — zero detector D-STALL records
+			// exist in the corpus to pair with anything.
+			Class:          parityJoinClassResetStallAlarmNoDetectorArm,
+			Classification: parityJoinIncomparable,
+			Side:           parityJoinSideLegacyOnly,
+			Sites:          []TraceSiteCode{TraceSiteReconcilerResetStalled},
+			LegacyReasons:  []TraceReasonCode{TraceReasonResetStalled},
+			LegacyOutcomes: []TraceOutcomeCode{TraceOutcomeFailed},
+		}},
 	},
 	{
 		// "none expected" — every divergence here is a WE blocker by design.

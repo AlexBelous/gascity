@@ -90,8 +90,8 @@ func parityJoinDispositionCount(report parityJoinReport, site TraceSiteCode, dis
 func TestParityJoinAttributesUnstampedLegacyRecordsOnTheLiveCorpus(t *testing.T) {
 	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
 
-	if report.Cycles.LegacyByElimination != 12 {
-		t.Fatalf("legacy_by_elimination = %d, want 12 (2x drain/no-wake-reason, 3x wake_decision/wake, drain_ack/acknowledged, drain_ack/orphaned, drain.timeout/orphaned, rollback_pending_create/recovery, 3x idle_timeout/stop — %+v)",
+	if report.Cycles.LegacyByElimination != 14 {
+		t.Fatalf("legacy_by_elimination = %d, want 14 (2x drain/no-wake-reason, 4x wake_decision/wake, drain_ack/acknowledged, drain_ack/orphaned, drain.timeout/orphaned, rollback_pending_create/recovery, 3x idle_timeout/stop, reset_stalled/failed — %+v)",
 			report.Cycles.LegacyByElimination, report.Cycles)
 	}
 
@@ -162,8 +162,13 @@ func TestParityJoinPairsLegacyYieldsAgainstTheActorOnTheLiveCorpus(t *testing.T)
 func TestParityJoinRefusesToScoreUnpairedOwnershipYields(t *testing.T) {
 	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
 
-	if report.Cycles.UnpairedOwnershipYields != 1 {
-		t.Fatalf("unpaired_ownership_yields = %d, want 1 (%+v)", report.Cycles.UnpairedOwnershipYields, report.Cycles)
+	// Two: the day-1 cycle where legacy stood down to the keyed start owner with
+	// nothing else beside it, and the day-2 preserve cycle where the stand-down
+	// is the family split's twin. Being a twin does not make a yield PAIRED —
+	// the twin sits in another family at another site, so the yield itself is
+	// still refused rather than scored.
+	if report.Cycles.UnpairedOwnershipYields != 2 {
+		t.Fatalf("unpaired_ownership_yields = %d, want 2 (%+v)", report.Cycles.UnpairedOwnershipYields, report.Cycles)
 	}
 	wake := parityJoinFamilyRow(t, report, parityJoinFamilyWake)
 	if wake.YieldOnly != 0 || wake.Mismatched != 0 {
@@ -176,8 +181,8 @@ func TestParityJoinRefusesToScoreUnpairedOwnershipYields(t *testing.T) {
 			entry = &report.Yields[i]
 		}
 	}
-	if entry == nil || entry.Arm != parityJoinYieldOwnership || entry.Unpaired != 1 {
-		t.Fatalf("keyed_start_owner yields entry = %+v, want ownership arm with unpaired=1 (%+v)", entry, report.Yields)
+	if entry == nil || entry.Arm != parityJoinYieldOwnership || entry.Unpaired != 2 {
+		t.Fatalf("keyed_start_owner yields entry = %+v, want ownership arm with unpaired=2 (%+v)", entry, report.Yields)
 	}
 }
 
@@ -189,8 +194,8 @@ func TestParityJoinJoinsRoutedSweepRecordsAgainstLegacyActs(t *testing.T) {
 	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
 
 	wake := parityJoinFamilyRow(t, report, parityJoinFamilyWake)
-	if wake.Joined != 2 || wake.Matched != 1 {
-		t.Fatalf("D-WAKE joined=%d matched=%d, want 2/1 — legacy wake/start_candidate beside the routed detector_wake_target, plus the admission-refused pair (%+v)",
+	if wake.Joined != 3 || wake.Matched != 2 {
+		t.Fatalf("D-WAKE joined=%d matched=%d, want 3/2 — legacy wake/start_candidate beside the routed detector_wake_target, plus two admission-refused pairs (%+v)",
 			wake.Joined, wake.Matched, wake)
 	}
 	drain := parityJoinFamilyRow(t, report, parityJoinFamilyDrain)
@@ -227,12 +232,19 @@ func TestParityJoinDecisionLevelMatchesOnOutcomeNotReason(t *testing.T) {
 func TestParityJoinTriagesThePendingCreateFamilySplitAgainstItsTwin(t *testing.T) {
 	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
 
-	for _, family := range []string{parityJoinFamilyWake, parityJoinFamilyStaleCreate} {
-		if got := parityJoinTriageCount(report, family, parityJoinClassPendingCreateFamilySplit); got != 1 {
-			t.Fatalf("%s %s = %d, want 1 (triage=%+v)", family, parityJoinClassPendingCreateFamilySplit, got, report.Triage)
+	// D-WAKE keeps one: legacy's own wake act, whose preserve twin is the
+	// detector's. D-STALE-CREATE has two, one per spelling of the start-family
+	// twin (legacy's wake act on day 1, the keyed_start_owner stand-down on
+	// day 2 — see TestParityJoinTriagesThePendingCreateSplitUnderKeyedStartOwnership).
+	for _, tc := range []struct {
+		family string
+		want   int
+	}{{parityJoinFamilyWake, 1}, {parityJoinFamilyStaleCreate, 2}} {
+		if got := parityJoinTriageCount(report, tc.family, parityJoinClassPendingCreateFamilySplit); got != tc.want {
+			t.Fatalf("%s %s = %d, want %d (triage=%+v)", tc.family, parityJoinClassPendingCreateFamilySplit, got, tc.want, report.Triage)
 		}
-		if row := parityJoinFamilyRow(t, report, family); row.Unclassified != 0 {
-			t.Fatalf("%s unclassified = %d, want 0 (%+v)", family, row.Unclassified, row)
+		if row := parityJoinFamilyRow(t, report, tc.family); row.Unclassified != 0 {
+			t.Fatalf("%s unclassified = %d, want 0 (%+v)", tc.family, row.Unclassified, row)
 		}
 	}
 }
@@ -319,6 +331,118 @@ func TestParityJoinDeadlineCrossingRaceDoesNotSwallowNeighbouringArms(t *testing
 	}
 }
 
+// The day-2 half of the pending-create family split. The class's first arm was
+// written from cycles where legacy's OWN wake pass drove the in-flight start;
+// under keyed start ownership legacy does not drive it, it stands down
+// (keyed_start_owner, session_reconciler.go:1880-1887 / :4091-4098) — so the
+// twin the rule required was never in the cycle and the preserve record fell
+// through to UNCLASSIFIED. Same split, same two writers agreeing to leave one
+// in-flight start alone; only the identity of the start's driver differs.
+//
+// Byte-copied from cycle-7edba7f31f6960ea (s-rc-wisp-s08pap), whose baseline
+// and result are both state=creating.
+func TestParityJoinTriagesThePendingCreateSplitUnderKeyedStartOwnership(t *testing.T) {
+	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
+
+	staleCreate := parityJoinFamilyRow(t, report, parityJoinFamilyStaleCreate)
+	if staleCreate.Unclassified != 0 {
+		t.Fatalf("D-STALE-CREATE unclassified = %d, want 0 (%+v)", staleCreate.Unclassified, staleCreate)
+	}
+	// Two arms of one class now: the legacy-act twin and the keyed-ownership
+	// stand-down twin.
+	if got := parityJoinTriageCount(report, parityJoinFamilyStaleCreate, parityJoinClassPendingCreateFamilySplit); got != 2 {
+		t.Fatalf("%s = %d, want 2 (triage=%+v)", parityJoinClassPendingCreateFamilySplit, got, report.Triage)
+	}
+	// No effect on either side, so it must not enter the family's match rate.
+	if staleCreate.Incomparable != 3 {
+		t.Fatalf("D-STALE-CREATE incomparable = %d, want 3 (%+v)", staleCreate.Incomparable, staleCreate)
+	}
+}
+
+// The twin requirement still bites. A preserve record with NO start-family
+// record beside it in the cycle is exactly the candidacy gap this alarm exists
+// to catch, and neither arm of the rule may absorb it.
+func TestParityJoinPendingCreateSplitStillRequiresAStartFamilyTwin(t *testing.T) {
+	spec := parityJoinSpecFor(t, parityJoinFamilyStaleCreate)
+
+	preserve := SessionReconcilerTraceRecord{
+		SiteCode:    TraceSiteReconcilerPendingCreatePreserved,
+		ReasonCode:  detectorReasonPendingCreatePreserved,
+		OutcomeCode: TraceOutcomeNoChange,
+	}
+	_, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, nil, "s-rc-wisp-s08pap", nil, &preserve)
+	if class != parityJoinClassUnclassified {
+		t.Fatalf("a twinless preserve record classified as %q, want UNCLASSIFIED", class)
+	}
+	for _, twin := range []TraceReasonCode{TraceReasonWake, "keyed_start_owner"} {
+		coTwins := map[string]map[TraceReasonCode]bool{"s-rc-wisp-s08pap": {twin: true}}
+		_, class = parityJoinClassify(spec, parityJoinSideDetectorOnly, coTwins, "s-rc-wisp-s08pap", nil, &preserve)
+		if class != parityJoinClassPendingCreateFamilySplit {
+			t.Fatalf("preserve record with twin %q classified as %q, want %s", twin, class, parityJoinClassPendingCreateFamilySplit)
+		}
+	}
+}
+
+// The last day-2 shape: legacy's reset-stall ALARM, which the join table filed
+// under D-STALL by site adjacency and which no detector record can ever pair.
+//
+// Two independent reasons, both re-derived at source:
+//  1. recordResetStallIfDue fires only for a NOT-alive row past the startup
+//     timeout (session_reconciler.go:223), while detectStall returns unless
+//     live.Alive (session_detector_sweep.go:1710). Disjoint populations.
+//  2. The site is an alarm, not a decision: the function prints, records a
+//     SessionResetStalled event and traces. It mutates nothing, so there is no
+//     effect for a keyed handler to own or to double-apply.
+//
+// Byte-copied from cycle-11e1730d6990ad8d (s-rc-wisp-u71tke, baseline asleep /
+// sleep_reason killed), the ONLY reset-stall record in the 13,757-cycle window.
+// The same cycle carries the sweep's own D-WAKE condition for the same row, so
+// the missing D-STALL record is not the sweep skipping the row.
+func TestParityJoinTriagesTheResetStallAlarm(t *testing.T) {
+	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
+
+	stall := parityJoinFamilyRow(t, report, parityJoinFamilyStall)
+	if stall.LegacyOnly != 1 {
+		t.Fatalf("D-STALL legacy_only = %d, want 1 (%+v)", stall.LegacyOnly, stall)
+	}
+	if stall.Unclassified != 0 {
+		t.Fatalf("D-STALL unclassified = %d, want 0 (%+v)", stall.Unclassified, stall)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyStall, parityJoinClassResetStallAlarmNoDetectorArm); got != 1 {
+		t.Fatalf("%s = %d, want 1 (triage=%+v)", parityJoinClassResetStallAlarmNoDetectorArm, got, report.Triage)
+	}
+	if stall.Mismatched != 0 || stall.Incomparable != 1 {
+		t.Fatalf("D-STALL mismatched=%d incomparable=%d, want 0/1 — an alarm that mutates nothing has no effect to compare (%+v)",
+			stall.Mismatched, stall.Incomparable, stall)
+	}
+}
+
+// The alarm rule's blast radius. It covers legacy's reset-stall record and
+// nothing else in the family: the progress-stall arms both write at
+// ProgressStallExempt (DETECTOR.md section 3 delta 2) and keep their own
+// classification, and a keyed record ever appearing at the alarm site would
+// stay unclassified rather than ride this rule.
+func TestParityJoinResetStallAlarmDoesNotSwallowTheProgressStallArms(t *testing.T) {
+	spec := parityJoinSpecFor(t, parityJoinFamilyStall)
+
+	exempt := SessionReconcilerTraceRecord{
+		SiteCode:    TraceSiteReconcilerProgressStallExempt,
+		ReasonCode:  detectorReasonProgressStall,
+		OutcomeCode: TraceOutcomeStop,
+	}
+	if _, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, nil, "worker-rc-abc", nil, &exempt); class != parityJoinClassUnclassified {
+		t.Fatalf("detector progress-stall singleton classified as %q, want UNCLASSIFIED", class)
+	}
+	alarmOnDetectorSide := SessionReconcilerTraceRecord{
+		SiteCode:    TraceSiteReconcilerResetStalled,
+		ReasonCode:  TraceReasonResetStalled,
+		OutcomeCode: TraceOutcomeFailed,
+	}
+	if _, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, nil, "worker-rc-abc", nil, &alarmOnDetectorSide); class != parityJoinClassUnclassified {
+		t.Fatalf("a detector-side record at the alarm site classified as %q, want UNCLASSIFIED", class)
+	}
+}
+
 // B1's guard. Absence classifies as legacy only inside the section 1 legacy
 // vocabulary. A phase site's per-cycle marker and a keyed-owned site are each
 // counted and surfaced with the reason they were refused — never binned as
@@ -382,17 +506,17 @@ func TestParityJoinReadsRollupCountersWhereTheCollectorWritesThem(t *testing.T) 
 				rec.DetailedTemplateCount)
 		}
 	}
-	if rollups != 16 {
-		t.Fatalf("fixture carries %d cycle rollups, want 16", rollups)
+	if rollups != 18 {
+		t.Fatalf("fixture carries %d cycle rollups, want 18", rollups)
 	}
 
 	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
 
-	if report.Cycles.Considered != 16 {
-		t.Fatalf("considered = %d, want 16 (%+v)", report.Cycles.Considered, report.Cycles)
+	if report.Cycles.Considered != 18 {
+		t.Fatalf("considered = %d, want 18 (%+v)", report.Cycles.Considered, report.Cycles)
 	}
 	if report.Cycles.WithoutDetailArms != 1 {
-		t.Fatalf("without_detail_arms = %d, want 1 — fourteen fixture rollups carry fields.detailed_template_count>0 (%+v)",
+		t.Fatalf("without_detail_arms = %d, want 1 — sixteen fixture rollups carry fields.detailed_template_count>0 (%+v)",
 			report.Cycles.WithoutDetailArms, report.Cycles)
 	}
 }

@@ -69,6 +69,13 @@ const (
 	// alarm, which sits in D-STALL's site list but in none of its arms. See the
 	// D-STALL spec below for the evidence.
 	parityJoinClassResetStallAlarmNoDetectorArm = "reset_stall_alarm_no_detector_arm"
+	// parityJoinClassPreWakeSupersedeConvergence names legacy's own pre-wake
+	// fence firing on a candidate it had already decided. See the D-WAKE spec
+	// below for the evidence.
+	parityJoinClassPreWakeSupersedeConvergence = "pre_wake_supersede_convergence"
+	// parityJoinClassOrphanLiveDetectorLead names the one-tick lead the sweep's
+	// live-orphan arm holds over legacy's. See the D-ORPHAN spec below.
+	parityJoinClassOrphanLiveDetectorLead = "orphan_live_detector_lead_one_tick"
 )
 
 // legacyReasonNoWakeReason is the code legacy stamps at the drain decision when
@@ -219,6 +226,31 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 			{
 				Class:       "deferred_confirm_off_by_one",
 				AnyOutcomes: []TraceOutcomeCode{TraceOutcomeDeferredConfirm},
+			},
+			{
+				// The live-drain arm runs one tick AHEAD of legacy's. WD.15 day 4
+				// reported three of these as unclassified; each has a legacy
+				// orphaned/drain twin for the same session at this same site on the
+				// very next tick, ~2.24s later and in a different trace cycle:
+				// dependent-rc-njwi 032633->032634 (20:21:21.761 -> 20:21:23.997),
+				// dependent-rc-c6xr 038223->038224, dependent-rc-h9bb7
+				// 038793->038794. Both writers agree on the row AND on the effect;
+				// only the tick differs, and the join is a same-cycle-handle
+				// equality join by contract, so an adjacent-cycle pair can only
+				// ever surface as two singletons. Same shape §3b already names for
+				// D-DRAIN as ack-timing skew.
+				//
+				// MISMATCHED on purpose, like ack_timing_skew and unlike the
+				// journey-proven arms: this rule explains the singleton, it cannot
+				// prove the twin landed on the neighboring tick, and widening the
+				// join to look would admit the cross-tick false pairs the cadence
+				// decision deliberately excludes. The class clears the WE blocker;
+				// the rate keeps counting the record.
+				Class:            parityJoinClassOrphanLiveDetectorLead,
+				Side:             parityJoinSideDetectorOnly,
+				Sites:            []TraceSiteCode{TraceSiteReconcilerOrphaned},
+				DetectorReasons:  []TraceReasonCode{detectorReasonOrphanLive},
+				DetectorOutcomes: []TraceOutcomeCode{TraceOutcomeDrain},
 			},
 		},
 	},
@@ -429,6 +461,35 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 		Level:  parityJoinLevelDecision,
 		Sites:  []TraceSiteCode{TraceSiteReconcilerWakeDecision, TraceSiteReconcilerPreserveConfiguredNamed},
 		Divergences: []parityJoinDivergenceRule{
+			{
+				// The round-6 fence writes a THIRD legacy record on a row legacy
+				// had already decided, and it is not a stand-down: parityJoinYieldOf
+				// routes the keyed_start_owner spelling to the yield vocabulary, so
+				// everything reaching here is the errPreWakeSuperseded convergence —
+				// premise_drift:* (session_lifecycle_parallel.go:1278-1280),
+				// mid_incarnation (:1281-1283) or the lost pre_wake_cas. All three
+				// unwrap to one error and the executor treats them as one outcome
+				// (:3502-3520): the candidate is dropped BEFORE the provider, so the
+				// outcome is skipped and no effect landed on either side.
+				//
+				// Incomparable, and for the same reason as the refusal rule below:
+				// the sweep's record for these rows declines to route them
+				// (WD.15 day 4, all four at admission_outcome
+				// refused_uncertifiable), so this compares an act to a non-act. It
+				// is that population one record later — legacy's two-phase fence
+				// catching its own stale snapshot — and the sweep has no prepare
+				// phase to produce a counterpart.
+				//
+				// Requires the twin. A supersede with NO sweep record for the row
+				// in the cycle is legacy fencing a candidate nothing else was
+				// looking at; that stays unclassified and blocks WE.
+				Class:          parityJoinClassPreWakeSupersedeConvergence,
+				Classification: parityJoinIncomparable,
+				Side:           parityJoinSideLegacyOnly,
+				Sites:          []TraceSiteCode{TraceSiteReconcilerWakeDecision},
+				LegacyReasons:  []TraceReasonCode{parityJoinReasonStartCommitSuperseded},
+				CoTwinReasons:  []TraceReasonCode{detectorReasonWakeTarget},
+			},
 			{
 				// The sweep raised a wake target and its OWN admission refused
 				// to route it: detectorAdmissionRefusedUncertifiable is D-WAKE's

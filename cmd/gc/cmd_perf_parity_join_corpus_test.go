@@ -739,3 +739,165 @@ func TestParityJoinNoEvidenceIsJoinBased(t *testing.T) {
 		t.Fatal("bar_met = true with no joined evidence")
 	}
 }
+
+// The round-6 pre-wake fence writes a THIRD record on the legacy side, and the
+// join had no class for it: day-4 of the campaign reported 4 legacy-only
+// start_commit_superseded records as unclassified and drove D-WAKE to 98.30%,
+// below the section 3b bar. All four carry a reason of premise_drift:*, which
+// session_lifecycle_parallel.go:1278-1280 writes when a wake-relevant premise
+// moved between the snapshot the candidate was decided on and its prepare —
+// legacy fencing its OWN stale candidate, the ga-l1j53 re-validation working.
+// The record is an errPreWakeSuperseded convergence with outcome skipped: no
+// effect entered the provider on either side, and the sweep's own record for
+// the row refused to route it (admission_outcome refused_uncertifiable). It is
+// the same population as wake_admission_refused_row_stays_legacy, one record
+// later, so it takes the same incomparable classification.
+func TestParityJoinTriagesThePreWakeSupersedeAgainstItsDetectorTwin(t *testing.T) {
+	cityDir := t.TempDir()
+	parityJoinArmTemplate(t, cityDir, "worker")
+	tracer := newSessionReconcilerTracer(cityDir, "wd15-supersede", io.Discard)
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	// The sweep raises the wake target and its own admission declines to route
+	// it (cycle-883e3e1d69a4db40, seq 2999118).
+	cycle.RecordDecision(TraceSiteReconcilerWakeDecision, detectorReasonWakeTarget, TraceOutcomeStartCandidate,
+		"worker", "worker-rc-2fan", map[string]any{
+			"session_id":        "rc-2fan",
+			"detector_family":   string(detectorFamilyWake),
+			"detector_acts":     true,
+			"effect_owner":      detectorKeyedEffectOwner,
+			"effect_applied":    false,
+			"predicted_effect":  "start",
+			"admission":         "wake_fill",
+			"admission_outcome": string(detectorAdmissionRefusedUncertifiable),
+		})
+	// Legacy decides the same row is a start candidate...
+	cycle.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate,
+		"worker", "worker-rc-2fan", map[string]any{"should_wake": true})
+	// ...and its own prepare-time re-validation supersedes the commit.
+	cycle.RecordDecision(TraceSiteReconcilerWakeDecision, parityJoinReasonStartCommitSuperseded, TraceOutcomeSkipped,
+		"worker", "worker-rc-2fan", map[string]any{
+			"session_id": "rc-2fan",
+			"reason":     "premise_drift:state",
+		})
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyWake)
+	if row.Unclassified != 0 || row.Mismatched != 0 {
+		t.Fatalf("D-WAKE unclassified=%d mismatched=%d, want 0/0 — the supersede is convergence, not a divergence (%+v)",
+			row.Unclassified, row.Mismatched, row)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyWake, parityJoinClassPreWakeSupersedeConvergence); got != 1 {
+		t.Fatalf("%s = %d, want 1 (triage=%+v)", parityJoinClassPreWakeSupersedeConvergence, got, report.Triage)
+	}
+	if !row.BarMet {
+		t.Fatalf("D-WAKE bar_met=false at match_rate=%v; the classified supersede must leave the rate clean (%+v)", row.MatchRate, row)
+	}
+}
+
+// The supersede class is evidence-scoped, not a blanket amnesty for the reason
+// code. A start_commit_superseded with NO sweep record for the row in the cycle
+// is a supersede with no keyed counterpart at all — legacy fenced a candidate
+// nothing else was looking at — and that is a real finding, not a class. It
+// must stay unclassified and keep blocking WE.
+func TestParityJoinPreWakeSupersedeStillRequiresItsDetectorTwin(t *testing.T) {
+	cityDir := t.TempDir()
+	parityJoinArmTemplate(t, cityDir, "worker")
+	tracer := newSessionReconcilerTracer(cityDir, "wd15-supersede-lonely", io.Discard)
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	cycle.RecordDecision(TraceSiteReconcilerWakeDecision, parityJoinReasonStartCommitSuperseded, TraceOutcomeSkipped,
+		"worker", "worker-rc-lonely", map[string]any{
+			"session_id": "rc-lonely",
+			"reason":     "premise_drift:state",
+		})
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyWake)
+	if row.Unclassified != 1 {
+		t.Fatalf("D-WAKE unclassified = %d, want 1 for a twinless supersede (%+v)", row.Unclassified, row)
+	}
+	if !report.WEBlocker {
+		t.Fatal("we_blocker = false for a twinless supersede; an unclassified mismatch blocks WE")
+	}
+}
+
+// D-ORPHAN's live-drain arm runs one tick AHEAD of legacy's. Day 4 reported 3
+// detector-only detector_orphan_live/drain records on dependent-rc-* rows as
+// unclassified; every one has a legacy orphaned/drain twin for the same session
+// at the same site on the very next tick, ~2.24s later (njwi 032633->032634,
+// c6xr 038223->038224, h9bb7 038793->038794). The two writers agree on the row
+// and on the effect; only the tick differs, and a same-cycle-handle join reports
+// an adjacent-cycle pair as two singletons. That is the ack-timing-skew shape
+// section 3b already names for D-DRAIN, now in D-ORPHAN. It stays MISMATCHED
+// rather than incomparable: the class explains the singleton, it does not prove
+// the twin landed, so the rate keeps counting it.
+func TestParityJoinTriagesTheOneTickOrphanDetectorLead(t *testing.T) {
+	cityDir := t.TempDir()
+	parityJoinArmTemplate(t, cityDir, "dependent")
+	tracer := newSessionReconcilerTracer(cityDir, "wd15-orphan-lead", io.Discard)
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	cycle.RecordDecision(TraceSiteReconcilerOrphaned, detectorReasonOrphanLive, TraceOutcomeDrain,
+		"dependent", "dependent-rc-njwi", map[string]any{
+			"session_id":        "rc-njwi",
+			"detector_family":   string(detectorFamilyOrphan),
+			"detector_acts":     true,
+			"effect_owner":      detectorKeyedEffectOwner,
+			"effect_applied":    false,
+			"predicted_effect":  "drain",
+			"admission":         "orphan_drain",
+			"admission_outcome": "accepted",
+		})
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyOrphan)
+	if row.Unclassified != 0 {
+		t.Fatalf("D-ORPHAN unclassified = %d, want 0 (%+v)", row.Unclassified, row)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyOrphan, parityJoinClassOrphanLiveDetectorLead); got != 1 {
+		t.Fatalf("%s = %d, want 1 (triage=%+v)", parityJoinClassOrphanLiveDetectorLead, got, report.Triage)
+	}
+	if row.Mismatched != 1 {
+		t.Fatalf("D-ORPHAN mismatched = %d, want 1 — the lead class is counted, not excused (%+v)", row.Mismatched, row)
+	}
+}

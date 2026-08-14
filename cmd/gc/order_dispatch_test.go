@@ -1915,7 +1915,10 @@ func TestOrderDispatchDoesNotReparseConfigPerTick(t *testing.T) {
 		Interval: "1h",
 		Exec:     "true",
 	}}
-	ad := newMemoryOrderDispatcher(aa, cityDir, cfg, events.Discard, io.Discard)
+	// nil routes is the identity routing of a single-store city, which is what
+	// this fixture writes; the test counts config reparses and takes no
+	// position on storage relocation.
+	ad := newMemoryOrderDispatcher(nil, aa, cityDir, cfg, events.Discard, io.Discard)
 
 	before := loadCityConfigCalls.Load()
 	now := time.Now()

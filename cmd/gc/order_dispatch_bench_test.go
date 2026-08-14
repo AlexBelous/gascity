@@ -90,7 +90,12 @@ func BenchmarkOrderDispatchTick(b *testing.B) {
 
 	b.Run("PreFix_ReparsePerTick", func(b *testing.B) {
 		before := loadCityConfigCalls.Load()
-		ad := newMemoryOrderDispatcher(aa, cityDir, cfg, events.Discard, io.Discard)
+		// nil routes is the identity routing of a single-store city, which is
+		// what this fixture writes — the benchmark counts config reparses and
+		// takes no position on storage relocation. The four PRODUCTION wiring
+		// sites must pass the resolved routes; that is asserted separately by
+		// TestOrderDispatchConstructorDeliversRoutesToTheWispBirth.
+		ad := newMemoryOrderDispatcher(nil, aa, cityDir, cfg, events.Discard, io.Discard)
 		// Reproduce the pre-fix storeFn verbatim (order_dispatch.go:431-433
 		// before the ga-237xpr fix): ignore the dispatcher's cached cfg and
 		// go through the nil-cfg path, which reloads city.toml + every pack
@@ -110,7 +115,7 @@ func BenchmarkOrderDispatchTick(b *testing.B) {
 
 	b.Run("PostFix_CachedConfig", func(b *testing.B) {
 		before := loadCityConfigCalls.Load()
-		ad := newMemoryOrderDispatcher(aa, cityDir, cfg, events.Discard, io.Discard)
+		ad := newMemoryOrderDispatcher(nil, aa, cityDir, cfg, events.Discard, io.Discard)
 		now := time.Now()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {

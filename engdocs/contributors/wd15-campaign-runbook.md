@@ -272,11 +272,35 @@ Two counters make the difference visible, and both belong in any readout you
 quote: `joined_yields` is the evidence; `cycles.unpaired_ownership_yields` is the
 part of the stand-down traffic that proves nothing and is deliberately not scored.
 
+## Trace archival (added day 3)
+
+The live trace store prunes oldest-first at a **1 GiB byte cap** — ~24h of
+retention at the campaign's write rate, so the store alone can never hold the
+7-day corpus (it ate window days 0-1 before anyone noticed; the day-N report
+JSONs plus tick-counter continuity are the surviving evidence for that span).
+A detached archiver loop now sweeps rotated segments into
+`campaign/trace-archive/segments/` every 4h, read-only on the live store:
+
+```bash
+pgrep -af wd15-trace-archiver          # discover (no status files)
+tail campaign/trace-archive/archive.log
+# relaunch if dead:
+setsid nohup campaign/trace-archive/wd15-trace-archiver.sh >/dev/null 2>&1 &
+```
+
+Every daily readout must confirm the archiver is alive and the last sweep is
+recent. End-of-window readouts run the join over the **archive**, not the live
+store, to cover the full retained span.
+
 ## Restart policy
 
 §3b requires the window to span **at least one controller restart** and **at
 least one config reload**, with arms re-verified after each. Both are manual
 steps; schedule the restart mid-window (day 3-4).
+
+`lastPrune` is in-memory, so the first append after a restart runs a prune
+sweep immediately. **Run an archiver sweep (or verify one is <4h old) before
+restarting**, or the restart eats un-archived segments.
 
 Controller restart:
 

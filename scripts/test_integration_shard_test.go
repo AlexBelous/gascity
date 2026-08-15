@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/parser"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode"
@@ -167,6 +169,38 @@ func TestRuntimeTmuxIntegrationShardClearsAmbientManifestOnDynamicFallback(t *te
 		"TestDarwinAlpha",
 		"GO_TEST_MANIFEST="+manifest,
 	)
+}
+
+func TestRestFullShardReportsEnumerationFailureNotEmptySelection(t *testing.T) {
+	fixture := newIntegrationShardFixtureWithListExit(t, 137)
+
+	out, err := fixture.runShard(t, "rest-full-1-of-16")
+	if err == nil {
+		t.Fatalf("rest-full-1-of-16 succeeded against a killed enumeration, want failure:\n%s", out)
+	}
+	if !strings.Contains(string(out), "enumeration failed") {
+		t.Fatalf("rest-full-1-of-16 output = %q, want it to contain %q", out, "enumeration failed")
+	}
+	if strings.Contains(string(out), "no tests selected") {
+		t.Fatalf("rest-full-1-of-16 output = %q, must not misattribute the enumeration failure to an empty selection", out)
+	}
+}
+
+func TestRestFullShardSelectsEveryShardWhenEnumerationSucceeds(t *testing.T) {
+	const listCount = 144
+	const shardTotal = 16
+	fixture := newIntegrationShardFixtureWithSyntheticTests(t, listCount)
+
+	for _, shard := range []string{"rest-full-1-of-16", "rest-full-15-of-16"} {
+		out, err := fixture.runShard(t, shard)
+		if err != nil {
+			t.Fatalf("%s failed against a healthy %d-test enumeration: %v\n%s", shard, listCount, err, out)
+		}
+		want := "(" + strconv.Itoa(listCount/shardTotal) + " tests)"
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("%s output = %q, want it to report %q", shard, out, want)
+		}
+	}
 }
 
 func TestCmdGCIntegrationManifestMatchesTaggedDeclarations(t *testing.T) {
@@ -491,6 +525,123 @@ case "$1" in
     printf '\0' >> "$capture_path"
     if [[ "$is_list" == "1" ]]; then
       printf '%s\n' TestDarwinAlpha TestDarwinBeta TestDarwinGamma 'ok  github.com/gastownhall/gascity/internal/runtime/tmux  0.001s'
+    fi
+    ;;
+  *)
+    echo "unexpected go command: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+
+	return integrationShardFixture{
+		binDir:      binDir,
+		homeDir:     filepath.Join(tmp, "home"),
+		capturePath: capturePath,
+	}
+}
+
+func newIntegrationShardFixtureWithListExit(t *testing.T, code int) integrationShardFixture {
+	t.Helper()
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	capturePath := filepath.Join(tmp, "go-test.capture")
+
+	writeExecutable(t, filepath.Join(binDir, "go"), `#!/usr/bin/env bash
+set -euo pipefail
+
+capture_path=`+shellQuote(capturePath)+`
+list_exit_code=`+shellQuote(strconv.Itoa(code))+`
+
+case "$1" in
+  env)
+    case "$2" in
+      GOPATH) echo /tmp/fake-gopath ;;
+      GOCACHE) echo /tmp/fake-gocache ;;
+      GOMODCACHE) echo /tmp/fake-gomodcache ;;
+      GOTMPDIR) echo "" ;;
+      GOROOT) echo /tmp/fake-goroot ;;
+      GOOS) echo linux ;;
+      GOARCH) echo amd64 ;;
+      *) echo "unexpected go env key: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  test)
+    is_list=0
+    for arg in "$@"; do
+      if [[ "$arg" == "-list" ]]; then
+        is_list=1
+      fi
+    done
+    printf '%s\0' "$@" >> "$capture_path"
+    printf '\0' >> "$capture_path"
+    if [[ "$is_list" == "1" ]]; then
+      exit "$list_exit_code"
+    fi
+    ;;
+  *)
+    echo "unexpected go command: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+
+	return integrationShardFixture{
+		binDir:      binDir,
+		homeDir:     filepath.Join(tmp, "home"),
+		capturePath: capturePath,
+	}
+}
+
+func newIntegrationShardFixtureWithSyntheticTests(t *testing.T, count int) integrationShardFixture {
+	t.Helper()
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	capturePath := filepath.Join(tmp, "go-test.capture")
+
+	var listing strings.Builder
+	for i := 1; i <= count; i++ {
+		fmt.Fprintf(&listing, "TestIntegrationCase%d\n", i)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "go"), `#!/usr/bin/env bash
+set -euo pipefail
+
+capture_path=`+shellQuote(capturePath)+`
+synthetic_listing=`+shellQuote(listing.String())+`
+
+case "$1" in
+  env)
+    case "$2" in
+      GOPATH) echo /tmp/fake-gopath ;;
+      GOCACHE) echo /tmp/fake-gocache ;;
+      GOMODCACHE) echo /tmp/fake-gomodcache ;;
+      GOTMPDIR) echo "" ;;
+      GOROOT) echo /tmp/fake-goroot ;;
+      GOOS) echo linux ;;
+      GOARCH) echo amd64 ;;
+      *) echo "unexpected go env key: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  test)
+    is_list=0
+    for arg in "$@"; do
+      if [[ "$arg" == "-list" ]]; then
+        is_list=1
+      fi
+    done
+    printf '%s\0' "$@" >> "$capture_path"
+    printf '\0' >> "$capture_path"
+    if [[ "$is_list" == "1" ]]; then
+      printf '%s' "$synthetic_listing"
     fi
     ;;
   *)

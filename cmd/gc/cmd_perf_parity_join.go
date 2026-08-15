@@ -220,6 +220,14 @@ type parityJoinFamilyReport struct {
 	Unclassified int     `json:"unclassified"`
 	MatchRate    float64 `json:"match_rate"`
 	BarMet       bool    `json:"bar_met"`
+	// BarStatus is the bar verdict as a word, and it is the only field that
+	// separates "every comparable pair disagreed" from "there were no
+	// comparable pairs". Both leave match_rate at 0 and bar_met at false,
+	// because a family with nothing to compare cannot clear a bar and does not
+	// count against one (it is skipped by the report-level blocker below). The
+	// human table has always drawn that distinction; a JSON reader could not,
+	// and read a no-data family as a total divergence.
+	BarStatus string `json:"bar_status"`
 }
 
 // parityJoinYieldEntry is one (site, reason) group of legacy stand-downs: the
@@ -448,6 +456,7 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 			row.MatchRate = float64(row.Matched) / float64(comparable)
 			row.BarMet = row.MatchRate >= opts.Bar
 		}
+		row.BarStatus = parityJoinBarCell(row)
 		report.JoinedActs += row.Joined
 		report.JoinedYields += row.YieldJoined
 		report.Families = append(report.Families, row)
@@ -1201,14 +1210,22 @@ func writeParityJoinReport(w io.Writer, report parityJoinReport) error {
 	return err
 }
 
+// The three bar verdicts. "no-data" is not a failing grade: it says the family
+// produced no comparable pair, so neither the rate nor bar_met carries meaning.
+const (
+	parityJoinBarNoData = "no-data"
+	parityJoinBarOK     = "ok"
+	parityJoinBarBelow  = "BELOW"
+)
+
 func parityJoinBarCell(row parityJoinFamilyReport) string {
 	switch {
 	case row.Matched+row.Mismatched == 0:
-		return "no-data"
+		return parityJoinBarNoData
 	case row.BarMet:
-		return "ok"
+		return parityJoinBarOK
 	default:
-		return "BELOW"
+		return parityJoinBarBelow
 	}
 }
 

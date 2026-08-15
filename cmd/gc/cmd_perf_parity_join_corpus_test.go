@@ -1022,3 +1022,63 @@ func TestParityJoinExcludeWindowIsHalfOpen(t *testing.T) {
 		t.Fatalf("unclassified = %+v, want none", report.Unclassified)
 	}
 }
+
+// A family whose joined pairs are ALL incomparable by design has no comparable
+// evidence at all, and the human table already says so: it prints "-" for the
+// rate and "no-data" in the bar cell. The JSON readout did not — it emitted the
+// zero values of match_rate and bar_met, which a reader (or a day-over-day
+// diff) cannot tell apart from "every pair disagreed, family below bar".
+//
+// That ambiguity is not hypothetical. The WD.15 day-4 readout reported D-SLEEP
+// as joined=6, match_rate=0.0, bar_met=false, and it was escalated as six real
+// disagreements; the corpus in fact held zero comparable pairs, every record
+// landing in the named fleet_only_no_wake_left_to_legacy class. The JSON must
+// carry the same no-data disclosure the table does.
+func TestParityJoinJSONDistinguishesNoComparablePairsFromZeroAgreement(t *testing.T) {
+	report := buildParityJoinReport(parityJoinCorpusRecords(t), parityJoinOptions{Bar: 0.995, Samples: 8})
+
+	sleep := parityJoinFamilyRow(t, report, parityJoinFamilySleep)
+	if sleep.Joined == 0 {
+		t.Fatalf("D-SLEEP joined = 0, want the corpus's joined pair (%+v)", sleep)
+	}
+	if sleep.Matched+sleep.Mismatched != 0 {
+		t.Fatalf("D-SLEEP comparable = %d, want 0 — the fixture's pair is incomparable by design (%+v)",
+			sleep.Matched+sleep.Mismatched, sleep)
+	}
+
+	encoded, err := json.Marshal(sleep)
+	if err != nil {
+		t.Fatalf("marshal family row: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal family row: %v", err)
+	}
+
+	status, ok := decoded["bar_status"].(string)
+	if !ok {
+		t.Fatalf("family row JSON has no bar_status string: %s", encoded)
+	}
+	if status != parityJoinBarNoData {
+		t.Fatalf("D-SLEEP bar_status = %q, want %q — joined>0 with no comparable pairs is not a 0%% match rate",
+			status, parityJoinBarNoData)
+	}
+
+	// The disclosure must stay honest for families that DO have evidence, or it
+	// just moves the ambiguity somewhere else.
+	deadline := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if deadline.Matched+deadline.Mismatched == 0 {
+		t.Fatalf("D-DEADLINE has no comparable pairs in the fixture; pick another family (%+v)", deadline)
+	}
+	if deadline.BarStatus == parityJoinBarNoData {
+		t.Fatalf("D-DEADLINE bar_status = %q, want a real verdict (%+v)", deadline.BarStatus, deadline)
+	}
+
+	// The table cell and the JSON field must be the same answer, always.
+	if got := parityJoinBarCell(sleep); got != sleep.BarStatus {
+		t.Fatalf("table cell %q != json bar_status %q for D-SLEEP", got, sleep.BarStatus)
+	}
+	if got := parityJoinBarCell(deadline); got != deadline.BarStatus {
+		t.Fatalf("table cell %q != json bar_status %q for D-DEADLINE", got, deadline.BarStatus)
+	}
+}

@@ -3,6 +3,7 @@
 package executionevent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -388,11 +389,12 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 // reconciliation pass must see that segment before deciding a close needs a
 // recovery fact; otherwise an event rotation can create a duplicate fact.
 func completedFacts(recorder events.Provider) ([]events.Event, error) {
+	ctx := context.Background()
 	filter := events.Filter{Type: events.ExecutionStepCompleted}
 	if inFlight, ok := recorder.(events.InFlightProvider); ok {
-		return inFlight.ListInFlight(filter)
+		return inFlight.ListInFlight(ctx, filter)
 	}
-	return recorder.List(filter)
+	return recorder.List(ctx, filter)
 }
 
 type completedFactKey struct {

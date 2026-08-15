@@ -183,7 +183,7 @@ func (h *charHarness) captureLane(t *testing.T, lane charLane, cmd charCommand) 
 	// only events emitted DURING this lane's runs count (delta vs the snapshot).
 	var eventLines []string
 	if fake, ok := h.cs.EventProvider().(*events.Fake); ok {
-		evs, _ := fake.List(events.Filter{})
+		evs, _ := fake.List(context.Background(), events.Filter{})
 		for _, e := range evs {
 			if e.Seq > evSeqBefore {
 				eventLines = append(eventLines, fmt.Sprintf("type=%s subject=%s", e.Type, e.Subject))

@@ -381,8 +381,8 @@ func (p transientCityEventProvider) Record(e events.Event) {
 	recorder.Close() //nolint:errcheck // best-effort
 }
 
-func (p transientCityEventProvider) List(filter events.Filter) ([]events.Event, error) {
-	return events.ReadFiltered(p.path, filter)
+func (p transientCityEventProvider) List(ctx context.Context, filter events.Filter) ([]events.Event, error) {
+	return events.ReadFilteredContext(ctx, p.path, filter)
 }
 
 func (p transientCityEventProvider) LatestSeq() (uint64, error) {

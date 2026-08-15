@@ -628,8 +628,8 @@ func (p *providerWithoutTail) Record(e Event) {
 	p.fake.Record(e)
 }
 
-func (p *providerWithoutTail) List(filter Filter) ([]Event, error) {
-	return p.fake.List(filter)
+func (p *providerWithoutTail) List(ctx context.Context, filter Filter) ([]Event, error) {
+	return p.fake.List(ctx, filter)
 }
 
 func (p *providerWithoutTail) LatestSeq() (uint64, error) {
@@ -659,7 +659,7 @@ func (p *blockingProvider) release() {
 
 func (p *blockingProvider) Record(Event) {}
 
-func (p *blockingProvider) List(Filter) ([]Event, error) {
+func (p *blockingProvider) List(context.Context, Filter) ([]Event, error) {
 	<-p.unblock
 	return nil, context.Canceled
 }

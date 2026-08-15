@@ -1191,7 +1191,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 
 	var firedEvents []events.Event
 	if ep != nil {
-		firedEvents, _ = ep.List(events.Filter{Type: events.OrderFired})
+		firedEvents, _ = ep.List(context.Background(), events.Filter{Type: events.OrderFired})
 	}
 	latestFired := make(map[string]time.Time)
 	for _, event := range firedEvents {

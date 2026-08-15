@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -22,7 +23,7 @@ func TestDoEventEmitSuccess(t *testing.T) {
 	}
 
 	// Verify the event was written.
-	evts, err := ep.List(events.Filter{})
+	evts, err := ep.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestDoEventEmitDefaultActor(t *testing.T) {
 	var stderr bytes.Buffer
 	doEventEmit(ep, events.BeadClosed, "gc-1", "", "", "", &stderr)
 
-	evts, err := ep.List(events.Filter{})
+	evts, err := ep.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestDoEventEmitGCAgentEnv(t *testing.T) {
 	var stderr bytes.Buffer
 	doEventEmit(ep, events.BeadCreated, "gc-1", "task", "", "", &stderr)
 
-	evts, err := ep.List(events.Filter{})
+	evts, err := ep.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestDoEventEmitPrefersAlias(t *testing.T) {
 	var stderr bytes.Buffer
 	doEventEmit(ep, events.BeadCreated, "gc-1", "task", "", "", &stderr)
 
-	evts, err := ep.List(events.Filter{})
+	evts, err := ep.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestDoEventEmitPayload(t *testing.T) {
 	var stderr bytes.Buffer
 	doEventEmit(ep, events.BeadCreated, "gc-42", "Fix login bug", "polecat", payload, &stderr)
 
-	evts, err := ep.List(events.Filter{})
+	evts, err := ep.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestDoEventEmitPayloadEmpty(t *testing.T) {
 	var stderr bytes.Buffer
 	doEventEmit(ep, events.BeadCreated, "gc-1", "task", "", "", &stderr)
 
-	evts, err := ep.List(events.Filter{})
+	evts, err := ep.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestDoEventEmitPayloadInvalidJSON(t *testing.T) {
 	}
 
 	// No event should be written.
-	evts, err := ep.List(events.Filter{})
+	evts, err := ep.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

@@ -416,7 +416,7 @@ func TestHandleEventEmit(t *testing.T) {
 	}
 
 	ep := state.eventProv.(*events.Fake)
-	evts, err := ep.List(events.Filter{Type: "deploy.completed"})
+	evts, err := ep.List(context.Background(), events.Filter{Type: "deploy.completed"})
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}

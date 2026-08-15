@@ -1,6 +1,7 @@
 package events
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -43,7 +44,7 @@ func TestFakeList_Limit(t *testing.T) {
 		f.Record(Event{Type: BeadCreated, Actor: "actor-a"})
 	}
 
-	got, err := f.List(Filter{Limit: 3})
+	got, err := f.List(context.Background(), Filter{Limit: 3})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -58,7 +59,7 @@ func TestMatchesFilter_SubjectFilter_ViaFake(t *testing.T) {
 	f.Record(Event{Type: BeadCreated, Subject: "gc-2"})
 	f.Record(Event{Type: BeadClosed, Subject: "gc-1"})
 
-	got, err := f.List(Filter{Subject: "gc-1"})
+	got, err := f.List(context.Background(), Filter{Subject: "gc-1"})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestMatchesFilter_UntilFilter_ViaFake(t *testing.T) {
 	f.Record(Event{Type: BeadCreated, Ts: past, Subject: "old"})
 	f.Record(Event{Type: BeadCreated, Ts: future, Subject: "new"})
 
-	got, err := f.List(Filter{Until: cutoff})
+	got, err := f.List(context.Background(), Filter{Until: cutoff})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

@@ -48,6 +48,13 @@ type TriggerOptions struct {
 	ConditionDir     string
 	ConditionEnv     []string
 	ConditionTimeout time.Duration
+	// EventCtx is the parent context for an event trigger's provider List
+	// call. When non-nil, canceling it — a controller shutdown, a config
+	// reload, or a canceled dispatch tick — aborts a slow fallback archive
+	// scan promptly instead of waiting it out. Bare callers (the API GET
+	// /v0/orders/check evaluator and the storeless CLI check) may leave it
+	// nil; checkEvent then falls back to context.Background().
+	EventCtx context.Context
 }
 
 var (
@@ -85,7 +92,7 @@ func CheckTriggerWithOptions(a Order, now time.Time, lastRunFn LastRunFunc, ep e
 	case "condition":
 		return checkCondition(a, opts)
 	case "event":
-		return checkEvent(a, ep, cursorFn)
+		return checkEvent(a, ep, cursorFn, opts)
 	case "manual":
 		return TriggerResult{Due: false, Reason: "manual trigger — use gc order run"}
 	case "webhook":
@@ -370,7 +377,7 @@ func mergeConditionEnv(environ, extra []string) []string {
 // checkEvent checks if matching events exist after the last cursor position.
 // Events emitted by order-tracking beads (controller bookkeeping) are excluded
 // to prevent event orders from self-firing on their own tracking-bead lifecycle.
-func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult {
+func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc, opts TriggerOptions) TriggerResult {
 	if ep == nil {
 		return TriggerResult{Due: false, Reason: "event: no events provider"}
 	}
@@ -379,7 +386,11 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		cursor = cursorFn(a.ScopedName())
 	}
 
-	matched, err := ep.List(events.Filter{
+	ctx := opts.EventCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	matched, err := ep.List(ctx, events.Filter{
 		Type:     a.On,
 		AfterSeq: cursor,
 	})

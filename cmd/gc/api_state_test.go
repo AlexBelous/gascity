@@ -2133,7 +2133,7 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
 	cs.startBeadEventWatcher(ctx)
 
-	got, listErr := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	got, listErr := ep.List(context.Background(), events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if listErr != nil {
 		t.Fatal(listErr)
 	}
@@ -2173,7 +2173,7 @@ func TestControllerStateReconcileExecutionCompletionsScansConfiguredRigStores(t 
 	}
 	cs.reconcileExecutionCompletions()
 
-	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	completed, err := ep.List(context.Background(), events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2185,7 +2185,7 @@ func TestControllerStateReconcileExecutionCompletionsScansConfiguredRigStores(t 
 	}
 
 	cs.reconcileExecutionCompletions()
-	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	completed, err = ep.List(context.Background(), events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3614,7 +3614,7 @@ func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
 				t.Fatalf("runtime state ExplicitCity = (%v, %v), want (%v, true)", v, ok, tc.wantSuspended)
 			}
 
-			gotEvents, err := ep.List(events.Filter{})
+			gotEvents, err := ep.List(context.Background(), events.Filter{})
 			if err != nil {
 				t.Fatalf("list events: %v", err)
 			}

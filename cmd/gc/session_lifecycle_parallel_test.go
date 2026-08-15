@@ -4309,7 +4309,7 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 		if commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
 			t.Fatal("commitStartResult returned true, want false when metadata batch fails")
 		}
-		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
+		woke, err := rec.List(context.Background(), events.Filter{Type: events.SessionWoke})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -4333,7 +4333,7 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 		if !commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
 			t.Fatal("commitStartResult returned false for successful start")
 		}
-		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
+		woke, err := rec.List(context.Background(), events.Filter{Type: events.SessionWoke})
 		if err != nil {
 			t.Fatal(err)
 		}

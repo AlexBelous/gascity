@@ -46,8 +46,9 @@ func (f *Fake) Record(e Event) {
 	f.notify = make(chan struct{})
 }
 
-// List returns events matching the filter from the in-memory store.
-func (f *Fake) List(filter Filter) ([]Event, error) {
+// List returns events matching the filter from the in-memory store. ctx is
+// unused: the in-memory store has no archive scan to abort.
+func (f *Fake) List(_ context.Context, filter Filter) ([]Event, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.broken {

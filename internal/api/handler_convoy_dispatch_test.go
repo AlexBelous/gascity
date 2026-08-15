@@ -1246,7 +1246,7 @@ type incrementingLatestSeqProvider struct {
 
 func (p *incrementingLatestSeqProvider) Record(events.Event) {}
 
-func (p *incrementingLatestSeqProvider) List(events.Filter) ([]events.Event, error) {
+func (p *incrementingLatestSeqProvider) List(context.Context, events.Filter) ([]events.Event, error) {
 	return nil, nil
 }
 

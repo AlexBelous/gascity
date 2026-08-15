@@ -340,7 +340,7 @@ func waitForSupervisorRequestPhase(t *testing.T, provider events.Provider, phase
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		evts, err := provider.List(events.Filter{Type: events.SupervisorRequest})
+		evts, err := provider.List(context.Background(), events.Filter{Type: events.SupervisorRequest})
 		if err != nil {
 			t.Fatalf("list supervisor request events: %v", err)
 		}

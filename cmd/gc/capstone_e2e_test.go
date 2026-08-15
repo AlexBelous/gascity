@@ -260,7 +260,7 @@ func (h *capstoneHarness) assertEventPair(t *testing.T, requestID string) {
 	if !ok {
 		t.Fatalf("event provider is %T, want *events.Fake", h.cs.EventProvider())
 	}
-	all, err := fake.List(events.Filter{})
+	all, err := fake.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}

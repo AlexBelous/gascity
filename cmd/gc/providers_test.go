@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -806,7 +807,7 @@ provider = "fake"
 	}
 	t.Cleanup(func() { _ = ep.Close() })
 
-	if _, err := ep.List(events.Filter{}); err != nil {
+	if _, err := ep.List(context.Background(), events.Filter{}); err != nil {
 		t.Fatalf("openCityEventsProvider() did not use included fake provider: %v", err)
 	}
 }

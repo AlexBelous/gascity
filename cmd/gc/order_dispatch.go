@@ -629,7 +629,10 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// Thread the dispatch tick's context into the condition check so a
 		// shutdown, reload, or canceled tick interrupts a slow check promptly
 		// instead of waiting out its (now operator-configurable) check_timeout.
+		// The same tick context bounds an event trigger's provider List so a
+		// shutdown or reload aborts a slow fallback archive scan the same way.
 		triggerOpts.ConditionCtx = ctx
+		triggerOpts.EventCtx = ctx
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)

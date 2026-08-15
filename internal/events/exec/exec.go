@@ -58,14 +58,16 @@ func (p *Provider) Record(e events.Event) {
 		p.logErr("record: marshal: %v", err)
 		return
 	}
-	if _, err := p.run(data, "record"); err != nil {
+	if _, err := p.run(context.Background(), data, "record"); err != nil {
 		p.logErr("record: %v", err)
 	}
 }
 
 // List delegates to: script list with JSON filter on stdin, then applies the
 // SDK filter locally so optional script filtering cannot weaken the contract.
-func (p *Provider) List(filter events.Filter) ([]events.Event, error) {
+// ctx is merged with the provider's own timeout so caller cancellation aborts
+// the subprocess promptly rather than riding out the full timeout.
+func (p *Provider) List(ctx context.Context, filter events.Filter) ([]events.Event, error) {
 	p.ensureRunning()
 	scriptFilter := listScriptFilter{
 		Type:     filter.Type,
@@ -77,7 +79,7 @@ func (p *Provider) List(filter events.Filter) ([]events.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("exec events provider: marshal filter: %w", err)
 	}
-	out, err := p.run(data, "list")
+	out, err := p.run(ctx, data, "list")
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +96,7 @@ func (p *Provider) List(filter events.Filter) ([]events.Event, error) {
 // LatestSeq delegates to: script latest-seq
 func (p *Provider) LatestSeq() (uint64, error) {
 	p.ensureRunning()
-	out, err := p.run(nil, "latest-seq")
+	out, err := p.run(context.Background(), nil, "latest-seq")
 	if err != nil {
 		return 0, err
 	}
@@ -137,14 +139,16 @@ func (p *Provider) Close() error {
 // lifetime. Exit 2 (unknown op) is treated as success.
 func (p *Provider) ensureRunning() {
 	p.ready.Do(func() {
-		_, _ = p.run(nil, "ensure-running")
+		_, _ = p.run(context.Background(), nil, "ensure-running")
 	})
 }
 
 // run executes the script with the given args, optionally piping stdinData
-// to its stdin. Returns the trimmed stdout on success.
-func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+// to its stdin. Returns the trimmed stdout on success. The subprocess's
+// deadline is the earlier of ctx and the provider's own timeout, so a
+// caller cancellation aborts the subprocess without waiting out the timeout.
+func (p *Provider) run(ctx context.Context, stdinData []byte, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
@@ -160,6 +164,9 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 
 	err := cmd.Run()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("exec events provider %s %s: %w", p.script, strings.Join(args, " "), ctxErr)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if exitErr.ExitCode() == 2 {

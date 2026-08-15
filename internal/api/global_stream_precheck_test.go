@@ -23,7 +23,9 @@ type afterSeqRecordingProvider struct {
 
 func (p *afterSeqRecordingProvider) Record(events.Event) {}
 
-func (p *afterSeqRecordingProvider) List(events.Filter) ([]events.Event, error) { return nil, nil }
+func (p *afterSeqRecordingProvider) List(context.Context, events.Filter) ([]events.Event, error) {
+	return nil, nil
+}
 
 func (p *afterSeqRecordingProvider) LatestSeq() (uint64, error) {
 	p.mu.Lock()

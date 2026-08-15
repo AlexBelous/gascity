@@ -89,14 +89,14 @@ func waitForSessionCreateResult(t *testing.T, prov events.Provider, requestID st
 	t.Helper()
 	deadline := time.Now().Add(testEventTimeout)
 	for time.Now().Before(deadline) {
-		successEvents, _ := prov.List(events.Filter{Type: events.RequestResultSessionCreate})
+		successEvents, _ := prov.List(context.Background(), events.Filter{Type: events.RequestResultSessionCreate})
 		for _, e := range successEvents {
 			var p SessionCreateSucceededPayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil && requestIDMatches(p.RequestID, requestID) {
 				return &p, nil
 			}
 		}
-		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
+		failedEvents, _ := prov.List(context.Background(), events.Filter{Type: events.RequestFailed})
 		for _, e := range failedEvents {
 			var p RequestFailedPayload
 			if json.Unmarshal(e.Payload, &p) == nil && p.Operation == RequestOperationSessionCreate && requestIDMatches(p.RequestID, requestID) {
@@ -136,14 +136,14 @@ func waitForSessionMessageResult(t *testing.T, prov events.Provider, requestID s
 	t.Helper()
 	deadline := time.Now().Add(testEventTimeout)
 	for time.Now().Before(deadline) {
-		successEvents, _ := prov.List(events.Filter{Type: events.RequestResultSessionMessage})
+		successEvents, _ := prov.List(context.Background(), events.Filter{Type: events.RequestResultSessionMessage})
 		for _, e := range successEvents {
 			var p SessionMessageSucceededPayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil && requestIDMatches(p.RequestID, requestID) {
 				return &p, nil
 			}
 		}
-		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
+		failedEvents, _ := prov.List(context.Background(), events.Filter{Type: events.RequestFailed})
 		for _, e := range failedEvents {
 			var p RequestFailedPayload
 			if json.Unmarshal(e.Payload, &p) == nil && p.Operation == RequestOperationSessionMessage && requestIDMatches(p.RequestID, requestID) {
@@ -161,14 +161,14 @@ func waitForSessionSubmitResult(t *testing.T, prov events.Provider, requestID st
 	t.Helper()
 	deadline := time.Now().Add(testEventTimeout)
 	for time.Now().Before(deadline) {
-		successEvents, _ := prov.List(events.Filter{Type: events.RequestResultSessionSubmit})
+		successEvents, _ := prov.List(context.Background(), events.Filter{Type: events.RequestResultSessionSubmit})
 		for _, e := range successEvents {
 			var p SessionSubmitSucceededPayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil && requestIDMatches(p.RequestID, requestID) {
 				return &p, nil
 			}
 		}
-		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
+		failedEvents, _ := prov.List(context.Background(), events.Filter{Type: events.RequestFailed})
 		for _, e := range failedEvents {
 			var p RequestFailedPayload
 			if json.Unmarshal(e.Payload, &p) == nil && p.Operation == RequestOperationSessionSubmit && requestIDMatches(p.RequestID, requestID) {
@@ -190,7 +190,7 @@ func waitForRequestFailed(t *testing.T, prov events.Provider, requestID string, 
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
+		failedEvents, _ := prov.List(context.Background(), events.Filter{Type: events.RequestFailed})
 		for _, e := range failedEvents {
 			var p RequestFailedPayload
 			if json.Unmarshal(e.Payload, &p) == nil && p.RequestID == requestID {
@@ -208,13 +208,13 @@ func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, time
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		evts, _ := prov.List(events.Filter{Type: events.RequestResultSessionCreate})
+		evts, _ := prov.List(context.Background(), events.Filter{Type: events.RequestResultSessionCreate})
 		if len(evts) >= n {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	evts, _ := prov.List(events.Filter{Type: events.RequestResultSessionCreate})
+	evts, _ := prov.List(context.Background(), events.Filter{Type: events.RequestResultSessionCreate})
 	t.Fatalf("timed out waiting for %d session create events (got %d)", n, len(evts))
 }
 
@@ -2749,7 +2749,7 @@ func TestHandleSessionCreateAsyncEmitsBeforeOptionalMetadataPersistenceCompletes
 
 	deadline := time.Now().Add(250 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		successEvents, _ := fs.eventProv.List(events.Filter{Type: events.RequestResultSessionCreate})
+		successEvents, _ := fs.eventProv.List(context.Background(), events.Filter{Type: events.RequestResultSessionCreate})
 		for _, e := range successEvents {
 			var p SessionCreateSucceededPayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil && requestIDMatches(p.RequestID, accepted.RequestID) {

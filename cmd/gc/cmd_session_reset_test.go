@@ -541,7 +541,7 @@ func TestCmdSessionKill_RecordsStoppedWhenCircuitBreakerResetFails(t *testing.T)
 		t.Fatalf("NewFileRecorder(events): %v", err)
 	}
 	defer rec.Close() //nolint:errcheck
-	recorded, err := rec.List(events.Filter{Type: events.SessionStopped, Subject: bead.ID})
+	recorded, err := rec.List(context.Background(), events.Filter{Type: events.SessionStopped, Subject: bead.ID})
 	if err != nil {
 		t.Fatalf("List(SessionStopped): %v", err)
 	}

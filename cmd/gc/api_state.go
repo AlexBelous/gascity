@@ -632,7 +632,7 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		Recorder:          cs.eventProv,
 		Stderr:            os.Stderr,
 		Mail:              mailProv,
-		LastRunAt:         supervisor.SeedLastRunAt(cs.eventProv),
+		LastRunAt:         supervisor.SeedLastRunAt(ctx, cs.eventProv),
 		DiskFreeBytes:     doltContainerFreeBytesFunc,
 		DiskMinFreeBytes:  doltDiskMinFreeBytes(),
 		DiskWarnFreeBytes: doltDiskWarnFreeBytes(),

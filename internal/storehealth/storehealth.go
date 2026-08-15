@@ -9,6 +9,7 @@
 package storehealth
 
 import (
+	"context"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -119,7 +120,7 @@ func WalkSize(path string) int64 {
 // "failed") of the most-recent store-maintenance event in provider.
 // Zero time and empty status when no events, provider is nil, or the
 // provider returns an error.
-func LastMaintenance(ep events.Provider) (time.Time, string) {
+func LastMaintenance(ctx context.Context, ep events.Provider) (time.Time, string) {
 	if ep == nil {
 		return time.Time{}, ""
 	}
@@ -134,7 +135,7 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		{events.StoreMaintenanceDone, "success"},
 		{events.StoreMaintenanceFailed, "failed"},
 	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
+		evts, err := ep.List(ctx, events.Filter{Type: spec.typ})
 		if err != nil {
 			continue
 		}

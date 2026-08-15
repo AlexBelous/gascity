@@ -339,7 +339,7 @@ func TestFakeList(t *testing.T) {
 	f.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
 	f.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 
-	all, err := f.List(Filter{})
+	all, err := f.List(context.Background(), Filter{})
 	if err != nil {
 		t.Fatalf("List(all): %v", err)
 	}
@@ -347,7 +347,7 @@ func TestFakeList(t *testing.T) {
 		t.Fatalf("List(all) = %d, want 3", len(all))
 	}
 
-	byType, err := f.List(Filter{Type: BeadCreated})
+	byType, err := f.List(context.Background(), Filter{Type: BeadCreated})
 	if err != nil {
 		t.Fatalf("List(type): %v", err)
 	}
@@ -412,7 +412,7 @@ func TestFakeLatestSeq(t *testing.T) {
 func TestFailFakeErrors(t *testing.T) {
 	f := NewFailFake()
 
-	_, err := f.List(Filter{})
+	_, err := f.List(context.Background(), Filter{})
 	if err == nil {
 		t.Error("List: expected error, got nil")
 	}
@@ -969,7 +969,7 @@ func TestFileRecorderList(t *testing.T) {
 	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 
 	// List all
-	all, err := rec.List(Filter{})
+	all, err := rec.List(context.Background(), Filter{})
 	if err != nil {
 		t.Fatalf("List(all): %v", err)
 	}
@@ -978,7 +978,7 @@ func TestFileRecorderList(t *testing.T) {
 	}
 
 	// List filtered by type
-	created, err := rec.List(Filter{Type: BeadCreated})
+	created, err := rec.List(context.Background(), Filter{Type: BeadCreated})
 	if err != nil {
 		t.Fatalf("List(type): %v", err)
 	}
@@ -1401,7 +1401,7 @@ func TestFileRecorderFlockSucceedsAfterShortContention(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", stderr.String())
 	}
-	got, err := rec.List(Filter{})
+	got, err := rec.List(context.Background(), Filter{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

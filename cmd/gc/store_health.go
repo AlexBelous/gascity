@@ -51,7 +51,7 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsM
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows, measured := liveRowCount(store)
-	lastAt, lastStatus := storehealth.LastMaintenance(ep)
+	lastAt, lastStatus := storehealth.LastMaintenance(context.Background(), ep)
 	return storeHealthFromInputs(cityPath, size, rows, measured, lastAt, lastStatus)
 }
 

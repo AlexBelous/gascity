@@ -1607,7 +1607,7 @@ func TestCityRuntimePatrolReconcilesGraphStepClosedAfterWatcherStartup(t *testin
 	if err := backing.Close(step.ID); err != nil {
 		t.Fatal(err)
 	}
-	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	completed, err := ep.List(ctx, events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1631,7 +1631,7 @@ func TestCityRuntimePatrolReconcilesGraphStepClosedAfterWatcherStartup(t *testin
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
 	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "poke")
-	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	completed, err = ep.List(ctx, events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1641,7 +1641,7 @@ func TestCityRuntimePatrolReconcilesGraphStepClosedAfterWatcherStartup(t *testin
 
 	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
 
-	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	completed, err = ep.List(ctx, events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1653,7 +1653,7 @@ func TestCityRuntimePatrolReconcilesGraphStepClosedAfterWatcherStartup(t *testin
 	}
 
 	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
-	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	completed, err = ep.List(ctx, events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if err != nil {
 		t.Fatal(err)
 	}

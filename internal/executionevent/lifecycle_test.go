@@ -2,6 +2,7 @@ package executionevent
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -102,7 +103,7 @@ func TestReconcileCompletedRepairsMissingFactAndRetainsConflictingHistory(t *tes
 	if got := ReconcileCompleted(recorder, beads.GraphStore{Store: graph}, "execution-reconcile"); got != 0 {
 		t.Fatalf("second ReconcileCompleted = %d, want exact-fact no-op", got)
 	}
-	completed, err := recorder.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	completed, err := recorder.List(context.Background(), events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +157,7 @@ func TestReconcileCompletedDoesNotDuplicateFactDuringFileRecorderRotation(t *tes
 	if got := ReconcileCompleted(recorder, beads.GraphStore{Store: graph}, "execution-reconcile"); got != 0 {
 		t.Fatalf("ReconcileCompleted during rotation = %d, want 0 duplicate facts", got)
 	}
-	all, err := recorder.ListInFlight(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	all, err := recorder.ListInFlight(context.Background(), events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +246,7 @@ func TestReconcileCompletedStoresPreloadsExactFactsOnceAndFailsClosed(t *testing
 		t.Fatalf("completed fact List calls after second pass = %d, want one per pass", provider.listCalls)
 	}
 
-	before, err := backing.List(events.Filter{Type: events.ExecutionStepCompleted})
+	before, err := backing.List(context.Background(), events.Filter{Type: events.ExecutionStepCompleted})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +257,7 @@ func TestReconcileCompletedStoresPreloadsExactFactsOnceAndFailsClosed(t *testing
 	if failing.listCalls != 1 {
 		t.Fatalf("failed completed fact List calls = %d, want one", failing.listCalls)
 	}
-	after, err := backing.List(events.Filter{Type: events.ExecutionStepCompleted})
+	after, err := backing.List(context.Background(), events.Filter{Type: events.ExecutionStepCompleted})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,12 +272,12 @@ type countingEventProvider struct {
 	listErr   error
 }
 
-func (p *countingEventProvider) List(filter events.Filter) ([]events.Event, error) {
+func (p *countingEventProvider) List(ctx context.Context, filter events.Filter) ([]events.Event, error) {
 	p.listCalls++
 	if p.listErr != nil {
 		return nil, p.listErr
 	}
-	return p.Provider.List(filter)
+	return p.Provider.List(ctx, filter)
 }
 
 func TestCompletedFactKeyDistinguishesUnknownFromKnownEmptyTopology(t *testing.T) {

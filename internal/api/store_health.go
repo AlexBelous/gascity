@@ -87,7 +87,7 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	if err != nil {
 		return nil, err
 	}
-	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
+	lastAt, lastStatus := storehealth.LastMaintenance(ctx, s.state.EventProvider())
 	// countBeadStoreRows returns an error (handled above) rather than a
 	// fabricated count on every failure path, so rows here is always a
 	// real measurement.

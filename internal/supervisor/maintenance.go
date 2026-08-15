@@ -693,11 +693,11 @@ func (s *sqlDoltOps) Close() error {
 //
 // Query failures are swallowed by design: maintenance scheduling is
 // best-effort and must tolerate a missing or unreadable event log.
-func SeedLastRunAt(provider events.Provider) time.Time {
+func SeedLastRunAt(ctx context.Context, provider events.Provider) time.Time {
 	if provider == nil {
 		return time.Time{}
 	}
-	evts, err := provider.List(events.Filter{Type: events.StoreMaintenanceDone})
+	evts, err := provider.List(ctx, events.Filter{Type: events.StoreMaintenanceDone})
 	if err != nil {
 		return time.Time{}
 	}

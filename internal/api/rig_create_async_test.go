@@ -197,7 +197,7 @@ func TestRigProvisionProgressEmitPanicIsSafe(t *testing.T) {
 	waitForEventType(t, state.eventProv.(*panicOnTypeProvider).Fake, events.RequestResultRigCreate, 3*time.Second)
 
 	// And no request.failed was emitted.
-	evs, _ := state.eventProv.List(events.Filter{})
+	evs, _ := state.eventProv.List(context.Background(), events.Filter{})
 	for _, e := range evs {
 		if e.Type == events.RequestFailed {
 			t.Fatalf("request.failed emitted despite recover-in-closure: %s", e.Payload)
@@ -209,7 +209,7 @@ func waitForEventType(t *testing.T, prov events.Provider, eventType string, time
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		evs, err := prov.List(events.Filter{})
+		evs, err := prov.List(context.Background(), events.Filter{})
 		if err == nil {
 			for _, e := range evs {
 				if e.Type == eventType {

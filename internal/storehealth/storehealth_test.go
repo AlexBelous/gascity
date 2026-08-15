@@ -1,6 +1,7 @@
 package storehealth
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -208,7 +209,7 @@ func TestWalkSizeSumsFiles(t *testing.T) {
 }
 
 func TestLastMaintenanceNilProvider(t *testing.T) {
-	ts, status := LastMaintenance(nil)
+	ts, status := LastMaintenance(context.Background(), nil)
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("LastMaintenance(nil) = (%v,%q), want (zero,\"\")", ts, status)
 	}
@@ -225,7 +226,7 @@ func TestLastMaintenanceReturnsLatestAcrossTypes(t *testing.T) {
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
 	ep.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
 
-	ts, status := LastMaintenance(ep)
+	ts, status := LastMaintenance(context.Background(), ep)
 	if !ts.Equal(newer) {
 		t.Fatalf("ts = %v, want %v", ts, newer)
 	}
@@ -242,7 +243,7 @@ func TestLastMaintenanceOnlyDoneEvents(t *testing.T) {
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: t1, Payload: payload})
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: t2, Payload: payload})
 
-	ts, status := LastMaintenance(ep)
+	ts, status := LastMaintenance(context.Background(), ep)
 	if !ts.Equal(t2) {
 		t.Fatalf("ts = %v, want %v", ts, t2)
 	}
@@ -253,7 +254,7 @@ func TestLastMaintenanceOnlyDoneEvents(t *testing.T) {
 
 func TestLastMaintenanceNoEvents(t *testing.T) {
 	ep := events.NewFake()
-	ts, status := LastMaintenance(ep)
+	ts, status := LastMaintenance(context.Background(), ep)
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
 	}

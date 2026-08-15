@@ -403,8 +403,10 @@ type Recorder interface {
 type Provider interface {
 	Recorder
 
-	// List returns events matching the filter.
-	List(filter Filter) ([]Event, error)
+	// List returns events matching the filter. Implementations that scan
+	// multiple archives must check ctx for cancellation between archives so
+	// a caller disconnect aborts a slow fallback scan promptly.
+	List(ctx context.Context, filter Filter) ([]Event, error)
 
 	// LatestSeq returns the highest sequence number, or 0 if empty.
 	LatestSeq() (uint64, error)
@@ -440,7 +442,7 @@ type TailProvider interface {
 // a whole seq range mid-rotation. Providers with no such window (in-memory
 // fakes, exec scripts) need not implement it.
 type InFlightProvider interface {
-	ListInFlight(filter Filter) ([]Event, error)
+	ListInFlight(ctx context.Context, filter Filter) ([]Event, error)
 }
 
 // Watcher yields events one at a time. Created by [Provider.Watch].

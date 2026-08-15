@@ -252,7 +252,7 @@ func TestConditionalWritesDegradedRecorder(t *testing.T) {
 		cb := conditionalWritesDegradedRecorder(fake, flags, "rig/r1")
 		cb(beads.ConditionalWritesDegrade{StoreKind: "BdStore", Mode: "auto", Reason: "bd lacks --if-revision"})
 
-		recorded, err := fake.List(events.Filter{})
+		recorded, err := fake.List(context.Background(), events.Filter{})
 		if err != nil {
 			t.Fatal(err)
 		}

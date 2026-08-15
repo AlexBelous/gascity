@@ -202,7 +202,7 @@ func TestHistory_RingBufferBoundedAt16(t *testing.T) {
 
 func TestSeedLastRunAt_NoEventsReturnsZero(t *testing.T) {
 	t.Parallel()
-	got := SeedLastRunAt(events.NewFake())
+	got := SeedLastRunAt(context.Background(), events.NewFake())
 	if !got.IsZero() {
 		t.Fatalf("SeedLastRunAt(empty provider) = %v; want zero", got)
 	}
@@ -210,7 +210,7 @@ func TestSeedLastRunAt_NoEventsReturnsZero(t *testing.T) {
 
 func TestSeedLastRunAt_NilProviderReturnsZero(t *testing.T) {
 	t.Parallel()
-	got := SeedLastRunAt(nil)
+	got := SeedLastRunAt(context.Background(), nil)
 	if !got.IsZero() {
 		t.Fatalf("SeedLastRunAt(nil) = %v; want zero", got)
 	}
@@ -225,7 +225,7 @@ func TestSeedLastRunAt_ReturnsLatestDoneTimestamp(t *testing.T) {
 	fake.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: later})
 	fake.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: earlier})
 
-	got := SeedLastRunAt(fake)
+	got := SeedLastRunAt(context.Background(), fake)
 	if !got.Equal(later) {
 		t.Fatalf("SeedLastRunAt = %v; want %v (latest event ts)", got, later)
 	}
@@ -237,7 +237,7 @@ func TestSeedLastRunAt_IgnoresUnrelatedEventTypes(t *testing.T) {
 	fake.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: time.Now()})
 	fake.Record(events.Event{Type: "controller.started", Ts: time.Now()})
 
-	got := SeedLastRunAt(fake)
+	got := SeedLastRunAt(context.Background(), fake)
 	if !got.IsZero() {
 		t.Fatalf("SeedLastRunAt (only non-done events) = %v; want zero", got)
 	}
@@ -245,7 +245,7 @@ func TestSeedLastRunAt_IgnoresUnrelatedEventTypes(t *testing.T) {
 
 func TestSeedLastRunAt_BrokenProviderReturnsZero(t *testing.T) {
 	t.Parallel()
-	got := SeedLastRunAt(events.NewFailFake())
+	got := SeedLastRunAt(context.Background(), events.NewFailFake())
 	if !got.IsZero() {
 		t.Fatalf("SeedLastRunAt(failing provider) = %v; want zero (errors swallowed)", got)
 	}

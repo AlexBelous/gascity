@@ -150,7 +150,7 @@ func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 	var all []TaggedEvent
 	timeout := m.providerOperationTimeout()
 	results, timedOut := collectProviderCallResults(providers, timeout, func(_ string, p Provider) ([]Event, error) {
-		return p.List(providerFilter)
+		return p.List(context.Background(), providerFilter)
 	})
 	for _, city := range timedOut {
 		log.Printf("events: list all timed out for city %q after %s", city, timeout)
@@ -192,7 +192,7 @@ func (m *Multiplexer) ListTail(filter Filter, limit int) ([]TaggedEvent, error) 
 		if tail, ok := p.(TailProvider); ok {
 			evts, err = tail.ListTail(providerFilter, limit)
 		} else {
-			evts, err = p.List(providerFilter)
+			evts, err = p.List(context.Background(), providerFilter)
 			if limit < len(evts) {
 				evts = evts[len(evts)-limit:]
 			}

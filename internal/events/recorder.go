@@ -522,9 +522,11 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	}, nil
 }
 
-// List returns events matching the filter from the underlying file.
-func (r *FileRecorder) List(filter Filter) ([]Event, error) {
-	return ReadFiltered(r.path, filter)
+// List returns events matching the filter from the underlying file. ctx is
+// checked between archives during a fallback scan so a caller disconnect
+// aborts promptly instead of waiting out the full archive set.
+func (r *FileRecorder) List(ctx context.Context, filter Filter) ([]Event, error) {
+	return ReadFilteredContext(ctx, r.path, filter)
 }
 
 // ListInFlight returns events matching the filter, including any still stranded
@@ -532,8 +534,8 @@ func (r *FileRecorder) List(filter Filter) ([]Event, error) {
 // compression window that plain List cannot see. Results are seq-ordered and
 // de-duplicated by seq. It implements [InFlightProvider] so the event-list
 // keyset walk cannot skip a just-rotated segment mid-rotation.
-func (r *FileRecorder) ListInFlight(filter Filter) ([]Event, error) {
-	return ReadFilteredWithInFlight(r.path, filter)
+func (r *FileRecorder) ListInFlight(ctx context.Context, filter Filter) ([]Event, error) {
+	return ReadFilteredWithInFlightContext(ctx, r.path, filter)
 }
 
 // ListTail returns trailing matching events from the underlying file.

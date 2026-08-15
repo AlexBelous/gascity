@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -396,7 +397,7 @@ func TestCityRegistryTransientCityEventProvidersIncludesRegisteredAndPendingCiti
 		if _, ok := provider.(*events.FileRecorder); ok {
 			t.Fatalf("provider %q should not retain a live file recorder", name)
 		}
-		list, err := provider.List(events.Filter{Type: events.CityCreated})
+		list, err := provider.List(context.Background(), events.Filter{Type: events.CityCreated})
 		if err != nil {
 			t.Fatalf("List(%s): %v", name, err)
 		}

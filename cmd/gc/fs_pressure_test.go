@@ -256,7 +256,7 @@ func TestCityRuntimeTickSkipsBeforeManagedDoltAndDemandUnderFSPressure(t *testin
 		t.Fatalf("stderr = %q, want FS pressure skip warning", stderr.String())
 	}
 
-	evts, err := rec.List(events.Filter{})
+	evts, err := rec.List(context.Background(), events.Filter{})
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestCityRuntimeTickSkipsDueOrderDispatchUnderFSPressure(t *testing.T) {
 	if !strings.Contains(stderr.String(), "FS pressure high") {
 		t.Fatalf("stderr = %q, want FS pressure skip warning", stderr.String())
 	}
-	evts, err := rec.List(events.Filter{Type: events.SupervisorFSPressureSkippedTick})
+	evts, err := rec.List(context.Background(), events.Filter{Type: events.SupervisorFSPressureSkippedTick})
 	if err != nil {
 		t.Fatalf("list FS pressure events: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestCityRuntimeTickForcesRunAfterMaxConsecutiveFSPressureSkips(t *testing.T
 	}
 
 	wantConsecutive := []int{1, 1, 2, 3, 4, 5, 1}
-	evts, err := rec.List(events.Filter{Type: events.SupervisorFSPressureSkippedTick})
+	evts, err := rec.List(context.Background(), events.Filter{Type: events.SupervisorFSPressureSkippedTick})
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestCityRuntimeManualReloadBypassesFSPressureSkipUntilDemandRefresh(t *test
 	default:
 		t.Fatal("manual reload did not reply after demand refresh")
 	}
-	evts, err := rec.List(events.Filter{Type: events.SupervisorFSPressureSkippedTick})
+	evts, err := rec.List(context.Background(), events.Filter{Type: events.SupervisorFSPressureSkippedTick})
 	if err != nil {
 		t.Fatalf("list FS pressure events: %v", err)
 	}

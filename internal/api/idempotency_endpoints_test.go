@@ -195,7 +195,7 @@ func TestMailReplyIdempotentReplay(t *testing.T) {
 	}
 	// The MailReplied event must have fired exactly once.
 	ep := state.eventProv.(*events.Fake)
-	evts, err := ep.List(events.Filter{Type: events.MailReplied})
+	evts, err := ep.List(context.Background(), events.Filter{Type: events.MailReplied})
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestEventEmitIdempotentReplay(t *testing.T) {
 	}
 	// The event must have been appended exactly once.
 	ep := state.eventProv.(*events.Fake)
-	evts, err := ep.List(events.Filter{Type: "deploy.completed"})
+	evts, err := ep.List(context.Background(), events.Filter{Type: "deploy.completed"})
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestExtMsgAdapterRegisterIdempotentReplay(t *testing.T) {
 	}
 	// The ExtMsgAdapterAdded event must have fired exactly once.
 	ep := state.eventProv.(*events.Fake)
-	evts, err := ep.List(events.Filter{Type: events.ExtMsgAdapterAdded})
+	evts, err := ep.List(context.Background(), events.Filter{Type: events.ExtMsgAdapterAdded})
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}

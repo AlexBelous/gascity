@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -105,7 +106,7 @@ func TestNewEventsProviderForNameLegacyWrapper(t *testing.T) {
 		t.Fatalf("newEventsProviderForName: %v", err)
 	}
 	defer ep.Close() //nolint:errcheck // test cleanup
-	if _, err := ep.List(events.Filter{}); err != nil {
+	if _, err := ep.List(context.Background(), events.Filter{}); err != nil {
 		t.Fatalf("legacy wrapper did not create fake provider: %v", err)
 	}
 }

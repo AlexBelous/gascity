@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -213,7 +214,7 @@ type archiveBlindTailProvider struct {
 }
 
 func (p *archiveBlindTailProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
-	all, err := p.List(filter)
+	all, err := p.List(context.Background(), filter)
 	if err != nil {
 		return nil, err
 	}
@@ -300,8 +301,8 @@ type rotationBlindProvider struct {
 
 // List models ReadFiltered: canonical archives + active, MISSING the in-flight
 // rotating segment.
-func (p *rotationBlindProvider) List(filter events.Filter) ([]events.Event, error) {
-	all, err := p.Fake.List(filter)
+func (p *rotationBlindProvider) List(ctx context.Context, filter events.Filter) ([]events.Event, error) {
+	all, err := p.Fake.List(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -317,13 +318,13 @@ func (p *rotationBlindProvider) List(filter events.Filter) ([]events.Event, erro
 
 // ListInFlight models ReadFilteredWithInFlight: the complete history including
 // the in-flight rotating segment.
-func (p *rotationBlindProvider) ListInFlight(filter events.Filter) ([]events.Event, error) {
-	return p.Fake.List(filter)
+func (p *rotationBlindProvider) ListInFlight(ctx context.Context, filter events.Filter) ([]events.Event, error) {
+	return p.Fake.List(ctx, filter)
 }
 
 // ListTail models the active-file-only backward scan.
 func (p *rotationBlindProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
-	all, err := p.Fake.List(filter)
+	all, err := p.Fake.List(context.Background(), filter)
 	if err != nil {
 		return nil, err
 	}

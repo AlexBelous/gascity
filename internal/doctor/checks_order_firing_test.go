@@ -12,7 +12,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestOrderFiringCurrent_NeverFired_BeyondUptime(t *testing.T) {
@@ -282,6 +284,75 @@ func TestOrderFiringCurrent_SkipsWildcardOverridesForSuspendedOnlyOrders(t *test
 	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
 	if result.Status != StatusOK {
 		t.Fatalf("status = %v, want OK for wildcard override targeting only a paused rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsSuspendedOnStartRigOrders(t *testing.T) {
+	// gascity#5268: the deprecated config.Rig.Suspended field is no longer
+	// written by live suspend/resume commands (see EffectiveSuspendedOnStart's
+	// doc comment). A rig suspended the current, documented way -- via
+	// suspended_on_start in city.toml -- must be skipped by
+	// order-firing-current exactly like TestOrderFiringCurrent_SkipsSuspendedRigOrders;
+	// #2725/#2785 did not intend the skip to depend on which suspension field
+	// was set.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath, SuspendedOnStart: true}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for suspended_on_start rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+		t.Fatalf("details = %v, suspended_on_start rig order should be skipped", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsRuntimeSuspendedRigOrders(t *testing.T) {
+	// gascity#5268: suspending a rig live via `gc rig suspend` records a
+	// runtime override in suspension-state.json rather than setting
+	// config.Rig.Suspended or SuspendedOnStart. order-firing-current must
+	// still skip that rig's orders -- this is the mechanism the dispatcher
+	// itself already honors via rigSuspendedByName/EffectiveRigSuspended.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
+	)
+	suspend := true
+	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{"parked": {Suspended: &suspend}}}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityPath, st); err != nil {
+		t.Fatalf("saving runtime suspension state: %v", err)
+	}
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for runtime-suspended rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+		t.Fatalf("details = %v, runtime-suspended rig order should be skipped", result.Details)
 	}
 }
 

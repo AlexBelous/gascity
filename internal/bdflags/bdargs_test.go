@@ -68,12 +68,14 @@ func TestGlobalValueFlagsIsComplete(t *testing.T) {
 // silently takes the ambiguous branch for an ordinary bd invocation.
 //
 // Sourced from `bd --help` (bd 1.1.0, build 0954be416), the same pass as the
-// value-flag table. bd rejects a bare --profile as "unknown flag" (only
-// --cpu-profile and --mem-profile exist) — do not reintroduce it here.
+// value-flag table. --profile is the pre-rename spelling of --cpu-profile: the
+// released bd v1.1.0 binary CI installs still exposes it as a persistent bool,
+// so it must stay here even though this build no longer accepts it. The table
+// is a superset allowlist over every supported bd build, not a snapshot of one.
 func TestGlobalBoolFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
 		"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true,
-		"--json": true, "--no-color": true, "-q": true, "--quiet": true,
+		"--json": true, "--no-color": true, "--profile": true, "-q": true, "--quiet": true,
 		"--readonly": true, "--sandbox": true, "-v": true, "--verbose": true,
 		"-h": true, "--help": true,
 	}

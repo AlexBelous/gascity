@@ -16,9 +16,16 @@ var globalValueFlags = map[string]bool{
 }
 
 // globalBoolFlags are accepted by every bd subcommand and take no value.
+//
+// This table is a superset allowlist across every bd build the fleet and CI
+// run, not a snapshot of one binary. --profile is the pre-rename spelling of
+// --cpu-profile (beads fb52ac6a5, landed after the v1.1.0 tag): the released
+// v1.1.0 binary CI installs still exposes it, so removing it here fails
+// TestBdFlagManifestCurrent on CI even though a newer bd rejects the flag.
+// Entries are safe to keep and dangerous to drop — only ever add.
 var globalBoolFlags = map[string]bool{
 	"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true, "--json": true,
-	"--no-color": true, "-q": true, "--quiet": true, "--readonly": true,
+	"--no-color": true, "--profile": true, "-q": true, "--quiet": true, "--readonly": true,
 	"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
 }
 

@@ -44,11 +44,11 @@ jobs:
             --method POST \
             -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}/check-runs" \
-            -f name="CI verdict: none (cancelled while queued)" \
+            -f name="CI verdict: none (run cancelled)" \
             -f head_sha="${HEAD_SHA}" \
             -f status="completed" \
             -f conclusion="neutral" \
             -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -f details_url="${RUN_URL}" \
-            -f output[title]="CI was cancelled before it ran" \
-            -f output[summary]="This commit's CI run was cancelled while still queued (manual cancel, a GitHub incident, or a concurrency-group collision) -- no CI jobs executed. This check exists so a cancelled-while-queued run shows up as an explicit non-verdict instead of silence that could be mistaken for a pass. See the empty run: ${RUN_URL}"
+            -f output[title]="CI produced no verdict (run cancelled)" \
+            -f output[summary]="This commit's CI run was cancelled (a manual cancel, a GitHub incident, or a concurrency-group collision), most often while still queued. Some jobs may have executed, or none. Either way this commit has no CI verdict. This check exists so a cancelled run shows up as an explicit non-verdict instead of silence that could be mistaken for a pass. See the run: ${RUN_URL}"

@@ -20,9 +20,9 @@ const (
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
 	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	expectedCIExecutionHash      = "5f808af12283745f8a84116039b5ece82aa963c10b51cda9d955a1929feb5705"
+	expectedCIExecutionHash      = "d68f07cf76e7666685541f6492717ac9f9e6543e23b59a6f58b9f8714b83134b" // reviewed delta: BD_VERSION v1.1.0 -> v1.2.2 in the matrix env blocks (beads pin hotfix)
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	expectedNightlyExecutionHash = "80575ca368f28ba9f8b14bf72ce5767a7877ffe4dcadc136854ab4b0b5f1377a"
+	expectedNightlyExecutionHash = "4b17e6d5c9c6c13c0935051aff0c50ddbbc6b6c5aa10947ed4447d25c29a2a23" // reviewed delta: BD_VERSION v1.1.0 -> v1.2.2 (beads pin hotfix)
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
 )
 

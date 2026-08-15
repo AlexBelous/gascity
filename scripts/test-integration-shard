@@ -176,15 +176,42 @@ validate_modulo_shard() {
   fi
 }
 
-list_integration_tests() {
-  run_go_test -tags integration -list '^Test' "$pkg" | grep '^Test'
+# require_integration_listing prints the integration test names, or aborts
+# with a diagnostic. An enumeration failure must never be mistaken for
+# "this package has no tests".
+require_integration_listing() {
+  local listing status=0
+  listing="$(run_go_test -tags integration -list '^Test' "$pkg")" || status=$?
+  if (( status != 0 )); then
+    echo "shard ${shard}: integration test enumeration failed (go test -list exited ${status}); refusing to treat this as an empty test set" >&2
+    exit 1
+  fi
+  listing="$(printf '%s\n' "$listing" | grep '^Test')" || true
+  if [[ -z "$listing" ]]; then
+    echo "shard ${shard}: integration test enumeration returned no tests; refusing to run an empty shard" >&2
+    exit 1
+  fi
+  printf '%s\n' "$listing"
+}
+
+# require_package_listing prints `go list ./...` output, or aborts with a
+# diagnostic naming its exit status. An enumeration failure must never be
+# mistaken for "this shard has no packages".
+require_package_listing() {
+  local listing status=0
+  listing="$(go list ./...)" || status=$?
+  if (( status != 0 )); then
+    echo "shard ${shard}: package enumeration failed (go list exited ${status}); refusing to treat this as an empty package set" >&2
+    exit 1
+  fi
+  printf '%s\n' "$listing"
 }
 
 validate_selected_tests() {
   local -a requested=("$@")
   local available missing requested_name
 
-  available="$(list_integration_tests)"
+  available="$(require_integration_listing)"
   missing=0
   for requested_name in "${requested[@]}"; do
     if ! printf '%s\n' "$available" | grep -Fxq -- "$requested_name"; then
@@ -201,10 +228,14 @@ run_packages_shard() {
   # Avoid bash 4 `mapfile` so this runs on macOS's stock bash 3.2.
   local -a packages=()
   local -a go_test_args=()
-  local line
-  while IFS= read -r line; do
-    packages+=("$line")
-  done < <(go list ./... | grep -v '^github.com/gastownhall/gascity/test/integration$')
+  local line raw_listing listing
+  raw_listing="$(require_package_listing)"
+  listing="$(printf '%s\n' "$raw_listing" | grep -v '^github.com/gastownhall/gascity/test/integration$')" || true
+  if [[ -n "$listing" ]]; then
+    while IFS= read -r line; do
+      packages+=("$line")
+    done <<< "$listing"
+  fi
   if [[ ${#packages[@]} -eq 0 ]]; then
     echo "no non-integration packages found" >&2
     exit 1
@@ -221,17 +252,21 @@ run_packages_core_shard() {
   local shard_index="$1"
   local shard_total="$2"
   local -a packages=() selected=() go_test_args=()
-  local line i
+  local line i raw_listing listing
 
   validate_modulo_shard "$shard_index" "$shard_total"
-  while IFS= read -r line; do
-    packages+=("$line")
-  done < <(
-    go list ./... |
+  raw_listing="$(require_package_listing)"
+  listing="$(
+    printf '%s\n' "$raw_listing" |
       grep -v '^github.com/gastownhall/gascity/test/integration$' |
       grep -v '^github.com/gastownhall/gascity/cmd/gc$' |
       grep -v '^github.com/gastownhall/gascity/internal/runtime/tmux$'
-  )
+  )" || true
+  if [[ -n "$listing" ]]; then
+    while IFS= read -r line; do
+      packages+=("$line")
+    done <<< "$listing"
+  fi
   if [[ ${#packages[@]} -eq 0 ]]; then
     echo "no core packages found" >&2
     exit 1
@@ -303,16 +338,17 @@ run_rest_full_shard_modulo() {
   # bash 3.2 has no associative arrays; encode the excluded set as a
   # newline-delimited string and use grep -Fx to test membership.
   local -a all_tests=() rest_tests=()
-  local excluded excluded_name test_name
+  local excluded excluded_name test_name listing
 
   excluded=""
   for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance TestBdStoreMailWispInsert; do
     excluded+="${excluded_name}"$'\n'
   done
 
+  listing="$(require_integration_listing)"
   while IFS= read -r test_name; do
     all_tests+=("$test_name")
-  done < <(list_integration_tests)
+  done <<< "$listing"
 
   for test_name in "${all_tests[@]}"; do
     if ! printf '%s' "$excluded" | grep -Fxq -- "$test_name"; then

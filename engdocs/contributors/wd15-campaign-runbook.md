@@ -129,9 +129,11 @@ Or the human table without `--json`. **Use `--window-start` for a campaign
 readout**, not `--since`: the window's clock is backdated to a fixed instant
 (`2026-08-12T03:39:17Z`), and an RFC3339 start reproduces the same readout
 tomorrow, where a duration silently slides. `--template` narrows to one selector;
-`--count-bar` overrides §3b's 10,000-joined floor. The command exits nonzero on
-`no_evidence` or `we_blocker` and the schema is `x-gc-jsonl`, so **capture stdout
-regardless of exit code.**
+`--count-bar` overrides §3b's 10,000-joined floor. `--exclude-window` (repeatable)
+drops a restart gap — see [Restart policy](#restart-policy); pass every recorded
+window that the readout spans. The command exits nonzero on `no_evidence` or
+`we_blocker` and the schema is `x-gc-jsonl`, so **capture stdout regardless of
+exit code.**
 
 ```bash
 campaign/gcc perf parity-join \
@@ -317,6 +319,66 @@ acknowledged controller socket still exists after lock acquisition`. Confirm
 with `pgrep -af "reconciler-campaign/bin/gc start"` before concluding anything;
 in practice the controller had already exited.
 
+### Record the restart's exclusion window
+
+Cycles between the exit and the next good arming boundary are excluded from
+every §3b readout. **Write the window down when you do the restart** — stop
+instant, arming-re-verified instant — and pass it to every readout that spans
+it, with the start padded back **one reconcile tick (~10s)**:
+
+```
+--exclude-window <stop-minus-one-tick>/<arming-re-verified>
+```
+
+The pad is what catches a pair split across the stop: legacy writes its
+decision, the process dies, and the sweep's twin is never written. Without the
+pad the surviving half joins as a singleton the §3b table has nothing true to
+say about. `gc perf parity-join` never infers a boundary — a window it guessed
+from the corpus would grow to fit whatever is red.
+
+**Day 4 restart (2026-08-15).** Stop ≈`06:00:0xZ`, arming re-verified complete
+`06:02:35Z`, so every readout spanning it takes:
+
+```bash
+campaign/gcc perf parity-join \
+  --trace-dir /data/cities/reconciler-campaign/campaign/trace-archive \
+  --exclude-window 2026-08-15T05:59:50Z/2026-08-15T06:02:40Z --json
+```
+
+That window drops 980 records: 20 cycles whole, plus the rollup of
+`cycle-9fac275181d8111e` (the outgoing instance's last cycle, records from
+05:59:32, rollup at 05:59:55). The rollup-only case is safe by construction —
+a cycle without a rollup is already excluded as truncated evidence, and it
+shows up in `cycles.excluded_no_cycle_rollup` rather than leaking half-pairs.
+Compare `campaign/reports/day4-archive-yield-join.json` (unfiltered: one
+unclassified D-ORPHAN `orphaned`/`closed` on `dependent-rc-5kfx6` in
+`cycle-6e82321f9d754602`, the new instance's *first* tick — `we_blocker=true`)
+with `day4-archive-yield-join-excluded.json` (`unclassified=0`,
+`we_blocker=false`).
+
+The readout self-describes: `excluded_windows` carries each window and its
+`records_excluded`, and the key is absent entirely when no window was passed,
+so an unfiltered artifact stays byte-comparable with one filed before the flag
+existed.
+
+**What the window does not fix.** D-DRAIN stays at 99.219% (1 mismatch in 128
+comparables) after the exclusion, because its mismatch is not a restart artifact:
+it is a legacy-only `orphaned`/`stop_pending` at
+`reconciler.session.drain_ack` on `dependent-rc-7mzpx`, cycle
+`cycle-0860a236ff1b82bd`, tick `…-1073853-…-049152`, at
+**2026-08-15T04:49:21.053Z** — 70 minutes before the stop, mid-run of the
+*outgoing* instance (`cherry:1073853`). It is the `ack_timing_skew` class §3b
+already names: the keyed twin reads the ack handler-side while legacy polls
+in-tick, so the pair lands in adjacent cycles and a same-cycle-handle join can
+only report it as two singletons. The class clears the WE blocker; the rate keeps
+counting it, and a 128-comparable family cannot clear a 0.995 bar with one
+counted singleton. Confirmed by probe: adding a throwaway
+`--exclude-window 2026-08-15T04:49:21Z/2026-08-15T04:49:22Z` takes D-DRAIN to
+127/0 and 100.000%. **Do not widen an exclusion window to cover it** — that
+probe is a diagnostic, never an artifact; the window records a restart, not
+whatever is red. D-DRAIN clears on volume or on a §3b ruling about the class,
+not on filtering.
+
 Config reload: edit `city.toml` (or `pack.toml`), then
 
 ```bash
@@ -334,7 +396,9 @@ corpus the readout is built from.
 ## When something dies
 
 - **Controller window shows `CONTROLLER-EXITED`.** Restart per above and re-arm.
-  Cycles between the exit and the next good arming boundary are excluded.
+  Cycles between the exit and the next good arming boundary are excluded — record
+  the window and pass it to every readout that spans it (see
+  [Record the restart's exclusion window](#record-the-restarts-exclusion-window)).
 - **Arming window shows `ARMING-EXITED`.** The report was written on the way out
   (`campaign/reports/arming-report.json`); read its `gaps` before relaunching.
   Relaunch with `campaign/run-arming.sh`. The remaining window shortens, so drop

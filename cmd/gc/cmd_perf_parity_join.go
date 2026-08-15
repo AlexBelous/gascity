@@ -60,6 +60,100 @@ type parityJoinOptions struct {
 	CountBar int
 	Samples  int
 	Template string
+	// ExcludedWindows drop their records before anything is joined. See
+	// parityJoinWindow.
+	ExcludedWindows []parityJoinWindow
+}
+
+// parityJoinWindow is a half-open [Start, End) span of trace time whose records
+// are dropped from the corpus before the join runs.
+//
+// The rule it serves is the WD.15 runbook's: cycles between a controller exit
+// and the next good arming boundary are excluded from a section 3b readout. A
+// restart cuts cycles in half — legacy writes its decision, the process stops,
+// and the sweep's twin is never written — and the incoming instance's first
+// ticks run before its detail arms are re-verified. Neither half is a
+// divergence, but a same-cycle-handle join can only report them as singletons,
+// and the section 3b table has nothing true to say about a record whose twin
+// does not exist. Dropping the records BEFORE the join, rather than filtering
+// the classified output, is what keeps a half-pair from leaking out.
+//
+// Boundaries are supplied, never inferred. The tool cannot know when an operator
+// considered arming re-verified, and guessing it from the corpus would let the
+// window grow to fit whatever is red.
+type parityJoinWindow struct {
+	Start time.Time
+	End   time.Time
+}
+
+func (w parityJoinWindow) contains(ts time.Time) bool {
+	return !ts.Before(w.Start) && ts.Before(w.End)
+}
+
+// parityJoinExcludedWindow is one exclusion window as the report declares it. A
+// readout that dropped part of its own corpus is only citable if the artifact
+// carries the windows and what they cost, so this is emitted whenever a window
+// was passed — and omitted entirely when none was, keeping an unfiltered
+// readout byte-identical to one produced before the flag existed.
+//
+// A record covered by more than one window counts against the first that covers
+// it, so the RecordsExcluded values sum to the number of records dropped.
+type parityJoinExcludedWindow struct {
+	Start           time.Time `json:"start"`
+	End             time.Time `json:"end"`
+	RecordsExcluded int       `json:"records_excluded"`
+}
+
+// parseParityJoinExcludeWindow reads one --exclude-window value. RFC3339 has no
+// unescaped '/', so the separator is unambiguous.
+func parseParityJoinExcludeWindow(spec string) (parityJoinWindow, error) {
+	rawStart, rawEnd, ok := strings.Cut(strings.TrimSpace(spec), "/")
+	if !ok {
+		return parityJoinWindow{}, fmt.Errorf("exclusion window %q: want <RFC3339-start>/<RFC3339-end>", spec)
+	}
+	start, err := time.Parse(time.RFC3339, strings.TrimSpace(rawStart))
+	if err != nil {
+		return parityJoinWindow{}, fmt.Errorf("exclusion window %q: parsing window start: %w", spec, err)
+	}
+	end, err := time.Parse(time.RFC3339, strings.TrimSpace(rawEnd))
+	if err != nil {
+		return parityJoinWindow{}, fmt.Errorf("exclusion window %q: parsing window end: %w", spec, err)
+	}
+	if !end.After(start) {
+		return parityJoinWindow{}, fmt.Errorf("exclusion window %q: end must be after start", spec)
+	}
+	return parityJoinWindow{Start: start.UTC(), End: end.UTC()}, nil
+}
+
+// parityJoinExcludeWindows drops the windowed records and tallies what each
+// window cost. It runs over the raw corpus, before cycles are bucketed, so an
+// excluded cycle never reaches the classifier at all.
+func parityJoinExcludeWindows(
+	records []SessionReconcilerTraceRecord,
+	windows []parityJoinWindow,
+) ([]SessionReconcilerTraceRecord, []parityJoinExcludedWindow) {
+	if len(windows) == 0 {
+		return records, nil
+	}
+	excluded := make([]parityJoinExcludedWindow, len(windows))
+	for i, window := range windows {
+		excluded[i] = parityJoinExcludedWindow{Start: window.Start, End: window.End}
+	}
+	kept := make([]SessionReconcilerTraceRecord, 0, len(records))
+	for _, rec := range records {
+		dropped := false
+		for i, window := range windows {
+			if window.contains(rec.Ts) {
+				excluded[i].RecordsExcluded++
+				dropped = true
+				break
+			}
+		}
+		if !dropped {
+			kept = append(kept, rec)
+		}
+	}
+	return kept, excluded
 }
 
 type parityJoinCycleStats struct {
@@ -162,10 +256,14 @@ type parityJoinSample struct {
 }
 
 type parityJoinReport struct {
-	SchemaVersion string               `json:"schema_version"`
-	Bar           float64              `json:"bar"`
-	CountBar      int                  `json:"count_bar"`
-	Cycles        parityJoinCycleStats `json:"cycles"`
+	SchemaVersion string  `json:"schema_version"`
+	Bar           float64 `json:"bar"`
+	CountBar      int     `json:"count_bar"`
+	// ExcludedWindows is empty — and the key absent — unless --exclude-window
+	// was passed, so an unfiltered readout is byte-identical to one produced
+	// before the flag existed.
+	ExcludedWindows []parityJoinExcludedWindow `json:"excluded_windows,omitempty"`
+	Cycles          parityJoinCycleStats       `json:"cycles"`
 	// JoinedActs and JoinedYields are the two evidence populations, kept apart
 	// because they prove different things: an act-pair is two writers deciding
 	// the same row, a yield-pair is one writer deciding it and the other
@@ -188,6 +286,7 @@ type parityJoinReport struct {
 // newPerfParityJoinCmd builds the hidden `gc perf parity-join` subcommand.
 func newPerfParityJoinCmd(stdout io.Writer) *cobra.Command {
 	var traceDir, since, windowStart, template string
+	var excludeWindows []string
 	var bar float64
 	var samples, countBar int
 	var jsonOut bool
@@ -214,11 +313,25 @@ func newPerfParityJoinCmd(stdout io.Writer) *cobra.Command {
 				}
 				filter.Since = start.UTC()
 			}
+			excluded := make([]parityJoinWindow, 0, len(excludeWindows))
+			for _, spec := range excludeWindows {
+				window, err := parseParityJoinExcludeWindow(spec)
+				if err != nil {
+					return fmt.Errorf("gc perf parity-join: parsing --exclude-window: %w", err)
+				}
+				excluded = append(excluded, window)
+			}
 			records, err := ReadTraceRecords(traceDir, filter)
 			if err != nil {
 				return fmt.Errorf("gc perf parity-join: reading trace store %q: %w", traceDir, err)
 			}
-			report := buildParityJoinReport(records, parityJoinOptions{Bar: bar, CountBar: countBar, Samples: samples, Template: template})
+			report := buildParityJoinReport(records, parityJoinOptions{
+				Bar:             bar,
+				CountBar:        countBar,
+				Samples:         samples,
+				Template:        template,
+				ExcludedWindows: excluded,
+			})
 			if jsonOut {
 				err = writeCLIJSONLine(stdout, report)
 			} else {
@@ -233,6 +346,11 @@ func newPerfParityJoinCmd(stdout io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&traceDir, "trace-dir", "", "session-reconciler-trace store directory (the one holding segments/)")
 	cmd.Flags().StringVar(&since, "since", "", "only join records newer than this duration ago (e.g. 168h)")
 	cmd.Flags().StringVar(&windowStart, "window-start", "", "only join records at or after this RFC3339 instant; the reproducible form of --since for a fixed campaign window")
+	cmd.Flags().StringArrayVar(&excludeWindows, "exclude-window", nil,
+		"drop every record in this half-open <RFC3339-start>/<RFC3339-end> span before joining; repeatable. "+
+			"Use it for the WD.15 restart rule (cycles between a controller exit and the next good arming "+
+			"boundary are excluded), and pad the start back one reconcile tick (~10s) so a pair split across "+
+			"the stop is dropped whole. Boundaries are never inferred — pass the window you recorded.")
 	cmd.Flags().StringVar(&template, "template", "", "only join records for this normalized template selector")
 	cmd.Flags().Float64Var(&bar, "bar", parityJoinDefaultBar, "section 3b must-match bar per family")
 	cmd.Flags().IntVar(&countBar, "count-bar", parityJoinDefaultCountBar, "section 3b joined-row count bar for the window")
@@ -298,7 +416,13 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 	if opts.CountBar <= 0 {
 		opts.CountBar = parityJoinDefaultCountBar
 	}
-	report := parityJoinReport{SchemaVersion: parityJoinSchemaV1, Bar: opts.Bar, CountBar: opts.CountBar}
+	records, excluded := parityJoinExcludeWindows(records, opts.ExcludedWindows)
+	report := parityJoinReport{
+		SchemaVersion:   parityJoinSchemaV1,
+		Bar:             opts.Bar,
+		CountBar:        opts.CountBar,
+		ExcludedWindows: excluded,
+	}
 	acc := &parityJoinAccumulator{
 		rows:         make(map[string]*parityJoinFamilyReport, len(parityJoinFamilySpecs)),
 		triage:       make(map[parityJoinTriageEntry]int),
@@ -1013,6 +1137,10 @@ func parityJoinTriageLog(counts map[parityJoinTriageEntry]int) []parityJoinTriag
 func writeParityJoinReport(w io.Writer, report parityJoinReport) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\ngc perf parity-join (DETECTOR.md 3b, bar %.3f)\n\n", report.Bar)
+	for _, window := range report.ExcludedWindows {
+		fmt.Fprintf(&b, "window: %s/%s excluded before the join — %d records dropped\n",
+			window.Start.Format(time.RFC3339), window.End.Format(time.RFC3339), window.RecordsExcluded)
+	}
 	fmt.Fprintf(&b, "cycles: %d scanned, %d considered, %d excluded (record_budget_exceeded=%d, no_rollup=%d)\n",
 		report.Cycles.Scanned, report.Cycles.Considered,
 		report.Cycles.ExcludedRecordBudget+report.Cycles.ExcludedNoRollup,

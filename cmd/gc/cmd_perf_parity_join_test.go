@@ -483,6 +483,143 @@ func TestParityJoinDeclaresJSONLSupportSoTheReadoutSurvivesANonzeroExit(t *testi
 	}
 }
 
+func TestParityJoinExcludeWindowFlagParsing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		spec  string
+		want  parityJoinWindow
+		error string
+	}{
+		{
+			name: "the day-4 restart window",
+			spec: "2026-08-15T05:59:50Z/2026-08-15T06:02:40Z",
+			want: parityJoinWindow{
+				Start: time.Date(2026, 8, 15, 5, 59, 50, 0, time.UTC),
+				End:   time.Date(2026, 8, 15, 6, 2, 40, 0, time.UTC),
+			},
+		},
+		{
+			name: "an offset window is normalized to UTC",
+			spec: "2026-08-15T01:59:50-04:00/2026-08-15T02:02:40-04:00",
+			want: parityJoinWindow{
+				Start: time.Date(2026, 8, 15, 5, 59, 50, 0, time.UTC),
+				End:   time.Date(2026, 8, 15, 6, 2, 40, 0, time.UTC),
+			},
+		},
+		{name: "no separator", spec: "2026-08-15T05:59:50Z", error: "want <RFC3339-start>/<RFC3339-end>"},
+		{name: "bad start", spec: "06:00/2026-08-15T06:02:40Z", error: "parsing window start"},
+		{name: "bad end", spec: "2026-08-15T05:59:50Z/soon", error: "parsing window end"},
+		{name: "empty window", spec: "2026-08-15T06:02:40Z/2026-08-15T06:02:40Z", error: "must be after"},
+		{name: "reversed window", spec: "2026-08-15T06:02:40Z/2026-08-15T05:59:50Z", error: "must be after"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseParityJoinExcludeWindow(tc.spec)
+			if tc.error != "" {
+				if err == nil {
+					t.Fatalf("parsed %q as %+v, want an error mentioning %q", tc.spec, got, tc.error)
+				}
+				if !strings.Contains(err.Error(), tc.error) {
+					t.Fatalf("error = %q, want it to mention %q", err, tc.error)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsing %q: %v", tc.spec, err)
+			}
+			if !got.Start.Equal(tc.want.Start) || !got.End.Equal(tc.want.End) {
+				t.Fatalf("window = %s/%s, want %s/%s", got.Start, got.End, tc.want.Start, tc.want.End)
+			}
+		})
+	}
+}
+
+// The flag reaches the report, and the report says so: a readout that excluded
+// part of its own corpus is only citable if the artifact carries the window.
+func TestParityJoinCommandRecordsItsExclusionWindowsInTheReport(t *testing.T) {
+	cityPath := t.TempDir()
+	store, err := newSessionReconcilerTraceStore(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newSessionReconcilerTraceStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	dropped := parityJoinTestRecord("tr-gap", "2", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-2", "gcs-2", TraceReasonIdleTimeout, TraceOutcomeStop)
+	dropped.Ts = time.Date(2026, 8, 8, 13, 0, 0, 0, time.UTC)
+	batch := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-cli", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRecord("tr-cli", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-cli", "1", nil, 1),
+		dropped,
+		parityJoinTestRollup("tr-gap", "2", nil, 1),
+	}
+	if err := store.AppendBatch(batch, TraceDurabilityDurable); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	cmd := newPerfParityJoinCmd(&stdout)
+	cmd.SetArgs([]string{
+		"--trace-dir", traceCityRuntimeDir(cityPath), "--json",
+		"--exclude-window", "2026-08-08T12:59:50Z/2026-08-08T13:00:10Z",
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc perf parity-join: %v", err)
+	}
+
+	var report parityJoinReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decoding JSON readout %q: %v", stdout.String(), err)
+	}
+	if len(report.ExcludedWindows) != 1 || report.ExcludedWindows[0].RecordsExcluded != 1 {
+		t.Fatalf("excluded_windows = %+v, want one window carrying 1 excluded record", report.ExcludedWindows)
+	}
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if row.Joined != 1 || row.Matched != 1 || row.LegacyOnly != 0 {
+		t.Fatalf("D-DEADLINE = %+v, want the out-of-window pair joined and the in-window singleton gone", row)
+	}
+}
+
+// An unpassed --exclude-window changes nothing about the readout, in either
+// rendering. Every campaign artifact filed before the flag existed has to stay
+// comparable to one filed after it.
+func TestParityJoinReadoutIsUnchangedWithoutAnExclusionWindow(t *testing.T) {
+	records := []SessionReconcilerTraceRecord{
+		parityJoinTestRecord("tr-same", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRecord("tr-same", "1", TraceSiteReconcilerIdleTimeout, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonIdleTimeout, TraceOutcomeStop),
+		parityJoinTestRollup("tr-same", "1", nil, 1),
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshaling report: %v", err)
+	}
+	if strings.Contains(string(encoded), "excluded_windows") {
+		t.Fatalf("JSON readout carries excluded_windows with no window passed:\n%s", encoded)
+	}
+
+	var table bytes.Buffer
+	if err := writeParityJoinReport(&table, report); err != nil {
+		t.Fatalf("writeParityJoinReport: %v", err)
+	}
+	if strings.Contains(table.String(), "excluded before the join") {
+		t.Fatalf("human readout carries an exclusion line with no window passed:\n%s", table.String())
+	}
+
+	// An explicitly empty window list is the same corpus and must render the
+	// same bytes as no list at all.
+	var empty bytes.Buffer
+	if err := writeParityJoinReport(&empty, buildParityJoinReport(records, parityJoinOptions{
+		Bar: 0.995, Samples: 4, ExcludedWindows: []parityJoinWindow{},
+	})); err != nil {
+		t.Fatalf("writeParityJoinReport: %v", err)
+	}
+	if empty.String() != table.String() {
+		t.Fatalf("empty window list changed the readout:\n%s\nwant:\n%s", empty.String(), table.String())
+	}
+}
+
 // Every site the section 3b table claims must resolve to exactly one family, and
 // every family must declare a parity level.
 func TestParityJoinFamilyTableIsWellFormed(t *testing.T) {

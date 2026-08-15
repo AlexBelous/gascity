@@ -23,10 +23,24 @@ import (
 
 const parityJoinCorpusFixture = "testdata/wd15_campaign_corpus.jsonl"
 
+// parityJoinRestartGapFixture holds the two cycles that straddle the day-4
+// mid-window controller restart: the last good cycle of the outgoing instance
+// (05:57:34-05:58:00, three D-DEADLINE pairs plus a D-ORPHAN pair for
+// dependent-rc-5kfx6) and the incoming instance's very first tick
+// (06:01:16-06:01:25), whose half-armed close_orphan record for that same
+// session is the restart artifact the exclusion window exists to drop.
+const parityJoinRestartGapFixture = "testdata/wd15_restart_gap_corpus.jsonl"
+
 // parityJoinCorpusRecords decodes the byte-copied campaign corpus fixture.
 func parityJoinCorpusRecords(t *testing.T) []SessionReconcilerTraceRecord {
 	t.Helper()
-	f, err := os.Open(parityJoinCorpusFixture)
+	return parityJoinCorpusFixtureRecords(t, parityJoinCorpusFixture)
+}
+
+// parityJoinCorpusFixtureRecords decodes one byte-copied campaign fixture.
+func parityJoinCorpusFixtureRecords(t *testing.T, path string) []SessionReconcilerTraceRecord {
+	t.Helper()
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("opening campaign corpus fixture: %v", err)
 	}
@@ -899,5 +913,112 @@ func TestParityJoinTriagesTheOneTickOrphanDetectorLead(t *testing.T) {
 	}
 	if row.Mismatched != 1 {
 		t.Fatalf("D-ORPHAN mismatched = %d, want 1 — the lead class is counted, not excused (%+v)", row.Mismatched, row)
+	}
+}
+
+// A controller restart mid-window leaves a stub of a cycle behind: the outgoing
+// instance stops between a legacy decision and its sweep twin, and the incoming
+// instance's first tick runs before its detail arms are re-verified. Both halves
+// surface as singletons the section 3b table cannot classify, because there is
+// no divergence to name — the twin was never written. The WD.15 runbook excludes
+// those cycles from the readout; --exclude-window is that rule as an artifact.
+//
+// This fixture is the day-4 restart itself, byte-copied from the campaign
+// archive: the outgoing instance's last good cycle (cycle-96035091d29b893d,
+// 05:57:34-05:58:00) and the incoming instance's first tick
+// (cycle-6e82321f9d754602, 06:01:16-06:01:25). The unclassified singleton it
+// reproduces is the one the archive join reported — D-ORPHAN legacy_only
+// orphaned/closed on dependent-rc-5kfx6 — and the control is the SAME session's
+// properly joined pair three minutes earlier, which the window must leave alone.
+func TestParityJoinExcludesRestartGapCyclesFromTheReadout(t *testing.T) {
+	records := parityJoinCorpusFixtureRecords(t, parityJoinRestartGapFixture)
+
+	baseline := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 8})
+	if len(baseline.Unclassified) != 1 {
+		t.Fatalf("baseline unclassified = %d, want the 1 restart artifact (%+v)", len(baseline.Unclassified), baseline.Unclassified)
+	}
+	sample := baseline.Unclassified[0]
+	if sample.SessionName != "dependent-rc-5kfx6" || sample.TraceID != "cycle-6e82321f9d754602" {
+		t.Fatalf("baseline unclassified sample = %+v, want the 5kfx6 first-tick orphan", sample)
+	}
+	if !baseline.WEBlocker {
+		t.Fatalf("baseline we_blocker = false, want true — the restart stub is a blocker until it is excluded")
+	}
+	if len(baseline.ExcludedWindows) != 0 {
+		t.Fatalf("baseline excluded_windows = %+v, want none", baseline.ExcludedWindows)
+	}
+
+	window := parityJoinWindow{
+		Start: time.Date(2026, 8, 15, 5, 59, 50, 0, time.UTC),
+		End:   time.Date(2026, 8, 15, 6, 2, 40, 0, time.UTC),
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{
+		Bar: 0.995, Samples: 8, ExcludedWindows: []parityJoinWindow{window},
+	})
+
+	if len(report.Unclassified) != 0 {
+		t.Fatalf("unclassified = %+v, want none once the restart gap is excluded", report.Unclassified)
+	}
+	if report.WEBlocker {
+		t.Fatalf("we_blocker = true, want false (%+v)", report)
+	}
+	if len(report.ExcludedWindows) != 1 {
+		t.Fatalf("excluded_windows = %+v, want exactly the one window", report.ExcludedWindows)
+	}
+	got := report.ExcludedWindows[0]
+	if !got.Start.Equal(window.Start) || !got.End.Equal(window.End) {
+		t.Fatalf("excluded window = %s/%s, want %s/%s", got.Start, got.End, window.Start, window.End)
+	}
+	// The first tick's close_orphan decision and its cycle rollup: the whole
+	// cycle leaves, so no half-pair from it can leak out as a singleton.
+	if got.RecordsExcluded != 2 {
+		t.Fatalf("records_excluded = %d, want 2 (the 5kfx6 decision and its cycle rollup)", got.RecordsExcluded)
+	}
+	if report.Cycles.Scanned != 1 || report.Cycles.Considered != 1 {
+		t.Fatalf("cycles = %+v, want 1 scanned / 1 considered", report.Cycles)
+	}
+
+	// The control: the outgoing instance's last good cycle is untouched, down to
+	// the D-ORPHAN pair for the very session the excluded record names.
+	deadline := parityJoinFamilyRow(t, report, parityJoinFamilyDeadline)
+	if deadline.Joined != 3 || deadline.Matched != 3 || deadline.Mismatched != 0 {
+		t.Fatalf("D-DEADLINE = %+v, want the 3 pre-restart pairs still joined and matched", deadline)
+	}
+	orphan := parityJoinFamilyRow(t, report, parityJoinFamilyOrphan)
+	if orphan.Joined != 1 || orphan.Matched != 1 {
+		t.Fatalf("D-ORPHAN = %+v, want the pre-restart 5kfx6 pair still joined and matched", orphan)
+	}
+	if orphan.LegacyOnly != 0 || orphan.Mismatched != 0 || orphan.Unclassified != 0 {
+		t.Fatalf("D-ORPHAN = %+v, want the restart singleton gone and nothing else with it", orphan)
+	}
+	if orphan.MatchRate != 1 || !orphan.BarMet {
+		t.Fatalf("D-ORPHAN rate = %.4f bar_met = %t, want 1.0 / true", orphan.MatchRate, orphan.BarMet)
+	}
+}
+
+// A window is half-open: a record exactly on the start instant is dropped, one
+// exactly on the end instant is kept. Callers pad the start back a tick by hand
+// precisely because the tool never infers a boundary, so the boundary it is
+// given has to mean one unambiguous thing.
+func TestParityJoinExcludeWindowIsHalfOpen(t *testing.T) {
+	records := parityJoinCorpusFixtureRecords(t, parityJoinRestartGapFixture)
+
+	// [decision, rollup) — the decision at 06:01:21.469296086Z is dropped, the
+	// rollup at 06:01:24.522622325Z is kept, so the cycle survives with no rows.
+	report := buildParityJoinReport(records, parityJoinOptions{
+		Bar: 0.995, Samples: 8,
+		ExcludedWindows: []parityJoinWindow{{
+			Start: time.Date(2026, 8, 15, 6, 1, 21, 469296086, time.UTC),
+			End:   time.Date(2026, 8, 15, 6, 1, 24, 522622325, time.UTC),
+		}},
+	})
+	if report.ExcludedWindows[0].RecordsExcluded != 1 {
+		t.Fatalf("records_excluded = %d, want 1 — start is inclusive, end exclusive", report.ExcludedWindows[0].RecordsExcluded)
+	}
+	if report.Cycles.Scanned != 2 {
+		t.Fatalf("cycles scanned = %d, want 2 — the kept rollup still makes a cycle", report.Cycles.Scanned)
+	}
+	if len(report.Unclassified) != 0 {
+		t.Fatalf("unclassified = %+v, want none", report.Unclassified)
 	}
 }

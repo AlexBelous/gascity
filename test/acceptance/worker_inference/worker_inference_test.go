@@ -3683,7 +3683,7 @@ func inferenceProbeSessionLine(data []byte) (string, error) {
 		return "", err
 	}
 	switch strings.TrimSpace(cfg.Workspace.Provider) {
-	case "kimi", "opencode", "mimocode", "pi", "antigravity":
+	case "cursor", "kimi", "opencode", "mimocode", "pi", "antigravity":
 		return `session = "tmux"` + "\n", nil
 	}
 	return "", nil
@@ -3695,7 +3695,7 @@ func ensureInferenceProbeProviderHooks(data []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	provider := strings.TrimSpace(cfg.Workspace.Provider)
-	if provider != "gemini" && provider != "opencode" && provider != "mimocode" && provider != "pi" && provider != "antigravity" {
+	if provider != "cursor" && provider != "gemini" && provider != "opencode" && provider != "mimocode" && provider != "pi" && provider != "antigravity" {
 		return data, false, nil
 	}
 	if stringListContains(cfg.Workspace.InstallAgentHooks, provider) {

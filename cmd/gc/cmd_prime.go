@@ -696,7 +696,7 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		return
 	}
 	if fromHookStdin && !providerAcceptsHookStdinSessionID(sessionProviderFamily(info)) {
-		warn("hook stdin provider session id is only accepted for codex/claude session %q", gcSessionID)
+		warn("hook stdin provider session id is only accepted for codex/cursor/claude session %q", gcSessionID)
 		return
 	}
 	if existing := strings.TrimSpace(info.SessionKey); existing != "" {
@@ -713,9 +713,10 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 }
 
 // providerAcceptsHookStdinSessionID reports whether a provider family delivers
-// its authoritative resume id on the SessionStart hook's stdin JSON. codex and
-// claude both run through the settings.json `gc prime --hook` path and emit
-// their own session id there, so it is the authoritative resume key. Other CLI
+// its authoritative resume id on the SessionStart hook's stdin JSON. Codex,
+// Cursor, and Claude all run through the settings.json `gc prime --hook` path
+// and emit their own session id there, so it is the authoritative resume key;
+// Cursor normalizes its conversation id into the session_id field. Other CLI
 // providers surface it via env instead (GC_PROVIDER_SESSION_ID for the
 // JS-plugin providers, GEMINI_SESSION_ID for gemini) and are handled above,
 // before this stdin gate.
@@ -727,7 +728,7 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 // any session that reached the hook without one.
 func providerAcceptsHookStdinSessionID(family string) bool {
 	switch family {
-	case "codex", "claude":
+	case "codex", "cursor", "claude":
 		return true
 	default:
 		return false

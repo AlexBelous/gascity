@@ -11,7 +11,7 @@ passing result for that provider.
 ## Compatibility grid
 
 <!-- BEGIN GENERATED: worker-conformance-grid (scripts/worker_conformance_grid.py) -->
-_Generated 2026-06-12 from 19 conformance report(s)._
+_Generated 2026-08-16 from 32 conformance report(s)._
 
 ### Phase 1 — transcript & continuation contract (deterministic fixtures)
 
@@ -19,6 +19,7 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 |---|---|---|---|---|
 | `claude` | ✅ | ✅ | ✅ | ✅ |
 | `codex` | ✅ | ✅ | ✅ | ✅ |
+| `cursor` | ✅ | ✅ | ✅ | ✅ |
 | `gemini` | ✅ | ✅ | ✅ | ✅ |
 | `kimi` | ✅ | ✅ | ✅ | ✅ |
 | `opencode` | ✅ | ✅ | ✅ | ✅ |
@@ -32,6 +33,7 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 |---|---|---|---|---|
 | `claude` | ✅ | ✅ | ✅ | ✅ |
 | `codex` | ✅ | ✅ | ✅ | ✅ |
+| `cursor` | ✅ | ✅ | ✅ | ✅ |
 | `gemini` | ✅ | ✅ | ✅ | ✅ |
 | `kimi` | ✅ | ✅ | ✅ | ✅ |
 | `opencode` | ✅ | ✅ | ✅ | ✅ |
@@ -45,6 +47,7 @@ _Generated 2026-06-12 from 19 conformance report(s)._
 |---|---|---|---|---|---|---|
 | `claude` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `codex` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
+| `cursor` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `gemini` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |
 | `kimi` | 🔒 | ✅ | 🔒 | 🔒 | 🔒 | 🔒 |
 | `opencode` | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 | 🔒 |

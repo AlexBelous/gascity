@@ -190,6 +190,8 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 
 func installLiveHandleProviderHooks(workDir, gcHome string, profile workerpkg.Profile) error {
 	switch profile {
+	case workerpkg.ProfileCursorTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"cursor"})
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
 	case workerpkg.ProfileMimoCodeTmuxCLI:

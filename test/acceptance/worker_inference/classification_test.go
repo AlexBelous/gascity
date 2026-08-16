@@ -175,6 +175,16 @@ func TestAntigravityProfileSetupUsesAgyBinaryAndBrainSearchPath(t *testing.T) {
 	require.Equal(t, []string{filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain")}, profileSearchPaths(gcHome, profile))
 }
 
+func TestCursorProfileSetupUsesCursorAgentAndCaptureSearchPath(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	profile := resolveProfile("cursor/tmux-cli")
+
+	require.Equal(t, workerpkg.ProfileCursorTmuxCLI, profile)
+	require.Equal(t, "cursor", profileProvider(profile))
+	require.Equal(t, "cursor-agent", profileExecutable(profile, profileProvider(profile)))
+	require.Equal(t, []string{filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts")}, profileSearchPaths(gcHome, profile))
+}
+
 func TestFreshWorkerTaskTimeoutAntigravity(t *testing.T) {
 	require.Equal(t, 12*time.Minute, freshWorkerTaskTimeout("antigravity"))
 	require.Equal(t, 6*time.Minute, freshWorkerTaskTimeout("gemini"))
@@ -527,6 +537,47 @@ func TestStageCodexAuthFromFile(t *testing.T) {
 	require.Equal(t, "file-secret:codex", source)
 	require.Equal(t, filepath.Join(gcHome, ".codex"), env.Get("CODEX_HOME"))
 	require.FileExists(t, filepath.Join(gcHome, ".codex", "auth.json"))
+}
+
+func TestStageCursorAuthFromFile(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	keyPath := filepath.Join(t.TempDir(), "cursor-api-key")
+	require.NoError(t, os.WriteFile(keyPath, []byte("cursor-file-key\n"), 0o600))
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY", "")
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE", keyPath)
+	t.Setenv("CURSOR_API_KEY", "")
+
+	source, err := stageCursorAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "file-secret:cursor", source)
+	require.Equal(t, "cursor-file-key", env.Get("CURSOR_API_KEY"))
+	require.DirExists(t, filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts"))
+}
+
+func TestStageCursorAuthFromEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY", "")
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE", "")
+	t.Setenv("CURSOR_API_KEY", "cursor-env-key")
+
+	source, err := stageCursorAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:CURSOR_API_KEY", source)
+	require.Equal(t, "cursor-env-key", env.Get("CURSOR_API_KEY"))
+}
+
+func TestStageCursorAuthErrorsWithoutKey(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY", "")
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE", "")
+	t.Setenv("CURSOR_API_KEY", "")
+
+	_, err := stageCursorAuth(gcHome, env)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "CURSOR_API_KEY")
 }
 
 func TestStageOpenCodeGeminiAuthFromEnv(t *testing.T) {
@@ -1022,6 +1073,36 @@ install_agent_hooks = ["gemini"]`)
 	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["gemini"]`))
 }
 
+func TestInstallInferenceProbeAgentEnablesCursorHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "cursor"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "cursor"
+install_agent_hooks = ["cursor"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["cursor"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
 func TestInstallInferenceProbeAgentEnablesOpenCodeHooks(t *testing.T) {
 	cityDir := t.TempDir()
 	cityToml := filepath.Join(cityDir, "city.toml")
@@ -1151,6 +1232,18 @@ func TestInstallLiveHandleProviderHooksAntigravity(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(data), `"gascity-prime"`)
 	require.Contains(t, string(data), `--hook-format antigravity`)
+}
+
+func TestInstallLiveHandleProviderHooksCursor(t *testing.T) {
+	workDir := t.TempDir()
+
+	require.NoError(t, installLiveHandleProviderHooks(workDir, t.TempDir(), workerpkg.ProfileCursorTmuxCLI))
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".cursor", "hooks.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), `gc prime --hook`)
+	require.Contains(t, string(data), `gc handoff --auto`)
+	require.Contains(t, string(data), `gc hook run`)
 }
 
 // TestInstallLiveHandleProviderHooksKimi covers the kimi staging contract:

@@ -31,6 +31,7 @@ import sys
 PROFILE_ORDER = [
     "claude/tmux-cli",
     "codex/tmux-cli",
+    "cursor/tmux-cli",
     "gemini/tmux-cli",
     "kimi/tmux-cli",
     "opencode/tmux-cli",

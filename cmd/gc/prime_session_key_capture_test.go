@@ -98,6 +98,21 @@ func TestPersistPrimeHookProviderSessionKey_CodexHookStdinStillCaptured(t *testi
 	}
 }
 
+func TestPersistPrimeHookProviderSessionKey_CursorHookStdinCaptured(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	id := createCaptureSessionBead(t, store, "cursor")
+	t.Setenv("GC_SESSION_ID", id)
+	isolateProviderSessionEnv(t)
+
+	const cursorSessionID = "cursor-chat-abc-123"
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey(cursorSessionID, &stderr)
+
+	if got := reloadSessionKey(t, cityDir, id); got != cursorSessionID {
+		t.Fatalf("cursor session_key = %q, want %q", got, cursorSessionID)
+	}
+}
+
 // TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite confirms an
 // already-captured key is authoritative: a resume-wake's SessionStart hook must
 // not clobber the stored key.
@@ -127,10 +142,11 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite(t *testing.T)
 
 // TestProviderAcceptsHookStdinSessionID locks the allowlist boundary: only the
 // families whose SessionStart hook delivers their authoritative resume id on
-// stdin (codex, claude) are accepted; every other family is not.
+// stdin (codex, cursor, claude) are accepted; every other family is not.
 func TestProviderAcceptsHookStdinSessionID(t *testing.T) {
 	cases := map[string]bool{
 		"codex":    true,
+		"cursor":   true,
 		"claude":   true,
 		"gemini":   false,
 		"pi":       false,

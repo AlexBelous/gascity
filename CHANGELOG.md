@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
+  SIGKILL, matching its documented contract.** The fallback (used when
+  neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
+  previously called `subprocess.run(..., timeout=...)`, which kills the
+  child with SIGKILL immediately on expiry — giving it no chance to run its
+  own signal handler, unlike the `timeout --kill-after=2` path it's meant to
+  match. `mol-dog-backup.sh` wraps `dolt backup sync` in this helper, and
+  `dolt` publishes a backup archive under its final name before writing the
+  manifest that references it; a SIGKILL mid-sync left the archive
+  permanently unreferenced (`dolt backup` has no prune verb). The fallback
+  now uses `Popen` + `terminate()` + a 2s grace `wait()` + `kill()`,
+  streaming output instead of buffering it. (gascity#4823)
+
+- **`GET /runs/{id}/steps` returns steps in topological (pipeline) order, not
+  arbitrary fold order.** No level of the read chain — the handler, the
+  member-bead projection, or the run projection fold — applied any sort, so
+  the Runs dashboard's Formula Graph rendered a run's steps in whatever order
+  the projection happened to yield, unreadable as a pipeline. Steps are now
+  topologically sorted on each member's real dependency edges (`Dependencies`
+  and `Needs`), with a deterministic bead-ID tiebreak for independent steps
+  and steps carrying no dependency data. (gascity#4699)
+
+- **`check-core-boundary.sh` no longer false-positives on an in-tree Go
+  build cache.** The `org_` boundary scan walked the whole working tree
+  (`grep -r --exclude-dir=vendor --exclude-dir=testdata`), so any untracked
+  in-tree Go module cache tripped false violations on third-party module
+  sources — the common case is GitLab CI's canonical
+  `$CI_PROJECT_DIR/.cache/go-mod` layout. The scan now runs over
+  `git ls-files` instead, so an untracked cache or build-artifact directory
+  is invisible to it regardless of name, while vendor/testdata (tracked or
+  not) stay excluded as before. (gascity#4479)
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report

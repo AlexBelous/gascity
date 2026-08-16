@@ -104,7 +104,11 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git tag -a "$tag" -m "Release $tag" "$commit"
-            git push "https://x-access-token:${TAGGER_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
+            # actions/checkout persists the default GITHUB_TOKEN as an
+            # http.extraheader that outranks URL-embedded credentials; blank it
+            # for this one push so the app token actually authenticates.
+            git -c "http.https://github.com/.extraheader=" \
+              push "https://x-access-token:${TAGGER_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
             echo "Created tag $tag at $commit"
           fi
 

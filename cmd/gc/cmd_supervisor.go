@@ -1166,18 +1166,34 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
 		}
 	}
+	forceTimeout := managedCityForcedStopTimeout(mc)
 	if mc.cr != nil {
 		if mc.cr.forceStopShutdown != nil {
 			mc.cr.forceStopShutdown.Store(true)
 		}
+		// forceDeadline bounds the *combined* time spent inside
+		// runCityShutdownBounded and the wait below by forceTimeout, not
+		// forceTimeout each: runCityShutdownBounded can return early (its
+		// shutdownDone fires as soon as mc.cr.shutdown() itself returns,
+		// which says nothing about whether mc.done has closed yet), so the
+		// remaining wait for mc.done must shrink by however long that
+		// already took rather than restart a fresh full-length timeout.
+		forceDeadline := time.Now().Add(forceTimeout)
 		runCityShutdownBounded(mc)
-	}
-	forceTimeout := managedCityForcedStopTimeout(mc)
-	if forceTimeout > 0 {
+		if forceTimeout > 0 {
+			select {
+			case <-mc.done:
+				// Forced shutdown completed within its budget — the city
+				// is out. Clear the pending error so we report success.
+				stopErr = nil
+			case <-time.After(time.Until(forceDeadline)):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
+			}
+		}
+	} else if forceTimeout > 0 {
 		select {
 		case <-mc.done:
-			// Forced shutdown completed before the second timeout — the
-			// city is out. Clear the pending error so we report success.
 			stopErr = nil
 		case <-time.After(forceTimeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
@@ -1214,14 +1230,24 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 		}
 	}
 	if waitForRuntimeShutdown && mc.cr != nil {
+		forceTimeout := managedCityForcedStopTimeout(mc)
+		// forceDeadline bounds the *combined* time spent inside
+		// runCityShutdownBounded and the wait below by forceTimeout, not
+		// forceTimeout each — see stopManagedCity for the full rationale:
+		// runCityShutdownBounded can return early (its shutdownDone fires as
+		// soon as mc.cr.shutdown() itself returns, which says nothing about
+		// whether mc.done has closed yet), so the remaining wait for mc.done
+		// must shrink by however long that already took rather than restart
+		// a fresh full-length timeout.
+		forceDeadline := time.Now().Add(forceTimeout)
 		runCityShutdownBounded(mc)
-		if timeout > 0 {
+		if forceTimeout > 0 {
 			select {
 			case <-mc.done:
 				stopErr = nil
-			case <-time.After(timeout):
-				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, timeout) //nolint:errcheck
-				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, timeout)
+			case <-time.After(time.Until(forceDeadline)):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, forceTimeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, forceTimeout)
 			}
 		}
 	}

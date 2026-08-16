@@ -4763,8 +4763,14 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 
 	select {
 	case err := <-result:
-		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-			t.Fatalf("stopManagedCity took %s, want bounded even when CityRuntime.shutdown hangs", elapsed)
+		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
+		// 100ms: the promised ceiling is grace(20ms) + forced(100ms) =
+		// 120ms. A double wait on the forced timeout — the regression
+		// this test guards against — pushes that to ~220ms, so the bound
+		// here must sit strictly below that, not at the old, much looser
+		// 500ms that a doubled wait still passed.
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Fatalf("stopManagedCity took %s, want bounded near grace+forced (~120ms) even when CityRuntime.shutdown hangs", elapsed)
 		}
 		if err == nil {
 			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")

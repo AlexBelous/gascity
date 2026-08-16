@@ -74,3 +74,52 @@ Follow-up `ga-zxpfic` tracks making that doctor test hermetic.
 .github/workflows/ci-verdict-watchdog.yml | 54 ++++++++++++++++++++++++++++++++
 1 file changed, 54 insertions(+)
 ```
+
+## Maintainer fix-merge addendum
+
+- Date: 2026-08-15
+- Reviewed source above: `5c86cd7542076c46e685896a81a086f553ff111b`
+- New head: the fix-merge commit on `deploy/ga-ovr2ic-gate`, parent
+  `682e0db0159549c12f2967cbd39e77884dfa053f`
+- Disposition unchanged: **PASS**
+
+The evaluation, evidence, and checklist above are the historical record as
+written at the reviewed source and are not restated. Three wording changes and
+one new test landed during fix-merge:
+
+1. **Header comment corrected.** The original claimed this workflow was
+   defense-in-depth behind a per-commit concurrency group in `ci.yml`. That
+   group does not exist at this head: `ci.yml:24-25` groups by
+   `ci-${{ github.event_name }}-${{ ... github.ref ... }}` with
+   `cancel-in-progress` limited to pull requests, so every main push collapses
+   into one `ci-push-refs/heads/main` group. The comment now states the actual
+   shape and that this watchdog is currently the only mitigation. The
+   `SECURITY MODEL:` block is unchanged.
+2. **Job renamed** `flag-cancelled-while-queued` → `flag-cancelled-run`, name
+   `Flag CI run cancelled while queued` → `Flag cancelled CI run`. The job id
+   is referenced nowhere else in `.github/` or `scripts/` and is not a required
+   check name.
+3. **Check payload generalized** to match what the `if` gate actually
+   establishes. The gate proves *cancelled*, not *cancelled while queued*, so a
+   mid-flight manual cancel no longer gets "no CI jobs executed" stamped onto
+   its commit. Name is now `CI verdict: none (run cancelled)`, title
+   `CI did not produce a verdict`, and the summary says some jobs may have
+   started but none produced a passing verdict. `conclusion="neutral"`,
+   `head_sha`, `details_url`, and the `env:` indirection are unchanged. This
+   closes the wording half of follow-up `ga-4ceq5w`.
+4. **Static contract test added:** `scripts/cipolicy/watchdog_policy_test.go`
+   pins the trigger shape (`workflow_run` on `CI`, `types: [completed]`, and no
+   other trigger), the exact `{checks: write, actions: read}` permissions pair,
+   the `cancelled && push` gate, the `/check-runs` POST against
+   `head_sha="${HEAD_SHA}"` carrying `${RUN_URL}`, `neutral`-never-`success`,
+   and that no template expression is interpolated into the `run:` body. The
+   runtime behavior still cannot be exercised until the file is on the default
+   branch (criterion 2 above stands; `ga-4ceq5w` owns the first live trigger),
+   but the static contract now fails the build if a later edit widens
+   permissions, broadens the trigger, or flips the conclusion to `success`. No
+   Makefile change was needed: `Makefile:397` already runs
+   `go test -count=1 ./scripts/cipolicy`.
+
+Known and deliberately not fixed here (out of this PR's scope): repeated
+cancellations on the same SHA POST additional check runs rather than updating
+one, so a commit can accumulate duplicate neutral checks. Cosmetic.

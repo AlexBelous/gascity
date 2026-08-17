@@ -652,10 +652,10 @@ func (a *parityJoinAccumulator) joinCycle(key parityJoinCycleKey, bucket *parity
 		rest := right[acts:]
 		pairs := min(len(stood), len(rest))
 		for i := range pairs {
-			a.classifyYield(key, spec, row, stood[i], &rest[i])
+			a.classifyYield(key, spec, row, coTwins, stood[i], &rest[i])
 		}
 		for i := pairs; i < len(stood); i++ {
-			a.classifyYield(key, spec, row, stood[i], nil)
+			a.classifyYield(key, spec, row, coTwins, stood[i], nil)
 		}
 		for i := pairs; i < len(rest); i++ {
 			a.classify(key, spec, row, coTwins, nil, &rest[i])
@@ -709,6 +709,7 @@ func (a *parityJoinAccumulator) classifyYield(
 	cycle parityJoinCycleKey,
 	spec *parityJoinFamilySpec,
 	row parityJoinRowKey,
+	coTwins map[string]map[TraceReasonCode]bool,
 	yield parityJoinYieldRecord,
 	actor *SessionReconcilerTraceRecord,
 ) {
@@ -722,7 +723,15 @@ func (a *parityJoinAccumulator) classifyYield(
 		}
 		entry.Unpaired++
 		stats.YieldOnly++
-		classification, class := parityJoinClassify(spec, parityJoinSideLegacyOnly, nil, row.Session, &yield.rec, nil)
+		// The unpaired candidacy yield classifies against the SAME co-twin
+		// index the act path uses. The live case is the pre-wake supersede's
+		// keyed_start_owner spelling (WD.15 day 6, cycle-88f708218a46489c):
+		// its detector_wake_target co-twin sits in the same cycle but the
+		// act-join consumes that record against legacy's own wake decision, so
+		// the yield is what is left — and a nil index here made the
+		// twin-REQUIRING class unreachable for a spelling that had its twin.
+		// A twinless yield still finds nothing and stays unclassified.
+		classification, class := parityJoinClassify(spec, parityJoinSideLegacyOnly, coTwins, row.Session, &yield.rec, nil)
 		a.record(cycle, spec, row, parityJoinSideLegacyOnly, classification, class, &yield.rec, nil)
 		return
 	}

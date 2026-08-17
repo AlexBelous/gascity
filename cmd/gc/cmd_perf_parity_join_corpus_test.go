@@ -1082,3 +1082,232 @@ func TestParityJoinJSONDistinguishesNoComparablePairsFromZeroAgreement(t *testin
 		t.Fatalf("table cell %q != json bar_status %q for D-DEADLINE", got, deadline.BarStatus)
 	}
 }
+
+// Day 6 of the WD.15 window (cycle-7eb5acef63924183, tick ...-012843, real
+// 2026-08-16T17:16:14Z): the wd15-campaign tmux server dropped between the
+// sweep's one-shot names-only ListRunning and legacy's own per-row probe. The
+// sweep failed closed for the whole family — detector_running_set_unavailable /
+// skipped / predicted_effect none is a refusal to evaluate, not a detection
+// (session_detector_sweep.go's detectOrphan: "proven absence, not assumed
+// absence") — while legacy's fresh per-row probe returned Running=true inside
+// the same second and it re-decided the drain it had been standing down from
+// for the previous 15 ticks (keyed_orphan_drain_owner, 012828-012842). Legacy's
+// own GC_DRAIN_ACK write then failed with "no tmux server running" in this
+// cycle and the next, so no effect entered the provider on either side, and the
+// keyed engine rebuilt the fleet within two minutes. Comparing legacy's act
+// against a record that DECLINED to evaluate the family measures degraded-input
+// policy, not detection parity — the wake_admission_refused_row_stays_legacy
+// rationale one family over.
+func TestParityJoinTriagesTheFailClosedOrphanSweepAgainstLegacyDrain(t *testing.T) {
+	cityDir := t.TempDir()
+	parityJoinArmTemplate(t, cityDir, "dependent")
+	tracer := newSessionReconcilerTracer(cityDir, "wd15-runningset", io.Discard)
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	// The sweep's fail-closed record (cycle-7eb5acef63924183, seq 4976959).
+	cycle.RecordDecision(TraceSiteReconcilerOrphaned, detectorReasonRunningSetUnavailable, TraceOutcomeSkipped,
+		"dependent", "dependent-rc-6f2nb", map[string]any{
+			"session_id":       "rc-6f2nb",
+			"detector_family":  string(detectorFamilyOrphan),
+			"detector_acts":    true,
+			"effect_owner":     detectorShadowEffectOwner,
+			"effect_applied":   false,
+			"predicted_effect": "none",
+		})
+	// Legacy re-decides the drain on its own probe result (seq 4976973).
+	cycle.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonOrphaned, TraceOutcomeDrain,
+		"dependent", "dependent-rc-6f2nb", map[string]any{
+			"provider_alive":      true,
+			"store_query_partial": false,
+		})
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyOrphan)
+	if row.Unclassified != 0 || row.Mismatched != 0 {
+		t.Fatalf("D-ORPHAN unclassified=%d mismatched=%d, want 0/0 — the fail-closed sweep made no claim on the row (%+v)",
+			row.Unclassified, row.Mismatched, row)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyOrphan, parityJoinClassOrphanRunningSetUnavailable); got != 1 {
+		t.Fatalf("%s = %d, want 1 (triage=%+v)", parityJoinClassOrphanRunningSetUnavailable, got, report.Triage)
+	}
+	if report.WEBlocker {
+		t.Fatal("we_blocker = true for the classified fail-closed pair")
+	}
+}
+
+// The fail-closed class is scoped to the exact tuple the corpus carries —
+// legacy orphaned/drain beside the sweep's running-set refusal. Any OTHER
+// legacy conclusion beside that refusal (here a close) is a shape the campaign
+// has never seen and must stay unclassified and keep blocking WE, not ride the
+// class. This is the control that must keep failing differently.
+func TestParityJoinFailClosedOrphanSweepDoesNotBlanketTheSite(t *testing.T) {
+	cityDir := t.TempDir()
+	parityJoinArmTemplate(t, cityDir, "dependent")
+	tracer := newSessionReconcilerTracer(cityDir, "wd15-runningset-control", io.Discard)
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	cycle.RecordDecision(TraceSiteReconcilerOrphaned, detectorReasonRunningSetUnavailable, TraceOutcomeSkipped,
+		"dependent", "dependent-rc-ctrl", map[string]any{
+			"session_id":       "rc-ctrl",
+			"detector_family":  string(detectorFamilyOrphan),
+			"detector_acts":    true,
+			"effect_owner":     detectorShadowEffectOwner,
+			"effect_applied":   false,
+			"predicted_effect": "none",
+		})
+	cycle.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonOrphaned, TraceOutcomeClosed,
+		"dependent", "dependent-rc-ctrl", map[string]any{
+			"provider_alive":      false,
+			"store_query_partial": false,
+		})
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyOrphan)
+	if row.Unclassified != 1 {
+		t.Fatalf("D-ORPHAN unclassified = %d, want 1 — a close beside the refusal is not the classified shape (%+v)",
+			row.Unclassified, row)
+	}
+	if !report.WEBlocker {
+		t.Fatal("we_blocker = false for an unclassified degraded-input divergence")
+	}
+}
+
+// Day 6, four ticks after the running-set outage (cycle-88f708218a46489c, tick
+// ...-012847): the same pre-wake supersede convergence the day-4 triage
+// classified, in its OTHER spelling. The wisp died with the tmux server
+// (baseline sleep_reason runtime-missing), both engines raised its restart, and
+// legacy's pre-wake CAS found the KEYED start owner holding the key — so the
+// supersede's own reason field says keyed_start_owner, not premise_drift:*,
+// and parityJoinYieldOf routes it to the yield vocabulary as a candidacy
+// stand-down. The sweep's detector_wake_target co-twin is in the SAME cycle
+// (seq 4977424, admission refused_uncertifiable, effect_applied false, emitted
+// ~2s before), exactly as the class requires — but the act-join consumes it
+// against legacy's own wake record, and the unpaired candidacy yield was
+// classified with a nil co-twin index, so the adjudicated class could never
+// fire on this spelling. Same evidence, same convergence, same classification
+// as the premise_drift spelling.
+func TestParityJoinTriagesTheSupersedeYieldSpellingAgainstItsDetectorTwin(t *testing.T) {
+	cityDir := t.TempDir()
+	parityJoinArmTemplate(t, cityDir, "worker")
+	tracer := newSessionReconcilerTracer(cityDir, "wd15-supersede-yield", io.Discard)
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	// The sweep raises the wake target and its own admission declines to route
+	// it (cycle-88f708218a46489c, seq 4977424).
+	cycle.RecordDecision(TraceSiteReconcilerWakeDecision, detectorReasonWakeTarget, TraceOutcomeStartCandidate,
+		"worker", "s-rc-wisp-mx105dm", map[string]any{
+			"session_id":        "rc-wisp-mx105dm",
+			"detector_family":   string(detectorFamilyWake),
+			"detector_acts":     true,
+			"effect_owner":      detectorKeyedEffectOwner,
+			"effect_applied":    false,
+			"predicted_effect":  "start",
+			"admission":         "wake_fill",
+			"admission_outcome": string(detectorAdmissionRefusedUncertifiable),
+			"wake_reason":       "manual",
+		})
+	// Legacy decides the same row is a start candidate (seq 4977446)...
+	cycle.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate,
+		"worker", "s-rc-wisp-mx105dm", map[string]any{"should_wake": true})
+	// ...and its pre-wake CAS finds the keyed start owner holding the key
+	// (seq 4977448) — the supersede spelling that IS a yield.
+	cycle.RecordDecision(TraceSiteReconcilerWakeDecision, parityJoinReasonStartCommitSuperseded, TraceOutcomeSkipped,
+		"worker", "s-rc-wisp-mx105dm", map[string]any{
+			"session_id": "rc-wisp-mx105dm",
+			"reason":     parityJoinSupersedeYieldReason,
+		})
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyWake)
+	if row.Unclassified != 0 || row.Mismatched != 0 {
+		t.Fatalf("D-WAKE unclassified=%d mismatched=%d, want 0/0 — the supersede-yield has its same-cycle co-twin (%+v)",
+			row.Unclassified, row.Mismatched, row)
+	}
+	if got := parityJoinTriageCount(report, parityJoinFamilyWake, parityJoinClassPreWakeSupersedeConvergence); got != 1 {
+		t.Fatalf("%s = %d, want 1 (triage=%+v)", parityJoinClassPreWakeSupersedeConvergence, got, report.Triage)
+	}
+	if row.Matched != 1 {
+		t.Fatalf("D-WAKE matched = %d, want 1 — the wake/wake-target act pair must still join (%+v)", row.Matched, row)
+	}
+	if report.WEBlocker {
+		t.Fatal("we_blocker = true for the classified supersede-yield")
+	}
+}
+
+// The yield-path fix must not relax the twin requirement: a supersede-yield
+// with NO sweep record for the row in its cycle is still legacy fencing a
+// candidate nothing else was looking at — the genuinely twinless case the
+// class exists to block on. It stays unclassified and keeps blocking WE.
+func TestParityJoinSupersedeYieldStillRequiresItsDetectorTwin(t *testing.T) {
+	cityDir := t.TempDir()
+	parityJoinArmTemplate(t, cityDir, "worker")
+	tracer := newSessionReconcilerTracer(cityDir, "wd15-supersede-yield-lonely", io.Discard)
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	cycle.RecordDecision(TraceSiteReconcilerWakeDecision, parityJoinReasonStartCommitSuperseded, TraceOutcomeSkipped,
+		"worker", "s-rc-wisp-lonely", map[string]any{
+			"session_id": "rc-wisp-lonely",
+			"reason":     parityJoinSupersedeYieldReason,
+		})
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyWake)
+	if row.Unclassified != 1 {
+		t.Fatalf("D-WAKE unclassified = %d, want 1 for a twinless supersede-yield (%+v)", row.Unclassified, row)
+	}
+	if !report.WEBlocker {
+		t.Fatal("we_blocker = false for a twinless supersede-yield; an unclassified mismatch blocks WE")
+	}
+}

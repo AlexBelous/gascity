@@ -76,6 +76,10 @@ const (
 	// parityJoinClassOrphanLiveDetectorLead names the one-tick lead the sweep's
 	// live-orphan arm holds over legacy's. See the D-ORPHAN spec below.
 	parityJoinClassOrphanLiveDetectorLead = "orphan_live_detector_lead_one_tick"
+	// parityJoinClassOrphanRunningSetUnavailable names the sweep's whole-family
+	// fail-closed refusal when the provider could not produce the running set,
+	// beside legacy's own per-row drain decision. See the D-ORPHAN spec below.
+	parityJoinClassOrphanRunningSetUnavailable = "orphan_running_set_unavailable_fail_closed"
 )
 
 // legacyReasonNoWakeReason is the code legacy stamps at the drain decision when
@@ -251,6 +255,41 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 				Sites:            []TraceSiteCode{TraceSiteReconcilerOrphaned},
 				DetectorReasons:  []TraceReasonCode{detectorReasonOrphanLive},
 				DetectorOutcomes: []TraceOutcomeCode{TraceOutcomeDrain},
+			},
+			{
+				// WD.15 day 6 (cycle-7eb5acef63924183, tick ...-012843, real
+				// 2026-08-16T17:16:14Z): the wd15-campaign tmux server dropped
+				// mid-tick and the sweep's one-shot names-only ListRunning
+				// errored, so the whole family failed closed for the cycle —
+				// detector_running_set_unavailable / skipped / predicted_effect
+				// none is a refusal to evaluate, not a detection ("proven
+				// absence, not assumed absence", detectOrphan). Legacy probes
+				// per-row instead and got a fresh non-error Running=true inside
+				// the same second, so it re-decided the drain it had stood down
+				// from for the previous 15 ticks; its GC_DRAIN_ACK write then
+				// failed with the same "no tmux server running" in this cycle
+				// and the next, so no effect entered the provider on either
+				// side, and the keyed engine rebuilt the fleet within two
+				// minutes.
+				//
+				// Incomparable for the wake_admission_refused_row_stays_legacy
+				// reason: the sweep made NO claim on the row, so this compares
+				// an act to a non-act — it measures the two engines'
+				// degraded-input POLICY (sweep fails closed for the family,
+				// legacy trusts its own per-row probe), not detection parity.
+				// The zero-write invariant stays independently guarded: a sweep
+				// record that acted on unavailable input would trip
+				// ShadowEffectViolations regardless of this class. Scoped to
+				// the exact fail-closed tuple; any other legacy conclusion
+				// beside the refusal stays unclassified and blocks WE.
+				Class:            parityJoinClassOrphanRunningSetUnavailable,
+				Classification:   parityJoinIncomparable,
+				Side:             parityJoinSideBoth,
+				Sites:            []TraceSiteCode{TraceSiteReconcilerOrphaned},
+				DetectorReasons:  []TraceReasonCode{detectorReasonRunningSetUnavailable},
+				DetectorOutcomes: []TraceOutcomeCode{TraceOutcomeSkipped},
+				LegacyReasons:    []TraceReasonCode{TraceReasonOrphaned},
+				LegacyOutcomes:   []TraceOutcomeCode{TraceOutcomeDrain},
 			},
 		},
 	},

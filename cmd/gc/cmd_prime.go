@@ -45,9 +45,10 @@ const primeHookReadTimeout = 500 * time.Millisecond
 var primeStdin = func() *os.File { return os.Stdin }
 
 type primeHookInput struct {
-	Source        string `json:"source"`
-	SessionID     string `json:"session_id"`
-	HookEventName string `json:"hook_event_name"`
+	Source         string `json:"source"`
+	SessionID      string `json:"session_id"`
+	ConversationID string `json:"conversation_id"`
+	HookEventName  string `json:"hook_event_name"`
 }
 
 type primeHookContext struct {
@@ -585,7 +586,11 @@ func readPrimeHookContext() primeHookContext {
 		if event := strings.TrimSpace(input.HookEventName); event != "" {
 			ctx.HookEventName = event
 		}
-		if providerSessionID := strings.TrimSpace(input.SessionID); providerSessionID != "" {
+		providerSessionID := strings.TrimSpace(input.SessionID)
+		if providerSessionID == "" {
+			providerSessionID = strings.TrimSpace(input.ConversationID)
+		}
+		if providerSessionID != "" {
 			ctx.ProviderSessionID = providerSessionID
 		}
 	}

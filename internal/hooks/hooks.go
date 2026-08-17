@@ -203,7 +203,7 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 				data = normalized
 			}
 		}
-		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
+		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel, data))
 	})
 }
 
@@ -226,7 +226,7 @@ func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {
 	return writeManagedData(fs, dst, data)
 }
 
-func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
+func overlayManagedNeedsUpgrade(provider, rel string, desired []byte) func([]byte) bool {
 	if provider == "pi" && rel == path.Join(".pi", "extensions", "gc-hooks.js") {
 		return piHookNeedsUpgrade
 	}
@@ -239,7 +239,28 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	if provider == "omp" && rel == path.Join(".omp", "hooks", "gc-hook.ts") {
 		return ompHookNeedsUpgrade
 	}
+	if provider == "cursor" && rel == path.Join(".cursor", "hooks.json") {
+		return func(existing []byte) bool {
+			return cursorHookNeedsUpgrade(existing, desired)
+		}
+	}
 	return nil
+}
+
+func cursorHookNeedsUpgrade(existing, desired []byte) bool {
+	legacy := bytes.Replace(desired, []byte(`\"${GC_BIN:-gc}\" prime --hook`), []byte(`gc prime --hook`), 1)
+	if bytes.Equal(legacy, desired) {
+		return false
+	}
+	existingCanonical, err := overlay.CanonicalJSON(existing)
+	if err != nil {
+		return false
+	}
+	legacyCanonical, err := overlay.CanonicalJSON(legacy)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(existingCanonical, legacyCanonical)
 }
 
 func piHookNeedsUpgrade(existing []byte) bool {

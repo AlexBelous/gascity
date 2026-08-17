@@ -126,6 +126,24 @@ Choose the text style
 	require.Equal(t, "first_run_picker", blocked.Kind)
 }
 
+func TestClassifyLivePaneBlockedIgnoresAcceptedCursorWorkspaceTrust(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+⚠ Workspace Trust Required
+Cursor Agent can execute code and access files in this directory.
+Do you trust the contents of this directory?
+[a] Trust this workspace
+⏳ Trusting workspace...
+
+Cursor Agent
+v2026.08.11-e8db854
+
+Create the requested output file.
+⠘⠆ Working
+`)
+
+	require.Nil(t, blocked)
+}
+
 func TestClassifyLivePaneBlockedCodexUsageLimitSwitcher(t *testing.T) {
 	blocked := classifyLivePaneBlocked(`
 ■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to
@@ -1241,7 +1259,7 @@ func TestInstallLiveHandleProviderHooksCursor(t *testing.T) {
 
 	data, err := os.ReadFile(filepath.Join(workDir, ".cursor", "hooks.json"))
 	require.NoError(t, err)
-	require.Contains(t, string(data), `gc prime --hook`)
+	require.Contains(t, string(data), `\"${GC_BIN:-gc}\" prime --hook`)
 	require.Contains(t, string(data), `gc handoff --auto`)
 	require.Contains(t, string(data), `gc hook run`)
 }

@@ -82,7 +82,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 		{
 			profileID:             workertest.ProfileCursorTmuxCLI,
 			family:                "cursor",
-			wantCommand:           "cursor-agent -f",
+			wantCommand:           "cursor-agent -f --trust",
 			wantReadyDelayMs:      10000,
 			wantReadyPromptPrefix: "→ ",
 			wantProcessNames:      []string{"cursor-agent"},

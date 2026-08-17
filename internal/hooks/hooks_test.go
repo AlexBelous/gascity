@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1732,6 +1733,10 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 			}
 		}
 	}
+	cursorHooks := string(fs.Files["/work/.cursor/hooks.json"])
+	if !strings.Contains(cursorHooks, `\"${GC_BIN:-gc}\" prime --hook`) {
+		t.Errorf("Cursor sessionStart hook must use GC_BIN before PATH fallback:\n%s", cursorHooks)
+	}
 	// Copilot CLI documents preCompact (camelCase). The hook fires before
 	// context compaction starts so handoff can capture state; without it,
 	// long Copilot sessions silently lose context at compact boundaries.
@@ -2323,6 +2328,45 @@ func TestWriteEmbeddedManagedDoesNotClobberExistingBackup(t *testing.T) {
 	}
 	if got := string(fs.Files[dst+".bak.1"]); got != string(existing) {
 		t.Fatalf("second backup = %q, want existing hook", got)
+	}
+}
+
+func TestInstallCursorHookUpgradesPreviousManagedFile(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	legacy := bytes.Replace(desired, []byte(`\"${GC_BIN:-gc}\" prime --hook`), []byte(`gc prime --hook`), 1)
+	if bytes.Equal(legacy, desired) {
+		t.Fatal("embedded Cursor hook does not contain the GC_BIN-aware sessionStart command")
+	}
+
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	fs.Files[dst] = legacy
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if got := string(fs.Files[dst]); !strings.Contains(got, `\"${GC_BIN:-gc}\" prime --hook`) {
+		t.Fatalf("previous managed Cursor hook was not upgraded:\n%s", got)
+	}
+	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
+		t.Fatalf("legacy Cursor hook backup = %q, want original managed content", got)
+	}
+}
+
+func TestInstallCursorHookPreservesUserAuthoredFile(t *testing.T) {
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	custom := []byte(`{"version":1,"hooks":{"sessionStart":[{"command":"my-cursor-hook"}]}}`)
+	fs.Files[dst] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := fs.Files[dst]; !bytes.Equal(got, custom) {
+		t.Fatalf("user-authored Cursor hook was overwritten:\n%s", got)
 	}
 }
 

@@ -1100,10 +1100,10 @@ func TestWorkerInferenceInterruptRecoverContinue(t *testing.T) {
 		t.FailNow()
 	}
 
-	if liveSetup.Profile == workerpkg.ProfileAntigravityTmuxCLI || liveSetup.Profile == workerpkg.ProfileMimoCodeTmuxCLI {
-		// Both CLIs deliver the replacement input but let the interrupted
-		// turn run to completion (mimocode verified live 2026-06-12, same
-		// behavior the Antigravity conformance runs recorded).
+	if liveSetup.Profile == workerpkg.ProfileAntigravityTmuxCLI || liveSetup.Profile == workerpkg.ProfileCursorTmuxCLI || liveSetup.Profile == workerpkg.ProfileMimoCodeTmuxCLI {
+		// These CLIs deliver the replacement input but let the interrupted
+		// turn run to completion (Cursor verified live 2026-08-17, mimocode
+		// verified live 2026-06-12, and Antigravity recorded the same behavior).
 		reporter.Record(workertest.Unsupported(profileID, workertest.RequirementInferenceInterruptRecoverContinue, fmt.Sprintf("%s CLI does not currently cancel an in-flight turn for interrupt_now", liveSetup.Provider)).WithEvidence(map[string]string{
 			"profile":       string(liveSetup.Profile),
 			"provider":      liveSetup.Provider,
@@ -5877,6 +5877,8 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 		return nil
 	}
 	haystack := strings.ToLower(paneTail)
+	cursorTrustAccepted := strings.LastIndex(haystack, "cursor agent") > strings.LastIndex(haystack, "trusting workspace") &&
+		strings.Contains(haystack, "trusting workspace")
 	switch {
 	case containsAny(haystack,
 		"oauth token has expired",
@@ -5901,7 +5903,7 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 		"quick safety check",
 		"trust this folder",
 		"do you trust the contents of this directory?",
-	):
+	) && !cursorTrustAccepted:
 		return &liveBlockedInteraction{
 			Kind:     "workspace_trust",
 			Detail:   "worker is blocked on a workspace trust dialog",

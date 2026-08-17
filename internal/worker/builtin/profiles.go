@@ -465,7 +465,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// Cursor: CURSOR_API_KEY for headless (login is the default). Serving is
 		// Cursor's own backend — no base-URL override env.
 		UpstreamAPIKeyEnv: "CURSOR_API_KEY",
-		Args:              []string{"-f"},
+		Args:              []string{"-f", "--trust"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",
 		ReadyDelayMs:      10000,

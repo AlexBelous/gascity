@@ -113,6 +113,18 @@ func TestPersistPrimeHookProviderSessionKey_CursorHookStdinCaptured(t *testing.T
 	}
 }
 
+func TestReadPrimeHookContextUsesCursorConversationID(t *testing.T) {
+	setPrimeHookStdinJSON(t, map[string]string{
+		"conversation_id": "cursor-chat-abc-123",
+		"hook_event_name": "sessionStart",
+	})
+
+	ctx := readPrimeHookContext()
+	if got := ctx.ProviderSessionID; got != "cursor-chat-abc-123" {
+		t.Fatalf("ProviderSessionID = %q, want Cursor conversation_id", got)
+	}
+}
+
 // TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite confirms an
 // already-captured key is authoritative: a resume-wake's SessionStart hook must
 // not clobber the stored key.

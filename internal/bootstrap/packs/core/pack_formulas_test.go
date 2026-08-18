@@ -207,3 +207,42 @@ func TestCoreShippedAssetsAvoidNonexistentBDListSearchFlag(t *testing.T) {
 		t.Fatalf("walking embedded core pack: %v", err)
 	}
 }
+
+// TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree pins the fix for a
+// stranded-worktree bug: `git worktree remove` resolves the repo from cwd,
+// and this step `cd`s away from the worktree before removing it, so the bare
+// form exits 128 having unregistered nothing while `rm -rf` deletes the
+// directory anyway, leaving the registration behind forever. These are
+// bootstrap templates, so every city seeded by `gc city init` inherited the
+// defect (ga-x1u5cr; contributing cause of ga-lc9yx's 396 dead worktrees).
+func TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-polecat-commit.toml"), "commit-and-push")
+
+	if strings.Contains(step, `git worktree remove "$WORKTREE_PATH" --force`) {
+		t.Error("commit-and-push calls bare `git worktree remove` after `cd ..`; resolve the repo via --git-common-dir first and remove via `git -C \"$REPO\" worktree remove`")
+	}
+	if !strings.Contains(step, "--git-common-dir") {
+		t.Error("commit-and-push must resolve REPO via `git rev-parse --path-format=absolute --git-common-dir` before `cd ..`, so worktree removal does not depend on cwd")
+	}
+	if !strings.Contains(step, `git -C "$REPO" worktree remove`) {
+		t.Error(`commit-and-push must remove the worktree via git -C "$REPO" worktree remove, not a bare invocation`)
+	}
+}
+
+// TestMolScopedWorkResolvesRepoBeforeRemovingWorktree pins the same fix for
+// mol-scoped-work's cleanup step, which is worse than mol-polecat-commit's:
+// its `|| rm -rf` fallback makes the stranded git registration the designed
+// outcome of the bare form's failure path, not just an incidental risk.
+func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-scoped-work.toml"), "cleanup-worktree")
+
+	if strings.Contains(step, `git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"`) {
+		t.Error("cleanup-worktree calls bare `git worktree remove --force ... || rm -rf`; resolve the repo via --git-common-dir first and remove via `git -C \"$REPO\" worktree remove`")
+	}
+	if !strings.Contains(step, "--git-common-dir") {
+		t.Error(`cleanup-worktree must resolve REPO via git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir; cwd is not guaranteed inside the repo at this step`)
+	}
+	if !strings.Contains(step, `git -C "$REPO" worktree remove`) {
+		t.Error(`cleanup-worktree must remove the worktree via git -C "$REPO" worktree remove, not a bare invocation`)
+	}
+}

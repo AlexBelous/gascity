@@ -658,6 +658,20 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 		return ControllerJSON{Running: true, PID: identity.PID, Mode: string(identity.HostingMode)}
 	}
 	if err == nil && registered {
+		// No control socket and no standalone controller identity to probe:
+		// this is an API-only build/config where the supervisor never binds
+		// a unix control socket at all (gascity ga-gr09oz). Fall back to the
+		// same service-manager/API liveness signals `gc supervisor status`
+		// already trusts for this exact situation before reporting down.
+		if running, status, known := supervisorCityRunningHook(cityPath); known {
+			return ControllerJSON{Mode: "supervisor", Running: running, Status: status}
+		}
+		switch {
+		case supervisorServiceManagerActive():
+			return ControllerJSON{Mode: "supervisor", Running: true, Status: "unknown"}
+		case supervisorAPIReachable():
+			return ControllerJSON{Mode: "supervisor", Running: true, Status: "unknown"}
+		}
 		return ControllerJSON{Mode: "supervisor"}
 	}
 	return ControllerJSON{}
@@ -704,6 +718,9 @@ func controllerStatusLine(ctrl ControllerJSON) string {
 	switch ctrl.Mode {
 	case "supervisor":
 		if ctrl.Running {
+			if ctrl.PID == 0 {
+				return "supervisor-managed (running, PID unknown)"
+			}
 			return fmt.Sprintf("supervisor-managed (PID %d)", ctrl.PID)
 		}
 		if ctrl.PID != 0 {
@@ -740,6 +757,9 @@ func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
 		}
 	case "supervisor":
 		if ctrl.PID == 0 {
+			if ctrl.Running {
+				return []string{"Authority: supervisor-managed; supervisor process running"}
+			}
 			return []string{
 				"Authority: supervisor registry; no supervisor process is running",
 				"Next: " + startCommand + " to start the supervisor and reconcile this city",

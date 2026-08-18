@@ -724,6 +724,11 @@ func TestControllerStatusLine(t *testing.T) {
 			want: "supervisor-managed (PID 4321)",
 		},
 		{
+			name: "supervisor running api-only build",
+			ctrl: ControllerJSON{Mode: "supervisor", Running: true},
+			want: "supervisor-managed (running, PID unknown)",
+		},
+		{
 			name: "legacy hosting unknown",
 			ctrl: ControllerJSON{PID: 2468, Running: true},
 			want: "controller running (PID 2468, hosting mode unknown)",
@@ -949,6 +954,102 @@ func TestControllerStatusForCityRequiresMatchingPIDForLegacySupervisorInference(
 				t.Fatalf("supervisorAliveHook calls = %d, want 2", calls)
 			}
 		})
+	}
+}
+
+func TestControllerStatusForCityFallsBackToAPIWhenSocketUnreachable(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+
+	root := shortSocketTempDir(t, "gc-status-")
+	cityPath := filepath.Join(root, "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
+		t.Fatalf("register city: %v", err)
+	}
+	// No fake control socket started: this simulates an API-only build/config
+	// where the supervisor never binds a unix control socket at all
+	// (gascity ga-gr09oz).
+
+	oldAlive := supervisorAliveHook
+	oldRunning := supervisorCityRunningHook
+	supervisorAliveHook = func() int { return 0 }
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return true, "", true }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorCityRunningHook = oldRunning
+	})
+
+	got := controllerStatusForCity(cityPath)
+	if got.Mode != "supervisor" || !got.Running || got.PID != 0 {
+		t.Fatalf("controllerStatusForCity = %+v, want running supervisor with no PID (API-confirmed)", got)
+	}
+}
+
+func TestControllerStatusForCityFallsBackToServiceManagerWhenPerCityLookupUnknown(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+
+	root := shortSocketTempDir(t, "gc-status-")
+	cityPath := filepath.Join(root, "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
+		t.Fatalf("register city: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	oldRunning := supervisorCityRunningHook
+	oldServiceManager := supervisorServiceManagerActive
+	oldAPIReachable := supervisorAPIReachable
+	supervisorAliveHook = func() int { return 0 }
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "", false }
+	supervisorServiceManagerActive = func() bool { return true }
+	supervisorAPIReachable = func() bool { return false }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorCityRunningHook = oldRunning
+		supervisorServiceManagerActive = oldServiceManager
+		supervisorAPIReachable = oldAPIReachable
+	})
+
+	got := controllerStatusForCity(cityPath)
+	if got.Mode != "supervisor" || !got.Running || got.PID != 0 || got.Status != "unknown" {
+		t.Fatalf("controllerStatusForCity = %+v, want unknown-but-running supervisor with no PID", got)
+	}
+}
+
+func TestControllerStatusForCityStaysDownWhenNoLivenessSignalConfirms(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+
+	root := shortSocketTempDir(t, "gc-status-")
+	cityPath := filepath.Join(root, "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
+		t.Fatalf("register city: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	oldRunning := supervisorCityRunningHook
+	oldServiceManager := supervisorServiceManagerActive
+	oldAPIReachable := supervisorAPIReachable
+	supervisorAliveHook = func() int { return 0 }
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "", false }
+	supervisorServiceManagerActive = func() bool { return false }
+	supervisorAPIReachable = func() bool { return false }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorCityRunningHook = oldRunning
+		supervisorServiceManagerActive = oldServiceManager
+		supervisorAPIReachable = oldAPIReachable
+	})
+
+	got := controllerStatusForCity(cityPath)
+	if got.Mode != "supervisor" || got.Running || got.PID != 0 {
+		t.Fatalf("controllerStatusForCity = %+v, want stopped supervisor (no liveness signal confirmed)", got)
 	}
 }
 
@@ -1292,6 +1393,13 @@ func TestControllerStatusGuidance(t *testing.T) {
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
 			want: []string{
 				"Authority: supervisor process PID 4321",
+			},
+		},
+		{
+			name: "supervisor running api-only build",
+			ctrl: ControllerJSON{Mode: "supervisor", Running: true},
+			want: []string{
+				"Authority: supervisor-managed; supervisor process running",
 			},
 		},
 		{

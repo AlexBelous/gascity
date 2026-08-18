@@ -513,7 +513,38 @@ func reapDoltLeakProcessesWithKiller(leaked []DoltProcInfo, killFn func(int, sys
 	return reapDoltLeakPIDsWithKiller(pids, killFn)
 }
 
+// doltLeakReapPollInterval and doltLeakReapDeadline bound how long
+// reapDoltLeakPIDsWithKiller waits for a signaled pid to actually leave the
+// process table after SIGKILL, instead of returning as soon as the signal
+// call itself succeeds. A signal delivered successfully only means the
+// kernel accepted it, not that the process has exited -- callers racing a
+// TempDir RemoveAll (or any cleanup) right behind this reap need the pid to
+// actually be gone (ga-62mu45).
+const (
+	doltLeakReapPollInterval = 20 * time.Millisecond
+	doltLeakReapDeadline     = 5 * time.Second
+)
+
 func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) error) []error {
+	return reapDoltLeakPIDsWithKillerAndWaiter(pids, killFn, processStillAlive, doltLeakReapPollInterval, doltLeakReapDeadline)
+}
+
+// processStillAlive reports whether pid is still present in the process
+// table, probing via signal 0 (delivers no actual signal; ESRCH means the
+// pid is already gone). Mirrors the ESRCH handling killFn callers already
+// use elsewhere in this file.
+func processStillAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || !errors.Is(err, syscall.ESRCH)
+}
+
+// reapDoltLeakPIDsWithKillerAndWaiter is the injectable-liveness form of
+// reapDoltLeakPIDsWithKiller, used directly by unit tests for the reaper
+// itself; production callers go through the two-arg wrapper above. After
+// signaling, it polls aliveFn for each pid until it reports exited or the
+// shared deadline elapses, so the caller gets a confirmed exit rather than
+// a fire-and-forget signal send.
+func reapDoltLeakPIDsWithKillerAndWaiter(pids []int, killFn func(int, syscall.Signal) error, aliveFn func(int) bool, pollInterval, deadline time.Duration) []error {
 	var errs []error
 	for _, pid := range pids {
 		if err := killFn(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -526,17 +557,20 @@ func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) err
 			errs = append(errs, fmt.Errorf("SIGKILL pid %d: %w", pid, err))
 		}
 	}
-	return errs
-}
 
-// reapDoltLeakPIDsWithKillerAndWaiter is the injectable-liveness form of
-// reapDoltLeakPIDsWithKiller. TODO(ga-62mu45): this stub does not yet poll
-// aliveFn for confirmed exit -- it delegates to the fire-and-forget
-// SIGTERM+sleep+SIGKILL behavior unconditionally, ignoring aliveFn,
-// pollInterval, and deadline entirely. Exists so the new RED tests compile
-// and fail on their assertions rather than on a missing symbol.
-func reapDoltLeakPIDsWithKillerAndWaiter(pids []int, killFn func(int, syscall.Signal) error, _ func(int) bool, _, _ time.Duration) []error {
-	return reapDoltLeakPIDsWithKiller(pids, killFn)
+	// Shared deadline across all pids so the total wait stays bounded by
+	// deadline, not deadline multiplied by len(pids).
+	deadlineAt := time.Now().Add(deadline)
+	for _, pid := range pids {
+		for aliveFn(pid) {
+			if time.Now().After(deadlineAt) {
+				errs = append(errs, fmt.Errorf("pid %d still alive after SIGKILL and %s wait (leak-guard reap timed out)", pid, deadline))
+				break
+			}
+			time.Sleep(pollInterval)
+		}
+	}
+	return errs
 }
 
 func ignoreProcessSignal(int, syscall.Signal) error {

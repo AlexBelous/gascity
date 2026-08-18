@@ -162,6 +162,16 @@ Read in this order:
 with evidence, or fix the detector — then re-run the window for that family. Do
 not bucket it.
 
+**One class is verified per row, not per rule.** D-DRAIN's
+`drain_ack_adjacent_cycle_convergence` (owner-signed 2026-08-17/18) is
+incomparable only for a skew that proves its own keyed twin: a record for the
+same session at `reconciler.session.drain_ack`, stamped `effect_owner=keyed`, in
+an adjacent cycle within one tick (11.5s). Read its `triage` count as a count of
+*verified* skews. If a `reconciler.session.drain_ack` legacy record ever turns up
+in `unclassified` instead, the twin was not in the corpus — that is the keyed
+engine failing to acknowledge a drain legacy acknowledged, which is a detector
+finding to escalate, **not** a window to widen or a bound to tune.
+
 ### How the readout attributes a record
 
 Nothing in the tree stamps `effect_owner = "legacy"`. Every keyed handler stamps
@@ -367,17 +377,23 @@ it is a legacy-only `orphaned`/`stop_pending` at
 `reconciler.session.drain_ack` on `dependent-rc-7mzpx`, cycle
 `cycle-0860a236ff1b82bd`, tick `…-1073853-…-049152`, at
 **2026-08-15T04:49:21.053Z** — 70 minutes before the stop, mid-run of the
-*outgoing* instance (`cherry:1073853`). It is the `ack_timing_skew` class §3b
-already names: the keyed twin reads the ack handler-side while legacy polls
-in-tick, so the pair lands in adjacent cycles and a same-cycle-handle join can
-only report it as two singletons. The class clears the WE blocker; the rate keeps
-counting it, and a 128-comparable family cannot clear a 0.995 bar with one
-counted singleton. Confirmed by probe: adding a throwaway
+*outgoing* instance (`cherry:1073853`). It is an ack-timing skew: the keyed twin
+reads the ack handler-side while legacy polls in-tick, so the pair lands in
+adjacent cycles and a same-cycle-handle join can only report it as two
+singletons. Confirmed by probe: adding a throwaway
 `--exclude-window 2026-08-15T04:49:21Z/2026-08-15T04:49:22Z` takes D-DRAIN to
 127/0 and 100.000%. **Do not widen an exclusion window to cover it** — that
 probe is a diagnostic, never an artifact; the window records a restart, not
 whatever is red. D-DRAIN clears on volume or on a §3b ruling about the class,
 not on filtering.
+
+**Resolved on day 7 by the §3b ruling, not by filtering.** The owner signed
+`drain_ack_adjacent_cycle_convergence` on 2026-08-17/18: this cycle, and the two
+that joined it (`s-rc-wisp-y73064d` cycle-41b467cd627d719e,
+`s-rc-wisp-d30uo8f` cycle-03d51f88678dbb50), each proved their keyed twin against
+the archive and are now incomparable, taking D-DRAIN to 351/0 and 100.000% with
+`bar_status: ok`. The exclusion-window probe above stays a diagnostic and was
+never filed.
 
 Config reload: edit `city.toml` (or `pack.toml`), then
 

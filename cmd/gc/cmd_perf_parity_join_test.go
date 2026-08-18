@@ -276,29 +276,35 @@ func TestParityJoinCountsSingletonsAndKeyedRecords(t *testing.T) {
 	}
 }
 
-// D-DRAIN is the one genuinely time-skewed family: the handler reads the ack
-// while legacy polls in-tick, so the pair lands in adjacent cycles. Both
-// singletons triage into the section 3b ack-timing-skew class; the join stays a
-// same-cycle-handle join.
+// D-DRAIN is the one genuinely time-skewed family: the KEYED handler reads the
+// ack from inside its own operation while legacy polls the same field in-tick,
+// so the two writes land in different cycles and a same-cycle-handle join sees
+// one legacy singleton with the keyed record accounted a cycle away.
+//
+// The join stays a same-cycle join; only the CLASS reaches across, and only to
+// the ownership stamp. The three cycles this shape is copied from, and the
+// controls proving an unproven skew still blocks WE, are next door in
+// cmd_perf_parity_join_corpus_test.go.
 func TestParityJoinTriagesDrainAckTimingSkewAcrossAdjacentCycles(t *testing.T) {
 	records := []SessionReconcilerTraceRecord{
 		parityJoinTestRecord("tr-9", "1", TraceSiteReconcilerDrainAck, parityJoinOwnerLegacy, "gc-city-worker-1", "gcs-1", TraceReasonAcknowledged, TraceOutcomeStopPending),
 		parityJoinTestRollup("tr-9", "1", nil, 1),
-		parityJoinTestRecord("tr-9", "2", TraceSiteReconcilerDrainAck, parityJoinOwnerDetectorShadow, "gc-city-worker-1", "gcs-1", TraceReasonAcknowledged, TraceOutcomeStopPending),
+		parityJoinTestRecord("tr-9", "2", TraceSiteReconcilerDrainAck, parityJoinOwnerKeyed, "gc-city-worker-1", "gcs-1", TraceReasonAcknowledged, TraceOutcomeStopPending),
 		parityJoinTestRollup("tr-9", "2", nil, 1),
 	}
 
 	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
 
 	row := parityJoinFamilyRow(t, report, parityJoinFamilyDrain)
-	if row.Joined != 0 || row.LegacyOnly != 1 || row.DetectorOnly != 1 {
-		t.Fatalf("joined=%d legacy_only=%d detector_only=%d, want 0/1/1 (%+v)", row.Joined, row.LegacyOnly, row.DetectorOnly, row)
+	if row.Joined != 0 || row.LegacyOnly != 1 || row.Keyed != 1 {
+		t.Fatalf("joined=%d legacy_only=%d keyed=%d, want 0/1/1 (%+v)", row.Joined, row.LegacyOnly, row.Keyed, row)
 	}
-	if row.Unclassified != 0 {
-		t.Fatalf("unclassified = %d, want 0: ack-timing skew is a section 3b class", row.Unclassified)
+	if row.Unclassified != 0 || row.Incomparable != 1 {
+		t.Fatalf("unclassified=%d incomparable=%d, want 0/1: the skew proved its keyed twin (%+v)",
+			row.Unclassified, row.Incomparable, row)
 	}
-	if got := parityJoinTriageCount(report, parityJoinFamilyDrain, "ack_timing_skew"); got != 2 {
-		t.Fatalf("ack-timing-skew triage count = %d, want 2 (triage=%+v)", got, report.Triage)
+	if got := parityJoinTriageCount(report, parityJoinFamilyDrain, parityJoinClassDrainAckAdjacentCycleConvergence); got != 1 {
+		t.Fatalf("%s = %d, want 1 (triage=%+v)", parityJoinClassDrainAckAdjacentCycleConvergence, got, report.Triage)
 	}
 }
 

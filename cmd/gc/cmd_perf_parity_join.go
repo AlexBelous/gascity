@@ -399,6 +399,32 @@ type parityJoinAccumulator struct {
 	samples      []parityJoinSample
 	opts         parityJoinOptions
 	report       *parityJoinReport
+	// keyedAcks is the corpus-wide keyed-stamped record index, keyed by session.
+	// The join is per-cycle; this is the only thing in the accumulator that
+	// crosses a cycle boundary, and only rules that name it can see it.
+	keyedAcks map[string][]parityJoinKeyedAck
+}
+
+// parityJoinKeyedAck is one keyed-stamped write: the cycle it landed in, the
+// site it was written at, and when. It is the evidence an adjacent-cycle class
+// rests on.
+type parityJoinKeyedAck struct {
+	cycle parityJoinCycleKey
+	site  TraceSiteCode
+	at    time.Time
+}
+
+// parityJoinRowContext is the evidence OUTSIDE the two records under comparison
+// that a section 3b rule may consult for one row.
+type parityJoinRowContext struct {
+	// cycle is the cycle this row is being joined in, so a rule can tell an
+	// adjacent-cycle twin from one the join already had in hand.
+	cycle parityJoinCycleKey
+	// coTwins is every reason written for this session anywhere in THIS cycle.
+	coTwins map[TraceReasonCode]bool
+	// keyedAcks is every keyed-stamped record written for this session anywhere
+	// in the corpus, this cycle included.
+	keyedAcks []parityJoinKeyedAck
 }
 
 type parityJoinYieldKey struct {
@@ -444,8 +470,15 @@ func buildParityJoinReport(records []SessionReconcilerTraceRecord, opts parityJo
 		acc.rows[spec.Family] = &parityJoinFamilyReport{Family: spec.Family, Level: spec.Level}
 	}
 
-	for _, key := range parityJoinCycles(records, &report.Cycles) {
-		acc.joinCycle(key.key, key.bucket)
+	cycles := parityJoinCycles(records, &report.Cycles)
+	// Built over every kept cycle BEFORE the join runs. An ack-timing skew's
+	// twin is by definition not in the cycle being joined, so it cannot be
+	// indexed from inside joinCycle the way the same-cycle co-twins are. Cycles
+	// the exclusion windows or the rollup filters dropped are already gone here,
+	// so a dropped cycle vouches for nothing.
+	acc.keyedAcks = parityJoinKeyedAckIndexOf(cycles, opts)
+	for _, cycle := range cycles {
+		acc.joinCycle(cycle.key, cycle.bucket)
 	}
 
 	report.Families = make([]parityJoinFamilyReport, 0, len(parityJoinFamilySpecs))
@@ -682,6 +715,71 @@ func parityJoinCoTwinIndex(records []SessionReconcilerTraceRecord) map[string]ma
 	return index
 }
 
+// parityJoinKeyedAckIndexOf maps a session key to every keyed-stamped record
+// written for it anywhere in the corpus, at any site the section 3b table owns.
+//
+// The keyed side is identified by the OWNERSHIP STAMP alone. That is deliberate:
+// parityJoinRecordRole reaches parityJoinRoleKeyed only for a record carrying an
+// effect_owner that is neither legacy nor the detector shadow, and the keyed
+// handler's own ack operations carry no detector_family label — so a
+// detector_family predicate, which is what identifies the SWEEP, never fires on
+// them and would index nothing.
+func parityJoinKeyedAckIndexOf(cycles []parityJoinOrderedCycle, opts parityJoinOptions) map[string][]parityJoinKeyedAck {
+	index := make(map[string][]parityJoinKeyedAck)
+	for _, cycle := range cycles {
+		for _, rec := range cycle.bucket.records {
+			if _, ok := parityJoinSiteFamily[rec.SiteCode]; !ok {
+				continue
+			}
+			if !traceTemplateMatches(rec.Template, opts.Template) {
+				continue
+			}
+			session := parityJoinSessionKey(rec)
+			if session == "" || rec.Ts.IsZero() {
+				continue
+			}
+			if role, _, _ := parityJoinRecordRole(rec); role != parityJoinRoleKeyed {
+				continue
+			}
+			index[session] = append(index[session], parityJoinKeyedAck{
+				cycle: cycle.key,
+				site:  rec.SiteCode,
+				at:    rec.Ts,
+			})
+		}
+	}
+	return index
+}
+
+// parityJoinHasAdjacentCycleKeyedTwin answers whether a row carries the twin an
+// adjacent-cycle class requires: a keyed-stamped record for the same session, at
+// one of the named sites, written in a DIFFERENT cycle within one tick of the
+// record under comparison.
+//
+// Same-cycle keyed records are skipped on purpose. The class exists to explain a
+// SKEW, and a keyed record the join already held in the same cycle is evidence
+// of the opposite — that the two writers were in step. Absence of the twin is
+// the whole answer: the caller keeps looking down the table and the row ends up
+// unclassified.
+func parityJoinHasAdjacentCycleKeyedTwin(
+	sites []TraceSiteCode,
+	ctx parityJoinRowContext,
+	rec *SessionReconcilerTraceRecord,
+) bool {
+	if rec == nil || rec.Ts.IsZero() {
+		return false
+	}
+	for _, ack := range ctx.keyedAcks {
+		if ack.cycle == ctx.cycle || !slices.Contains(sites, ack.site) {
+			continue
+		}
+		if ack.at.Sub(rec.Ts).Abs() <= parityJoinAdjacentCycleWindow {
+			return true
+		}
+	}
+	return false
+}
+
 // yieldEntry records one stand-down against the yield-side vocabulary log.
 func (a *parityJoinAccumulator) yieldEntry(rec SessionReconcilerTraceRecord, spec parityJoinYieldSpec) *parityJoinYieldEntry {
 	key := parityJoinYieldKey{Site: rec.SiteCode, Reason: rec.ReasonCode}
@@ -731,7 +829,8 @@ func (a *parityJoinAccumulator) classifyYield(
 		// the yield is what is left — and a nil index here made the
 		// twin-REQUIRING class unreachable for a spelling that had its twin.
 		// A twinless yield still finds nothing and stays unclassified.
-		classification, class := parityJoinClassify(spec, parityJoinSideLegacyOnly, coTwins, row.Session, &yield.rec, nil)
+		ctx := a.rowContext(cycle, coTwins, row)
+		classification, class := parityJoinClassify(spec, parityJoinSideLegacyOnly, ctx, &yield.rec, nil)
 		a.record(cycle, spec, row, parityJoinSideLegacyOnly, classification, class, &yield.rec, nil)
 		return
 	}
@@ -778,8 +877,24 @@ func (a *parityJoinAccumulator) classify(
 		stats.Joined++
 	}
 
-	classification, class := parityJoinClassify(spec, side, coTwins, row.Session, legacyRec, shadowRec)
+	ctx := a.rowContext(cycle, coTwins, row)
+	classification, class := parityJoinClassify(spec, side, ctx, legacyRec, shadowRec)
 	a.record(cycle, spec, row, side, classification, class, legacyRec, shadowRec)
+}
+
+// rowContext resolves the twin evidence for one row: the same-cycle reason index
+// the cross-family splits read, and the corpus-wide keyed-stamp index the
+// adjacent-cycle classes read.
+func (a *parityJoinAccumulator) rowContext(
+	cycle parityJoinCycleKey,
+	coTwins map[string]map[TraceReasonCode]bool,
+	row parityJoinRowKey,
+) parityJoinRowContext {
+	return parityJoinRowContext{
+		cycle:     cycle,
+		coTwins:   coTwins[row.Session],
+		keyedAcks: a.keyedAcks[row.Session],
+	}
 }
 
 // record books one classified row into the family counters, the triage log and
@@ -817,8 +932,7 @@ func (a *parityJoinAccumulator) record(
 func parityJoinClassify(
 	spec *parityJoinFamilySpec,
 	side parityJoinSide,
-	coTwins map[string]map[TraceReasonCode]bool,
-	session string,
+	ctx parityJoinRowContext,
 	legacyRec, shadowRec *SessionReconcilerTraceRecord,
 ) (string, string) {
 	if side == parityJoinSideBoth {
@@ -846,7 +960,7 @@ func parityJoinClassify(
 		}
 	}
 	for _, rule := range slices.Concat(spec.Divergences, parityJoinGlobalDivergences) {
-		if !parityJoinRuleMatches(rule, side, coTwins[session], legacyRec, shadowRec) {
+		if !parityJoinRuleMatches(rule, side, ctx, legacyRec, shadowRec) {
 			continue
 		}
 		if rule.Classification != "" {
@@ -860,14 +974,23 @@ func parityJoinClassify(
 func parityJoinRuleMatches(
 	rule parityJoinDivergenceRule,
 	side parityJoinSide,
-	coTwins map[TraceReasonCode]bool,
+	ctx parityJoinRowContext,
 	legacyRec, shadowRec *SessionReconcilerTraceRecord,
 ) bool {
 	if rule.Side != "" && rule.Side != side {
 		return false
 	}
-	if len(rule.CoTwinReasons) > 0 && !parityJoinAnyCoTwin(rule.CoTwinReasons, coTwins) {
+	if len(rule.CoTwinReasons) > 0 && !parityJoinAnyCoTwin(rule.CoTwinReasons, ctx.coTwins) {
 		return false
+	}
+	if len(rule.AdjacentCycleKeyedTwinSites) > 0 {
+		rec := legacyRec
+		if rec == nil {
+			rec = shadowRec
+		}
+		if !parityJoinHasAdjacentCycleKeyedTwin(rule.AdjacentCycleKeyedTwinSites, ctx, rec) {
+			return false
+		}
 	}
 	if len(rule.DetectorAdmissionOutcomes) > 0 {
 		if shadowRec == nil {

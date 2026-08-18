@@ -12,6 +12,8 @@ package main
 // evidence, or fix the detector"). Inventing a speculative predicate would
 // silently bucket real mismatches, which is the one failure the bar forbids.
 
+import "time"
+
 const (
 	parityJoinFamilyStart       = "start"
 	parityJoinFamilyDeadline    = "D-DEADLINE"
@@ -80,7 +82,27 @@ const (
 	// fail-closed refusal when the provider could not produce the running set,
 	// beside legacy's own per-row drain decision. See the D-ORPHAN spec below.
 	parityJoinClassOrphanRunningSetUnavailable = "orphan_running_set_unavailable_fail_closed"
+	// parityJoinClassDrainAckAdjacentCycleConvergence names legacy's drain
+	// acknowledgement standing beside the keyed engine's own ack for the same
+	// session, one cycle away. See the D-DRAIN spec below for the evidence and
+	// the owner ruling that made it incomparable-with-verified-twin.
+	parityJoinClassDrainAckAdjacentCycleConvergence = "drain_ack_adjacent_cycle_convergence"
 )
+
+// parityJoinAdjacentCycleWindow bounds how far a keyed acknowledgement may sit
+// from the legacy decision it is claimed to be the twin of. It is ONE TICK: the
+// campaign corpus's median inter-tick gap is 9.222s over 9010 consecutive tick
+// pairs on 2026-08-15 and 11.454s over 8178 on 2026-08-17, so 11.5s is one tick
+// at the slower of the two cadences. A window of one tick is the whole claim the
+// class makes — the ack and the poll are two observations of the SAME drain
+// episode, because no complete tick separates them and the reconciler re-decides
+// a session's drain every tick. Widening it past a tick would let a genuinely
+// later drain episode vouch for an earlier one.
+//
+// The bound is not tuned to the specimens: the nearest keyed twin in each of the
+// three adjudicated cycles sits at 255ms, 162ms and 190ms, two orders of
+// magnitude inside it.
+const parityJoinAdjacentCycleWindow = 11500 * time.Millisecond
 
 // legacyReasonNoWakeReason is the code legacy stamps at the drain decision when
 // ComputeAwakeSet found no reason to be awake. It is NOT TraceReasonNoWakeReason
@@ -115,6 +137,22 @@ type parityJoinDivergenceRule struct {
 	// can never pair. A rule that names its twin fires only when the twin is
 	// actually in the corpus — the singleton stays unclassified otherwise.
 	CoTwinReasons []TraceReasonCode
+	// AdjacentCycleKeyedTwinSites requires a KEYED-STAMPED record for the same
+	// session at one of these sites, written in a DIFFERENT cycle within
+	// parityJoinAdjacentCycleWindow of this record. It is CoTwinReasons' answer
+	// to a skew the same-cycle index structurally cannot see: where a
+	// cross-family split lands two writers in one cycle at two sites, an
+	// ack-timing skew lands them at ONE site in two cycles, because the keyed
+	// handler acks off-tick while legacy polls in-tick.
+	//
+	// The keyed side is identified by its OWNERSHIP STAMP (effect_owner), not by
+	// detector_family: the keyed handler's ack records carry no family label at
+	// all, so a detector_family predicate never fires on them.
+	//
+	// Each skew must prove its OWN twin. The class is incomparable only for the
+	// rows that carry one; a twinless skew finds nothing here, falls through the
+	// whole table, and stays an unclassified mismatch that blocks WE.
+	AdjacentCycleKeyedTwinSites []TraceSiteCode
 }
 
 type parityJoinFamilySpec struct {
@@ -426,7 +464,9 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 		// "ack-timing skew (handler-side ack read vs legacy's in-tick poll);
 		// advance arms journey-proven". Both are singleton classes: the pair lands
 		// in adjacent cycles, which a same-cycle-handle join reports as one
-		// legacy-only and one detector-only record.
+		// legacy-only and one detector-only record. The advance arms are
+		// incomparable on the co-twin in the SAME cycle; the ack skew is
+		// incomparable on a keyed twin in an ADJACENT one, proved per row.
 		Family: parityJoinFamilyDrain,
 		Level:  parityJoinLevelDetection,
 		Sites: []TraceSiteCode{
@@ -456,12 +496,37 @@ var parityJoinFamilySpecs = []parityJoinFamilySpec{
 				DetectorReasons: []TraceReasonCode{detectorReasonDrainInFlight},
 			},
 			{
-				// Legacy's own acknowledgement arm. Its keyed twin reads the ack
-				// handler-side while legacy polls in-tick, so the pair lands in
-				// adjacent cycles and a same-cycle-handle join reports it as two
-				// singletons.
-				Class: "ack_timing_skew",
-				Sites: []TraceSiteCode{TraceSiteReconcilerDrainAck},
+				// Legacy's own acknowledgement arm, and the one D-DRAIN shape the
+				// owner adjudicated by hand (signed 2026-08-17/18, WD.15 day 7).
+				//
+				// The skew is STRUCTURAL, not a detector defect: the keyed handler
+				// reads the ack from inside its own operation while legacy polls
+				// the same field in-tick, so the two writes land in different
+				// cycles and a same-cycle-handle join reports one legacy-only
+				// singleton with the keyed record accounted one cycle away. It is
+				// also RARE — roughly 2 a day against ~90 comparable joins a day —
+				// so it cannot be characterized statistically the way the volume
+				// classes were.
+				//
+				// The ruling: incomparable, but only per-row and only on proof.
+				// Each skew must individually show its keyed twin — same session,
+				// same site, an adjacent cycle, inside one tick. That is the
+				// co-twin requirement pre_wake_supersede_convergence carries, moved
+				// from the same cycle to the adjacent one, and it is why the class
+				// cannot blanket the site: a legacy ack with no keyed ack beside it
+				// is a legacy write the keyed engine never made, which is a real
+				// divergence and stays an unclassified mismatch blocking WE.
+				//
+				// Specimens: dependent-rc-7mzpx cycle-0860a236ff1b82bd
+				// (2026-08-15T04:49:21.053Z, twins in cycle-880fa1b90288d6a4 and
+				// cycle-793999c79d218eb5), s-rc-wisp-y73064d cycle-41b467cd627d719e
+				// (2026-08-17T00:21:48.259Z) and s-rc-wisp-d30uo8f
+				// cycle-03d51f88678dbb50 (2026-08-17T02:05:29.315Z).
+				Class:                       parityJoinClassDrainAckAdjacentCycleConvergence,
+				Classification:              parityJoinIncomparable,
+				Side:                        parityJoinSideLegacyOnly,
+				Sites:                       []TraceSiteCode{TraceSiteReconcilerDrainAck},
+				AdjacentCycleKeyedTwinSites: []TraceSiteCode{TraceSiteReconcilerDrainAck},
 			},
 			{
 				Class:          "advance_arms_journey_proven",

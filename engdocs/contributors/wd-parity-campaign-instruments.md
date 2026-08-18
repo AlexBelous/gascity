@@ -94,11 +94,21 @@ the legacy call — no new loop, timer, or goroutine — so there is no cadence 
 reconcile. Both records for a session land in the same cycle. A window would be
 strictly weaker: it would admit cross-tick false pairs.
 
-The one genuinely time-skewed family is **D-DRAIN**, where the handler reads the
-ack while legacy polls in-tick. That surfaces as a legacy-only record in cycle N
-and a detector-only record in cycle N+1. §3b already names that class
-(`ack_timing_skew`), so the tool triages it as a singleton divergence rather than
-widening the join to hide it.
+The one genuinely time-skewed family is **D-DRAIN**, where the KEYED handler
+reads the ack while legacy polls in-tick. That surfaces as a legacy-only record
+in cycle N with the keyed record accounted a cycle away. §3b names that class
+(`drain_ack_adjacent_cycle_convergence`), so the tool triages it as a singleton
+divergence rather than widening the join to hide it.
+
+That class is the one place a rule reaches outside its cycle, and it does so
+without touching the join. `AdjacentCycleKeyedTwinSites` consults a corpus-wide
+index of keyed-STAMPED records (`effect_owner=keyed` — the keyed handler's ack
+operations carry no `detector_family` label, so the sweep predicate finds
+nothing) and requires one for the same session, at the same site, in a DIFFERENT
+cycle, within one tick. The join itself stays an equality join on the cycle
+handle; only the classification consults the index, and only per row. A skew that
+cannot produce its twin stays an unclassified mismatch and keeps blocking WE, so
+the reach can explain a skew but can never hide a divergence.
 
 Records that carry no `effect_owner` are counted in `cycles.unowned_records` and
 never guessed at, so running the tool against a pre-WD.2 corpus reads as

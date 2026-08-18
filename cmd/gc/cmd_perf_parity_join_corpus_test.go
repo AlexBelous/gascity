@@ -31,6 +31,14 @@ const parityJoinCorpusFixture = "testdata/wd15_campaign_corpus.jsonl"
 // session is the restart artifact the exclusion window exists to drop.
 const parityJoinRestartGapFixture = "testdata/wd15_restart_gap_corpus.jsonl"
 
+// parityJoinDrainAckTwinFixture holds the three D-DRAIN ack-timing skews the
+// owner adjudicated on day 6 and signed on 2026-08-17/18, each with the keyed
+// acknowledgement it has to prove. Every line is byte-copied from
+// campaign/trace-archive: for each specimen, legacy's own drain_ack decision
+// and the keyed handler's drain_ack operation one cycle over, each beside its
+// cycle's rollup so the cycle survives the join's own filters.
+const parityJoinDrainAckTwinFixture = "testdata/wd15_drain_ack_twin_corpus.jsonl"
+
 // parityJoinCorpusRecords decodes the byte-copied campaign corpus fixture.
 func parityJoinCorpusRecords(t *testing.T) []SessionReconcilerTraceRecord {
 	t.Helper()
@@ -122,10 +130,12 @@ func TestParityJoinAttributesUnstampedLegacyRecordsOnTheLiveCorpus(t *testing.T)
 		t.Fatalf("fleet-only triage count = %d, want 2 (the joined pair and the legacy-only singleton) (triage=%+v)", got, report.Triage)
 	}
 
-	// Legacy's own acknowledgement singleton stays a singleton and triages into
-	// the ack-timing-skew class, not into unowned_records.
-	if got := parityJoinTriageCount(report, parityJoinFamilyDrain, "ack_timing_skew"); got != 1 {
-		t.Fatalf("D-DRAIN ack_timing_skew = %d, want 1 (triage=%+v)", got, report.Triage)
+	// Legacy's own acknowledgement singleton stays a singleton and reaches the
+	// D-DRAIN table as a legacy row, not as an unowned_record. What the table
+	// then does with it is parityJoinDrainAckUnprovenSingleton's business.
+	if drain := parityJoinFamilyRow(t, report, parityJoinFamilyDrain); drain.LegacyOnly != 2 {
+		t.Fatalf("D-DRAIN legacy_only = %d, want 2 (worker-rc-6nq's ack and dependent-rc-1vd's) (%+v)",
+			drain.LegacyOnly, drain)
 	}
 }
 
@@ -278,10 +288,34 @@ func TestParityJoinTriagesTheRemainingLegacyOnlySingletons(t *testing.T) {
 	if got := parityJoinTriageCount(report, parityJoinFamilyStaleCreate, "live_runtime_recovery_excluded_from_sweep"); got != 1 {
 		t.Fatalf("live_runtime_recovery_excluded_from_sweep = %d, want 1 (triage=%+v)", got, report.Triage)
 	}
-	if report.WEBlocker {
-		t.Fatalf("we_blocker = true: the campaign corpus fixture must triage clean, unclassified=%+v", report.Unclassified)
+	// The fixture triages clean apart from the one singleton the corpus cannot
+	// answer for; see parityJoinDrainAckUnprovenSingleton.
+	for _, sample := range report.Unclassified {
+		if sample.SessionName != parityJoinDrainAckUnprovenSingleton {
+			t.Fatalf("unexpected unclassified mismatch in the campaign corpus fixture: %+v", sample)
+		}
 	}
 }
+
+// parityJoinDrainAckUnprovenSingleton is the campaign fixture's day-0 legacy
+// drain acknowledgement (cycle-c10ea5757924016e, tick ...-000030,
+// 2026-08-12T03:39:39.085Z, acknowledged/stop_pending).
+//
+// It is the one row in the fixture that drain_ack_adjacent_cycle_convergence
+// cannot decide, and the reason is curation, not divergence: the fixture samples
+// 18 individual cycles rather than cycle neighborhoods, and this record predates
+// campaign/trace-archive by a day — the archive's first segment is
+// 2026-08-13T08:51:27Z. The adjacent cycles that would carry or refute its keyed
+// twin exist nowhere on disk any more, so the corpus cannot prove the twin and
+// the tool refuses to assume it. That refusal is the class working as signed: an
+// unprovable ack is not an excused ack.
+//
+// Do NOT relax the class to clear this row. The three cycles the owner actually
+// adjudicated verify against the live archive
+// (TestParityJoinTriagesTheAdjudicatedDrainAckSkewsAgainstTheirKeyedTwins), and
+// laundering an unprovable row into `incomparable` here would take the only
+// alarm this seam has left off the one shape it exists to catch.
+const parityJoinDrainAckUnprovenSingleton = "worker-rc-6nq"
 
 // ga-f7v2ft.158's last survivors: three sibling pool sessions legacy idle-killed
 // in one tick with no detector record anywhere in the corpus. The fixture cycle
@@ -329,7 +363,7 @@ func TestParityJoinDeadlineCrossingRaceDoesNotSwallowNeighbouringArms(t *testing
 		ReasonCode:  TraceReasonCode("idle_timeout"),
 		OutcomeCode: TraceOutcomeDeferred,
 	}
-	_, class := parityJoinClassify(spec, parityJoinSideLegacyOnly, nil, "worker-rc-tca", &deferral, nil)
+	_, class := parityJoinClassify(spec, parityJoinSideLegacyOnly, parityJoinRowContext{}, &deferral, nil)
 	if class != "legacy_pending_interaction_deferral" {
 		t.Fatalf("legacy idle deferral classified as %q, want legacy_pending_interaction_deferral", class)
 	}
@@ -339,7 +373,7 @@ func TestParityJoinDeadlineCrossingRaceDoesNotSwallowNeighbouringArms(t *testing
 		ReasonCode:  TraceReasonCode("max_session_age"),
 		OutcomeCode: TraceOutcomeStop,
 	}
-	_, class = parityJoinClassify(spec, parityJoinSideLegacyOnly, nil, "worker-rc-tca", &maxAge, nil)
+	_, class = parityJoinClassify(spec, parityJoinSideLegacyOnly, parityJoinRowContext{}, &maxAge, nil)
 	if class != parityJoinClassUnclassified {
 		t.Fatalf("legacy max-age stop classified as %q, want UNCLASSIFIED — the idle arm's evidence does not cover it", class)
 	}
@@ -384,13 +418,13 @@ func TestParityJoinPendingCreateSplitStillRequiresAStartFamilyTwin(t *testing.T)
 		ReasonCode:  detectorReasonPendingCreatePreserved,
 		OutcomeCode: TraceOutcomeNoChange,
 	}
-	_, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, nil, "s-rc-wisp-s08pap", nil, &preserve)
+	_, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, parityJoinRowContext{}, nil, &preserve)
 	if class != parityJoinClassUnclassified {
 		t.Fatalf("a twinless preserve record classified as %q, want UNCLASSIFIED", class)
 	}
 	for _, twin := range []TraceReasonCode{TraceReasonWake, "keyed_start_owner"} {
-		coTwins := map[string]map[TraceReasonCode]bool{"s-rc-wisp-s08pap": {twin: true}}
-		_, class = parityJoinClassify(spec, parityJoinSideDetectorOnly, coTwins, "s-rc-wisp-s08pap", nil, &preserve)
+		ctx := parityJoinRowContext{coTwins: map[TraceReasonCode]bool{twin: true}}
+		_, class = parityJoinClassify(spec, parityJoinSideDetectorOnly, ctx, nil, &preserve)
 		if class != parityJoinClassPendingCreateFamilySplit {
 			t.Fatalf("preserve record with twin %q classified as %q, want %s", twin, class, parityJoinClassPendingCreateFamilySplit)
 		}
@@ -444,7 +478,7 @@ func TestParityJoinResetStallAlarmDoesNotSwallowTheProgressStallArms(t *testing.
 		ReasonCode:  detectorReasonProgressStall,
 		OutcomeCode: TraceOutcomeStop,
 	}
-	if _, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, nil, "worker-rc-abc", nil, &exempt); class != parityJoinClassUnclassified {
+	if _, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, parityJoinRowContext{}, nil, &exempt); class != parityJoinClassUnclassified {
 		t.Fatalf("detector progress-stall singleton classified as %q, want UNCLASSIFIED", class)
 	}
 	alarmOnDetectorSide := SessionReconcilerTraceRecord{
@@ -452,7 +486,7 @@ func TestParityJoinResetStallAlarmDoesNotSwallowTheProgressStallArms(t *testing.
 		ReasonCode:  TraceReasonResetStalled,
 		OutcomeCode: TraceOutcomeFailed,
 	}
-	if _, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, nil, "worker-rc-abc", nil, &alarmOnDetectorSide); class != parityJoinClassUnclassified {
+	if _, class := parityJoinClassify(spec, parityJoinSideDetectorOnly, parityJoinRowContext{}, nil, &alarmOnDetectorSide); class != parityJoinClassUnclassified {
 		t.Fatalf("a detector-side record at the alarm site classified as %q, want UNCLASSIFIED", class)
 	}
 }
@@ -1310,4 +1344,191 @@ func TestParityJoinSupersedeYieldStillRequiresItsDetectorTwin(t *testing.T) {
 	if !report.WEBlocker {
 		t.Fatal("we_blocker = false for a twinless supersede-yield; an unclassified mismatch blocks WE")
 	}
+}
+
+// The three D-DRAIN ack-timing skews the owner adjudicated on WD.15 day 6 and
+// signed on 2026-08-17/18. Each is one legacy drain_ack decision with no sweep
+// record beside it in its own cycle, and the keyed handler's own drain_ack
+// operation for the same session one cycle away:
+//
+//	dependent-rc-7mzpx  cycle-0860a236ff1b82bd  2026-08-15T04:49:21.053Z
+//	    keyed twins cycle-880fa1b90288d6a4 (-3.413s), cycle-793999c79d218eb5 (+255ms)
+//	s-rc-wisp-y73064d   cycle-41b467cd627d719e  2026-08-17T00:21:48.259Z
+//	    keyed twin  cycle-10efb4c154f087cd (+162ms)
+//	s-rc-wisp-d30uo8f   cycle-03d51f88678dbb50  2026-08-17T02:05:29.315Z
+//	    keyed twin  cycle-9b0154e4270d3a4c (+190ms)
+//
+// The skew is structural — the keyed handler acks from inside its own operation
+// while legacy polls the same field in-tick — and far too rare to characterize
+// statistically: roughly 2 a day against ~90 comparable joins a day. So the
+// owner ruled it incomparable PER ROW ON PROOF rather than by rule, and each
+// specimen runs in ISOLATION here: one specimen's twin cannot vouch for another.
+func TestParityJoinTriagesTheAdjudicatedDrainAckSkewsAgainstTheirKeyedTwins(t *testing.T) {
+	records := parityJoinCorpusFixtureRecords(t, parityJoinDrainAckTwinFixture)
+
+	for _, session := range parityJoinDrainAckSpecimens {
+		t.Run(session, func(t *testing.T) {
+			report := buildParityJoinReport(
+				parityJoinDrainAckSpecimen(records, session, true),
+				parityJoinOptions{Bar: 0.995, Samples: 4},
+			)
+
+			row := parityJoinFamilyRow(t, report, parityJoinFamilyDrain)
+			if row.LegacyOnly != 1 {
+				t.Fatalf("legacy_only = %d, want 1 — the skew is a singleton by construction (%+v)", row.LegacyOnly, row)
+			}
+			if row.Mismatched != 0 || row.Unclassified != 0 {
+				t.Fatalf("mismatched=%d unclassified=%d, want 0/0 — the twin is in the corpus (%+v)",
+					row.Mismatched, row.Unclassified, row)
+			}
+			if row.Incomparable != 1 {
+				t.Fatalf("incomparable = %d, want 1 (%+v)", row.Incomparable, row)
+			}
+			if got := parityJoinTriageCount(report, parityJoinFamilyDrain, parityJoinClassDrainAckAdjacentCycleConvergence); got != 1 {
+				t.Fatalf("%s = %d, want 1 (triage=%+v)", parityJoinClassDrainAckAdjacentCycleConvergence, got, report.Triage)
+			}
+			if report.WEBlocker {
+				t.Fatalf("we_blocker = true for a skew that proved its twin (%+v)", report.Unclassified)
+			}
+		})
+	}
+}
+
+// The control, and the reason the class is worth having at all. Strip the keyed
+// RECORD out of each specimen — its cycle stays in the corpus, so the corpus can
+// still answer the question and answers "no keyed ack" — and the skew must fall
+// all the way through the section 3b table to UNCLASSIFIED and block WE.
+//
+// A legacy acknowledgement with no keyed acknowledgement beside it is not a
+// timing artifact; it is legacy writing a drain ack the keyed engine never
+// wrote, which is the exact divergence D-DRAIN exists to catch. If this test
+// ever passes for the same reason the one above does, the class has become a
+// blanket over the site and the family's only remaining alarm is gone.
+func TestParityJoinDrainAckSkewWithoutItsKeyedTwinStaysAnUnclassifiedMismatch(t *testing.T) {
+	records := parityJoinCorpusFixtureRecords(t, parityJoinDrainAckTwinFixture)
+
+	for _, session := range parityJoinDrainAckSpecimens {
+		t.Run(session, func(t *testing.T) {
+			report := buildParityJoinReport(
+				parityJoinDrainAckSpecimen(records, session, false),
+				parityJoinOptions{Bar: 0.995, Samples: 4},
+			)
+
+			row := parityJoinFamilyRow(t, report, parityJoinFamilyDrain)
+			if row.Mismatched != 1 || row.Unclassified != 1 {
+				t.Fatalf("mismatched=%d unclassified=%d, want 1/1 — a twinless skew is not explained (%+v)",
+					row.Mismatched, row.Unclassified, row)
+			}
+			if row.Incomparable != 0 {
+				t.Fatalf("incomparable = %d, want 0 — the class must not fire without its twin (%+v)", row.Incomparable, row)
+			}
+			if got := parityJoinTriageCount(report, parityJoinFamilyDrain, parityJoinClassDrainAckAdjacentCycleConvergence); got != 0 {
+				t.Fatalf("%s = %d, want 0 (triage=%+v)", parityJoinClassDrainAckAdjacentCycleConvergence, got, report.Triage)
+			}
+			if !report.WEBlocker {
+				t.Fatal("we_blocker = false for a twinless drain ack; an unclassified mismatch blocks WE")
+			}
+		})
+	}
+}
+
+// The two edges of "adjacent cycle", probed against the specimen with the
+// tightest real skew (s-rc-wisp-d30uo8f, +190ms).
+//
+// A keyed ack in the SAME cycle is evidence the two writers were IN STEP, which
+// is the opposite of the claim this class makes, so it must not verify. A keyed
+// ack more than one tick away is a different drain episode — the reconciler
+// re-decides a session's drain every tick — so it must not verify either. Only
+// the window between them is an ack-timing skew.
+func TestParityJoinDrainAckTwinMustBeAdjacentAndInsideOneTick(t *testing.T) {
+	const session = "s-rc-wisp-d30uo8f"
+	fixture := parityJoinCorpusFixtureRecords(t, parityJoinDrainAckTwinFixture)
+	legacy := parityJoinDrainAckRecordOf(t, fixture, session, false)
+
+	for _, tc := range []struct {
+		name     string
+		shift    time.Duration
+		intoLeft *SessionReconcilerTraceRecord
+		verified bool
+	}{
+		{name: "as_recorded", verified: true},
+		{name: "just_inside_one_tick", shift: parityJoinAdjacentCycleWindow - time.Second, verified: true},
+		{name: "just_past_one_tick", shift: parityJoinAdjacentCycleWindow + time.Second},
+		{name: "same_cycle", intoLeft: &legacy},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records := parityJoinDrainAckSpecimen(fixture, session, true)
+			for i := range records {
+				owner, _ := records[i].Fields["effect_owner"].(string)
+				if owner != parityJoinOwnerKeyed {
+					continue
+				}
+				records[i].Ts = records[i].Ts.Add(tc.shift)
+				if tc.intoLeft != nil {
+					records[i].TraceID, records[i].TickID = tc.intoLeft.TraceID, tc.intoLeft.TickID
+				}
+			}
+
+			report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995, Samples: 4})
+			row := parityJoinFamilyRow(t, report, parityJoinFamilyDrain)
+			if tc.verified && row.Incomparable != 1 {
+				t.Fatalf("incomparable = %d, want 1 — this twin is inside the window (%+v)", row.Incomparable, row)
+			}
+			if !tc.verified && row.Unclassified != 1 {
+				t.Fatalf("unclassified = %d, want 1 — this twin is out of bounds and vouches for nothing (%+v)",
+					row.Unclassified, row)
+			}
+		})
+	}
+}
+
+// parityJoinDrainAckSpecimens are the sessions of the three adjudicated skews,
+// in the order the archive wrote them.
+var parityJoinDrainAckSpecimens = []string{
+	"dependent-rc-7mzpx",
+	"s-rc-wisp-y73064d",
+	"s-rc-wisp-d30uo8f",
+}
+
+// parityJoinDrainAckSpecimen narrows the fixture to one specimen: that session's
+// records plus the rollup of every cycle they touch. With keyedTwins false the
+// keyed RECORDS are dropped and their cycles are kept, so the corpus still
+// covers the adjacent cycles and the absence of an ack is a proven absence.
+func parityJoinDrainAckSpecimen(records []SessionReconcilerTraceRecord, session string, keyedTwins bool) []SessionReconcilerTraceRecord {
+	cycles := make(map[parityJoinCycleKey]bool)
+	picked := make([]SessionReconcilerTraceRecord, 0, len(records))
+	for _, rec := range records {
+		if rec.SessionName != session {
+			continue
+		}
+		cycles[parityJoinCycleKey{TraceID: rec.TraceID, TickID: rec.TickID}] = true
+		owner, _ := rec.Fields["effect_owner"].(string)
+		if !keyedTwins && owner == parityJoinOwnerKeyed {
+			continue
+		}
+		picked = append(picked, rec)
+	}
+	for _, rec := range records {
+		if rec.RecordType == TraceRecordCycleResult && cycles[parityJoinCycleKey{TraceID: rec.TraceID, TickID: rec.TickID}] {
+			picked = append(picked, rec)
+		}
+	}
+	return picked
+}
+
+// parityJoinDrainAckRecordOf returns the specimen's legacy decision (keyed
+// false) or its first keyed acknowledgement (keyed true).
+func parityJoinDrainAckRecordOf(t *testing.T, records []SessionReconcilerTraceRecord, session string, keyed bool) SessionReconcilerTraceRecord {
+	t.Helper()
+	for _, rec := range records {
+		if rec.SessionName != session || rec.SiteCode != TraceSiteReconcilerDrainAck {
+			continue
+		}
+		owner, _ := rec.Fields["effect_owner"].(string)
+		if (owner == parityJoinOwnerKeyed) == keyed {
+			return rec
+		}
+	}
+	t.Fatalf("no drain_ack record for %s (keyed=%v) in the fixture", session, keyed)
+	return SessionReconcilerTraceRecord{}
 }

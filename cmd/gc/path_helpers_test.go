@@ -529,8 +529,80 @@ func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) err
 	return errs
 }
 
+// reapDoltLeakPIDsWithKillerAndWaiter is the injectable-liveness form of
+// reapDoltLeakPIDsWithKiller. TODO(ga-62mu45): this stub does not yet poll
+// aliveFn for confirmed exit -- it delegates to the fire-and-forget
+// SIGTERM+sleep+SIGKILL behavior unconditionally, ignoring aliveFn,
+// pollInterval, and deadline entirely. Exists so the new RED tests compile
+// and fail on their assertions rather than on a missing symbol.
+func reapDoltLeakPIDsWithKillerAndWaiter(pids []int, killFn func(int, syscall.Signal) error, _ func(int) bool, _, _ time.Duration) []error {
+	return reapDoltLeakPIDsWithKiller(pids, killFn)
+}
+
 func ignoreProcessSignal(int, syscall.Signal) error {
 	return nil
+}
+
+// TestReapDoltLeakPIDsWithKillerAndWaiter_WaitsForConfirmedExit proves the
+// reaper polls for actual exit instead of returning the instant SIGKILL is
+// sent. A killFn call succeeding only means the kernel accepted the signal,
+// not that the process has left the process table -- the caller's
+// t.Cleanup (and any TempDir RemoveAll racing right behind it) needs the
+// pid to actually be gone (ga-62mu45).
+func TestReapDoltLeakPIDsWithKillerAndWaiter_WaitsForConfirmedExit(t *testing.T) {
+	const pid = 4242
+	var aliveCalls int
+	aliveFn := func(gotPID int) bool {
+		if gotPID != pid {
+			t.Fatalf("aliveFn called with unexpected pid %d, want %d", gotPID, pid)
+		}
+		aliveCalls++
+		// Reports alive for the first two polls, then exited -- simulates a
+		// process that takes a couple of poll ticks to actually leave the
+		// process table after SIGKILL is delivered.
+		return aliveCalls <= 2
+	}
+
+	errs := reapDoltLeakPIDsWithKillerAndWaiter([]int{pid}, ignoreProcessSignal, aliveFn, 5*time.Millisecond, 200*time.Millisecond)
+
+	if len(errs) != 0 {
+		t.Fatalf("reapDoltLeakPIDsWithKillerAndWaiter returned unexpected errors: %v", errs)
+	}
+	if aliveCalls < 2 {
+		t.Fatalf("aliveFn called only %d time(s); reaper must poll for confirmed exit, not return after a single check", aliveCalls)
+	}
+}
+
+// TestReapDoltLeakPIDsWithKillerAndWaiter_TimesOutWithClearPIDError proves
+// a pid that never confirms exit produces a clear, pid-naming error within
+// the bounded deadline -- rather than either hanging forever or silently
+// returning success for a process that is still alive.
+func TestReapDoltLeakPIDsWithKillerAndWaiter_TimesOutWithClearPIDError(t *testing.T) {
+	const pid = 4343
+	aliveFn := func(int) bool { return true } // never exits
+
+	const deadline = 40 * time.Millisecond
+	start := time.Now()
+	errs := reapDoltLeakPIDsWithKillerAndWaiter([]int{pid}, ignoreProcessSignal, aliveFn, 5*time.Millisecond, deadline)
+	elapsed := time.Since(start)
+
+	if len(errs) == 0 {
+		t.Fatal("reapDoltLeakPIDsWithKillerAndWaiter returned no error for a pid that never confirmed exit")
+	}
+	found := false
+	for _, err := range errs {
+		if strings.Contains(err.Error(), fmt.Sprintf("%d", pid)) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected an error naming pid %d, got: %v", pid, errs)
+	}
+	// Generous upper bound so host contention can't flake this: the reaper
+	// must not hang well past its own configured deadline.
+	if elapsed > deadline+2*time.Second {
+		t.Fatalf("reapDoltLeakPIDsWithKillerAndWaiter took %s, well beyond its %s deadline -- it must not hang past the bound", elapsed, deadline)
+	}
 }
 
 // requireNoLeakedDoltAfterWith is the testReporter+injectable-enumerator

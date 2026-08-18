@@ -12,7 +12,7 @@ import (
 // the pool check determines how many instances run.
 func TestGastown_PoolScaling(t *testing.T) {
 	agents := []gasTownAgent{
-		{Name: "worker", StartCommand: "bash " + agentScript("loop.sh"), Pool: &poolConfig{
+		{Name: "worker", StartCommand: "bash " + agentScript("loop.sh"), WorkDir: ".gc/agents/{{.AgentBase}}", Pool: &poolConfig{
 			Min: 1, Max: 3, Check: "echo 1",
 		}},
 	}
@@ -30,7 +30,7 @@ func TestGastown_PoolScaling(t *testing.T) {
 // even when check returns 0.
 func TestGastown_PoolMinGuarantee(t *testing.T) {
 	agents := []gasTownAgent{
-		{Name: "builder", StartCommand: "sleep 3600", Pool: &poolConfig{
+		{Name: "builder", StartCommand: "sleep 3600", WorkDir: ".gc/agents/{{.AgentBase}}", Pool: &poolConfig{
 			Min: 2, Max: 5, Check: "echo 0",
 		}},
 	}
@@ -49,7 +49,7 @@ func TestGastown_PoolMinGuarantee(t *testing.T) {
 // TestGastown_PoolMaxCap validates that pool scaling is capped at max.
 func TestGastown_PoolMaxCap(t *testing.T) {
 	agents := []gasTownAgent{
-		{Name: "worker", StartCommand: "sleep 3600", Pool: &poolConfig{
+		{Name: "worker", StartCommand: "sleep 3600", WorkDir: ".gc/agents/{{.AgentBase}}", Pool: &poolConfig{
 			Min: 0, Max: 3, Check: "echo 100",
 		}},
 	}

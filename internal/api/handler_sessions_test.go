@@ -3253,6 +3253,56 @@ func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testi
 	}
 }
 
+// TestHandleProviderSessionCreateAliasGetsIsolatedWorkDir is the ga-9b4jbd
+// regression guard: two "provider" kind sessions against the same bare
+// provider, distinguished only by alias, must not collide on the same
+// work_dir. Before the fix, createProviderSession hardcoded workDir to the
+// bare city path regardless of alias, so concurrently running provider
+// sessions shared a cwd.
+func TestHandleProviderSessionCreateAliasGetsIsolatedWorkDir(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	create := func(alias string) *SessionCreateSucceededPayload {
+		t.Helper()
+		body := fmt.Sprintf(`{"kind":"provider","name":"test-agent","alias":%q}`, alias)
+		req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("alias %q: got status %d, want %d; body: %s", alias, w.Code, http.StatusAccepted, w.Body.String())
+		}
+		accepted := decodeAsyncAccepted(t, w.Body)
+		success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+		if success == nil {
+			t.Fatalf("alias %q: session create failed: %s: %s", alias, failure.ErrorCode, failure.ErrorMessage)
+		}
+		return success
+	}
+
+	first := create("provider-session-one")
+	second := create("provider-session-two")
+
+	firstBead, err := fs.cityBeadStore.Get(first.Session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", first.Session.ID, err)
+	}
+	secondBead, err := fs.cityBeadStore.Get(second.Session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", second.Session.ID, err)
+	}
+
+	firstWorkDir := firstBead.Metadata["work_dir"]
+	secondWorkDir := secondBead.Metadata["work_dir"]
+	if firstWorkDir == "" || secondWorkDir == "" {
+		t.Fatalf("expected non-empty work_dir metadata, got %q and %q", firstWorkDir, secondWorkDir)
+	}
+	if firstWorkDir == secondWorkDir {
+		t.Fatalf("expected distinct work_dir per alias, both resolved to %q", firstWorkDir)
+	}
+}
+
 func TestHandleProviderSessionCreateUsesACPTransportCommand(t *testing.T) {
 	supportsACP := true
 	fs := newSessionFakeState(t)

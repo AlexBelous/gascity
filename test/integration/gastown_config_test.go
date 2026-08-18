@@ -33,7 +33,7 @@ func TestGastown_ConfigStartStop(t *testing.T) {
 func TestGastown_ConfigWithPool(t *testing.T) {
 	agents := []gasTownAgent{
 		{Name: "mayor", StartCommand: "sleep 3600"},
-		{Name: "dog", StartCommand: "sleep 3600", Pool: &poolConfig{
+		{Name: "dog", StartCommand: "sleep 3600", WorkDir: ".gc/agents/{{.AgentBase}}", Pool: &poolConfig{
 			Min: 0, Max: 3, Check: "echo 2",
 		}},
 	}

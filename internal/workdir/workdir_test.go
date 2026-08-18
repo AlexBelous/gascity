@@ -122,6 +122,33 @@ func TestResolveWorkDirPathGivesEachPoolSlotUniqueWorktree(t *testing.T) {
 	}
 }
 
+// TestResolveWorkDirPathIsolatesUntemplatedDirlessInstancesByQualifiedName is
+// the ga-9b4jbd regression guard: a multi-session-capable agent with no dir,
+// no rig, and no work_dir template must still get a distinct working
+// directory per distinct instance identity. Before the fix, every such
+// instance collapsed onto the bare city path, so two concurrently running
+// instances would collide on the same cwd.
+func TestResolveWorkDirPathIsolatesUntemplatedDirlessInstancesByQualifiedName(t *testing.T) {
+	cityPath := t.TempDir()
+	agent := config.Agent{
+		Name:     "worker",
+		Provider: "contract-agent",
+	}
+
+	got1 := ResolveWorkDirPath(cityPath, "gastown", "worker/run1", agent, nil)
+	got2 := ResolveWorkDirPath(cityPath, "gastown", "worker/run2", agent, nil)
+
+	if got1 == cityPath {
+		t.Fatalf("ResolveWorkDirPath(%q) = %q, want a path distinct from the bare city path", "worker/run1", got1)
+	}
+	if got2 == cityPath {
+		t.Fatalf("ResolveWorkDirPath(%q) = %q, want a path distinct from the bare city path", "worker/run2", got2)
+	}
+	if got1 == got2 {
+		t.Fatalf("ResolveWorkDirPath(%q) and ResolveWorkDirPath(%q) both resolved to %q, want distinct work dirs", "worker/run1", "worker/run2", got1)
+	}
+}
+
 func TestSessionQualifiedNameCanonicalizesBareAndQualifiedPoolAliases(t *testing.T) {
 	cityPath := t.TempDir()
 	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}

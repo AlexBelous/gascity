@@ -515,6 +515,33 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 	return cityDir
 }
 
+// setupE2ECityExpectInitFailure renders a city config that is expected to be
+// rejected by a pre-expansion config gate (e.g. the pool work_dir isolation
+// guard in internal/workdir/pool_isolation.go) and runs `gc init` against it.
+// Unlike setupE2ECity, it treats a `gc init` failure as the expected outcome
+// and returns the command's output for the caller to assert against, instead
+// of fataling.
+func setupE2ECityExpectInitFailure(t *testing.T, city e2eCity) string {
+	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
+
+	if city.Workspace.Name == "" {
+		city.Workspace.Name = uniqueCityName()
+	}
+
+	cityDir := filepath.Join(canonicalTempDir(t), city.Workspace.Name)
+	configPath := filepath.Join(canonicalTempDir(t), city.Workspace.Name+".toml")
+	writeE2ETomlFile(t, configPath, city)
+	copyE2EScripts(t, cityDir)
+	t.Cleanup(func() { cleanupTestCityDir(cityDir) })
+
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	if err == nil {
+		t.Fatalf("gc init unexpectedly succeeded for a config expected to fail pool work_dir isolation:\noutput: %s", out)
+	}
+	return out
+}
+
 // e2eReportScript returns the start_command for e2e-report.sh.
 // Uses $GC_CITY so the path resolves inside Docker/K8s containers
 // where the city directory is mounted but the host source tree is not.

@@ -22,6 +22,7 @@ type gasTownAgent struct {
 	Name         string
 	StartCommand string
 	Dir          string // rig directory (working dir for agent)
+	WorkDir      string // working directory override; templated per-instance ({{.Agent}}, {{.AgentBase}}, etc.)
 	Isolation    string // "worktree" or ""
 	Pool         *poolConfig
 	Suspended    bool
@@ -139,6 +140,9 @@ func writeGasTownAgentFiles(t *testing.T, cityDir string, agents []gasTownAgent)
 		}
 		if a.Dir != "" {
 			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
+		}
+		if a.WorkDir != "" {
+			fmt.Fprintf(&b, "work_dir = %s\n", quote(a.WorkDir))
 		}
 		if a.Suspended {
 			b.WriteString("suspended = true\n")

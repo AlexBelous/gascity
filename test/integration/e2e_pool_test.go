@@ -3,7 +3,7 @@
 package integration
 
 import (
-	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -15,6 +15,7 @@ func TestE2E_Pool_InstanceNaming(t *testing.T) {
 			{
 				Name:         "worker",
 				StartCommand: e2eReportScript(),
+				WorkDir:      ".gc/agents/{{.AgentBase}}",
 				Pool:         &e2ePool{Min: 2, Max: 2, Check: "echo 2"},
 			},
 		},
@@ -53,8 +54,12 @@ func TestE2E_Pool_MaxOneUsesCanonicalIdentity(t *testing.T) {
 	}
 }
 
-// TestE2E_Pool_WithDir verifies that pool agents with a dir get the
-// correct GC_DIR and working directory.
+// TestE2E_Pool_WithDir verifies that a pool agent with a dir but no
+// per-instance work_dir template is rejected at init time: without a
+// template, dirpool-1 and dirpool-2 would resolve to the identical working
+// directory, which the pool work_dir isolation guard
+// (internal/workdir/pool_isolation.go ValidatePoolWorkDirIsolation) fails
+// closed on rather than silently letting instances collide.
 func TestE2E_Pool_WithDir(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
@@ -66,25 +71,20 @@ func TestE2E_Pool_WithDir(t *testing.T) {
 			},
 		},
 	}
-	cityDir := setupE2ECity(t, nil, city)
 
-	// Pool instances with dir: qualified names include dir prefix.
-	r1 := waitForReport(t, cityDir, "workdir/dirpool-1", e2eDefaultTimeout())
-	r2 := waitForReport(t, cityDir, "workdir/dirpool-2", e2eDefaultTimeout())
+	out := setupE2ECityExpectInitFailure(t, city)
 
-	wantDir := filepath.Join(cityDir, "workdir")
-
-	// Both instances share the same workdir (no template expansion).
-	if cwd := r1.get("CWD"); !sameE2EPath(t, cwd, wantDir) {
-		t.Errorf("dirpool-1 CWD = %q, want %q", cwd, wantDir)
-	}
-	if cwd := r2.get("CWD"); !sameE2EPath(t, cwd, wantDir) {
-		t.Errorf("dirpool-2 CWD = %q, want %q", cwd, wantDir)
+	for _, want := range []string{"dirpool-1", "dirpool-2", "work_dir does not vary per instance", "{{.AgentBase}}"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in gc init rejection output:\n%s", want, out)
+		}
 	}
 }
 
-// TestE2E_Pool_SharedDir verifies that without a template dir, all pool
-// instances share the same working directory.
+// TestE2E_Pool_SharedDir verifies that a pool agent with no dir and no
+// per-instance work_dir template is rejected at init time: without a
+// template, shared-1 and shared-2 would resolve to the identical working
+// directory, which the pool work_dir isolation guard fails closed on.
 func TestE2E_Pool_SharedDir(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
@@ -95,16 +95,13 @@ func TestE2E_Pool_SharedDir(t *testing.T) {
 			},
 		},
 	}
-	cityDir := setupE2ECity(t, nil, city)
 
-	r1 := waitForReport(t, cityDir, "shared-1", e2eDefaultTimeout())
-	r2 := waitForReport(t, cityDir, "shared-2", e2eDefaultTimeout())
+	out := setupE2ECityExpectInitFailure(t, city)
 
-	cwd1 := r1.get("CWD")
-	cwd2 := r2.get("CWD")
-
-	if cwd1 != cwd2 {
-		t.Errorf("shared pool instances have different CWDs: %q vs %q", cwd1, cwd2)
+	for _, want := range []string{"shared-1", "shared-2", "work_dir does not vary per instance", "{{.AgentBase}}"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in gc init rejection output:\n%s", want, out)
+		}
 	}
 }
 
@@ -116,6 +113,7 @@ func TestE2E_Pool_EnvPerInstance(t *testing.T) {
 			{
 				Name:         "envpool",
 				StartCommand: e2eReportScript(),
+				WorkDir:      ".gc/agents/{{.AgentBase}}",
 				Env:          map[string]string{"CUSTOM_SHARED": "yes"},
 				Pool:         &e2ePool{Min: 2, Max: 2, Check: "echo 2"},
 			},

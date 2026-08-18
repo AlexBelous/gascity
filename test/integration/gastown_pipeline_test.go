@@ -64,7 +64,7 @@ func TestGastown_PipelineMailAndWork(t *testing.T) {
 // create multiple beads → pool agent drains them all.
 func TestGastown_PipelinePoolDrain(t *testing.T) {
 	agents := []gasTownAgent{
-		{Name: "polecat", StartCommand: "bash " + agentScript("loop.sh"), Pool: &poolConfig{
+		{Name: "polecat", StartCommand: "bash " + agentScript("loop.sh"), WorkDir: ".gc/agents/{{.AgentBase}}", Pool: &poolConfig{
 			Min: 1, Max: 5, Check: "echo 1",
 		}},
 	}

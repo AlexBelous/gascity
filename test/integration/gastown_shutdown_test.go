@@ -11,7 +11,7 @@ import (
 // processes a warrant (work bead) and closes it.
 func TestGastown_ShutdownDogProcessesWarrant(t *testing.T) {
 	agents := []gasTownAgent{
-		{Name: "dog", StartCommand: "bash " + agentScript("dog-warrant.sh"), Pool: &poolConfig{
+		{Name: "dog", StartCommand: "bash " + agentScript("dog-warrant.sh"), WorkDir: ".gc/agents/{{.AgentBase}}", Pool: &poolConfig{
 			Min: 1, Max: 3, Check: "echo 1",
 		}},
 	}
@@ -32,7 +32,7 @@ func TestGastown_ShutdownGraceful(t *testing.T) {
 		{Name: "mayor", StartCommand: "sleep 3600"},
 		{Name: "deacon", StartCommand: "sleep 3600"},
 		{Name: "boot", StartCommand: "sleep 3600"},
-		{Name: "dog", StartCommand: "sleep 3600", Pool: &poolConfig{
+		{Name: "dog", StartCommand: "sleep 3600", WorkDir: ".gc/agents/{{.AgentBase}}", Pool: &poolConfig{
 			Min: 0, Max: 3, Check: "echo 1",
 		}},
 	}

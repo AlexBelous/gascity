@@ -969,8 +969,7 @@ func TestControllerStatusForCityFallsBackToAPIWhenSocketUnreachable(t *testing.T
 		t.Fatalf("register city: %v", err)
 	}
 	// No fake control socket started: this simulates an API-only build/config
-	// where the supervisor never binds a unix control socket at all
-	// (gascity ga-gr09oz).
+	// where the supervisor never binds a unix control socket at all.
 
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook

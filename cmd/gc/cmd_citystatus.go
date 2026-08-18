@@ -660,9 +660,9 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 	if err == nil && registered {
 		// No control socket and no standalone controller identity to probe:
 		// this is an API-only build/config where the supervisor never binds
-		// a unix control socket at all (gascity ga-gr09oz). Fall back to the
-		// same service-manager/API liveness signals `gc supervisor status`
-		// already trusts for this exact situation before reporting down.
+		// a unix control socket at all. Fall back to the same service-manager/
+		// API liveness signals `gc supervisor status` already trusts for this
+		// exact situation before reporting down.
 		if running, status, known := supervisorCityRunningHook(cityPath); known {
 			return ControllerJSON{Mode: "supervisor", Running: running, Status: status}
 		}

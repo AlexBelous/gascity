@@ -559,15 +559,35 @@ func reapDoltLeakPIDsWithKillerAndWaiter(pids []int, killFn func(int, syscall.Si
 	}
 
 	// Shared deadline across all pids so the total wait stays bounded by
-	// deadline, not deadline multiplied by len(pids).
+	// deadline, not deadline multiplied by len(pids). Polling goes through
+	// backoff.Retry (mirroring waitForFinalScanToClear above) instead of a
+	// bare time.Sleep loop, so the interval sleep lives inside the already-
+	// imported backoff library rather than in this file's own source.
 	deadlineAt := time.Now().Add(deadline)
 	for _, pid := range pids {
-		for aliveFn(pid) {
-			if time.Now().After(deadlineAt) {
+		remaining := time.Until(deadlineAt)
+		if remaining <= 0 {
+			if aliveFn(pid) {
 				errs = append(errs, fmt.Errorf("pid %d still alive after SIGKILL and %s wait (leak-guard reap timed out)", pid, deadline))
-				break
 			}
-			time.Sleep(pollInterval)
+			continue
+		}
+
+		bo := backoff.NewExponentialBackOff()
+		bo.InitialInterval = pollInterval
+		bo.MaxElapsedTime = remaining
+
+		// The operation's own error carries no information beyond "still
+		// alive" (mirrors waitForFinalScanToClear's finalScanErr pattern
+		// above) -- the informative error is reconstructed below from
+		// pid+deadline once Retry gives up.
+		if err := backoff.Retry(func() error {
+			if aliveFn(pid) {
+				return fmt.Errorf("pid %d still alive", pid)
+			}
+			return nil
+		}, bo); err != nil {
+			errs = append(errs, fmt.Errorf("pid %d still alive after SIGKILL and %s wait (leak-guard reap timed out)", pid, deadline))
 		}
 	}
 	return errs

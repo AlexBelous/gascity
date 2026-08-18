@@ -189,11 +189,18 @@ func drainOrderDispatch(t *testing.T, m *memoryOrderDispatcher) {
 
 // barrierCheckScript returns a condition-check shell script for the
 // concurrent-overlap fixtures below. Every check registers itself in liveDir
-// (a mktemp'd file, removed on exit via trap) and then waits up to ~1s (50 *
-// 20ms polls) to observe at least 2 registrations before exiting 0; it always
-// exits normally so the trap unregisters. A nonzero startDelay simulates a
-// check whose own subprocess spawn was delayed — host contention, a
-// straggler — before it ever gets to register.
+// (a mktemp'd file, removed on exit via trap) and then holds that
+// registration for the full ~1s window (50 * 20ms polls), regardless of when
+// it personally observes a sibling: a seen flag latches on any poll that
+// finds >= 2 registrations, and only that flag — checked once the window is
+// over — decides exit 0 vs exit 1. It always exits normally so the trap
+// unregisters. Holding to the end of the window (rather than exiting the
+// instant a sibling is seen) makes overlap detection independent of which
+// pair happens to notice each other first, so a straggler that starts late
+// but still within the window is guaranteed to be seen by, and see, whoever
+// is still holding. A nonzero startDelay simulates a check whose own
+// subprocess spawn was delayed — host contention, a straggler — before it
+// ever gets to register.
 func barrierCheckScript(liveDir, ranMarker string, startDelay time.Duration) string {
 	var delay string
 	if startDelay > 0 {
@@ -201,7 +208,8 @@ func barrierCheckScript(liveDir, ranMarker string, startDelay time.Duration) str
 	}
 	return fmt.Sprintf(
 		`%[3]smkdir -p %[1]s; echo . >> %[2]s; f=$(mktemp %[1]s/w.XXXXXX); trap 'rm -f "$f"' EXIT; `+
-			`i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge 2 ]; then exit 0; fi; sleep 0.02; i=$((i+1)); done; exit 1`,
+			`seen=0; i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge 2 ]; then seen=1; fi; sleep 0.02; i=$((i+1)); done; `+
+			`if [ "$seen" -eq 1 ]; then exit 0; else exit 1; fi`,
 		liveDir, ranMarker, delay)
 }
 

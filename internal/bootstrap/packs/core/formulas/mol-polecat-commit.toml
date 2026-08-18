@@ -136,8 +136,15 @@ done
 **3. Clean up worktree:**
 ```bash
 WORKTREE_PATH=$(pwd)
+# --git-common-dir, not --show-toplevel: inside a linked worktree the latter
+# returns the worktree itself, which stops existing halfway through cleanup
+# and is useless for the prune fallback.
+REPO=$(git rev-parse --path-format=absolute --git-common-dir)
 cd ..
-git worktree remove "$WORKTREE_PATH" --force
+if ! git -C "$REPO" worktree remove --force "$WORKTREE_PATH"; then
+    rm -rf "$WORKTREE_PATH"
+    git -C "$REPO" worktree prune
+fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
 

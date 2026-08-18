@@ -204,7 +204,13 @@ if [ -z "$WORK_BEAD_ID" ]; then
 fi
 WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
-  git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"
+  # cwd is not guaranteed to be inside the repo at this step, so resolve REPO
+  # off the worktree itself rather than off `pwd`.
+  REPO=$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir)
+  if ! git -C "$REPO" worktree remove --force "$WORKTREE"; then
+    rm -rf "$WORKTREE"
+    git -C "$REPO" worktree prune
+  fi
 fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```

@@ -236,8 +236,9 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	if cfg == nil {
 		return nil, apierr.ServiceUnavailable.Msg("city config not loaded yet")
 	}
+	agentCfg := config.Agent{Provider: providerName}
 	resolved, err := config.ResolveProvider(
-		&config.Agent{Provider: providerName},
+		&agentCfg,
 		&cfg.Workspace,
 		cfg.Providers,
 		exec.LookPath,
@@ -279,13 +280,23 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		return nil, apierr.InvalidRequest.Msg("async session creation is only supported for configured agent templates")
 	}
 
-	workDir := s.state.CityPath()
-
 	alias, err := session.ValidateAlias(body.Alias)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
 	mcpIdentity, err := providerSessionMCPIdentity(resolved.Name, alias)
+	if err != nil {
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+	// workDir is derived from the validated alias rather than always the bare
+	// city path: a distinct alias signals a distinct concurrent instance, and
+	// resolveSessionWorkDir auto-isolates it the same way template-based
+	// agent sessions are isolated per instance. An empty alias (the ad-hoc,
+	// anonymous case, where mcpIdentity above already fell back to a
+	// generated identity) keeps the bare-city-path behavior: ResolveWorkDirPathStrict
+	// only isolates when the qualified name differs from the agent's own
+	// unqualified name, which an empty alias does not.
+	workDir, err := s.resolveSessionWorkDir(agentCfg, alias)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}

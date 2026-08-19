@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -128,6 +129,13 @@ func WithState(cityPath string, fn func(*State) error) error {
 		return fmt.Errorf("write nudge queue: %w", err)
 	}
 	return nil
+}
+
+// withStateBounded is the bounded-wait variant of WithState (ga-2kzci3
+// FR1/FR2). RED stub: compiles so the package typechecks, but does not yet
+// bound the wait -- GREEN replaces this body with a real LOCK_NB poll loop.
+func withStateBounded(_ string, _ time.Duration, _ clock.Clock, _ func(*State) error) error {
+	return errors.New("withStateBounded: not implemented")
 }
 
 // LoadState reads the persisted queue state from disk.

@@ -12,12 +12,18 @@ machinery. It asserts nothing not already recorded in the artifact chain:
 
 - **Ledger:** bead `ga-f7v2ft.122` (every readout, incident, triage verdict,
   and signature, day 0 through window close).
-- **Final readout:** `campaign/reports/we-final-yield-join.json`
-  (tool `b19d84be97`, archive corpus, produced 2026-08-19T04:59Z).
-- **Arming:** `campaign/reports/arming-report.json` (168h harness run).
-- **Report chain:** `campaign/reports/day0-parity-join.json` …
-  `day7-yield-join.json` (plus `day4b/c`, `day6b`) — the durable per-day
-  evidence, and the *only* evidence for the pre-archiver day-0/1 span (§4.2).
+- **Final readout:** `we-final-yield-join.json` (tool `b19d84be97`, archive
+  corpus, produced 2026-08-19T04:59Z).
+- **Arming:** `arming-report.json` (168h harness run).
+- **Report chain:** `day0-parity-join.json` … `day7-yield-join.json` (plus
+  `day4b/c`, `day6b`) — the durable per-day evidence, and the *only* evidence
+  for the pre-archiver day-0/1 span (§4.2).
+- **Where those live:** `engdocs/plans/reconciler-distillation/evidence/`,
+  copied byte-identical from `campaign/reports/` on 2026-08-19 (§5.3 step 1).
+  Cite the in-repo copies: the `campaign/` originals die with the teardown.
+  `evidence/README.md` carries per-file tool provenance and the exclusion
+  windows. The raw `campaign/trace-archive/` (4.5 GiB) is **not** copied —
+  its retention is the open teardown precondition (§5.3 step 2).
 - **Bar definition:** `engdocs/plans/reconciler-distillation/DETECTOR.md` §3b.
 - **Deletion scope:** `engdocs/plans/reconciler-distillation/DESIGN.md` §3–§4
   and DETECTOR.md § "Coexistence-code census".
@@ -29,7 +35,7 @@ Uncertainty is stated where it exists; §4 is written against interest.
 
 Bar text: DETECTOR.md §3b ("Window"/"Bar", lines ~2106–2115; re-expressed over
 yield-joins per the owner ruling of 2026-08-12, § "The bar, re-expressed").
-All numbers: `campaign/reports/we-final-yield-join.json` unless noted.
+All numbers: `evidence/we-final-yield-join.json` unless noted.
 
 | # | Criterion (§3b) | Required | Measured | Source |
 |---|---|---|---|---|
@@ -40,7 +46,7 @@ All numbers: `campaign/reports/we-final-yield-join.json` unless noted.
 | 5 | Match bar per must-match cell | ≥99.5% | D-DEADLINE **99.844%** (67,269 m / 105 mm); D-ORPHAN **99.896%** (10,517 / 11); D-DRAIN **100.00%** (357 / 0); D-WAKE **100.00%** (1,214 / 0); `bar_met: true` | final JSON `families[]` |
 | 6 | Every mismatch triaged into a §3b class; one unclassified = WE blocker | 0 unclassified | **0** unclassified, all families; `we_blocker: false`. 116 counted mismatches, all classified (§3) | final JSON `families[]`, `triage[]` |
 | 7 | Exclude cycles with `record_budget_exceeded` drops | excluded | `excluded_record_budget_exceeded: 0` (none occurred) | final JSON `cycles` |
-| 8 | Arms verified at every sample boundary, re-armed before expiry (§3) | zero gaps | 6 templates, 1,993 boundaries, 2,376 re-arms, `gaps: null`, `armed: true`, full 168h | `campaign/reports/arming-report.json` |
+| 8 | Arms verified at every sample boundary, re-armed before expiry (§3) | zero gaps | 6 templates, 1,993 boundaries, 2,376 re-arms, `gaps: null`, `armed: true`, full 168h | `evidence/arming-report.json` |
 | 9 | Zero-write shadow control (engine-divergence guard) | 0 | `shadow_effect_violations: 0`, entire window | final JSON |
 
 Corpus scale: 66,797 cycles scanned / 66,794 considered
@@ -159,16 +165,23 @@ supports. The signature in §6 accepts them by name.
    Signing WE deletes the god function and the instruments — it does not make
    the lane small, and the census's trap (live code with "shadow" in its
    name) is restated in §5.4.
-6. **One §4-WE precondition is not satisfied: the `gc perf
-   reconciler-compare` A/B was never run and archived.** DESIGN.md §4 (WE)
-   and the WD.15 acceptance criteria require it "recorded in engdocs" before
-   cutover. No such artifact exists (checked: `campaign/reports/`, engdocs,
-   git history). Relatedly, `engdocs/plans/reconciler-distillation/evidence/`
-   — the AC's named destination for campaign artifacts — was never created;
-   the durable chain lives in `campaign/reports/` (a directory the teardown
-   destroys) and the bead ledger. §5.3 makes evidence preservation a
-   teardown *precondition*; §6 makes the perf A/B an explicit checkbox the
-   owner either directs or waives.
+6. **The §4-WE perf A/B is now satisfied, but it is a synthetic bench — not
+   campaign evidence.** DESIGN.md §4 (WE) and the WD.15 acceptance criteria
+   require `gc perf reconciler-compare` "recorded in engdocs" before cutover.
+   It was run on 2026-08-19 at tool `4c75ef9dc2` and archived to
+   `evidence/we-perf-reconciler-compare.json` (§6). Read its scope narrowly:
+   the tool is hermetic and synthetic — throwaway `TMPDIR` workspace,
+   `beads.MemStore`/`runtime.Fake`, provenance
+   `excludes=tmux,Dolt,wake-socket/IPC,contention` — so it replays *nothing*
+   from this campaign's corpus and adds no evidence about the window. It
+   discharges a named precondition; it does not broaden §4.1. It also found a
+   real regression: keyed **start** is 2.52x slower at p50 than legacy
+   (1.302 ms vs 0.516 ms), bounded only by scale (worst sample 4.890 ms =
+   ~0.016% of the 30s debounce that becomes an absolute budget at WE).
+   Relatedly, `engdocs/plans/reconciler-distillation/evidence/` — the AC's
+   named destination — now exists and holds the full report chain (§5.3
+   step 1, DONE). The **raw trace archive is still unpreserved**: §5.3 step 2
+   remains open and is the live teardown precondition.
 7. **The two counted-mismatch classes remain unexplained-by-proof.**
    `deadline_crossed_after_sweep_sample` (105) and
    `orphan_live_detector_lead_one_tick` (11) are *characterized* timing races,
@@ -215,13 +228,19 @@ supports. The signature in §6 accepts them by name.
 
 Precondition — preserve the evidence the teardown would otherwise destroy:
 
-1. Copy `campaign/reports/*.json` (final + arming + full day chain) into
+1. ~~Copy `campaign/reports/*.json` (final + arming + full day chain) into
    `engdocs/plans/reconciler-distillation/evidence/` (the AC's destination)
-   and commit. Until this lands, the canonical §3b artifact chain lives in a
-   directory scheduled for deletion.
-2. Decide raw-corpus retention: `campaign/trace-archive/` (~3–5 GiB) is the
-   only thing that supports re-triage under a future rule (the day-3 lesson,
-   §4.2). Archive or consciously discard — recorded, not defaulted.
+   and commit.~~ **DONE 2026-08-19.** All 16 reports (final + arming + full
+   day chain) are in `evidence/`, verified byte-identical to
+   `campaign/reports/`, alongside `evidence/README.md` (per-file tool
+   provenance, the three exclusion windows, the archive's location and this
+   precondition) and the two perf A/B artifacts. The §3b chain no longer
+   lives only in a directory scheduled for deletion.
+2. **STILL OPEN — the live precondition.** Decide raw-corpus retention:
+   `campaign/trace-archive/` (**4.5 GiB**, measured 2026-08-19) is the only
+   thing that supports re-triage under a future rule (the day-3 lesson,
+   §4.2), and it is deliberately *not* in `evidence/`. Move it out of the
+   city directory or consciously discard it — recorded, not defaulted.
 3. Stop the detached archiver loop (`pgrep -af wd15-trace-archiver`) before
    removing its target.
 
@@ -253,7 +272,7 @@ Never `tmux kill-server`, and never on the default socket.
 ## 6. Signature block
 
 **What Julian is signing.** That the §3b campaign bar is met as tabulated in
-§1 from `campaign/reports/we-final-yield-join.json`; that the window events in
+§1 from `evidence/we-final-yield-join.json`; that the window events in
 §2 (including the operator-error restart) are completely disclosed and
 correctly excluded; that the §3 classification taxonomy — including the
 already-signed `drain_ack_adjacent_cycle_convergence` (2026-08-17/18) and the
@@ -280,10 +299,26 @@ arms, per the owner ruling of 2026-08-12.
   (Fable council reviews WE before merge — DESIGN.md §4), its own RED/GREEN
   and journey gates, and the full-suite wave gate. This document is evidence
   the *precondition* is met, not review of code that does not yet exist.
-- Skipping the `gc perf reconciler-compare` A/B (§4.6). Owner selects one:
-  - [ ] Run and archive the A/B in engdocs before the cutover commit
-        (the DESIGN.md §4 default), or
-  - [ ] Waive it here, recorded: ______
+- Skipping the `gc perf reconciler-compare` A/B (§4.6).
+  - [x] **RUN and archived 2026-08-19** (the DESIGN.md §4 default), tool
+        `4c75ef9dc2` (`dirty: false`), artifact
+        `evidence/we-perf-reconciler-compare.json` — 300 pairs (`--iter 100`),
+        3/3 actions covered, **0 mismatches, 0 errors on either arm**,
+        `ok: true`. A default `--iter 20` run immediately prior agreed in sign
+        and magnitude (`evidence/we-perf-reconciler-compare-iter20.json`).
+
+    p50 keyed vs legacy: **start** 1.302 ms vs 0.516 ms (**2.52x slower**);
+    **stop** 0.390 ms vs 0.510 ms (24% faster); **nudge** 1.204 ms vs
+    1.147 ms (5% slower, better tail — p99 2.641 ms vs 3.024 ms).
+
+    The start regression is real and reproduced in both runs; it is bounded by
+    scale, not by argument — the worst keyed sample anywhere is 4.890 ms
+    against the 30s debounce DESIGN.md §4 converts to an absolute latency
+    budget at WE (~0.016% of it). The keyed arm pays a fixed controller
+    admission cost the in-line legacy path does not. Per §4.6 this is a
+    hermetic synthetic bench (`runtime.Fake`, memory stores, excludes tmux /
+    Dolt / IPC / contention): it discharges the precondition and says nothing
+    about the campaign window.
 - Any WF work (renames, lease folds, controller-skeleton extraction), any
   deletion by filename, or silent removal of `daemon.session_reconciler`.
 

@@ -280,3 +280,121 @@ func TestSweep_MultipleCandidatesMixedOutcomes(t *testing.T) {
 		}
 	}
 }
+
+// TestSweep_ConfirmsUnheldWithSecondLsofScanBeforeRemoving reproduces
+// ga-vbyn8v: under heavy host load, a single lsof scan can transiently miss
+// a still-open file for a live process without lsof itself erroring. Sweep
+// must not trust a lone "unheld" reading before deleting anything.
+func TestSweep_ConfirmsUnheldWithSecondLsofScanBeforeRemoving(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "flaky-held", 2, old)
+
+	calls := 0
+	flaky := func(context.Context) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			// First scan transiently misses the live holder.
+			return nil, nil
+		}
+		// Confirming second scan sees it.
+		return []byte(dir + "/noms/oldgen/000001.chunk\n"), nil
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: flaky})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (confirm scan caught what the first scan missed)", result.Removed)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	if calls != 2 {
+		t.Fatalf("RunLsof called %d times, want exactly 2 (initial + confirm)", calls)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
+// TestSweep_SkipsConfirmScanWhenFirstScanAlreadyHeld proves the confirm
+// scan is only spent on candidates about to be deleted, not on every
+// candidate — a directory already known held doesn't need reconfirming.
+func TestSweep_SkipsConfirmScanWhenFirstScanAlreadyHeld(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "held1", 2, old)
+
+	calls := 0
+	held := func(context.Context) ([]byte, error) {
+		calls++
+		return []byte(dir + "/noms/oldgen/000001.chunk\n"), nil
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: held})
+
+	if len(result.Removed) != 0 || result.Skipped != 1 {
+		t.Fatalf("result = %+v, want held dir skipped without removal", result)
+	}
+	if calls != 1 {
+		t.Fatalf("RunLsof called %d times, want exactly 1 (no confirm scan needed)", calls)
+	}
+}
+
+// TestSweep_RemovesWhenBothScansAgreeUnheld guards against a regression
+// where the confirm scan makes removal impossible: a genuinely orphaned
+// directory that both scans agree is unheld must still be removed.
+func TestSweep_RemovesWhenBothScansAgreeUnheld(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+
+	calls := 0
+	unheld := func(context.Context) ([]byte, error) {
+		calls++
+		return nil, nil
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: unheld})
+
+	if len(result.Removed) != 1 || result.Removed[0] != dir {
+		t.Fatalf("Removed = %v, want [%s]", result.Removed, dir)
+	}
+	if calls != 2 {
+		t.Fatalf("RunLsof called %d times, want exactly 2 (initial + confirm)", calls)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir %s should have been removed, stat err = %v", dir, err)
+	}
+}
+
+// TestSweep_ConfirmScanErrorFailsClosed extends the fail-closed contract to
+// the confirm scan: if it errors, treat the candidate as held rather than
+// falling back to the (possibly wrong) first-scan reading.
+func TestSweep_ConfirmScanErrorFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+
+	calls := 0
+	boom := errors.New("lsof: resource temporarily unavailable")
+	flaky := func(context.Context) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, nil
+		}
+		return nil, boom
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: flaky})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none when the confirm scan fails (fail closed)", result.Removed)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatalf("expected an error to be reported when the confirm lsof scan fails")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}

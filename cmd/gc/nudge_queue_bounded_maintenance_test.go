@@ -22,14 +22,23 @@ func TestRunNudgeQueueMaintenanceSweep_BoundedPassPreservesBacklogThenConverges(
 	dir := t.TempDir()
 	base := time.Now()
 	const backlog = 5
-	for i := 0; i < backlog; i++ {
-		// Created 25h before base, so ExpiresAt (created+24h TTL) is ~1h
-		// before base -- already expired by the time any of the `now`
-		// values below are evaluated against it.
-		item := newQueuedNudge("ghost-agent", "msg", base.Add(-25*time.Hour))
-		if err := enqueueQueuedNudge(dir, item); err != nil {
-			t.Fatalf("enqueueQueuedNudge(%d): %v", i, err)
+	// Seeded directly into the queue state rather than via
+	// enqueueQueuedNudge: enqueueQueuedNudge runs its own real-clock-bounded
+	// prune pass on every call (nudgeEnqueueMaintenanceBudget, PR #3903),
+	// which would dead-letter each already-expired item the moment the next
+	// one is enqueued, corrupting the fixture before this test's own sweep
+	// calls below ever run.
+	if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+		for i := 0; i < backlog; i++ {
+			// Created 25h before base, so ExpiresAt (created+24h TTL) is ~1h
+			// before base -- already expired by the time any of the `now`
+			// values below are evaluated against it.
+			item := newQueuedNudge("ghost-agent", "msg", base.Add(-25*time.Hour))
+			state.Pending = append(state.Pending, item)
 		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed queue state: %v", err)
 	}
 
 	// staleNow is far enough in the past that staleNow+maintenanceBudget is

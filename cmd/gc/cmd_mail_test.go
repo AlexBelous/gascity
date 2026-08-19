@@ -4846,6 +4846,36 @@ func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
 	}
 }
 
+func TestCmdMailSendPositionalBodyAndMessageFlagBothPresentFails(t *testing.T) {
+	// ga-dqii6y: -m together with a positional body silently discarded the
+	// positional text and stored only the -m body, with exit 0. Must fail
+	// loudly instead of guessing which one the caller meant.
+	cityPath := mailSendTestCity(t, "mayor")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"mayor/", "TEXT"}, false, false, "controller", "", "", "BODY", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend() = 0, want non-zero; stdout=%s", stdout.String())
+	}
+
+	const wantErr = "gc mail send: both a positional body and -m were given; use -s for the subject line"
+	if !strings.Contains(stderr.String(), wantErr) {
+		t.Errorf("stderr = %q, want to contain %q", stderr.String(), wantErr)
+	}
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	all, err := store.List(beads.ListQuery{Type: "message", Status: "open", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List messages: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("messages stored = %d, want 0 (nothing should be stored when send fails)", len(all))
+	}
+}
+
 func TestCmdMailSendAllPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 	// Regression for #3331 --all arm: positional body dropped when -s set but -m absent.
 	cityPath := mailSendTestCity(t, "worker")

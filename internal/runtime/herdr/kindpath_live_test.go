@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,11 +35,16 @@ func TestKindPathNamesAreUnique(t *testing.T) {
 	}
 }
 
+var kindPathSessionSeq int64
+
 // kindPathNames returns the herdr session name and pane/agent name that
-// TestProviderLiveClaudeKindPath claims. TODO(ga-fh1flg): still static —
-// TestKindPathNamesAreUnique documents the required (not yet met) contract.
+// TestProviderLiveClaudeKindPath claims, salted with this process's PID and
+// a per-process call counter so concurrent fleet runs of this test can never
+// collide on the same herdr session/pane.
 func kindPathNames() (session, agent string) {
-	return "gctest-kind", "kindsmoke"
+	n := atomic.AddInt64(&kindPathSessionSeq, 1)
+	pid := os.Getpid()
+	return fmt.Sprintf("gctest-kind-%d-%d", pid, n), fmt.Sprintf("kindsmoke-%d-%d", pid, n)
 }
 
 // TestProviderLiveClaudeKindPath drives the herdr ≥0.7.5 kind-launch path

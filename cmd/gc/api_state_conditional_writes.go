@@ -127,11 +127,22 @@ func (cs *controllerState) ConditionalWritesStatus() *api.StatusConditionalWrite
 // sessionClassRequirementVerdict reports whether the store serving the session
 // class can fence its own writes, and whether that requirement is unmet.
 //
-// The verdict is deliberately capability-only: beads.RequiredConditionalWriter
-// asks the store what it implements, with no mode in the question, because this
+// The question is capability, not policy: no mode participates, because this
 // row exists to say "the reconciler needs this and it is/is not there", not
-// "the rollout gate resolved to X here". A nil row means the controller holds
-// no session-class store yet — an absent store, not an absent capability.
+// "the rollout gate resolved to X here".
+//
+// It is answered from the side-effect-free inspection rather than from
+// beads.RequiredConditionalWriter, which the boot preflight uses. The
+// difference matters: a capability PROBE may shell out (BdStore runs four bd
+// subprocesses on its first), and a status poll must never do that. The
+// inspection's Implements flag is a type assertion, and its probe/latch fields
+// are memos — so a store that has definitively reported incapable is caught
+// here, and one that simply has not been exercised yet reads as meeting the
+// requirement until something actually tries. The eager, expensive answer
+// belongs to boot, where it is paid once.
+//
+// A nil row means the controller holds no session-class store yet — an absent
+// store, not an absent capability.
 func (cs *controllerState) sessionClassRequirementVerdict() (*api.StatusConditionalWriteStoreVerdict, bool) {
 	if cs == nil {
 		return nil, false
@@ -148,11 +159,19 @@ func (cs *controllerState) sessionClassRequirementVerdict() (*api.StatusConditio
 		Latch:   insp.Latch,
 		Capable: true,
 	}
-	if _, err := beads.RequiredConditionalWriter(store); err != nil {
-		verdict.Capable = false
-		verdict.Probe = beads.ConditionalWriteProbeIncapable
-		verdict.Reason = "FATAL: the session reconciler requires conditional writes on this class and this store cannot provide them: " + err.Error()
-		return verdict, true
+	switch {
+	case !insp.Implements:
+		verdict.Reason = "the store does not implement conditional writes"
+	case !insp.Capable:
+		verdict.Reason = insp.Reason
+		if verdict.Reason == "" {
+			verdict.Reason = "the store reported it cannot fence a write"
+		}
+	default:
+		return verdict, false
 	}
-	return verdict, false
+	verdict.Capable = false
+	verdict.Probe = beads.ConditionalWriteProbeIncapable
+	verdict.Reason = "FATAL: the session reconciler requires conditional writes on this class and this store cannot provide them: " + verdict.Reason
+	return verdict, true
 }

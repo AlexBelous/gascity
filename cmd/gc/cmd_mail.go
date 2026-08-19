@@ -1791,6 +1791,10 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 				fmt.Fprintln(stderr, "gc mail send: missing recipient") //nolint:errcheck // best-effort stderr
 				return 1
 			}
+			if message != "" && len(args) > 1 {
+				fmt.Fprintln(stderr, "gc mail send: both a positional body and -m were given; use -s for the subject line") //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			body := message
 			if body == "" && len(args) > 1 {
 				body = strings.Join(args[1:], " ")

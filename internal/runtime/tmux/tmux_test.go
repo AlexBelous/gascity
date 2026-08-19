@@ -841,13 +841,15 @@ func TestWaitForShellReady_TransientShellBeforeExec(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// Sanity check: confirm the fixture actually completes the sh->zsh
-	// transition. If this fails, the test isn't exercising the intended
-	// scenario at all (e.g. zsh failed to start).
-	time.Sleep(500 * time.Millisecond)
+	// WaitForShellReady only returns once the pane has shown the same
+	// supportedShells member on shellReadyStableChecks consecutive polls,
+	// so the pane's command right now is already settled -- no sleep
+	// needed before checking it. This distinguishes a broken fixture
+	// (e.g. zsh failed to start) from a debounce regression with a clear,
+	// distinct message.
 	settledCmd, err := tm.GetPaneCommand(sessionName)
 	if err != nil {
-		t.Fatalf("GetPaneCommand after settling: %v", err)
+		t.Fatalf("GetPaneCommand: %v", err)
 	}
 	if settledCmd != "zsh" {
 		t.Fatalf("test fixture did not settle on zsh (got %q); not exercising the sh->zsh transition", settledCmd)

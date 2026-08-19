@@ -239,11 +239,18 @@ func (p *forceLifecycleProvider) ListRunning(prefix string) ([]string, error) {
 
 	running, err := p.Fake.ListRunning(prefix)
 	if call == 1 {
+		// Block unconditionally rather than racing hangBudget: under
+		// concurrent shard load the released Start goroutine can be
+		// scheduler-delayed past any fixed budget, so a bounded wait here
+		// let this call fall through with the stale pre-release snapshot
+		// while "worker" was still landing — and with nothing between the
+		// two sweeps to catch up, the late sweep missed it too (ga-550z2h).
+		// gatedStartProvider.Start cannot block or error for "worker" here
+		// once released, so this can only wedge on a genuine bug, which a
+		// real hang (caught by go test's own timeout, with a goroutine
+		// dump) surfaces better than a silently-wrong assertion would.
 		p.release("worker")
-		select {
-		case <-p.workerStarted:
-		case <-time.After(hangBudget):
-		}
+		<-p.workerStarted
 	}
 	return running, err
 }

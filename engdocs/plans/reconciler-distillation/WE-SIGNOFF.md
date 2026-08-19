@@ -322,7 +322,17 @@ arms, per the owner ruling of 2026-08-12.
 - Any WF work (renames, lease folds, controller-skeleton extraction), any
   deletion by filename, or silent removal of `daemon.session_reconciler`.
 
-Signature: ______________________  Date: ____________
+Signature: **SIGNED — Julian Knutsen**, 2026-08-19, via session directive:
+"yay! let's go ahead and cutover. I want you to work with win3 who manages
+[our] local gc deployment and have them integrate the relevant branch and
+config changes so our existing cities are swapped. We'll let that soak for a
+few days and the[n] do the final commit to origin/main."
+
+Scope note recorded with the signature: cutover proceeds as a **local
+deployment swap first** (existing cities to `session_reconciler = "auto"` on
+the signed branch), a multi-day soak, and only then the final merge to
+origin/main. The §5.2 orphan decisions (.159/.137/.160) and the raw-archive
+retention location remain open items to resolve during the soak.
 
 (Julian Knutsen, owner — signing here is the recorded owner sign-off
 referenced by DETECTOR.md §3b and closes WD.15 / `ga-f7v2ft.122`.)

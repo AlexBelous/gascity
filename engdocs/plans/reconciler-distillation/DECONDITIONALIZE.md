@@ -45,7 +45,11 @@ rollout_payloads.go`) and emitters (`cmd/gc/store_rollout.go`).
 (`unstampableResult`: refuse under require, warn under auto). The .162 defect:
 `internal/storebinding/sqlite/beads_engine.go:61` opens the engine outside the
 factory, so nothing stamps — `require` on a split city silently ran unfenced.
-The .162 slice adds `AdoptOpenedStore` to close exactly this hole.
+The .162 slice closes this hole from the other side, per the owner directive:
+rather than plumbing the stamp out to the binding opener, the session class
+states a requirement (`beads.RequiredConditionalWriter`, capability only — no
+mode, no stamp) and a store that cannot meet it is a named error. The stamping
+hole survives for every OTHER class until step 5 retires the lattice.
 
 **Resolve call sites (11), each handling the `(writer, diag, err)` trio:**
 `cmd/gc/city_runtime_session_start.go:121,1167` (keyed StatusWriter),
@@ -81,7 +85,8 @@ is event-silent:
 
 - `cmd/gc/storage_boot.go:498-510` — `openStorageRoutes` returns the bare
   engine; relocated session-class writes emit **no** bead.* (.162 defect 3,
-  NOT closed by the in-flight slice — the slice stamps, it does not wrap).
+  NOT closed by the in-flight slice — the slice requires the fence, it does
+  not wrap).
   Consequence: `admitSessionStartEvent` (`api_state_session_start.go:180-205`)
   and the bead-event tick Poke (`api_state.go:752-754`) never fire for session
   rows; keyed admission degrades to patrol cadence. Who notices: only S4-style
@@ -164,9 +169,12 @@ at controller boot. No mode, no per-resolve probing, no degradation.**
 
 **Enforcement — both points, deliberately:**
 
-1. **Open-time (factory + adopt).** `OpenStoreAtForCity` and
-   `AdoptOpenedStore` refuse to return a store that will serve a
-   session/infra class without the contract. BdStore's four-verb probe runs
+1. **Open-time (factory + binding opener).** `OpenStoreAtForCity` and the
+   storage-binding `EngineOpener` outlet (`openStorageRoutes`) refuse to
+   return a store that will serve a session/infra class without the contract.
+   The check is the contract itself, not a mode stamp: the .162 slice
+   deliberately did NOT add a stamping seam here, because a store's capability
+   is what it implements. BdStore's four-verb probe runs
    **eagerly at open** (today: lazily on first write, §1.4), so "bd too old"
    is an open error, not a first-write surprise. This covers one-shot CLI
    opens that never reach controller boot.
@@ -249,9 +257,10 @@ This is **not** fork-drift surface; it is an upstreamable series:
   at boot" — no silent anything.
 - **Fork/enterprise side (stays out of upstream):** the gc-enterprise
   five-store layout (`sessions.db` with `{sessions,waits,id_seq}` — enterprise
-  delta per .161) must conform before it upgrades past step 3 (§5); its opener
-  adopts via the same `AdoptOpenedStore` seam the .162 slice created. The
-  deploy-line rebase ask in .161 is unchanged.
+  delta per .161) must conform before it upgrades past step 3 (§5): whatever
+  opens those databases must serve session/infra classes from contract-complete
+  stores, which is a property of the store rather than of a seam the enterprise
+  opener has to call. The deploy-line rebase ask in .161 is unchanged.
 
 ## 5. Migration order (gated on the cutover soak)
 
@@ -260,7 +269,7 @@ soak-safe; steps 3-5 land only after the owner closes the soak.
 
 | Step | Change | Test story | Blast radius |
 |---|---|---|---|
-| 0 (in flight) | .162 slice: `AdoptOpenedStore` stamping + `storage/<binding>` enumeration in preflight/§12.5 | `conditional_writes_adopt_test.go`, `storage_boot_test.go` | split cities only; makes require actually fence there |
+| 0 (landed, `3e9141da82`) | .162 slice: the session class REQUIRES conditional writes (`beads.RequiredConditionalWriter`, capability only) instead of resolving the mode; unconditional boot preflight + `storage/<binding>` and `sessions (required)` rows in §12.5 | `storage_boot_conditional_writes_test.go`, `sqlite_store_conditional_capability_internal_test.go` | split cities fence on every mode incl. off; one of step 5's 11 call sites (`city_runtime_session_start.go:121`) already converted |
 | 1 | Contract preflight in **WARN** mode: full enumeration incl. routed engines + recorder-wiring check; stderr per violation | boot test with contract-violating fake store; doctor check | zero behavior change; log noise only |
 | 2 | Recorder-wire routed engines (CachingStore wrap in `openStorageRoutes`) + fix stale `class_store.go:151-153` comment; `observeSessionWaitCensus` starts working on split cities | split-city event-emission test (bead.* observed on session-class write) | split cities: bead.* volume appears; keyed admission leaves patrol cadence (S4 tax removed) |
 | 3 | Eager BdStore probe at open; preflight WARN→**ERROR** (boot refusal) | open-time refusal test per engine; upgrade-path test for old bd | any deployment with unfenceable session-class store fails at boot with named remediation — release note; mc/enterprise must conform first (§4) |

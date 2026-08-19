@@ -778,6 +778,10 @@ func standaloneBDEnvForDir(dir string) []string {
 			env = append(env, key+"="+value)
 		}
 	}
+	// integrationEnv pins HOME to the real passwd-db home for gc start/supervisor
+	// start subprocesses. This helper only execs the bd binary, so re-isolate HOME
+	// back to the caller-owned dir instead of leaking the real home through.
+	env = replaceEnv(env, "HOME", dir)
 	// Keep DOLT_ROOT_PATH from integrationEnv so standalone bd commands use
 	// the suite's seeded Dolt identity instead of an unseeded per-workspace root.
 	// BEADS_DIR and XDG_RUNTIME_DIR are temp-scoped by caller-owned test dirs;
@@ -1162,7 +1166,7 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 // platformSupervisorHomeOverrideError's own tolerance.
 func pinRealHomeEnv(env []string) []string {
 	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
-	if err != nil || lu.HomeDir == "" {
+	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
 		return env
 	}
 	return replaceEnv(env, "HOME", lu.HomeDir)
@@ -1787,6 +1791,41 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s leaked into standalone bd env: %v", key, got[key])
 		}
+	}
+}
+
+func TestStandaloneBDEnvForDirIsolatesHome(t *testing.T) {
+	oldGCHome := testGCHome
+	oldRuntimeDir := testRuntimeDir
+	oldRealBDBinary := realBDBinary
+	oldToolBinDir := integrationToolBinDir
+	t.Cleanup(func() {
+		testGCHome = oldGCHome
+		testRuntimeDir = oldRuntimeDir
+		realBDBinary = oldRealBDBinary
+		integrationToolBinDir = oldToolBinDir
+	})
+
+	testGCHome = filepath.Join(t.TempDir(), "gc-home")
+	testRuntimeDir = filepath.Join(t.TempDir(), "runtime")
+	realBDBinary = "/usr/bin/bd"
+	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
+
+	t.Setenv("HOME", "/host/home")
+
+	dir := t.TempDir()
+	env := standaloneBDEnvForDir(dir)
+	got := parseEnvList(env)
+
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatalf("looking up real home for assertion: %v", err)
+	}
+	if got["HOME"] == lu.HomeDir {
+		t.Fatalf("HOME = %q, leaked the real passwd-db home; standalone bd only execs the bd binary (never gc start/supervisor start), so it must not inherit the real-HOME pin meant for gc-start consumers", got["HOME"])
+	}
+	if got["HOME"] != dir {
+		t.Fatalf("HOME = %q, want dir-scoped %q, matching this helper's own XDG_RUNTIME_DIR/BEADS_DIR isolation root", got["HOME"], dir)
 	}
 }
 

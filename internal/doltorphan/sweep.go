@@ -70,16 +70,28 @@ type SweepResult struct {
 // Sweep removes direct children of cfg.Root that look like abandoned dolt
 // store directories: mtime older than MinAge, a .dolt marker directory
 // within maxMarkerDepth levels, and not currently held open by any live
-// process per lsof. Candidate selection intentionally does not filter on
-// directory name — the three signals above are what establish
-// abandonment, not any particular naming convention, so this catches
-// leaks "regardless of creation source" (ga-ntbpyb.2 acceptance criterion
-// 2) including directories named by Go's t.TempDir() rather than the
-// bare-mktemp "tmp.*" pattern the heuristic was first observed against.
+// process per two independent lsof scans. Candidate selection intentionally
+// does not filter on directory name — the three signals above are what
+// establish abandonment, not any particular naming convention, so this
+// catches leaks "regardless of creation source" (ga-ntbpyb.2 acceptance
+// criterion 2) including directories named by Go's t.TempDir() rather than
+// the bare-mktemp "tmp.*" pattern the heuristic was first observed against.
 //
-// If the lsof scan itself fails, Sweep fails closed: nothing is removed
-// this pass (an unverifiable "is this held open" check is treated the
-// same as "yes, it's held").
+// A directory is removed only when it is absent from both an initial lsof
+// scan and a confirming second scan taken just before removal. A single
+// lsof invocation is not atomic: under heavy concurrent process churn on a
+// shared host, lsof's process-by-process scan can transiently miss a
+// still-open file for one specific PID without lsof itself reporting an
+// error (observed in ga-vbyn8v — a live dolt sql-server's data dir was
+// reported unheld and removed under a 40-job parallel test run, though the
+// identical test passed in isolation). Either scan reporting a directory
+// held is enough to protect it, so the confirm scan only ever adds
+// caution — it cannot cause a genuinely-held directory to be removed, and
+// it is only spent on candidates that are already about to be deleted.
+//
+// If an lsof scan fails, Sweep fails closed: nothing is removed this pass
+// (an unverifiable "is this held open" check is treated the same as "yes,
+// it's held").
 func Sweep(cfg SweepConfig) SweepResult {
 	var result SweepResult
 
@@ -132,8 +144,29 @@ func Sweep(cfg SweepConfig) SweepResult {
 		return result
 	}
 
+	var unheld []string
 	for _, dir := range candidates {
 		if held[dir] {
+			result.Skipped++
+			continue
+		}
+		unheld = append(unheld, dir)
+	}
+	if len(unheld) == 0 {
+		return result
+	}
+
+	// Re-confirm just before removal: see the Sweep doc comment for why a
+	// single scan isn't trusted to delete anything on its own.
+	confirmHeld, err := lsofHeldChildren(cfg.Root, cfg.RunLsof)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("lsof -w (confirm): %w", err))
+		result.Skipped += len(unheld)
+		return result
+	}
+
+	for _, dir := range unheld {
+		if confirmHeld[dir] {
 			result.Skipped++
 			continue
 		}

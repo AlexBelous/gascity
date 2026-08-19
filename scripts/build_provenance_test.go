@@ -2,10 +2,12 @@ package scripts_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // buildRecipe extracts the command lines of the Makefile's `build` target.
@@ -85,5 +87,84 @@ func TestBuildStampsWorkingTreeDirtiness(t *testing.T) {
 	}
 	if !strings.Contains(commitFlag[1], "$(DIRTY)") {
 		t.Fatalf("main.commit must carry $(DIRTY) so a modified tree is visible in `gc version --long`, got: %s", commitFlag[1])
+	}
+}
+
+// TestBuildTimeIsSourceDerivedNotWallClock asserts that BUILD_TIME is a
+// function of the source tree (the HEAD commit's date), not the wall clock.
+//
+// ldflags participate in the link step's cache key. A wall-clock BUILD_TIME
+// changes on every invocation, so `-X main.date=$(BUILD_TIME)` guarantees a
+// cache miss on every link even when the source is byte-identical to the
+// build that just ran — each miss stores a fresh ~270MB binary in the shared
+// GOCACHE that nothing will ever reuse (ga-vx62cc). The commit date is
+// stable for a given tree, so identical-source relinks become cache hits,
+// and this is also the standard reproducible-build posture (cf.
+// SOURCE_DATE_EPOCH).
+func TestBuildTimeIsSourceDerivedNotWallClock(t *testing.T) {
+	makefile := readMakefile(t)
+
+	buildTime := regexp.MustCompile(`(?m)^BUILD_TIME\s*:?=\s*(.+)$`).FindStringSubmatch(makefile)
+	if len(buildTime) != 2 {
+		t.Fatal("Makefile defines no BUILD_TIME variable")
+	}
+	expr := buildTime[1]
+
+	if strings.Contains(expr, "date -u") {
+		t.Fatalf("BUILD_TIME must not be derived from the wall clock (date -u) — that "+
+			"changes on every invocation and makes the link step's ldflags cache key "+
+			"guaranteed to miss even for byte-identical source, got: %s", expr)
+	}
+	if !strings.Contains(expr, "git") || !strings.Contains(expr, "show") {
+		t.Fatalf("BUILD_TIME must be derived from `git show` on HEAD so it is a function "+
+			"of the source tree, not the clock, got: %s", expr)
+	}
+	if !strings.Contains(expr, "%cI") {
+		t.Fatalf("BUILD_TIME must use the commit date format %%cI (ISO 8601), got: %s", expr)
+	}
+	if !strings.Contains(expr, "HEAD") {
+		t.Fatalf("BUILD_TIME must read the HEAD commit's date, got: %s", expr)
+	}
+	if !strings.Contains(expr, "unknown") {
+		t.Fatalf("BUILD_TIME must fall back to a literal value when git metadata is "+
+			"unavailable (e.g. a non-git build context), got: %s", expr)
+	}
+}
+
+// TestBuildTimeIsDeterministicAcrossInvocations executes the Makefile's
+// extracted BUILD_TIME shell expression twice, more than a second apart, and
+// asserts byte-identical output. This is the property that actually makes
+// the link step cache-hit eligible for an unchanged source tree: a
+// wall-clock BUILD_TIME would reliably differ once a second has elapsed; a
+// source-derived one will not.
+func TestBuildTimeIsDeterministicAcrossInvocations(t *testing.T) {
+	makefile := readMakefile(t)
+
+	buildTime := regexp.MustCompile(`(?m)^BUILD_TIME\s*:?=\s*\$\(shell (.+)\)$`).FindStringSubmatch(makefile)
+	if len(buildTime) != 2 {
+		t.Fatal("Makefile defines no BUILD_TIME := $(shell ...) variable")
+	}
+	expr := buildTime[1]
+	root := repoRoot(t)
+
+	run := func() string {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", expr)
+		cmd.Dir = root
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("running extracted BUILD_TIME expression %q: %v", expr, err)
+		}
+		return string(out)
+	}
+
+	first := run()
+	time.Sleep(1100 * time.Millisecond)
+	second := run()
+	if first != second {
+		t.Fatalf("BUILD_TIME expression is not deterministic across invocations one "+
+			"second apart on an unchanged tree — got %q then %q; a non-deterministic "+
+			"value defeats the link step's cache key even when source is unchanged",
+			first, second)
 	}
 }

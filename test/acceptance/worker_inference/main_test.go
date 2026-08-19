@@ -65,6 +65,9 @@ func TestMain(m *testing.M) {
 			panic("worker-inference: " + err.Error())
 		}
 	}
+	if err := os.Setenv("GC_HOME", gcHome); err != nil {
+		panic("worker-inference: setting GC_HOME: " + err.Error())
+	}
 	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(runtimeDir, "tmux")); err != nil {
 		panic("worker-inference: configuring tmux test env: " + err.Error())
 	}
@@ -86,6 +89,17 @@ func TestMain(m *testing.M) {
 		Without("GC_BEADS").
 		Without("GC_DOLT").
 		With("DOLT_ROOT_PATH", gcHome)
+	if bdPath := helpers.FindBD(); bdPath != "" {
+		bdShimDir := filepath.Join(tmpDir, "bd-bin")
+		if err := os.MkdirAll(bdShimDir, 0o755); err != nil {
+			panic("worker-inference: creating bd shim dir: " + err.Error())
+		}
+		if err := os.Symlink(bdPath, filepath.Join(bdShimDir, "bd")); err != nil {
+			panic("worker-inference: staging bd shim: " + err.Error())
+		}
+		liveEnv.With("BD_BIN", bdPath)
+		liveEnv.With("PATH", bdShimDir+string(os.PathListSeparator)+liveEnv.Get("PATH"))
+	}
 	liveSetup = prepareProviderSetup(gcHome, liveEnv)
 
 	// Reap dolt orphans left by prior crashed runs, then guard this run so an
@@ -115,7 +129,7 @@ func prepareProviderSetup(gcHome string, env *helpers.Env) providerSetup {
 		setup.SetupError = "tmux not found in PATH"
 		return setup
 	}
-	if _, err := exec.LookPath("bd"); err != nil {
+	if helpers.FindBD() == "" {
 		setup.SetupError = "bd not found in PATH"
 		return setup
 	}

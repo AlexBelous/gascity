@@ -74,6 +74,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 		Without("GC_BEADS").
 		Without("GC_DOLT").
 		With("DOLT_ROOT_PATH", gcHome)
+	applyLiveBDBinaryEnv(env)
 
 	authSource, err := stageProviderAuth(gcHome, env, liveSetup.Profile)
 	if err != nil {

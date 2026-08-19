@@ -77,9 +77,11 @@ func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string)
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
 		execName := name
 		if name == "bd" {
-			if pinned := strings.TrimSpace(env["BD_BIN"]); filepath.IsAbs(pinned) {
+			pinned, _ := effectiveEnvValue(baseEnv, env, "BD_BIN")
+			if pinned = strings.TrimSpace(pinned); filepath.IsAbs(pinned) {
 				execName = pinned
 			}
 		}
@@ -107,7 +109,7 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
+		cmd.Env = execEnvFor(name, baseEnv, env)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -119,6 +121,23 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		trace(status, traceErr)
 		return out, resultErr
 	}
+}
+
+// effectiveEnvValue returns the value a child process receives after explicit
+// runner overrides replace the inherited process environment. Reading BD_BIN
+// through the same merge contract keeps executable selection aligned with the
+// environment passed to bd itself.
+func effectiveEnvValue(baseEnv []string, overrides map[string]string, key string) (string, bool) {
+	if value, ok := overrides[key]; ok {
+		return value, true
+	}
+	prefix := key + "="
+	for i := len(baseEnv) - 1; i >= 0; i-- {
+		if strings.HasPrefix(baseEnv[i], prefix) {
+			return strings.TrimPrefix(baseEnv[i], prefix), true
+		}
+	}
+	return "", false
 }
 
 // newBDExecTrace returns the legacy line-format trace callback for one command

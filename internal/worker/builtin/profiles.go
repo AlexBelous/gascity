@@ -837,6 +837,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "claude"), true
 	case "codex/tmux-cli":
 		return newProfileIdentity(profile, "codex"), true
+	case "cursor/tmux-cli":
+		return newProfileIdentity(profile, "cursor"), true
 	case "gemini/tmux-cli":
 		return newProfileIdentity(profile, "gemini"), true
 	case "kimi/tmux-cli":

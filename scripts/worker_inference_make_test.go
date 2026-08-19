@@ -20,6 +20,7 @@ func TestWorkerInferenceMakeTargetForwardsCursorAuthThroughSanitizedEnvironment(
 		t.Fatal("Makefile has no test-worker-inference recipe")
 	}
 	for _, name := range []string{
+		"GC_ACCEPTANCE_BD_BIN",
 		"GC_WORKER_INFERENCE_CURSOR_API_KEY",
 		"GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE",
 		"CURSOR_API_KEY",

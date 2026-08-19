@@ -1718,8 +1718,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.cursor/hooks.json": {
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+			`hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.kiro/agents/gascity.json": {
 			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
@@ -1736,6 +1736,18 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	cursorHooks := string(fs.Files["/work/.cursor/hooks.json"])
 	if !strings.Contains(cursorHooks, `\"${GC_BIN:-gc}\" prime --hook`) {
 		t.Errorf("Cursor sessionStart hook must use GC_BIN before PATH fallback:\n%s", cursorHooks)
+	}
+	if !strings.Contains(cursorHooks, `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`) {
+		t.Errorf("Cursor hooks must preserve the inherited workspace PATH ahead of user tool fallbacks:\n%s", cursorHooks)
+	}
+	if strings.Contains(cursorHooks, `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`) {
+		t.Errorf("Cursor hooks must not select ambient user tools ahead of the inherited workspace PATH:\n%s", cursorHooks)
+	}
+	if !strings.Contains(cursorHooks, `if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi`) {
+		t.Errorf("Cursor hooks must put the configured bd binary directory ahead of provider PATH entries:\n%s", cursorHooks)
+	}
+	if strings.Contains(cursorHooks, ` && gc `) {
+		t.Errorf("Cursor hooks must use GC_BIN so provider PATH changes cannot select another gc:\n%s", cursorHooks)
 	}
 	// Copilot CLI documents preCompact (camelCase). The hook fires before
 	// context compaction starts so handoff can capture state; without it,
@@ -2350,6 +2362,59 @@ func TestInstallCursorHookUpgradesPreviousManagedFile(t *testing.T) {
 
 	if got := string(fs.Files[dst]); !strings.Contains(got, `\"${GC_BIN:-gc}\" prime --hook`) {
 		t.Fatalf("previous managed Cursor hook was not upgraded:\n%s", got)
+	}
+	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
+		t.Fatalf("legacy Cursor hook backup = %q, want original managed content", got)
+	}
+}
+
+func TestInstallCursorHookUpgradesHistoricalManagedFile(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	variants := cursorHookLegacyVariants(desired)
+	if len(variants) < 3 {
+		t.Fatalf("cursorHookLegacyVariants() = %d, want historical variant", len(variants))
+	}
+
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	legacy := variants[len(variants)-1]
+	fs.Files[dst] = legacy
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files[dst]); !strings.Contains(got, `\"${GC_BIN:-gc}\" prime --hook`) {
+		t.Fatalf("historical Cursor hook was not upgraded:\n%s", got)
+	}
+	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
+		t.Fatalf("historical Cursor hook backup = %q, want original managed content", got)
+	}
+}
+
+func TestInstallCursorHookUpgradesManagedPrependingPathFile(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	const (
+		workspaceFirst = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`
+		ambientFirst   = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
+	)
+	legacy := bytes.ReplaceAll(desired, []byte(workspaceFirst), []byte(ambientFirst))
+	if bytes.Equal(legacy, desired) {
+		t.Fatal("embedded Cursor hook does not preserve the inherited workspace PATH")
+	}
+
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	fs.Files[dst] = legacy
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files[dst]); !strings.Contains(got, workspaceFirst) {
+		t.Fatalf("managed Cursor hook with ambient-first PATH was not upgraded:\n%s", got)
 	}
 	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
 		t.Fatalf("legacy Cursor hook backup = %q, want original managed content", got)

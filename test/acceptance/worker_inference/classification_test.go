@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gastownhall/gascity/internal/config"
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/internal/worker/workertest"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
@@ -1260,8 +1261,8 @@ func TestInstallLiveHandleProviderHooksCursor(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(workDir, ".cursor", "hooks.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(data), `\"${GC_BIN:-gc}\" prime --hook`)
-	require.Contains(t, string(data), `gc handoff --auto`)
-	require.Contains(t, string(data), `gc hook run`)
+	require.Contains(t, string(data), `\"${GC_BIN:-gc}\" handoff --auto`)
+	require.Contains(t, string(data), `\"${GC_BIN:-gc}\" hook run`)
 }
 
 // TestInstallLiveHandleProviderHooksKimi covers the kimi staging contract:
@@ -1393,6 +1394,75 @@ command = "agy --dangerously-skip-permissions"
 	require.NotContains(t, text, `path_check = "/tmp/provider-bin/agy"`)
 }
 
+func TestInstallLiveWorkspaceBDBinaryPin(t *testing.T) {
+	prevEnv := liveEnv
+	liveEnv = helpers.NewEnv("", t.TempDir(), t.TempDir()).
+		With("BD_BIN", "/tmp/pinned-bd/bd").
+		With("PATH", "/tmp/pinned-bd:/usr/bin")
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+	})
+
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "cursor"
+`), 0o644))
+
+	require.NoError(t, installLiveWorkspaceBDBinaryPin(cityDir))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	cfg, err := config.Parse(data)
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/pinned-bd/bd", cfg.Workspace.Env["BD_BIN"])
+	require.Equal(t, "/tmp/pinned-bd:/usr/bin", cfg.Workspace.Env["PATH"])
+}
+
+func TestLiveBDBinaryEnvPropagatesToFreshEnvironmentsAndStoreRunners(t *testing.T) {
+	prevEnv := liveEnv
+	liveEnv = helpers.NewEnv("", t.TempDir(), t.TempDir()).
+		With("BD_BIN", "/tmp/pinned-bd/bd").
+		With("PATH", "/tmp/pinned-bd:/usr/bin")
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+	})
+
+	got := liveBDBinaryEnv()
+	require.Equal(t, map[string]string{
+		"BD_BIN": "/tmp/pinned-bd/bd",
+		"PATH":   "/tmp/pinned-bd:/usr/bin",
+	}, got)
+
+	fresh := helpers.NewEnv("", t.TempDir(), t.TempDir()).With("PATH", "/fresh/bin")
+	applyLiveBDBinaryEnv(fresh)
+	require.Equal(t, "/tmp/pinned-bd/bd", fresh.Get("BD_BIN"))
+	require.Equal(t, "/tmp/pinned-bd:/usr/bin", fresh.Get("PATH"))
+
+	storeEnv := liveBeadStoreEnv(t.TempDir())
+	require.Equal(t, "/tmp/pinned-bd/bd", storeEnv["BD_BIN"])
+	require.Equal(t, "/tmp/pinned-bd:/usr/bin", storeEnv["PATH"])
+}
+
+func TestBdCmdWithTimeoutUsesConfiguredBDBinary(t *testing.T) {
+	ambientDir := t.TempDir()
+	pinnedDir := t.TempDir()
+	ambientBD := filepath.Join(ambientDir, "bd")
+	pinnedBD := filepath.Join(pinnedDir, "bd")
+	require.NoError(t, os.WriteFile(ambientBD, []byte("#!/bin/sh\nprintf 'ambient\\n'\n"), 0o755))
+	require.NoError(t, os.WriteFile(pinnedBD, []byte("#!/bin/sh\nprintf 'pinned\\n'\n"), 0o755))
+	t.Setenv("PATH", ambientDir)
+
+	env := helpers.NewEnv("", t.TempDir(), t.TempDir()).
+		With("BD_BIN", pinnedBD).
+		With("PATH", ambientDir)
+	out, err := bdCmdWithTimeout(time.Second, env, t.TempDir(), "version")
+	require.NoError(t, err)
+	require.Equal(t, "pinned", strings.TrimSpace(out))
+}
+
 func TestInstallDefaultPoolInferenceAgentUsesAgentFile(t *testing.T) {
 	cityDir := t.TempDir()
 	cityToml := filepath.Join(cityDir, "city.toml")
@@ -1417,6 +1487,14 @@ provider = "antigravity"
 	require.Contains(t, agentText, `default_sling_formula = "mol-do-work"`)
 	require.Contains(t, agentText, `min_active_sessions = 0`)
 	require.Contains(t, agentText, `max_active_sessions = 2`)
+}
+
+func TestNoSkillLiveProviderDefaultsCursorUseSupportedFlags(t *testing.T) {
+	promptMode, promptFlag, readyDelay, args := noSkillLiveProviderDefaults("cursor")
+	require.Equal(t, "arg", promptMode)
+	require.Empty(t, promptFlag)
+	require.Equal(t, 10000, readyDelay)
+	require.Equal(t, []string{"-f", "--trust"}, args)
 }
 
 func TestParseSessionListJSONSkipsStructuredLogPreamble(t *testing.T) {

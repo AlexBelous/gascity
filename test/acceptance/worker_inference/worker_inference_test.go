@@ -1481,6 +1481,80 @@ func newLiveCity(t *testing.T) *helpers.City {
 	return helpers.NewCityAt(t, liveEnv, cityDir)
 }
 
+// liveBDBinaryEnv returns the Beads executable pin selected for this live
+// acceptance run. Live tests may run with a compatibility binary that is not
+// the ambient bd on PATH; every independently-created environment and store
+// runner must carry the same selection.
+func liveBDBinaryEnv() map[string]string {
+	if liveEnv == nil {
+		return nil
+	}
+	bdPath := strings.TrimSpace(liveEnv.Get("BD_BIN"))
+	if bdPath == "" {
+		return nil
+	}
+	env := map[string]string{"BD_BIN": bdPath}
+	if path := liveEnv.Get("PATH"); strings.TrimSpace(path) != "" {
+		env["PATH"] = path
+	}
+	return env
+}
+
+func applyLiveBDBinaryEnv(env *helpers.Env) {
+	if env == nil {
+		return
+	}
+	for key, value := range liveBDBinaryEnv() {
+		env.With(key, value)
+	}
+}
+
+func installLiveWorkspaceBDBinaryPin(cityDir string) error {
+	if liveEnv == nil {
+		return nil
+	}
+	bdValue := strings.TrimSpace(liveEnv.Get("BD_BIN"))
+	if bdValue == "" {
+		return nil
+	}
+	pathValue := strings.TrimSpace(liveEnv.Get("PATH"))
+	if pathValue == "" {
+		return fmt.Errorf("live bd binary is configured without PATH")
+	}
+
+	cityPath := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(cityPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return err
+	}
+	existingBD, bdConfigured := cfg.Workspace.Env["BD_BIN"]
+	if bdConfigured && strings.TrimSpace(existingBD) != bdValue {
+		return fmt.Errorf("workspace.env BD_BIN is already configured")
+	}
+	existingPath, pathConfigured := cfg.Workspace.Env["PATH"]
+	if pathConfigured && strings.TrimSpace(existingPath) != pathValue {
+		return fmt.Errorf("workspace.env PATH is already configured")
+	}
+	if bdConfigured && pathConfigured {
+		return nil
+	}
+	if strings.Contains(string(data), "[workspace.env]") {
+		return fmt.Errorf("workspace.env already exists without complete bd binary pins")
+	}
+
+	var b strings.Builder
+	b.Write(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		b.WriteByte('\n')
+	}
+	fmt.Fprintf(&b, "\n[workspace.env]\nBD_BIN = %s\nPATH = %s\n", strconv.Quote(bdValue), strconv.Quote(pathValue))
+	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
+}
+
 func installLiveProviderCommandOverride(cityDir, provider, command string, processNames []string) error {
 	return installLiveProviderCommandOverrideWithArgs(cityDir, provider, command, processNames, nil)
 }
@@ -1681,6 +1755,8 @@ func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string
 		return "flag", "--prompt", 8000, []string{"--never-ask"}
 	case "antigravity":
 		return "flag", "--prompt-interactive", 5000, []string{"--dangerously-skip-permissions"}
+	case "cursor":
+		return "arg", "", 10000, []string{"-f", "--trust"}
 	default:
 		return "arg", "", 10000, []string{"--dangerously-skip-permissions", "--effort", "max"}
 	}
@@ -1911,16 +1987,19 @@ func leadingWhitespace(line string) string {
 }
 
 func closeLiveSessionsByTemplate(cityDir, template string) error {
-	sessionsOut, err := runGCWithTimeout(liveControlTimeout, liveEnv, cityDir, "session", "list", "--json")
-	if err != nil {
-		return err
-	}
-	sessions, err := parseSessionListJSON(sessionsOut)
-	if err != nil {
-		if isBootstrapSessionListError(err) {
+	sessionsOut, commandErr := runGCWithTimeout(liveControlTimeout, liveEnv, cityDir, "session", "list", "--json")
+	sessions, parseErr := parseSessionListJSON(sessionsOut)
+	if parseErr != nil {
+		if isBootstrapSessionListError(parseErr) {
 			return nil
 		}
-		return err
+		if commandErr != nil {
+			return fmt.Errorf("%w: %s", commandErr, truncateEvidence(strings.TrimSpace(sessionsOut), 500))
+		}
+		return parseErr
+	}
+	if commandErr != nil {
+		return fmt.Errorf("%w: %s", commandErr, truncateEvidence(strings.TrimSpace(sessionsOut), 500))
 	}
 	store, err := openLiveCityStore(cityDir)
 	if err != nil {
@@ -2213,6 +2292,9 @@ func TestInterruptContinuationSnapshotErrorAllowsDroppedInterruptedPrompt(t *tes
 
 func liveBeadStoreEnv(cityDir string) map[string]string {
 	env := citylayout.CityRuntimeEnvMap(cityDir)
+	for key, value := range liveBDBinaryEnv() {
+		env[key] = value
+	}
 	env["BEADS_DIR"] = filepath.Join(cityDir, ".beads")
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
@@ -2261,7 +2343,7 @@ func startManagedInferenceSession(
 	t.Helper()
 
 	c := newLiveCity(t)
-	initArgs := []string{"init", "--skip-provider-readiness"}
+	initArgs := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
@@ -2470,7 +2552,7 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 	if slingTarget == "" {
 		slingTarget = provider
 	}
-	initArgs := []string{"init", "--skip-provider-readiness"}
+	initArgs := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
@@ -2910,7 +2992,7 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 	t.Helper()
 
 	c := newLiveCity(t)
-	initArgs := []string{"init", "--skip-provider-readiness"}
+	initArgs := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
@@ -3266,7 +3348,7 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 	t.Helper()
 
 	c := newLiveCity(t)
-	initArgs := []string{"init", "--skip-provider-readiness"}
+	initArgs := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
 	}
@@ -3574,6 +3656,9 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 }
 
 func seedLiveProviderState(cityDir string) error {
+	if err := installLiveWorkspaceBDBinaryPin(cityDir); err != nil {
+		return fmt.Errorf("pinning live bd binary: %w", err)
+	}
 	gcHome := strings.TrimSpace(liveEnv.Get("GC_HOME"))
 	if gcHome == "" {
 		return fmt.Errorf("GC_HOME is empty")
@@ -5491,9 +5576,12 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 }
 
 func bdCmdWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args ...string) (string, error) {
-	bdPath := "bd"
-	if path, err := exec.LookPath("bd"); err == nil {
-		bdPath = path
+	bdPath := strings.TrimSpace(env.Get("BD_BIN"))
+	if bdPath == "" {
+		bdPath = "bd"
+		if path, err := exec.LookPath("bd"); err == nil {
+			bdPath = path
+		}
 	}
 
 	return runJSONCommandWithTimeout(timeout, env, dir, bdPath, args...)

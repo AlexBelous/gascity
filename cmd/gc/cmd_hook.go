@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -1069,10 +1070,10 @@ func hookIdentityMatchesRoute(route, identity string) bool {
 	return normalizeHookRouteIdentity(route) == normalizeHookRouteIdentity(identity)
 }
 
-// normalizeHookRouteIdentity collapses the session ("--") and legacy
+// normalizeHookRouteIdentity collapses the session ("--"/"__") and legacy
 // bound-template ("binding.") spellings of a qualified identity onto one form.
 func normalizeHookRouteIdentity(s string) string {
-	s = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), "--", "/"))
+	s = strings.ToLower(agent.UnsanitizeQualifiedNameFromSession(strings.TrimSpace(s)))
 	dir, local := config.ParseQualifiedName(s)
 	if binding, unbound, ok := strings.Cut(local, "."); ok && binding != "" && unbound != "" {
 		local = unbound

@@ -1842,6 +1842,35 @@ esac
 	}
 }
 
+// TestHookIdentityMatchesRouteDotAxis guards against normalizeHookRouteIdentity
+// only reversing the slash-encoding axis ("--" -> "/") of a session-name
+// identity while leaving the dot-encoding axis ("__" -> ".") untouched. A
+// route spelled with a literal dot (e.g. a bound-template identity like
+// "triager.triager") must still match a session-encoded identity for the
+// same agent (e.g. "triager__triager"), or the filter wrongly treats an
+// agent's own routed work as belonging to someone else and drops it (ga-4wwxl7).
+func TestHookIdentityMatchesRouteDotAxis(t *testing.T) {
+	tests := []struct {
+		name     string
+		route    string
+		identity string
+		want     bool
+	}{
+		{"dot template route vs dot-encoded session identity", "triager.triager", "triager__triager", true},
+		{"dir-qualified dot route vs session-encoded identity", "gastown.mayor", "gastown__mayor", true},
+		{"slash route vs session-encoded slash identity (pre-existing axis)", "gascity/builder", "gascity--builder", true},
+		{"combined slash+dot route vs fully session-encoded identity", "hello-world/gastown.polecat", "hello-world--gastown__polecat", true},
+		{"distinct identities must not match", "gascity/builder", "gascity--reviewer", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hookIdentityMatchesRoute(tt.route, tt.identity); got != tt.want {
+				t.Errorf("hookIdentityMatchesRoute(%q, %q) = %v, want %v", tt.route, tt.identity, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCmdHookClaimSuffixedPoolWorkerDoesNotAdoptBareTemplateInProgressWork is
 // the ga-80pen8 end-to-end regression: "builder" is BOTH a [[named_session]]
 // holder's own identity AND a pool template shared by suffixed instances

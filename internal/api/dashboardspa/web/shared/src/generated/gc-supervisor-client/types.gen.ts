@@ -4712,14 +4712,14 @@ export type StatusConditionalWriteStoreVerdict = {
      */
     reason?: string;
     /**
-     * Store scope: city, or rig/<name>.
+     * Store scope: city, rig/<name>, storage/<binding> for a relocated coordination-class binding, or 'sessions (required)' for the session class's mode-independent fencing requirement.
      */
     store_id: string;
 };
 
 export type StatusConditionalWrites = {
     /**
-     * Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+     * Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store, OR the session class lacks the conditional writes it requires — which outranks the mode and applies even when the gate is off), pending_restart (on-disk config drifted from the latched mode).
      */
     effective: 'off' | 'active' | 'degraded' | 'fail_closed' | 'pending_restart';
     /**

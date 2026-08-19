@@ -564,6 +564,10 @@ func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	// cross — a second resolution would be a second plan.
 	if cs != nil {
 		cs.storageRoutes = cr.storageRoutes
+		// This is the first moment the class front doors resolve to the stores
+		// that will actually serve them, so it is the first moment the
+		// session class's required fencing capability can be asserted.
+		cs.preflightSessionClassConditionalWrites()
 	}
 }
 

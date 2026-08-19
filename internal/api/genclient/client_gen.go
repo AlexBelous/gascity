@@ -4832,7 +4832,7 @@ type StatusConditionalWriteStoreVerdict struct {
 	// Reason Incapable cause, verbatim from the probe or latch.
 	Reason *string `json:"reason,omitempty"`
 
-	// StoreId Store scope: city, or rig/<name>.
+	// StoreId Store scope: city, rig/<name>, storage/<binding> for a relocated coordination-class binding, or 'sessions (required)' for the session class's mode-independent fencing requirement.
 	StoreId string `json:"store_id"`
 }
 
@@ -4844,7 +4844,7 @@ type StatusConditionalWriteStoreVerdictProbe string
 
 // StatusConditionalWrites defines model for StatusConditionalWrites.
 type StatusConditionalWrites struct {
-	// Effective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+	// Effective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store, OR the session class lacks the conditional writes it requires — which outranks the mode and applies even when the gate is off), pending_restart (on-disk config drifted from the latched mode).
 	Effective StatusConditionalWritesEffective `json:"effective"`
 
 	// Mode Boot-latched beads.conditional_writes mode.
@@ -4860,7 +4860,7 @@ type StatusConditionalWrites struct {
 	Stores *[]StatusConditionalWriteStoreVerdict `json:"stores,omitempty"`
 }
 
-// StatusConditionalWritesEffective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).
+// StatusConditionalWritesEffective Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store, OR the session class lacks the conditional writes it requires — which outranks the mode and applies even when the gate is off), pending_restart (on-disk config drifted from the latched mode).
 type StatusConditionalWritesEffective string
 
 // StatusConditionalWritesMode Boot-latched beads.conditional_writes mode.

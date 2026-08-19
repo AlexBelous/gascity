@@ -24,6 +24,33 @@ import (
 
 var _ ConditionalWriter = (*SQLiteStore)(nil)
 
+// probeConditionalWriteCapability answers with the one condition every verb
+// below already enforces: no revision column, no fence. The check is a field
+// read — no query, no subprocess — so the resolve seam may consult it on any
+// path.
+func (s *SQLiteStore) probeConditionalWriteCapability() (bool, string) {
+	if s == nil {
+		return false, "sqlite store is nil"
+	}
+	if !s.hasRevisionColumn {
+		return false, "the sqlite database predates the revision column, so no write can be fenced"
+	}
+	return true, ""
+}
+
+// inspectConditionalWriteState reports the same answer without side effects.
+// The probe is instantaneous, so the verdict is always definitive; SQLite has
+// no runtime latch (a rejected fenced write is a transaction that rolled back,
+// not a capability the store loses).
+//
+//nolint:unparam // latch is fixed by the inspector contract's tuple shape.
+func (s *SQLiteStore) inspectConditionalWriteState() (probe, latch, reason string) {
+	if capable, why := s.probeConditionalWriteCapability(); !capable {
+		return ConditionalWriteProbeIncapable, ConditionalWriteLatchUnlatched, why
+	}
+	return ConditionalWriteProbeCapable, ConditionalWriteLatchUnlatched, ""
+}
+
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
 	if err := s.ensureOpen(); err != nil {

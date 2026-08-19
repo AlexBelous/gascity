@@ -343,6 +343,8 @@ func conditionalStoreKind(store Store) string {
 		return "CachingStore"
 	case *NativeDoltStore:
 		return storeNameNativeDoltStore
+	case *SQLiteStore:
+		return storeNameSQLiteStore
 	case nil:
 		return "<nil>"
 	default:

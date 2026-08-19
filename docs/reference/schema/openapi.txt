@@ -11105,7 +11105,7 @@
             "type": "string"
           },
           "store_id": {
-            "description": "Store scope: city, or rig/\u003cname\u003e.",
+            "description": "Store scope: city, rig/\u003cname\u003e, storage/\u003cbinding\u003e for a relocated coordination-class binding, or 'sessions (required)' for the session class's mode-independent fencing requirement.",
             "type": "string"
           }
         },
@@ -11122,7 +11122,7 @@
         "additionalProperties": false,
         "properties": {
           "effective": {
-            "description": "Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store — fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).",
+            "description": "Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store, OR the session class lacks the conditional writes it requires — which outranks the mode and applies even when the gate is off), pending_restart (on-disk config drifted from the latched mode).",
             "enum": [
               "off",
               "active",

@@ -1340,18 +1340,49 @@ func (cs *controllerState) preflightConditionalWrites() {
 	if cs.rolloutFlags.BeadsConditionalWrites() != rollout.Require {
 		return
 	}
-	probe := func(name string, store beads.Store) {
-		if store == nil {
-			return
-		}
-		if _, _, err := beads.ResolveConditionalWriter(store); err != nil {
-			cs.rolloutWarnf("api: rollout: ERROR: conditional_writes=require but store %s cannot fence: %v\n", name, err)
-		}
-	}
 	for rigName, store := range cs.beadStores {
-		probe("rig/"+rigName, store)
+		cs.probeConditionalWrites("rig/"+rigName, store)
 	}
-	probe("city", cs.cityBeadStore)
+	cs.probeConditionalWrites("city", cs.cityBeadStore)
+}
+
+// preflightSessionClassConditionalWrites asserts the capability the session
+// class REQUIRES, against the store that actually serves it.
+//
+// It runs on every boot, in every mode: the requirement is not a rollout
+// option. The keyed reconciler's session writes are revision-fenced by
+// construction, so a session-class store that cannot fence is a startup error
+// naming the store and what it lacks — not a silent absence discovered at the
+// first drain (ga-f7v2ft.162).
+//
+// It is a second entry point rather than part of the constructor's pass
+// because the storage routes are attached AFTER the controller state is built
+// (setControllerState composes the pair): a constructor-time check would
+// inspect the work store on a split city and clear a class served from
+// somewhere else entirely.
+func (cs *controllerState) preflightSessionClassConditionalWrites() {
+	if cs == nil {
+		return
+	}
+	store := cs.SessionsBeadStore().Store
+	if store == nil {
+		return
+	}
+	if _, err := beads.RequiredConditionalWriter(store); err != nil {
+		cs.rolloutWarnf("api: beads: ERROR: the session-class store cannot fence its own writes, which the session reconciler requires: %v\n", err)
+	}
+}
+
+// probeConditionalWrites resolves one store's fence under the city's rollout
+// mode and reports a require-mode refusal as a startup ERROR line naming the
+// store.
+func (cs *controllerState) probeConditionalWrites(name string, store beads.Store) {
+	if store == nil {
+		return
+	}
+	if _, _, err := beads.ResolveConditionalWriter(store); err != nil {
+		cs.rolloutWarnf("api: rollout: ERROR: conditional_writes=require but store %s cannot fence: %v\n", name, err)
+	}
 }
 
 // rolloutWarnf routes noteRolloutDrift's transition lines to the injected sink

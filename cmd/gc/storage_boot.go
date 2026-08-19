@@ -71,12 +71,40 @@ type storageRoutes struct {
 	// reserved work binding is absent, so it falls through to the work store
 	// the caller already holds.
 	stores map[coordclass.Class]beads.Store
+	// engines lists each opened engine once, in open order, beside the binding
+	// that named it. The class map answers "who serves this class" and
+	// deliberately repeats one store across every class it serves; the
+	// operator surfaces ask the other question — "what did this process open"
+	// — and must not report one engine five times or dedupe by comparing
+	// interface values whose dynamic type need not be comparable.
+	engines []routedEngine
 	// closers owns the durable resources the opened bindings hold, in open
 	// order. The process closes them once, on shutdown.
 	closers []io.Closer
 	// binding names the non-work binding these routes were opened from, for
 	// diagnostics.
 	binding string
+}
+
+// routedEngine is one opened binding engine and the binding that named it.
+type routedEngine struct {
+	binding string
+	store   beads.Store
+}
+
+// openedEngines lists the engines these routes opened. A nil receiver opened
+// none, which is the identity path every city without [storage] takes.
+func (r *storageRoutes) openedEngines() []routedEngine {
+	if r == nil {
+		return nil
+	}
+	return r.engines
+}
+
+// conditionalWritesStoreID labels a routed engine on the operator surfaces,
+// beside the "city" and "rig/<name>" spellings the work stores use.
+func (e routedEngine) conditionalWritesStoreID() string {
+	return "storage/" + e.binding
 }
 
 // storeFor returns the store serving a class and whether these routes relocate
@@ -501,6 +529,7 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	}
 	routes := &storageRoutes{
 		stores:  make(map[coordclass.Class]beads.Store, len(planned.AssignedClasses.Classes())),
+		engines: []routedEngine{{binding: target.Binding, store: store}},
 		closers: []io.Closer{closer},
 		binding: target.Binding,
 	}

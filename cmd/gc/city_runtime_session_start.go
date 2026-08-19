@@ -118,7 +118,15 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 					cr.recordExactSessionLifecycleStatusShadow(snapshot.Config, result)
 				}))
 			}
-			statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(snapshot.Store)
+			// The session class REQUIRES the fence. Every keyed write on a
+			// session row — deadline sleep, zombie terminal mark, status heal,
+			// drain-ack — is decided from a revision this store handed out and
+			// applied under that revision, so a nil writer is not a legacy
+			// fallback, it is the fence removed. Asking for the capability
+			// instead of resolving the rollout gate is what stops a store that
+			// genuinely implements conditional writes from being routed around
+			// because some policy value never reached it (ga-f7v2ft.162).
+			statusWriter, statusWriterErr := beads.RequiredConditionalWriter(snapshot.Store)
 			owner, reconcileErr := reconcileExactSessionStartWithOwner(reconcileCtx, admission, exactSessionStartParams{
 				Generation:        snapshot.Generation,
 				CityPath:          snapshot.CityPath,

@@ -1204,6 +1204,92 @@ title = "Do work for {{convoy_id}}"
 	}
 }
 
+// TestFormulaCookAttachRefusesWhenTargetAlreadyHasMoleculeAttached locks in
+// that the non-graph (v1) `--attach` arm refuses to attach a second molecule
+// onto a bead that already carries a live molecule attachment, instead of
+// silently creating a duplicate wrapper rooted at the same target
+// (ga-qiplt2). The graph.v2 arm above already guards this via
+// existingFormulaCookGraphV2Root / sourceworkflow conflict checks; the v1
+// arm called molecule.Attach directly with no equivalent guard, so a bead
+// already carrying a "finishing sling" molecule attachment (molecule_id
+// metadata pointing at a live wrapper) could accumulate a second, unrelated
+// wrapper on every cook --attach invocation.
+func TestFormulaCookAttachRefusesWhenTargetAlreadyHasMoleculeAttached(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formulas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "plain-work.formula.toml"), []byte(`
+formula = "plain-work"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	wrapper, err := store.Create(beads.Bead{Title: "existing molecule wrapper", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("create wrapper: %v", err)
+	}
+	target, err := store.Create(beads.Bead{
+		Title:    "review target",
+		Type:     "task",
+		Assignee: "reviewer",
+		Metadata: map[string]string{beadmeta.MoleculeIDMetadataKey: wrapper.ID},
+	})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"plain-work", "--attach", target.ID})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("formula cook --attach = nil error, want refusal because %s already has attached molecule %s\nstdout=%s\nstderr=%s", target.ID, wrapper.ID, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "already has attached") {
+		t.Fatalf("stderr = %q, want it to mention the existing attachment", stderr.String())
+	}
+
+	roots, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": target.ID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		AllowScan:     true,
+	})
+	if err != nil {
+		t.Fatalf("list roots rooted at target: %v", err)
+	}
+	if len(roots) != 0 {
+		t.Fatalf("beads rooted at target = %+v, want none (refusal must create nothing)", roots)
+	}
+}
+
 // TestFormulaCookStandaloneGraphV2StampsRunRootStoreScope locks in that a
 // standalone `gc formula cook <graph.v2-formula>` (no --attach) stamps the run
 // root with its store/scope identity (gc.root_store_ref + gc.scope_kind), the

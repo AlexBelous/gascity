@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
@@ -931,10 +932,33 @@ store, copy them into the binding with
 				// its own graph leg through resolveGraphStore, which already
 				// names the binding, and its work leg is only read for an input
 				// convoy this arm never mints.
+				//
+				// Unlike the graph.v2 arm above, this path had no
+				// existing-attachment guard at all: attach targets a
+				// caller-named bead rather than a workflow-scoped step, so a
+				// bead that already carries a live molecule/workflow
+				// attachment (e.g. a sling finishing-sling wrapper) could
+				// accumulate a second, unrelated one on every cook --attach
+				// (ga-qiplt2). CheckNoMoleculeChildren is the same guard
+				// sling's own legacy (non-graph) attach path uses before
+				// instantiating a molecule (sling_core.go).
+				var attachCheck sling.SlingResult
+				if err := sling.CheckNoMoleculeChildren(attachStore, attach, attachStore, &attachCheck); err != nil {
+					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
+				}
+				for _, id := range attachCheck.AutoBurned {
+					_, _ = fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id)
+				}
+
 				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
+					// attach names its own root: a workflow_id/molecule_id it
+					// carries is a separate attachment (just ruled out above),
+					// not a container it lives inside, so ResolveRunID's
+					// chain-walk must not run here.
+					SelfRoot: true,
 				})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)

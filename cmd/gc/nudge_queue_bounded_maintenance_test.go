@@ -77,6 +77,70 @@ func TestRunNudgeQueueMaintenanceSweep_BoundedPassPreservesBacklogThenConverges(
 	}
 }
 
+// TestListQueuedNudgesForTarget_BoundedMaintenancePreservesBacklogOnStaleNow
+// guards ga-2kzci3 candidate 1 / NFR1: every mutating/listing queue call
+// site -- not just the foreground enqueue path and the supervisor sweep --
+// must bound its maintenance pass to nudgeEnqueueMaintenanceBudget relative
+// to its own now, instead of running it against noMaintenanceDeadline's
+// unconditional wall-clock+24h deadline. A stale now (whose now+budget has
+// already elapsed relative to the real clock) must leave the backlog
+// untouched rather than draining it, exactly as the enqueue path and the
+// supervisor sweep already do.
+func TestListQueuedNudgesForTarget_BoundedMaintenancePreservesBacklogOnStaleNow(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	dir := t.TempDir()
+	base := time.Now()
+	const backlog = 5
+	if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+		for i := 0; i < backlog; i++ {
+			item := newQueuedNudge("ghost-agent", "msg", base.Add(-25*time.Hour))
+			state.Pending = append(state.Pending, item)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed queue state: %v", err)
+	}
+
+	// staleNow is far enough in the past that staleNow+nudgeEnqueueMaintenanceBudget
+	// (2s) is already behind the real wall clock: a bounded pass must bail
+	// before touching any item, not silently ignore how stale now actually
+	// is and drain the whole backlog like an unbounded (24h-deadline) pass
+	// would.
+	staleNow := base.Add(-10 * time.Second)
+	target := nudgeTarget{cityPath: dir, alias: "ghost-agent"}
+	if _, _, _, err := listQueuedNudgesForTarget(dir, target, staleNow); err != nil {
+		t.Fatalf("listQueuedNudgesForTarget(staleNow): %v", err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState after bounded pass: %v", err)
+	}
+	if len(state.Pending) != backlog {
+		t.Fatalf("pending after bounded listQueuedNudgesForTarget pass = %d, want %d (bounded pass must preserve the backlog, not drain it against noMaintenanceDeadline's unconditional 24h deadline)", len(state.Pending), backlog)
+	}
+	if len(state.Dead) != 0 {
+		t.Fatalf("dead after bounded pass = %d, want 0", len(state.Dead))
+	}
+
+	// A fresh now gives the pass a deadline safely in the future, so it must
+	// fully converge the preserved backlog.
+	if _, _, _, err := listQueuedNudgesForTarget(dir, target, time.Now()); err != nil {
+		t.Fatalf("listQueuedNudgesForTarget(fresh now): %v", err)
+	}
+	state, err = nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState after convergence pass: %v", err)
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("pending after convergence pass = %d, want 0", len(state.Pending))
+	}
+	if len(state.Dead) != backlog {
+		t.Fatalf("dead after convergence pass = %d, want %d", len(state.Dead), backlog)
+	}
+}
+
 // TestQueuedNudgeMaintenanceDebounce_SkipsRedundantSameTickSweep guards
 // ga-2kzci3 FR4: two maintenance sweeps against the same city whose `now`
 // values fall within the debounce window must not both run the full

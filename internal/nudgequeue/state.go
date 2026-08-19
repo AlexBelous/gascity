@@ -96,52 +96,36 @@ func SortState(state *State) {
 	})
 }
 
+// defaultLockWaitTimeout bounds how long WithState waits to acquire the
+// queue's exclusive flock before giving up with a descriptive error
+// (ga-2kzci3 FR1/FR2). Set to 4x nudgeEnqueueMaintenanceBudget (cmd/gc,
+// 2s), per NFR2 -- comfortably above what a well-behaved holder should ever
+// take (every holder's own critical section is itself bounded to that same
+// budget), so it doesn't false-trigger under normal contention, while still
+// failing fast enough to diagnose in seconds, not the multi-minute hangs
+// this fix replaces.
+const defaultLockWaitTimeout = 8 * time.Second
+
 // WithState locks, loads, mutates, and atomically rewrites the queue state.
+// The wait to acquire the lock is bounded to defaultLockWaitTimeout
+// (ga-2kzci3 FR1/FR2); a caller that needs a different budget -- e.g. one
+// that must keep cycling other work under contention -- can call
+// withStateBounded directly instead.
 func WithState(cityPath string, fn func(*State) error) error {
-	dir := filepath.Dir(StatePath(cityPath))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("creating nudge queue dir: %w", err)
-	}
-
-	lockFile, err := os.OpenFile(LockPath(cityPath), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("opening nudge queue lock: %w", err)
-	}
-	defer lockFile.Close() //nolint:errcheck
-
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("locking nudge queue: %w", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-
-	state, err := LoadState(cityPath)
-	if err != nil {
-		return err
-	}
-	if err := fn(&state); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal nudge queue: %w", err)
-	}
-	if err := fsys.WriteFileAtomic(fsys.OSFS{}, StatePath(cityPath), append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write nudge queue: %w", err)
-	}
-	return nil
+	return withStateBounded(cityPath, defaultLockWaitTimeout, clock.Real{}, fn)
 }
 
 // nudgeQueueLockPollInterval is how often withStateBounded retries a
 // non-blocking lock acquisition while waiting for its budget to expire.
 const nudgeQueueLockPollInterval = 10 * time.Millisecond
 
-// withStateBounded is the bounded-wait variant of WithState (ga-2kzci3
-// FR1/FR2): a caller that cannot tolerate an unbounded wait on the queue's
-// exclusive flock -- e.g. the supervisor dispatch tick, which must keep
-// cycling other sessions even when the queue is contended -- passes a
-// budget instead of blocking forever. flock offers no notification API, so
-// the bound is enforced by polling LOCK_EX|LOCK_NB against clk until either
-// the lock is acquired or the budget elapses.
+// withStateBounded is WithState's bounded-wait implementation, callable
+// directly by a caller that needs a different timeout budget than
+// WithState's default -- e.g. the supervisor dispatch tick, which must keep
+// cycling other sessions even when the queue is contended (ga-2kzci3
+// FR1/FR2). flock offers no notification API, so the bound is enforced by
+// polling LOCK_EX|LOCK_NB against clk until either the lock is acquired or
+// the budget elapses.
 func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Clock, fn func(*State) error) error {
 	dir := filepath.Dir(StatePath(cityPath))
 	if err := os.MkdirAll(dir, 0o755); err != nil {

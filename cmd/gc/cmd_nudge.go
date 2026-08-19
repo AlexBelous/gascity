@@ -1930,7 +1930,7 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 	var claimed []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -1970,7 +1970,7 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2070,7 +2070,7 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2278,7 +2278,7 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2332,7 +2332,7 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2397,7 +2397,7 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 	var deadLettered []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		deadLettered = deadLettered[:0]
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2491,9 +2491,15 @@ func terminalStateForDeadQueuedNudge(item queuedNudge) string {
 }
 
 // noMaintenanceDeadline returns a deadline far enough in the future that a
-// nudge-queue maintenance pass never stops early. Callers outside the
-// latency-sensitive foreground enqueue path (poller, doctor, list/ack/release)
-// want the full backlog drained every time, matching pre-budget behavior.
+// nudge-queue maintenance pass never stops early. Used by tests that
+// exercise the recover/prune primitives' own full-drain behavior directly.
+// Every production call site is bounded instead -- nudgeEnqueueMaintenanceBudget
+// for per-call maintenance (claim, list, ack, release, record-failure),
+// nudgeMaintenanceSweepBudget for the supervisor's whole-queue sweep -- per
+// ga-2kzci3: an unconditional full-backlog drain on every call does
+// unbounded O(backlog) work under the queue's exclusive flock, and the
+// recover/prune passes already bail out cleanly on deadline, leaving the
+// remainder for the next bounded pass to pick up.
 func noMaintenanceDeadline() time.Time {
 	return time.Now().Add(24 * time.Hour)
 }

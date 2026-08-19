@@ -35,6 +35,54 @@ func TestKindPathNamesAreUnique(t *testing.T) {
 	}
 }
 
+// TestKindPathNamesWorkThroughFakeProviderLifecycle hermetically covers what
+// TestProviderLiveClaudeKindPath cannot in a claude-less sandbox: that
+// kindPathNames()'s PID-salted session/agent names actually thread correctly
+// through the same New/Start/GetMeta/IsRunning/ObserveLiveness call sequence,
+// using the fake-herdr harness from newFakeHerdrProvider
+// (panebinding_provider_test.go) instead of a live herdr server and claude
+// binary.
+//
+// ga-hmd2gu review round 1: TestKindPathNamesAreUnique proves the generated
+// names are distinct, but never threads them through a real provider call
+// sequence — exactly what a claude-absent skip leaves unverified everywhere
+// this test runs without a live claude binary.
+func TestKindPathNamesWorkThroughFakeProviderLifecycle(t *testing.T) {
+	session, agent := kindPathNames()
+	p, _, _ := newFakeHerdrProviderForSession(t, session)
+	listenHerdrSocket(t, session)
+
+	ctx := context.Background()
+	cfg := runtime.Config{
+		Command: "claude",
+		Env:     map[string]string{"GC_SESSION_ID": session + "-session"},
+	}
+	if err := p.Start(ctx, agent, cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// herdr registered the agent under the session name (kind path).
+	if _, ok, err := p.c.getAgent(ctx, agent); err != nil || !ok {
+		t.Fatalf("agent get %s = ok=%v, %v; want registered", agent, ok, err)
+	}
+	if mode, _ := p.GetMeta(agent, metaBoundMode); mode != bindModeAgent {
+		t.Errorf("bound mode = %q; want %q", mode, bindModeAgent)
+	}
+	if pane, _ := p.GetMeta(agent, metaBoundPane); pane == "" {
+		t.Error("bound pane empty after kind Start")
+	}
+
+	if !p.IsRunning(agent) {
+		t.Error("IsRunning = false after kind Start")
+	}
+	if live := p.ObserveLiveness(agent, nil); !live.Running || !live.Alive {
+		t.Errorf("ObserveLiveness = %+v; want Running=true Alive=true", live)
+	}
+	if err := p.Start(ctx, agent, cfg); !errors.Is(err, runtime.ErrSessionExists) {
+		t.Errorf("re-issued Start = %v; want ErrSessionExists", err)
+	}
+}
+
 var kindPathSessionSeq int64
 
 // kindPathNames returns the herdr session name and pane/agent name that

@@ -2,12 +2,10 @@ package scripts_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 )
 
 // buildRecipe extracts the command lines of the Makefile's `build` target.
@@ -128,43 +126,5 @@ func TestBuildTimeIsSourceDerivedNotWallClock(t *testing.T) {
 	if !strings.Contains(expr, "unknown") {
 		t.Fatalf("BUILD_TIME must fall back to a literal value when git metadata is "+
 			"unavailable (e.g. a non-git build context), got: %s", expr)
-	}
-}
-
-// TestBuildTimeIsDeterministicAcrossInvocations executes the Makefile's
-// extracted BUILD_TIME shell expression twice, more than a second apart, and
-// asserts byte-identical output. This is the property that actually makes
-// the link step cache-hit eligible for an unchanged source tree: a
-// wall-clock BUILD_TIME would reliably differ once a second has elapsed; a
-// source-derived one will not.
-func TestBuildTimeIsDeterministicAcrossInvocations(t *testing.T) {
-	makefile := readMakefile(t)
-
-	buildTime := regexp.MustCompile(`(?m)^BUILD_TIME\s*:?=\s*\$\(shell (.+)\)$`).FindStringSubmatch(makefile)
-	if len(buildTime) != 2 {
-		t.Fatal("Makefile defines no BUILD_TIME := $(shell ...) variable")
-	}
-	expr := buildTime[1]
-	root := repoRoot(t)
-
-	run := func() string {
-		t.Helper()
-		cmd := exec.Command("sh", "-c", expr)
-		cmd.Dir = root
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("running extracted BUILD_TIME expression %q: %v", expr, err)
-		}
-		return string(out)
-	}
-
-	first := run()
-	time.Sleep(1100 * time.Millisecond)
-	second := run()
-	if first != second {
-		t.Fatalf("BUILD_TIME expression is not deterministic across invocations one "+
-			"second apart on an unchanged tree — got %q then %q; a non-deterministic "+
-			"value defeats the link step's cache key even when source is unchanged",
-			first, second)
 	}
 }

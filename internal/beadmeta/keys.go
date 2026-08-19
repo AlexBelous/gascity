@@ -61,6 +61,18 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	// ControllerRetryFirstSeenMetadataKey is the RFC3339 instant of the FIRST
+	// semantic-refusal retry recorded for a control bead. It is the persisted
+	// deadline anchor for the bounded Tier-B retry budget: it lives on the bead
+	// rather than in dispatcher memory precisely so a control-dispatcher restart
+	// cannot reset the clock. Written once and never re-stamped while the bead
+	// keeps failing; cleared with the other controller-error keys on recovery.
+	ControllerRetryFirstSeenMetadataKey = "gc.controller_retry_first_seen"
+	// ControllerRetryCountMetadataKey counts the semantic-refusal retries
+	// recorded for a control bead. Diagnostics only — the budget is a deadline,
+	// not a count, because per-attempt cost varies by two orders of magnitude
+	// between a healthy and a saturated store.
+	ControllerRetryCountMetadataKey = "gc.controller_retry_count"
 	// CoordinatorOutcomeProducerDispositionMetadataKey holds the typed-close JSON
 	// envelope written by gc-outcome-close.
 	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
@@ -93,6 +105,14 @@ const (
 	DrainParentConvoyIDMetadataKey       = "gc.drain_parent_convoy_id"
 	DrainStateMetadataKey                = "gc.drain_state"
 	DrainUnitKeyMetadataKey              = "gc.drain_unit_key"
+	// DrainUnprojectedBlockersMetadataKey records, on a drain item root, the
+	// out-of-convoy blockers of its source member that the item workflow could
+	// not depend on because they live in another class store. The item workflow
+	// runs without those constraints: a dependency row can only reference an id
+	// its own store resolves, and writing one anyway removes the dependent from
+	// Ready forever. Only OPEN blockers are recorded — a terminal one constrains
+	// nothing, so omitting its edge loses no meaning. Comma-separated bead ids.
+	DrainUnprojectedBlockersMetadataKey  = "gc.drain_unprojected_blockers"
 	DurationMsMetadataKey                = "gc.duration_ms"
 	DynamicFragmentMetadataKey           = "gc.dynamic_fragment"
 	ExclusiveDrainReservationMetadataKey = "gc.exclusive_drain_reservation"
@@ -157,6 +177,8 @@ const (
 	RigRootMetadataKey                   = "gc.rig_root"
 	RootBeadIDMetadataKey                = "gc.root_bead_id"
 	RootStoreRefMetadataKey              = "gc.root_store_ref"
+	RouteQuarantineMetadataKey           = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey     = "gc.route_recovery_quarantine_reason"
 	RoutedToMetadataKey                  = "gc.routed_to"
 	RunTargetMetadataKey                 = "gc.run_target"
 	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
@@ -173,23 +195,28 @@ const (
 	SessionNameMetadataKey    = "gc.session_name"
 	// SessionNameCamelMetadataKey is the camelCase variant of SessionNameMetadataKey,
 	// mirroring SessionIDCamelMetadataKey.
-	SessionNameCamelMetadataKey    = "gc.sessionName"
-	SourceBeadIDMetadataKey        = "gc.source_bead_id"
-	SourceStepSpecMetadataKey      = "gc.source_step_spec"
-	SourceStoreRefMetadataKey      = "gc.source_store_ref"
-	SpawnedCountMetadataKey        = "gc.spawned_count"
-	SpecForMetadataKey             = "gc.spec_for"
-	SpecForRefMetadataKey          = "gc.spec_for_ref"
-	StderrMetadataKey              = "gc.stderr"
-	StdoutMetadataKey              = "gc.stdout"
-	StepIDMetadataKey              = "gc.step_id"
-	StepRefMetadataKey             = "gc.step_ref"
-	StepTimeoutMetadataKey         = "gc.step_timeout"
-	SyntheticKindMetadataKey       = "gc.synthetic_kind"
-	SyntheticMetadataKey           = "gc.synthetic"
-	TemplateMetadataKey            = "gc.template"
-	TerminalMetadataKey            = "gc.terminal"
-	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
+	SessionNameCamelMetadataKey = "gc.sessionName"
+	SourceBeadIDMetadataKey     = "gc.source_bead_id"
+	SourceStepSpecMetadataKey   = "gc.source_step_spec"
+	SourceStoreRefMetadataKey   = "gc.source_store_ref"
+	SpawnedCountMetadataKey     = "gc.spawned_count"
+	SpecForMetadataKey          = "gc.spec_for"
+	SpecForRefMetadataKey       = "gc.spec_for_ref"
+	StderrMetadataKey           = "gc.stderr"
+	StdoutMetadataKey           = "gc.stdout"
+	StepIDMetadataKey           = "gc.step_id"
+	StepRefMetadataKey          = "gc.step_ref"
+	StepTimeoutMetadataKey      = "gc.step_timeout"
+	SyntheticKindMetadataKey    = "gc.synthetic_kind"
+	SyntheticMetadataKey        = "gc.synthetic"
+	TemplateMetadataKey         = "gc.template"
+	TerminalMetadataKey         = "gc.terminal"
+	TriggerBeadIDMetadataKey    = "gc.trigger_bead_id"
+	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
+	// copied into a binding with the name of the binding it came from, so a
+	// resumed attempt can tell a row it wrote from content the destination
+	// already owned.
+	InfraMigratedFromMetadataKey   = "gc.infra_migrated_from"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -312,6 +339,8 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	ControllerRetryFirstSeenMetadataKey,
+	ControllerRetryCountMetadataKey,
 	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
@@ -337,6 +366,7 @@ var KnownMetadataKeys = []string{
 	DrainParentConvoyIDMetadataKey,
 	DrainStateMetadataKey,
 	DrainUnitKeyMetadataKey,
+	DrainUnprojectedBlockersMetadataKey,
 	DurationMsMetadataKey,
 	DynamicFragmentMetadataKey,
 	ExclusiveDrainReservationMetadataKey,
@@ -401,6 +431,8 @@ var KnownMetadataKeys = []string{
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
 	RootStoreRefMetadataKey,
+	RouteQuarantineMetadataKey,
+	RouteQuarantineReasonMetadataKey,
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,
@@ -429,6 +461,7 @@ var KnownMetadataKeys = []string{
 	TemplateMetadataKey,
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
+	InfraMigratedFromMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,

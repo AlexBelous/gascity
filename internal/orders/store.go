@@ -236,6 +236,42 @@ func (s *Store) mixedLegStores() []beads.Store {
 // trackingTitle returns the canonical tracking-bead title for a scoped order.
 func trackingTitle(scoped string) string { return labelOrderTitlePrefix + scoped }
 
+// RunLabel returns the canonical label shared by order tracking records and
+// graph roots for scoped.
+func RunLabel(scoped string) string { return labelOrderRunPrefix + scoped }
+
+// ScopedFromRunLabel returns the scoped order name a run label names, and
+// reports whether label is a run label at all.
+//
+// It is RunLabel read backwards, and it exists so a caller that indexes a whole
+// store's order-run evidence in one read — rather than one label-filtered query
+// per order — parses the label with the function that wrote it. The prefix is
+// otherwise spelled as a literal at a dozen call sites, and an index that
+// disagreed with the writer about where the name starts would gate on nothing.
+func ScopedFromRunLabel(label string) (string, bool) {
+	if !strings.HasPrefix(label, labelOrderRunPrefix) {
+		return "", false
+	}
+	scoped := strings.TrimPrefix(label, labelOrderRunPrefix)
+	if scoped == "" {
+		return "", false
+	}
+	return scoped, true
+}
+
+// IsTrackingBead reports whether b is an order tracking record.
+func IsTrackingBead(b beads.Bead) bool { return beadLabelsContain(b.Labels, labelOrderTracking) }
+
+// MaxEventCursor returns the largest event cursor encoded by the supplied
+// order-run bead labels.
+func MaxEventCursor(items []beads.Bead) EventCursor {
+	labels := make([][]string, 0, len(items))
+	for _, item := range items {
+		labels = append(labels, item.Labels)
+	}
+	return EventCursor(MaxSeqFromLabels(labels))
+}
+
 // baseLabels returns the order-run + order-tracking labels every tracking bead
 // carries, plus any outcome labels.
 func baseLabels(scoped string, outcome RunOutcome) []string {
@@ -304,6 +340,10 @@ func (s *Store) CloseRun(runID, reason string) error {
 	}
 	return nil
 }
+
+// DeleteRun removes one tracking record. Retention owns the selection policy;
+// this method only confines the persistence operation to the orders front door.
+func (s *Store) DeleteRun(runID string) error { return s.store.Delete(runID) }
 
 // CreateRunClosed creates a tracking bead, optionally stamps an event cursor and
 // outcome, then closes it — the cooldown-advance-only path used by manual

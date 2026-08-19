@@ -33,6 +33,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/transcriptmeta"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
@@ -1448,6 +1449,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
 	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
 
+	// External event forwarders consume the typed supervisor stream without
+	// configuring [events.export]. Allow that long-lived supervisor unit to arm
+	// the same transcript correlation sidecars independently.
+	armSupervisorTranscriptMetaFromEnv(stderr)
+
 	// Redacted event export (opt-in via [events.export]). No-op unless an
 	// endpoint is configured.
 	if supCfg.Events.Export.Enabled() {
@@ -1910,7 +1916,22 @@ func reconcileCities(
 			})
 		}
 
-		// recordInitFailure logs the error and records backoff state.
+		// recordInitFailure logs the error, ends the attempt, and records
+		// backoff state.
+		//
+		// Clearing initStatus is part of recording the failure, not a courtesy
+		// each branch performs for itself. reconcileCities selects cities to
+		// start by skipping any with a live initStatus entry, and it consults
+		// that skip BEFORE the backoff and its config-mtime reset. So a branch
+		// that records a failure but leaves the entry behind wedges the city out
+		// of the loop for the life of the process: it logs "next retry in 10s"
+		// and is then never selected again, and neither editing city.toml nor
+		// `gc start` recovers it — only a supervisor restart does.
+		//
+		// Three of the branches below used to clear it and three did not, which
+		// is what the split produced. Every call site either has already cleared
+		// it (the pre-runtime branches, and publishManagedCity for everything
+		// after it) or needs it cleared, so the delete belongs here, once.
 		recordInitFailure := func(cityName, msg string) {
 			fmt.Fprintln(stderr, logutil.FormatFatalLine(msg))                              //nolint:errcheck // best-effort stderr
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s (skipping)\n", cityName, msg) //nolint:errcheck
@@ -1920,10 +1941,11 @@ func reconcileCities(
 			}
 			cr.BatchUpdate(func(
 				_ map[string]*managedCity,
-				_ map[string]cityInitProgress,
+				initStatus map[string]cityInitProgress,
 				initFailures map[string]*initFailRecord,
 				_ map[string]*panicRecord,
 			) {
+				delete(initStatus, path)
 				ifrec := initFailures[path]
 				if ifrec == nil {
 					ifrec = &initFailRecord{}
@@ -1989,14 +2011,6 @@ func reconcileCities(
 				initStatus[path] = cityInitProgress{name: cityName, status: status}
 			})
 		}); err != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
 			emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 			continue
@@ -2038,14 +2052,6 @@ func reconcileCities(
 			return nil
 		})
 		if spErr != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
 			emitPendingCityCreateFailure(cr, path, cityName, "session_provider_failed", spErr, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
 			continue
@@ -2055,14 +2061,6 @@ func reconcileCities(
 		if err := runPostPrepareStep("checking_agent_images", func() error {
 			return checkAgentImages(sp, cfg.Agents, stderr)
 		}); err != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
 			emitPendingCityCreateFailure(cr, path, cityName, "agent_image_check_failed", err, stderr)
 			recordInitFailure(cityName, err.Error())
 			continue
@@ -2095,7 +2093,8 @@ func reconcileCities(
 
 		var cityRuntime *CityRuntime
 		if err := runPostPrepareStep("building_city_runtime", func() error {
-			cityRuntime = newCityRuntime(CityRuntimeParams{
+			var runtimeErr error
+			cityRuntime, runtimeErr = newCityRuntime(CityRuntimeParams{
 				CityPath:                path,
 				CityName:                cityName,
 				TomlPath:                tomlPath,
@@ -2116,6 +2115,7 @@ func reconcileCities(
 				ConvergenceReqCh:        convergenceReqCh,
 				PokeCh:                  pokeCh,
 				ControlDispatcherCh:     controlDispatcherCh,
+				TranscriptMetaEnabled:   transcriptmeta.Enabled(),
 				OnStarted: func() {
 					cr.UpdateCallback(path, func(m *managedCity) {
 						m.started = true
@@ -2131,7 +2131,7 @@ func reconcileCities(
 				Stdout:    stdout,
 				Stderr:    stderr,
 			})
-			return nil
+			return runtimeErr
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
@@ -2142,9 +2142,18 @@ func reconcileCities(
 		// Wire API state.
 		var cs *controllerState
 		if err := runPostPrepareStep("opening_controller_state", func() error {
-			cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
+			cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
 			return nil
 		}); err != nil {
+			// The runtime is already built, and it holds this city's storage
+			// binding, its trace file and its workspace services. Abandoning it
+			// here would leave the engine open for the life of the supervisor —
+			// including across the next attempt to start this same city.
+			cityCancel()
+			cityRuntime.shutdown()
+			if fr != nil {
+				fr.Close() //nolint:errcheck
+			}
 			emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
 			continue
@@ -2184,6 +2193,14 @@ func reconcileCities(
 			runPoolOnBoot(cfg, path, shellRunHook, stderr)
 			return nil
 		}); err != nil {
+			// Same as the controller-state branch above: the runtime is built,
+			// so it is shut down rather than abandoned with its storage binding
+			// still open.
+			cityCancel()
+			cityRuntime.shutdown()
+			if fr != nil {
+				fr.Close() //nolint:errcheck
+			}
 			emitPendingCityCreateFailure(cr, path, cityName, "pool_on_boot_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
 			continue
@@ -2232,6 +2249,14 @@ func reconcileCities(
 			recordInitFailure(cityName, fmt.Sprintf("controller lock: %v", lockErr))
 			continue
 		}
+
+		// The lock holder — and only the lock holder — is this process's
+		// residency answer for the city. The runtime above already opened its
+		// binding, but registering it at construction time would let a
+		// replacement that LOSES this lock repoint the live city's release
+		// sweeps at a handle it is about to close. Same reason the socket is
+		// started after the lock rather than before it.
+		registerResidencyRoutes(path, cityRuntime.storageRoutes, cityRuntime.cityBeadStore)
 
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.

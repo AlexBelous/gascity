@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -63,12 +64,17 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // #4706 was filed against a k8s codex agent whose first turn never started:
 // codex's TUI buffers a send-keys burst as a paste, so a lone trailing Enter
 // is swallowed as a composer newline rather than treated as submit — codex's
-// actual submit sequence is Escape then Enter. This fork's tmux carrier does
-// not yet carry that fix; adding it here is left to a follow-up once the
-// change is exercised against a live codex TUI in this repo's own test
-// harness (it is out of scope for this claude-focused patch, but the table
-// exists precisely so that follow-up is a one-line addition, not another
-// pass through the delivery mechanics).
+// actual submit sequence is Escape then Enter, which is the codex entry below.
+//
+// Exactly ONE Escape reaches a codex pane, and that is load-bearing. codex stays
+// in providersSkippingEscapeBeforeEnter, so the pre-submit Escape at step 3 of
+// NudgeSession is skipped and this entry supplies the only one; sending both
+// would put Escape-Escape into the pane, which codex binds to
+// backtrack/edit-previous rather than to submit. Declaring it here (instead of
+// dropping codex from the skip list, which would produce the same two keystrokes
+// today) also keeps the pair RETRYABLE as a unit: sendNudgeSubmitSequence is what
+// the submit-confirm loop and the best-effort fallback re-send, and a re-sent
+// bare Enter would be swallowed exactly like the first one.
 //
 // This table does NOT yet contain an entry for the claude-specific stall
 // this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
@@ -85,7 +91,9 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // traced, the fix — whatever key sequence or timing claude's TUI turns out
 // to need — is a single entry in this table plus a test, not a rewrite of
 // NudgeSession.
-var nudgeSubmitKeySequences = map[string][]string{}
+var nudgeSubmitKeySequences = map[string][]string{
+	"codex": {"Escape", "Enter"},
+}
 
 // nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
 // for a provider family, or defaultNudgeSubmitKeySequence when the family
@@ -526,6 +534,92 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	return nil
 }
 
+// sessionEnvUnsetKeys returns the sorted keys of env whose value is empty.
+//
+// An empty value is this repo's spelling of "withhold this var from the child",
+// not "set it to the empty string" — see processenv.ControllerOnlyEnvKeys and
+// convergence.ScrubTokenEnv. A session env map is an OVERLAY on an environment
+// the child already inherits (the tmux server's global env), so a key the caller
+// merely omitted arrives carrying the server's value; only an explicit
+// withholding removes it.
+func sessionEnvUnsetKeys(env map[string]string) []string {
+	var keys []string
+	for k, v := range env {
+		if v == "" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// withEnvUnsetPrefix prefixes command with `env -u KEY ...` so the process tmux
+// execs starts without those vars. This covers the INITIAL exec only — it is a
+// property of one command string, not of the session — which is why
+// markSessionEnvRemoved has to carry the same withholding forward.
+func withEnvUnsetPrefix(command string, unsetKeys []string) string {
+	if len(unsetKeys) == 0 || command == "" {
+		return command
+	}
+	var prefix string
+	for _, k := range unsetKeys {
+		prefix += " -u " + k
+	}
+	return "env" + prefix + " " + command
+}
+
+// durableWithholdKeys returns the empty-valued keys whose withholding must
+// SURVIVE into later processes, rather than only applying to the command tmux
+// execs first.
+//
+// That is the controller-scope credentials and nothing else. The other keys a
+// session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the CODEX_ pair —
+// are nesting-detection flags, not secrets: the `env -u` prefix already gives
+// them the behavior they need on the launched command, and marking them in the
+// session environment would buy nothing while putting an extra tmux round-trip
+// on every session creation in the repo.
+func durableWithholdKeys(env map[string]string) []string {
+	var keys []string
+	for _, k := range sessionEnvUnsetKeys(env) {
+		if processenv.IsControllerOnlyEnv(k) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// markSessionEnvRemoved marks keys for REMOVAL in the session environment
+// (`set-environment -r`), so every process tmux starts in this session from now
+// on — respawn-pane, new-window, split-window — is started without them.
+//
+// This is the durable half of the withholding contract, and it is what makes the
+// relaunch path safe: respawn-pane takes no env argument, so a warm box that
+// carried the withholding only as an `env -u` command prefix would hand the
+// server's real value to the respawned agent. `-r` is not `-u`: -u unsets the
+// SESSION entry and lets the server's global value show through again, which is
+// the bug rather than the fix.
+//
+// A session that no longer exists is the one tolerated failure, and it is not a
+// swallow: a short-lived pane command can exit and take its session down while
+// this call is in flight, and a session that is gone has no pane to leak into
+// and no warm box to respawn, so the control is vacuous rather than unapplied.
+// That condition is confirmed by ASKING tmux, not by matching stderr — tmux 3.4
+// answers set-environment with "no such session" and has-session with "can't
+// find session", so only one of the two is classified, and wording is not a
+// contract. Every other failure is a real failure to apply a security control
+// and is returned.
+func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
+	for _, k := range keys {
+		if _, err := t.run("set-environment", "-t", session, "-r", k); err != nil {
+			if alive, probeErr := t.HasSession(session); probeErr == nil && !alive {
+				return nil
+			}
+			return fmt.Errorf("marking %s for removal from session %q env: %w", k, session, err)
+		}
+	}
+	return nil
+}
+
 // NewSessionWithCommandAndEnv creates a new detached tmux session with environment
 // variables set via -e flags. This ensures the initial shell process inherits the
 // correct environment from the session, rather than inheriting from the tmux server
@@ -536,6 +630,14 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 // The command should still use 'exec env' for WaitForCommand detection compatibility,
 // but -e provides defense-in-depth for the initial shell environment.
 // Requires tmux >= 3.2.
+//
+// Empty-valued keys are WITHHELD by the `env -u` command prefix, which covers
+// the command new-session execs. Controller-scope credentials additionally get
+// the durable session-environment marker, which covers every process started in
+// the session afterwards — above all respawn-pane. Both are required for those
+// keys and each was falsified against a real tmux 3.4: new-session starts the
+// command before any follow-up can land, so the marker alone leaves the CREATED
+// pane exposed; the prefix alone leaves the RESPAWNED pane exposed.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
@@ -554,30 +656,29 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	var unsetKeys []string
+	unsetKeys := sessionEnvUnsetKeys(env)
 	for _, k := range keys {
-		if env[k] == "" {
-			// Empty values mean "unset this var". Collect for env -u prefix.
-			unsetKeys = append(unsetKeys, k)
-		} else {
+		if env[k] != "" {
 			args = append(args, "-e", fmt.Sprintf("%s=%s", k, env[k]))
 		}
 	}
-	// For vars that need unsetting, prefix the command with env -u flags.
-	// tmux -e sets session-level env but the shell process still inherits
-	// from the tmux server's global environment. env -u ensures the var
-	// is actually absent from the child process.
-	if len(unsetKeys) > 0 && command != "" {
-		var prefix string
-		for _, k := range unsetKeys {
-			prefix += " -u " + k
-		}
-		command = "env" + prefix + " " + command
-	}
+	// For vars that need unsetting, prefix the command with env -u flags. The
+	// pane's shell would otherwise inherit them from the tmux server's global
+	// environment, which holds whatever the controller exported when the server
+	// started. This prefix is a property of THIS command only.
+	command = withEnvUnsetPrefix(command, unsetKeys)
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
 	_, err := t.run(args...)
 	if err != nil {
+		return err
+	}
+	// Carry the CREDENTIAL withholding into the session environment, so it
+	// survives into every later process — above all respawn-pane, which the
+	// warm-box relaunch path uses and which takes no env argument at all. Fail
+	// closed: a session that silently kept a withheld credential is the defect
+	// this prevents.
+	if err := t.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
 	_ = t.ConfigureServer()
@@ -1660,15 +1761,36 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	if client == nil {
 		return false, nil
 	}
-	for _, key := range keys {
+	if len(keys) == 0 {
+		return true, nil
+	}
+	// Resolve every key to its byte sequence before writing anything: an unknown
+	// key must fall through to the SendKeysRaw path (used=false) without a partial
+	// hidden-client write or a recorded poke.
+	seqs := make([][]byte, len(keys))
+	for i, key := range keys {
 		seq, ok := hiddenAttachedKeyBytes(key)
 		if !ok {
 			return false, nil
 		}
+		seqs[i] = seq
+	}
+	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
+	// so record a poke here too — mirroring sendHiddenAttachedText. Without it, the
+	// detached-Gemini rewind picker keys ResetInterruptedTurn drives through
+	// SendKeys (and the detached Interrupt's Ctrl-C) would let gc's own final
+	// keystroke echo count as the agent responding once the sequence outlasts
+	// pokeEcho (see discountPokeActivity). beginPoke captures the genuine prior
+	// before the first write — carrying a still-unanswered earlier poke's baseline
+	// forward so chained gc echoes don't become the new prior — and stamps it only
+	// after the last key lands. A failed write records nothing.
+	commitPoke := t.beginPoke(target)
+	for _, seq := range seqs {
 		if err := client.write(seq); err != nil {
 			return true, err
 		}
 	}
+	commitPoke()
 	return true, nil
 }
 
@@ -1886,14 +2008,43 @@ func (t *Tmux) paneBusy(target string) (bool, error) {
 }
 
 // submitVerifyEligible reports whether the target runs a provider whose busy
-// indicator is reliable enough to confirm a submit. Scoped to the Claude family
-// (the confirmed ga-bwm failure); other providers keep best-effort single
-// delivery so this change cannot regress them.
+// indicator is reliable enough to confirm a submit.
 func (t *Tmux) submitVerifyEligible(target string) bool {
 	if provider := t.providerEnv(target); provider != "" {
-		return sessionlog.ProviderFamily(provider) == "claude"
+		return submitVerifyEligibleFamily(sessionlog.ProviderFamily(provider))
 	}
-	return t.targetLooksLikeProvider(target, "claude")
+	for _, family := range submitVerifyEligibleFamilies {
+		if t.targetLooksLikeProvider(target, family) {
+			return true
+		}
+	}
+	return false
+}
+
+// submitVerifyEligibleFamilies are the provider families whose busy indicator
+// paneContainsBusyIndicator can actually read: claude (its spinner/elapsed-timer
+// footer, the confirmed ga-bwm failure) and codex, whose TUI shows the same
+// "esc to interrupt" string that function has always matched.
+//
+// Eligibility is what makes an unconfirmed submit an ERROR instead of a silent
+// success, and that is the point for codex: the best-effort fallback reports
+// delivery as soon as the keys reach tmux, so the queue acks and DELETES an item
+// whose paste may still be sitting unsubmitted in the composer — the nudge is
+// then gone with nothing to retry. With verification, an unconfirmed submit
+// requeues under the existing attempt cap instead.
+//
+// Adding a family here is a promise about its busy indicator: a provider whose
+// indicator is unreadable would report every delivery as unconfirmed and burn
+// the queue's attempts re-pasting messages that already landed.
+var submitVerifyEligibleFamilies = []string{"claude", "codex"}
+
+func submitVerifyEligibleFamily(family string) bool {
+	for _, eligible := range submitVerifyEligibleFamilies {
+		if family == eligible {
+			return true
+		}
+	}
+	return false
 }
 
 // nudgeSubmitKeySequence resolves target's declared submit key sequence (see
@@ -2023,6 +2174,17 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// dependence on an external observer re-kicking the session. Providers
 	// without a reliable indicator keep best-effort delivery.
 	submitKeys := t.nudgeSubmitKeySequence(target)
+	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
+	// Escape is only safe to repeat while the pane is still idle. If the first
+	// attempt actually submitted and the pane went busy, a re-sent Escape is an
+	// INTERRUPT for the very TUIs that need the Escape (codex reads it as
+	// cancel), so a retry could kill the turn it just started. submitEnterAndConfirm
+	// re-checks busy before every re-send, which is why the verified path is safe
+	// — and why codex is on it (submitVerifyEligibleFamilies). The best-effort
+	// fallback below and NudgePane's retry loop do NOT re-check; they are safe
+	// only for single-key (plain Enter) sequences, which is what every family
+	// without a table entry has. Adding a multi-key entry for a family that is
+	// not submit-verify eligible would need that gap closed first.
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {

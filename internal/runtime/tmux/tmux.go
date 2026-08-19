@@ -38,6 +38,17 @@ import (
 
 const pollInterval = 100 * time.Millisecond
 
+// shellReadyStableChecks is the number of consecutive pollInterval samples
+// WaitForShellReady must see the same supportedShells member before it
+// trusts that name (ga-14s617). A pane's initial process can be a transient
+// wrapper (e.g. "sh") that execs into a DIFFERENT supportedShells member
+// (e.g. "zsh") shortly after; since both names are valid shells, a single
+// match cannot distinguish "this shell is ready" from "this shell is about
+// to become a different shell." Requiring repeat confirmation costs at most
+// (shellReadyStableChecks-1)*pollInterval of extra latency in the already-
+// stable common case, comfortably inside every caller's timeout.
+const shellReadyStableChecks = 3
+
 // grok's TUI treats Escape as "clear input"/mode-toggle, so synthesizing an
 // Escape between the pasted prompt and the submit Enter (the default for
 // non-listed providers) prevents the Enter from submitting — the worker then
@@ -3251,19 +3262,46 @@ func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeComman
 
 // WaitForShellReady polls until the pane is running a shell command.
 // Useful for waiting until a process has exited and returned to shell.
+//
+// A single matching sample is not trusted on its own: the pane's initial
+// process can be a transient wrapper shell that execs into a different
+// supportedShells member shortly after (ga-14s617), so the same name must
+// be observed on shellReadyStableChecks consecutive polls before it's
+// treated as settled.
 func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 	shells := supportedShells
 	deadline := time.Now().Add(timeout)
+	lastMatched := ""
+	streak := 0
 	for time.Now().Before(deadline) {
 		cmd, err := t.GetPaneCommand(session)
 		if err != nil {
+			lastMatched = ""
+			streak = 0
 			time.Sleep(pollInterval)
 			continue
 		}
+		matched := false
 		for _, shell := range shells {
 			if cmd == shell {
-				return nil
+				matched = true
+				break
 			}
+		}
+		if !matched {
+			lastMatched = ""
+			streak = 0
+			time.Sleep(pollInterval)
+			continue
+		}
+		if cmd == lastMatched {
+			streak++
+		} else {
+			lastMatched = cmd
+			streak = 1
+		}
+		if streak >= shellReadyStableChecks {
+			return nil
 		}
 		time.Sleep(pollInterval)
 	}

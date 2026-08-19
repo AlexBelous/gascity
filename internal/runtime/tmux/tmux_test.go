@@ -803,6 +803,65 @@ func TestIsAgentRunning(t *testing.T) {
 	}
 }
 
+// TestWaitForShellReady_TransientShellBeforeExec reproduces ga-14s617: the
+// integration runtime-tmux shard intermittently failed TestIsAgentRunning
+// under parallel shard load because the pane's initial shell can start as a
+// transient wrapper (e.g. "sh") that execs into a DIFFERENT supportedShells
+// member (e.g. "zsh") shortly after. Since both names are in supportedShells,
+// a poller that accepts the first match declares the pane ready before it
+// has actually settled.
+func TestWaitForShellReady_TransientShellBeforeExec(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	if _, err := exec.LookPath("zsh"); err != nil {
+		t.Skip("zsh not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-shellready-transient-" + t.Name()
+	_ = tm.KillSession(sessionName)
+
+	// The pane's initial process blocks in the "read" builtin (no forked
+	// child, so pane_current_command reports "sh" the whole time) for
+	// 150ms -- longer than one pollInterval (100ms), so any 100ms-cadence
+	// poller is guaranteed to sample "sh" at least once -- then execs into
+	// zsh. The leading "exec" on the outer command ensures tmux's own
+	// default-shell process is replaced immediately, so "sh" is the pane's
+	// only pre-transition identity.
+	command := "exec sh -c 'read -t 0.15 dummy; exec zsh'"
+	if err := tm.NewSessionWithCommand(sessionName, "", command); err != nil {
+		t.Fatalf("NewSessionWithCommand: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	start := time.Now()
+	if err := tm.WaitForShellReady(sessionName, 3*time.Second); err != nil {
+		t.Fatalf("WaitForShellReady: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Sanity check: confirm the fixture actually completes the sh->zsh
+	// transition. If this fails, the test isn't exercising the intended
+	// scenario at all (e.g. zsh failed to start).
+	time.Sleep(500 * time.Millisecond)
+	settledCmd, err := tm.GetPaneCommand(sessionName)
+	if err != nil {
+		t.Fatalf("GetPaneCommand after settling: %v", err)
+	}
+	if settledCmd != "zsh" {
+		t.Fatalf("test fixture did not settle on zsh (got %q); not exercising the sh->zsh transition", settledCmd)
+	}
+
+	// The pane cannot show anything but "sh" before the 150ms read times
+	// out, so WaitForShellReady returning before that point proves it
+	// accepted the transient "sh" instead of waiting for the pane to
+	// stabilize.
+	if elapsed < 150*time.Millisecond {
+		t.Errorf("WaitForShellReady returned after %v, before the sh->zsh transition (150ms) could complete -- it accepted a transient shell name instead of waiting for the pane to stabilize", elapsed)
+	}
+}
+
 func TestIsAgentRunning_NonexistentSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

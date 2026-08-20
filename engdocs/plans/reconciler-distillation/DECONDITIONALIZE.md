@@ -270,8 +270,8 @@ soak-safe; steps 3-5 land only after the owner closes the soak.
 | Step | Change | Test story | Blast radius |
 |---|---|---|---|
 | 0 (landed, `3e9141da82`) | .162 slice: the session class REQUIRES conditional writes (`beads.RequiredConditionalWriter`, capability only) instead of resolving the mode; unconditional boot preflight + `storage/<binding>` and `sessions (required)` rows in §12.5 | `storage_boot_conditional_writes_test.go`, `sqlite_store_conditional_capability_internal_test.go` | split cities fence on every mode incl. off; one of step 5's 11 call sites (`city_runtime_session_start.go:121`) already converted |
-| 1 | Contract preflight in **WARN** mode: full enumeration incl. routed engines + recorder-wiring check; stderr per violation | boot test with contract-violating fake store; doctor check | zero behavior change; log noise only |
-| 2 | Recorder-wire routed engines (CachingStore wrap in `openStorageRoutes`) + fix stale `class_store.go:151-153` comment; `observeSessionWaitCensus` starts working on split cities | split-city event-emission test (bead.* observed on session-class write) | split cities: bead.* volume appears; keyed admission leaves patrol cadence (S4 tax removed) |
+| 1 (landed) | Contract preflight in **WARN** mode: `preflightStoreContract` enumerates every store × class the controller serves — city, rigs, routed engines — and warns one line per store and missing capability, naming store/kind/classes/capability/remediation. Runs from `setControllerState`, beside the .162 session-class ERROR | `store_contract_preflight_test.go`: non-conforming fixture, conforming split-city control, routed-engine enumeration, WARN-not-refuse, boot call site | zero behavior change; log noise only |
+| 2 (landed) | Recorder-wire routed engines at the seam that opens them (`newCityRuntime` → `storageRoutes.withControllerEmission(p.Rec)`) + fix the stale `class_store.go` / `api_state.go` accessor comments | `class_store_emit_controller_test.go`: split-city write → emission → recorder → bead-event watcher → `admitSessionStartEvent`, with the single-store city as the control topology | split cities: bead.* volume appears; keyed admission leaves patrol cadence (S4 tax removed) |
 | 3 | Eager BdStore probe at open; preflight WARN→**ERROR** (boot refusal) | open-time refusal test per engine; upgrade-path test for old bd | any deployment with unfenceable session-class store fails at boot with named remediation — release note; mc/enterprise must conform first (§4) |
 | 4 | Delete degradation arms: deadline/zombie front-door arms, heal-skip arms, drain-ack handback; `StatusWriter` becomes non-optional in `exactSessionStartParams` | rerun D-family fixtures (`cmd_perf_parity_join_corpus_test.go`); delete arm tests | keyed paths only; certified composition unchanged (§3) |
 | 5 | Retire the lattice: flag→deprecation warning, delete seam modes/stamp/prober/degrade event/§12.5 verdicts; `ResolveConditionalWriter`→`ConditionalWriterFor` at all 11 call sites | deprecation-warning test; grep-guard that no `conditional_writes` mode survives outside the warning | default-off cities flip to fenced (§3) — the owner-stated intent |
@@ -279,6 +279,40 @@ soak-safe; steps 3-5 land only after the owner closes the soak.
 Step 5 is where "auto collapses toward require" becomes literal: the words
 disappear from config for beads writes. `daemon.session_reconciler` is
 untouched here (WE owns its retirement).
+
+### What steps 1-2 did differently from this table's first draft
+
+Two corrections, recorded because the difference matters to whoever reads
+§1.2 next:
+
+1. **Emission arrived as the equivalent notifyChange, not a CachingStore wrap**
+   (§2's own "CachingStore wrap **or equivalent notifyChange**"). The routed
+   engine is wrapped in the `emittingClassStore` the one-shot CLI already used
+   for the identical defect — capability-complete against both engines by a
+   pinned test, canonical payloads, no read-path change — parameterized on an
+   emit target so the two processes share one implementation. A read cache in
+   front of the session/graph store is not additive: it changes read freshness
+   and adds a per-cycle reconcile scan, which step 1-2's soak-safe mandate
+   forbids, and `CachingStore` drops engine methods the split path asserts on
+   (`SupportsEphemeralGraphApply`, `ApplyGraphPlanWithStorage`, the sequence
+   floor, ...).
+2. **`observeSessionWaitCensus` is therefore still `ErrCacheUnavailable` on a
+   split city**, and so are the other §1.2 `ErrCacheUnavailable` consumers
+   (`build_desired_state.go`, `city_runtime_wait_dependency_index.go`). That is
+   the READ-cache half of §1.2 and it is unclosed: it wants either a
+   capability-complete cache over the binding or a cache-free census, and it is
+   a perf/fast-path question rather than a correctness or admission-latency one.
+   Filed separately; it is not a prerequisite for steps 3-5.
+
+One hazard found and closed while wiring step 2, worth naming because §1.1
+predicted its shape: wrapping the store the session class resolves to put a
+layer between the .162 requirement and the engine that answers it, and the
+wrapper forwards the fenced trio — so it answered "capable" for a backing that
+could not fence, exactly the vacuous capability §1.1 flags on the status wire.
+`beads.ConditionalWritesCapabilityTargeter` points every capability question
+(boot requirement, status inspection) at the engine while the WRITER stays the
+wrapper; redirecting resolution instead would have handed callers the bare
+engine and made every fenced write, terminal close included, silent again.
 
 ## 6. Deletion dividend
 

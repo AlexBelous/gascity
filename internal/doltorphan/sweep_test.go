@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dolthub/fslock"
 	"github.com/gastownhall/gascity/internal/clock"
 )
 
@@ -396,5 +397,81 @@ func TestSweep_ConfirmScanErrorFailsClosed(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
+// TestSweep_RespectsRealDoltLockEvenWhenLsofMissesIt reproduces ga-63rfxj:
+// lsof is a point-in-time /proc snapshot and can transiently miss a still-
+// open file for a live process under heavy host load without erroring, on
+// both the initial and the confirm scan alike (the gate-fail evidence for
+// ga-vbyn8v showed exactly this — a live dolt sql-server's data dir removed
+// under a 40-job parallel run despite the two-scan confirm). Dolt's NBS
+// store independently holds a real kernel flock on <dir>/.dolt/noms/LOCK
+// for as long as it has the store open; that lock is atomic and race-free
+// because it's enforced by the kernel, not reconstructed from a process
+// listing. This test holds a real fslock on a real LOCK file and configures
+// lsof to report the directory clean on every scan, proving Sweep must
+// still refuse to remove it.
+func TestSweep_RespectsRealDoltLockEvenWhenLsofMissesIt(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "live-dolt-store", 1, old)
+
+	nomsDir := filepath.Join(dir, ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", nomsDir, err)
+	}
+	lockPath := filepath.Join(nomsDir, "LOCK")
+	lock, err := fslock.New(lockPath)
+	if err != nil {
+		t.Fatalf("fslock.New(%s): %v", lockPath, err)
+	}
+	if err := lock.TryLock(); err != nil {
+		t.Fatalf("TryLock(%s): %v", lockPath, err)
+	}
+	defer func() {
+		if err := lock.Unlock(); err != nil {
+			t.Errorf("Unlock(%s): %v", lockPath, err)
+		}
+	}()
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (real dolt LOCK held, even though lsof missed it on both scans)", result.Removed)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
+// TestSweep_RemovesWhenDoltLockFileExistsButIsUnheld guards against the
+// real-lock check over-blocking: a LOCK file left on disk by a store that
+// has since closed (and so released its flock) must not itself prevent a
+// genuinely orphaned directory from being removed.
+func TestSweep_RemovesWhenDoltLockFileExistsButIsUnheld(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "stale-lock-file", 1, old)
+
+	nomsDir := filepath.Join(dir, ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", nomsDir, err)
+	}
+	lockPath := filepath.Join(nomsDir, "LOCK")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s): %v", lockPath, err)
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 1 || result.Removed[0] != dir {
+		t.Fatalf("Removed = %v, want [%s] (LOCK file present on disk but not held)", result.Removed, dir)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir %s should have been removed, stat err = %v", dir, err)
 	}
 }

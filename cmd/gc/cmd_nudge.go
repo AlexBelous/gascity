@@ -2063,6 +2063,16 @@ func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now 
 }
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	return listQueuedNudgesForTargetWithClock(cityPath, target, now, clock.Real{})
+}
+
+// listQueuedNudgesForTargetWithClock is the clock-injectable core of
+// listQueuedNudgesForTarget (mirrors enqueueQueuedNudgeWithStoreAndClock's
+// seam). Tests can pass a clock.Fake so the maintenance pass's
+// now.Add(nudgeEnqueueMaintenanceBudget) deadline check is evaluated against
+// a controlled clock instead of real wall-clock time, which otherwise races
+// against this pass's own file I/O under -race.
+func listQueuedNudgesForTargetWithClock(cityPath string, target nudgeTarget, now time.Time, clk clock.Clock) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	var pending []queuedNudge
@@ -2071,13 +2081,13 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
-		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
+		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {

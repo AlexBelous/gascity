@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -125,9 +126,14 @@ func TestListQueuedNudgesForTarget_BoundedMaintenancePreservesBacklogOnStaleNow(
 	}
 
 	// A fresh now gives the pass a deadline safely in the future, so it must
-	// fully converge the preserved backlog.
-	if _, _, _, err := listQueuedNudgesForTarget(dir, target, time.Now()); err != nil {
-		t.Fatalf("listQueuedNudgesForTarget(fresh now): %v", err)
+	// fully converge the preserved backlog. Pinned to a clock.Fake that never
+	// advances: real wall-clock time (via clock.Real) races this pass's own
+	// per-item file I/O for 5 items under -race, which can exceed the 2s
+	// budget and bail the pass early even though nothing here is actually
+	// slow relative to the fresh deadline itself.
+	freshNow := time.Now()
+	if _, _, _, err := listQueuedNudgesForTargetWithClock(dir, target, freshNow, &clock.Fake{Time: freshNow}); err != nil {
+		t.Fatalf("listQueuedNudgesForTargetWithClock(fresh now): %v", err)
 	}
 	state, err = nudgequeue.LoadState(dir)
 	if err != nil {

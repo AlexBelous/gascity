@@ -329,7 +329,7 @@ func TestPoolSweepPreservesCanonicalSingletonWithCurrentWake(t *testing.T) {
 			}
 			snapshot := newSessionBeadSnapshot([]beads.Bead{row})
 			swept := sweepUndesiredPoolSessionBeads(
-				beads.SessionStore{Store: env.store}, nil, snapshot, map[string]TemplateParams{}, env.cfg, env.sp, false,
+				"", beads.SessionStore{Store: env.store}, nil, snapshot, map[string]TemplateParams{}, env.cfg, env.sp, false,
 			)
 			if swept != tc.wantSwept {
 				t.Fatalf("sweepUndesiredPoolSessionBeads swept %d rows, want %d", swept, tc.wantSwept)

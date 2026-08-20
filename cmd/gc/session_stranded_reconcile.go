@@ -162,7 +162,7 @@ func reconcileExactSessionStrandedRepair(
 	}
 
 	repairStartedAt := time.Now()
-	if !repairStrandedPoolWorkerBead(params.Store, params.RigStores, latest,
+	if !repairStrandedPoolWorkerBead(params.CityPath, params.Config, params.Store, params.RigStores, latest,
 		retiredSessionFallbackRouteInfo(latest), clk, stderr) {
 		// An unassign did not land, so the helper left the bead open on purpose.
 		// Report the refusal instead of claiming a repair; the next sweep

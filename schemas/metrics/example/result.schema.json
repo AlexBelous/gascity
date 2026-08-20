@@ -210,6 +210,9 @@
               "events-reemit-execution",
               "storage-migrate",
               "storage-status",
+              "ready",
+              "storage-recover-stranded",
+              "beads-metadata-cas",
               "perf-reconciler-compare",
               "perf-parity-join"
             ]

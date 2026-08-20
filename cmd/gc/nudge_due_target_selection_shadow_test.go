@@ -541,6 +541,7 @@ func TestNudgeDueTargetSelectionShadowComparisonOutcomes(t *testing.T) {
 					called++
 					got = observation
 				},
+				nil,
 			)
 			if called != 1 {
 				t.Fatalf("observer calls = %d, want 1", called)
@@ -627,6 +628,7 @@ func TestNudgeDueTargetSelectionShadowKeepsExactlyOneLegacyProviderEffect(t *tes
 		provider,
 		newSessionBeadSnapshot([]beads.Bead{created}),
 		func(observation nudgeDueTargetSelectionObservation) { observed = observation },
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudgesObserved: %v", err)
@@ -673,6 +675,7 @@ func TestNudgeDueTargetSelectionShadowObserverPanicCannotPreemptLegacyProviderEf
 			provider,
 			newSessionBeadSnapshot([]beads.Bead{sessionBead}),
 			func(nudgeDueTargetSelectionObservation) { panic(observerPanic) },
+			nil,
 		)
 	}()
 

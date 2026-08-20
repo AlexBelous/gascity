@@ -130,7 +130,7 @@ func decideExactSessionProgressStall(
 	holdsClaim := false
 	claimKnown := true
 	if !exempt && (!decision.FloorExempt || claimHolder > 0) {
-		has, claimErr := sessionHasInProgressAssignedWorkForConfig(params.Store, params.RigStores, info, params.Config)
+		has, claimErr := sessionHasInProgressAssignedWorkForConfig(params.CityPath, params.Config, params.Store, params.RigStores, info)
 		if claimErr != nil {
 			holdsClaim = true
 			claimKnown = false

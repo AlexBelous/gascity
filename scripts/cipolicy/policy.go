@@ -20,13 +20,16 @@ const (
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
 	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	// Re-pinned 2026-08-05 for the reviewed v59 contract-test change: the
-	// cmd/gc integration shard builds bd at deps.env's exact BD_CURRENT_REF
-	// and refuses to run that shard without the resulting pinned binary.
-	expectedCIExecutionHash      = "b19d9091e83cd21c4904b901219780b45c88617baf2faf0a17ddb12b42d1a11c"
+	// Re-pinned for the merged CI workflow. It is the union of two reviewed
+	// execution changes: the v59 contract-test cell (the cmd/gc integration
+	// shard builds bd at deps.env's exact BD_CURRENT_REF and refuses to run
+	// without the resulting pinned binary) and the bd conditional-release CAS
+	// contract step, which runs inside that same cell because it is the only
+	// one whose bd is new enough to carry --if-assignee/--if-status.
+	expectedCIExecutionHash      = "38aeabd035b1347074caae62308aed183549eb980f0cc24f5a08243206283c5b"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "80575ca368f28ba9f8b14bf72ce5767a7877ffe4dcadc136854ab4b0b5f1377a"
-	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
+	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
 var requiredFilterPaths = map[string][]string{

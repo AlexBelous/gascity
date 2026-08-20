@@ -198,6 +198,7 @@ const (
 	TraceReasonMaxSessionAge         TraceReasonCode = "max_session_age"
 	TraceReasonUserHold              TraceReasonCode = "user_hold"
 	TraceReasonQuarantine            TraceReasonCode = "quarantine"
+	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	// TraceReasonAdmissionOverflow marks a key a bounded admission channel
 	// dropped. Recovery is census-owed re-detection, never a retry or a legacy
@@ -257,6 +258,7 @@ const (
 	TraceOutcomeStopPending         TraceOutcomeCode = "stop_pending"
 	TraceOutcomeDeferredConfirm     TraceOutcomeCode = "deferred_confirm"
 	TraceOutcomeExempt              TraceOutcomeCode = "exempt"
+	TraceOutcomeDeferredMinFloor    TraceOutcomeCode = "deferred_min_floor"
 	TraceOutcomeRestartInPlace      TraceOutcomeCode = "restart_in_place"
 	TraceOutcomeDeferredPending     TraceOutcomeCode = "deferred_pending"
 	TraceOutcomeRepairInPlace       TraceOutcomeCode = "repair_in_place"
@@ -278,6 +280,7 @@ const (
 	TraceOutcomeStartEnqueued       TraceOutcomeCode = "start_enqueued"
 	TraceOutcomeDeferredUserHold    TraceOutcomeCode = "deferred_user_hold"
 	TraceOutcomeDeferredQuarantine  TraceOutcomeCode = "deferred_quarantine"
+	TraceOutcomeDeferredPinned      TraceOutcomeCode = "deferred_pinned"
 	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
 	TraceOutcomeStopDeferExhausted  TraceOutcomeCode = "stop_defer_exhausted"
 

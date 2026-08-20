@@ -361,9 +361,18 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
-			return runtimeStateSnapshot{
-				Sessions: make(map[string]sessionRuntimeState),
-			}, nil
+			// The server ANSWERED and holds zero sessions. gc configures
+			// exit-empty off, so an empty-but-alive server is a normal steady
+			// state for any city between agents, and tmux replies to a
+			// target-taking command like list-panes with "no current target"
+			// rather than empty output. That is a successful observation of an
+			// empty fleet — identical to the out == "" case below — so it must
+			// prime the cache. Treating it as ErrNoServer (which it wraps, for
+			// the idempotent-teardown callers) left the supervisor's cache
+			// permanently unprimed: a tmux subprocess and a "refresh failed"
+			// log line on EVERY IsRunning, plus a staleTTL cliff that reported
+			// the whole city not-running. See ga-jnavd.
+			return runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}, nil
 		}
 		if isNoServerError(err) {
 			// An unreachable tmux server is an observation FAILURE, not the

@@ -119,7 +119,7 @@ func (f *reconcilerPerfNudgeFixture) dispatchLegacyWithInstalledStore() (int, er
 	if err != nil {
 		return 0, err
 	}
-	return dispatchAllQueuedNudges(f.cityPath, f.cfg, f.store, f.store, f.provider, snapshot)
+	return dispatchAllQueuedNudges(f.cityPath, f.cfg, f.store, f.store, f.provider, snapshot, nil)
 }
 
 func newReconcilerPerfNudgeFixture(workspacePath, arm, pairID string) (*reconcilerPerfNudgeFixture, error) {

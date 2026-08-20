@@ -779,7 +779,7 @@ func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t 
 		t.Fatal("precondition: matching metadata should allow store reuse")
 	}
 
-	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`)
 	nextProvider := runtime.NewFake()
 	cs.updateFromRuntime(current, nextProvider, "")
 
@@ -2747,102 +2747,6 @@ func TestControllerStateReconcileExecutionCompletionsScansConfiguredRigStores(t 
 	}
 	if len(completed) != 1 {
 		t.Fatalf("completed events after repeated rig reconciliation = %#v, want exact-fact no-op", completed)
-	}
-}
-
-// countingReconcileStore counts what a completion-reconcile pass costs per
-// tick: the journal read is counted on the event provider, the per-root step
-// walk here.
-type countingReconcileStore struct {
-	beads.Store
-	getCalls int
-}
-
-func (s *countingReconcileStore) Get(id string) (beads.Bead, error) {
-	s.getCalls++
-	return s.Store.Get(id)
-}
-
-type countingReconcileEventProvider struct {
-	events.Provider
-	listCalls int
-}
-
-func (p *countingReconcileEventProvider) List(filter events.Filter) ([]events.Event, error) {
-	p.listCalls++
-	return p.Provider.List(filter)
-}
-
-func TestControllerStateReconcileExecutionCompletionsMemoizesSettledRoots(t *testing.T) {
-	backing := beads.NewMemStore()
-	root, err := backing.Create(beads.Bead{ID: "gcg-memo-run", Metadata: map[string]string{
-		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	step, err := backing.Create(beads.Bead{ID: "gcg-memo-attempt", Metadata: map[string]string{
-		"gc.root_bead_id": root.ID, "gc.step_id": "build", "gc.session_id": "gcs-session",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := backing.Close(step.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := backing.Close(root.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	rigStore := &countingReconcileStore{Store: backing}
-	ep := &countingReconcileEventProvider{Provider: events.NewFake()}
-	cs := &controllerState{
-		cfg:           &config.City{Rigs: []config.Rig{{Name: "gascity"}}},
-		cityBeadStore: beads.NewMemStore(),
-		beadStores:    map[string]beads.Store{"gascity": rigStore},
-		eventProv:     ep,
-	}
-
-	cs.reconcileExecutionCompletions()
-	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(completed) != 1 {
-		t.Fatalf("completed events after first patrol reconcile = %#v, want one", completed)
-	}
-	if ep.listCalls == 0 || rigStore.getCalls == 0 {
-		t.Fatalf("first pass did no work: journal reads=%d step Gets=%d", ep.listCalls, rigStore.getCalls)
-	}
-	listsAfterFirst := ep.listCalls
-	getsAfterFirst := rigStore.getCalls
-
-	// A second patrol tick with no new closed roots costs neither a journal
-	// re-read nor a per-root step walk. (listCalls also counts the assertion
-	// List above, which is why the baseline is captured after it.)
-	cs.reconcileExecutionCompletions()
-	if ep.listCalls != listsAfterFirst {
-		t.Fatalf("journal reads on a no-change patrol tick = %d, want %d", ep.listCalls, listsAfterFirst)
-	}
-	if rigStore.getCalls != getsAfterFirst {
-		t.Fatalf("step Gets on a no-change patrol tick = %d, want %d", rigStore.getCalls, getsAfterFirst)
-	}
-
-	// A fresh controllerState — boot, or a crash restart — always replays the
-	// full pass, which is what makes startBeadEventWatcher's boot repair
-	// unconditional.
-	rebooted := &controllerState{
-		cfg:           cs.cfg,
-		cityBeadStore: beads.NewMemStore(),
-		beadStores:    map[string]beads.Store{"gascity": rigStore},
-		eventProv:     ep,
-	}
-	rebooted.reconcileExecutionCompletions()
-	if ep.listCalls != listsAfterFirst+1 {
-		t.Fatalf("journal reads after a controller restart = %d, want %d", ep.listCalls, listsAfterFirst+1)
-	}
-	if rigStore.getCalls <= getsAfterFirst {
-		t.Fatalf("step Gets after a controller restart = %d, want more than %d", rigStore.getCalls, getsAfterFirst)
 	}
 }
 

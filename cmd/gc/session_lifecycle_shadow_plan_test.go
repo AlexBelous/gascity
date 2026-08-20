@@ -144,6 +144,7 @@ func TestPlanSessionLifecycleStatusMatchesLegacyDerivation(t *testing.T) {
 			wantPatch := healStatePatchWithRollbackInfo(
 				tt.input.Info,
 				tt.input.RuntimeAlive,
+				tt.input.RuntimeObserved,
 				&clock.Fake{Time: tt.input.ObservedAt},
 				tt.input.StartupTimeout,
 				tt.input.RollbackAvailable,

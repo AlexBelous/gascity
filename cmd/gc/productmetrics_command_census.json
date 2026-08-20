@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 202,
+  "next_id": 205,
   "permanent_ids": [
     {
       "name": "help",
@@ -300,6 +300,23 @@
       "classification": "beads-list",
       "owner": "immediate",
       "id": 15
+    },
+    {
+      "path": "gc beads metadata-cas",
+      "aliases": [],
+      "conditional_modes": [
+        "beads-machine-output"
+      ],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-metadata-cas",
+      "owner": "immediate",
+      "id": 202
     },
     {
       "path": "gc beads show",
@@ -1790,6 +1807,21 @@
       "exclusion": "hook-protocol"
     },
     {
+      "path": "gc hook current",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hook-protocol",
+      "exclusion": "hook-protocol"
+    },
+    {
       "path": "gc hook run",
       "aliases": [],
       "conditional_modes": [],
@@ -3023,7 +3055,7 @@
       "hidden_exception": "perf-wrapper",
       "classification": "perf-parity-join",
       "owner": "immediate",
-      "id": 201
+      "id": 204
     },
     {
       "path": "gc perf reconciler-compare",
@@ -3039,7 +3071,7 @@
       "hidden_exception": "perf-wrapper",
       "classification": "perf-reconciler-compare",
       "owner": "immediate",
-      "id": 200
+      "id": 203
     },
     {
       "path": "gc perf run",
@@ -3122,6 +3154,21 @@
       "classification": "prompt-synth",
       "owner": "immediate",
       "id": 117
+    },
+    {
+      "path": "gc ready",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "ready",
+      "owner": "immediate",
+      "id": 200
     },
     {
       "path": "gc register",
@@ -3979,6 +4026,21 @@
       "classification": "storage-migrate",
       "owner": "immediate",
       "id": 198
+    },
+    {
+      "path": "gc storage recover-stranded",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-recover-stranded",
+      "owner": "immediate",
+      "id": 201
     },
     {
       "path": "gc storage status",

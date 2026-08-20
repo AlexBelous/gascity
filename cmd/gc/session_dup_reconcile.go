@@ -145,7 +145,7 @@ func reconcileExactSessionDuplicateNamedRetire(
 
 	startedAt := time.Now()
 	retireDuplicateConfiguredNamedSessionRows(
-		params.Store, params.RigStores, params.Provider, params.Config, params.CityName,
+		params.CityPath, params.Store, params.RigStores, params.Provider, params.Config, params.CityName,
 		[]sessionpkg.ReconcileSession{{Info: winner}, {Info: info, Revision: response.Revision}},
 		nil, clk.Now().UTC(), stderr,
 	)

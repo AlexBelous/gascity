@@ -105,9 +105,9 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 
 func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
-	ctx := buildPrimeContextForBeads(cityPath, "", &config.Agent{
+	ctx := buildPrimeContextFor(cityPath, "", &config.Agent{
 		Name: "worker",
-	}, nil, config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}, nil)
+	}, nil, config.QueryTopology{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}}, nil)
 
 	if !strings.Contains(ctx.AssignedReadyQuery, `bd ready --include-ephemeral --assignee="$id"`) {
 		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)
@@ -350,8 +350,19 @@ func TestSessionStartAutoHandoffUsesProvidedStoreWithoutOpeningCity(t *testing.T
 		t.Fatal("afterDelivery = nil, want archive acknowledgement")
 	}
 	injection.afterDelivery()
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("provided store still contains archived auto-handoff: %v", err)
+	// The archive is mark-read + close (retain-addressable), not a hard delete:
+	// "injected" only means the stdout write returned, so a handoff the agent
+	// never consumed must stay recoverable for the read-gated TTL sweep (#5051).
+	// What this asserts is that the archive landed in the PROVIDED store.
+	archived, err := store.Get(auto.ID)
+	if err != nil {
+		t.Fatalf("archived auto-handoff missing from the provided store: %v", err)
+	}
+	if archived.Status != "closed" {
+		t.Fatalf("archived auto-handoff status = %q, want closed", archived.Status)
+	}
+	if got := archived.Metadata["close_reason"]; got != beadmail.RetentionSweepCloseReason {
+		t.Fatalf("archived auto-handoff close_reason = %q, want %q", got, beadmail.RetentionSweepCloseReason)
 	}
 }
 
@@ -1006,9 +1017,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			if strings.Contains(context, ordinary.ID) || strings.Contains(context, ordinary.Body) {
 				t.Fatalf("additionalContext = %q, want no ordinary mail %q from the exec: provider at SessionStart", context, ordinary.ID)
 			}
-			if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-				t.Fatalf("auto-handoff should be archived after SessionStart injection, got err=%v", err)
-			}
+			assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 			if _, err := store.Get(ordinary.ID); err != nil {
 				t.Fatalf("ordinary mail should remain for UserPromptSubmit: %v", err)
 			}
@@ -1215,9 +1224,7 @@ prompt_template = "prompts/worker.md"
 	if !strings.Contains(hookStdout.String(), auto.ID) {
 		t.Fatalf("hook output = %q, want auto-handoff %q", hookStdout.String(), auto.ID)
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto-handoff should be archived after the real SessionStart injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 func TestDoPrimeWithHookFormat_GatesDefaultFallbackWithoutManagedSession(t *testing.T) {

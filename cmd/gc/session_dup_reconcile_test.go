@@ -518,7 +518,7 @@ func TestLegacyDuplicateRetireYieldsToKeyedOwnedRow(t *testing.T) {
 
 	rows := dupReconcileRows(t, store, loser.ID, winner.ID)
 	retireDuplicateConfiguredNamedSessionRows(
-		store, nil, sp, cfg, "test-city", rows,
+		"", store, nil, sp, cfg, "test-city", rows,
 		func(info sessionpkg.Info) bool { return info.ID == loser.ID },
 		time.Now().UTC(), io.Discard,
 	)

@@ -1269,6 +1269,38 @@ func waitDependencyBoundedPoolTarget(info sessionpkg.Info, cfg *config.City) (st
 // waitDependencyConfiguredTemplateEligible admits ordinary configured sessions
 // and configured dependencies only when every dependency is a currently-live
 // canonical singleton.
+// poolMemberOwnsItsRuntimeName reports whether info carries a runtime session
+// name derived from its OWN pool identity, and is therefore addressing its own
+// box rather than one minted for a different bead.
+//
+// What it enforces is the ga-vcjr9 invariant: the name is a pure function of the
+// configured identity and free of the bead ID. A bead-ID-scoped name mints a
+// fresh runtime identity per start attempt, and since the runtime name is the
+// sandbox (and pod) name, a pool whose start op keeps failing then leaks one box
+// per attempt.
+//
+// Three spellings satisfy that invariant and all three are accepted. The two
+// identity-derived ones differ only by the "-pool" step-aside, which the create
+// path decides from the resolved identity's own transient-slot flag rather than
+// from config, so a reader cannot re-derive which was used; both are equally
+// free of the bead ID, and the sibling conjuncts have already pinned AgentName
+// to the canonical instance identity. The third is the legacy bead-ID form,
+// which beads created before the fix still carry — PoolSessionName survives
+// upstream as the recognizer for exactly those.
+func poolMemberOwnsItsRuntimeName(cfg *config.City, cfgAgent *config.Agent, info sessionpkg.Info) bool {
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		return false
+	}
+	template := cfgAgent.QualifiedName()
+	for _, transientSlot := range []bool{false, true} {
+		if name == poolRuntimeSessionName(cfg, info.AgentName, template, transientSlot) {
+			return true
+		}
+	}
+	return name == PoolSessionName(template, info.ID)
+}
+
 func waitDependencyConfiguredTemplateEligible(
 	info sessionpkg.Info,
 	cfg *config.City,
@@ -1289,7 +1321,7 @@ func waitDependencyConfiguredTemplateEligible(
 			!isEphemeralSessionInfoForAgent(info, cfgAgent) || err != nil || poolSlot <= 0 ||
 			existingPoolSlotWithConfigInfo(cfg, cfgAgent, info) != poolSlot ||
 			info.AgentName != cfgAgent.QualifiedInstanceName(poolInstanceName(cfgAgent.Name, poolSlot, cfgAgent)) ||
-			info.SessionNameMetadata != PoolSessionName(cfgAgent.QualifiedName(), info.ID) {
+			!poolMemberOwnsItsRuntimeName(cfg, cfgAgent, info) {
 			return false
 		}
 		namedTemplates := make(map[string]struct{}, len(cfg.NamedSessions))

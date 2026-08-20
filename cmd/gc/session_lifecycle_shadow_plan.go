@@ -145,6 +145,7 @@ func planSessionLifecycleStatus(input sessionLifecycleShadowInput) sessionLifecy
 	patch := healStatePatchWithRollbackInfo(
 		input.Info,
 		input.RuntimeAlive,
+		input.RuntimeObserved,
 		&clock.Fake{Time: input.ObservedAt},
 		input.StartupTimeout,
 		input.RollbackAvailable,

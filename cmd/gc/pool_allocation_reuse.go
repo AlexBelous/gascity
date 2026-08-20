@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -293,20 +294,29 @@ func (cr *CityRuntime) routedWorkPoolReuseAssignedWork(
 			ownersByAssignee[identifier] = append(ownersByAssignee[identifier], info.ID)
 		}
 	}
-	stores, err := reachableStoresForSessionInfo(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), candidates[0])
+	plan, err := assignedWorkPlanForSessionInfo(snapshot.CityPath, snapshot.Config, snapshot.Store, cr.rigBeadStores(), candidates[0])
 	if err != nil {
 		return nil, fmt.Errorf("checking reusable pool assignments: resolving reachable stores: %w", err)
 	}
-	for _, store := range stores {
-		items, err := workAssignmentForStore(beads.WorkStore{Store: store}).OpenAssignedToAny(assignees)
+	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
+		items, err := workAssignmentForStore(beads.WorkStore{Store: leg.Store}).OpenAssignedToAny(assignees)
 		if err != nil {
-			return nil, fmt.Errorf("checking reusable pool assignments: %w", err)
+			return false, err
 		}
 		for _, item := range items {
 			for _, sessionID := range ownersByAssignee[strings.TrimSpace(item.Assignee)] {
 				busyBySession[sessionID] = true
 			}
 		}
+		return false, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("checking reusable pool assignments: %w", err)
+	}
+	// Every leg has to answer: a dark store could be holding the very claim
+	// that makes a candidate busy, and reusing it would double-assign.
+	if err := assignedWorkScanComplete(res); err != nil {
+		return nil, fmt.Errorf("checking reusable pool assignments: %w", err)
 	}
 	return busyBySession, nil
 }

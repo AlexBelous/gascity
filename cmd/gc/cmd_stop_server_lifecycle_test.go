@@ -19,8 +19,13 @@ import (
 // managed-stop test can reject server destruction.
 type lifecycleOrderProvider struct {
 	*runtime.Fake
-	mu         sync.Mutex
-	events     []string
+	mu     sync.Mutex
+	events []string
+	// listErr, when set, makes every ListRunning return it (empty slice),
+	// modeling a persistently failed enumeration.
+	listErr error
+	// listErrors is the per-call error sequence, for tests that need a
+	// specific call in the sequence to fail.
 	listCalls  int
 	listErrors []error
 }
@@ -28,18 +33,22 @@ type lifecycleOrderProvider struct {
 func (p *lifecycleOrderProvider) ListRunning(prefix string) ([]string, error) {
 	p.mu.Lock()
 	p.events = append(p.events, "ListRunning")
+	always := p.listErr
 	call := p.listCalls
 	p.listCalls++
-	var err error
+	var seq error
 	if call < len(p.listErrors) {
-		err = p.listErrors[call]
+		seq = p.listErrors[call]
 	}
 	p.mu.Unlock()
-	names, listErr := p.Fake.ListRunning(prefix)
-	if listErr != nil {
-		return names, listErr
+	if always != nil {
+		return nil, always
 	}
-	return names, err
+	names, err := p.Fake.ListRunning(prefix)
+	if err != nil {
+		return names, err
+	}
+	return names, seq
 }
 
 func (p *lifecycleOrderProvider) ConfigureServer() error {

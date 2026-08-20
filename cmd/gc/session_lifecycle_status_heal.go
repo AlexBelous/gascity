@@ -56,7 +56,7 @@ func applySessionLifecycleStatusHeal(
 		candidate = &planned
 	}
 
-	patch, err := healStateWithRollbackInfo(info, healContext.RuntimeAlive, sessFront, clk, startupTimeout, healContext.RollbackAvailable, healContext.LoadedRevision)
+	patch, err := healStateWithRollbackInfo(info, healContext.RuntimeAlive, healContext.RuntimeObserved, sessFront, clk, startupTimeout, healContext.RollbackAvailable, healContext.LoadedRevision)
 	if candidate != nil {
 		observer(compareSessionLifecycleStatus(healContext.Site, *candidate, patch, err))
 	}

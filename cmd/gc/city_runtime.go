@@ -657,8 +657,10 @@ func (cr *CityRuntime) setControllerState(cs *controllerState) {
 		// The routes already crossed at construction, so this is simply the
 		// first moment the class front doors resolve to the stores that will
 		// actually serve them — and therefore the first moment the session
-		// class's required fencing capability can be asserted.
+		// class's required fencing capability can be asserted, or the wider
+		// class contract enumerated over every store this city serves.
 		cs.preflightSessionClassConditionalWrites()
+		cs.preflightStoreContract()
 	}
 }
 

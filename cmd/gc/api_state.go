@@ -331,6 +331,14 @@ func newControllerStateWithRoutes(
 }
 
 // wrapWithCachingStore wraps store in an in-memory read cache. When
+// beadStoreLayerActor attributes a bead.* row to the store layer of the process
+// that made the mutation, as opposed to an externally-authored write arriving
+// through a bd hook. The distinction is load-bearing rather than cosmetic: a
+// row carrying it does not poke the tick and does not contribute routed-work
+// demand, because the process that wrote the bead already knows. The wire value
+// is historical — the caching store was the first layer to emit under it.
+const beadStoreLayerActor = "cache-reconcile"
+
 // backgroundRefresh is true the cache fully primes and runs a continuous
 // reconcile loop (the steady-state cost: one bd subprocess per cycle per scope).
 // When false the cache only pre-primes active beads synchronously — enough for
@@ -354,7 +362,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		if recorder != nil {
 			recorder.Record(events.Event{
 				Type:             eventType,
-				Actor:            "cache-reconcile",
+				Actor:            beadStoreLayerActor,
 				Subject:          beadID,
 				RunID:            runID,
 				SessionID:        sessionID,
@@ -838,7 +846,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}()
 	cs.admitReadyRoutedWorkEvent(evt, stores)
 	cs.admitSessionStartEvent(evt)
-	if evt.Actor != "cache-reconcile" {
+	if evt.Actor != beadStoreLayerActor {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
@@ -900,7 +908,7 @@ func (cs *controllerState) stopReadyRoutedWorkEventAdmission() {
 }
 
 func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []beadEventStore) {
-	if cs == nil || evt.Actor == "cache-reconcile" || !isBeadMutationEvent(evt.Type) {
+	if cs == nil || evt.Actor == beadStoreLayerActor || !isBeadMutationEvent(evt.Type) {
 		return
 	}
 	observedAt := time.Now().UTC()
@@ -1949,10 +1957,9 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 // when [beads.classes.graph] is relocated it returns the dedicated graph store at the
 // legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
 // passed for signature parity with the other accessors but is ignored by
-// resolveGraphStore, as it is for every class: a class store carries no emitting
-// layer, and on this side the controller's CachingStore is the emitter. The
-// one-shot CLI's side is covered by class_store_emit.go. The result is wrapped in
-// the strongly-typed beads.GraphStore so the
+// resolveGraphStore, as it is for every class: emission is installed on the
+// routes at boot, not chosen per accessor (class_store_emit.go). The result is
+// wrapped in the strongly-typed beads.GraphStore so the
 // graph class is statically visible to callers; the wrapper carries the same
 // underlying store value, so runtime behavior is unchanged.
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {

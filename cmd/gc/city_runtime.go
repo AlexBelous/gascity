@@ -530,6 +530,15 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A relocated class is served from a bare bead engine: the CachingStore
+	// this controller wraps its work ledger in never sees it, so without this
+	// the whole infrastructure half of a split city writes in silence —
+	// admitSessionStartEvent never fires for a session row and keyed admission
+	// falls back to patrol cadence (ga-f7v2ft.164 step 2). Emission is required
+	// plumbing on a binding, so it is wired at the seam that opened it rather
+	// than asked for per call site. p.Rec is the same recorder this process's
+	// bead-event watcher tails, which is what closes the loop.
+	routes = routes.withControllerEmission(p.Rec)
 	// NOTE: the routes are NOT registered as this city's residency answer here.
 	// Construction happens before the supervisor knows whether it can take the
 	// controller lock, and a replacement that loses it would have repointed the

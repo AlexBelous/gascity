@@ -94,13 +94,14 @@ type storageRoutes struct {
 	// binding names the non-work binding these routes were opened from, for
 	// diagnostics.
 	binding string
-	// emitCityPath is the city whose event log these routes' class stores
-	// append bead.* events to, and it is set on exactly one construction:
-	// the one-shot CLI funnel's (cli_storage_routes.go). openStorageRoutes
-	// leaves it empty, so the controller's routes carry no emit target and
-	// its CachingStore stays the only emitter on that side — see
-	// class_store_emit.go for why the two must not both emit.
-	emitCityPath string
+	// emit is where the bead.* rows these routes' class stores produce are
+	// written. Every process that serves a binding sets one, at its own single
+	// construction — the one-shot CLI funnel's (cli_storage_routes.go) and the
+	// controller's (city_runtime.go). openStorageRoutes leaves it nil because
+	// opening a binding does not decide who will record for it; a route map
+	// that reaches a running process still holding nil is the event-silence
+	// defect, which is why the boot preflight asks. See class_store_emit.go.
+	emit classStoreEmitTarget
 }
 
 // routedEngine is one opened binding engine and the binding that named it.
@@ -121,7 +122,14 @@ func (r *storageRoutes) openedEngines() []routedEngine {
 // conditionalWritesStoreID labels a routed engine on the operator surfaces,
 // beside the "city" and "rig/<name>" spellings the work stores use.
 func (e routedEngine) conditionalWritesStoreID() string {
-	return "storage/" + e.binding
+	return storageBindingStoreID(e.binding)
+}
+
+// storageBindingStoreID is the one spelling a routed binding carries across the
+// operator surfaces. Two surfaces naming one store differently is two stores as
+// far as anyone reading them is concerned.
+func storageBindingStoreID(binding string) string {
+	return "storage/" + binding
 }
 
 // storeFor returns the store serving a class and whether these routes relocate

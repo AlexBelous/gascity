@@ -49,22 +49,33 @@ func (e *ConditionalWritesUnavailableError) Error() string {
 // asking this question is not offering the city a choice.
 //
 // Wrapper following matches the resolve seam exactly, so a class front door or
-// a cache wrapper resolves to the same store the write path would use.
+// a cache wrapper resolves to the same store the write path would use — and the
+// capability question then follows one step further, to whichever store holds
+// the answer (ConditionalWritesCapabilityTargeter). Without that second step a
+// wrapper that forwards the fenced trio answers "yes" about itself, which is
+// true and useless: the engine underneath it may be unable to fence at all.
 func RequiredConditionalWriter(store Store) (ConditionalWriter, error) {
 	if store == nil {
 		return nil, &ConditionalWritesUnavailableError{StoreKind: "<nil>", Reason: "no store"}
 	}
 	resolved := followConditionalWritesResolveTarget(store)
-	kind := conditionalStoreKind(resolved)
 	writer, ok := ConditionalWriterFor(resolved)
+	capable := followConditionalWritesCapabilityTarget(resolved)
+	kind := conditionalStoreKind(capable)
 	if !ok {
 		return nil, &ConditionalWritesUnavailableError{
 			StoreKind: kind,
 			Reason:    "the store does not implement conditional writes",
 		}
 	}
-	if prober, ok := resolved.(conditionalWriteCapabilityProber); ok {
-		if capable, why := prober.probeConditionalWriteCapability(); !capable {
+	if _, backs := ConditionalWriterFor(capable); !backs {
+		return nil, &ConditionalWritesUnavailableError{
+			StoreKind: kind,
+			Reason:    "the store does not implement conditional writes",
+		}
+	}
+	if prober, ok := capable.(conditionalWriteCapabilityProber); ok {
+		if ok, why := prober.probeConditionalWriteCapability(); !ok {
 			if why == "" {
 				why = "the store reports it cannot fence a write"
 			}

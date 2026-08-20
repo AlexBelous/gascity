@@ -118,7 +118,11 @@ func (c *CachingStore) inspectConditionalWriteState() (probe, latch, reason stri
 // unexercised bd store legitimately reports Probe=unprobed.
 func InspectConditionalWrites(store Store) ConditionalWritesInspection {
 	if store != nil {
-		store = followConditionalWritesResolveTarget(store)
+		// Two steps, and the second is what stops a side-effect wrapper from
+		// reporting its own vacuous yes: the writer may be the wrapper, but the
+		// probe memo, the stamp and the store kind all belong to the engine it
+		// declares (ConditionalWritesCapabilityTargeter).
+		store = followConditionalWritesCapabilityTarget(followConditionalWritesResolveTarget(store))
 	}
 	insp := ConditionalWritesInspection{
 		StoreKind: conditionalStoreKind(store),

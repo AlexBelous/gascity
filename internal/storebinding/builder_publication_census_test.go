@@ -903,7 +903,18 @@ func censusModuleRoot(t *testing.T) string {
 // every census into a pass.
 func censusSources(t *testing.T) []censusSource {
 	t.Helper()
-	root := censusModuleRoot(t)
+	sources := censusSourcesFrom(t, censusModuleRoot(t))
+	if len(sources) < censusMinimumFiles {
+		t.Fatalf("census scanned %d non-test Go files, want at least %d; the module walk is broken", len(sources), censusMinimumFiles)
+	}
+	return sources
+}
+
+// censusSourcesFrom reads every non-test Go file under root. censusSources
+// runs it against the module root; a synthetic root (a fixture git
+// repository, say) lets a test exercise the walk itself directly.
+func censusSourcesFrom(t *testing.T, root string) []censusSource {
+	t.Helper()
 	var sources []censusSource
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -933,9 +944,6 @@ func censusSources(t *testing.T) []censusSource {
 	})
 	if err != nil {
 		t.Fatalf("walking %s: %v", root, err)
-	}
-	if len(sources) < censusMinimumFiles {
-		t.Fatalf("census scanned %d non-test Go files, want at least %d; the module walk is broken", len(sources), censusMinimumFiles)
 	}
 	return sources
 }

@@ -433,11 +433,57 @@ func rootOnlyVaporPourHint(formulaName string, recipe *formula.Recipe) string {
 func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID string, result SlingResult) (SlingResult, error) {
 	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.OnFormula, "on-formula", "formula", result)
 	if err == nil {
-		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars); hint != "" {
+		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars, opts.OnFormula, SlingFormulaSearchPaths(deps, opts.Target)); hint != "" {
 			result.BeadWarnings = append(result.BeadWarnings, hint)
 		}
 	}
 	return result, err
+}
+
+// beadInstructionCarrierVars are the two formula vars #3681 tells a caller to
+// pass so a bead's own instructions reach the formula's rendered context. One
+// list, read both by the "did the caller pass one" check and by the "can this
+// formula receive one" check, so the two can never drift apart.
+var beadInstructionCarrierVars = [...]string{"context_path", "requirements_path"}
+
+// formulaCanReceiveBeadInstructions reports whether f actually consumes either
+// of beadInstructionCarrierVars — by declaring it under [vars], or by
+// referencing {{var}} in the formula description or any step (Substitute
+// renders any supplied var, declared or not, so a formula may consume one
+// without declaring it).
+//
+// This gates the #3681 hint, and it is load-bearing rather than cosmetic.
+// Nothing rejects an undeclared --var anywhere on the path: buildSlingFormulaVars
+// accepts every key it is given, CollectVarValidationErrors
+// (internal/formula/parser.go) walks only the formula's DECLARED vars and so
+// never sees an extra one, and stampFormulaVars records the value as
+// gc.var.<name> metadata that no template reads. Against a formula consuming
+// neither var the advertised remedy is therefore inert: passing the var
+// silences this very hint (the userVars check below) while changing nothing the
+// agent sees — strictly worse than staying quiet, because it reads as fixed.
+// Fire only where the fix the hint names would actually land.
+func formulaCanReceiveBeadInstructions(f *formula.Formula) bool {
+	if f == nil {
+		return false
+	}
+	for _, name := range beadInstructionCarrierVars {
+		if def, ok := f.Vars[name]; ok && def != nil {
+			return true
+		}
+		placeholder := "{{" + name + "}}"
+		if strings.Contains(f.Description, placeholder) {
+			return true
+		}
+		for _, step := range f.Steps {
+			if step == nil {
+				continue
+			}
+			if strings.Contains(step.Title, placeholder) || strings.Contains(step.Description, placeholder) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // attachedBeadInstructionsDroppedHint returns a sling-time diagnostic when
@@ -450,18 +496,40 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 // context, unless the caller explicitly carries them in via
 // context_path/requirements_path (#3681). It changes neither routing nor
 // the materialized wisp.
-func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, userVars []string) string {
+//
+// The hint stays silent unless the attached formula can actually consume one
+// of those vars. A formula that consumes neither cannot be fixed by the
+// remedy this text names, and a caller who follows it anyway gets a silenced
+// warning and an unchanged rendered context — see
+// formulaCanReceiveBeadInstructions. Note this is a statement about the
+// RENDERED context only: a formula whose steps read the bead at runtime
+// (`bd show $ROOT_ID` off the wrapper's gc.var.issue) reaches the same text by
+// a different route, which is why the hint must not be read as "the agent
+// cannot see this bead".
+func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, userVars []string, formulaName string, searchPaths []string) string {
 	if querier == nil || beadID == "" {
 		return ""
 	}
 	for _, v := range userVars {
 		key, _, ok := strings.Cut(v, "=")
-		if ok && (key == "context_path" || key == "requirements_path") {
+		if !ok {
+			continue
+		}
+		if slices.Contains(beadInstructionCarrierVars[:], key) {
 			return ""
 		}
 	}
 	bead, err := querier.Get(beadID)
 	if err != nil || strings.TrimSpace(bead.Description) == "" {
+		return ""
+	}
+	// Load, never compile. This is a diagnostic on an attach that has already
+	// succeeded, and the compile-once rule earlier in this file exists to keep
+	// exactly this kind of second pass off the recipe path; LoadFormula is the
+	// parser-only resolve. An error here means the formula shape is unknowable,
+	// and an unactionable hint is the defect being avoided — stay silent.
+	f, loadErr := graphv2.LoadFormula(formulaName, searchPaths)
+	if loadErr != nil || !formulaCanReceiveBeadInstructions(f) {
 		return ""
 	}
 	return fmt.Sprintf("note: bead %s's description is not carried into the formula's rendered context — pass --var context_path=<dir> or --var requirements_path=<doc> to include your instructions, or the formula's brainstorm will not see them.", beadID)
@@ -471,7 +539,7 @@ func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, use
 func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID string, result SlingResult) (SlingResult, error) {
 	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", result)
 	if err == nil {
-		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars); hint != "" {
+		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars, opts.Target.EffectiveDefaultSlingFormula(), SlingFormulaSearchPaths(deps, opts.Target)); hint != "" {
 			result.BeadWarnings = append(result.BeadWarnings, hint)
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -2418,6 +2419,35 @@ func TestSlingAttachFormula(t *testing.T) {
 	}
 }
 
+// slingCtxVarFormulaDeps builds deps whose only formula layer holds a single
+// formula that DECLARES context_path, and returns it alongside the formula
+// name. The #3681 hint fires only where the remedy it names is available, so
+// the shared code-review fixture — which declares no vars at all — would make
+// every assertion below vacuous.
+func slingCtxVarFormulaDeps(t *testing.T) (SlingDeps, string) {
+	t.Helper()
+	const name = "ctx-var-formula"
+	dir := t.TempDir()
+	content := fmt.Sprintf("formula = %q\nversion = 1\n\n[vars]\n[vars.context_path]\ndescription = \"dir carrying the caller's instructions\"\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n", name)
+	if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+	}
+	return testDeps(cfg, runtime.NewFake(), newFakeRunner().run), name
+}
+
+func hasBeadInstructionsDroppedHint(result SlingResult) bool {
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "not carried into the formula's rendered context") {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped is the regression
 // for #3681: --on/AttachFormula never carries the target bead's own
 // description into the formula's rendered context — the wisp root's
@@ -2426,9 +2456,60 @@ func TestSlingAttachFormula(t *testing.T) {
 // description as the actual build instructions silently gets a brainstorm
 // that never saw them. Warn instead of changing routing/materialization.
 func TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped(t *testing.T) {
+	deps, formulaName := slingCtxVarFormulaDeps(t)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Description: "follow ~/rigs/ultimate-brain-mcp patterns"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), formulaName, b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if !hasBeadInstructionsDroppedHint(result) {
+		t.Errorf("BeadWarnings = %#v, want a hint that the bead's description is dropped", result.BeadWarnings)
+	}
+}
+
+// TestSlingAttachFormulaNoWarningWhenContextPathProvided guards the
+// #3681 hint's scope: a caller who already passes context_path (or
+// requirements_path) has explicitly carried the instructions in some
+// form, so the generic hint would be noise.
+func TestSlingAttachFormulaNoWarningWhenContextPathProvided(t *testing.T) {
+	deps, formulaName := slingCtxVarFormulaDeps(t)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Description: "follow ~/rigs/ultimate-brain-mcp patterns"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), formulaName, b.ID, a, FormulaOpts{Vars: []string{"context_path=/tmp/spec"}})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if hasBeadInstructionsDroppedHint(result) {
+		t.Errorf("BeadWarnings = %#v, want no drop hint once context_path is explicit", result.BeadWarnings)
+	}
+}
+
+// TestSlingAttachFormulaNoWarningWhenFormulaCannotReceiveContextVars is the
+// regression for ga-awchvd. The hint tells the caller to pass --var
+// context_path / requirements_path, but a formula that consumes neither
+// cannot be fixed that way: nothing rejects an undeclared var, so the value
+// is accepted, stamped as gc.var.<name> metadata, and read by nothing. The
+// advice would silence this very warning while changing nothing the agent
+// sees, which reads as fixed and is not. Every formula the deacon dispatch
+// table routes is this shape — none of the eight declares either var — so
+// before this gate the advisory fired on every automated sling in the fleet
+// with no reachable remedy.
+func TestSlingAttachFormulaNoWarningWhenFormulaCannotReceiveContextVars(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	// The shared code-review fixture declares no vars at all.
 	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Description: "follow ~/rigs/ultimate-brain-mcp patterns"})
 
 	s, err := New(deps)
@@ -2440,40 +2521,29 @@ func TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AttachFormula: %v", err)
 	}
-	found := false
-	for _, w := range result.BeadWarnings {
-		if strings.Contains(w, "not carried into the formula's rendered context") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("BeadWarnings = %#v, want a hint that the bead's description is dropped", result.BeadWarnings)
+	if hasBeadInstructionsDroppedHint(result) {
+		t.Errorf("BeadWarnings = %#v, want no drop hint: the formula declares neither context_path nor requirements_path, so the remedy the hint names cannot work", result.BeadWarnings)
 	}
 }
 
-// TestSlingAttachFormulaNoWarningWhenContextPathProvided guards the
-// #3681 hint's scope: a caller who already passes context_path (or
-// requirements_path) has explicitly carried the instructions in some
-// form, so the generic hint would be noise.
-func TestSlingAttachFormulaNoWarningWhenContextPathProvided(t *testing.T) {
-	runner := newFakeRunner()
-	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
-	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Description: "follow ~/rigs/ultimate-brain-mcp patterns"})
-
-	s, err := New(deps)
-	if err != nil {
-		t.Fatal(err)
+// TestFormulaCanReceiveBeadInstructionsDetectsTemplateReference covers the
+// second way a formula consumes one of these vars: Substitute renders any
+// supplied var, declared or not, so a formula referencing {{requirements_path}}
+// in a step can receive it without an entry under [vars].
+func TestFormulaCanReceiveBeadInstructionsDetectsTemplateReference(t *testing.T) {
+	if formulaCanReceiveBeadInstructions(nil) {
+		t.Error("nil formula must not be reported as able to receive the vars")
 	}
-	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{Vars: []string{"context_path=/tmp/spec"}})
-	if err != nil {
-		t.Fatalf("AttachFormula: %v", err)
+	bare := &formula.Formula{Formula: "bare", Steps: []*formula.Step{{ID: "work", Title: "Work"}}}
+	if formulaCanReceiveBeadInstructions(bare) {
+		t.Error("formula declaring and referencing neither var must not be reported as able to receive them")
 	}
-	for _, w := range result.BeadWarnings {
-		if strings.Contains(w, "not carried into the formula's rendered context") {
-			t.Errorf("BeadWarnings = %#v, want no drop hint once context_path is explicit", result.BeadWarnings)
-		}
+	referencing := &formula.Formula{
+		Formula: "referencing",
+		Steps:   []*formula.Step{{ID: "work", Title: "Work", Description: "Read {{requirements_path}} first."}},
+	}
+	if !formulaCanReceiveBeadInstructions(referencing) {
+		t.Error("formula referencing {{requirements_path}} in a step must be reported as able to receive it")
 	}
 }
 

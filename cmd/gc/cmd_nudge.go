@@ -348,10 +348,10 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 	}
 
 	// City-wide (not agent-scoped) skip-reason totals from the supervisor
-	// dispatch tick, read directly off the persisted queue state — a raw
-	// read so this doesn't re-run the maintenance sweep listQueuedNudgesForTarget
-	// above already ran. Best-effort: a load failure here must not fail the
-	// whole status command over a diagnostics-only field.
+	// dispatch tick. The snapshot read above is lock-free and runs no
+	// maintenance sweep, so this is simply a second raw read for a field
+	// that is not agent-scoped. Best-effort: a load failure here must not
+	// fail the whole status command over a diagnostics-only field.
 	var dispatchSkips map[string]int64
 	if qs, qsErr := nudgequeue.LoadState(target.cityPath); qsErr == nil {
 		dispatchSkips = qs.DispatchSkips
@@ -2033,15 +2033,21 @@ func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now 
 		return !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)
 	}
 	// Mirrors recoverExpiredInFlightNudges: expired in-flight items read as
-	// dead, and lease-expired ones read as pending again.
+	// dead, and lease-expired ones read as pending again. The field
+	// projection matches that pass exactly, so a lease the item no longer
+	// holds never surfaces on a pending item in `--json`.
 	for _, item := range state.InFlight {
 		switch {
 		case expired(item):
+			item.DeadAt = now.UTC()
 			if item.LastError == "" {
 				item.LastError = "expired"
 			}
 			add(&dead, item)
 		case item.LeaseUntil.IsZero() || !item.LeaseUntil.After(now):
+			item.ClaimedAt = time.Time{}
+			item.LeaseUntil = time.Time{}
+			item.DeliverAfter = now.UTC()
 			add(&pending, item)
 		default:
 			add(&inFlight, item)
@@ -2050,6 +2056,7 @@ func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now 
 	// Mirrors pruneExpiredQueuedNudges: expired pending items read as dead.
 	for _, item := range state.Pending {
 		if expired(item) {
+			item.DeadAt = now.UTC()
 			if item.LastError == "" {
 				item.LastError = "expired"
 			}
@@ -2061,7 +2068,11 @@ func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now 
 	for _, item := range state.Dead {
 		add(&dead, item)
 	}
-	return pending, inFlight, dead, nil
+	// Re-sort with the queue's own comparator: re-bucketing changed the
+	// fields it orders on, so the source order no longer holds.
+	projected := nudgeQueueState{Pending: pending, InFlight: inFlight, Dead: dead}
+	sortQueuedNudges(&projected)
+	return projected.Pending, projected.InFlight, projected.Dead, nil
 }
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {

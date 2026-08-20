@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/dolthub/fslock"
 	"github.com/gastownhall/gascity/internal/clock"
 )
 
@@ -36,6 +37,17 @@ const maxMarkerDepth = 3
 // lsofScanTimeout bounds the real `lsof -w` invocation, mirroring the
 // shell script's `timeout 30 lsof -w`.
 const lsofScanTimeout = 30 * time.Second
+
+// lockFileName is the file Dolt's NBS store holds a real kernel flock on
+// for as long as a store is open (github.com/dolthub/dolt/go/store/nbs,
+// lockFileName), conventionally at <store>/.dolt/noms/LOCK.
+const lockFileName = "LOCK"
+
+// maxLockSearchDepth bounds how deep findLockFiles descends below a
+// candidate directory looking for a dolt LOCK file, one level deeper than
+// maxMarkerDepth to comfortably cover <marker>/noms/LOCK wherever the
+// .dolt marker itself was found.
+const maxLockSearchDepth = maxMarkerDepth + 2
 
 // SweepConfig configures a single Sweep pass. Root is required; every
 // other field defaults to production behavior when left zero-valued.
@@ -170,6 +182,24 @@ func Sweep(cfg SweepConfig) SweepResult {
 			result.Skipped++
 			continue
 		}
+		// Belt-and-suspenders beyond the lsof scans: a single lsof
+		// invocation parses a point-in-time /proc snapshot and can
+		// transiently miss a still-open file for a live process under
+		// heavy host load without erroring (observed in ga-vbyn8v even
+		// with the two-scan confirm above). Dolt's own NBS store holds a
+		// real kernel flock for as long as it has a store open, which is
+		// atomic and race-free because the kernel enforces it directly
+		// rather than it being reconstructed from a process listing.
+		held, err := doltLockHeld(dir)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("dolt lock probe %s: %w", dir, err))
+			result.Skipped++
+			continue
+		}
+		if held {
+			result.Skipped++
+			continue
+		}
 		if err := removeAll(dir); err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("remove %s: %w", dir, err))
 			continue
@@ -201,6 +231,72 @@ func hasDoltMarker(dir string, depth int) bool {
 		}
 	}
 	return false
+}
+
+// findLockFiles returns the full path of every file literally named "LOCK"
+// within depth levels of dir (dir's direct children are depth 1), mirroring
+// hasDoltMarker's bounded recursive traversal shape.
+func findLockFiles(dir string, depth int) []string {
+	if depth <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var found []string
+	for _, e := range entries {
+		if e.IsDir() {
+			found = append(found, findLockFiles(filepath.Join(dir, e.Name()), depth-1)...)
+			continue
+		}
+		if e.Name() == lockFileName {
+			found = append(found, filepath.Join(dir, e.Name()))
+		}
+	}
+	return found
+}
+
+// doltLockHeld reports whether any dolt LOCK file found within dir is
+// currently held by a live process. It only ever probes paths already
+// discovered by the read-only findLockFiles walk above — fslock.New +
+// TryLock against a not-yet-existing path would create an empty file as a
+// side effect (the underlying open uses O_CREATE), so this must never be
+// called speculatively against a path that hasn't already been confirmed
+// to exist.
+func doltLockHeld(dir string) (bool, error) {
+	for _, path := range findLockFiles(dir, maxLockSearchDepth) {
+		held, err := probeLockHeld(path)
+		if err != nil {
+			return false, err
+		}
+		if held {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// probeLockHeld reports whether path is currently held by another process,
+// via a non-blocking TryLock. A failed TryLock already closes the lock's
+// internal file handle, so Unlock below is always a safe no-op in that
+// case; Close only releases the directory handle and never a held lock, so
+// Unlock must run first regardless of outcome.
+func probeLockHeld(path string) (bool, error) {
+	lock, err := fslock.New(path)
+	if err != nil {
+		return false, fmt.Errorf("open lock %s: %w", path, err)
+	}
+	lockErr := lock.TryLock()
+	_ = lock.Unlock()
+	_ = lock.Close()
+	if lockErr == nil {
+		return false, nil
+	}
+	if errors.Is(lockErr, fslock.ErrLocked) {
+		return true, nil
+	}
+	return false, fmt.Errorf("probe lock %s: %w", path, lockErr)
 }
 
 // lsofHeldChildren runs runLsof (defaulting to a real `lsof -w`) and

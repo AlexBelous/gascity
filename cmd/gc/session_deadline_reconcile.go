@@ -371,13 +371,16 @@ func decideExactSessionDeadline(
 		}
 		facts := sessionpkg.TimerFacts{Triggered: true, Blocker: lifecycleTimerBlockerInfo(info, now)}
 		dec := decide(facts)
-		for dec.Action == sessionpkg.TimerActionGatherPending || dec.Action == sessionpkg.TimerActionGatherAssignedWork {
-			if dec.Action == sessionpkg.TimerActionGatherPending {
+		for dec.Action == sessionpkg.TimerActionGatherPending ||
+			dec.Action == sessionpkg.TimerActionGatherAssignedWork ||
+			dec.Action == sessionpkg.TimerActionGatherMinFloor {
+			switch dec.Action {
+			case sessionpkg.TimerActionGatherPending:
 				facts.Pending = sessionpkg.PendingNo
 				if pendingInteractionKeepsAwakeInfo(info, params.Provider, name, clk) {
 					facts.Pending = sessionpkg.PendingYes
 				}
-			} else {
+			case sessionpkg.TimerActionGatherAssignedWork:
 				// Fail closed on a store blip, exactly as the fleet arms do: a
 				// session that may still hold in-flight work is not killed.
 				has, err := hasAssignedWork(params.CityPath, params.Config, params.Store, params.RigStores, info)
@@ -387,6 +390,11 @@ func decideExactSessionDeadline(
 				facts.AssignedWork = sessionpkg.AssignedWorkNone
 				if has {
 					facts.AssignedWork = sessionpkg.AssignedWorkHas
+				}
+			case sessionpkg.TimerActionGatherMinFloor:
+				facts.MinFloor = sessionpkg.MinFloorNo
+				if exactSessionDeadlineMinFloorExempt(params, info) {
+					facts.MinFloor = sessionpkg.MinFloorYes
 				}
 			}
 			dec = decide(facts)
@@ -410,6 +418,39 @@ func decideExactSessionDeadline(
 		lastDecision, lastDeadline = dec, deadline
 	}
 	return lastDecision, lastDeadline, false
+}
+
+// exactSessionDeadlineMinFloorExempt answers DecideIdleTimeout's keep-warm floor
+// rung (sc-5mtyhy) for one key: is this row one of the deterministic
+// min_active_sessions floor members, which the idle path defers instead of
+// killing and cold-recreating every tick.
+//
+// The fleet arm ranks the floor off the tick's coherent infoByID snapshot. A
+// keyed admission has no tick, so it re-reads the inventory through the same
+// front door the stall family's floor rung uses and hands it to the SAME
+// predicate the fleet arm calls, so the two sides cannot answer differently for
+// the same row. The store read is paid only once a configured floor exists —
+// the overwhelmingly common minFloor==0 template short-circuits above it, so an
+// ordinary idle admission still costs nothing.
+//
+// A store failure fails CLOSED (exempt), matching the assigned-work gather
+// beside it: an unreadable fleet must not idle-kill a session that may be the
+// one holding its pool floor warm.
+func exactSessionDeadlineMinFloorExempt(params exactSessionStartParams, info sessionpkg.Info) bool {
+	template := normalizedSessionTemplateInfo(info, params.Config)
+	cfgAgent := findAgentByTemplate(params.Config, template)
+	if cfgAgent == nil || cfgAgent.EffectiveMinActiveSessions() <= 0 {
+		return false
+	}
+	rows, err := sessionFrontDoor(params.Store).ListAllForReconcile(sessionpkg.ListAllOptions{})
+	if err != nil {
+		return true
+	}
+	infoByID := make(map[string]sessionpkg.Info, len(rows))
+	for i := range rows {
+		infoByID[rows[i].Info.ID] = rows[i].Info
+	}
+	return isMinFloorExemptIdleSession(infoByID, params.Config, template, info.ID)
 }
 
 // persistExactSessionDeadlineSleep lands the sleep patch BEFORE the key is

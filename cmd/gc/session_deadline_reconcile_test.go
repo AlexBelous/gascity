@@ -249,6 +249,85 @@ func TestExactDeadlineSleepLandsBeforeHandlerReturns(t *testing.T) {
 	}
 }
 
+// TestExactDeadlineMinFloorExemptsTheFloorAndStopsAboveIt pins DecideIdleTimeout's
+// keep-warm floor rung (sc-5mtyhy) on the keyed path.
+//
+// The rung is a gather, and an unanswered gather is not a defer: the ladder
+// returns holding TimerActionGatherMinFloor, which is neither Stop nor Defer, so
+// the handler treats EVERY idle deadline as declined and no keyed idle stop ever
+// fires. That is why the above-floor half is not optional — it is the control
+// that separates "the rung is answered" from "the family stopped stopping", and
+// it fails against a ladder that simply defers whatever it does not understand.
+func TestExactDeadlineMinFloorExemptsTheFloorAndStopsAboveIt(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{
+		Name: "worker", StartCommand: "true", MinActiveSessions: intPtr(1),
+	}}}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	it := newFakeIdleTracker()
+
+	beadsByName := map[string]beads.Bead{}
+	for _, name := range []string{"worker-a", "worker-b"} {
+		bead := env.createSessionBead(name, "worker")
+		env.markSessionActive(&bead)
+		if err := provider.Start(t.Context(), name, runtime.Config{}); err != nil {
+			t.Fatalf("start runtime %s: %v", name, err)
+		}
+		if err := provider.SetMeta(name, "GC_INSTANCE_TOKEN", "test-token"); err != nil {
+			t.Fatalf("set runtime token %s: %v", name, err)
+		}
+		it.idle[name] = true
+		beadsByName[name] = bead
+	}
+
+	// The floor is ranked by bead ID, which the store mints; read the ranking
+	// off the beads themselves rather than assuming creation order.
+	floorName, elasticName := "worker-a", "worker-b"
+	if beadsByName[elasticName].ID < beadsByName[floorName].ID {
+		floorName, elasticName = elasticName, floorName
+	}
+	floor, elastic := beadsByName[floorName], beadsByName[elasticName]
+
+	statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(env.store)
+	params := exactSessionStartParams{
+		Generation: 1, CityPath: "test-city", CityName: "test-city",
+		Config: env.cfg, Provider: provider, Store: env.store,
+		StatusWriter: statusWriter, StatusWriterError: statusWriterErr,
+		Recorder: events.Discard, RolloutMode: rollout.Require, IdleTracker: it,
+	}
+	stop := func(t *testing.T, bead beads.Bead) {
+		t.Helper()
+		info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+		if err != nil {
+			t.Fatalf("authoritative read: %v", err)
+		}
+		owner, err := reconcileExactSessionDeadlineStop(
+			t.Context(),
+			sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionDeadline},
+			params, info, response, env.clk,
+		)
+		if err != nil || owner != exactSessionStartKeyedOwner {
+			t.Fatalf("handler returned owner=%v err=%v, want keyed ownership and no error", owner, err)
+		}
+	}
+
+	stop(t, floor)
+	if !provider.IsRunning(floorName) {
+		t.Fatal("the min_active_sessions floor member was idle-killed; the keep-warm rung must defer it")
+	}
+	if got := env.sessionInfo(floor.ID); got.SleepReason != "" || got.MetadataState != "active" {
+		t.Fatalf("floor member row = state:%q sleep_reason:%q, want an untouched active row", got.MetadataState, got.SleepReason)
+	}
+
+	stop(t, elastic)
+	if provider.IsRunning(elasticName) {
+		t.Fatal("the above-floor elastic session must still idle-reclaim")
+	}
+	if got := env.sessionInfo(elastic.ID); got.SleepReason != "idle-timeout" {
+		t.Fatalf("above-floor row sleep_reason = %q, want idle-timeout", got.SleepReason)
+	}
+}
+
 // TestDetectorDeadlineNotPassedNeitherEnqueuesNorStops is the negative: a live
 // row whose deadline has NOT elapsed produces zero enqueues from the sweep, and
 // the handler refuses with zero effect even if some other admission carries the

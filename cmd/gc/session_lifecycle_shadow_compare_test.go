@@ -153,20 +153,45 @@ func TestCompareSessionLifecycleStatusDetachesPlansAndPatches(t *testing.T) {
 
 func TestReconcileSessionBeadsReportsStatusComparisonAtBothHealSites(t *testing.T) {
 	tests := []struct {
-		name               string
-		desired            bool
-		storeQueryPartial  bool
+		name string
+		// desired routes the row to the desired heal site instead of the orphan one.
+		desired bool
+		// storeQueryPartial defers the formal rollback (rollbackAvailable=false).
+		storeQueryPartial bool
+		// staleCreateAnchor seeds pending_create_started_at, which is what makes
+		// a state=creating row STALE (creatingStateIsStale reads that key, then
+		// falls back to CreatedAt — which a freshly minted bead sets to now).
+		staleCreateAnchor bool
+		// pendingCreateClaim seeds the lease itself, the key #4944's deferral
+		// gate requires before it holds the whole transition back.
 		pendingCreateClaim bool
 		wantSite           sessionLifecycleStatusHealSite
 		wantPatch          session.MetadataPatch
 	}{
+		// A partial inventory sets rollbackAvailable=false at the orphan site.
+		// #4944 turned that from "defer only the claim half" into "defer the
+		// whole transition": the lease AND the state it belongs to both hold
+		// until one complete rollback can land, so the deferred row does not
+		// move. The claim-less row below is the pair's other half — it proves
+		// the deferral is scoped to rows that actually hold a lease rather than
+		// freezing every stale creating row a partial inventory touches, and it
+		// keeps a non-trivial heal patch on this site's comparison path.
 		{
 			name:               "orphan partial inventory preserves stale creating lease",
 			desired:            false,
 			storeQueryPartial:  true,
+			staleCreateAnchor:  true,
 			pendingCreateClaim: true,
 			wantSite:           sessionLifecycleStatusHealSiteOrphan,
-			wantPatch:          session.MetadataPatch{"state": string(session.StateAsleep)},
+			wantPatch:          nil,
+		},
+		{
+			name:              "orphan stale creating without a lease still heals asleep",
+			desired:           false,
+			storeQueryPartial: true,
+			staleCreateAnchor: true,
+			wantSite:          sessionLifecycleStatusHealSiteOrphan,
+			wantPatch:         session.MetadataPatch{"state": string(session.StateAsleep)},
 		},
 		{
 			name:      "desired site observes prepass-converged noop",
@@ -189,9 +214,11 @@ func TestReconcileSessionBeadsReportsStatusComparisonAtBothHealSites(t *testing.
 				"state":        string(session.StateCreating),
 				"last_woke_at": env.clk.Now().Add(-2 * time.Minute).Format(time.RFC3339),
 			}
+			if tt.staleCreateAnchor {
+				metadata["pending_create_started_at"] = env.clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)
+			}
 			if tt.pendingCreateClaim {
 				metadata["pending_create_claim"] = "true"
-				metadata["pending_create_started_at"] = env.clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)
 			}
 			env.setSessionMetadata(&sessionBead, metadata)
 			var comparisons []sessionLifecycleStatusComparison

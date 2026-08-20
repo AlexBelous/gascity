@@ -257,6 +257,13 @@ func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) 
 				},
 			},
 		},
+		// #4944 completed the intent the orphan site's own rollbackAvailable
+		// comment states — never apply HALF a pending-create rollback — by
+		// keeping state and claim on one decision: while the configured Start
+		// lease is in flight the row does not move at all, where this case
+		// previously pinned the half-applied form (state→asleep with the lease
+		// left behind). The rollback twin above is the other half of the pair:
+		// once the lease expires the whole transition lands in one batch.
 		{
 			name: "desired configured startup timeout preserves in-flight lease",
 			context: sessionLifecycleStatusHealContext{
@@ -267,15 +274,10 @@ func TestApplySessionLifecycleStatusHealMatchesLegacyPatchAndFold(t *testing.T) 
 			},
 			startupTimeout: 5 * time.Minute,
 			lastWokeAt:     -90 * time.Second,
-			wantPatch: sessionpkg.MetadataPatch{
-				"state": string(sessionpkg.StateAsleep),
-			},
+			wantPatch:      nil,
 			wantCandidate: sessionLifecycleStatusPlan{
-				Outcome: sessionLifecycleStatusHeal,
-				Reason:  sessionLifecycleStatusReasonHeal,
-				Patch: sessionpkg.MetadataPatch{
-					"state": string(sessionpkg.StateAsleep),
-				},
+				Outcome: sessionLifecycleStatusNoop,
+				Reason:  sessionLifecycleStatusReasonConverged,
 			},
 		},
 	}
@@ -417,10 +419,23 @@ func (s *statusHealAttemptStore) SetMetadataBatch(id string, patch map[string]st
 	return s.Store.SetMetadataBatch(id, patch)
 }
 
+// TestApplySessionLifecycleStatusHealUnknownRuntimeKeepsLegacyWriter pins the
+// ownership invariant applySessionLifecycleStatusHeal's doc comment states: the
+// legacy write is authoritative until the rollout gate transfers ownership, so a
+// PARKED candidate never suppresses it.
+//
+// The row is drained rather than the runtime-liveness row this used to seed.
+// #5138 stopped the legacy writer hardcoding Runtime.Observed=true, so with the
+// observation genuinely unknown the projection now returns the compat state for
+// every runtime-driven row and there is nothing left to write — a fixture that
+// can no longer tell "legacy ran" from "legacy was suppressed". The drained
+// branch reads BaseState, which is metadata-derived and does not consult the
+// observation, so it still exercises a real legacy write while the candidate
+// parks on the same unknown observation.
 func TestApplySessionLifecycleStatusHealUnknownRuntimeKeepsLegacyWriter(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	info, front := statusHealFixture(t, "status-heal-unknown", now, map[string]string{
-		"state": string(sessionpkg.StateAsleep),
+		"state": string(sessionpkg.StateDrained),
 	})
 	tick := newReconcileTick([]sessionpkg.Info{info})
 	var comparisons []sessionLifecycleStatusComparison
@@ -428,7 +443,7 @@ func TestApplySessionLifecycleStatusHealUnknownRuntimeKeepsLegacyWriter(t *testi
 	patch, err := applySessionLifecycleStatusHeal(tick, info.ID, sessionLifecycleStatusHealContext{
 		Site:              sessionLifecycleStatusHealSiteOrphan,
 		RuntimeObserved:   false,
-		RuntimeAlive:      true,
+		RuntimeAlive:      false,
 		RollbackAvailable: false,
 	}, front, &clock.Fake{Time: now}, 0, func(comparison sessionLifecycleStatusComparison) {
 		comparisons = append(comparisons, comparison)
@@ -436,18 +451,18 @@ func TestApplySessionLifecycleStatusHealUnknownRuntimeKeepsLegacyWriter(t *testi
 	if err != nil {
 		t.Fatalf("apply unknown-runtime status heal: %v", err)
 	}
-	if patch["state"] != string(sessionpkg.StateAwake) {
-		t.Fatalf("legacy patch = %#v, want state=awake despite parked candidate", patch)
+	if patch["state"] != string(sessionpkg.StateAsleep) || patch["sleep_reason"] != string(sessionpkg.SleepReasonDrained) {
+		t.Fatalf("legacy patch = %#v, want asleep/drained despite parked candidate", patch)
 	}
-	if tick.infoByID[info.ID].MetadataState != string(sessionpkg.StateAwake) {
-		t.Fatalf("tick state = %q, want awake legacy patch folded", tick.infoByID[info.ID].MetadataState)
+	if tick.infoByID[info.ID].MetadataState != string(sessionpkg.StateAsleep) {
+		t.Fatalf("tick state = %q, want asleep legacy patch folded", tick.infoByID[info.ID].MetadataState)
 	}
 	persisted, err := front.Get(info.ID)
 	if err != nil {
 		t.Fatalf("front.Get(%s): %v", info.ID, err)
 	}
 	if !reflect.DeepEqual(persisted, tick.infoByID[info.ID]) {
-		t.Fatalf("persisted reread = %#v, want folded legacy awake state %#v", persisted, tick.infoByID[info.ID])
+		t.Fatalf("persisted reread = %#v, want folded legacy asleep state %#v", persisted, tick.infoByID[info.ID])
 	}
 	if len(comparisons) != 1 {
 		t.Fatalf("comparison count = %d, want 1", len(comparisons))

@@ -1781,6 +1781,10 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	// When -s/-m flags provide subject/body, use them.
 	if subject != "" || message != "" {
 		if all {
+			if message != "" && len(args) > 0 {
+				fmt.Fprintln(stderr, "gc mail send: both a positional body and -m were given; use -s for the subject line") //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			allBody := message
 			if allBody == "" && len(args) > 0 {
 				allBody = args[0]

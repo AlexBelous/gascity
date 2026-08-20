@@ -4897,18 +4897,21 @@ func TestCmdMailSendAllPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 	}
 }
 
-func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
-	// When both -m and a positional body are present with --all, -m wins.
-	cityPath := mailSendTestCity(t, "worker")
+func TestCmdMailSendAllFlagBodyAndPositionalBothPresentFails(t *testing.T) {
+	// ga-4jl87y: when -m and a positional body are both present with --all,
+	// the caller's intent is ambiguous. Fail loudly instead of silently
+	// letting -m win and discarding the positional text (mirrors
+	// TestCmdMailSendFlagBodyAndPositionalBothPresentFails for the non-all path).
+	mailSendTestCity(t, "worker")
 
 	var stdout, stderr bytes.Buffer
 	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code == 0 {
+		t.Fatalf("cmdMailSend --all = %d, want non-zero; stdout=%s", code, stdout.String())
 	}
 
-	msg := mailSendTestFindMessage(t, cityPath)
-	if msg.Description != "flag body" {
-		t.Errorf("Description = %q, want %q (--all -m flag body should win over positional)", msg.Description, "flag body")
+	const wantErr = "gc mail send: both a positional body and -m were given; use -s for the subject line"
+	if !strings.Contains(stderr.String(), wantErr) {
+		t.Errorf("stderr = %q, want to contain %q", stderr.String(), wantErr)
 	}
 }

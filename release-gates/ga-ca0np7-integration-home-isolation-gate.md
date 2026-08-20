@@ -6,12 +6,16 @@
 - Evaluated source after bounded self-rebase: `c0358b4fadb06fea51301c1ab4a3bb119656d9ba`
 - Base: `origin/main@7c817e0640fae801631043005f1d54b17ce3e97c`
 - Deploy branch: `deploy/ga-20x17h-gate`
-- Verdict: **FAIL**
+- Verdict: **FAIL — NINE FAILURES WAIVED; ONE BLOCKER REMAINS**
 
 The ancestry-fix retry resolves the prior traceability rejection: both commits
-in the evaluated range cite accepted source beads. The release remains blocked
-because required integration failures overlap the changed package and shared
-harness path, so criterion 3 cannot attribute or waive them.
+in the evaluated range cite accepted source beads. The mayor's standing
+`ga-lpfjhc` authorization waives the nine exact beads#4566 failures after a
+mechanism trace established that this diff cannot alter Dolt's explicitly set
+config/schema root. The release remains blocked by the tenth integration
+failure, `TestDoltConfigWiringExternalHost`: it has a different signature,
+has no exact-base reproduction, and overlaps the changed package. No
+waiver covers that failure.
 
 ## Gate checklist
 
@@ -19,7 +23,7 @@ harness path, so criterion 3 cannot attribute or waive them.
 |---|---|---|---|
 | 1 | Review PASS present | **PASS** | `ga-20x17h` records `verdict: pass` for reviewed source `254dbabb5b`; it independently verified the identical reviewed tree, the ancestry-fix message, style, security, and targeted tests. |
 | 2 | Acceptance criteria met | **PASS** | The combined change pins real HOME only for `gc`/supervisor subprocess fixtures, re-isolates standalone `bd` subprocess HOME to the caller-owned directory, and tightens the empty-home guard. The two changed tests and three directly related tests all passed by name with zero skips. The evaluated commits cite `ga-vvnov6` and `ga-9lh4m0`, resolving the prior ancestry-scope failure. |
-| 3 | Tests pass | **FAIL** | The required 40-job local CI union completed **27 PASS / 13 FAIL jobs**. Ten failing top-level tests are in `test/integration`, the same package as the changed `integration_test.go`; nine use the exact beads#4566 bootstrap signature and one is the tracked external-host init timeout. The diff also changes shared `integrationEnv` HOME projection used by fixture subprocesses, so there is a plausible mechanism and package-path overlap. Attribution clauses 3 and 4 are unsatisfied. The mayor standing authorization on `ga-lpfjhc` explicitly excludes diffs that can touch store bootstrap, so no waiver applies. The failures are preserved below. `waiver_ref: none`. |
+| 3 | Tests pass | **FAIL — PARTIAL WAIVER** | The required 40-job local CI union completed **27 PASS / 13 FAIL jobs**. Nine `test/integration` failures carry the exact beads#4566 signature and are preserved as **FAIL — WAIVED** under the mayor's `ga-lpfjhc` standing authorization: the builder's recorded mechanism trace shows the diff replaces only `HOME`, while every affected fixture explicitly sets unchanged `GC_HOME`/`DOLT_ROOT_PATH`, so it cannot alter schema migration or store bootstrap. `TestDoltConfigWiringExternalHost` remains **FAIL**: it has the distinct tracked `ga-gajll3` timeout signature, lacks an exact-`origin/main` reproduction, and its `test/integration` package overlaps the diff. Attribution clauses (iii) and (iv) are therefore unsatisfied, and `ga-lpfjhc` cannot waive a different signature. `waiver_ref: ga-lpfjhc mayor ruling 2026-08-18 for the nine exact beads#4566 failures; none for TestDoltConfigWiringExternalHost`. |
 | 4 | No high-severity review findings open | **PASS** | `ga-20x17h` reports no style or security findings. One pre-existing low-severity fail-open branch coverage gap is explicitly non-blocking. Unresolved HIGH count: `0`. |
 | 5 | Final branch is clean | **PASS** | Before adding this record, the branch was clean and tracked `origin/deploy/ga-20x17h-gate`. `git diff --check`, affected formatting, `go build ./...`, `go vet ./...`, and integration-tagged vet all passed. Repository hooks resolve to `.githooks`. |
 | 6 | Branch diverges cleanly from main | **PASS** | Reviewed source `254dbabb5b` rebased without conflict onto `origin/main@7c817e0640`, producing `c0358b4fad`. An initial zsh source of the bash helper failed to load its push guard only after completing the clean local rebase and therefore did not push; the correct bash invocation then returned the documented no-op result because current main was already an ancestor. The exact candidate was subsequently pushed under the recorded non-diff fast-failure attribution. |
@@ -60,13 +64,15 @@ Related unchanged tests executed in the same focused command:
 
 `skip_justification`: not applicable — zero diff-owned skips.
 
-`waiver_ref`: none. The `ga-lpfjhc` standing authorization does not cover this
-same-package/shared-bootstrap-harness diff.
+`waiver_ref`: `ga-lpfjhc` mayor ruling 2026-08-18 covers the nine exact
+beads#4566 failures after the recorded condition-(b) mechanism trace. It does
+not cover `TestDoltConfigWiringExternalHost`, whose distinct timeout failure
+still has no waiver.
 
 ## Preserved full-union failures
 
-Criterion 3 is blocked by these `test/integration` failures because the
-candidate changes that package and its shared subprocess environment helper:
+The following exact beads#4566 failures are preserved as **FAIL — WAIVED**
+under `ga-lpfjhc`; they are not rewritten green:
 
 - `TestPersonalWorkFormulaCompileAndRun`
 - `TestAdoptPRFormulaRetriesTransientReviewerStep`
@@ -77,11 +83,12 @@ candidate changes that package and its shared subprocess environment helper:
 - `TestCleanInstallTutorialPath`
 - `TestGCLiveContract_BeadsAndEvents`
 - `TestHumaBinary_CityCreateAsync`
-- `TestDoltConfigWiringExternalHost`
 
-The first nine carry the exact `ga-lpfjhc` / gastownhall/beads#4566 signature;
-the last is tracked by `ga-gajll3`. Their trackers establish recurrence but do
-not erase the candidate's path overlap or plausible shared-harness mechanism.
+The remaining blocker is `TestDoltConfigWiringExternalHost`, tracked by
+`ga-gajll3`. Its tracker establishes recurrence, but no exact-base reproduction
+is recorded and the candidate changes the same package, so attribution clauses
+(iii) and (iv) remain unsatisfied. Because this is not a beads#4566 signature,
+the `ga-lpfjhc` standing authorization cannot waive it.
 
 Five additional failures are structurally outside the candidate and tracked:
 

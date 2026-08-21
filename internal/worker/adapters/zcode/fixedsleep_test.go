@@ -159,3 +159,81 @@ func TestAdapterWaitBudgetStaysAHangDetector(t *testing.T) {
 			adapterWaitBudget, 2*largestReplacedDeadline)
 	}
 }
+
+// TestAdapterHarnessHasNoSingleShotStatChecks guards adapter_test.go against
+// the flake class ga-b9lkux's chain (ga-uuzffa, ga-p2mybq) has kept
+// rediscovering one call site at a time: a single os.Stat immediately after
+// an async write (h.run, s.wait, a reset/adopt call) races the write it is
+// checking for — the same failure mode TestAdapterHarnessHasNoFixedWallClockSleeps
+// guards for a sleep, just without a sleep in the source for that test to
+// flag. waitForPathExists/waitForPathGone are this package's one sanctioned
+// way to observe a path's arrival or removal. Everything else that stats a
+// path directly — a same-instant negative assertion following code that
+// already synchronized on the event being checked, or a bespoke poll loop
+// whose failure message needs more than the helpers' static string — must
+// say so with a trailing "// guard-ack:bare-stat-ok <reason>" comment on the
+// call's own line, so the next reader — and this guard — can tell an
+// audited exception from an unreviewed reintroduction of the anti-pattern.
+func TestAdapterHarnessHasNoSingleShotStatChecks(t *testing.T) {
+	t.Parallel()
+
+	const src = "adapter_test.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, src, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", src, err)
+	}
+
+	ackedLines := map[int]bool{}
+	for _, group := range f.Comments {
+		for _, c := range group.List {
+			if strings.Contains(c.Text, "guard-ack:bare-stat-ok") {
+				ackedLines[fset.Position(c.Slash).Line] = true
+			}
+		}
+	}
+
+	allowedFuncs := map[string]bool{
+		"waitForPathExists": true,
+		"waitForPathGone":   true,
+	}
+
+	var violations []string
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || allowedFuncs[fn.Name.Name] {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Stat" {
+				return true
+			}
+			pkgIdent, ok := sel.X.(*ast.Ident)
+			if !ok || pkgIdent.Name != "os" {
+				return true
+			}
+			line := fset.Position(call.Pos()).Line
+			if ackedLines[line] {
+				return true
+			}
+			violations = append(violations, fmt.Sprintf("%s:%d: os.Stat call in %s outside waitForPathExists/waitForPathGone", src, line, fn.Name.Name))
+			return true
+		})
+	}
+
+	if len(violations) > 0 {
+		t.Fatalf("found os.Stat call(s) that bypass the package's shared wait helpers — this is the "+
+			"single-shot-check-after-async-write flake class ga-b9lkux's chain keeps rediscovering one "+
+			"call site at a time; route every existence/absence check through "+
+			"waitForPathExists/waitForPathGone (bounded by adapterWaitBudget), or if it is a reviewed "+
+			"exception (a same-instant negative assertion after an already-synchronized event, or a poll "+
+			"loop whose failure message needs more than a static string), mark it explicitly with a "+
+			"trailing \"// guard-ack:bare-stat-ok <reason>\" comment:\n%s",
+			strings.Join(violations, "\n"))
+	}
+}

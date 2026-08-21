@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -2331,6 +2332,19 @@ func TestControllerStatePrioritizesOnlyExactReadyRoutedWork(t *testing.T) {
 		{
 			name: "ready-excluded type",
 			work: beads.Bead{Title: "container", Type: "molecule", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			// #5250's agreement rule, at the EVENT reader. IsReadyCandidateForTier
+			// does not compensate for either of these: readyExcludeTypes has no
+			// "epic" and drops only the gc:session / order-tracking labels. Each
+			// one counted here is one seat minted for a row its own hook query is
+			// forbidden to serve.
+			name: "routed epic",
+			work: beads.Bead{Title: "routed epic", Type: "epic", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+		},
+		{
+			name: "routed bead parked on a dispatch hold",
+			work: beads.Bead{Title: "held work", Type: "task", Status: "open", Labels: []string{beadmeta.HoldMayorLabel}, Metadata: map[string]string{"gc.routed_to": "worker"}},
 		},
 		{
 			name: "unknown route",

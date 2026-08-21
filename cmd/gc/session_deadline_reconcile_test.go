@@ -539,3 +539,143 @@ func TestDetectorDeadlineRefusesD2IncapableProviderWithoutTreadmill(t *testing.T
 		t.Fatalf("D2-incapable provider enqueued %v; want zero enqueues and no treadmill", admitter.keys)
 	}
 }
+
+// A pin is a blocker for exactly ONE lifecycle timer.
+//
+// Main added "pinned" as a third lifecycleTimerBlockerInfo value and, in the
+// same change, narrowed it back out of the age timer (maxSessionAgeBlockerInfo,
+// session_reconciler.go:72). The reason is that a max-age stop is not a kill:
+// SleepPatch records state=asleep with sleep_reason=max_session_age and leaves
+// pin_awake alone, and ComputeAwakeSet's durable pin override re-wakes an asleep
+// pinned row on the next tick. So the stop IS the credential refresh the timer
+// exists to perform, and exempting it skips the refresh without saving the
+// session — permanently, because a pin never self-clears the way a hold or a
+// quarantine does.
+//
+// The keyed path took the unnarrowed blocker at both of its D-DEADLINE seams.
+// These three tests pin the per-timer split from both directions: the age
+// restart must still happen for a pinned row, and the idle kill must still not.
+
+// TestExactDeadlinePinnedSessionStillStopsForAge is the keyed handler's RED. It
+// covers both halves of the seam at once — the family guard
+// (exactSessionDeadlineStopCandidate) and the ladder's own blocker rung inside
+// decideExactSessionDeadline — because either one still taking the pin leaves
+// the session running past its age deadline.
+func TestExactDeadlinePinnedSessionStillStopsForAge(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h", StartCommand: "true"}}}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&bead)
+	env.setSessionMetadata(&bead, map[string]string{
+		"pin_awake":            "true",
+		"creation_complete_at": time.Now().UTC().Add(-6 * time.Hour).Format(time.RFC3339),
+	})
+	if err := provider.Start(t.Context(), "witness", runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if err := provider.SetMeta("witness", "GC_INSTANCE_TOKEN", "test-token"); err != nil {
+		t.Fatalf("set runtime token: %v", err)
+	}
+
+	mat := newMaxSessionAgeTracker()
+	mat.setConfig("witness", 5*time.Hour, 0)
+	cr := newExactDeadlineRuntime(t, env, provider, nil, mat, events.NewFake())
+
+	if outcome, err := cr.detectorAdmitFunc()(bead.ID, sessionStartAdmissionDeadline); err != nil || outcome == sessionStartAdmissionOverflow {
+		t.Fatalf("admitting deadline key: outcome=%q err=%v", outcome, err)
+	}
+
+	awaitCond(t, func() bool { return !provider.IsRunning("witness") }, "keyed max-age stop for a pinned row")
+	awaitCond(t, func() bool { return env.sessionInfo(bead.ID).SleepReason == "max-session-age" },
+		"durable max-session-age sleep reason for a pinned row")
+}
+
+// TestExactDeadlinePinnedSessionKeepsIdleExemption is the control that keeps the
+// narrowing honest. Dropping the blocker outright would pass the test above and
+// still be wrong: an operator's pin has to go on suppressing the idle kill,
+// which is the half of #4648 that survived review unchanged.
+func TestExactDeadlinePinnedSessionKeepsIdleExemption(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&bead)
+	env.setSessionMetadata(&bead, map[string]string{"pin_awake": "true"})
+	if err := provider.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+	cr := newExactDeadlineRuntime(t, env, provider, it, nil, events.NewFake())
+
+	if outcome, err := cr.detectorAdmitFunc()(bead.ID, sessionStartAdmissionDeadline); err != nil || outcome == sessionStartAdmissionOverflow {
+		t.Fatalf("admitting deadline key: outcome=%q err=%v", outcome, err)
+	}
+
+	if calls := provider.stopSnapshot(); len(calls) != 0 {
+		t.Fatalf("pinned row was idle-killed: %#v", calls)
+	}
+	if !provider.IsRunning("worker") {
+		t.Fatal("pinned row stopped running; the idle exemption is gone")
+	}
+}
+
+// TestDetectorDeadlinePinnedRowDefersIdleButRoutesMaxAge is the sweep's RED. The
+// detector captured the blocker ONCE per row and the shared closure applied it
+// to both arms, so a pinned row recorded deadline_deferred for max-age and
+// detectorAdmissionSourceFor — which only enqueues on TraceOutcomeStop — never
+// routed the stop. Both arms fire here, and they must disagree.
+func TestDetectorDeadlinePinnedRowDefersIdleButRoutesMaxAge(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MaxSessionAge: "5h"}}}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&bead)
+	now := time.Now().UTC()
+	env.setSessionMetadata(&bead, map[string]string{
+		"pin_awake":            "true",
+		"creation_complete_at": now.Add(-6 * time.Hour).Format(time.RFC3339),
+	})
+	if err := provider.Start(t.Context(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+	mat := newMaxSessionAgeTracker()
+	mat.setConfig("worker", 5*time.Hour, 0)
+	admitter := &recordingDetectorAdmitter{}
+	in := deadlineSweepInput(env, provider, env.sessionInfo(bead.ID), it, mat, now, admitter.admit)
+	result := detectSessionConditions(context.Background(), in)
+	routeDetectorConditions(in, &result)
+
+	idleDeferred, ageStop := false, false
+	for _, cond := range result.Conditions {
+		if cond.Family != detectorFamilyDeadline {
+			continue
+		}
+		switch cond.Site {
+		case TraceSiteReconcilerIdleTimeout:
+			if cond.Outcome == TraceOutcomeStop {
+				t.Fatalf("pinned row predicted an idle stop: %#v", cond)
+			}
+			idleDeferred = cond.Fields["blocker"] == "pinned"
+		case TraceSiteReconcilerMaxSessionAge:
+			if cond.Outcome != TraceOutcomeStop {
+				t.Fatalf("pinned row did not predict its age stop: %#v", cond)
+			}
+			ageStop = true
+		}
+	}
+	if !idleDeferred {
+		t.Fatalf("no traced pin deferral on the idle arm; conditions=%#v", result.Conditions)
+	}
+	if !ageStop {
+		t.Fatalf("no predicted max-age stop on a pinned row; conditions=%#v", result.Conditions)
+	}
+	if len(admitter.keys) != 1 || admitter.keys[0] != bead.ID {
+		t.Fatalf("max-age enqueues = %v, want exactly the pinned row's key", admitter.keys)
+	}
+}

@@ -524,7 +524,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolReuse(
 	if err != nil {
 		return routedWorkPoolReuseRefused, err
 	}
-	if !ready || controllerDemandRouteTarget(snapshot.Config, work, map[string]struct{}{lease.PoolTarget: {}}) != lease.PoolTarget {
+	if !ready || !demandServableForTemplate(snapshot.Config, work, lease.PoolTarget) {
 		return routedWorkPoolReuseRefused, nil
 	}
 	if busy {

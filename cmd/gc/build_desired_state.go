@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1843,27 +1842,6 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 // stamped before root routing switched to gc.routed_to.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
 	return routedToAndLegacyWorkflowCandidates(b)
-}
-
-// controllerDemandRouteTarget matches a work bead's routed-to candidates
-// against the pool's template set. Candidates are normalized through
-// agentutil.NormalizePoolRouteTarget before the membership check so a
-// gc.routed_to value stamped with a live instance suffix (e.g.
-// "hello-world/polecat-1") — whether written by gc sling's own write-side
-// normalization or by any other writer, such as a direct
-// `bd update --set-metadata` — still counts as demand for the base template.
-// Without this, an unnormalized instance-suffixed candidate never matches
-// group.templates (keyed by base template names) and the demand is silently
-// dropped, so the pool never scales up. The returned value is the normalized
-// template name, since callers use it as the counts/demand map key.
-func controllerDemandRouteTarget(cfg *config.City, b beads.Bead, templates map[string]struct{}) string {
-	for _, candidate := range controllerDemandRouteCandidates(b) {
-		normalized := agentutil.NormalizePoolRouteTarget(cfg, candidate)
-		if _, ok := templates[normalized]; ok {
-			return normalized
-		}
-	}
-	return ""
 }
 
 func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[string]bool {

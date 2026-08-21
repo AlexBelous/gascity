@@ -1052,18 +1052,23 @@ func detectDeadline(in detectorSweepInput, emit *detectorConditionSink, base det
 		return
 	}
 	// The durable blocker rung of DecideIdleTimeout / DecideMaxSessionAge is the
-	// only rung the sweep can evaluate: it reads held_until and quarantined_until
-	// off the row it already has. The pending-interaction and assigned-work rungs
+	// only rung the sweep can evaluate: it reads held_until, quarantined_until
+	// and pin_awake off the row it already has. The pending-interaction and
+	// assigned-work rungs
 	// are a provider probe and a reachable-store scan, so they stay handler-side
 	// with the rest of the ladder (§3b: "legacy pending-interaction deferral —
 	// probe-only signal, unpredicted"). A blocked row records its deferral for
 	// the parity join and is never enqueued, so the handler is never entered.
-	blocker := lifecycleTimerBlockerInfo(info, now)
-	deadline := func(site TraceSiteCode, reason TraceReasonCode, fields map[string]any) {
+	deadline := func(site TraceSiteCode, reason TraceReasonCode, maxAge bool, fields map[string]any) {
 		cond := base
 		cond.Family = detectorFamilyDeadline
 		cond.Site = site
-		if blocker != "" {
+		// Per ARM, not per row. The two timers take different blocker sets
+		// (deadlineTimerBlockerInfo), and capturing one verdict for the closure
+		// gives the age arm the idle ladder's pin exemption — which records
+		// deadline_deferred where a stop belongs, and detectorAdmissionSourceFor
+		// enqueues only on TraceOutcomeStop, so the age restart is never routed.
+		if blocker := deadlineTimerBlockerInfo(info, now, maxAge); blocker != "" {
 			cond.Reason = detectorReasonDeadlineDeferred
 			cond.Outcome = TraceOutcomeNoChange
 			cond.Fields = map[string]any{"predicted_effect": "none", "blocker": blocker, "deadline": string(reason)}
@@ -1076,7 +1081,7 @@ func detectDeadline(in detectorSweepInput, emit *detectorConditionSink, base det
 		emit.add(cond, true)
 	}
 	if in.Idle != nil && in.Idle.checkIdle(base.SessionName, template, in.Provider, now) {
-		deadline(TraceSiteReconcilerIdleTimeout, detectorReasonIdleTimeout, map[string]any{
+		deadline(TraceSiteReconcilerIdleTimeout, detectorReasonIdleTimeout, false, map[string]any{
 			"predicted_effect": "stop",
 			"sleep_reason":     string(sessionpkg.SleepReasonIdleTimeout),
 		})
@@ -1089,7 +1094,7 @@ func detectDeadline(in detectorSweepInput, emit *detectorConditionSink, base det
 		return
 	}
 	if in.MaxAge.shouldRestart(base.SessionName, template, completeAt, now) {
-		deadline(TraceSiteReconcilerMaxSessionAge, detectorReasonMaxSessionAge, map[string]any{
+		deadline(TraceSiteReconcilerMaxSessionAge, detectorReasonMaxSessionAge, true, map[string]any{
 			"predicted_effect": "stop",
 			"sleep_reason":     string(sessionpkg.SleepReasonMaxSessionAge),
 			"age_seconds":      int64(now.Sub(completeAt).Seconds()),
@@ -1394,7 +1399,13 @@ func detectWakeOrSleep(
 		// It cannot double-act: legacy already skips these rows, and the keyed
 		// admission chain blocks them again at the handler, so the refusal is a
 		// non-action on both sides.
-		if blocker := lifecycleTimerBlockerInfo(info, clk.Now()); blocker != "" {
+		//
+		// The TIMED blockers only (wakeBlockerInfo). Those are the two
+		// ComputeAwakeSet itself suppresses, which is what made this refusal a
+		// pure trace repair. A pin is the opposite — it is why ShouldWake is
+		// true on an asleep row — so taking it here would refuse the pin-revive
+		// wake instead of recording a skip legacy also performs.
+		if blocker := wakeBlockerInfo(info, clk.Now()); blocker != "" {
 			cond.Reason = detectorReasonWakeBlocked
 			cond.Outcome = TraceOutcomeSkipped
 			cond.Fields = map[string]any{"predicted_effect": "none", "wake_reason": decision.Reason, "blocker": blocker}

@@ -955,9 +955,15 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 		return
 	}
 	now := time.Now().UTC()
+	// AGREEMENT: IsReadyCandidateForTier is not the serving rules. Its exclude
+	// list has no "epic" and it drops only the gc:session / order-tracking
+	// labels, so a routed epic and a row on a dispatch hold both pass it — and
+	// neither is servable to the seat this event would mint.
 	if strings.TrimSpace(eventBead.Assignee) != "" ||
-		!beads.IsReadyCandidateForTier(eventBead, now, beads.TierBoth) ||
-		controllerDemandRouteTarget(cfg, eventBead, templates) == "" {
+		!beads.IsReadyCandidateForTier(eventBead, now, beads.TierBoth) {
+		return
+	}
+	if _, servable := demandServableForTemplates(cfg, eventBead, templates); !servable {
 		return
 	}
 
@@ -974,7 +980,7 @@ func (cs *controllerState) admitReadyRoutedWorkEvent(evt events.Event, stores []
 		if !ready || strings.TrimSpace(work.Assignee) != "" {
 			continue
 		}
-		if target := controllerDemandRouteTarget(cfg, work, templates); target != "" {
+		if target, servable := demandServableForTemplates(cfg, work, templates); servable {
 			policy := allocationPolicies[target].forSourceStore(cfg, allocationAgents[target], cs.cityPath, candidate.ref)
 			admit(readyRoutedWorkDemandContribution{
 				WorkID:              work.ID,

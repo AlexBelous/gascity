@@ -222,14 +222,22 @@ func exactSessionDeadlineTriggered(params exactSessionStartParams, info sessionp
 // exactSessionDeadlineStopCandidate is the seam's guard. A durable blocker
 // keeps the row out of the family entirely — a user-hold row belongs to the
 // suspend arm above, and a quarantined row belongs to nobody.
+//
+// The blocker is asked PER FIRED TIMER, not once for the row, because the two
+// timers do not take the same set (deadlineTimerBlockerInfo). A row-wide guard
+// lets the idle ladder's pin exemption swallow the age restart as well, and the
+// age restart is the credential refresh — so one unblocked deadline is enough to
+// admit the row and let decideExactSessionDeadline apply each arm's own rung.
 func exactSessionDeadlineStopCandidate(params exactSessionStartParams, info sessionpkg.Info, response sessionpkg.PersistedResponse, now time.Time) bool {
 	if response.Revision == 0 || (params.IdleTracker == nil && params.MaxSessionAgeTracker == nil) {
 		return false
 	}
-	if lifecycleTimerBlockerInfo(info, now) != "" {
-		return false
+	for _, deadline := range exactSessionDeadlineTriggered(params, info, now) {
+		if deadlineTimerBlockerInfo(info, now, deadline.MaxAge) == "" {
+			return true
+		}
 	}
-	return len(exactSessionDeadlineTriggered(params, info, now)) > 0
+	return false
 }
 
 // reconcileExactSessionDeadlineStop stops one over-deadline session by exact
@@ -369,7 +377,7 @@ func decideExactSessionDeadline(
 			decide = sessionpkg.DecideMaxSessionAge
 			hasAssignedWork = sessionHasOpenAssignedWorkForReachableStore
 		}
-		facts := sessionpkg.TimerFacts{Triggered: true, Blocker: lifecycleTimerBlockerInfo(info, now)}
+		facts := sessionpkg.TimerFacts{Triggered: true, Blocker: deadlineTimerBlockerInfo(info, now, deadline.MaxAge)}
 		dec := decide(facts)
 		for dec.Action == sessionpkg.TimerActionGatherPending ||
 			dec.Action == sessionpkg.TimerActionGatherAssignedWork ||

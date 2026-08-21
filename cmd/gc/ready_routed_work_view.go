@@ -21,8 +21,9 @@ import (
 //
 // PoolTarget is the resolved pool template — the same resolution
 // admitReadyRoutedWorkEvent performs for event-carried work — and is empty for a
-// ready bead no pool template answers for. Those beads stay in the view because
-// their appearance and disappearance still moves named-session and
+// ready bead no pool template answers for, or that a worker for that template
+// would not be served (demand_serve_predicate.go). Those beads stay in the view
+// because their appearance and disappearance still moves named-session and
 // control-dispatcher demand; only the enqueue is target-gated.
 type readyRoutedWorkEntry struct {
 	SourceStore string
@@ -219,10 +220,16 @@ func (cr *CityRuntime) readReadyRoutedWorkView() readyRoutedWorkView {
 			return ready[i].ID < ready[j].ID
 		})
 		for _, bead := range ready {
+			// AGREEMENT: resolve a target only for a row a worker for that
+			// template would actually be served. A routed epic or a row parked
+			// on a dispatch hold is not capacity demand — enqueueing it mints a
+			// seat whose own hook query reads empty, drains, and leaves the row
+			// exactly as it found it. See demand_serve_predicate.go.
+			target, _ := demandServableForTemplates(cfg, bead, templates)
 			row := readyRoutedWorkEntry{
 				SourceStore: entry.ref,
 				WorkID:      bead.ID,
-				PoolTarget:  controllerDemandRouteTarget(cfg, bead, templates),
+				PoolTarget:  target,
 				Assigned:    strings.TrimSpace(bead.Assignee) != "",
 				Status:      bead.Status,
 				Type:        bead.Type,

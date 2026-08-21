@@ -285,11 +285,25 @@ func TestDetectorRefusesQuarantinedWakeTargetWithATrace(t *testing.T) {
 		name        string
 		quarantined string
 		held        string
+		pinAwake    string
+		wakeReason  string
 		wantBlocker string
 	}{
 		{name: "quarantine", quarantined: now.Add(time.Hour).Format(time.RFC3339), wantBlocker: "quarantine"},
 		{name: "hold", held: now.Add(time.Hour).Format(time.RFC3339), wantBlocker: "user_hold"},
 		{name: "expired quarantine routes", quarantined: now.Add(-time.Hour).Format(time.RFC3339)},
+		{
+			// The pin is not a blocker HERE, and refusing on it inverts what a
+			// pin means. This guard was written when the only blockers were
+			// user_hold and quarantine, both of which ComputeAwakeSet forces
+			// ShouldWake=false for, so it was unreachable. ComputeAwakeSet has
+			// no pin suppression at all — its durable pin override SETS
+			// ShouldWake=true with Reason="pin" for an asleep pinned row — so
+			// ShouldWake && blocker=="pinned" is reachable for exactly the
+			// pin-revive case the override exists to serve. Refusing it turns
+			// `gc session pin` from "always keep awake" into "never restart".
+			name: "pin revives rather than blocks", pinAwake: "true", wakeReason: "pin",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			info := sessionpkg.Info{
@@ -299,11 +313,16 @@ func TestDetectorRefusesQuarantinedWakeTargetWithATrace(t *testing.T) {
 				MetadataState:       string(sessionpkg.StateAsleep),
 				QuarantinedUntil:    test.quarantined,
 				HeldUntil:           test.held,
+				PinAwake:            test.pinAwake,
 			}
 			base := detectorCondition{SessionID: info.ID, SessionName: info.SessionNameMetadata, Template: "worker"}
 			emit := newDetectorConditionSink(false)
 			in := poolFillSweepInput(nil, nil, nil, nil)
-			awake := map[string]AwakeDecision{"worker": {ShouldWake: true, Reason: "assigned-work"}}
+			wakeReason := test.wakeReason
+			if wakeReason == "" {
+				wakeReason = "assigned-work"
+			}
+			awake := map[string]AwakeDecision{"worker": {ShouldWake: true, Reason: wakeReason}}
 
 			detectWakeOrSleep(in, emit, base, info, awake, nil, detectorLivenessBits{}, nil, &clock.Fake{Time: now})
 

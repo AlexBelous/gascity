@@ -697,7 +697,7 @@ func (cr *CityRuntime) reconcileRoutedWorkPoolAllocation(ctx context.Context, hi
 	}
 	policy := newPoolAllocationShadowPolicy(snapshot.Config, agent, namedTemplates).
 		forSourceStore(snapshot.Config, agent, snapshot.CityPath, hint.SourceStore)
-	if target := controllerDemandRouteTarget(snapshot.Config, work, map[string]struct{}{hint.PoolTarget: {}}); target != hint.PoolTarget {
+	if !demandServableForTemplate(snapshot.Config, work, hint.PoolTarget) {
 		return routedWorkPoolAllocationResult{}, nil
 	}
 	if !policy.supported() {
@@ -980,7 +980,7 @@ func (cr *CityRuntime) authorizeRoutedWorkPoolStart(
 	if err != nil {
 		return false, err
 	}
-	if !ready || controllerDemandRouteTarget(snapshot.Config, work, map[string]struct{}{lease.PoolTarget: {}}) != lease.PoolTarget {
+	if !ready || !demandServableForTemplate(snapshot.Config, work, lease.PoolTarget) {
 		return false, nil
 	}
 	observation, occupied := cr.poolMembershipShadow.observeOccupiedMember(lease.PoolTarget, lease.SessionID)

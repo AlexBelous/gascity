@@ -438,6 +438,12 @@ type detectorSweepResult struct {
 	// per-key guard whose whole condition is provider I/O can decide whether to
 	// pay a probe of its own instead of probing on every admission.
 	Liveness map[string]detectorLivenessBits
+	// WakeEvaluations is the sweep's wake verdict per bead ID — the same
+	// awakeSetToWakeEvals projection the fleet drain scan reads. It is published
+	// for the keyed D-DRAIN advance's third cancel arm, whose condition ("the
+	// session reacquired ANY wake reason") is a fleet verdict no per-key
+	// predicate can re-derive (ga-f7v2ft.179).
+	WakeEvaluations map[string]wakeEvaluation
 	// FamilyOverflow counts, per family, the conditions dropped past the
 	// per-family record budget. recordDetectorShadow turns each entry into one
 	// summary record so a truncated family is visible rather than silent.
@@ -525,6 +531,17 @@ type detectorSweepInput struct {
 	// which makes the guard decline — level-triggered, so the next sweep
 	// re-detects.
 	PublishLiveness func(map[string]detectorLivenessBits)
+	// PublishWakeEvaluations hands this sweep's wake verdicts back to the runtime
+	// so the keyed D-DRAIN advance's third cancel arm can read the same fleet
+	// answer the legacy drain scan reads (ga-f7v2ft.179). It carries
+	// PublishLiveness's restriction for PublishLiveness's reason: only the
+	// patrol/boot call site supplies one, because a NARROWED sweep would publish
+	// wake verdicts for a subset of the fleet and a row absent from that subset
+	// reads as "no reason to be awake" — which is precisely the force-stop this
+	// arm exists to prevent. A nil hook publishes nothing, which declines the arm
+	// and leaves the drain to its other arms; the condition is level-triggered,
+	// so the next sweep re-offers it.
+	PublishWakeEvaluations func(map[string]wakeEvaluation)
 	// AdmitWake is D-WAKE's own admission entry (WD.10a). Every other acting
 	// family hands its key to the bare Admit above, because its handler
 	// re-derives the condition from the row. A wake cannot: a wake IS a start,
@@ -633,6 +650,7 @@ func detectSessionConditions(ctx context.Context, in detectorSweepInput) detecto
 	}
 
 	awake, wakeEvals := detectorAwakeSet(in, known, liveness, now)
+	result.WakeEvaluations = wakeEvals
 
 	namedIdentityRows := make(map[string][]sessionpkg.Info)
 	var idleProbeCandidates []detectorCondition
@@ -898,6 +916,9 @@ func detectorAwakeSet(in detectorSweepInput, rows []sessionpkg.ReconcileSession,
 	detectorFillAwakeConfig(&input, in.Cfg, in.CityPath)
 	detectorFillAwakeWork(&input, in.AssignedWorkBeads, in.ReadyAssignedFlags)
 	detectorFillAwakeSessions(&input, in.Cfg, infos, now)
+	// The one derivation the legacy bridge also calls, once its three inputs —
+	// NamedSessions, WorkSet, SessionBeads — are all populated (ga-f7v2ft.180).
+	fillAwakeNamedSessionWorkQueue(&input)
 	decisions := ComputeAwakeSet(input)
 	return decisions, awakeSetToWakeEvals(decisions, input.SessionBeads)
 }
@@ -2209,6 +2230,9 @@ func runDetectorSweep(ctx context.Context, cycle *sessionReconcilerTraceCycle, i
 	// handled against the observation this sweep made, not the previous one.
 	if in.PublishLiveness != nil {
 		in.PublishLiveness(result.Liveness)
+	}
+	if in.PublishWakeEvaluations != nil {
+		in.PublishWakeEvaluations(result.WakeEvaluations)
 	}
 	routeDetectorConditions(in, &result)
 	recordDetectorShadow(cycle, in, result)

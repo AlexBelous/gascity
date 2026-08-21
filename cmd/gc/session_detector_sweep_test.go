@@ -812,3 +812,116 @@ func detectorFunctionBody(src, header string) string {
 	}
 	return rest[:end]
 }
+
+// namedWorkQuerySweepInput builds the sweep over ONE on_demand named session
+// whose canonical bead is in the given durable state. workSet carries the
+// backing template's work_query verdict; nil is the withdrawn-signal control.
+//
+// The row is idle past the on-demand timeout, which is what makes the fixture
+// the field's: a running on_demand named session is held awake by
+// "on-demand:running" until that window elapses, so only past it does the
+// work_query signal decide between waking the row and draining it.
+func namedWorkQuerySweepInput(cfg *config.City, sp runtime.Provider, name, state string, workSet map[string]bool, now time.Time) detectorSweepInput {
+	info := sessionpkg.Info{
+		ID:                      "mc-session-1",
+		Template:                "rig-a/worker",
+		SessionName:             name,
+		SessionNameMetadata:     name,
+		MetadataState:           state,
+		State:                   sessionpkg.State(state),
+		ConfiguredNamedSession:  true,
+		ConfiguredNamedIdentity: "rig-a/refinery",
+		CreatedAt:               now.Add(-time.Hour),
+		DetachedAt:              now.Add(-(defaultOnDemandIdleTimeout + time.Minute)).Format(time.RFC3339),
+	}
+	return detectorSweepInput{
+		CityPath: "test-city",
+		CityName: cfg.EffectiveCityName(),
+		Cfg:      cfg,
+		Provider: sp,
+		Rows:     []sessionpkg.ReconcileSession{{Info: info}},
+		Desired:  map[string]TemplateParams{name: {SessionName: name, TemplateName: "rig-a/worker"}},
+		WorkSet:  workSet,
+		Clock:    &clock.Fake{Time: now},
+		Trigger:  "patrol",
+	}
+}
+
+func namedWorkQuerySweepFamilies(result detectorSweepResult, family detectorFamily) []detectorCondition {
+	var out []detectorCondition
+	for _, cond := range result.Conditions {
+		if cond.Family == family {
+			out = append(out, cond)
+		}
+	}
+	return out
+}
+
+// TestDetectorRoutesNamedWorkQueryDemandToWakeNotSleep is ga-f7v2ft.180's
+// routing RED: the consequence of the missing NamedSessionWorkQ signal is not a
+// quieter trace, it is the wrong family. An on_demand named session whose
+// backing template matched work_query is a D-WAKE start candidate when its
+// runtime is down and a row D-SLEEP must leave alone when it is up. Without the
+// signal ComputeAwakeSet answers ShouldWake=false for both, so the asleep row
+// raises nothing at all and the live row is proposed for a drain the legacy tick
+// would never have started.
+//
+// Each leg carries its withdrawn-signal control: the SAME row with an empty
+// WorkSet must take the opposite branch. Without it a wake assertion that fired
+// for any other reason, or a no-drain assertion on a row nothing was ever going
+// to drain, would both read as proof.
+func TestDetectorRoutesNamedWorkQueryDemandToWakeNotSleep(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		ResolvedWorkspaceName: "gc-test",
+		Agents: []config.Agent{
+			{Name: "worker", Scope: "rig", WorkQuery: "echo 1"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "refinery", Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"},
+		},
+	}
+	name := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "rig-a/refinery")
+	matched := map[string]bool{"rig-a/worker": true}
+
+	t.Run("down runtime becomes a wake start candidate", func(t *testing.T) {
+		sp := runtime.NewFake()
+		result := detectSessionConditions(context.Background(), namedWorkQuerySweepInput(cfg, sp, name, "asleep", matched, now))
+		wake := namedWorkQuerySweepFamilies(result, detectorFamilyWake)
+		if len(wake) != 1 || wake[0].Outcome != TraceOutcomeStartCandidate {
+			t.Fatalf("wake conditions = %+v, want exactly one start candidate.\n"+
+				"A named on_demand session with matched work_query is the legacy tick's work-query wake (ga-f7v2ft.180).", wake)
+		}
+	})
+
+	t.Run("control: down runtime with no work_query raises no wake", func(t *testing.T) {
+		sp := runtime.NewFake()
+		result := detectSessionConditions(context.Background(), namedWorkQuerySweepInput(cfg, sp, name, "asleep", nil, now))
+		if wake := namedWorkQuerySweepFamilies(result, detectorFamilyWake); len(wake) != 0 {
+			t.Fatalf("wake conditions = %+v, want none: an on_demand named session with no demand has no reason to be awake", wake)
+		}
+	})
+
+	t.Run("live runtime is left alone", func(t *testing.T) {
+		sp := runtime.NewFake()
+		if err := sp.Start(t.Context(), name, runtime.Config{}); err != nil {
+			t.Fatalf("start runtime for %q: %v", name, err)
+		}
+		result := detectSessionConditions(context.Background(), namedWorkQuerySweepInput(cfg, sp, name, "active", matched, now))
+		if sleep := namedWorkQuerySweepFamilies(result, detectorFamilySleep); len(sleep) != 0 {
+			t.Fatalf("sleep conditions = %+v, want none.\n"+
+				"The row the legacy tick keeps awake for work-query must not be proposed for a drain (ga-f7v2ft.180).", sleep)
+		}
+	})
+
+	t.Run("control: live runtime with no work_query is a sleep candidate", func(t *testing.T) {
+		sp := runtime.NewFake()
+		if err := sp.Start(t.Context(), name, runtime.Config{}); err != nil {
+			t.Fatalf("start runtime for %q: %v", name, err)
+		}
+		result := detectSessionConditions(context.Background(), namedWorkQuerySweepInput(cfg, sp, name, "active", nil, now))
+		if sleep := namedWorkQuerySweepFamilies(result, detectorFamilySleep); len(sleep) == 0 {
+			t.Fatal("sleep conditions = none, want the no-wake row raised: without this the live-runtime leg above proves nothing")
+		}
+	})
+}

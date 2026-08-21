@@ -679,3 +679,193 @@ func TestDetectorDeadlinePinnedRowDefersIdleButRoutesMaxAge(t *testing.T) {
 		t.Fatalf("max-age enqueues = %v, want exactly the pinned row's key", admitter.keys)
 	}
 }
+
+// seedPendingIdleDeadlineRow seeds the ONE row that reaches DecideIdleTimeout's
+// PendingYes rung: a live, desired session past its idle deadline with a
+// structured interaction outstanding. That rung is the only producer of
+// TimerDecision.CancelDrain and TimerDecision.SkipWakePass
+// (internal/session/lifecycle_timers.go), so it is the only fixture that can
+// exercise the two fields the keyed arm does not read (ga-f7v2ft.181).
+func seedPendingIdleDeadlineRow(t *testing.T, env *reconcilerTestEnv) (*unattendedStopProvider, beads.Bead, exactSessionStartParams) {
+	t.Helper()
+	const name = "worker"
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: name, StartCommand: "true"}},
+	}
+	provider := &unattendedStopProvider{Fake: env.sp}
+	if err := provider.Start(t.Context(), name, runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	provider.SetPendingInteraction(name, &runtime.PendingInteraction{})
+	bead := env.createSessionBead(name, name)
+	env.markSessionActive(&bead)
+
+	it := newFakeIdleTracker()
+	it.idle[name] = true
+	statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(env.store)
+	params := exactSessionStartParams{
+		Generation: 1, CityPath: "test-city", CityName: "test-city",
+		Config: env.cfg, Provider: provider, Store: env.store,
+		StatusWriter: statusWriter, StatusWriterError: statusWriterErr,
+		Recorder: events.Discard, RolloutMode: rollout.Require,
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		IdleTracker:         it,
+		DrainTracker:        env.dt,
+		DrainOps:            newDrainOps(provider),
+		DesiredSessionNames: func() map[string]bool { return map[string]bool{name: true} },
+	}
+	return provider, bead, params
+}
+
+// TestKeyedDeadlineCancelDrainIsUnreachableByConstruction is ga-f7v2ft.181's
+// CancelDrain half, asserted rather than assumed.
+//
+// DecideIdleTimeout's PendingYes rung sets CancelDrain, and the keyed arm never
+// reads it. That is safe only because reconcileExactSessionDeadlineStop yields
+// the whole row the moment params.DrainTracker holds an entry for it — and it
+// does so BEFORE decideExactSessionDeadline runs, which is the only caller of
+// that ladder in the tree. So wherever a CancelDrain=true decision can exist,
+// there is no drain to cancel, and legacy's own consumer
+// (cancelSessionDrainInfo → cancelSessionDrainIfInfo) returns false on a tracker
+// with no entry for the key.
+//
+// Both legs are needed. The first proves the field IS produced here — an
+// unreachable rung would make the whole exemption vacuous. The second proves the
+// guard, not some unrelated refusal, is what withholds the row: the SAME fixture
+// with a tracked drain must fail DIFFERENTLY, by yielding instead of deferring.
+func TestKeyedDeadlineCancelDrainIsUnreachableByConstruction(t *testing.T) {
+	t.Run("the rung fires and there is nothing to cancel", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		_, bead, params := seedPendingIdleDeadlineRow(t, env)
+		info := env.sessionInfo(bead.ID)
+
+		decision, _, ok := decideExactSessionDeadline(params, info, env.clk, env.clk.Now().UTC())
+		if ok {
+			t.Fatalf("decision = %+v, want the pending-interaction defer rather than a stop", decision)
+		}
+		if !decision.CancelDrain || !decision.SkipWakePass {
+			t.Fatalf("decision = %+v, want CancelDrain and SkipWakePass set.\n"+
+				"If this rung stopped producing them the exemption is vacuous and must be re-derived, not kept.", decision)
+		}
+		if params.DrainTracker.get(bead.ID) != nil {
+			t.Fatal("a drain was tracked for a row the handler would have yielded; the guard's premise does not hold")
+		}
+		if cancelSessionDrainInfo(info, params.Provider, params.DrainTracker) {
+			t.Fatal("legacy's own consumer canceled something here; the keyed arm's omission is then a real dropped effect")
+		}
+	})
+
+	t.Run("a tracked drain yields the row before the ladder runs", func(t *testing.T) {
+		env := newReconcilerTestEnv()
+		provider, bead, params := seedPendingIdleDeadlineRow(t, env)
+		now := env.clk.Now()
+		params.DrainTracker.set(bead.ID, &drainState{
+			startedAt:  now.Add(-10 * time.Second),
+			deadline:   now.Add(defaultDrainTimeout),
+			reason:     "idle",
+			generation: 1,
+		})
+		info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+		if err != nil {
+			t.Fatalf("authoritative read: %v", err)
+		}
+
+		owner, err := reconcileExactSessionDeadlineStop(t.Context(), sessionStartAdmission{
+			SessionID: bead.ID, Source: sessionStartAdmissionDeadline, Version: 3,
+		}, params, info, response, env.clk)
+		if err == nil {
+			t.Fatal("the handler ran the ladder on a row carrying an active drain; the CancelDrain guard is not total")
+		}
+		if owner != exactSessionStartKeyedOwner {
+			t.Fatalf("owner = %v, want keyed under rollout.Require", owner)
+		}
+		if params.DrainTracker.get(bead.ID) == nil {
+			t.Fatal("the yield canceled the drain; advancing a drain is D-DRAIN's, not this family's")
+		}
+		if !provider.IsRunning("worker") {
+			t.Fatal("the yield stopped the runtime")
+		}
+	})
+}
+
+// TestKeyedDeadlineSkipWakePassIsStructural is ga-f7v2ft.181's SkipWakePass
+// half. Legacy's `continue` withholds the session from that tick's wake/sleep
+// pass; the keyed handler has no wake pass of its own, so the equivalent
+// guarantee has to come from whatever decides that no OTHER family drains the
+// row. Two independent things do, and the three legs below take them apart one
+// variable at a time:
+//
+//	deadline fires + pending  → D-DEADLINE claims the key (it sits above D-SLEEP
+//	                            in reconcileExactSessionDetectorFamily), so the
+//	                            sleep family never runs. The decision carrying
+//	                            SkipWakePass can only be produced inside
+//	                            reconcileExactSessionDeadlineStop, which only runs
+//	                            once that claim has happened, so the withholding is
+//	                            total for the dispatch — and checkIdle is a pure
+//	                            read, so the claim is stable across dispatches
+//	                            within a tick.
+//	deadline withdrawn        → D-SLEEP takes the row and DEFERS on A6 active use
+//	  + pending                 (exactSessionActiveUseDeferralReason →
+//	                            "pending_interaction"). The protection survives
+//	                            even if the claim ordering ever changed.
+//	both withdrawn            → D-SLEEP drains. Without this the two legs above
+//	                            would be satisfied by a row nothing was ever going
+//	                            to drain.
+func TestKeyedDeadlineSkipWakePassIsStructural(t *testing.T) {
+	seed := func(t *testing.T, deadlineFires, pending bool) (*unattendedStopProvider, beads.Bead, exactSessionStartParams) {
+		t.Helper()
+		env := newReconcilerTestEnv()
+		provider, bead, params := seedPendingIdleDeadlineRow(t, env)
+		env.setSessionMetadata(&bead, map[string]string{"sleep_intent": sessionSleepIntentIdleStopPending})
+		if !deadlineFires {
+			it, ok := params.IdleTracker.(*fakeIdleTracker)
+			if !ok {
+				t.Fatalf("IdleTracker = %T, want the fixture's fake", params.IdleTracker)
+			}
+			it.idle["worker"] = false
+		}
+		if !pending {
+			provider.SetPendingInteraction("worker", nil)
+		}
+		info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+		if err != nil {
+			t.Fatalf("authoritative read: %v", err)
+		}
+		if !exactSessionSleepDrainCandidate(params, info, response, env.clk) {
+			t.Fatal("the fixture is not a D-SLEEP candidate, so nothing here proves anything withheld it")
+		}
+		handled, owner, err := reconcileExactSessionDetectorFamily(t.Context(), sessionStartAdmission{
+			SessionID: bead.ID, Source: sessionStartAdmissionDeadline, Version: 3,
+		}, params, info, response, env.clk)
+		if !handled || err != nil || owner != exactSessionStartKeyedOwner {
+			t.Fatalf("dispatch: handled=%v owner=%v err=%v", handled, owner, err)
+		}
+		return provider, bead, params
+	}
+
+	t.Run("a fired deadline claims the row above the sleep family", func(t *testing.T) {
+		provider, bead, params := seed(t, true, true)
+		if state := params.DrainTracker.get(bead.ID); state != nil {
+			t.Fatalf("drain = %+v: the sleep family drained a row the idle ladder deferred for a pending interaction.\n"+
+				"D-DEADLINE must claim the row above D-SLEEP, which is what legacy's SkipWakePass buys (ga-f7v2ft.181).", state)
+		}
+		if !provider.IsRunning("worker") {
+			t.Fatal("the pending-interaction defer stopped the runtime")
+		}
+	})
+
+	t.Run("without the deadline the sleep family still defers on the pending interaction", func(t *testing.T) {
+		_, bead, params := seed(t, false, true)
+		if state := params.DrainTracker.get(bead.ID); state != nil {
+			t.Fatalf("drain = %+v, want the A6 active-use deferral: a person is waiting on a prompt", state)
+		}
+	})
+
+	t.Run("control: with neither the deadline nor the interaction, the row drains", func(t *testing.T) {
+		_, bead, params := seed(t, false, false)
+		if params.DrainTracker.get(bead.ID) == nil {
+			t.Fatal("the sleep family never drains this fixture, so the two legs above withhold nothing")
+		}
+	})
+}

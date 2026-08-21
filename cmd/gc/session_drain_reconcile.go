@@ -190,6 +190,29 @@ func reconcileExactSessionDrainAdvance(
 		}
 	}
 
+	// Cancel arm 3 — the session reacquired SOME reason to be awake. Arms 1 and 2
+	// cover WakePending and WakeWork; this one covers the other seven reasons in
+	// the vocabulary (config, create, session, keep-warm, attached, wait, pin),
+	// which is why it cannot be a per-key predicate: "any wake reason" is a fleet
+	// verdict over pool counts, named and routed demand and the ready-wait set,
+	// exactly the shape D-ORPHAN's undesiredness takes. The handler therefore
+	// reads the sweep's own published projection rather than re-deriving it, and
+	// an absent view or an absent key declines — the fleet scan's behavior for a
+	// row missing from wakeEvals.
+	//
+	// It sits ABOVE the acknowledgement discovery for the reason the fleet scan
+	// puts it above its timeout: a session someone has re-engaged must never be
+	// carried into the stop leg. The cancel itself is the shared library's
+	// (cancelSessionDrainInfo), the same one arms 1 and 2 route through, so the
+	// clear-ack/clear-probe/retire sequence has one implementation.
+	if drainReasonCancelable(state.reason) && exactSessionDrainReacquiredWake(params, info.ID) {
+		if cancelSessionDrainInfo(info, params.Provider, params.DrainTracker) {
+			recordExactSessionDrainTrace(params, admission, info, state.reason,
+				TraceSiteDrainCancel, TraceReasonCode(state.reason), TraceOutcomeCancel, 0, true, nil)
+			return exactSessionStartKeyedOwner, nil
+		}
+	}
+
 	// Handler-side ack discovery. This single GetMeta is the read the sweep
 	// refuses to pay fleet-wide, and it is what lets detection stay zero-read.
 	acked, ackErr := params.DrainOps.isDrainAcked(name)
@@ -291,6 +314,25 @@ func reconcileExactSessionDrainAdvance(
 	recordExactSessionDrainTrace(params, admission, info, state.reason,
 		TraceSiteReconcilerDrainAck, TraceReasonCode(state.reason), TraceOutcomeNoChange, 0, false, nil)
 	return exactSessionStartKeyedOwner, nil
+}
+
+// exactSessionDrainReacquiredWake answers the fleet half of D-DRAIN's third
+// cancel arm for one key: does the tick's own wake evaluation give this session a
+// reason to be awake?
+//
+// It is the exact predicate the fleet scan applies inline
+// (`eval, ok := wakeEvals[info.ID]; ok && len(eval.Reasons) > 0`), read off the
+// projection the detector sweep published for the same cycle. Everything
+// missing — no accessor, no published view, no entry for the key — answers false,
+// which declines the cancel and leaves the drain to its remaining arms. That is
+// the fleet scan's own answer for a row its wakeEvals does not carry, and it is
+// the direction that cannot invent a rescue for a session nothing wants awake.
+func exactSessionDrainReacquiredWake(params exactSessionStartParams, sessionID string) bool {
+	if params.SessionWakeEvaluations == nil {
+		return false
+	}
+	eval, ok := params.SessionWakeEvaluations()[sessionID]
+	return ok && len(eval.Reasons) > 0
 }
 
 // rereadExactSessionDrainRow re-reads the authoritative row and fences it on the

@@ -274,10 +274,13 @@ func TestTimerDecisionFieldsAreConsumedByEveryLadderArm(t *testing.T) {
 		},
 		"session_deadline_reconcile.go:decideExactSessionDeadline[DecideAssignedWorkExhausted+DecideIdleTimeout+DecideMaxSessionAge]": {
 			"TraceOutcome": "recordExactSessionDeadlineTrace takes the whole decision and reads it through timerTraceCodes",
-			// ga-f7v2ft.176: the keyed arm drops both pending-interaction
-			// side effects. Masked today, not asserted.
-			"CancelDrain":  "ga-f7v2ft.176: the keyed arm yields the key when a legacy drain is tracked (session_deadline_reconcile.go:274), so the cancel is legacy's; masked, not asserted",
-			"SkipWakePass": "ga-f7v2ft.176: the keyed handler has no wake pass to skip — it returns after the trace; masked, not asserted",
+			// ga-f7v2ft.181 adjudicated both pending-interaction side effects:
+			// each is UNREACHABLE-as-effect for this family, and each is now
+			// asserted rather than assumed. Consuming them at the keyed site
+			// would be dead code, so the exemption is the honest record — but
+			// only because a test fails when its premise stops holding.
+			"CancelDrain":  "ga-f7v2ft.181: PROVED unreachable-as-effect. reconcileExactSessionDeadlineStop yields the row whenever DrainTracker holds an entry for it, and it does so BEFORE decideExactSessionDeadline — its only caller — so wherever CancelDrain can be set there is no drain to cancel and legacy's own cancelSessionDrainInfo returns false. Asserted by TestKeyedDeadlineCancelDrainIsUnreachableByConstruction, including that the rung still fires (a vacuous exemption fails there too)",
+			"SkipWakePass": "ga-f7v2ft.181: PROVED structurally satisfied. The dispatch switch claims a fired-deadline row for D-DEADLINE above D-SLEEP so the draining family never runs on the key, and D-SLEEP independently defers a ready pending interaction on its A6 active-use rung. Asserted by TestKeyedDeadlineSkipWakePassIsStructural, whose third leg drains the same fixture once both are withdrawn",
 			"SleepReason":  "read at the call site (persistExactSessionDeadlineSleep via SleepPatch), outside decideExactSessionDeadline's block",
 		},
 	}
@@ -309,20 +312,22 @@ func TestTimerDecisionFieldsAreConsumedByEveryLadderArm(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // awakeInputBuilders are the two field-by-field constructions of AwakeInput:
-// the legacy tick's bridge and the detector sweep's copy. Each entry lists the
-// builder plus the helpers it delegates population to.
+// the legacy tick's bridge and the detector sweep's copy. Each entry names the
+// builder's ENTRY function only. The helpers each one delegates population to —
+// the detector's three Fill passes, and the shared
+// fillAwakeNamedSessionWorkQueue derivation both call (ga-f7v2ft.180) — are
+// discovered from the call graph rather than declared here, so a builder that
+// stops CALLING a shared derivation goes red instead of continuing to claim its
+// fields by listing it.
 var awakeInputBuilders = map[string][]string{
 	"legacy":   {"buildAwakeInputFromReconciler"},
-	"detector": {"detectorAwakeSet", "detectorFillAwakeConfig", "detectorFillAwakeWork", "detectorFillAwakeSessions"},
+	"detector": {"detectorAwakeSet"},
 }
 
 // awakeInputFieldExemptions records a field one builder populates and the other
-// deliberately does not, with the reason.
-var awakeInputFieldExemptions = map[string]map[string]string{
-	"detector": {
-		"NamedSessionWorkQ": "ga-f7v2ft.177: LIVE DIVERGENCE, not a design choice — the detector never carries the on_demand named-session work_query signal, so ComputeAwakeSet answers ShouldWake=false where the legacy tick answers work-query",
-	},
-}
+// deliberately does not, with the reason. Empty today: every field one builder
+// sets, the other sets too.
+var awakeInputFieldExemptions = map[string]map[string]string{}
 
 // TestAwakeInputBuilderTwinsPopulateTheSameFields ties the detector's AwakeInput
 // construction to the legacy bridge's. Both hand the SAME pure function
@@ -347,8 +352,10 @@ func TestAwakeInputBuilderTwinsPopulateTheSameFields(t *testing.T) {
 			if decl == nil {
 				t.Fatalf("AwakeInput builder %q (%s) not found; the census registry has drifted from the tree", name, builder)
 			}
-			for field := range structFieldsPopulated(decl, "AwakeInput", fields) {
-				populated[builder][field] = true
+			for _, fn := range append([]*ast.FuncDecl{decl}, awakeInputPopulationHelpers(files, decl)...) {
+				for field := range structFieldsPopulated(fn, "AwakeInput", fields) {
+					populated[builder][field] = true
+				}
 			}
 		}
 		if len(populated[builder]) == 0 {
@@ -715,6 +722,55 @@ func timerDecisionFieldsRead(t *testing.T, arm timerLadderArm) map[string]bool {
 		return true
 	})
 	return read
+}
+
+// awakeInputPopulationHelpers returns the same-package functions a builder hands
+// its AwakeInput to, one level deep. Following the CALL rather than trusting a
+// registry entry is what makes a shared derivation count only for the builder
+// that actually invokes it: a builder that drops the call loses the field and
+// the census reports the divergence, which is exactly what a registry listing
+// would have concealed.
+func awakeInputPopulationHelpers(files map[string]*ast.File, fn *ast.FuncDecl) []*ast.FuncDecl {
+	var helpers []*ast.FuncDecl
+	seen := map[string]bool{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		callee, ok := call.Fun.(*ast.Ident)
+		if !ok || seen[callee.Name] {
+			return true
+		}
+		if !censusPassesAwakeInput(call.Args) {
+			return true
+		}
+		helper := censusFindFunc(files, callee.Name)
+		if helper == nil || helper == fn {
+			return true
+		}
+		seen[callee.Name] = true
+		helpers = append(helpers, helper)
+		return true
+	})
+	return helpers
+}
+
+// censusPassesAwakeInput reports whether a call hands over the ADDRESS of the
+// builder's own AwakeInput. By-address is the only form that can populate the
+// caller's struct — ComputeAwakeSet takes the same value by copy and only reads
+// it — so requiring the `&` is what keeps a consumer out of the producer census.
+func censusPassesAwakeInput(args []ast.Expr) bool {
+	for _, arg := range args {
+		unary, ok := arg.(*ast.UnaryExpr)
+		if !ok || unary.Op != token.AND {
+			continue
+		}
+		if ident, ok := unary.X.(*ast.Ident); ok && (ident.Name == "input" || ident.Name == "in") {
+			return true
+		}
+	}
+	return false
 }
 
 // structFieldsPopulated reports which of the named struct's fields a function

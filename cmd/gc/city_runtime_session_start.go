@@ -177,6 +177,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 				DesiredSessionNames:      cr.desiredSessionNamesView,
 				ProviderHealth:           cr.providerHealthSnapshotView,
 				SessionLiveness:          cr.sessionLivenessView,
+				SessionWakeEvaluations:   cr.sessionWakeEvaluationsView,
 				Trace:                    cr.trace,
 				AuthorizePoolStart: func(authorizeCtx context.Context, info sessionpkg.Info, lease routedWorkPoolStartLease) (bool, error) {
 					return cr.authorizeRoutedWorkPoolStart(authorizeCtx, snapshot, info, lease)
@@ -1102,6 +1103,34 @@ func (cr *CityRuntime) publishSessionLiveness(liveness map[string]detectorLivene
 	}
 	cr.sessionStartMu.Lock()
 	cr.sessionLiveness = liveness
+	cr.sessionStartMu.Unlock()
+}
+
+// sessionWakeEvaluationsView returns the wake verdicts the last patrol/boot
+// sweep derived. A nil return declines D-DRAIN's third cancel arm, which leaves
+// the drain to its other arms: the arm can only ever spare a session, so
+// declining is the direction that cannot rescue one nothing wants awake.
+func (cr *CityRuntime) sessionWakeEvaluationsView() map[string]wakeEvaluation {
+	if cr == nil {
+		return nil
+	}
+	cr.sessionStartMu.Lock()
+	defer cr.sessionStartMu.Unlock()
+	return cr.sessionWakeEvals
+}
+
+// publishSessionWakeEvaluations records the sweep's wake verdicts for the keyed
+// D-DRAIN advance. Only the patrol/boot sweep calls it, and here the restriction
+// is load-bearing rather than merely tidy: a narrowed sweep publishes verdicts
+// for a subset of the fleet, and a row absent from that subset reads as "no
+// reason to be awake" — the exact input that lets the drain run to its deadline
+// and force-stop a session legacy would have rescued.
+func (cr *CityRuntime) publishSessionWakeEvaluations(evals map[string]wakeEvaluation) {
+	if cr == nil {
+		return
+	}
+	cr.sessionStartMu.Lock()
+	cr.sessionWakeEvals = evals
 	cr.sessionStartMu.Unlock()
 }
 

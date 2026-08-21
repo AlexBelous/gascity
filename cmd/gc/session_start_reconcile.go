@@ -132,6 +132,24 @@ type exactSessionStartParams struct {
 	// writes. A nil accessor, or a view no tick has published yet, declines the
 	// family rather than probing.
 	SessionLiveness func() map[string]detectorLivenessBits
+
+	// SessionWakeEvaluations returns the wake verdicts the tick's detector sweep
+	// derived for the whole fleet, keyed by bead ID — the same
+	// awakeSetToWakeEvals projection the fleet drain scan reads.
+	//
+	// The keyed D-DRAIN advance needs it for its third cancel arm, which cancels
+	// a cancelable drain on a session that has reacquired ANY reason to be awake
+	// (ga-f7v2ft.179). Its two narrow siblings re-pay the probe and the store
+	// query their reasons were built from, but "any wake reason" is fleet-shaped
+	// in the same way DesiredSessionNames is — pool counts, named and routed
+	// demand, the ready-wait set — so no per-key predicate can re-derive it, and
+	// recomputing ComputeAwakeSet per key would turn an O(1) handler into an
+	// O(fleet) one.
+	//
+	// A nil accessor, a view no tick has published yet, or a key the view does
+	// not carry all decline the cancel, which is the fleet scan's own behavior
+	// for a row absent from wakeEvals and leaves the remaining arms untouched.
+	SessionWakeEvaluations func() map[string]wakeEvaluation
 }
 
 // exactSessionProviderHealth resolves the provider-health snapshot a keyed gate

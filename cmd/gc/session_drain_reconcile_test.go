@@ -512,6 +512,164 @@ func TestSessionStartControllerAppliesAnAuthorizedDrainAckWithinTheDeadlineOnce(
 	}
 }
 
+// seedReacquiredWakeDrain seeds the field's shape for ga-f7v2ft.179: a drain
+// that has already signaled (GC_DRAIN_ACK set, so the very next advance carries
+// the row into the stop leg) on a session the tick's wake evaluation now says
+// should be awake for `reasons`.
+//
+// The acknowledgement is what makes the fixture load-bearing rather than
+// decorative: without a cancel arm above it the handler discovers the ack, marks
+// drain_ack_stop_pending, and the session is killed. The rescue and the kill are
+// therefore one dispatch apart, which is exactly the field report.
+func seedReacquiredWakeDrain(t *testing.T, env *reconcilerTestEnv, drainReason string, reasons []WakeReason) (*deadRuntimeProvider, beads.Bead, exactSessionStartParams) {
+	t.Helper()
+	provider, bead := seedDrainingSession(t, env, drainReason)
+	if err := provider.SetMeta(exactDrainAdvanceTestSessionName, "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+	}
+	env.dt.get(bead.ID).ackSet = true
+	params := newExactDrainAdvanceParams(env, provider)
+	params.SessionWakeEvaluations = func() map[string]wakeEvaluation {
+		if reasons == nil {
+			return map[string]wakeEvaluation{bead.ID: {}}
+		}
+		return map[string]wakeEvaluation{bead.ID: {Reasons: reasons}}
+	}
+	return provider, bead, params
+}
+
+// assertExactDrainRescued asserts the whole rescue. The stop-pending check comes
+// FIRST because it is the one assertion that discriminates: the stop leg retires
+// the tracker entry too, so "drain intent is gone" is satisfied by both the
+// rescue and the kill and proves nothing on its own.
+func assertExactDrainRescued(t *testing.T, env *reconcilerTestEnv, provider *deadRuntimeProvider, bead beads.Bead) {
+	t.Helper()
+	if isDrainAckStopPendingInfo(readSessionInfoForTest(t, env, bead.ID)) {
+		t.Fatal("the row reached drain_ack_stop_pending instead of being rescued; the cancel arms run above the stop leg")
+	}
+	if ack, _ := provider.GetMeta(exactDrainAdvanceTestSessionName, "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared: a stale ack kills the rescued session on the next drain-ack check", ack)
+	}
+	if !provider.IsRunning(exactDrainAdvanceTestSessionName) {
+		t.Fatal("the rescued session's runtime was stopped")
+	}
+	if state := env.dt.get(bead.ID); state != nil {
+		t.Fatalf("drain = %+v, want canceled for a reacquired wake reason", state)
+	}
+}
+
+// TestExactDrainAdvanceCancelsForAnyReacquiredWakeReason is ga-f7v2ft.179's RED.
+// The fleet drain scan has THREE cancel arms; the keyed advance had two. Arms 1
+// and 2 read WakePending and WakeWork off the wake evaluation, so the other seven
+// reasons in the WakeReason vocabulary — config, create, session, keep-warm,
+// attached, wait, pin — never canceled a keyed drain. A session that got pinned,
+// attached to, or became wait-ready while draining ran to its deadline and was
+// force-stopped where the fleet scan would have spared it, and under
+// session_reconciler=auto the keyed family holds the key so legacy never covers
+// the row.
+//
+// Every one of the seven is exercised, because the gap was the vocabulary and
+// not any single reason.
+func TestExactDrainAdvanceCancelsForAnyReacquiredWakeReason(t *testing.T) {
+	for _, reason := range []WakeReason{
+		WakeConfig, WakeCreate, WakeSession, WakeKeepWarm, WakeAttached, WakeWait, WakePin,
+	} {
+		t.Run(string(reason), func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			provider, bead, params := seedReacquiredWakeDrain(t, env, "idle", []WakeReason{reason})
+
+			handled, owner, err := dispatchExactDrainAdvance(t, env, params, bead.ID)
+			if !handled || err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("cancel leg: handled=%v owner=%v err=%v", handled, owner, err)
+			}
+			assertExactDrainRescued(t, env, provider, bead)
+		})
+	}
+}
+
+// TestExactDrainAdvanceKeepsDrainsTheFleetScanAlsoRefusesToCancel is the control
+// the rescue above is meaningless without. The fleet scan's third arm is gated on
+// drainReasonCancelable, and on a session with NO reacquired reason it does not
+// fire at all. Both negatives have to keep behaving exactly as they did:
+//
+//   - the four non-cancelable drain reasons are the ones whose whole purpose is
+//     to survive a wake signal — an execution-stalled seat is alive, awake and
+//     holding a claim by construction, so a cancel there is the wedge this lane
+//     exists to end;
+//   - a cancelable drain with an empty reason set is the ordinary path to the
+//     stop, and a fix that rescued it would have disabled draining altogether.
+//
+// Each case must fail DIFFERENTLY from the rescue: the row reaches the
+// stop-pending transition instead of surviving.
+func TestExactDrainAdvanceKeepsDrainsTheFleetScanAlsoRefusesToCancel(t *testing.T) {
+	cases := []struct {
+		name        string
+		drainReason string
+		reasons     []WakeReason
+	}{
+		{name: "config-drift", drainReason: "config-drift", reasons: []WakeReason{WakePin}},
+		{name: "orphaned", drainReason: "orphaned", reasons: []WakeReason{WakePin}},
+		{name: "suspended", drainReason: "suspended", reasons: []WakeReason{WakePin}},
+		{name: "execution-stalled", drainReason: executionStalledDrainReason, reasons: []WakeReason{WakePin}},
+		{name: "cancelable drain with no reacquired reason", drainReason: "idle", reasons: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			provider, bead, params := seedReacquiredWakeDrain(t, env, tc.drainReason, tc.reasons)
+
+			handled, owner, err := dispatchExactDrainAdvance(t, env, params, bead.ID)
+			if !handled || err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("stop-pending leg: handled=%v owner=%v err=%v", handled, owner, err)
+			}
+			if !isDrainAckStopPendingInfo(readSessionInfoForTest(t, env, bead.ID)) {
+				t.Fatalf("row = %+v, want drain_ack_stop_pending: this drain is not cancelable by a wake reason",
+					readSessionInfoForTest(t, env, bead.ID))
+			}
+			if env.dt.get(bead.ID) != nil {
+				t.Fatal("drain intent survived the stop-pending transition")
+			}
+			if !provider.IsRunning(exactDrainAdvanceTestSessionName) {
+				t.Fatal("the stop-pending transition stopped the runtime synchronously; the stop leg is the drain-ack stop's")
+			}
+		})
+	}
+}
+
+// TestExactDrainAdvanceDeclinesTheWakeCancelWithoutAPublishedView pins the
+// fail-safe direction of the fleet-shaped read. No accessor, or a view no tick
+// has published, must leave the arm inert rather than guess — the fleet scan's
+// own answer for a row its wakeEvals does not carry.
+func TestExactDrainAdvanceDeclinesTheWakeCancelWithoutAPublishedView(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		view func() map[string]wakeEvaluation
+	}{
+		{name: "no accessor", view: nil},
+		{name: "nothing published yet", view: func() map[string]wakeEvaluation { return nil }},
+		{name: "key absent from the view", view: func() map[string]wakeEvaluation {
+			return map[string]wakeEvaluation{"some-other-session": {Reasons: []WakeReason{WakePin}}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			provider, bead, params := seedReacquiredWakeDrain(t, env, "idle", []WakeReason{WakePin})
+			params.SessionWakeEvaluations = tc.view
+
+			handled, owner, err := dispatchExactDrainAdvance(t, env, params, bead.ID)
+			if !handled || err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("stop-pending leg: handled=%v owner=%v err=%v", handled, owner, err)
+			}
+			if !isDrainAckStopPendingInfo(readSessionInfoForTest(t, env, bead.ID)) {
+				t.Fatal("the arm fired without a published wake verdict; an unpublished view must decline, not rescue")
+			}
+			if !provider.IsRunning(exactDrainAdvanceTestSessionName) {
+				t.Fatal("the stop-pending transition stopped the runtime synchronously")
+			}
+		})
+	}
+}
+
 // TestExactDrainAdvanceRefusesWhenLivenessIsIncomplete pins the one place the
 // keyed arm is deliberately STRICTER than the fleet scan: the fleet loop treats
 // an unreadable running-probe as "exited" and completes the drain, which writes

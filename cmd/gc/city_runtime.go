@@ -251,6 +251,14 @@ type CityRuntime struct {
 	// probe just to be declined. Guarded by sessionStartMu; nil until the first
 	// patrol sweep publishes, which declines the family rather than probing.
 	sessionLiveness map[string]detectorLivenessBits
+	// sessionWakeEvals is the wake verdict per bead ID the patrol/boot tick's
+	// detector sweep derived, published for the keyed D-DRAIN advance's third
+	// cancel arm (ga-f7v2ft.179). "The session reacquired ANY wake reason" is a
+	// fleet verdict over pool counts, named and routed demand and the ready-wait
+	// set, so the handler reads the tick's answer rather than re-deriving one.
+	// Guarded by sessionStartMu; nil until the first patrol sweep publishes,
+	// which declines the arm rather than inventing a rescue.
+	sessionWakeEvals map[string]wakeEvaluation
 	// orphanSuspendDeferrals is the detector's own #3630 named spec-absence
 	// confirmation window (DETECTOR.md §3, D-ORPHAN). Guarded by sessionStartMu
 	// and created on first use; only beadReconcileTick supplies it to the sweep,
@@ -3078,37 +3086,38 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	providerHealth := loadProviderHealthSnapshot(cr.cityPath)
 	cr.publishProviderHealthSnapshot(providerHealth)
 	runDetectorSweep(ctx, trace, detectorSweepInput{
-		CityPath:              cr.cityPath,
-		CityName:              cityName,
-		Cfg:                   cr.cfg,
-		Provider:              cr.sp,
-		Rows:                  sessionBeads.OpenForReconcile(),
-		Snapshot:              sessionBeads,
-		Desired:               desiredState,
-		CfgNames:              cfgNames,
-		PoolDesired:           poolDesired,
-		RoutedWork:            cr.flooredReadyRoutedWorkView().unallocated(),
-		NamedDemand:           result.NamedSessionDemand,
-		NamedRoutedDemand:     result.NamedSessionRoutedDemand,
-		WorkSet:               workSet,
-		ReadyWaitSet:          readyWaitSet,
-		AssignedWorkBeads:     awakeAssignedWorkBeads,
-		ReadyAssignedFlags:    readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs),
-		ProviderHealth:        providerHealth,
-		Drains:                cr.sessionDrains,
-		Idle:                  cr.it,
-		MaxAge:                cr.mat,
-		SuspendDeferrals:      cr.detectorSuspendDeferrals(),
-		IdleProbes:            cr.detectorIdleProbes(),
-		Clock:                 clock.Real{},
-		StartupTimeout:        cr.cfg.Session.StartupTimeoutDuration(),
-		StoreQueryPartial:     result.snapshotQueryPartial(),
-		DeferSessionCloses:    bootReconcile,
-		Trigger:               detectorSweepTriggerFor(bootReconcile),
-		Admit:                 cr.detectorAdmitFunc(),
-		PublishLiveness:       cr.publishSessionLiveness,
-		AdmitWake:             cr.detectorWakeAdmitFunc(),
-		EnqueuePoolAllocation: cr.detectorPoolAllocationEnqueueFunc(),
+		CityPath:               cr.cityPath,
+		CityName:               cityName,
+		Cfg:                    cr.cfg,
+		Provider:               cr.sp,
+		Rows:                   sessionBeads.OpenForReconcile(),
+		Snapshot:               sessionBeads,
+		Desired:                desiredState,
+		CfgNames:               cfgNames,
+		PoolDesired:            poolDesired,
+		RoutedWork:             cr.flooredReadyRoutedWorkView().unallocated(),
+		NamedDemand:            result.NamedSessionDemand,
+		NamedRoutedDemand:      result.NamedSessionRoutedDemand,
+		WorkSet:                workSet,
+		ReadyWaitSet:           readyWaitSet,
+		AssignedWorkBeads:      awakeAssignedWorkBeads,
+		ReadyAssignedFlags:     readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs),
+		ProviderHealth:         providerHealth,
+		Drains:                 cr.sessionDrains,
+		Idle:                   cr.it,
+		MaxAge:                 cr.mat,
+		SuspendDeferrals:       cr.detectorSuspendDeferrals(),
+		IdleProbes:             cr.detectorIdleProbes(),
+		Clock:                  clock.Real{},
+		StartupTimeout:         cr.cfg.Session.StartupTimeoutDuration(),
+		StoreQueryPartial:      result.snapshotQueryPartial(),
+		DeferSessionCloses:     bootReconcile,
+		Trigger:                detectorSweepTriggerFor(bootReconcile),
+		Admit:                  cr.detectorAdmitFunc(),
+		PublishLiveness:        cr.publishSessionLiveness,
+		PublishWakeEvaluations: cr.publishSessionWakeEvaluations,
+		AdmitWake:              cr.detectorWakeAdmitFunc(),
+		EnqueuePoolAllocation:  cr.detectorPoolAllocationEnqueueFunc(),
 	})
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,

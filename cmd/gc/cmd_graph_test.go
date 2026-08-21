@@ -22,7 +22,7 @@ func TestGraphTable(t *testing.T) {
 	_ = store.DepAdd("gc-2", "gc-1", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2", "gc-3"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2", "gc-3"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -62,7 +62,7 @@ func TestGraphJSON(t *testing.T) {
 	_ = store.DepAdd("gc-2", "gc-1", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{JSON: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{JSON: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph --json = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -92,7 +92,7 @@ func TestGraphMermaid(t *testing.T) {
 	_ = store.DepAdd("gc-2", "gc-1", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{Mermaid: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{Mermaid: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph mermaid = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -114,7 +114,7 @@ func TestGraphConvoyExpansion(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "child B", ParentID: "gc-1"}) // gc-3
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph convoy = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -142,7 +142,7 @@ func TestGraphConvoyExpansionUsesTracksDependencies(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph convoy = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -163,7 +163,7 @@ func TestGraphEpicIsTreatedAsOrdinaryBead(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "story 2", ParentID: "gc-1"}) // gc-3
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph epic = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -184,7 +184,7 @@ func TestGraphMissingArgs(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, nil, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), nil, graphOpts{}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doGraph no args = %d, want 1", code)
 	}
@@ -198,7 +198,7 @@ func TestGraphEmptyConvoy(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "empty convoy", Type: "convoy"}) // gc-1
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph empty convoy = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -219,7 +219,7 @@ func TestGraphDepsFilteredToSet(t *testing.T) {
 
 	// Only graph gc-1 and gc-2 — gc-3 dep should be filtered out.
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -245,7 +245,7 @@ func TestGraphMermaidClosedStyle(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "ready task"}) // gc-2
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{Mermaid: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{Mermaid: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph mermaid = %d, want 0", code)
 	}
@@ -266,7 +266,7 @@ func TestGraphMermaidLabelEscaping(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: `fix "quotes" issue`}) // gc-1
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{Mermaid: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{Mermaid: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0", code)
 	}
@@ -288,7 +288,7 @@ func TestGraphClosedBlockerIsReady(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -314,7 +314,7 @@ func TestGraphDeduplicate(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	// Pass same ID twice — should only appear once.
-	code := doGraph(store, []string{"gc-1", "gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0", code)
 	}
@@ -335,7 +335,7 @@ func TestGraphTree(t *testing.T) {
 	_ = store.DepAdd("gc-3", "gc-2", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -369,7 +369,7 @@ func TestGraphTreeMultipleRoots(t *testing.T) {
 	_ = store.DepAdd("gc-3", "gc-1", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -394,7 +394,7 @@ func TestGraphTreeInProgressIcon(t *testing.T) {
 	_ = store.Update(b.ID, beads.UpdateOpts{Status: strPtr("in_progress")})
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{Tree: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{Tree: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -414,7 +414,7 @@ func TestGraphNonBlockingDepIgnored(t *testing.T) {
 	_ = store.DepAdd("gc-2", "gc-1", "tracks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}

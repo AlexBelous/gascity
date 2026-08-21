@@ -73,7 +73,19 @@ import (
 // [class, work].
 func classRoutedStoreForID(cityPath, id string, work beads.Store) (beads.Store, error) {
 	class, relocated := graphClassBinding(cliStorageRoutes(cityPath))
-	if !relocated || class == nil || class == work {
+	if !relocated {
+		class = nil
+	}
+	return classRoutedStoreForIDIn(class, id, work)
+}
+
+// classRoutedStoreForIDIn is classRoutedStoreForID with the binding already in
+// hand. Callers that resolve the binding once for a whole request (rather than
+// once per id) and tests that have no city on disk route through here, so the
+// probe order, the identity gate and the failure classification stay in one
+// place. A nil class means the city relocates nothing.
+func classRoutedStoreForIDIn(class beads.Store, id string, work beads.Store) (beads.Store, error) {
+	if class == nil || class == work {
 		return work, nil
 	}
 	for _, candidate := range classRouteCandidates(id, class, work) {

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/testutil"
 	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 )
 
@@ -296,8 +297,11 @@ func (s *session) signal(sig syscall.Signal) {
 
 // adapterWaitBudget bounds every lifecycle wait in this suite. Generous on
 // purpose: it is a deadlock guard, not a timing assertion, and a loaded machine
-// must not turn a slow turn into a failure.
-const adapterWaitBudget = 40 * time.Second
+// must not turn a slow turn into a failure. Sized off testutil.ExecRaceTimeout
+// (the shared exec-timing floor) rather than a bare literal, with headroom
+// above the largest deadline it covers (20s waitForOutput calls) instead of
+// sitting exactly on it — see TestAdapterWaitBudgetStaysAHangDetector.
+const adapterWaitBudget = 6 * testutil.ExecRaceTimeout
 
 // waitForTurns blocks until the adapter has completed n turns, counted by its
 // ready markers (startup prints one, then one per finished turn). This is the
@@ -1064,8 +1068,15 @@ func TestResetArchivesTheSupersededEpochsState(t *testing.T) {
 	h.run("first conversation\n")
 
 	oldMirror := filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_one.json")
-	if _, err := os.Stat(oldMirror); err != nil {
-		t.Fatalf("epoch 1 mirror missing: %v", err)
+	deadline := time.Now().Add(adapterWaitBudget)
+	for {
+		if _, err := os.Stat(oldMirror); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("epoch 1 mirror never appeared")
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	oldHome := filepath.Join(h.home, ".local", "state", "gascity", "zcode", "homes", h.epochScope())
 	if _, err := os.Stat(oldHome); err != nil {
@@ -1229,6 +1240,18 @@ func TestInterruptedTurnClosesTheMirrorEntry(t *testing.T) {
 	s.signal(syscall.SIGTERM)
 	if _, code := s.wait(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	mirror := filepath.Join(h.mirrorDir, h.epochScope(), "sess_int_closes.json")
+	deadline := time.Now().Add(adapterWaitBudget)
+	for {
+		if _, err := os.Stat(mirror); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("interrupted turn's mirror entry never appeared")
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	export := h.readExport("sess_int_closes")

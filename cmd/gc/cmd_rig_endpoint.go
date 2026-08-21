@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/go-sql-driver/mysql"
@@ -362,6 +363,14 @@ func requireCanonicalScopeMetadata(fs fsys.FS, scopeRoot string) error {
 	return nil
 }
 
+// ensureCanonicalScopeMetadataIfPresent canonicalizes an existing scope's
+// metadata to server mode, for the endpoint commands (`gc rig set-endpoint`,
+// `gc beads city use-managed`/`use-external`).
+//
+// It announces the mode change for the same reason ensureCanonicalScopeMetadata
+// does: this is the identical rewrite through a different door, and a warning
+// that depends on which command performed the flip is a warning an operator
+// cannot rely on.
 func ensureCanonicalScopeMetadataIfPresent(fs fsys.FS, scopeRoot string) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	doltDatabase, err := func() (string, error) {
@@ -377,6 +386,7 @@ func ensureCanonicalScopeMetadataIfPresent(fs fsys.FS, scopeRoot string) error {
 	if err != nil {
 		return err
 	}
+	announceStorageModeChange(fs, path, "server", doltDatabase)
 	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
 		Backend:      "dolt",
@@ -586,22 +596,11 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 	}
 	password := canonicalValidationPassword(host, port, authScopeRoot)
 
-	cfg := mysql.NewConfig()
-	cfg.User = user
-	cfg.Passwd = password
-	cfg.Net = "tcp"
-	cfg.Addr = net.JoinHostPort(host, port)
-	cfg.DBName = strings.TrimSpace(database)
-	cfg.Timeout = 5 * time.Second
-	cfg.ReadTimeout = 5 * time.Second
-	cfg.WriteTimeout = 5 * time.Second
-	cfg.AllowNativePasswords = true
-
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	// Pooled handle owned by internal/doltpool; do not Close.
+	db, err := doltpool.Open(host, port, user, password, strings.TrimSpace(database))
 	if err != nil {
 		return err
 	}
-	defer db.Close() //nolint:errcheck // best-effort cleanup
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -57,6 +57,53 @@ origin/main.
 to your previous deploy binary. Both engines coexist in every build; rollback
 is config-only.
 
+## Merge workflow: the origin/main sync
+
+Merge 5ec88b1535 lost meaning twice while compiling clean and running green.
+Both losses were set differences against the merge base, and both are now
+checked. Run at **every** origin/main sync — once before merging, once after:
+
+```bash
+make check-merge-integrity          # --self-test, then the real audit
+```
+
+Or against a specific merge, which is how a past merge is audited:
+
+```bash
+bash scripts/check-merge-integrity.sh --merged <merge-commit>
+```
+
+**Check 1 — deleted-symbol resurrection.** Top-level Go symbols present at the
+merge base and absent from origin/main are symbols upstream retired. None may
+survive into the merged tree. This is `ga-f7v2ft.167`: the merge kept
+`controllerDemandRouteTarget` alive to satisfy six lane call sites after
+origin/main deleted it in #5250, so every ready epic and hold-parked row spawned
+a pool seat that read empty and drained. Run at `5ec88b1535` the check reports
+exactly that symbol, and only that symbol, out of 126 upstream retirements.
+
+**Check 2 — vanished-test census.** Every `Test*` present at the merge base must
+exist after the merge, be named in a commit message on `base..merged`, or be
+listed in the allowlist. A conflict resolution that drops a behaviour drops its
+test in the same hunk, so the suite that would have caught it is deleted by the
+commit that broke the code.
+
+Deliberate keeps and retirements go in `scripts/merge-integrity-allow.txt`, one
+per line with the reason. **A blank reason fails.** Regenerating the file to
+absorb a finding defeats the guard — the diff is the review. Open findings
+(`ga-f7v2ft.182`, `ga-f7v2ft.183`) stay out of it until they are adjudicated;
+the guard is red on them on purpose.
+
+The guard proves its own bite through `--self-test`: nine cases on real temp git
+repos covering a resurrection, an allowlisted resurrection, an allowlist entry
+with no reason, a symbol that merely moved files, a vanished test, a
+commit-body retirement, Go source inside a raw string, an unresolvable ref and
+an unreadable allowlist.
+
+Twin drift is the sibling failure — a shared decider gains a rung upstream and
+the lane's keyed copy silently never learns it (`ga-f7v2ft.166`). That one is
+checked continuously by the census in `cmd/gc/twin_drift_census_test.go`, which
+runs with the ordinary suite and needs no merge to be useful.
+
 ## Boundaries
 
 - **`/data/cities/reconciler-campaign` is off-limits** to the deploy: its own

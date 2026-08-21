@@ -1,0 +1,50 @@
+# Merge-integrity allowlist — scripts/check-merge-integrity.sh
+#
+# Format, tab-separated, one entry per line:
+#
+#   symbol <TAB> Name          <TAB> why the lane deliberately keeps a symbol upstream retired
+#   test   <TAB> TestName      <TAB> why a test present at the merge base is gone
+#
+# A blank reason is a violation. An allowlist without reasons is a mute button,
+# and the whole point of this guard is that a merge cannot go quiet.
+#
+# Regenerating this file to absorb a finding defeats the guard: the diff is the
+# review. Prefer porting the upstream replacement into the lane call sites and
+# deleting the symbol, which is what ga-f7v2ft.167 had to do after the fact.
+#
+# Methods are spelled Receiver.Name; everything else is the bare identifier.
+
+# --- WD.0 tick-debouncer retirement -----------------------------------------
+# The keyed detector sweep replaced the tick debouncer outright. The deletion
+# is not merely deliberate, it is PINNED: cmd/gc/tick_debounce_retirement_test.go
+# fails if "tickDebouncer", "TickDebounce", "tick_debounce" or the dead
+# TraceSiteReconcilerIdleDrain constant reappears in any Go source. Restoring
+# these tests would fail that guard, which is the correct relationship — the
+# retirement has a test, so the census does not need one.
+test	TestTickDebouncer_CancelPendingDrainsQueuedFire	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_CancelPendingDropsTimer	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_CoalescesBurstyArms	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_IndependentInstances	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_RearmsAfterFire	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_ZeroFiresImmediately	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestTickDebouncer_ZeroPreservesCapOneCoalesce	WD.0 retired the tick debouncer; the retirement is pinned by TestTickDebounceRetirementLeavesNoSourceReferences
+test	TestDaemonTickDebounceCustom	WD.0 retired the daemon.tick_debounce config key with the debouncer it configured
+test	TestDaemonTickDebounceDefault	WD.0 retired the daemon.tick_debounce config key with the debouncer it configured
+test	TestDaemonTickDebounceInvalid	WD.0 retired the daemon.tick_debounce config key with the debouncer it configured
+test	TestDaemonTickDebounceNegative	WD.0 retired the daemon.tick_debounce config key with the debouncer it configured
+test	TestParseDaemonTickDebounce	WD.0 retired the daemon.tick_debounce parser with the config key
+
+# --- narrow-CAS tests both sides retired ------------------------------------
+# The 5ec88b1535 conflict ledger records dropping main's narrow-CAS test: its
+# premise ("no sound revision token at beads v1.1.0") is falsified by the
+# beadslib.Storage pin both branches share. Upstream no longer declares these
+# either, so they are not lane-only losses.
+test	TestCachingStoreOverNativeDoltStoreForwardsNarrowCAS	retired on BOTH sides; the narrow-CAS premise is falsified by the shared beadslib.Storage pin (5ec88b1535 ledger)
+test	TestNativeDoltStoreConditionalWritesStillRefuseOrDegrade	retired on BOTH sides; superseded by the lane's ConditionalWriter capability assertion (5ec88b1535 ledger)
+test	TestNativeDoltStoreDeclaresNarrowCASButNotConditionalWriter	retired on BOTH sides; superseded by the lane's ConditionalWriter capability assertion (5ec88b1535 ledger)
+
+# --- NOT allowlisted, deliberately ------------------------------------------
+# ga-f7v2ft.182 (four retired internal/pidutil timeout constants, #5427) and
+# ga-f7v2ft.183 (thirteen tests origin/main still ships) are OPEN findings, not
+# exemptions. The guard stays red on them until each one is adjudicated. Adding
+# them here to get a green run is the failure this file exists to prevent.

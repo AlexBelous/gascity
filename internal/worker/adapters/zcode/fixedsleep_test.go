@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // fixedSleepThreshold separates a poll's own retry-interval sleep (this
@@ -132,12 +134,23 @@ func constSleepDuration(arg ast.Expr) (time.Duration, bool) {
 // below a justified floor would silently reintroduce the same class of
 // failure on a machine slow enough to need the full budget.
 //
-// The floor is twice the largest deadline this budget now covers — the
-// pre-existing 20s waitForOutput bound, not the largest raw sleep removed
-// (3s) — matching the convention already established for hangBudget in
-// cmd/gc/hangbudget_helpers_test.go (TestHangBudgetStaysAHangDetector).
+// Two independent floors are asserted, matching the convention established
+// for hangBudget in cmd/gc/hangbudget_helpers_test.go
+// (TestHangBudgetStaysAHangDetector). The first is testutil.ExecRaceTimeout's
+// shared exec-timing floor, scaled 6x — sized against this budget's own
+// largest replaced deadline (20s waitForOutput calls: a 40s floor leaves no
+// headroom above the deadline it bounds, while 60s ships 1.5x headroom
+// instead). The second is twice the largest deadline this budget now
+// covers — the pre-existing 20s waitForOutput bound, not the largest raw
+// sleep removed (3s).
 func TestAdapterWaitBudgetStaysAHangDetector(t *testing.T) {
 	t.Parallel()
+
+	if adapterWaitBudget < 6*testutil.ExecRaceTimeout {
+		t.Fatalf("adapterWaitBudget = %s, want >= %s (6x testutil.ExecRaceTimeout); "+
+			"testutil.ExecRaceTimeout is the shared exec-timing floor this package may not go below",
+			adapterWaitBudget, 6*testutil.ExecRaceTimeout)
+	}
 
 	const largestReplacedDeadline = 20 * time.Second
 	if adapterWaitBudget < 2*largestReplacedDeadline {

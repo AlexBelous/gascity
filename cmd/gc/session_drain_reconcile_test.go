@@ -670,6 +670,160 @@ func TestExactDrainAdvanceDeclinesTheWakeCancelWithoutAPublishedView(t *testing.
 	}
 }
 
+// realDetectorWakeEvals publishes the tick's wake projection the way the SWEEP
+// publishes it — detectorAwakeSet over the authoritative row — and returns the
+// result unedited. Every other test in this file hands the handler a view it
+// wrote by hand, which is exactly how a permanently-empty AttachedSessions went
+// unnoticed: a hand-seeded WakeAttached proves the handler reads the view, not
+// that any tick can put WakeAttached in it.
+func realDetectorWakeEvals(t *testing.T, env *reconcilerTestEnv, provider runtime.Provider, id string) map[string]wakeEvaluation {
+	t.Helper()
+	info := readSessionInfoForTest(t, env, id)
+	_, evals := detectorAwakeSet(
+		detectorSweepInput{
+			CityName: env.cfg.EffectiveCityName(),
+			Cfg:      env.cfg,
+			Provider: provider,
+			Clock:    env.clk,
+		},
+		[]sessionpkg.ReconcileSession{{Info: info}},
+		map[string]detectorLivenessBits{info.ID: {Probed: true, Running: true, Alive: true}},
+		env.clk.Now(),
+	)
+	return evals
+}
+
+// TestDetectorWakeProjectionCannotCarryAttachment is ga-f7v2ft.161's structural
+// proof, and the reason the rescue below has to be handler-side. The two
+// AwakeInput builders are fed the SAME attached row and the SAME provider: the
+// legacy bridge probes attachment and reports WakeAttached, the detector's
+// builder leaves AwakeInput.AttachedSessions empty by design (fleet-wide provider
+// I/O the sweep may not pay), so ComputeAwakeSet never reaches its "attached"
+// rung and the published projection cannot carry the reason at all.
+//
+// The legacy leg is the control. Without it a detector projection that carries
+// nothing for an unrelated reason — a broken fixture, a row the builder dropped —
+// would read as the same "vacancy" and prove nothing.
+func TestDetectorWakeProjectionCannotCarryAttachment(t *testing.T) {
+	env := newReconcilerTestEnv()
+	provider, bead := seedDrainingSession(t, env, "idle")
+	provider.SetAttached(exactDrainAdvanceTestSessionName, true)
+	info := readSessionInfoForTest(t, env, bead.ID)
+
+	legacyInput := buildAwakeInputFromReconciler(
+		env.cfg, "", []sessionpkg.Info{info}, nil, nil, nil, nil, nil, nil, nil,
+		[]wakeTarget{{info: info, alive: true}}, provider, env.clk.Now(),
+	)
+	legacy := awakeSetToWakeEvals(ComputeAwakeSet(legacyInput), legacyInput.SessionBeads)
+	if !containsWakeReason(legacy[bead.ID].Reasons, WakeAttached) {
+		t.Fatalf("the legacy bridge answered %v for an attached row, want WakeAttached.\n"+
+			"The fixture no longer exercises the divergence, so the detector leg below proves nothing.",
+			legacy[bead.ID].Reasons)
+	}
+
+	detector := realDetectorWakeEvals(t, env, provider, bead.ID)
+	if containsWakeReason(detector[bead.ID].Reasons, WakeAttached) {
+		t.Fatal("the detector projection now carries WakeAttached.\n" +
+			"That is a welcome change, but it means the sweep pays the attachment probe fleet-wide: " +
+			"revisit D-DRAIN's handler-side re-pay and the AttachedSessions census exemption before keeping it.")
+	}
+}
+
+// TestExactDrainAdvanceRescuesAnAttachedSessionThroughTheRealPublication is
+// ga-f7v2ft.161's RED for council finding B2. The .179 arm rescues a drain whose
+// session reacquired any wake reason, but it reads only the published projection —
+// and per the test above that projection can never say "attached". Under
+// session_reconciler=auto the fleet scan skips a row the keyed controller holds an
+// advance admission for, so nothing else covers it either: a keyed idle drain
+// force-stopped the session a person was sitting in.
+//
+// The drain is already acknowledged, so absent a cancel arm the very next advance
+// marks drain_ack_stop_pending and the session dies. Rescue and kill are one
+// dispatch apart, which is the field report.
+//
+// The unattached control has to fail DIFFERENTLY — it reaches stop-pending — or a
+// fix that simply stopped draining would pass.
+func TestExactDrainAdvanceRescuesAnAttachedSessionThroughTheRealPublication(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		attached bool
+	}{
+		{name: "a human is attached", attached: true},
+		{name: "control: nobody is attached", attached: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			provider, bead := seedDrainingSession(t, env, "idle")
+			if err := provider.SetMeta(exactDrainAdvanceTestSessionName, "GC_DRAIN_ACK", "1"); err != nil {
+				t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+			}
+			env.dt.get(bead.ID).ackSet = true
+			provider.SetAttached(exactDrainAdvanceTestSessionName, tc.attached)
+
+			published := realDetectorWakeEvals(t, env, provider, bead.ID)
+			eval, ok := published[bead.ID]
+			if !ok {
+				t.Fatal("the real publication carried no entry for the drained row; the arm would decline on an absent key rather than on an empty verdict, which is not the premise under test")
+			}
+			if len(eval.Reasons) != 0 {
+				t.Fatalf("the real publication gave the row wake reasons %v.\n"+
+					"The published-view half of the arm would fire on its own and the attachment re-pay would never be exercised.",
+					eval.Reasons)
+			}
+
+			params := newExactDrainAdvanceParams(env, provider)
+			params.SessionWakeEvaluations = func() map[string]wakeEvaluation { return published }
+
+			handled, owner, err := dispatchExactDrainAdvance(t, env, params, bead.ID)
+			if !handled || err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("advance: handled=%v owner=%v err=%v", handled, owner, err)
+			}
+
+			if tc.attached {
+				assertExactDrainRescued(t, env, provider, bead)
+				return
+			}
+			if !isDrainAckStopPendingInfo(readSessionInfoForTest(t, env, bead.ID)) {
+				t.Fatal("an unattended acknowledged drain did not reach stop-pending; the rescue fires for rows nobody is attached to")
+			}
+			if env.dt.get(bead.ID) != nil {
+				t.Fatal("drain intent survived the stop-pending transition")
+			}
+		})
+	}
+}
+
+// TestExactDrainAdvanceAttachmentRescueRespectsTheFleetScansCancelGate is the
+// second control. The handler-side re-pay is an extra SOURCE for cancel arm 3,
+// never a wider gate: legacy's arm is bounded by drainReasonCancelable, and an
+// execution-stalled seat is alive, awake and holding a claim by construction, so
+// rescuing one on attachment would restore the wedge this lane exists to end.
+func TestExactDrainAdvanceAttachmentRescueRespectsTheFleetScansCancelGate(t *testing.T) {
+	for _, reason := range []string{"config-drift", "orphaned", "suspended", executionStalledDrainReason} {
+		t.Run(reason, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			provider, bead := seedDrainingSession(t, env, reason)
+			if err := provider.SetMeta(exactDrainAdvanceTestSessionName, "GC_DRAIN_ACK", "1"); err != nil {
+				t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+			}
+			env.dt.get(bead.ID).ackSet = true
+			provider.SetAttached(exactDrainAdvanceTestSessionName, true)
+
+			published := realDetectorWakeEvals(t, env, provider, bead.ID)
+			params := newExactDrainAdvanceParams(env, provider)
+			params.SessionWakeEvaluations = func() map[string]wakeEvaluation { return published }
+
+			handled, owner, err := dispatchExactDrainAdvance(t, env, params, bead.ID)
+			if !handled || err != nil || owner != exactSessionStartKeyedOwner {
+				t.Fatalf("advance: handled=%v owner=%v err=%v", handled, owner, err)
+			}
+			if !isDrainAckStopPendingInfo(readSessionInfoForTest(t, env, bead.ID)) {
+				t.Fatalf("an attached %s drain was canceled; this drain reason is not cancelable by a wake reason in the fleet scan either", reason)
+			}
+		})
+	}
+}
+
 // TestExactDrainAdvanceRefusesWhenLivenessIsIncomplete pins the one place the
 // keyed arm is deliberately STRICTER than the fleet scan: the fleet loop treats
 // an unreadable running-probe as "exited" and completes the drain, which writes

@@ -325,9 +325,21 @@ var awakeInputBuilders = map[string][]string{
 }
 
 // awakeInputFieldExemptions records a field one builder populates and the other
-// deliberately does not, with the reason. Empty today: every field one builder
-// sets, the other sets too.
-var awakeInputFieldExemptions = map[string]map[string]string{}
+// deliberately does not, with the reason.
+//
+// An entry here is a promise, not a shrug: the detector may leave a field empty
+// only because every family that consumes the resulting projection RE-PAYS the
+// missing observation handler-side, for its own key. Each reason therefore names
+// the re-payment site per family, so a family added later without one is a
+// missing citation rather than an invisible vacancy. Both entries below are the
+// same shape — the sweep refuses fleet-wide provider I/O (DETECTOR.md §2), and
+// the handler buys the one probe it needs for the one key it holds.
+var awakeInputFieldExemptions = map[string]map[string]string{
+	"detector": {
+		"AttachedSessions": "ga-f7v2ft.161 (council B2): detectorAwakeSet leaves it empty because attachment is a per-session provider probe the sweep may not pay fleet-wide (DETECTOR.md §2; §3b D-SLEEP \"probe/pending arms unpredicted\"). Every consuming family re-pays it handler-side: D-SLEEP's drain arm and D-ORPHAN's drain arm through exactSessionActiveUseDeferralReason (session_sleep_reconcile.go, session_orphan_drain_reconcile.go), and D-DRAIN's third cancel arm through exactSessionUserAttached (session_drain_reconcile.go) — the arm that was reading a WakeAttached the projection can never carry. D-WAKE consumes the same view but only ever starts a session, which an attached row does not need rescuing from. Recordable only WITH that D-DRAIN re-pay: without it this exemption would certify the force-stop of an attached session",
+		"PendingSessions":  "ga-f7v2ft.161 (council B2, same shape): detectorAwakeSet leaves it empty because pendingInteractionReady is per-session provider I/O with the same fleet-wide cost. Re-paid handler-side by D-SLEEP's and D-ORPHAN's drain arms through exactSessionActiveUseDeferralReason, and by D-DRAIN's FIRST cancel arm through pendingInteractionKeepsAwakeInfo (session_drain_reconcile.go) — which is why D-DRAIN's pending rescue was never reachable-only-by-view the way its attachment rescue was",
+	},
+}
 
 // TestAwakeInputBuilderTwinsPopulateTheSameFields ties the detector's AwakeInput
 // construction to the legacy bridge's. Both hand the SAME pure function
@@ -774,7 +786,17 @@ func censusPassesAwakeInput(args []ast.Expr) bool {
 }
 
 // structFieldsPopulated reports which of the named struct's fields a function
-// assigns, whether through a composite literal or a field assignment.
+// puts CONTENT in, whether through a composite literal or a field assignment.
+//
+// Allocating an empty container is not content (censusEmptyContainer): an empty
+// map answers every lookup exactly as a nil map does, so a builder that writes
+// `AttachedSessions: map[string]bool{}` and never fills it has left the field at
+// its effective zero value and the twin divergence is real. Counting that stub as
+// population is how the detector's permanently-empty AttachedSessions passed this
+// census while a downstream cancel arm read a verdict the projection could never
+// carry (ga-f7v2ft.161, council finding F6). A field allocated empty here still
+// counts once some index or assignment puts a value in it — which is how
+// RunningSessions, allocated by both builders and filled by both, stays green.
 func structFieldsPopulated(fn *ast.FuncDecl, structName string, fields []string) map[string]bool {
 	known := map[string]bool{}
 	for _, field := range fields {
@@ -790,7 +812,7 @@ func structFieldsPopulated(fn *ast.FuncDecl, structName string, fields []string)
 			}
 			for _, elt := range node.Elts {
 				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
+				if !ok || censusEmptyContainer(kv.Value) {
 					continue
 				}
 				if key, ok := kv.Key.(*ast.Ident); ok && known[key.Name] {
@@ -798,15 +820,35 @@ func structFieldsPopulated(fn *ast.FuncDecl, structName string, fields []string)
 				}
 			}
 		case *ast.AssignStmt:
-			for _, lhs := range node.Lhs {
+			for i, lhs := range node.Lhs {
+				// Pair only when the assignment is positional; a multi-value
+				// call has one RHS for many LHS and nothing to inspect per field.
+				if len(node.Rhs) == len(node.Lhs) && censusEmptyContainer(node.Rhs[i]) {
+					continue
+				}
 				collectPopulatedField(lhs, known, populated)
 			}
-		case *ast.IndexExpr:
-			collectPopulatedField(node.X, known, populated)
 		}
 		return true
 	})
 	return populated
+}
+
+// censusEmptyContainer reports whether an expression only ALLOCATES storage —
+// `map[K]V{}`, `[]T{}`, or any `make(...)` — without putting a value in it. Both
+// forms have to be recognized or the rule is only a ban on one spelling: the
+// legacy bridge allocates its three session maps with `make`, so a detector that
+// switched from the empty literal to `make` would re-open the same vacancy with
+// the census still green.
+func censusEmptyContainer(expr ast.Expr) bool {
+	switch node := expr.(type) {
+	case *ast.CompositeLit:
+		return len(node.Elts) == 0
+	case *ast.CallExpr:
+		ident, ok := node.Fun.(*ast.Ident)
+		return ok && ident.Name == "make"
+	}
+	return false
 }
 
 func collectPopulatedField(expr ast.Expr, known, populated map[string]bool) {

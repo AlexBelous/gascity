@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -49,10 +50,29 @@ func exactSessionActiveUseDeferralReason(
 	if pendingInteractionKeepsAwakeInfo(info, params.Provider, name, clk) {
 		return "pending_interaction"
 	}
-	if params.Provider.IsAttached(name) {
+	if exactSessionUserAttached(params.Provider, name) {
 		return "attached"
 	}
 	return ""
+}
+
+// exactSessionUserAttached is the attachment rung itself, named once so every
+// keyed arm that owes A6 spells it the same way. D-ORPHAN's and D-SLEEP's drain
+// arms reach it through exactSessionActiveUseDeferralReason above; D-DRAIN's
+// third cancel arm calls it directly, because at that point in the advance the
+// pending-interaction probe has already been paid by cancel arm 1 and re-paying
+// it would buy a second provider read per key per tick for an answer the handler
+// already has.
+//
+// IsRunning is deliberately not re-checked the way sessionAttachedForWakeReason
+// checks it. Every caller has already proven fresh liveness for the key before it
+// asks, so the extra probe would only add provider I/O to a question already
+// answered.
+func exactSessionUserAttached(sp runtime.Provider, name string) bool {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return false
+	}
+	return sp.IsAttached(name)
 }
 
 // reconcileExactSessionOrphanDrain begins the keyed drain of ONE live undesired

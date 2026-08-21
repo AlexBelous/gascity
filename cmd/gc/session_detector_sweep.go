@@ -886,6 +886,16 @@ func detectorProcessNames(cfg *config.City, info sessionpkg.Info) []string {
 // order. Attachment and pending-interaction probes are deliberately absent:
 // they are provider I/O and move handler-side, so their arms are unpredicted
 // (DETECTOR.md §3b, D-SLEEP "probe/pending arms unpredicted").
+//
+// AttachedSessions and PendingSessions therefore stay EMPTY here, and every
+// consumer of this projection owes the matching handler-side re-pay for its own
+// key: D-SLEEP's and D-ORPHAN's drain arms through
+// exactSessionActiveUseDeferralReason, D-DRAIN's cancel arms through
+// pendingInteractionKeepsAwakeInfo (arm 1) and exactSessionUserAttached (arm 3).
+// A consumer that reads "attached" or "pending" off this view alone reads a
+// verdict it can never see. The pairing is guarded by named exemptions in
+// TestAwakeInputBuilderTwinsPopulateTheSameFields.
+//
 // The wakeEvaluation map it returns beside the decisions is the same bridge
 // projection legacy feeds its sleep-policy pass (awakeSetToWakeEvals), so the
 // detector's ConfigSuppressed pass and legacy's answer the demand-override rung

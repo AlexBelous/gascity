@@ -205,10 +205,31 @@ func reconcileExactSessionDrainAdvance(
 	// carried into the stop leg. The cancel itself is the shared library's
 	// (cancelSessionDrainInfo), the same one arms 1 and 2 route through, so the
 	// clear-ack/clear-probe/retire sequence has one implementation.
-	if drainReasonCancelable(state.reason) && exactSessionDrainReacquiredWake(params, info.ID) {
-		if cancelSessionDrainInfo(info, params.Provider, params.DrainTracker) {
+	//
+	// ATTACHMENT is the one reason in that list the published projection
+	// structurally cannot carry, so the arm pays for it the way every other keyed
+	// arm pays for A6: handler-side, for one key. detectorAwakeSet leaves
+	// AwakeInput.AttachedSessions empty on purpose — attachment is provider I/O
+	// the sweep refuses to pay fleet-wide (DETECTOR.md §3b, D-SLEEP "probe/pending
+	// arms unpredicted") — so ComputeAwakeSet never reaches its "attached" rung,
+	// awakeSetToWakeEvals never emits WakeAttached, and a published-view-only arm
+	// would force-stop a session a human is sitting in. The re-pay is the same
+	// rung D-ORPHAN's and D-SLEEP's drain arms take through
+	// exactSessionActiveUseDeferralReason, and it is ordered second so the free
+	// map read decides before any provider read is bought.
+	if drainReasonCancelable(state.reason) {
+		source := ""
+		switch {
+		case exactSessionDrainReacquiredWake(params, info.ID):
+			source = "published_wake_view"
+		case exactSessionUserAttached(params.Provider, name):
+			source = "attachment_probe"
+		}
+		if source != "" && cancelSessionDrainInfo(info, params.Provider, params.DrainTracker) {
 			recordExactSessionDrainTrace(params, admission, info, state.reason,
-				TraceSiteDrainCancel, TraceReasonCode(state.reason), TraceOutcomeCancel, 0, true, nil)
+				TraceSiteDrainCancel, TraceReasonCode(state.reason), TraceOutcomeCancel, 0, true, map[string]any{
+					"wake_cancel_source": source,
+				})
 			return exactSessionStartKeyedOwner, nil
 		}
 	}

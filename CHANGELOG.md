@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`[daemon] session_reconciler` selects a keyed session reconciler,
+  opt-in and off by default.** A city keeps its sessions matching its config —
+  starting what is missing, stopping what has finished, waking what has work —
+  and by default decides that with one pass over every session on each patrol
+  tick. Set `session_reconciler = "auto"` and each session is decided against
+  its own identity instead, with the fleet-wide pass covering anything the
+  keyed engine does not take; `"require"` refuses startup rather than covering
+  the gap. `"off"` is the default and the existing behavior. It is a change of
+  engine, not of behavior: the same triggers start, stop and wake the same
+  sessions under the same config.
+
+  Upgrading: the value is read once at startup, so a city takes it on the next
+  `gc stop` / `gc start`. There is no drain-and-wait step first — a session
+  that was mid-drain when the city restarted is re-evaluated against the state
+  it is actually in, so a drain already under way finishes normally. Rollback
+  is `session_reconciler = "off"` and one more restart: neither engine writes
+  anything the other cannot read, nothing on disk is converted, and a build
+  without the setting behaves as `"off"`. See
+  [Turn On Keyed Session Reconciliation](docs/runbooks/keyed-session-reconciler.md).
+
 ### Changed
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you

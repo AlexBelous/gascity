@@ -102,13 +102,7 @@ type graphStores struct {
 // graphStoresFor builds the per-id resolver for the city at cityPath. A city
 // that relocates nothing yields a resolver that answers from the work store.
 func graphStoresFor(work beads.Store, cityPath string) *graphStores {
-	var graph beads.Store
-	if cityPath != "" {
-		if binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)); relocated {
-			graph = binding
-		}
-	}
-	return graphStoresOver(work, graph)
+	return graphStoresOver(work, cityGraphClassBinding(cityPath))
 }
 
 // graphStoresOver builds the resolver from an already-resolved binding.
@@ -136,7 +130,9 @@ func (g *graphStores) storeFor(id string) (beads.Store, error) {
 // memberClasses names the classes a convoy expansion spans. Naming a class is
 // what makes it participate; an unnamed Graph leaves members as placeholders.
 func (g *graphStores) memberClasses(convoyStore beads.Store) convoycore.MemberClasses {
-	return convoycore.MemberClasses{Convoy: convoyStore, Work: []beads.Store{g.work}, Graph: g.graph}
+	// A constructor INPUT, not a residency answer: it names the legs convoycore
+	// resolves against, and storeFor above is this type's actual answer.
+	return convoycore.MemberClasses{Convoy: convoyStore, Work: []beads.Store{g.work}, Graph: g.graph} // residency:allow — constructor input to convoycore.MemberClasses
 }
 
 // openRigAwareStore opens a bead store, routing to the correct rig directory

@@ -878,7 +878,7 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	// this a "gcg-*" close fell through to the broadcast and autoclose read an
 	// arbitrary work store. Gated on `relocated`, so single-store is unchanged.
 	for _, class := range infraMigrationClasses {
-		prefix, ok := config.ReservedClassPrefix(string(class))
+		prefix, ok := config.ReservedClassPrefix(string(class)) // residency:allow — extends this scan's configured-prefix table, not a probe
 		if !ok {
 			continue
 		}

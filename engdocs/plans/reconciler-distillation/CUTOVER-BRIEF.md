@@ -112,19 +112,34 @@ another. Regenerating the file to absorb a finding defeats the guard — the dif
 is the review. A finding stays out of the file until it is adjudicated, and the
 guard stays red on it on purpose in the meantime.
 
-**Status at the release cut (`0d8f61a335`): green.** `ga-f7v2ft.182` was
+**Status at the release cut: green**, re-verified against the cut commit itself
+rather than its parent (see the second trap below). `ga-f7v2ft.182` was
 adjudicated by ADOPTING upstream's retirement (cherry-pick `c2da2c1624`), not by
 a waiver, so check 1 reports no resurrection; `ga-f7v2ft.183`'s thirteen tests
 were each recovered and run against lane code before being ruled on — two were
-genuine losses and were restored, eleven are allowlisted retirements; and the
-three modal-dismissal tests the council's B1 fix re-sited were ruled the same
-way, with their replacements run (including on real tmux) before a line went in
-the file. Nothing is parked awaiting a decision.
+genuine losses and were restored, eleven are allowlisted retirements; the three
+modal-dismissal tests the council's B1 fix re-sited were ruled the same way,
+with their replacements run (including on real tmux); and B4's own
+`TestUndecodedPathsWithEmptyRetiredRegistry` was recovered, RUN, and shown to
+fail on its first line — `len(retiredKeys) != 0` is exactly what F2 changed —
+so it was re-expressed rather than restored. Nothing is parked awaiting a
+decision. Re-run this at the merge commit anyway: pre-merge mode audits against
+whatever `origin/main` is TODAY, so a sync that lands after this line is written
+can surface findings this run could not have seen.
 
-One operational trap: the guard's pre-merge mode resolves its base as
-`merge-base(HEAD, origin/main)`, and a SHALLOW `origin/main` has none — it fails
-closed on an unresolvable base, which reads like a broken script rather than a
-missing fetch. Run `git fetch --unshallow origin` (or pass `--base`) first.
+Two operational traps, both hit for real on this cut:
+
+**A shallow `origin/main` looks like a broken script.** Pre-merge mode resolves
+its base as `merge-base(HEAD, origin/main)`, and a depth-1 `origin/main` has
+none, so the guard fails closed on an unresolvable base. Run
+`git fetch --unshallow origin` (or pass `--base`) first.
+
+**Run it on a commit, not on your edits.** Every tree is materialized with
+`git archive REF`, so uncommitted work is invisible. A green run taken before
+committing certifies the tree you are about to change. Here a pre-commit run
+passed check 2 at 34 vanished tests, and the very next commit's test rename made
+it 35 — the guard was right both times, and the operator was reading the wrong
+one. Commit, then run.
 
 The guard proves its own bite through `--self-test`: sixteen cases on real temp
 git repos covering a resurrection, an allowlisted resurrection, an allowlist

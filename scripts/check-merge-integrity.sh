@@ -79,6 +79,15 @@
 #   cut. Wiring it into an automated gate is ga-f7v2ft.189 (council S1), which
 #   also carries the four open soundness minors on this script.
 #
+#   RUN IT ON A COMMIT, NOT ON YOUR EDITS. Every tree here is materialized with
+#   `git archive REF` (extract_tree), so the guard sees COMMITTED state only —
+#   an uncommitted rename or deletion in your working tree is invisible to it.
+#   A green run before you commit therefore certifies the tree you are ABOUT to
+#   change, which is worth nothing. Commit first, then run; if it goes red, fix
+#   it in a follow-up commit. Observed for real at ga-f7v2ft.161: a pre-commit
+#   run passed check 2, and the very next commit's test rename took it from 34
+#   vanished tests to 35.
+#
 # FAILS CLOSED on an unresolvable ref, an unreadable allowlist, a malformed
 # allowlist line, an allowlist entry with no reason, or a symbol extraction
 # that finds nothing at all. A guard that passes when it cannot evaluate

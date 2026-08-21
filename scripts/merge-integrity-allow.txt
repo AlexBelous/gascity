@@ -115,6 +115,19 @@ test	TestDismissModelSwitchModal	renamed onto the production entry point as Test
 test	TestDismissModelSwitchModalNoOpOnWorkingPane	renamed as TestClearModelSwitchModalNoOpOnWorkingPane on byte-identical pane content, now proving no send-keys AND no if-shell reaches a working pane that merely mentions rate limits (B1, b290985c9e)
 test	TestDismissModelSwitchModalIfPresentClearsModalOnRealTmux	renamed as TestClearModelSwitchModalOnRealTmux on the same fake-agent fixture and the same MODEL_KEPT assertion, with a deadline wait replacing the fixed sleep; TestNudgeNeverTypesIntoAModelSwitchModalOnRealTmux was added beside it to pin the #3916/ga-3syh signature end-to-end (B1, b290985c9e)
 
+# --- the retired-key registry stopped being empty ----------------------------
+# Council finding F2 registered the first entry in config.retiredKeys, which
+# falsifies the base test's own premise: its first assertion is
+# `len(retiredKeys) != 0 -> Fatal`. Recovered verbatim and RUN against lane code
+# per ga-f7v2ft.183's method, it fails on exactly that line — so it cannot be
+# restored, only re-expressed. The replacement carries both of its end-to-end
+# assertions unchanged (an unknown key stays fatal through
+# fatalUndecodedWarnings, and CheckUndecodedKeys still warns about it) and adds
+# the guard the registry now needs: every registered entry must carry a
+# RemovedIn anchor and a Note. Retiring a key must downgrade THAT key, never
+# open a hole for typos.
+test	TestUndecodedPathsWithEmptyRetiredRegistry	its premise (retiredKeys ships empty) is what F2 changed; re-expressed as TestUndecodedPathsWithPopulatedRetiredRegistry, which keeps both unknown-key-fatality assertions and adds a RemovedIn+Note requirement per entry
+
 # --- check 3: restorations the merge got RIGHT --------------------------------
 # Check 3's finding is not automatically a defect. A lane that lost a symbol
 # during branch churn and a merge that hands it back is the guard working in the

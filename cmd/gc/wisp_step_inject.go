@@ -45,12 +45,7 @@ func wispStepInjectionContent(cityPath string) string {
 // If GC_RIG_ROOT is set it opens that rig's store (where rig-scoped polecat
 // work lives); otherwise it opens the city store at cityPath.
 // Returns nil on any error — callers treat nil as "no store available".
-//
-// This is the WORK store and stays unrouted: the assignee-owned beads this
-// file starts from — the attached-formula source bead behind the molecule_id
-// bridge, and the legacy in-progress-with-description fallback — are work
-// class, and work is what a rig store holds. The graph leg is derived from it
-// by the caller; see resolveActiveWispStep.
+// This is the WORK store and stays unrouted; see resolveActiveWispStep.
 func openWispStepStore(cityPath string) beads.Store {
 	if rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT")); rigRoot != "" {
 		store, err := openStoreAtForCity(rigRoot, cityPath)
@@ -105,14 +100,8 @@ func wispStepAssignees() []string {
 // Returns nil, nil when no bead can be resolved. Never returns an error for
 // not-found conditions — callers treat nil as "nothing to inject".
 //
-// It takes BOTH stores because this resolution genuinely spans two coordination
-// classes, and routing it wholesale to either one breaks the other half on a
-// migrated city. Molecule/wisp roots and their type=step children are
-// ClassGraph; the assignee-owned source bead the molecule_id bridge starts from
-// and the legacy in-progress-with-description fallback are work class and live
-// in the city or rig work ledger. graphStore may be the same value as workStore
-// (it is on every single-store city), which is why the split is expressed as
-// two parameters rather than one routed store.
+// Both stores, because the resolution spans two classes: roots and type=step
+// children are ClassGraph, the assignee-owned beads it starts from are work.
 func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string) (*beads.Bead, error) {
 	if workStore == nil || len(assignees) == 0 {
 		return nil, nil
@@ -207,11 +196,8 @@ func resolveActiveMolecule(store beads.Store, assignees []string) (*beads.Bead, 
 // Returns nil on any error or when no bridge bead is found — callers treat nil
 // as "no bridge available" and fall through to the legacy path.
 //
-// The bridge crosses a class boundary, which is why it takes both stores: the
-// assignee-owned bead carrying the stamp is work class, and the root it names
-// is ClassGraph. Reading the root back out of the work store is what made this
-// return nil on a migrated city, silently demoting every attached formula to
-// the legacy description fallback.
+// The bridge crosses a class boundary: the bead carrying the stamp is work
+// class, the root it names is ClassGraph.
 func resolveMoleculeRootViaBridge(workStore, graphStore beads.Store, assignees []string) *beads.Bead {
 	results, err := workStore.List(beads.ListQuery{
 		Status:    "in_progress",

@@ -160,10 +160,8 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 	// so byte-identical.
 	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
 	sessStore := cliSessionStore(store, routeCfg, current.cityPath)
-	// The handoff message bead is ClassMessaging, so its persistence follows the
-	// messaging binding for the same reason the session arm follows the sessions
-	// one: left on the work store, a relocated city writes the handoff into the
-	// ledger nothing delivers from.
+	// The handoff bead is ClassMessaging; left on the work store, a relocated
+	// city writes the handoff into the ledger nothing delivers from.
 	msgStore := cliMailStore(store, routeCfg, current.cityPath).Store
 	rec := openCityRecorderAt(current.cityPath, stderr)
 	if auto {
@@ -353,11 +351,8 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 	// than resolving the configured mail provider (GC_MAIL / city.toml): handoff
 	// needs the thread label and handoff-specific extra-labels that SendHandoff
 	// expresses, which aren't part of the generic provider surface. Built as a
-	// two-store provider (mirroring newCityMailProvider): the handoff message bead
-	// is ClassMessaging and persists to the messaging-class store, while beadmail's
-	// session addressing/identity reads are ClassSessions and follow the
-	// session-class store. Both legs are routed by the caller; passing an unrouted
-	// work store here writes the handoff into the ledger nothing delivers from.
+	// two-store provider (mirroring newCityMailProvider): the message bead is
+	// ClassMessaging, beadmail's addressing reads are ClassSessions.
 	provider := beadmail.NewWithStores(msgStore, sessStore)
 	msg, err := provider.SendHandoff(mail.HandoffIntent{
 		From:        senderAddress,

@@ -51,11 +51,8 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	// (city) cwd/env, so resolve the store that actually owns the bead across
 	// the city and every rig, so rig-store closes autoclose their attached
 	// wisps instead of silently no-op'ing (#3411).
-	// The attachments this closes are ClassGraph wherever the just-closed bead
-	// lives, so the graph leg routes off the owning store rather than following
-	// it. Without this the hook reads an empty graph on a migrated city and
-	// reports success — the attachment outlives its parent, which is the leak
-	// this hook exists to drain.
+	// Attachments are ClassGraph wherever the just-closed bead lives; without
+	// this the hook reads an empty graph on a migrated city and reports success.
 	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
 		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
@@ -83,19 +80,11 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // graph-class store. A closed work bead in a rig store can own graph-workflow
 // attachments that live in the graph store, so the attachment collection,
 // parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
-// graph store.
-//
-// The graph store is a REQUIRED, class-typed parameter. It was briefly variadic
-// with a collapse-to-store default, and that default was the defect rather than
-// a convenience: both hook-path callers simply omitted the argument, so the
-// on_close hook — the only caller that runs in production — resolved every
-// attachment against the work store while the graph class lived in the binding.
-// A missing argument that silently means "use the wrong store" cannot be caught
-// by review; a compile error can.
+// graph store. It is required rather than variadic: as a variadic with a
+// collapse-to-store default, both hook-path callers silently omitted it.
 func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
-	// Unwrapped for internal use: the helpers below are generic Store helpers
-	// shared across classes and some assert optional capabilities, which do not
-	// promote through the wrapper. The wrapper's job is done at the boundary.
+	// Unwrapped for internal use: the helpers below assert optional store
+	// capabilities, which do not promote through the class wrapper.
 	graphStore := graphClassStore.Store
 	if graphStore == nil {
 		graphStore = store

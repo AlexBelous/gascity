@@ -85,41 +85,22 @@ func cmdGraph(args []string, opts graphOpts, stdout, stderr io.Writer) int {
 		return code
 	}
 	// resolveCity already succeeded inside openRigAwareStore; a failure here
-	// only costs class routing, and a graph read of the work ledger is still
-	// the right answer for every work-class id.
+	// only costs class routing, leaving the work ledger as the answer.
 	cityPath, _ := resolveCity()
 	return doGraph(graphStoresFor(store, cityPath), args, opts, stdout, stderr)
 }
 
-// graphStores answers "which store owns this bead?" for each id a graph request
-// touches, so one `gc graph` can span the work ledger and the infrastructure
-// binding.
-//
-// `gc graph` takes ARBITRARY ids and is the command an operator reaches for when
-// a molecule looks stuck — which on a migrated city means a "gcg-" id whose
-// bead the work store has never heard of. Answering the whole request from one
-// store gets that wrong in two ways at once: a relocated id reports as not
-// found, and a work convoy whose members relocated renders those members as
-// unresolved placeholders whose DepList comes back empty from the work store —
-// a dependency graph with no dependencies, which is exactly the output that
-// looks like an answer.
-//
-// The routing decision is delegated rather than re-derived. classRoutedStoreForID
-// is the repo's one by-id class resolver, and its own header records that
-// answering this question a second time in a second place "is how this repo's
-// split-store bug class reproduces (#5125, #5127)".
+// graphStores answers "which store owns this bead?" per id: `gc graph` takes
+// arbitrary ids, so a one-store read misses everything the binding holds.
 type graphStores struct {
 	work beads.Store
-	// graph is the relocated infrastructure binding, or nil on a city that
-	// relocates nothing — which is every single-store city, and the shape every
-	// test that hands doGraph one store is describing.
+	// graph is the relocated binding, nil on a city that relocates nothing.
 	graph beads.Store
 	cache map[string]beads.Store
 }
 
-// graphStoresFor builds the per-id resolver for a graph request against the
-// city at cityPath. A city path of "" (or one whose graph class is not
-// relocated) yields a resolver that answers every id from the work store.
+// graphStoresFor builds the per-id resolver for the city at cityPath. A city
+// that relocates nothing yields a resolver that answers from the work store.
 func graphStoresFor(work beads.Store, cityPath string) *graphStores {
 	var graph beads.Store
 	if cityPath != "" {
@@ -136,8 +117,7 @@ func graphStoresOver(work, graph beads.Store) *graphStores {
 }
 
 // storeFor returns the store that owns id, falling back to the work store.
-// Results are memoized because doGraph asks twice about the same id — once to
-// resolve the input, once to list its edges — and each miss costs a probe.
+// Memoized: doGraph asks twice per id, and each miss costs a probe.
 func (g *graphStores) storeFor(id string) (beads.Store, error) {
 	if g.graph == nil {
 		return g.work, nil
@@ -153,13 +133,8 @@ func (g *graphStores) storeFor(id string) (beads.Store, error) {
 	return store, nil
 }
 
-// memberClasses names the classes a convoy expansion spans. convoyStore is the
-// store that owns the convoy bead and its `tracks` edges; the graph binding is
-// named as the Graph class so a member that relocated resolves to the real bead.
-//
-// Naming a class is what makes it participate: an unnamed Graph class makes
-// every relocated member an unresolved placeholder with no dependency edges,
-// which renders as a graph that has answered and simply has nothing in it.
+// memberClasses names the classes a convoy expansion spans. Naming a class is
+// what makes it participate; an unnamed Graph leaves members as placeholders.
 func (g *graphStores) memberClasses(convoyStore beads.Store) convoycore.MemberClasses {
 	return convoycore.MemberClasses{Convoy: convoyStore, Work: []beads.Store{g.work}, Graph: g.graph}
 }
@@ -254,10 +229,8 @@ func doGraph(stores *graphStores, args []string, opts graphOpts, stdout, stderr 
 	// Fetch dependencies for each bead.
 	nodes := make([]graphNode, 0, len(resolved))
 	for _, b := range resolved {
-		// Each bead's edges are read from the store that owns the bead. A
-		// convoy's members can span classes, so a single store here would
-		// return an empty dep list for every member it does not hold and print
-		// an edgeless graph.
+		// Edges come from the store that owns the bead; convoy members span
+		// classes, and a store that lacks one returns an empty dep list.
 		depStore, err := stores.storeFor(b.ID)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc graph: resolving the store for %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
@@ -370,10 +343,8 @@ func resolveGraphInput(stores *graphStores, args []string, stderr io.Writer) ([]
 			fmt.Fprintf(stderr, "gc graph: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", b.ID) //nolint:errcheck // best-effort stderr
 		}
 		if beads.IsContainerType(b.Type) {
-			// The convoy's own membership edges are read from the store that
-			// owns the convoy; each member is resolved across BOTH legs, so a
-			// convoy that tracks relocated members expands to the real beads
-			// instead of the unresolved placeholders a one-store read produces.
+			// Membership edges come from the convoy's own store; members
+			// resolve across both legs.
 			children, err := convoycore.MembersIn(stores.memberClasses(store), b.ID, false)
 			if err != nil {
 				return nil, fmt.Errorf("expanding %s %s: %w", b.Type, b.ID, err)

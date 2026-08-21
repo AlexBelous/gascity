@@ -79,11 +79,26 @@ func classRoutedStoreForID(cityPath, id string, work beads.Store) (beads.Store, 
 	return classRoutedStoreForIDIn(class, id, work)
 }
 
+// classBindingForID is the class leg of classRoutedStoreForID, for callers whose
+// work answer is a leg list rather than one store. A nil work leg makes the
+// residual answer nil, so ok=false means "no named leg answered".
+func classBindingForID(cityPath, id string) (beads.Store, bool, error) {
+	class, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	if !relocated || class == nil {
+		return nil, false, nil
+	}
+	store, err := classRoutedStoreForIDIn(class, id, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if store == nil {
+		return nil, false, nil
+	}
+	return class, true, nil
+}
+
 // classRoutedStoreForIDIn is classRoutedStoreForID with the binding already in
-// hand. Callers that resolve the binding once for a whole request (rather than
-// once per id) and tests that have no city on disk route through here, so the
-// probe order, the identity gate and the failure classification stay in one
-// place. A nil class means the city relocates nothing.
+// hand, for callers that resolve it once per request. Nil class means no relocation.
 func classRoutedStoreForIDIn(class beads.Store, id string, work beads.Store) (beads.Store, error) {
 	if class == nil || class == work {
 		return work, nil

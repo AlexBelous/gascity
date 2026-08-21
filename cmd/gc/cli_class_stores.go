@@ -31,15 +31,7 @@ func cliNudgesStore(store beads.Store, cfg *config.City, cityPath string) beads.
 }
 
 // cliGraphStore routes a generic CLI one-shot work store to the graph
-// coordination-class store. It is the graph twin of cliSessionStore; see
-// cliNudgesStore for why the CLI needs its own seam.
-//
-// Graph is the class the one-shot tier reaches most often and routed least: a
-// molecule root, its step beads, a wisp and a convergence pour are all
-// ClassGraph, and every `gc` hook that touches one (autoclose, wisp step
-// injection, PR-repair cook) opens a work store of its own. Left unrouted on a
-// migrated city those read an empty graph and report success — the silent-empty
-// arm of this bug family, which is why the seam is named rather than inlined.
+// coordination-class store. Graph twin of cliSessionStore.
 func cliGraphStore(store beads.Store, cfg *config.City, cityPath string) beads.GraphStore {
 	return beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}
 }

@@ -383,15 +383,8 @@ func githubPRRepairMetadata(result githubmonitor.Result) map[string]string {
 // carries the standard polecat steps. The error is treated as non-fatal by the
 // caller (the bead is already created and routed).
 //
-// Two stores, two classes. The repair bead itself is work class and stays in the
-// rig or city ledger the caller opened it in — that is where `gc hook` looks for
-// the work it hands a polecat. The workflow attached to it is classified from
-// the compiled recipe: a graph.v2 or root-only repair formula is ClassGraph and
-// belongs in the city's graph binding, while a v1 POURED one compiles to
-// work-class steps that must stay beside the bead. Cooking both on the work
-// store — what this did — poured graph-class repair workflows into the ledger
-// nothing graph-side reads, so on a migrated city every repair bead was created,
-// routed, and reported dispatched with no steps anyone could find.
+// Two stores because the classes differ: the repair bead is work class, while
+// the attached workflow's class comes from the compiled recipe.
 func defaultAttachGitHubPRRepairWorkflow(store beads.Store, graphStore beads.GraphStore, cfg *config.City, rig config.Rig, monitor config.GitHubPRMonitor, bead beads.Bead, result githubmonitor.Result) error {
 	workflow := monitor.RepairWorkflowOrDefault()
 	if workflow == "" {
@@ -400,8 +393,8 @@ func defaultAttachGitHubPRRepairWorkflow(store beads.Store, graphStore beads.Gra
 	searchPaths := cfg.FormulaLayers.SearchPaths(strings.TrimSpace(rig.Name))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// Unwrapped at the boundary: molecule.Instantiate asserts optional store
-	// capabilities, and those do not promote through the class wrapper.
+	// Unwrapped: molecule.Instantiate asserts optional store capabilities, which
+	// do not promote through the class wrapper.
 	graph := graphStore.Store
 	if graph == nil {
 		graph = store

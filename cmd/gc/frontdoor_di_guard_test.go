@@ -308,11 +308,9 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // sessionFrontDoor(sessStore).ApplyPatch), restart persist (sessionRestartPersister),
 // the remote kill/observe/identity trio, resolveSessionID, sender-identity resolution
 // (resolveDefaultMailSenderForCommand), and beadmail's session addressing via
-// beadmail.NewWithStores(msgStore, sessStore) — through cliSessionStore. Its MESSAGING
-// arm is now routed too: both roots derive msgStore := cliMailStore(store, cfg,
-// cityPath).Store and thread it as createHandoffMail's message-bead leg, so the
-// beadmail provider is a fully routed two-store split (mirroring newCityMailProvider's
-// msgStore/sessStore split) rather than a work-store message leg. cmd_runtime_drain.go routes only
+// beadmail.NewWithStores(msgStore, sessStore) — through cliSessionStore. Its messaging
+// arm is routed too: both roots derive msgStore via cliMailStore, mirroring
+// newCityMailProvider's split. cmd_runtime_drain.go routes only
 // cmdRuntimeRequestRestart's session-bead access; every other command in the file is
 // drainOps runtime metadata (no bead store) plus nil-store worker observation, so the
 // guard is a regression canary for that one root.
@@ -451,15 +449,9 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 }
 
 // graphRelocationRoutedFiles are the CLI one-shot roots that reach the graph
-// coordination class and must derive their graph leg through cliGraphStore.
-//
-// Graph is city-keyed and the one class with no per-rig binding, so a hook that
-// opens a rig or city work store and asks it for a molecule root reads an empty
-// graph on a migrated city and reports success — the silent-empty arm. Each of
-// these files now takes the graph store as a required, class-typed parameter, so
-// the CALLEE is compile-enforced; what a compiler cannot check is whether the
-// caller handed it a routed store or just passed `store` again. That is what
-// this canary covers, and only that: it is a substring check, not a proof.
+// coordination class and must derive their graph leg through cliGraphStore. The
+// callee's typed parameter is compile-enforced; whether the CALLER handed it a
+// routed store is what this substring canary covers.
 var graphRelocationRoutedFiles = []string{
 	"wisp_autoclose.go",     // bd on_close hook: attached molecule/workflow reaping
 	"molecule_autoclose.go", // bd on_close hook: molecule completion

@@ -74,7 +74,7 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 
 	var (
 		out     []runtime.LiveRuntime
-		scanErr error
+		residue scanResidue
 	)
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -89,9 +89,9 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 			if irrelevant, proofErr := processPredatesIncarnation(root, pid, incarnationStartedAt); irrelevant {
 				continue
 			} else if proofErr != nil {
-				scanErr = errors.Join(scanErr, fmt.Errorf("proving age for pid %d: %w", pid, proofErr))
+				residue.add(fmt.Errorf("proving age for pid %d: %w", pid, proofErr))
 			}
-			scanErr = errors.Join(scanErr, fmt.Errorf("reading owner for pid %d: %w", pid, err))
+			residue.add(fmt.Errorf("reading owner for pid %d: %w", pid, err))
 			continue
 		}
 		if !owned {
@@ -102,7 +102,7 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 			if irrelevant, proofErr := processPredatesIncarnation(root, pid, incarnationStartedAt); irrelevant {
 				continue
 			} else if proofErr != nil {
-				scanErr = errors.Join(scanErr, fmt.Errorf("proving age for pid %d: %w", pid, proofErr))
+				residue.add(fmt.Errorf("proving age for pid %d: %w", pid, proofErr))
 			}
 			if irrelevant, proofErr := unreadableProcessProvenOutsideIncarnation(
 				root,
@@ -112,9 +112,9 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 			); irrelevant {
 				continue
 			} else if proofErr != nil {
-				scanErr = errors.Join(scanErr, fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
+				residue.add(fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
 			}
-			scanErr = errors.Join(scanErr, fmt.Errorf("reading environ for pid %d: %w", pid, err))
+			residue.add(fmt.Errorf("reading environ for pid %d: %w", pid, err))
 			continue
 		}
 		if root == "/proc" && pid == os.Getpid() {
@@ -132,7 +132,7 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 		}
 		rootProcess, err := isRootWithSessionID(root, pid, sessionID)
 		if err != nil {
-			scanErr = errors.Join(scanErr, fmt.Errorf("checking root for pid %d: %w", pid, err))
+			residue.add(fmt.Errorf("checking root for pid %d: %w", pid, err))
 			continue
 		}
 		if !rootProcess {
@@ -156,8 +156,60 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 	if out == nil {
 		out = []runtime.LiveRuntime{}
 	}
-	return out, scanErr
+	return out, residue.err()
 }
+
+// scanResidue accumulates the per-process inspection failures a sweep could
+// not resolve, so it can report them as one line instead of one line per
+// process — 513k of a production supervisor log's 637k lines, at ~253 per
+// sweep (gastownhall/gascity ga-f7v2ft.172).
+//
+// Only the reporting is collapsible. The residue itself cannot be pruned by
+// skipping the reads, because every process that lands here is one we are
+// already entitled to care about: processOwnedByUID has passed, so the failures
+// left are our own processes whose environ the kernel still withholds. It
+// guards /proc/<pid>/environ with ptrace_may_access, not file permissions, so a
+// non-dumpable agent and a sudo child both stay unreadable to the uid that owns
+// them. Neither may be assumed absent — a sudo child can outlive the runtime
+// that spawned it and keep carrying its GC_SESSION_ID, which is exactly what
+// unreadableProcessProvenOutsideIncarnation exists to adjudicate. Each failure
+// therefore still costs the sweep its proof of absence, and err() keeps a
+// non-nil verdict whenever one remains.
+type scanResidue struct {
+	errs []error
+}
+
+func (r *scanResidue) add(err error) {
+	if err != nil {
+		r.errs = append(r.errs, err)
+	}
+}
+
+// err returns nil only when every process was inspected, so callers keep
+// reading a nil error as their proof that absence is complete.
+func (r *scanResidue) err() error {
+	switch len(r.errs) {
+	case 0:
+		return nil
+	case 1:
+		return r.errs[0]
+	default:
+		return &inspectionResidueError{errs: r.errs}
+	}
+}
+
+// inspectionResidueError renders a sweep's uninspectable processes as a count
+// and one example while keeping each underlying error reachable through
+// [errors.Is] and [errors.As].
+type inspectionResidueError struct {
+	errs []error
+}
+
+func (e *inspectionResidueError) Error() string {
+	return fmt.Sprintf("%d processes could not be inspected (first: %v)", len(e.errs), e.errs[0])
+}
+
+func (e *inspectionResidueError) Unwrap() []error { return e.errs }
 
 const (
 	linuxUserHZ                  = 100

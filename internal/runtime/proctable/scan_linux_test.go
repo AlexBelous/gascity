@@ -3,6 +3,7 @@
 package proctable
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -637,5 +638,142 @@ func TestProcessPredatesIncarnationFutureBoundaryFailsClosed(t *testing.T) {
 	}
 	if irrelevant {
 		t.Fatal("future incarnation boundary classified an inaccessible process as irrelevant")
+	}
+}
+
+// writeUnreadableEnviron makes <dir>/environ a directory. os.ReadFile then
+// fails with EISDIR for every uid, so a fixture stays unreadable even when the
+// suite runs as root — unlike a 0000-mode file, which root can still open.
+func writeUnreadableEnviron(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "environ"), 0o755); err != nil {
+		t.Fatalf("create unreadable environ fixture: %v", err)
+	}
+}
+
+// TestScanWithRootSkipsForeignUIDBeforeReadingEnviron pins that a process owned
+// by another uid costs the sweep nothing: it is neither read nor counted. The
+// control proves the fixture is genuinely unreadable — the same tree under our
+// own uid must fail closed.
+func TestScanWithRootSkipsForeignUIDBeforeReadingEnviron(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "700")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeUnreadableEnviron(t, dir)
+	writeFakeProcessUID(t, dir, os.Geteuid()+1)
+
+	got, err := scanWithRoot(root, "")
+	if err != nil {
+		t.Fatalf("foreign-uid process was inspected: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("foreign-uid scan returned %d runtimes, want 0", len(got))
+	}
+
+	// Control: the identical fixture owned by us must be read, fail, and fail
+	// closed. Without it a skip and an unreadable-but-harmless fixture look the
+	// same.
+	writeFakeProcessUID(t, dir, os.Geteuid())
+	if _, err := scanWithRoot(root, ""); err == nil {
+		t.Fatal("owned unreadable process did not make the scan incomplete; the fixture proves nothing")
+	}
+}
+
+// TestScanWithRootReportsInspectionResidueAsOneLine pins the logging contract
+// behind ga-f7v2ft.172: a sweep that cannot inspect some processes still fails
+// closed, but reports the residue as a single summary line rather than one
+// line per process.
+func TestScanWithRootReportsInspectionResidueAsOneLine(t *testing.T) {
+	root := t.TempDir()
+
+	// Three processes we may not read: two owned outright (non-dumpable
+	// agents keep their environ unreadable even to their owner) and one
+	// sudo-shaped, with our real uid and root's effective uid.
+	for _, pid := range []int{501, 502} {
+		dir := filepath.Join(root, strconv.Itoa(pid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		writeUnreadableEnviron(t, dir)
+		writeFakeProcessUID(t, dir, os.Geteuid())
+	}
+	sudoDir := filepath.Join(root, "503")
+	if err := os.MkdirAll(sudoDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeUnreadableEnviron(t, sudoDir)
+	writeFakeProcessUIDs(t, sudoDir, os.Geteuid(), 0)
+
+	// A foreign process the sweep must not even attempt.
+	foreignDir := filepath.Join(root, "504")
+	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeUnreadableEnviron(t, foreignDir)
+	writeFakeProcessUID(t, foreignDir, os.Geteuid()+1)
+
+	// A readable runtime the sweep must still surface.
+	buildFakeProc(t, root, 505, map[string]string{"GC_SESSION_ID": "ga-live"})
+
+	got, err := scanWithRoot(root, "")
+	if err == nil {
+		t.Fatalf("scanWithRoot = %v, nil error; want the sweep to fail closed on unreadable processes", got)
+	}
+	if len(got) != 1 || got[0].PID != 505 {
+		t.Fatalf("scanWithRoot = %v, want the readable runtime pid 505", got)
+	}
+
+	msg := err.Error()
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("inspection residue spans %d lines, want one summary line:\n%s", strings.Count(msg, "\n")+1, msg)
+	}
+	if !strings.Contains(msg, "3 processes") {
+		t.Fatalf("residue summary %q does not count the 3 uninspectable processes", msg)
+	}
+	if !strings.Contains(msg, "reading environ for pid 501") {
+		t.Fatalf("residue summary %q does not carry the first example", msg)
+	}
+	if strings.Contains(msg, "504") {
+		t.Fatalf("residue summary %q names the foreign process; it must never be read", msg)
+	}
+}
+
+// TestScanWithRootReportsSingleResidueVerbatim keeps the one-failure case free
+// of summary framing.
+func TestScanWithRootReportsSingleResidueVerbatim(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "600")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeUnreadableEnviron(t, dir)
+	writeFakeProcessUID(t, dir, os.Geteuid())
+
+	_, err := scanWithRoot(root, "")
+	if err == nil {
+		t.Fatal("single unreadable process did not make the scan incomplete")
+	}
+	if got := err.Error(); !strings.HasPrefix(got, "reading environ for pid 600: ") {
+		t.Fatalf("single residue = %q, want the underlying error verbatim", got)
+	}
+}
+
+// TestScanResidueKeepsEveryFailureReachable pins that collapsing the log line
+// does not discard the errors themselves: every process that cost the sweep
+// its proof stays reachable through errors.Is.
+func TestScanResidueKeepsEveryFailureReachable(t *testing.T) {
+	first := errors.New("first failure")
+	last := errors.New("last failure")
+
+	var residue scanResidue
+	residue.add(first)
+	residue.add(errors.New("middle failure"))
+	residue.add(last)
+
+	err := residue.err()
+	if !errors.Is(err, first) || !errors.Is(err, last) {
+		t.Fatalf("residue %v hid a failure from errors.Is", err)
 	}
 }

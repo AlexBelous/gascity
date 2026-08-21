@@ -33,7 +33,7 @@ const (
 	mergeIntegrityAllowlist = "merge-integrity-allow.txt"
 	mergeIntegrityExtractor = "lib/go-top-level-symbols.awk"
 	mergeIntegrityTarget    = "check-merge-integrity:"
-	mergeIntegrityDoc       = "engdocs/plans/reconciler-distillation/CUTOVER-BRIEF.md"
+	mergeIntegrityDoc       = "TESTING.md"
 )
 
 type mergeIntegrityEntry struct {

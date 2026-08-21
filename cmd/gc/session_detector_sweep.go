@@ -16,12 +16,11 @@ import (
 )
 
 // The detector sweep is the read-only observation half of the reconciler
-// distillation (engdocs/plans/reconciler-distillation/DETECTOR.md §2). It runs
-// beside the legacy god function at all three production entry points and
-// classifies every session row into condition families. It never mutates the
-// store, the provider, or any domain state, and during the WD wave it never
-// enqueues: every family's act constant below is false until the WE cutover
-// commit flips it.
+// distillation. It runs beside the legacy god function at all three production
+// entry points and classifies every session row into condition families. It
+// never mutates the store, the provider, or any domain state, and during the
+// WD wave it never enqueues: every family's act constant below is false until
+// the WE cutover commit flips it.
 
 // detectorFamily names one condition family from DETECTOR.md §3. The value is
 // the stable key used in trace payloads and by the WD.15 parity join.

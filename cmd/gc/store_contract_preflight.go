@@ -1,7 +1,7 @@
 package main
 
-// The class contract, enumerated and warned at controller boot
-// (engdocs/plans/reconciler-distillation/DECONDITIONALIZE.md §2, step 1).
+// The class contract, enumerated and warned at controller boot: step 1 of the
+// three-step deconditionalization (warn, then require, then refuse).
 //
 // The .162 slice replaced one capability RESOLUTION with one capability
 // REQUIREMENT: the session class states what it needs and a store that cannot

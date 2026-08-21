@@ -88,7 +88,8 @@ test	TestRuntimeStartCallSitesCleanOrphansFirst	renamed in place by 1654bac8d1 t
 # RoutedWork plan narrowed to the runtime plane (bindings in, work ledger out),
 # and the view reads the canonical workflow stores (city ledger in). The
 # zero-ledger-read budget these tests pinned is not a property the live path has
-# or claims — DETECTOR.md declares the view's read bounded-per-sweep, not zero —
+# or claims — readyRoutedWorkView is one bounded ReadyLive read per store per
+# patrol by design and says so on its own doc comment, not zero reads —
 # so re-pointing them would assert something false under a name that sounds true.
 # The live equivalents are TestReadyRoutedWorkViewFingerprintTracksDemandNotTouches
 # and TestReadyRoutedWorkViewEmitsResolvableStoreRefs.

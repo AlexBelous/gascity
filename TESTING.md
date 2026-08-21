@@ -498,6 +498,65 @@ all-source audit while staying outside untagged and Small debt.
 | `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->
 
+## Merge integrity: the census that runs at every origin/main sync
+
+A long-lived branch can lose meaning across a merge while still compiling clean
+and running green, because the loss is a *set difference* against the merge
+base rather than a broken symbol. `scripts/check-merge-integrity.sh` audits
+those three set differences. Run it at **every** origin/main sync — once before
+merging, once after:
+
+```bash
+make check-merge-integrity          # --self-test, then the real audit
+```
+
+Or against a specific merge, which is how a past merge is audited:
+
+```bash
+bash scripts/check-merge-integrity.sh --merged <merge-commit>
+```
+
+**Check 1 — deleted-symbol resurrection.** Top-level Go symbols present at the
+merge base and absent from origin/main are symbols upstream retired. None may
+survive into the merged tree. A resurrection is how a conflict resolution keeps
+lane call sites compiling against a contract upstream has already withdrawn.
+
+**Check 2 — vanished-test census.** Every `Test*` present at the merge base must
+exist after the merge, be named in a commit message on `base..merged`, or be
+listed in the allowlist. A conflict resolution that drops a behaviour drops its
+test in the same hunk, so the suite that would have caught it is deleted by the
+commit that broke the code.
+
+**Check 3 — restored lane deletion**, the mirror of check 1. Symbols present at
+the merge base and absent from the LANE are symbols *this branch* retired; none
+may come back through the merge. Check 1 is blind to this class: when upstream
+never touched the symbol it is byte-identical between base and head, so there is
+no upstream retirement to compare against. The classic failure is an incoming
+upstream *test* file calling a symbol the lane retired, the merge breaking the
+compile, and the compile being fixed by taking the symbol back — shipping a
+caller-less island. The check needs a lane ref, which it takes from `^1` of a
+merge commit or from `--lane`; in the pre-merge mode the lane *is* the tree, so
+it reports NOT APPLICABLE rather than passing mute.
+
+Deliberate keeps and retirements go in `scripts/merge-integrity-allow.txt`, one
+per line with the reason. **A blank reason fails.** The three kinds are separate
+(`symbol`, `test`, `restored`) so a waiver written for one class cannot silence
+another. Regenerating the file to absorb a finding defeats the guard — the diff
+is the review. A finding stays out of the file until it is adjudicated, and the
+guard stays red on it on purpose in the meantime. Adopting upstream's retirement
+is a better adjudication than a waiver whenever the lane can live without the
+symbol.
+
+Two traps worth naming. Audit the cut commit itself, not its parent: a
+`--merged` run against `HEAD^` certifies a tree you are not shipping. And
+recover a vanished test and run it against lane code before ruling on it — a
+test that still passes was a genuine loss, not a retirement.
+
+`scripts/merge_integrity_test.go` is the CI-visible half: it pins the path from
+`make check-merge-integrity` to a guard that proves its own bite with
+`--self-test` before it audits, and it fails closed on a malformed or
+reasonless allowlist line.
+
 ## Five test categories, clear boundaries
 
 ### 1. Unit tests (`*_test.go` next to the code)

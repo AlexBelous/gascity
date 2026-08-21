@@ -218,51 +218,7 @@ func (cr *CityRuntime) ensureSessionStartController(ctx context.Context, seed *s
 			return reconcileErr
 		},
 		Observer: func(result sessionStartReconcileResult) {
-			if result.Outcome == sessionStartReconcileRetrying &&
-				(result.Admission.PoolDrainAck != nil || result.Admission.PoolDrainAckUncertain) &&
-				result.Err != nil && result.Err.Error() != errSessionStartPoolDrainAckPending.Error() {
-				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation retrying for %s: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // non-exhausting safety retries must retain their cause
-			}
-			// ga-f7v2ft.112 ruling 1b. Repeated refusals are indistinguishable from
-			// transient by construction, so this classifies nothing and changes
-			// nothing — it is the one throttled observability escalation, and the
-			// deadline release below is what actually bounds the obligation.
-			if result.Outcome == sessionStartReconcileRetrying && result.DrainAckRefusals > 0 &&
-				result.DrainAckRefusals%drainAckRefusalDiagnosticInterval == 0 {
-				cr.recordDrainAckAdmissionBoundTrace(stateSnapshot.Config, result, TraceOutcomeRetry)
-			}
-			if result.Outcome == sessionStartReconcileDeadlineExceeded {
-				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation released %s at the drain deadline after %d consecutive refusals: %v; authoritative audit requested\n", //nolint:errcheck // the release must be visible: legacy re-owns the row from here
-					cr.sessionStartLogPrefix(), result.Admission.SessionID, result.DrainAckRefusals, result.Err)
-				cr.recordDrainAckAdmissionBoundTrace(stateSnapshot.Config, result, TraceOutcomeDeadlineExceeded)
-				if mode == rollout.Auto {
-					cr.requestLegacySessionStartFallback()
-				}
-			}
-			if result.Outcome == sessionStartReconcileSucceeded && result.LegacyFallback {
-				if result.Err != nil {
-					fmt.Fprintf(cr.sessionStartStderr(), "%s: exact session reconciliation yielded %s to priority legacy fallback: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // fallback cause must remain visible
-				}
-				if result.Admission.PoolAllocation == nil {
-					// Pool allocations have no legacy fallback from Q2 onward:
-					// the yielded key is re-detected by the next patrol's
-					// declared routed-work view (census-owed re-detection).
-					cr.requestLegacySessionStartFallback()
-				}
-			}
-			if result.Outcome == sessionStartReconcileSucceeded {
-				// A queued nudge can arrive while this exact session is still
-				// starting. Once lifecycle work completes, re-poke the nudge
-				// dispatcher; it rereads durable queue authority before any effect.
-				cr.signalNudgeKeyWake()
-			}
-			if result.Outcome == sessionStartReconcileExhausted {
-				fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start reconciliation exhausted for %s: %v; authoritative audit requested\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // terminal retry diagnostic
-				if result.Admission.PoolAllocation == nil &&
-					result.Admission.PoolDrainAck != nil && mode == rollout.Auto {
-					cr.requestLegacySessionStartFallback()
-				}
-			}
+			cr.observeSessionStartReconcile(stateSnapshot.Config, mode, result)
 		},
 		Stderr: cr.sessionStartStderr(),
 	})
@@ -426,6 +382,70 @@ func exactSessionLifecycleStatusOutcomeTraceValue(outcome sessionLifecycleStatus
 		return "park"
 	default:
 		return "unknown"
+	}
+}
+
+// observeSessionStartReconcile is the runtime's observer for keyed
+// session-start reconcile results: per-refusal drain-ack diagnostics, the
+// throttled admission-bound trace, the deadline release, the named escalation
+// crossing, legacy fallback requests, and the nudge re-poke. Extracted from
+// the controller wiring so the observable surface is testable on crafted
+// results.
+func (cr *CityRuntime) observeSessionStartReconcile(cfg *config.City, mode rollout.Mode, result sessionStartReconcileResult) {
+	if result.Outcome == sessionStartReconcileRetrying &&
+		(result.Admission.PoolDrainAck != nil || result.Admission.PoolDrainAckUncertain) &&
+		result.Err != nil && result.Err.Error() != errSessionStartPoolDrainAckPending.Error() {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation retrying for %s: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // non-exhausting safety retries must retain their cause
+	}
+	// ga-f7v2ft.112 ruling 1b. Repeated refusals are indistinguishable from
+	// transient by construction, so this classifies nothing and changes
+	// nothing — it is the one throttled observability escalation, and the
+	// deadline release below is what actually bounds the obligation.
+	if result.Outcome == sessionStartReconcileRetrying && result.DrainAckRefusals > 0 &&
+		result.DrainAckRefusals%drainAckRefusalDiagnosticInterval == 0 {
+		cr.recordDrainAckAdmissionBoundTrace(cfg, result, TraceOutcomeRetry)
+	}
+	// The escalation crossing is loud exactly once per refusal streak: the
+	// obligation-scoped count passes the threshold once, and escalated
+	// re-examinations after it are quiet by design — the slow cadence is the
+	// bound, the named line is the signal (ga-f7v2ft.173).
+	if result.Outcome == sessionStartReconcileDrainAckEscalated &&
+		result.DrainAckRefusals == drainAckRefusalEscalationThreshold {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation escalated for %s: unresolvable after %d consecutive refusals: %v; re-examining every %s until the row or runtime changes\n", //nolint:errcheck // the escalation must be visible: it replaces the per-retry storm
+			cr.sessionStartLogPrefix(), result.Admission.SessionID, result.DrainAckRefusals, result.Err, drainAckEscalatedRetryInterval)
+		cr.recordDrainAckAdmissionBoundTrace(cfg, result, TraceOutcomeEscalated)
+	}
+	if result.Outcome == sessionStartReconcileDeadlineExceeded {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation released %s at the drain deadline after %d consecutive refusals: %v; authoritative audit requested\n", //nolint:errcheck // the release must be visible: legacy re-owns the row from here
+			cr.sessionStartLogPrefix(), result.Admission.SessionID, result.DrainAckRefusals, result.Err)
+		cr.recordDrainAckAdmissionBoundTrace(cfg, result, TraceOutcomeDeadlineExceeded)
+		if mode == rollout.Auto {
+			cr.requestLegacySessionStartFallback()
+		}
+	}
+	if result.Outcome == sessionStartReconcileSucceeded && result.LegacyFallback {
+		if result.Err != nil {
+			fmt.Fprintf(cr.sessionStartStderr(), "%s: exact session reconciliation yielded %s to priority legacy fallback: %v\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // fallback cause must remain visible
+		}
+		if result.Admission.PoolAllocation == nil {
+			// Pool allocations have no legacy fallback from Q2 onward:
+			// the yielded key is re-detected by the next patrol's
+			// declared routed-work view (census-owed re-detection).
+			cr.requestLegacySessionStartFallback()
+		}
+	}
+	if result.Outcome == sessionStartReconcileSucceeded {
+		// A queued nudge can arrive while this exact session is still
+		// starting. Once lifecycle work completes, re-poke the nudge
+		// dispatcher; it rereads durable queue authority before any effect.
+		cr.signalNudgeKeyWake()
+	}
+	if result.Outcome == sessionStartReconcileExhausted {
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start reconciliation exhausted for %s: %v; authoritative audit requested\n", cr.sessionStartLogPrefix(), result.Admission.SessionID, result.Err) //nolint:errcheck // terminal retry diagnostic
+		if result.Admission.PoolAllocation == nil &&
+			result.Admission.PoolDrainAck != nil && mode == rollout.Auto {
+			cr.requestLegacySessionStartFallback()
+		}
 	}
 }
 

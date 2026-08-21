@@ -616,6 +616,35 @@ func (r drainAckFinalizeResult) applyTo(info sessionpkg.Info) sessionpkg.Info {
 	return info
 }
 
+// drainAckTerminalProvenance is the provenance a fenced drain-ack terminal
+// close stamps onto and asserts over the closed row, plus the SessionStopped
+// message naming what proved the stop. The agent form re-asserts the durable
+// acknowledgement stamps the row already carries; the superseded form records
+// a keyed recovery that acted on dead-runtime evidence instead of an
+// acknowledgement (ga-f7v2ft.173).
+type drainAckTerminalProvenance struct {
+	stamp   sessionpkg.MetadataPatch
+	message string
+}
+
+func agentDrainAckTerminalProvenance(info sessionpkg.Info) drainAckTerminalProvenance {
+	return drainAckTerminalProvenance{
+		stamp: sessionpkg.MetadataPatch{
+			sessionpkg.DrainAckSourceMetadataKey:                 sessionpkg.DrainAckSourceAgentValue,
+			sessionpkg.DrainAckRequesterSessionIDMetadataKey:     info.ID,
+			sessionpkg.DrainAckRequesterInstanceTokenMetadataKey: strings.TrimSpace(info.InstanceToken),
+		},
+		message: "drain acknowledged by agent",
+	}
+}
+
+func supersededDrainAckTerminalProvenance() drainAckTerminalProvenance {
+	return drainAckTerminalProvenance{
+		stamp:   sessionpkg.MetadataPatch{sessionpkg.DrainAckSourceMetadataKey: sessionpkg.DrainAckSourceSupersededValue},
+		message: "drain acknowledgement superseded: runtime proven dead with no recognizable provenance",
+	}
+}
+
 func finalizeDrainAckStoppedSession(
 	cityPath string,
 	cfg *config.City,
@@ -630,9 +659,14 @@ func finalizeDrainAckStoppedSession(
 	rec events.Recorder,
 	stderr io.Writer,
 	exactCloseFence *drainAckStopPendingFence,
+	terminal *drainAckTerminalProvenance,
 ) drainAckFinalizeResult {
 	if store == nil || info.ID == "" {
 		return drainAckFinalizeResult{}
+	}
+	if terminal == nil {
+		agentTerminal := agentDrainAckTerminalProvenance(info)
+		terminal = &agentTerminal
 	}
 	// Every decision read comes off the typed Info; the whole-bead raw-by-design
 	// helpers (sessionHasOpenAssignedWorkForReachableStore,
@@ -664,7 +698,7 @@ func finalizeDrainAckStoppedSession(
 			Type:      events.SessionStopped,
 			Actor:     "gc",
 			Subject:   template,
-			Message:   "drain acknowledged by agent",
+			Message:   terminal.message,
 			SessionID: info.ID,
 			Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, "drain acknowledged"),
 		})
@@ -688,11 +722,15 @@ func finalizeDrainAckStoppedSession(
 			}
 			now := clk.Now().UTC()
 			closePatch := sessionpkg.ClosePatch(now, "drained")
+			// The terminal provenance is both stamped and asserted: the agent
+			// form writes values the fence already proved durable (a no-op
+			// re-assertion), the superseded form is the one durable record of
+			// what the recovery acted on.
+			for key, value := range terminal.stamp {
+				closePatch[key] = value
+			}
 			terminalMatches := func(id, status string, metadata map[string]string) bool {
-				if id != info.ID || status != "closed" || metadata["instance_token"] != info.InstanceToken ||
-					metadata[sessionpkg.DrainAckSourceMetadataKey] != sessionpkg.DrainAckSourceAgentValue ||
-					metadata[sessionpkg.DrainAckRequesterSessionIDMetadataKey] != info.ID ||
-					metadata[sessionpkg.DrainAckRequesterInstanceTokenMetadataKey] != info.InstanceToken {
+				if id != info.ID || status != "closed" || metadata["instance_token"] != info.InstanceToken {
 					return false
 				}
 				for key, value := range closePatch {
@@ -869,7 +907,7 @@ func reconcileDrainAckStopPending(
 	return true, finalizeDrainAckStoppedSession(
 		cityPath, cfg, store, rigStores, info, tp.TemplateName,
 		!desired || isPoolManagedSessionInfo(info),
-		dops, dt, clk, rec, stderr, nil,
+		dops, dt, clk, rec, stderr, nil, nil,
 	)
 }
 
@@ -947,7 +985,7 @@ func finalizeDrainAckStopPendingSessions(
 			cityPath, cfg, store, rigStores, info,
 			normalizedSessionTemplateInfo(info, cfg),
 			isPoolManagedSessionInfo(info),
-			dops, dt, clk, rec, stderr, nil,
+			dops, dt, clk, rec, stderr, nil, nil,
 		)
 		finalized++
 	}
@@ -2397,7 +2435,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						result := finalizeDrainAckStoppedSession(
 							cityPath, cfg, store, rigStores, infoByID[id], template,
-							true, dops, dt, clk, rec, stderr, nil,
+							true, dops, dt, clk, rec, stderr, nil, nil,
 						)
 						// finalizeDrainAckStoppedSession may close the bead in memory; fold
 						// that close onto the snapshot so the cross-session min-floor scan
@@ -2834,7 +2872,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						cityPath, cfg, store, rigStores, infoByID[id], tp.TemplateName,
 						isPoolManagedSessionInfo(infoByID[id]),
 						dops, finalizeDT,
-						clk, rec, stderr, nil,
+						clk, rec, stderr, nil, nil,
 					)
 					// finalizeDrainAckStoppedSession may close the bead in memory; fold
 					// that close onto the snapshot so the cross-session min-floor scan

@@ -3824,9 +3824,14 @@ func TestRecoverRoutedWorkPoolDrainAckLeaseDistinguishesLegacyFromUnknownProvena
 	if err := fixture.provider.RemoveMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey); err != nil {
 		t.Fatalf("remove drain acknowledgement source: %v", err)
 	}
+	// Re-pointed by ga-f7v2ft.173: unrecognized provenance is evidence, not an
+	// error — the caller re-validates it against a fresh COMPLETE liveness
+	// observation before any effect. The pin's teeth are unchanged: recovery
+	// must never CLAIM an agent acknowledgement or a legacy marker it cannot
+	// read.
 	_, agent, legacy, err = fixture.cr.recoverRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info)
-	if err == nil || agent || legacy {
-		t.Fatalf("recover unknown provenance = (agent=%t, legacy=%t, err=%v), want false/false/error", agent, legacy, err)
+	if err != nil || agent || legacy {
+		t.Fatalf("recover unknown provenance = (agent=%t, legacy=%t, err=%v), want false/false/nil unrecognized", agent, legacy, err)
 	}
 }
 
@@ -3849,12 +3854,14 @@ func TestRecoverRoutedWorkPoolDrainAckLeaseHoldsMemberOutsideKeyedMembership(t *
 		t.Fatalf("recovered lease = %+v, want the row's own ack stamps with MembershipOccupied=false", lease)
 	}
 	// The stamps are still the fence: strip the agent source and recovery must
-	// stop claiming an agent acknowledgement.
+	// stop claiming an agent acknowledgement. Re-pointed by ga-f7v2ft.173: the
+	// unstamped answer is the unrecognized disposition (false/false/nil), never
+	// a claimed agent lease or legacy marker.
 	if err := fixture.provider.RemoveMeta(fixture.info.SessionName, reconcilerDrainAckSourceKey); err != nil {
 		t.Fatalf("remove drain acknowledgement source: %v", err)
 	}
-	if _, agent, legacy, err = fixture.cr.recoverRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info); err == nil || agent || legacy {
-		t.Fatalf("recover unstamped member = (agent=%t, legacy=%t, err=%v), want false/false/error", agent, legacy, err)
+	if _, agent, legacy, err = fixture.cr.recoverRoutedWorkPoolDrainAckLease(fixture.snapshot, fixture.info); err != nil || agent || legacy {
+		t.Fatalf("recover unstamped member = (agent=%t, legacy=%t, err=%v), want false/false/nil unrecognized", agent, legacy, err)
 	}
 }
 

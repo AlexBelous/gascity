@@ -1985,7 +1985,7 @@ func TestFinalizeExactDrainAckCloseUsesAuthoritativeWitnessAfterAmbiguousError(t
 
 	result := finalizeDrainAckStoppedSession(
 		"", env.cfg, store, nil, info, "worker", true,
-		dops, env.dt, env.clk, recorder, &env.stderr, &fence,
+		dops, env.dt, env.clk, recorder, &env.stderr, &fence, nil,
 	)
 	if result.witnessInfo == nil || !result.witnessInfo.Closed {
 		t.Fatalf("result = %#v, want authoritative closed witness", result)

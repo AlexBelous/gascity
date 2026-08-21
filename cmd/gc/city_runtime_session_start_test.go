@@ -1064,6 +1064,13 @@ func TestSessionStartControllerZeroDelayRetryDoesNotDuplicateDrainAckStop(t *tes
 					retryQueued.Store(queued)
 					close(retryObserved)
 				})
+			} else if !queued {
+				// Hold the zero-delay refusal count below the escalation
+				// threshold (ga-f7v2ft.173) while the initial completion is
+				// still pending: the retry this test observes is the one AFTER
+				// the completion callback has entered, and an escalated
+				// obligation would slow-park before it arrives.
+				<-completionEntered
 			}
 			return errSessionStartPoolDrainAckPending
 		},

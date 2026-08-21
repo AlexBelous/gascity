@@ -3725,7 +3725,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
 		"", env.cfg, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
-		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr, nil,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr, nil, nil,
 	)
 
 	if len(fake.Events) != 0 {
@@ -3752,7 +3752,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
 		"", env.cfg, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
-		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr, nil,
+		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr, nil, nil,
 	)
 
 	got, err := env.store.Get(session.ID)

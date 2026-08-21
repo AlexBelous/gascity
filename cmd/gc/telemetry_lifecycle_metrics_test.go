@@ -288,7 +288,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 
 		result := finalizeDrainAckStoppedSession(
 			"", env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
-			newFakeDrainOps(), env.dt, env.clk, rec, &env.stderr, nil,
+			newFakeDrainOps(), env.dt, env.clk, rec, &env.stderr, nil, nil,
 		)
 
 		// W-tick dropped the raw session.Status="closed" mirror; the close is now
@@ -877,7 +877,7 @@ func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *test
 
 	result := finalizeDrainAckStoppedSession(
 		"", env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
-		newFakeDrainOps(), env.dt, env.clk, events.NewFake(), &env.stderr, nil,
+		newFakeDrainOps(), env.dt, env.clk, events.NewFake(), &env.stderr, nil, nil,
 	)
 
 	// W-tick dropped the raw session.Status="closed" mirror; the witness close is

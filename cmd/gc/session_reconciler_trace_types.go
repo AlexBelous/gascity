@@ -209,20 +209,25 @@ const (
 type TraceOutcomeCode string
 
 const (
-	TraceOutcomeUnknown                 TraceOutcomeCode = "unknown"
-	TraceOutcomeComplete                TraceOutcomeCode = "complete"
-	TraceOutcomePartial                 TraceOutcomeCode = "partial"
-	TraceOutcomeApplied                 TraceOutcomeCode = "applied"
-	TraceOutcomeNoChange                TraceOutcomeCode = "no_change"
-	TraceOutcomeFailed                  TraceOutcomeCode = "failed"
-	TraceOutcomeSuccess                 TraceOutcomeCode = "success"
-	TraceOutcomeDeferredByWakeBudget    TraceOutcomeCode = "deferred_by_wake_budget"
-	TraceOutcomeSessionExists           TraceOutcomeCode = "session_exists"
-	TraceOutcomeSessionExistsConverged  TraceOutcomeCode = "session_exists_converged"
-	TraceOutcomeBlockedOnDependencies   TraceOutcomeCode = "blocked_on_dependencies"
-	TraceOutcomeProviderError           TraceOutcomeCode = "provider_error"
-	TraceOutcomePanicRecovered          TraceOutcomeCode = "panic_recovered"
-	TraceOutcomeDeadlineExceeded        TraceOutcomeCode = "deadline_exceeded"
+	TraceOutcomeUnknown                TraceOutcomeCode = "unknown"
+	TraceOutcomeComplete               TraceOutcomeCode = "complete"
+	TraceOutcomePartial                TraceOutcomeCode = "partial"
+	TraceOutcomeApplied                TraceOutcomeCode = "applied"
+	TraceOutcomeNoChange               TraceOutcomeCode = "no_change"
+	TraceOutcomeFailed                 TraceOutcomeCode = "failed"
+	TraceOutcomeSuccess                TraceOutcomeCode = "success"
+	TraceOutcomeDeferredByWakeBudget   TraceOutcomeCode = "deferred_by_wake_budget"
+	TraceOutcomeSessionExists          TraceOutcomeCode = "session_exists"
+	TraceOutcomeSessionExistsConverged TraceOutcomeCode = "session_exists_converged"
+	TraceOutcomeBlockedOnDependencies  TraceOutcomeCode = "blocked_on_dependencies"
+	TraceOutcomeProviderError          TraceOutcomeCode = "provider_error"
+	TraceOutcomePanicRecovered         TraceOutcomeCode = "panic_recovered"
+	TraceOutcomeDeadlineExceeded       TraceOutcomeCode = "deadline_exceeded"
+	// TraceOutcomeEscalated marks a retained drain-ack obligation crossing its
+	// refusal-escalation threshold: the obligation is kept, re-examination
+	// slows to the drain-budget cadence, and this record is the named signal
+	// that replaces the per-retry storm (ga-f7v2ft.173).
+	TraceOutcomeEscalated               TraceOutcomeCode = "escalated"
 	TraceOutcomeCanceled                TraceOutcomeCode = "canceled"
 	TraceOutcomeSlowStorageDegraded     TraceOutcomeCode = "slow_storage_degraded"
 	TraceOutcomeLowSpaceDegraded        TraceOutcomeCode = "low_space_degraded"

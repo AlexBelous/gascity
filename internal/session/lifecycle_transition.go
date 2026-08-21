@@ -404,6 +404,12 @@ const (
 	DrainAckRequesterSessionIDMetadataKey     = "drain_ack_requester_session_id"
 	DrainAckRequesterInstanceTokenMetadataKey = "drain_ack_requester_instance_token"
 	DrainAckSourceAgentValue                  = "agent"
+	// DrainAckSourceSupersededValue names a keyed recovery that superseded a
+	// stop-pending row carrying no recognizable acknowledgement provenance,
+	// after a fresh COMPLETE liveness observation proved the runtime dead.
+	// It is deliberately distinct from the agent value: a supersede records
+	// the evidence it acted on and never forges an acknowledgement.
+	DrainAckSourceSupersededValue = "keyed-superseded"
 )
 
 // DrainAckStopPendingPatch records that a drain-acked session has moved into

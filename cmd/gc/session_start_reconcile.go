@@ -2148,6 +2148,7 @@ func reconcileExactSessionStartWithOwner(
 			return park(errors.New("drain acknowledgement stop-pending row is not canonical or lacks revision provenance"))
 		}
 		var drainAckLease *routedWorkPoolDrainAckLease
+		provenanceUnrecognized := false
 		recoverDrainAckLease := func() (exactSessionStartOwner, error) {
 			if drainAckLease != nil {
 				return exactSessionStartKeyedOwner, nil
@@ -2173,7 +2174,17 @@ func reconcileExactSessionStartWithOwner(
 				return exactSessionStartLegacyOwner, nil
 			}
 			if !agentDrainAck {
-				return park(errors.New("drain acknowledgement provenance is not a confirmed legacy marker"))
+				// No recognizable provenance anywhere: neither agent stamps nor
+				// a confirmed legacy marker. The marker is a MEANS of
+				// re-validation, not an end — its absence is not a verdict, so
+				// this is decided below against CURRENT authoritative state
+				// under the per-key lock: a fresh COMPLETE observation proving
+				// the runtime dead supersedes the lease; a live or unprovable
+				// runtime keeps the protection and stays refused
+				// (ga-f7v2ft.173, the post-flip drain-ack provenance
+				// treadmill).
+				provenanceUnrecognized = true
+				return exactSessionStartKeyedOwner, nil
 			}
 			drainAckLease = &recoveredLease
 			return exactSessionStartKeyedOwner, nil
@@ -2222,18 +2233,38 @@ func reconcileExactSessionStartWithOwner(
 			if !liveness.Complete {
 				return park(errors.New("drain acknowledgement liveness observation is incomplete"))
 			}
+			terminal := agentDrainAckTerminalProvenance(info)
 			if !durableAgentProvenance {
-				return park(errors.New("drain acknowledgement stopped runtime lacks durable agent provenance"))
+				if !provenanceUnrecognized {
+					return park(errors.New("drain acknowledgement stopped runtime lacks durable agent provenance"))
+				}
+				// Accept-and-supersede: the lease has no recognizable
+				// provenance and the runtime it protected is proven dead by a
+				// fresh COMPLETE observation, so there is no destructive stop
+				// left for the provenance check to fence. The only remaining
+				// effect is finalization, revision-fenced on the row this
+				// cycle validated, and the recovery is stamped keyed going
+				// forward — a named supersede source, never a forged
+				// acknowledgement (ga-f7v2ft.173).
+				terminal = supersededDrainAckTerminalProvenance()
 			}
 			result := finalizeDrainAckStoppedSession(
 				params.CityPath, params.Config, params.Store, params.RigStores, info,
 				normalizedSessionTemplateInfo(info, params.Config), isPoolManagedSessionInfo(info),
-				params.DrainOps, params.DrainTracker, clk, recorder, stderr, drainAckStopPendingFence,
+				params.DrainOps, params.DrainTracker, clk, recorder, stderr, drainAckStopPendingFence, &terminal,
 			)
 			if result.batch == nil && !result.closed && result.folded == nil && result.witnessInfo == nil {
 				return park(fmt.Errorf("reconciling exact drain-ack stop %q: durable finalization made no progress", info.ID))
 			}
 			return exactSessionStartKeyedOwner, nil
+		}
+		if provenanceUnrecognized {
+			// The control the supersede arm must never widen into: a LIVE
+			// runtime whose acknowledgement cannot be proven is exactly what
+			// the provenance check exists to protect. Zero STOP effects; the
+			// obligation stays parked and the controller's refusal bound
+			// escalates it instead of retrying forever.
+			return park(errors.New("live runtime holds no recognizable drain acknowledgement provenance"))
 		}
 		if drainAckLease == nil && admission.PoolDrainAck != nil {
 			drainAckLease = admission.PoolDrainAck
@@ -2242,6 +2273,9 @@ func reconcileExactSessionStartWithOwner(
 			owner, recoverErr := recoverDrainAckLease()
 			if recoverErr != nil || owner != exactSessionStartKeyedOwner {
 				return owner, recoverErr
+			}
+			if provenanceUnrecognized {
+				return park(errors.New("live runtime holds no recognizable drain acknowledgement provenance"))
 			}
 		}
 		if params.AuthorizePoolDrainAck == nil {

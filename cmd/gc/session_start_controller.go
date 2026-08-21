@@ -130,12 +130,14 @@ type sessionStartAdmission struct {
 	// (ga-f7v2ft.112 ruling 1b): stamped when the obligation is first retained,
 	// carried across coalescing so a re-admission storm cannot roll it forward.
 	DrainAckDeadline time.Time
-	// DrainAckRefusals counts CONSECUTIVE refusals of this admission version.
+	// DrainAckRefusals mirrors the OBLIGATION-scoped consecutive-refusal count
+	// (sessionStartController.drainAckRefusalHistory) at the last bound check.
 	// Repeated (false, nil) authorization refusals are indistinguishable from
-	// transient by construction, so the counter classifies nothing: it only
-	// throttles one observability escalation while the deadline bound above does
-	// the actual bounding. It resets with every new version, which is what makes
-	// it consecutive.
+	// transient by construction, so the counter classifies nothing: it throttles
+	// the observability escalation and, at drainAckRefusalEscalationThreshold,
+	// moves the retained obligation onto the slow re-examination cadence. It
+	// survives version coalescing and the deadline release; any resolution of
+	// the admission clears it (ga-f7v2ft.173).
 	DrainAckRefusals int
 }
 
@@ -162,6 +164,15 @@ const (
 	// reaching that deadline RELEASES ownership so a surviving owner can finish
 	// the row (ga-f7v2ft.112 ruling 1b).
 	sessionStartReconcileDeadlineExceeded sessionStartReconcileOutcome = "deadline_exceeded"
+	// sessionStartReconcileDrainAckEscalated is the NAMED state a retained
+	// drain-ack obligation enters once its obligation-scoped refusal count
+	// crosses drainAckRefusalEscalationThreshold: the obligation (and its
+	// legacy-exclusion fence) is retained, but re-examination drops from the
+	// hot rate-limited cadence to drainAckEscalatedRetryInterval. Level-
+	// triggered convergence is preserved — the row is still re-read on every
+	// re-examination, so landed stamps or a died runtime resolve it — while an
+	// unresolvable lease stops burning reconcile cycles (ga-f7v2ft.173).
+	sessionStartReconcileDrainAckEscalated sessionStartReconcileOutcome = "drain_ack_escalated"
 )
 
 type sessionStartReconcileResult struct {
@@ -200,15 +211,22 @@ type sessionStartControllerOptions struct {
 // reconciliation. The durable store remains authoritative: admissions are only
 // hints naming which exact key to reread.
 type sessionStartController struct {
-	queue                     workqueue.TypedRateLimitingInterface[string]
-	workers                   int
-	maxDistinct               int
-	maxRetries                int
-	reconcile                 func(context.Context, sessionStartAdmission) error
-	observer                  func(sessionStartReconcileResult)
-	now                       func() time.Time
-	stderr                    io.Writer
-	admissions                map[string]sessionStartAdmission
+	queue       workqueue.TypedRateLimitingInterface[string]
+	workers     int
+	maxDistinct int
+	maxRetries  int
+	reconcile   func(context.Context, sessionStartAdmission) error
+	observer    func(sessionStartReconcileResult)
+	now         func() time.Time
+	stderr      io.Writer
+	admissions  map[string]sessionStartAdmission
+	// drainAckRefusalHistory is the OBLIGATION-scoped consecutive-refusal
+	// count for retained drain-acks, keyed by session ID. It deliberately
+	// survives the deadline release (which deletes the admission and arms an
+	// audit) so the release → re-detect → retry macro cycle cannot reset the
+	// escalation bound; any resolution of the admission clears it
+	// (ga-f7v2ft.173).
+	drainAckRefusalHistory    map[string]int
 	nextVersion               uint64
 	auditPending              bool
 	seedOutstanding           map[string]struct{}
@@ -254,18 +272,19 @@ func newSessionStartController(opts sessionStartControllerOptions) (*sessionStar
 		stderr = io.Discard
 	}
 	return &sessionStartController{
-		queue:           workqueue.NewTypedRateLimitingQueue(rateLimiter),
-		workers:         opts.Workers,
-		maxDistinct:     opts.MaxDistinct,
-		maxRetries:      opts.MaxRetries,
-		reconcile:       opts.Reconcile,
-		observer:        opts.Observer,
-		now:             now,
-		stderr:          stderr,
-		admissions:      make(map[string]sessionStartAdmission, opts.MaxDistinct),
-		seedOutstanding: make(map[string]struct{}),
-		inFlight:        make(map[string]uint64, opts.MaxDistinct),
-		seedCapacity:    make(chan struct{}, 1),
+		queue:                  workqueue.NewTypedRateLimitingQueue(rateLimiter),
+		workers:                opts.Workers,
+		maxDistinct:            opts.MaxDistinct,
+		maxRetries:             opts.MaxRetries,
+		reconcile:              opts.Reconcile,
+		observer:               opts.Observer,
+		now:                    now,
+		stderr:                 stderr,
+		admissions:             make(map[string]sessionStartAdmission, opts.MaxDistinct),
+		drainAckRefusalHistory: make(map[string]int, opts.MaxDistinct),
+		seedOutstanding:        make(map[string]struct{}),
+		inFlight:               make(map[string]uint64, opts.MaxDistinct),
+		seedCapacity:           make(chan struct{}, 1),
 	}, nil
 }
 
@@ -1397,6 +1416,17 @@ func (c *sessionStartController) reconcileKey(key string) {
 			c.observe(result)
 			return
 		}
+		if refusals >= drainAckRefusalEscalationThreshold {
+			// The named escalated state: the obligation and its fence are
+			// retained, but re-examination leaves the hot rate-limited cadence.
+			// Forget resets the limiter so a later resolution does not inherit
+			// escalation-era backoff.
+			c.queue.Forget(key)
+			c.queue.AddAfter(key, drainAckEscalatedRetryInterval)
+			result.Outcome = sessionStartReconcileDrainAckEscalated
+			c.observe(result)
+			return
+		}
 		c.queue.AddRateLimited(key)
 		result.Outcome = sessionStartReconcileRetrying
 		c.observe(result)
@@ -1441,9 +1471,27 @@ const drainAckAdmissionBudget = defaultDrainTimeout
 // reports them periodically and keeps retrying until the deadline bound fires.
 const drainAckRefusalDiagnosticInterval = 8
 
-// boundRetainedDrainAck stamps the drain's own deadline on first retention,
-// counts the consecutive refusal, and reports whether the obligation has now
-// outlived its bound.
+// drainAckRefusalEscalationThreshold is where a retained drain-ack obligation
+// stops riding the hot rate-limited retry and enters the named escalated
+// state. Three diagnostic intervals of consecutive refusals is well past any
+// healthy async-stop window and past the point where another hot retry could
+// classify anything new — from here only external evidence (the row changing,
+// the runtime dying) resolves the lease, and the slow cadence still observes
+// both (ga-f7v2ft.173).
+const drainAckRefusalEscalationThreshold = 3 * drainAckRefusalDiagnosticInterval
+
+// drainAckEscalatedRetryInterval is the escalated obligation's re-examination
+// cadence: the drain's own deadline budget, because that is the drain
+// contract's native clock and each re-examination re-proves provenance and
+// liveness from scratch.
+const drainAckEscalatedRetryInterval = drainAckAdmissionBudget
+
+// boundRetainedDrainAck stamps the drain's own deadline on first retention and
+// counts the consecutive refusal. The count is OBLIGATION-scoped
+// (drainAckRefusalHistory): it survives version coalescing AND the deadline
+// release, so the release → audit → re-detect macro cycle cannot reset the
+// escalation bound. It reports whether the obligation has outlived its
+// deadline bound.
 func (c *sessionStartController) boundRetainedDrainAck(key string, version uint64) (bool, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1454,7 +1502,8 @@ func (c *sessionStartController) boundRetainedDrainAck(key string, version uint6
 	if current.DrainAckDeadline.IsZero() {
 		current.DrainAckDeadline = c.now().Add(drainAckAdmissionBudget)
 	}
-	current.DrainAckRefusals++
+	c.drainAckRefusalHistory[key]++
+	current.DrainAckRefusals = c.drainAckRefusalHistory[key]
 	c.admissions[key] = current
 	return !c.now().Before(current.DrainAckDeadline), current.DrainAckRefusals
 }
@@ -1501,6 +1550,10 @@ func (c *sessionStartController) deleteAdmissionIfVersion(key string, version ui
 	defer c.mu.Unlock()
 	if current, ok := c.admissions[key]; ok && current.Version == version {
 		delete(c.admissions, key)
+		// Any resolution of the admission ends the obligation's refusal
+		// streak; only the deadline release (releaseAdmission) keeps it, so
+		// the audit's re-detection continues the count (ga-f7v2ft.173).
+		delete(c.drainAckRefusalHistory, key)
 		c.releaseAuthoritativeSlotLocked(key)
 	}
 }

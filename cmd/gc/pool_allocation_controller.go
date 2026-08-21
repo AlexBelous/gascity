@@ -305,9 +305,16 @@ func drainAckTriggerBindingForLease(info sessionpkg.Info, stampedWorkID, stamped
 	return strings.TrimSpace(info.TriggerBeadID), info.TriggerBeadStoreRef, false
 }
 
-// recoverRoutedWorkPoolDrainAckLease distinguishes a confirmed legacy marker
-// from an unavailable or malformed provenance witness. Only the former may
-// yield to legacy; unknown provenance remains parked with zero STOP effects.
+// recoverRoutedWorkPoolDrainAckLease classifies the provenance of a durable
+// stop-pending row: (lease, true, false, nil) for a rebuilt agent
+// acknowledgement, (_, false, true, nil) for a confirmed legacy marker (only
+// this may yield to legacy), and (_, false, false, nil) for UNRECOGNIZED
+// provenance — a witness that was consulted and shows no marker, including a
+// runtime that is provably absent. Unrecognized is evidence, not an error: the
+// caller re-validates it against a fresh COMPLETE liveness observation under
+// the per-key lock before any effect (supersede on a dead runtime, refuse on a
+// live one). An error is reserved for a witness that could not be read on a
+// runtime that is still present — a failed read proves nothing about absence.
 func (cr *CityRuntime) recoverRoutedWorkPoolDrainAckLease(
 	snapshot controllerSessionStartSnapshot,
 	info sessionpkg.Info,
@@ -328,12 +335,18 @@ func (cr *CityRuntime) recoverRoutedWorkPoolDrainAckLease(
 	}
 	source, sourceErr := snapshot.Provider.GetMeta(name, reconcilerDrainAckSourceKey)
 	if sourceErr != nil {
-		return routedWorkPoolDrainAckLease{}, false, false, fmt.Errorf("reading drain acknowledgement provenance: %w", sourceErr)
+		if snapshot.Provider.IsRunning(name) {
+			return routedWorkPoolDrainAckLease{}, false, false, fmt.Errorf("reading drain acknowledgement provenance: %w", sourceErr)
+		}
+		// The runtime itself is absent, so no marker can exist on it. This is
+		// still not treated as a marker of anything — it is the unrecognized
+		// disposition, decided by the caller's liveness re-validation.
+		return routedWorkPoolDrainAckLease{}, false, false, nil
 	}
 	if source == reconcilerDrainAckSourceValue {
 		return routedWorkPoolDrainAckLease{}, false, true, nil
 	}
-	return routedWorkPoolDrainAckLease{}, false, false, errors.New("drain acknowledgement provenance is not a confirmed legacy marker")
+	return routedWorkPoolDrainAckLease{}, false, false, nil
 }
 
 // drainAckProviderCheck is one live provider-meta equality the drain-ack effect

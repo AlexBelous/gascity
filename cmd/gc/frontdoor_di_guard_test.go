@@ -308,10 +308,11 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // sessionFrontDoor(sessStore).ApplyPatch), restart persist (sessionRestartPersister),
 // the remote kill/observe/identity trio, resolveSessionID, sender-identity resolution
 // (resolveDefaultMailSenderForCommand), and beadmail's session addressing via
-// beadmail.NewWithStores(store, sessStore) — through cliSessionStore, while
-// createHandoffMail's message-bead persistence deliberately stays on the plain store
-// (messaging class, its own slice, mirroring newCityMailProvider's msgStore/sessStore
-// split and cmd_sling.go's deferred nudge enqueue). cmd_runtime_drain.go routes only
+// beadmail.NewWithStores(msgStore, sessStore) — through cliSessionStore. Its MESSAGING
+// arm is now routed too: both roots derive msgStore := cliMailStore(store, cfg,
+// cityPath).Store and thread it as createHandoffMail's message-bead leg, so the
+// beadmail provider is a fully routed two-store split (mirroring newCityMailProvider's
+// msgStore/sessStore split) rather than a work-store message leg. cmd_runtime_drain.go routes only
 // cmdRuntimeRequestRestart's session-bead access; every other command in the file is
 // drainOps runtime metadata (no bead store) plus nil-store worker observation, so the
 // guard is a regression canary for that one root.

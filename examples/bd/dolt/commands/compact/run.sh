@@ -1504,6 +1504,10 @@ emit_compact_quarantine_event() {
   gc event emit dolt.compact.quarantine --actor controller --message "$_ca_msg" || true
 }
 
+# quarantine_notify_error holds why the last alert did not land, for the
+# marker. Empty means delivered; callers reset it before each attempt.
+quarantine_notify_error=""
+
 mail_compact_quarantine_alert() {
   _ca_db="$1"
   _ca_type="$2"
@@ -1511,9 +1515,15 @@ mail_compact_quarantine_alert() {
   _ca_reason="$4"
   _ca_created_at="${5:-<unknown>}"
   _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
-  if gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg"; then
+  quarantine_notify_error=""
+  if _ca_err=$(gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" 2>&1 >/dev/null); then
     return 0
   fi
+  # A quarantine nobody is told about is a quarantine nobody clears, so an
+  # undelivered alert has to be as loud as the quarantine itself.
+  quarantine_notify_error=$(printf '%s' "$_ca_err" | tr '\n' ' ' | cut -c1-200)
+  printf 'compact: db=%s quarantine alert did not reach recipient %s: %s\n' \
+    "$_ca_db" "$compact_alert_to" "${quarantine_notify_error:-<no error output>}" >&2
   return 1
 }
 
@@ -1542,11 +1552,13 @@ quarantine_should_notify() {
 
 # record_quarantine_notify_state DB REASON EMITTED
 #   Patches only the notify-bookkeeping fields (seen_count, notify_count,
-#   last_notified_ts, last_notified_reason) onto DB's existing quarantine
-#   marker, preserving every other field byte-for-byte. EMITTED=1 bumps
-#   notify_count and stamps last_notified_ts/last_notified_reason; EMITTED=0
-#   only bumps seen_count. A missing marker or write failure is a silent
-#   no-op — bookkeeping must never block or fail compaction.
+#   last_notified_ts, last_notified_reason, last_notify_error) onto DB's
+#   existing quarantine marker, preserving every other field byte-for-byte.
+#   EMITTED=1 bumps notify_count, stamps last_notified_ts/last_notified_reason
+#   and clears last_notify_error; EMITTED=0 bumps seen_count and records
+#   $quarantine_notify_error, so a marker stuck at notify_count=0 says why
+#   instead of leaving the operator to guess. A missing marker or write
+#   failure is a silent no-op — bookkeeping must never block compaction.
 record_quarantine_notify_state() {
   db="$1"
   reason="$2"
@@ -1563,10 +1575,12 @@ record_quarantine_notify_state() {
   case "$_qn_notify_count" in ''|*[!0-9]*) _qn_notify_count=0 ;; esac
   _qn_last_ts=$(compact_marker_value "$quarantine_dir" "$db" last_notified_ts || true)
   _qn_last_reason=$(compact_marker_value "$quarantine_dir" "$db" last_notified_reason || true)
+  _qn_last_error="$quarantine_notify_error"
   if [ "$_qn_emitted" = "1" ]; then
     _qn_notify_count=$((_qn_notify_count + 1))
     _qn_last_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     _qn_last_reason="$reason"
+    _qn_last_error=""
   fi
 
   _qn_old_umask=$(umask)
@@ -1576,7 +1590,7 @@ record_quarantine_notify_state() {
     return 0
   }
   umask "$_qn_old_umask"
-  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason)=/' "$_qn_marker" > "$_qn_tmp" 2>/dev/null; then
+  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason|last_notify_error)=/' "$_qn_marker" > "$_qn_tmp" 2>/dev/null; then
     rm -f "$_qn_tmp"
     return 0
   fi
@@ -1585,6 +1599,7 @@ record_quarantine_notify_state() {
     printf 'notify_count=%s\n' "$_qn_notify_count"
     printf 'last_notified_ts=%s\n' "$_qn_last_ts"
     printf 'last_notified_reason=%s\n' "$_qn_last_reason"
+    printf 'last_notify_error=%s\n' "$_qn_last_error"
   } >> "$_qn_tmp" 2>/dev/null; then
     rm -f "$_qn_tmp"
     return 0
@@ -1604,6 +1619,8 @@ record_quarantine_notify_state() {
 #   pages once instead of on every subsequent run.
 report_existing_quarantine() {
   db="$1"
+  # One run reports many dbs; a prior db's send failure is not this db's.
+  quarantine_notify_error=""
   quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
   quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
   quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)

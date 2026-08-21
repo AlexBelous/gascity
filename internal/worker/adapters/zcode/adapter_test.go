@@ -345,6 +345,47 @@ func (s *session) waitForOutput(needle string) {
 	}
 }
 
+// waitForPathExists polls path against adapterWaitBudget until it appears, or
+// fails the test. Adapter-managed state files (mirrors, sid files, per-epoch
+// homes, archives) are written on a lifecycle decoupled from process exit or
+// stdout completion, exactly like the turn/output signals waitForTurns and
+// waitForOutput already poll for above; a single os.Stat right after h.run()
+// or s.wait() returns can race that write.
+func waitForPathExists(t *testing.T, path, timeoutMsg string) {
+	t.Helper()
+	deadline := time.Now().Add(adapterWaitBudget)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s", timeoutMsg)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// waitForPathGone is waitForPathExists' mirror image: removal (archival,
+// epoch pruning) is exactly as asynchronous as arrival, so absence right
+// after a run needs the same poll, not a single check.
+func waitForPathGone(t *testing.T, path, timeoutMsg string) {
+	t.Helper()
+	deadline := time.Now().Add(adapterWaitBudget)
+	for {
+		_, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s", timeoutMsg)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func (s *session) alive() bool {
 	return s.cmd.ProcessState == nil && syscall.Kill(-s.cmd.Process.Pid, 0) == nil
 }
@@ -799,7 +840,7 @@ func TestInterruptKillsASigintIgnoringTurn(t *testing.T) {
 	if !s.alive() {
 		t.Fatalf("adapter exited on SIGINT; it must absorb it:\n%s", s.output())
 	}
-	if _, err := os.Stat(doneFile); err == nil {
+	if _, err := os.Stat(doneFile); err == nil { // guard-ack:bare-stat-ok already synced on the error-rc waitForOutput above; nothing async is still in flight
 		t.Fatal("the interrupted turn ran to completion; it must be killed, not orphaned")
 	}
 	if !strings.Contains(s.output(), "zcode-repl interrupting turn") {
@@ -811,7 +852,7 @@ func TestInterruptKillsASigintIgnoringTurn(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	// Still absent after the adapter is gone: nothing survived to finish.
-	if _, err := os.Stat(doneFile); err == nil {
+	if _, err := os.Stat(doneFile); err == nil { // guard-ack:bare-stat-ok s.wait() already blocked for full process exit; no process remains to write this file
 		t.Fatal("an orphaned turn outlived the adapter and completed")
 	}
 }
@@ -932,9 +973,7 @@ func TestContinuationEpochScopesTheSid(t *testing.T) {
 	}
 	// The superseded epoch's sid file is pruned, not left to accumulate.
 	stale := filepath.Join(h.home, ".local", "state", "gascity", "zcode", "sids", "test-session#1")
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatalf("superseded epoch sid file still present: %v", err)
-	}
+	waitForPathGone(t, stale, "superseded epoch sid file still present")
 }
 
 func TestSessionKeyComesFromGCSession(t *testing.T) {
@@ -945,9 +984,7 @@ func TestSessionKeyComesFromGCSession(t *testing.T) {
 	h.run("key me\n")
 
 	// Path-unsafe characters are folded to underscores.
-	if _, err := os.Stat(h.sidPath("gascity_gc.worker-9")); err != nil {
-		t.Fatalf("sid file not written under the folded session key: %v", err)
-	}
+	waitForPathExists(t, h.sidPath("gascity_gc.worker-9"), "sid file not written under the folded session key")
 }
 
 // Behavior 9: the export mirror the sessionlog zcode reader consumes.
@@ -1068,43 +1105,24 @@ func TestResetArchivesTheSupersededEpochsState(t *testing.T) {
 	h.run("first conversation\n")
 
 	oldMirror := filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_one.json")
-	deadline := time.Now().Add(adapterWaitBudget)
-	for {
-		if _, err := os.Stat(oldMirror); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("epoch 1 mirror never appeared")
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	waitForPathExists(t, oldMirror, "epoch 1 mirror never appeared")
 	oldHome := filepath.Join(h.home, ".local", "state", "gascity", "zcode", "homes", h.epochScope())
-	if _, err := os.Stat(oldHome); err != nil {
-		t.Fatalf("epoch 1 CLI home missing: %v", err)
-	}
+	waitForPathExists(t, oldHome, "epoch 1 CLI home missing")
 
 	h.env["GC_CONTINUATION_EPOCH"] = "2"
 	h.env["STUB_SID"] = "sess_epoch_two"
 	h.run("fresh conversation\n")
 
 	// Gone from the live tree the model reads...
-	if _, err := os.Stat(oldMirror); !os.IsNotExist(err) {
-		t.Fatalf("superseded epoch's transcript stayed adjacent to the fresh one: %v", err)
-	}
+	waitForPathGone(t, oldMirror, "superseded epoch's transcript stayed adjacent to the fresh one")
 	// ...but preserved in the archive, still keyed by its own scope.
 	archived := filepath.Join(h.home, ".local", "state", "gascity", "zcode",
 		"archived-transcripts", "test-session#1", "sess_epoch_one.json")
-	if _, err := os.Stat(archived); err != nil {
-		t.Fatalf("superseded epoch's transcript was destroyed rather than archived: %v", err)
-	}
+	waitForPathExists(t, archived, "superseded epoch's transcript was destroyed rather than archived")
 	// The CLI's own database has no preservation contract and is the copy the
 	// CLI itself would reattach to, so it is still deleted.
-	if _, err := os.Stat(oldHome); !os.IsNotExist(err) {
-		t.Fatalf("superseded epoch's CLI state survived the reset: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_two.json")); err != nil {
-		t.Fatalf("epoch 2 mirror missing: %v", err)
-	}
+	waitForPathGone(t, oldHome, "superseded epoch's CLI state survived the reset")
+	waitForPathExists(t, filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_two.json"), "epoch 2 mirror missing")
 	// The live tree carries exactly one scope: the current one.
 	entries, err := os.ReadDir(h.mirrorDir)
 	if err != nil {
@@ -1164,7 +1182,7 @@ func TestCancelledFirstTurnStaysVisibleAndIsAdopted(t *testing.T) {
 	s.send("the turn that lands")
 	deadline := time.Now().Add(adapterWaitBudget)
 	for {
-		if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_after_cancel.json")); err == nil {
+		if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_after_cancel.json")); err == nil { // guard-ack:bare-stat-ok kept as a bespoke poll (not waitForPathExists) so the timeout message can embed live s.output()
 			break
 		}
 		if time.Now().After(deadline) {
@@ -1187,9 +1205,7 @@ func TestCancelledFirstTurnStaysVisibleAndIsAdopted(t *testing.T) {
 	if got := export.Messages[0].Info.SessionID; got != "sess_after_cancel" {
 		t.Fatalf("adopted message sessionID = %q, want sess_after_cancel", got)
 	}
-	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), h.pendingSessionID()+".json")); !os.IsNotExist(err) {
-		t.Fatalf("placeholder export survived adoption: %v", err)
-	}
+	waitForPathGone(t, filepath.Join(h.mirrorDir, h.epochScope(), h.pendingSessionID()+".json"), "placeholder export survived adoption")
 }
 
 // A turn that fails or is interrupted must CLOSE in the mirror. The user
@@ -1243,16 +1259,7 @@ func TestInterruptedTurnClosesTheMirrorEntry(t *testing.T) {
 	}
 
 	mirror := filepath.Join(h.mirrorDir, h.epochScope(), "sess_int_closes.json")
-	deadline := time.Now().Add(adapterWaitBudget)
-	for {
-		if _, err := os.Stat(mirror); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("interrupted turn's mirror entry never appeared")
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	waitForPathExists(t, mirror, "interrupted turn's mirror entry never appeared")
 
 	export := h.readExport("sess_int_closes")
 	last := export.Messages[len(export.Messages)-1]

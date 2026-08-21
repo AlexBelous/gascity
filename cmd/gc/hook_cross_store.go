@@ -345,7 +345,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		if !firstHit {
 			firstHitOut, firstHitStore, firstHit = out, st, true
 		}
-		rank, ok := bestHookCandidateRank(ready)
+		rank, id, ok := bestHookCandidateRank(ready)
 		if !ok {
 			unrankable = true
 			continue
@@ -357,9 +357,17 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		switch {
 		case !haveBest || rank.less(bestRank):
 			bestRank, haveBest = rank, true
-			bestTied = append(bestTied[:0], hookRankedStore{out: out, store: st})
-		case rank == bestRank:
-			bestTied = append(bestTied, hookRankedStore{out: out, store: st})
+			bestTied = append(bestTied[:0], hookRankedStore{out: out, store: st, id: id})
+		case rank == bestRank && !hookTiedIDSeen(bestTied, id):
+			// A migrated bead (`gc storage migrate` copies, never deletes) can be
+			// ready from more than one store under the SAME id: the same row, not
+			// two tied pieces of work. Rotating across a duplicate would put a
+			// later store ahead of the primary for no reason — nothing about the
+			// work differs — and breaks the rig-first-city-last fan-out order the
+			// class-escalation claim loop depends on. An empty id (unidentifiable
+			// row) is never treated as a duplicate, so unranked-id fixtures keep
+			// rotating exactly as before.
+			bestTied = append(bestTied, hookRankedStore{out: out, store: st, id: id})
 		}
 	}
 
@@ -392,11 +400,28 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 }
 
 // hookRankedStore pairs one store's work-query output with the store it came
-// from. bestStoreWithWork accumulates one per store tied for the best rank,
-// held only long enough to resolve the tie.
+// from and the winning candidate's id. bestStoreWithWork accumulates one per
+// store tied for the best rank, held only long enough to resolve the tie.
 type hookRankedStore struct {
 	out   string
 	store hookStore
+	id    string
+}
+
+// hookTiedIDSeen reports whether id already has an entry in tied. An empty id
+// (a row bestHookCandidateRank could not read an "id" field from) never
+// counts as seen, so unidentifiable rows fall back to the pre-existing
+// rotate-every-entry behavior rather than being silently collapsed.
+func hookTiedIDSeen(tied []hookRankedStore, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, t := range tied {
+		if t.id == id {
+			return true
+		}
+	}
+	return false
 }
 
 // hookTieBreakClock returns the time bestStoreWithWork uses to rotate an
@@ -453,7 +478,7 @@ func hookOwnResumeAnswer(out string, now time.Time) (string, bool) {
 	if !workQueryHasReadyWork(ready) {
 		return "", false
 	}
-	rank, ok := bestHookCandidateRank(ready)
+	rank, _, ok := bestHookCandidateRank(ready)
 	if !ok || rank.tier != hookTierInProgress {
 		return "", false
 	}
@@ -506,20 +531,22 @@ func (r hookCandidateRank) less(other hookCandidateRank) bool {
 // — not JSON, not a JSON array, or an array holding a non-object — which the
 // caller treats as "do not reorder on a comparison that was not made" rather
 // than as an absence of work.
-func bestHookCandidateRank(ready string) (hookCandidateRank, bool) {
+func bestHookCandidateRank(ready string) (hookCandidateRank, string, bool) {
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(ready)), &rows); err != nil {
-		return hookCandidateRank{}, false
+		return hookCandidateRank{}, "", false
 	}
 	best := hookCandidateRank{}
+	bestID := ""
 	found := false
 	for _, row := range rows {
 		rank := hookRankCandidate(row)
 		if !found || rank.less(best) {
 			best, found = rank, true
+			bestID, _ = row["id"].(string)
 		}
 	}
-	return best, found
+	return best, bestID, found
 }
 
 // hookRankCandidate reads one row's tier and priority. An unrecognized status or

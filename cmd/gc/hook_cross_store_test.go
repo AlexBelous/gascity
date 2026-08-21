@@ -221,6 +221,38 @@ func TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime(t *testing.T) {
 	}
 }
 
+// TestBestStoreWithWorkDoesNotRotateOnACoResidentDuplicateID is the
+// regression test for a gap in ga-kbbg9a's own rotation: a bead migrated
+// with `gc storage migrate` (copies, never deletes) is visible as ready from
+// MORE than one store under the SAME id — the exact same row, not two tied
+// pieces of work. An id-blind tie-break can rotate onto a later store ahead
+// of the primary even though nothing about the work differs, which breaks
+// the rig-first-city-last fan-out order TestClassEscalationWaitsForEveryWorkLeg
+// and TestClassEscalationStillReachesABindingOnlyBead
+// (hook_claim_class_fanout_test.go) depend on. Two DIFFERENT ids at the same
+// rank must still rotate (TestBestStoreWithWorkRotatesExactTies) — only a
+// shared id must not.
+func TestBestStoreWithWorkDoesNotRotateOnACoResidentDuplicateID(t *testing.T) {
+	stores := []hookStore{{dir: "riga"}, {dir: "city"}}
+	run := func(_, _ string, _ []string) (string, error) {
+		// Same id, same rank, from every store: a co-resident duplicate, not
+		// two different pieces of work.
+		return `[{"id":"dup-1","assignee":"worker-1"}]`, nil
+	}
+
+	// Offset 1 is exactly the clock value TestBestStoreWithWorkRotatesExactTies
+	// uses to prove rotation moves off the first store; here the tied
+	// candidates share an id, so it must NOT move off riga.
+	withHookTieBreakClock(t, time.Unix(0, 1))
+	_, got, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga: a tie between two copies of the SAME bead id must keep slice order, not rotate", got.dir)
+	}
+}
+
 // TestHookTieBreakIndex pins the rotation formula directly: it must stay
 // within [0, n) and must not collapse to a constant across varying clock
 // values, which is exactly what would silently reintroduce the starvation
@@ -360,7 +392,7 @@ func TestBestHookCandidateRank(t *testing.T) {
 		{"array of non-objects is unrankable", `["a"]`, hookCandidateRank{}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := bestHookCandidateRank(tc.ready)
+			got, _, ok := bestHookCandidateRank(tc.ready)
 			if ok != tc.ok {
 				t.Fatalf("ok = %v, want %v", ok, tc.ok)
 			}

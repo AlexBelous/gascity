@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -374,6 +376,42 @@ func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Stor
 		return graphStore
 	}
 	return workStore
+}
+
+// cookOnClassRouted compiles a formula by name and instantiates it attached to
+// opts.ParentID, in the store the compiled recipe's class demands.
+//
+// It exists because molecule.Cook takes exactly one store and picks it before
+// anything knows what class the formula compiles to, so every caller that
+// reaches for the convenience wrapper silently materializes into whatever store
+// it happened to have open. On a migrated city that is the defect twice over: a
+// graph-class wisp poured into the work ledger is invisible to every graph
+// reader, and a work-class molecule poured into the binding hides its steps from
+// `gc hook`. Routing correctly requires the recipe, and the recipe requires
+// compiling first — which is the whole reason the wrapper cannot be used as-is.
+//
+// The parent may live in a different store than the molecule; that is the
+// normal shape, not a degenerate one. A repair or source bead is work class in a
+// rig ledger while the graph.v2 workflow attached to it is city-keyed graph
+// class. Instantiate only stamps ParentID onto the beads it creates and never
+// reads the parent back, so the cross-store link is written the same way
+// `gc wisp autoclose` later follows it.
+func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, formulaName string, searchPaths []string, opts molecule.Options) (*molecule.Result, error) {
+	if opts.ParentID == "" {
+		return nil, fmt.Errorf("cookOnClassRouted requires Options.ParentID")
+	}
+	compileVars := opts.Vars
+	if compileVars == nil {
+		compileVars = map[string]string{}
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
+	if err != nil {
+		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+	}
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+		return nil, err
+	}
+	return molecule.Instantiate(ctx, moleculeClassStore(recipe, workStore, graphStore), recipe, opts)
 }
 
 // recipeCoordClass returns the coordination class of the beads that

@@ -449,3 +449,41 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 		}
 	}
 }
+
+// graphRelocationRoutedFiles are the CLI one-shot roots that reach the graph
+// coordination class and must derive their graph leg through cliGraphStore.
+//
+// Graph is city-keyed and the one class with no per-rig binding, so a hook that
+// opens a rig or city work store and asks it for a molecule root reads an empty
+// graph on a migrated city and reports success — the silent-empty arm. Each of
+// these files now takes the graph store as a required, class-typed parameter, so
+// the CALLEE is compile-enforced; what a compiler cannot check is whether the
+// caller handed it a routed store or just passed `store` again. That is what
+// this canary covers, and only that: it is a substring check, not a proof.
+var graphRelocationRoutedFiles = []string{
+	"wisp_autoclose.go",     // bd on_close hook: attached molecule/workflow reaping
+	"molecule_autoclose.go", // bd on_close hook: molecule completion
+	"wisp_step_inject.go",   // hook injection: the agent's current step bead
+	"cmd_github.go",         // PR-monitor repair: the workflow cooked onto the repair bead
+}
+
+// TestGraphRelocationRootsRouteThroughGraphClassStore pins that the CLI roots
+// reaching graph-class beads still derive the leg through cliGraphStore rather
+// than handing along the work store they happened to open.
+func TestGraphRelocationRootsRouteThroughGraphClassStore(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(currentFile)
+	for _, name := range graphRelocationRoutedFiles {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		if !strings.Contains(string(data), "cliGraphStore(") {
+			t.Errorf("%s is listed as graph-relocation-routed but never calls cliGraphStore( — did the routing get dropped? A graph read left on the work store returns empty on a migrated city and reports success", name)
+		}
+	}
+}

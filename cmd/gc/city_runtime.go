@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -18,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -32,7 +30,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -348,22 +345,21 @@ type CityRuntime struct {
 }
 
 // runtimeDemandSnapshotBackstopMaxAge bounds how long an EVENT-BACKED demand
-// snapshot may be reused before it is rebuilt regardless of what the ready
-// fingerprint says.
+// snapshot may be reused before it is rebuilt regardless of what the routed-work
+// view says.
 //
 // It is a convergence backstop, not the freshness mechanism, and it used to be
 // neither. At 30s it sat at or below the patrol interval — and far below a slow
-// tick — which mattered because the age gate SHORT-CIRCUITS the fingerprint:
-// loadDemandSnapshot only computes readyDemandSnapshotFingerprint when the
-// snapshot is not already due. On maintainer-city's 373s tick the snapshot was
-// therefore always due, the fingerprint was never consulted, and the cache it
-// guards was dead code (ga-l7jdg).
+// tick — so on maintainer-city's 373s tick the snapshot was always already due,
+// every patrol rebuilt it, and the cache the bound guards was dead code
+// (ga-l7jdg).
 //
-// Freshness is the fingerprint's job: a claim, close or create anywhere in the
-// routed-demand leg set changes it and forces a rebuild in the same tick, and
-// the session fingerprint covers the session half. This bound exists for what
-// neither can see — a change no read of the ready set reflects — so it is set
-// well clear of any plausible tick rather than tuned for responsiveness.
+// Freshness is the routed-work view's job: a claim, close or create anywhere in
+// the view's store set moves its fingerprint, and the change edge
+// loadDemandSnapshot consumes forces a rebuild in the same tick; the session
+// fingerprint covers the session half. This bound exists for what neither can
+// see — a change no read of the ready set reflects — so it is set well clear of
+// any plausible tick rather than tuned for responsiveness.
 //
 // It applies ONLY on the event-backed path. A city with a configured scale_check
 // is not event-backed at all (demandSnapshotsEnabled), and keeps the per-tick
@@ -4295,118 +4291,6 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	// bites sub-second patrol_intervals, where it stops the probe subprocess
 	// from running on every tick.
 	return scaleCheckDemandMinInterval
-}
-
-// readyDemandSnapshotFingerprint hashes the ready sets of every store the
-// demand probe reads, so a write anywhere in that set invalidates the cached
-// demand snapshot instead of letting it be reused for up to its max age.
-//
-// "Every store the probe reads" is the load-bearing part, and it is now answered
-// by the resolver: the legs are Plan(RoutedWork) narrowed to the RUNTIME plane —
-// the identical leg set the routed-demand read itself consumes
-// (routedWorkStoreCandidates). A fingerprint over a WIDER set than the read
-// invalidates the cache for changes the read cannot see; a fingerprint over a
-// NARROWER set licenses reuse of a snapshot that is already wrong. The old
-// hand-rolled list was the second kind: it hashed the work store and the rigs
-// and missed the graph binding where every routed step lives, so a step claimed
-// there changed nothing it could see and the controller kept asserting demand
-// for work already taken.
-//
-// The plane is what makes the check cheap. It used to issue one ReadyLive per
-// store — remote work ledger, binding, every rig — so asking "may I reuse the
-// cached demand?" cost several remote round trips on every patrol tick, to avoid
-// recomputing something cheaper (ga-l7jdg).
-//
-// Read through the resolver's Walk executor rather than an enumeration: a leg
-// read failure is HASHED rather than raised (a stable error must license reuse
-// exactly as a stable read does, or a dark store rebuilds the snapshot every
-// tick forever), so the visit never returns an error and the plan's per-leg
-// policy has nothing to escalate.
-func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
-	h := fnv.New64a()
-	cfg := cr.serviceConfigSnapshot()
-	// The rig map is a constructor INPUT to the topology, not a residency answer
-	// — it is filtered by the configured suspension frame and handed straight to
-	// residencyTopology, which is what decides the legs. It stays on the
-	// residency-boundary census (baselined) because the census counts every
-	// consumer of a base enumerator, not only the wrong ones.
-	rigs := cr.rigBeadStores()
-	topo := cr.residencyTopology(servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cr.cityPath)))
-	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
-	if err == nil {
-		plan, err = storeref.Narrow(plan, storeref.PlaneRuntime)
-	}
-	if err != nil {
-		// A refused city has no plan. Hash the refusal: it is stable while the
-		// refusal stands, and every arm downstream already reports it loudly.
-		_, _ = io.WriteString(h, "refused:")
-		_, _ = io.WriteString(h, err.Error())
-		return fmt.Sprintf("%x", h.Sum64())
-	}
-	_, _ = storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		ref := demandFingerprintRef(cr.cityName, leg.Ref)
-		_, _ = io.WriteString(h, ref)
-		_, _ = io.WriteString(h, "\x00")
-		if leg.Store == nil {
-			_, _ = io.WriteString(h, "<nil>")
-			_, _ = io.WriteString(h, "\x00")
-			return false, nil
-		}
-		ready, err := beads.ReadyLive(leg.Store, beads.ReadyQuery{TierMode: beads.TierBoth})
-		if err != nil {
-			log.Printf("readyDemandSnapshotFingerprint: store %s: %v", ref, err)
-			_, _ = io.WriteString(h, "error:")
-			_, _ = io.WriteString(h, err.Error())
-			_, _ = io.WriteString(h, "\x00")
-			return false, nil
-		}
-		sort.Slice(ready, func(i, j int) bool {
-			return ready[i].ID < ready[j].ID
-		})
-		for _, bead := range ready {
-			writeReadyDemandFingerprintBead(h, bead)
-		}
-		return false, nil
-	})
-	return fmt.Sprintf("%x", h.Sum64())
-}
-
-// demandFingerprintRef spells a plan leg the way this fingerprint's log line
-// always has.
-func demandFingerprintRef(cityName string, ref storeref.StoreRef) string {
-	switch {
-	case ref == storeref.WorkRef:
-		return cityName
-	case storeref.IsClassRef(string(ref)):
-		return string(ref)
-	default:
-		rig, _ := storeref.ScopeRigContext(string(ref))
-		return rig
-	}
-}
-
-func writeReadyDemandFingerprintBead(w io.Writer, bead beads.Bead) {
-	_, _ = io.WriteString(w, bead.ID)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Status)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Type)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.Assignee)
-	_, _ = io.WriteString(w, "\x00")
-	_, _ = io.WriteString(w, bead.UpdatedAt.Format(time.RFC3339Nano))
-	_, _ = io.WriteString(w, "\x00")
-	for _, key := range []string{
-		beadmeta.RoutedToMetadataKey,
-		beadmeta.RunTargetMetadataKey,
-		beadmeta.KindMetadataKey,
-		beadmeta.FormulaContractMetadataKey,
-	} {
-		_, _ = io.WriteString(w, key)
-		_, _ = io.WriteString(w, "\x00")
-		_, _ = io.WriteString(w, bead.Metadata[key])
-		_, _ = io.WriteString(w, "\x00")
-	}
 }
 
 func (cr *CityRuntime) demandSnapshotsEnabled() bool {

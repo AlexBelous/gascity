@@ -35,7 +35,6 @@ cmd/gc/city_runtime.go	buildStandaloneRigStores	ast:returns-store-list	1
 cmd/gc/city_runtime.go	openStandaloneRigStores	ast:returns-store-list	1
 cmd/gc/city_runtime.go	orderTrackingSweepStores	a:rigBeadStores	1
 cmd/gc/city_runtime.go	orderTrackingSweepStores	ast:returns-store-list	1
-cmd/gc/city_runtime.go	readyDemandSnapshotFingerprint	a:rigBeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	a:BeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	a:rigBeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	ast:returns-store-list	1

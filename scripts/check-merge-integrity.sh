@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# check-merge-integrity.sh [--base REF] [--head REF] [--merged REF]
+# check-merge-integrity.sh [--base REF] [--head REF] [--lane REF] [--merged REF]
 #                          [--allow FILE] [--repo DIR] [--self-test]
 #
 # A merge that compiles is not a merge that kept its meaning.
 #
-# Two integration merges of origin/main into this fork lost meaning silently
+# Three integration merges of origin/main into this fork lost meaning silently
 # and shipped:
 #
 #   ga-f7v2ft.167 — the merge RESURRECTED controllerDemandRouteTarget, a
@@ -17,8 +17,15 @@
 #     drops its tests in the same hunk, so the suite that would have failed
 #     was deleted by the same commit that broke the code.
 #
-# Neither is visible to the compiler, to `go vet`, or to a green test run.
-# Both are visible as a SET DIFFERENCE against the merge base, which is what
+#   ga-f7v2ft.184 — the MIRROR of the first: the merge restored
+#     readyDemandSnapshotFingerprint, which the LANE had retired when the scan
+#     was promoted to the sweep's routed-work view. Upstream never touched the
+#     function, so check 1 had nothing to compare; incoming upstream TESTS
+#     called it, the merge broke the compile, and the compile was fixed by
+#     taking the symbol back. It shipped with zero production callers.
+#
+# None is visible to the compiler, to `go vet`, or to a green test run. All
+# three are visible as a SET DIFFERENCE against the merge base, which is what
 # this guard computes.
 #
 # CHECK 1 — deleted-symbol resurrection.
@@ -34,10 +41,26 @@
 #   allowlist. A retirement anybody wrote down is fine; a retirement nobody
 #   wrote down is the delete-source bug.
 #
+# CHECK 3 — restored lane deletion, the mirror of check 1.
+#   Top-level Go symbols present at the merge base and absent from the LANE
+#   (the merge's first parent) are symbols THIS BRANCH retired. None of them
+#   may exist in the merged tree unless the allowlist names it with a reason.
+#   Check 1 cannot see this class: when upstream never touched the symbol it is
+#   byte-identical between base and head, so it is not an upstream retirement
+#   and nothing compares it to anything. Symbols BOTH sides retired are
+#   reported once, by check 1, which carries the stronger claim.
+#
+#   Check 3 needs a lane ref and therefore runs only when there is one: it is
+#   supplied by --lane, or defaulted to ^1 in the merge-commit mode below. In
+#   the pre-merge mode the lane IS the merged tree, so the set is empty by
+#   construction and the check reports NOT APPLICABLE rather than passing mute.
+#
 # REF RESOLUTION, in order:
-#   1. explicit --base/--head/--merged win.
-#   2. if --merged is a merge commit, base = merge-base(^1, ^2) and
-#      head = ^2 (the side being merged in). This is the post-merge audit.
+#   1. explicit --base/--head/--merged win (--lane is optional and enables
+#      check 3).
+#   2. if --merged is a merge commit, base = merge-base(^1, ^2),
+#      head = ^2 (the side being merged in) and lane = ^1 (the branch that was
+#      checked out). This is the post-merge audit.
 #   3. otherwise head = origin/main and base = merge-base(merged, head). This
 #      is the PRE-merge audit and asks the same question one commit earlier:
 #      does this lane still carry symbols upstream has retired?
@@ -58,7 +81,8 @@
 # SELF-TEST: `--self-test` proves the guard's bite on real temp git repos —
 # a resurrection fails, an allowlisted resurrection passes, a moved symbol is
 # not a deletion, a vanished test fails, a commit-body retirement passes, an
-# allowlist entry without a reason fails, and a bad ref fails.
+# allowlist entry without a reason fails, a restored lane deletion fails while
+# the same tree without a lane ref passes, and a bad ref fails.
 #
 # TEMP SPACE: scratch trees go under /var/tmp, never the size-capped tmpfs on
 # /tmp — three extracted Go trees are ~200MB and the fleet shares /tmp.
@@ -71,6 +95,7 @@ extractor="${script_dir}/lib/go-top-level-symbols.awk"
 repo=""
 base_ref=""
 head_ref=""
+lane_ref=""
 merged_ref="HEAD"
 allow_file=""
 self_test=0
@@ -87,6 +112,10 @@ while [ $# -gt 0 ]; do
 		;;
 	--head)
 		head_ref="${2:-}"
+		shift 2
+		;;
+	--lane)
+		lane_ref="${2:-}"
 		shift 2
 		;;
 	--merged)
@@ -177,8 +206,14 @@ symbol_paths() {
 # read_allowlist FILE SECTION prints the allowed names of one section and
 # fails closed on any malformed line. Format, one entry per line:
 #
-#   symbol <TAB> NAME <TAB> reason text
-#   test   <TAB> NAME <TAB> reason text
+#   symbol   <TAB> NAME <TAB> reason text
+#   test     <TAB> NAME <TAB> reason text
+#   restored <TAB> NAME <TAB> reason text
+#
+# The kinds are deliberately separate. `symbol` says "upstream retired this and
+# the lane keeps it on purpose" (check 1); `restored` says "the lane retired
+# this and the merge brings it back on purpose" (check 3). One kind for both
+# would let a waiver written for one class silence the other.
 #
 # Blank lines and # comments are ignored. A missing or empty reason is a
 # violation: an allowlist without reasons is a mute button.
@@ -199,7 +234,7 @@ read_allowlist() {
 			gsub(/^[ \t]+|[ \t]+$/, "", kind)
 			gsub(/^[ \t]+|[ \t]+$/, "", name)
 			gsub(/^[ \t]+|[ \t]+$/, "", reason)
-			if (kind != "symbol" && kind != "test") {
+			if (kind != "symbol" && kind != "test" && kind != "restored") {
 				printf("unknown allowlist kind %s on line %d\n", kind, NR) > "/dev/stderr"
 				bad = 1
 				next
@@ -248,6 +283,7 @@ run_check() {
 		head_ref="${merged}^2"
 		base_ref=$(git merge-base "${merged}^1" "${merged}^2" 2>/dev/null) ||
 			die "cannot compute merge base of ${merged_ref}'s parents"
+		[ -n "$lane_ref" ] || lane_ref="${merged}^1"
 		mode="merge-commit"
 	else
 		if ! git rev-parse --verify "origin/main^{commit}" >/dev/null 2>&1; then
@@ -260,15 +296,20 @@ run_check() {
 		mode="pre-merge"
 	fi
 
-	local base head
+	local base head lane=""
 	base=$(git rev-parse --verify "${base_ref}^{commit}" 2>/dev/null) ||
 		die "cannot resolve --base ref: $base_ref"
 	head=$(git rev-parse --verify "${head_ref}^{commit}" 2>/dev/null) ||
 		die "cannot resolve --head ref: $head_ref"
+	if [ -n "$lane_ref" ]; then
+		lane=$(git rev-parse --verify "${lane_ref}^{commit}" 2>/dev/null) ||
+			die "cannot resolve --lane ref: $lane_ref"
+	fi
 
 	echo "check-merge-integrity: mode=$mode"
 	echo "  base   $base"
 	echo "  head   $head"
+	[ -n "$lane" ] && echo "  lane   $lane"
 	echo "  merged $merged"
 
 	if [ "$base" = "$head" ]; then
@@ -290,19 +331,29 @@ run_check() {
 	symbols_of "$scratch/merged" tests >"$scratch/merged.tests"
 	symbol_paths "$scratch/base" >"$scratch/base.paths"
 
-	for census in base.symbols head.symbols merged.symbols base.tests merged.tests; do
+	local censuses="base.symbols head.symbols merged.symbols base.tests merged.tests"
+	if [ -n "$lane" ]; then
+		extract_tree "$lane" "$scratch/lane" || die "cannot read Go sources at lane $lane"
+		symbols_of "$scratch/lane" symbols >"$scratch/lane.symbols"
+		censuses="$censuses lane.symbols"
+	fi
+
+	for census in $censuses; do
 		if [ ! -s "$scratch/$census" ]; then
 			die "symbol census $census is empty; refusing to pass on an unevaluated tree"
 		fi
 	done
 
-	local allowed_symbols allowed_tests
+	local allowed_symbols allowed_tests allowed_restored
 	allowed_symbols=$(read_allowlist "$allow_file" symbol) ||
 		die "allowlist is malformed: $allow_file"
 	allowed_tests=$(read_allowlist "$allow_file" test) ||
 		die "allowlist is malformed: $allow_file"
+	allowed_restored=$(read_allowlist "$allow_file" restored) ||
+		die "allowlist is malformed: $allow_file"
 	printf '%s\n' "$allowed_symbols" | sed '/^$/d' | sort -u >"$scratch/allow.symbols"
 	printf '%s\n' "$allowed_tests" | sed '/^$/d' | sort -u >"$scratch/allow.tests"
+	printf '%s\n' "$allowed_restored" | sed '/^$/d' | sort -u >"$scratch/allow.restored"
 
 	# CHECK 1: upstream-retired symbols that survived into the merged tree.
 	comm -23 "$scratch/base.symbols" "$scratch/head.symbols" >"$scratch/retired.symbols"
@@ -354,6 +405,37 @@ run_check() {
 		echo "Restore the test, name it in a commit message on ${base_ref}..${merged_ref} with the reason," >&2
 		echo "or add it to ${allow_file}." >&2
 		exit_code=1
+	fi
+
+	# CHECK 3: lane-retired symbols the merge put back.
+	if [ -z "$lane" ]; then
+		echo "check-merge-integrity: check 3 — no lane ref; NOT APPLICABLE"
+	else
+		comm -23 "$scratch/base.symbols" "$scratch/lane.symbols" >"$scratch/retired.lane"
+		comm -12 "$scratch/retired.lane" "$scratch/merged.symbols" >"$scratch/restored.all"
+		# A symbol both sides retired is check 1's finding, not two findings.
+		comm -23 "$scratch/restored.all" "$scratch/resurrected.all" >"$scratch/restored.mine"
+		comm -23 "$scratch/restored.mine" "$scratch/allow.restored" >"$scratch/restored"
+
+		local lane_retired_count restored_count
+		lane_retired_count=$(wc -l <"$scratch/retired.lane" | tr -d ' ')
+		restored_count=$(wc -l <"$scratch/restored" | tr -d ' ')
+		echo "check-merge-integrity: check 3 — ${lane_retired_count} symbol(s) retired by the lane since the base"
+		if [ "$restored_count" -gt 0 ]; then
+			echo
+			echo "RESTORED LANE DELETION (${restored_count}): the lane retired these and the merged tree declares them again." >&2
+			while IFS= read -r sym; do
+				local where
+				where=$(awk -F'\t' -v s="$sym" '$1 == s { print $2 }' "$scratch/base.paths" | paste -sd, -)
+				echo "  ${sym}  (at base: ${where:-unknown})" >&2
+			done <"$scratch/restored"
+			echo >&2
+			echo "A merge that has to take a symbol back to compile is usually satisfying an" >&2
+			echo "incoming TEST, not restoring behaviour the lane still ships: check for callers" >&2
+			echo "before keeping it. Finish the lane's deletion and re-point or retire the tests," >&2
+			echo "or add it to ${allow_file} with the reason the merge deliberately restores it." >&2
+			exit_code=1
+		fi
 	fi
 
 	if [ "$exit_code" -eq 0 ]; then
@@ -529,11 +611,63 @@ self_test_main() {
 	st_expect fail "a // inside a raw string does not hide the declarations below it" \
 		"${guard[@]}" --base "$jq_base" --head "$jq_head" --merged "$(git -C "$st_repo" rev-parse HEAD)"
 
-	# 8. An unresolvable ref fails closed rather than passing vacuously.
+	# 8. CHECK 3: the lane retired a symbol and the merge brought it back.
+	#    Upstream never touched it — head still declares it, and adds one of its
+	#    own — so check 1 has nothing to compare and only the lane comparison
+	#    can see the restoration. This is ga-f7v2ft.184 in miniature.
+	st_git checkout -q "$base"
+	st_git checkout -q -b lane-retires
+	st_write pkg/a.go 'package pkg' '' 'func Kept() {}'
+	st_commit lane-retires-retired
+	local lane_head
+	lane_head=$(git -C "$st_repo" rev-parse HEAD)
+
+	st_git checkout -q "$base"
+	st_git checkout -q -b upstream-keeps
+	st_write pkg/a.go 'package pkg' '' 'func Kept() {}' '' 'func Retired() {}' '' 'func Added() {}'
+	st_commit upstream-adds-a-symbol-and-keeps-retired
+	local lane_upstream
+	lane_upstream=$(git -C "$st_repo" rev-parse HEAD)
+
+	st_git checkout -q "$lane_head"
+	st_git checkout -q -b lane-merged
+	st_write pkg/a.go 'package pkg' '' 'func Kept() {}' '' 'func Retired() {}' '' 'func Added() {}'
+	st_commit merge-restores-the-lane-deletion
+	local restored_merge
+	restored_merge=$(git -C "$st_repo" rev-parse HEAD)
+	st_expect fail "restored lane deletion fails" \
+		"${guard[@]}" --base "$base" --head "$lane_upstream" --lane "$lane_head" \
+		--merged "$restored_merge"
+
+	# 8b. The same tree passes once the allowlist names it under the RESTORED
+	#     kind — and the check-1 kind must not be the one that silences it.
+	printf 'symbol\tRetired\ta check-1 waiver must not mute check 3\n' >"$allow"
+	st_expect fail "a check-1 waiver does not silence check 3" \
+		"${guard[@]}" --base "$base" --head "$lane_upstream" --lane "$lane_head" \
+		--merged "$restored_merge"
+	printf 'restored\tRetired\tthe merge deliberately restores it for the self-test\n' >"$allow"
+	st_expect pass "allowlisted restoration passes" \
+		"${guard[@]}" --base "$base" --head "$lane_upstream" --lane "$lane_head" \
+		--merged "$restored_merge"
+	printf '# self-test allowlist\n' >"$allow"
+
+	# 8c. Controls. The SAME merged tree passes when the lane never retired the
+	#     symbol (--lane base), and when no lane ref is given at all. Without
+	#     these, case 8's failure could be any of the three checks firing.
+	st_expect pass "a symbol the lane kept is not a restoration" \
+		"${guard[@]}" --base "$base" --head "$lane_upstream" --lane "$base" \
+		--merged "$restored_merge"
+	st_expect pass "no lane ref makes check 3 not applicable" \
+		"${guard[@]}" --base "$base" --head "$lane_upstream" --merged "$restored_merge"
+
+	# 9. An unresolvable ref fails closed rather than passing vacuously.
 	st_expect fail "unresolvable ref fails closed" \
 		"${guard[@]}" --base "$base" --head "$head" --merged deadbeefdeadbeef
+	st_expect fail "unresolvable lane ref fails closed" \
+		"${guard[@]}" --base "$base" --head "$lane_upstream" --lane deadbeefdeadbeef \
+		--merged "$restored_merge"
 
-	# 9. An unreadable allowlist fails closed.
+	# 10. An unreadable allowlist fails closed.
 	st_expect fail "missing allowlist fails closed" \
 		"${BASH_SOURCE[0]}" --repo "$st_repo" --allow "${root}/nope.txt" \
 		--base "$base" --head "$head" --merged "$resurrect"

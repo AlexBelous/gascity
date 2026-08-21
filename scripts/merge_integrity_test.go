@@ -12,8 +12,9 @@ import (
 //
 // scripts/check-merge-integrity.sh is the guard itself: it needs three git
 // trees and a merge base, so its functional falsification lives in its own
-// `--self-test` (nine cases on real temp git repos) and in the historical run
-// at 5ec88b1535, where check 1 reports exactly the ga-f7v2ft.167 resurrection.
+// `--self-test` (sixteen cases on real temp git repos) and in the historical
+// run at 5ec88b1535, where check 1 reports exactly the ga-f7v2ft.167
+// resurrection and check 3 reports the ga-f7v2ft.184 island.
 //
 // THIS FILE DELIBERATELY SPAWNS NOTHING. The test-resource census
 // (internal/testpolicy/resourcecensus) ratchets every os/exec call site in a
@@ -90,8 +91,8 @@ func TestMergeIntegrityAllowlistEntriesCarryAReason(t *testing.T) {
 
 	seen := map[string]int{}
 	for _, entry := range entries {
-		if entry.Kind != "symbol" && entry.Kind != "test" {
-			t.Errorf("%s line %d: unknown kind %q, want symbol or test", path, entry.Line, entry.Kind)
+		if entry.Kind != "symbol" && entry.Kind != "test" && entry.Kind != "restored" {
+			t.Errorf("%s line %d: unknown kind %q, want symbol, test or restored", path, entry.Line, entry.Kind)
 		}
 		if entry.Name == "" {
 			t.Errorf("%s line %d: entry has no name", path, entry.Line)
@@ -132,9 +133,9 @@ func TestMergeIntegrityGuardStaysWired(t *testing.T) {
 	if !strings.Contains(script, mergeIntegrityExtractor) {
 		t.Errorf("%s no longer references %s; the symbol census has no extractor", mergeIntegrityScript, mergeIntegrityExtractor)
 	}
-	for _, needle := range []string{"DELETED-SYMBOL RESURRECTION", "VANISHED TESTS"} {
+	for _, needle := range []string{"DELETED-SYMBOL RESURRECTION", "VANISHED TESTS", "RESTORED LANE DELETION"} {
 		if !strings.Contains(script, needle) {
-			t.Errorf("%s no longer reports %q; one of the two checks has been dropped", mergeIntegrityScript, needle)
+			t.Errorf("%s no longer reports %q; one of the three checks has been dropped", mergeIntegrityScript, needle)
 		}
 	}
 

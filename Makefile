@@ -223,13 +223,15 @@ check-residency-boundary:
 	./scripts/check-residency-boundary.sh
 
 ## check-merge-integrity: prove an upstream merge kept the meaning it compiled with
-## Run this at every origin/main sync, before and after the merge. Two set differences
+## Run this at every origin/main sync, before and after the merge. Three set differences
 ## against the merge base that no compiler and no green suite can see: symbols upstream
 ## RETIRED that the merged tree still declares (ga-f7v2ft.167 resurrected
-## controllerDemandRouteTarget and spawned pool seats that read empty and drained), and
+## controllerDemandRouteTarget and spawned pool seats that read empty and drained),
 ## Test* functions present at the base that are gone with no retirement note anywhere
 ## (the delete-source class, where a conflict resolution drops a behaviour and its test
-## in the same hunk). Deliberate keeps and retirements live in
+## in the same hunk), and symbols the LANE retired that a merge RESTORED to satisfy an
+## incoming test (ga-f7v2ft.184 shipped readyDemandSnapshotFingerprint with zero
+## production callers). Deliberate keeps and retirements live in
 ## scripts/merge-integrity-allow.txt, each with its reason. The --self-test run first is
 ## the bite proof: nine cases on real temp git repos.
 check-merge-integrity:

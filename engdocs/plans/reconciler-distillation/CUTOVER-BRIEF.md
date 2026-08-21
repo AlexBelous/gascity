@@ -59,9 +59,10 @@ is config-only.
 
 ## Merge workflow: the origin/main sync
 
-Merge 5ec88b1535 lost meaning twice while compiling clean and running green.
-Both losses were set differences against the merge base, and both are now
-checked. Run at **every** origin/main sync — once before merging, once after:
+Merge 5ec88b1535 lost meaning three times while compiling clean and running
+green. All three losses were set differences against the merge base, and all
+three are now checked. Run at **every** origin/main sync — once before merging,
+once after:
 
 ```bash
 make check-merge-integrity          # --self-test, then the real audit
@@ -87,17 +88,37 @@ listed in the allowlist. A conflict resolution that drops a behaviour drops its
 test in the same hunk, so the suite that would have caught it is deleted by the
 commit that broke the code.
 
-Deliberate keeps and retirements go in `scripts/merge-integrity-allow.txt`, one
-per line with the reason. **A blank reason fails.** Regenerating the file to
-absorb a finding defeats the guard — the diff is the review. Open findings
-(`ga-f7v2ft.182`, `ga-f7v2ft.183`) stay out of it until they are adjudicated;
-the guard is red on them on purpose.
+**Check 3 — restored lane deletion**, the mirror of check 1. Symbols present at
+the merge base and absent from the LANE are symbols *this branch* retired; none
+may come back through the merge. Check 1 is blind to this class: when upstream
+never touched the symbol it is byte-identical between base and head, so there is
+no upstream retirement to compare against. This is `ga-f7v2ft.184`: the lane
+retired `readyDemandSnapshotFingerprint` when the scan was promoted to the
+sweep's routed-work view, two incoming upstream *test* files called it, the merge
+broke the compile, and the compile was fixed by taking the symbol back — shipping
+a caller-less island. The check needs a lane ref, which it takes from `^1` of a
+merge commit or from `--lane`; in the pre-merge mode the lane *is* the tree, so
+it reports NOT APPLICABLE rather than passing mute. Run at `5ec88b1535` it
+reports three of the lane's twenty retirements: the two island symbols, plus
+`teardownServerForStop`, a restoration the merge got *right* (the lane had lost
+upstream #5175/#5196's managed-stop teardown; the merged tree calls it in
+production) and which is allowlisted under the `restored` kind with that caller
+named.
 
-The guard proves its own bite through `--self-test`: nine cases on real temp git
-repos covering a resurrection, an allowlisted resurrection, an allowlist entry
-with no reason, a symbol that merely moved files, a vanished test, a
-commit-body retirement, Go source inside a raw string, an unresolvable ref and
-an unreadable allowlist.
+Deliberate keeps and retirements go in `scripts/merge-integrity-allow.txt`, one
+per line with the reason. **A blank reason fails.** The three kinds are separate
+(`symbol`, `test`, `restored`) so a waiver written for one class cannot silence
+another. Regenerating the file to absorb a finding defeats the guard — the diff
+is the review. Open findings (`ga-f7v2ft.182`, `ga-f7v2ft.183`) stay out of it
+until they are adjudicated; the guard is red on them on purpose.
+
+The guard proves its own bite through `--self-test`: sixteen cases on real temp
+git repos covering a resurrection, an allowlisted resurrection, an allowlist
+entry with no reason, a symbol that merely moved files, a vanished test, a
+commit-body retirement, Go source inside a raw string, a restored lane deletion,
+a check-1 waiver that must *not* silence check 3, the two controls that make
+check 3's failure attributable (a lane that kept the symbol, and no lane ref at
+all), an unresolvable ref, an unresolvable lane ref and an unreadable allowlist.
 
 Twin drift is the sibling failure — a shared decider gains a rung upstream and
 the lane's keyed copy silently never learns it (`ga-f7v2ft.166`). That one is

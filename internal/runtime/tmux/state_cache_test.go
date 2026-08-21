@@ -15,6 +15,7 @@ import (
 	"time"
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -353,7 +354,7 @@ func TestProviderObserveFreshLivenessFollowsSupersedingFreshGeneration(t *testin
 		release:   make(chan struct{}),
 	}
 	cache := NewStateCache(fetcher, time.Hour)
-	cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
+	cache.setScanBySessionID(func(string, time.Time, proctable.SessionScope) exactProcessScan {
 		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
 	})
 	provider := &Provider{cache: cache}
@@ -389,7 +390,7 @@ func TestProviderObserveFreshLivenessFollowsSupersedingFreshGeneration(t *testin
 }
 
 func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T) {
-	completedScan := func(string, time.Time) exactProcessScan {
+	completedScan := func(string, time.Time, proctable.SessionScope) exactProcessScan {
 		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
 	}
 	liveSession := runtimeStateSnapshot{
@@ -477,7 +478,7 @@ func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T)
 	t.Run("exact session scan is positive and partial scans remain incomplete", func(t *testing.T) {
 		cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}}, time.Hour)
 		incarnationStartedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-		cache.setScanBySessionID(func(id string, gotStartedAt time.Time) exactProcessScan {
+		cache.setScanBySessionID(func(id string, gotStartedAt time.Time, _ proctable.SessionScope) exactProcessScan {
 			if id != "sid-1" {
 				t.Fatalf("scan session ID = %q, want sid-1", id)
 			}
@@ -499,12 +500,66 @@ func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T)
 			t.Fatalf("exact-ID process observation = %#v, want complete live", got)
 		}
 
-		cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
+		cache.setScanBySessionID(func(string, time.Time, proctable.SessionScope) exactProcessScan {
 			return exactProcessScan{}
 		})
 		got = provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
 		if got.Complete {
 			t.Fatalf("partial process scan = %#v, want incomplete", got)
+		}
+	})
+}
+
+// TestProviderObserveFreshLivenessLicensesPaneScopeProofOnProvenAbsence pins
+// the ga-lp5w6 license derivation: the exact process scan is told the target
+// tmux session is proven absent ONLY when the same fresh generation produced a
+// complete snapshot without the target's pane. A live pane or an incomplete
+// snapshot must never license the wider scope proof.
+func TestProviderObserveFreshLivenessLicensesPaneScopeProofOnProvenAbsence(t *testing.T) {
+	observeScope := func(t *testing.T, fetcher StateFetcher) proctable.SessionScope {
+		t.Helper()
+		cache := NewStateCache(fetcher, time.Hour)
+		var (
+			got    proctable.SessionScope
+			called bool
+		)
+		cache.setScanBySessionID(func(_ string, _ time.Time, scope proctable.SessionScope) exactProcessScan {
+			got = scope
+			called = true
+			return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
+		})
+		provider := &Provider{cache: cache}
+		provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
+		if !called {
+			t.Fatal("fresh observation never ran the exact process scan")
+		}
+		return got
+	}
+
+	t.Run("complete snapshot without the pane licenses the proof", func(t *testing.T) {
+		scope := observeScope(t, &mockFetcher{state: runtimeStateSnapshot{
+			Sessions:           map[string]sessionRuntimeState{},
+			ProcessesAvailable: true,
+		}})
+		if !scope.TmuxSessionProvenAbsent {
+			t.Fatal("complete pane-less snapshot did not license the pane-scope proof")
+		}
+	})
+
+	t.Run("live pane withholds the license", func(t *testing.T) {
+		scope := observeScope(t, &mockFetcher{state: runtimeStateSnapshot{
+			Sessions:           map[string]sessionRuntimeState{"agent-1": {Running: true}},
+			ProcessesAvailable: true,
+		}})
+		if scope.TmuxSessionProvenAbsent {
+			t.Fatal("a live target pane licensed the pane-scope proof; absence was not proven")
+		}
+	})
+
+	t.Run("incomplete snapshot withholds the license", func(t *testing.T) {
+		scope := observeScope(t, &mockFetcher{err: errors.New("tmux fetch failed")})
+		if scope.TmuxSessionProvenAbsent {
+			t.Fatal("an incomplete snapshot licensed the pane-scope proof; nothing was proven")
 		}
 	})
 }
@@ -515,7 +570,7 @@ func TestProviderObserveFreshLivenessLastSessionUsesDrainedServerAbsence(t *test
 		errs: []error{nil, ErrNoCurrentTarget},
 	}
 	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: exec}}, time.Hour)
-	cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
+	cache.setScanBySessionID(func(string, time.Time, proctable.SessionScope) exactProcessScan {
 		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
 	})
 	provider := &Provider{cache: cache}

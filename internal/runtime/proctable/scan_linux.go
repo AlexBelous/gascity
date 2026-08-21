@@ -26,13 +26,28 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 }
 
 // ScanBySessionIDSince scans for an exact session incarnation. Inspection
-// failures from processes proven to predate incarnationStartedAt do not make
-// absence incomplete; those processes cannot belong to that incarnation.
+// failures from processes proven outside the incarnation's reachable scope —
+// predating incarnationStartedAt, or rooted in a foreign pre-incarnation
+// lineage — do not make absence incomplete; those processes cannot belong to
+// that incarnation. A nil error therefore proves absence within that scope,
+// not across the whole host.
 func ScanBySessionIDSince(id string, incarnationStartedAt time.Time) ([]runtime.LiveRuntime, error) {
+	return ScanBySessionIDSinceInScope(id, incarnationStartedAt, SessionScope{})
+}
+
+// ScanBySessionIDSinceInScope is ScanBySessionIDSince with caller-established
+// scope facts. A nil error proves absence within the session's reachable
+// scope — the pane lineage the runtime layer spawned for this incarnation plus
+// every owned process no proof could exclude — NOT absence across the whole
+// host: unreadable owned processes provably outside that scope (predating the
+// incarnation, living in another live pane's spawn scope, or rooted in a
+// foreign pre-incarnation lineage) do not cost the sweep its completeness
+// (ga-lp5w6).
+func ScanBySessionIDSinceInScope(id string, incarnationStartedAt time.Time, scope SessionScope) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
-	return scanWithRootSince(scanRoot, id, incarnationStartedAt)
+	return scanWithRootSinceInScope(scanRoot, id, incarnationStartedAt, scope)
 }
 
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
@@ -67,6 +82,10 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 }
 
 func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runtime.LiveRuntime, error) {
+	return scanWithRootSinceInScope(root, id, incarnationStartedAt, SessionScope{})
+}
+
+func scanWithRootSinceInScope(root, id string, incarnationStartedAt time.Time, scope SessionScope) ([]runtime.LiveRuntime, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return []runtime.LiveRuntime{}, fmt.Errorf("enumerating %s: %w", root, err)
@@ -113,6 +132,26 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 				continue
 			} else if proofErr != nil {
 				residue.add(fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
+			}
+			if irrelevant, proofErr := unreadableProcessProvenInForeignLivePaneScope(
+				root,
+				pid,
+				id,
+				incarnationStartedAt,
+				scope,
+			); irrelevant {
+				continue
+			} else if proofErr != nil {
+				residue.add(fmt.Errorf("proving live pane scope for pid %d: %w", pid, proofErr))
+			}
+			if irrelevant, proofErr := unreadableProcessProvenForeignLineage(
+				root,
+				pid,
+				incarnationStartedAt,
+			); irrelevant {
+				continue
+			} else if proofErr != nil {
+				residue.add(fmt.Errorf("proving foreign lineage for pid %d: %w", pid, proofErr))
 			}
 			residue.add(fmt.Errorf("reading environ for pid %d: %w", pid, err))
 			continue
@@ -170,11 +209,15 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 // left are our own processes whose environ the kernel still withholds. It
 // guards /proc/<pid>/environ with ptrace_may_access, not file permissions, so a
 // non-dumpable agent and a sudo child both stay unreadable to the uid that owns
-// them. Neither may be assumed absent — a sudo child can outlive the runtime
-// that spawned it and keep carrying its GC_SESSION_ID, which is exactly what
-// unreadableProcessProvenOutsideIncarnation exists to adjudicate. Each failure
-// therefore still costs the sweep its proof of absence, and err() keeps a
-// non-nil verdict whenever one remains.
+// them. None may be assumed absent — a sudo child can outlive the runtime
+// that spawned it and keep carrying its GC_SESSION_ID — but some can be PROVEN
+// outside the incarnation's reachable scope: predating it, living in another
+// live pane's spawn scope, or rooted in a foreign pre-incarnation lineage
+// (the unreadableProcessProven* adjudications, ga-lp5w6). What remains in the
+// residue is the genuinely undecidable set, each failure still costs the sweep
+// its proof of absence, and err() keeps a non-nil verdict whenever one
+// remains — so a nil verdict means absence proven within the session's
+// reachable scope, not inspected across the host.
 type scanResidue struct {
 	errs []error
 }
@@ -314,6 +357,161 @@ func unreadableProcessProvenOutsideIncarnation(
 		return false, nil
 	}
 	return true, nil
+}
+
+// maxUnreadableProofChainHops bounds the parent-chain walks below. Real pane
+// and login lineages are a handful of processes deep; a chain longer than this
+// is either a pathological tree or a ppid cycle, and both must fail closed.
+const maxUnreadableProofChainHops = 32
+
+// unreadableProcessProvenInForeignLivePaneScope adjudicates an unreadable
+// owned process inside a unique tmux pane spawn scope by following its parent
+// chain to the scope's exit — the live process that spawned the pane. If that
+// spawner predates the incarnation and its readable environment does not carry
+// the target session ID, the pane belongs to some other lineage: a unique
+// spawn scope holds exactly one pane's subtree, membership only changes by an
+// explicit privileged cgroup write, and the target's own incarnation-spawned
+// pane would hang off the same spawner only when the caller-supplied license —
+// a same-generation COMPLETE tmux observation proving the target session
+// absent — could not have been granted. Every undecidable link (an ancestor
+// re-parented to init, an unreadable or post-incarnation spawner, an unstable
+// chain) declines, leaving the process in the residue.
+func unreadableProcessProvenInForeignLivePaneScope(
+	root string,
+	pid int,
+	targetSessionID string,
+	incarnationStartedAt time.Time,
+	scope SessionScope,
+) (bool, error) {
+	if !scope.TmuxSessionProvenAbsent ||
+		targetSessionID == "" ||
+		incarnationStartedAt.IsZero() ||
+		incarnationStartedAt.After(time.Now()) {
+		return false, nil
+	}
+
+	bootedAt, err := readBootTime(root)
+	if err != nil {
+		return false, err
+	}
+	candidateBefore, exists, err := readProcessIdentity(root, pid)
+	if err != nil || !exists {
+		return false, err
+	}
+	if !isUniqueTmuxSpawnScope(candidateBefore.Cgroup) {
+		return false, nil
+	}
+
+	cur := candidateBefore
+	for range maxUnreadableProofChainHops {
+		if cur.PPID <= 1 {
+			// A chain that exits to init is the re-parented orphan shape — the
+			// scope's pane is gone and nothing proves whose pane it was.
+			return false, nil
+		}
+		parent, exists, err := readProcessIdentity(root, cur.PPID)
+		if err != nil || !exists {
+			return false, err
+		}
+		if parent.Cgroup == candidateBefore.Cgroup {
+			cur = parent
+			continue
+		}
+		// parent is the scope-exit ancestor: the live spawner of this pane.
+		if !processDefinitelyPredatesIncarnation(
+			processStartedAt(bootedAt, parent.StartTicks),
+			incarnationStartedAt,
+		) {
+			return false, nil
+		}
+		parentEnv, err := parseEnvironFile(
+			filepath.Join(root, strconv.Itoa(parent.PID), "environ"),
+		)
+		if err != nil || parentEnv == nil {
+			return false, err
+		}
+		if parentEnv["GC_SESSION_ID"] == targetSessionID {
+			return false, nil
+		}
+		parentAfter, exists, err := readProcessIdentity(root, parent.PID)
+		if err != nil || !exists {
+			return false, err
+		}
+		candidateAfter, exists, err := readProcessIdentity(root, pid)
+		if err != nil || !exists {
+			return false, err
+		}
+		if parentAfter != parent || candidateAfter != candidateBefore {
+			return false, nil
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// unreadableProcessProvenForeignLineage adjudicates an unreadable owned
+// process by its parent chain alone: if every ancestor up to the first
+// pre-incarnation one runs as a foreign real uid — and the chain never exits
+// to init — the lineage is rooted in a process that existed before this
+// session and belongs to another uid domain (an sshd login tree, a container
+// supervisor). Nothing the session spawned can be rooted there: every process
+// in the session's own tree descends from the incarnation root, so its chain
+// reaches a same-uid ancestor (declined) or init via re-parenting (declined)
+// before any foreign pre-incarnation process.
+func unreadableProcessProvenForeignLineage(
+	root string,
+	pid int,
+	incarnationStartedAt time.Time,
+) (bool, error) {
+	if incarnationStartedAt.IsZero() || incarnationStartedAt.After(time.Now()) {
+		return false, nil
+	}
+
+	bootedAt, err := readBootTime(root)
+	if err != nil {
+		return false, err
+	}
+	candidateBefore, exists, err := readProcessStat(root, pid)
+	if err != nil || !exists {
+		return false, err
+	}
+
+	uid := os.Geteuid()
+	cur := candidateBefore
+	for range maxUnreadableProofChainHops {
+		if cur.PPID <= 1 {
+			// Parented by init: the re-parenting target for surviving session
+			// processes. Never decidable from lineage.
+			return false, nil
+		}
+		owned, err := processOwnedByUID(root, cur.PPID, uid)
+		if err != nil {
+			return false, err
+		}
+		if owned {
+			// A same-uid ancestor could be the session's own sudo tree.
+			return false, nil
+		}
+		parent, exists, err := readProcessStat(root, cur.PPID)
+		if err != nil || !exists {
+			return false, err
+		}
+		if processDefinitelyPredatesIncarnation(
+			processStartedAt(bootedAt, parent.StartTicks),
+			incarnationStartedAt,
+		) {
+			candidateAfter, exists, err := readProcessStat(root, pid)
+			if err != nil || !exists {
+				return false, err
+			}
+			if candidateAfter != candidateBefore {
+				return false, nil
+			}
+			return true, nil
+		}
+		cur = parent
+	}
+	return false, nil
 }
 
 func readProcessIdentity(root string, pid int) (processIdentity, bool, error) {

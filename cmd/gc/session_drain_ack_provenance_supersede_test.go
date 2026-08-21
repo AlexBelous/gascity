@@ -163,6 +163,86 @@ func TestReconcileExactSessionStartSupersedesUnrecognizedProvenanceOnDeadRuntime
 	}
 }
 
+// TestReconcileExactSessionStartDrainAckFinalizesWhenObservationCompletes is
+// the ga-lp5w6 self-recovery contract: a drain-ack stop parked on an
+// INCOMPLETE liveness observation is a retained obligation, and the very next
+// re-examination that sees a complete dead observation must finalize the row
+// and free its pool seat — no manual close. This is the fleet-stall sequence:
+// unreadable stranger processes made every host-wide sweep incomplete, the
+// obligation escalated and parked on the 5m cadence, and once the sweep's
+// completeness domain is the session's reachable scope the same re-examination
+// self-heals.
+func TestReconcileExactSessionStartDrainAckFinalizesWhenObservationCompletes(t *testing.T) {
+	env := newDrainAckAtomicCloseTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	bead := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&bead, map[string]string{"pool_managed": "true"})
+	markDrainAckStopPendingForTest(env, &bead)
+
+	store := &drainAckAtomicCloseStore{Store: env.store}
+	params := exactSessionStartTestParams(t, env)
+	params.Store = store
+	provider := &freshLivenessProvider{Fake: env.sp, fresh: runtime.Liveness{Complete: false}}
+	params.Provider = provider
+	params.RolloutMode = rollout.Auto
+	params.RecoverPoolDrainAck = func(session.Info) (routedWorkPoolDrainAckLease, bool, bool, error) {
+		return routedWorkPoolDrainAckLease{}, false, false, nil
+	}
+	admission := sessionStartAdmission{
+		SessionID:             bead.ID,
+		Source:                sessionStartAdmissionAntiEntropy,
+		PoolDrainAckUncertain: true,
+	}
+
+	// The stall: an incomplete observation parks the obligation with zero
+	// effects. The row stays the durable stop-pending obligation.
+	owner, err := reconcileExactSessionStartWithOwner(context.Background(), admission, params)
+	if owner != exactSessionStartKeyedOwner || !errors.Is(err, errSessionStartPoolDrainAckPending) {
+		t.Fatalf("incomplete observation = (%v, %v), want a keyed park on the pending sentinel", owner, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "drain acknowledgement liveness observation is incomplete") {
+		t.Fatalf("incomplete-observation park cause = %v, want it to name the incomplete observation", err)
+	}
+	parked, readErr := env.store.Get(bead.ID)
+	if readErr != nil {
+		t.Fatalf("read parked row: %v", readErr)
+	}
+	if parked.Status != "open" {
+		t.Fatalf("parked row status = %q, want the untouched open obligation", parked.Status)
+	}
+	if got := len(store.expected); got != 0 {
+		t.Fatalf("atomic terminal close calls while parked = %d, want 0", got)
+	}
+
+	// The recovery: the observation regains completeness (the sweep can now
+	// prove absence within the session's scope), and the SAME retained
+	// obligation finalizes in one pass.
+	provider.mu.Lock()
+	provider.fresh = runtime.Liveness{Complete: true}
+	provider.mu.Unlock()
+
+	owner, err = reconcileExactSessionStartWithOwner(context.Background(), admission, params)
+	if owner != exactSessionStartKeyedOwner || err != nil {
+		t.Fatalf("complete re-examination = (%v, %v), want the finalizing pass to succeed", owner, err)
+	}
+	after, readErr := env.store.Get(bead.ID)
+	if readErr != nil {
+		t.Fatalf("read finalized row: %v", readErr)
+	}
+	if after.Status != "closed" || after.Metadata["state"] != "drained" {
+		t.Fatalf("finalized row = status %q state %q, want closed/drained", after.Status, after.Metadata["state"])
+	}
+	if got := after.Metadata[session.DrainAckSourceMetadataKey]; got != session.DrainAckSourceSupersededValue {
+		t.Fatalf("finalized row drain_ack_source = %q, want %q", got, session.DrainAckSourceSupersededValue)
+	}
+	if got := env.sp.CountCalls("Stop", "worker"); got != 0 {
+		t.Fatalf("provider Stop calls = %d, want 0 across park and recovery", got)
+	}
+}
+
 // TestReconcileExactSessionStartRefusesUnrecognizedProvenanceOnLiveRuntime is
 // THE control: the case the provenance check exists for. A LIVE runtime whose
 // acknowledgement cannot be proven must never be stopped or closed on absent

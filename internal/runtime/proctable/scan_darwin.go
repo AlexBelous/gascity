@@ -66,6 +66,13 @@ func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error)
 	return ScanBySessionID(id)
 }
 
+// ScanBySessionIDSinceInScope returns the Darwin session-ID scan. Scope facts
+// are irrelevant on Darwin: the ps snapshot has no per-process inspection
+// failures for the scope proofs to adjudicate.
+func ScanBySessionIDSinceInScope(id string, _ time.Time, _ SessionScope) ([]runtime.LiveRuntime, error) {
+	return ScanBySessionID(id)
+}
+
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
 // envelope and should be treated as an agent root.
 func IsScanRoot(pid int) bool {

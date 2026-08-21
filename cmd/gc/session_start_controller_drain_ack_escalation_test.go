@@ -187,6 +187,72 @@ func TestSessionStartControllerEscalatesUnresolvableDrainAckAfterThreshold(t *te
 	}
 }
 
+// TestSessionStartControllerEscalatedDrainAckResolvesWhenReconcileSucceeds is
+// the ga-lp5w6 self-recovery half of the .173 bound: escalation parks the
+// obligation, it must not entomb it. When a re-examination of the RETAINED
+// escalated obligation finally succeeds (the liveness observation regained
+// completeness and the stop finalized), the admission resolves, the ownership
+// fence lifts, and the refusal history clears — the pool seat is free again
+// with no manual close.
+func TestSessionStartControllerEscalatedDrainAckResolvesWhenReconcileSucceeds(t *testing.T) {
+	start := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	resolved := false
+	results := make(chan sessionStartReconcileResult, 256)
+	controller := drainAckEscalationTestController(t,
+		func(context.Context, sessionStartAdmission) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if resolved {
+				return nil
+			}
+			return errSessionStartPoolDrainAckPending
+		},
+		func(result sessionStartReconcileResult) {
+			select {
+			case results <- result:
+			default:
+			}
+		},
+		func() time.Time { return start },
+	)
+
+	lease := testDrainAckEscalationLease()
+	if _, err := controller.AdmitPoolDrainAck(lease); err != nil {
+		t.Fatalf("admit drain ack: %v", err)
+	}
+	awaitDrainAckResult(t, results, func(result sessionStartReconcileResult) bool {
+		return result.Outcome == sessionStartReconcileDrainAckEscalated
+	}, "the escalation crossing")
+
+	// The observation regains completeness: from here every re-examination of
+	// the retained obligation succeeds. The escalated slow cadence and the
+	// audit's level-triggered re-detection run the same reconcile; drive it via
+	// the re-detection so the test does not sleep out the real 5m interval.
+	mu.Lock()
+	resolved = true
+	mu.Unlock()
+	if _, err := controller.AdmitPoolDrainAck(lease); err != nil {
+		t.Fatalf("re-admit escalated drain ack: %v", err)
+	}
+	awaitDrainAckResult(t, results, func(result sessionStartReconcileResult) bool {
+		return result.Outcome == sessionStartReconcileSucceeded
+	}, "the escalated obligation's resolution")
+
+	if controller.ownsPoolDrainAckStop(lease.SessionID, lease.InstanceToken) {
+		t.Fatal("resolution left the drain-ack ownership fence in place; the seat is still fenced")
+	}
+	if controller.holdsAnyAdmission(lease.SessionID) {
+		t.Fatal("resolution retained the admission; the obligation must end when the stop finalizes")
+	}
+	controller.mu.Lock()
+	refusals := controller.drainAckRefusalHistory[lease.SessionID]
+	controller.mu.Unlock()
+	if refusals != 0 {
+		t.Fatalf("refusal history after resolution = %d, want the obligation's streak cleared", refusals)
+	}
+}
+
 // TestObserveSessionStartReconcileEmitsNamedEscalationOnceAtThreshold pins the
 // loud-not-silent half: the runtime's observer emits ONE named supervisor line
 // at the crossing, and escalated re-examinations after it are quiet.

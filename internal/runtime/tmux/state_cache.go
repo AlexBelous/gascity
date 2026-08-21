@@ -96,16 +96,16 @@ type StateCache struct {
 	scanMu     sync.RWMutex
 	// scanBySessionID is an instance-owned seam so fresh liveness tests can
 	// model exact and partial process-table scans without mutable global state.
-	scanBySessionID func(string, time.Time) exactProcessScan
+	scanBySessionID func(string, time.Time, proctable.SessionScope) exactProcessScan
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
 // staleTTL defaults to 30s.
 func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
-	var scanBySessionID func(string, time.Time) exactProcessScan
+	var scanBySessionID func(string, time.Time, proctable.SessionScope) exactProcessScan
 	if goruntime.GOOS == "linux" || goruntime.GOOS == "darwin" {
-		scanBySessionID = func(id string, incarnationStartedAt time.Time) exactProcessScan {
-			runtimes, err := proctable.ScanBySessionIDSince(id, incarnationStartedAt)
+		scanBySessionID = func(id string, incarnationStartedAt time.Time, scope proctable.SessionScope) exactProcessScan {
+			runtimes, err := proctable.ScanBySessionIDSinceInScope(id, incarnationStartedAt, scope)
 			return exactProcessScan{runtimes: runtimes, complete: err == nil}
 		}
 	}
@@ -150,25 +150,30 @@ func (c *StateCache) freshState() (runtimeStateSnapshot, bool) {
 	}
 }
 
-func (c *StateCache) setScanBySessionID(scan func(string, time.Time) exactProcessScan) {
+func (c *StateCache) setScanBySessionID(scan func(string, time.Time, proctable.SessionScope) exactProcessScan) {
 	c.scanMu.Lock()
 	c.scanBySessionID = scan
 	c.scanMu.Unlock()
 }
 
-func (c *StateCache) scanSessionID(id string, incarnationStartedAt time.Time) (exactProcessScan, bool) {
+func (c *StateCache) scanSessionID(id string, incarnationStartedAt time.Time, scope proctable.SessionScope) (exactProcessScan, bool) {
 	c.scanMu.RLock()
 	scan := c.scanBySessionID
 	c.scanMu.RUnlock()
 	if scan == nil {
 		return exactProcessScan{}, false
 	}
-	return scan(id, incarnationStartedAt), true
+	return scan(id, incarnationStartedAt, scope), true
 }
 
 // ObserveFreshLiveness forces a new tmux snapshot and combines it with an
 // exact GC_SESSION_ID process-table scan. Absence is complete only when both
-// sources were fully observed in that post-invalidation generation.
+// sources were fully observed in that post-invalidation generation, and it is
+// a proof of absence within the session's reachable scope, not across the
+// whole host: when the fresh snapshot is complete and the target session holds
+// no pane, that fact licenses the scan's live-pane-scope proof, so unreadable
+// strangers inside OTHER live panes' spawn scopes cannot park this session's
+// stop forever (ga-lp5w6).
 func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
 	name := strings.TrimSpace(target.SessionName)
 	if name == "" || p.cache == nil {
@@ -186,7 +191,10 @@ func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.L
 		scanComplete      bool
 	)
 	if sessionID := strings.TrimSpace(target.SessionID); sessionID != "" {
-		result, scanned := p.cache.scanSessionID(sessionID, target.IncarnationStartedAt)
+		scope := proctable.SessionScope{
+			TmuxSessionProvenAbsent: cacheComplete && !panePresent,
+		}
+		result, scanned := p.cache.scanSessionID(sessionID, target.IncarnationStartedAt, scope)
 		scanComplete = scanned && result.complete
 		for _, live := range result.runtimes {
 			if live.SessionID == sessionID {

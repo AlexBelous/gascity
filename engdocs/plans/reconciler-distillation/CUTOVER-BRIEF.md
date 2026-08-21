@@ -109,8 +109,22 @@ Deliberate keeps and retirements go in `scripts/merge-integrity-allow.txt`, one
 per line with the reason. **A blank reason fails.** The three kinds are separate
 (`symbol`, `test`, `restored`) so a waiver written for one class cannot silence
 another. Regenerating the file to absorb a finding defeats the guard — the diff
-is the review. Open findings (`ga-f7v2ft.182`, `ga-f7v2ft.183`) stay out of it
-until they are adjudicated; the guard is red on them on purpose.
+is the review. A finding stays out of the file until it is adjudicated, and the
+guard stays red on it on purpose in the meantime.
+
+**Status at the release cut (`0d8f61a335`): green.** `ga-f7v2ft.182` was
+adjudicated by ADOPTING upstream's retirement (cherry-pick `c2da2c1624`), not by
+a waiver, so check 1 reports no resurrection; `ga-f7v2ft.183`'s thirteen tests
+were each recovered and run against lane code before being ruled on — two were
+genuine losses and were restored, eleven are allowlisted retirements; and the
+three modal-dismissal tests the council's B1 fix re-sited were ruled the same
+way, with their replacements run (including on real tmux) before a line went in
+the file. Nothing is parked awaiting a decision.
+
+One operational trap: the guard's pre-merge mode resolves its base as
+`merge-base(HEAD, origin/main)`, and a SHALLOW `origin/main` has none — it fails
+closed on an unresolvable base, which reads like a broken script rather than a
+missing fetch. Run `git fetch --unshallow origin` (or pass `--base`) first.
 
 The guard proves its own bite through `--self-test`: sixteen cases on real temp
 git repos covering a resurrection, an allowlisted resurrection, an allowlist

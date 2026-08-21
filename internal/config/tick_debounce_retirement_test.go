@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -10,11 +11,11 @@ import (
 // TestLoadWithIncludesWarnsAndIgnoresRetiredTickDebounce is WD.0's second
 // negative: a city that still carries the retired [daemon].tick_debounce key
 // must keep loading — with a surfaced warning, never a hard failure — and must
-// tick at exactly the cadence it declares. It follows the
-// session_start_reconciler retirement precedent
-// (TestLoadWithIncludesWarnsAndIgnoresRetiredSessionStartReconciler): the key
-// is no longer decoded, so it lands in the non-fatal unknown-field warning
-// path for city.toml.
+// tick at exactly the cadence it declares.
+//
+// The warning is the RETIRED-key rendering, not "unknown field": the debounce
+// window is gone, and an operator who reads "unknown field" deletes the line
+// believing nothing changed. The Note must therefore name the behavior.
 func TestLoadWithIncludesWarnsAndIgnoresRetiredTickDebounce(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -33,7 +34,20 @@ tick_debounce = "500ms"
 	if got := cfg.Daemon.PatrolIntervalDuration(); got != 10*time.Second {
 		t.Fatalf("PatrolIntervalDuration() = %v, want 10s (cadence unchanged by the retired key)", got)
 	}
-	if !containsWarningPrefix(prov.Warnings, `/city/city.toml: unknown field "daemon.tick_debounce"`) {
-		t.Fatalf("warnings = %v, want retired tick-debounce warning", prov.Warnings)
+	var got string
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "daemon.tick_debounce") {
+			got = w
+			break
+		}
+	}
+	if got == "" {
+		t.Fatalf("warnings = %v, want a retired tick-debounce warning", prov.Warnings)
+	}
+	if strings.Contains(got, "unknown field") || !IsRetiredKeyWarning(got) {
+		t.Fatalf("warning = %q, want the retired-key rendering, not an unknown field", got)
+	}
+	if !strings.Contains(got, "debounce window is gone") {
+		t.Fatalf("warning = %q, want it to say the BEHAVIOR is gone, not just the key", got)
 	}
 }

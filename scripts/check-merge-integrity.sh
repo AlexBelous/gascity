@@ -67,16 +67,27 @@
 #
 # When the resolved base and head are the same commit there is no upstream
 # divergence to audit and the guard reports NOTHING TO AUDIT and passes. That
-# is not a silent pass: it is printed, and it is the state `make check` sees
-# on a lane that has not diverged from its base.
+# is not a silent pass: it is printed, and it is the expected state on a lane
+# that has not diverged from its base.
+#
+# HOW THIS RUNS — read this before trusting a green tree.
+#   Nothing runs this guard for you. It is NOT in `make check`, NOT in any CI
+#   workflow, and NOT in any git hook: `make check-merge-integrity` is the only
+#   trigger and a human has to type it. So a green `make check`, a green
+#   pre-commit and a green CI run all say NOTHING about the three classes
+#   below. Run it by hand on every integration merge and before every release
+#   cut. Wiring it into an automated gate is ga-f7v2ft.189 (council S1), which
+#   also carries the four open soundness minors on this script.
 #
 # FAILS CLOSED on an unresolvable ref, an unreadable allowlist, a malformed
 # allowlist line, an allowlist entry with no reason, or a symbol extraction
 # that finds nothing at all. A guard that passes when it cannot evaluate
 # manufactures false confidence. The one deliberate exception is a missing
 # origin/main in mode 3 — a fresh clone without the remote fetched is not a
-# merge, and failing there would break every `make check` that is not
-# integrating anything.
+# merge, so the guard reports it and passes rather than failing a tree that is
+# not integrating anything. NOTE that a SHALLOW origin/main resolves but has no
+# merge base; deepen it (`git fetch --unshallow origin`) or pass --base
+# explicitly rather than reading the refusal as a clean tree.
 #
 # SELF-TEST: `--self-test` proves the guard's bite on real temp git repos —
 # a resurrection fails, an allowlisted resurrection passes, a moved symbol is

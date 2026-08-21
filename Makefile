@@ -233,7 +233,9 @@ check-residency-boundary:
 ## incoming test (ga-f7v2ft.184 shipped readyDemandSnapshotFingerprint with zero
 ## production callers). Deliberate keeps and retirements live in
 ## scripts/merge-integrity-allow.txt, each with its reason. The --self-test run first is
-## the bite proof: nine cases on real temp git repos.
+## the bite proof: sixteen cases on real temp git repos.
+## NOT automated: `make check`, CI and the git hooks do not run this, so a green tree says
+## nothing about these three classes. Wiring it into a gate is ga-f7v2ft.189.
 check-merge-integrity:
 	bash scripts/check-merge-integrity.sh --self-test
 	bash scripts/check-merge-integrity.sh

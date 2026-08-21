@@ -97,6 +97,24 @@ test	TestDemandFingerprintTracksTheBindingTheProbeReads	pinned the retired scan'
 test	TestDemandFingerprintIgnoresAStoreTheProbeDoesNotRead	the control for the test above, retired with it; the view's store scope is pinned by TestReadyRoutedWorkViewEmitsResolvableStoreRefs (ga-f7v2ft.184)
 test	TestDemandFingerprintReadsASingleStoreCityOnce	pinned the retired scan's single-store dedup; the view enumerates canonical workflow stores, which cannot double-count the city (ga-f7v2ft.184)
 
+# --- B1 nudge input fence: the modal dismissal was re-sited, not dropped -----
+# The council's release blocker B1 restored the Codex/GPT model-switch dismissal
+# to the nudge path (b290985c9e) as a CERTIFIED, server-queued effect. Doing that
+# retired the two symbols the three tests below called: the free function
+# dismissModelSwitchModal (its detection half now lives at
+# runtime.ContainsModelSwitchModal, pinned by TestContainsModelSwitchModal) and
+# the uncertified Tmux.DismissModelSwitchModalIfPresent. Both are absent from the
+# tree, so these are retirements-by-rename, not the delete-source class.
+#
+# Adjudicated per ga-f7v2ft.183's method — recover, run against lane code, then
+# rule. The base tests cannot compile at HEAD (they name deleted symbols), so the
+# ruling rests on the replacements being RUN, and each is strictly stronger than
+# what it replaces: it drives the production entry point instead of a helper, and
+# asserts the certification the base tests could not.
+test	TestDismissModelSwitchModal	renamed onto the production entry point as TestClearModelSwitchModalKeepsTheCurrentModel, which asserts the same Keep-current-model choice AND that Down/settle/Enter ride one if-shell effect re-proving the pane (B1, b290985c9e)
+test	TestDismissModelSwitchModalNoOpOnWorkingPane	renamed as TestClearModelSwitchModalNoOpOnWorkingPane on byte-identical pane content, now proving no send-keys AND no if-shell reaches a working pane that merely mentions rate limits (B1, b290985c9e)
+test	TestDismissModelSwitchModalIfPresentClearsModalOnRealTmux	renamed as TestClearModelSwitchModalOnRealTmux on the same fake-agent fixture and the same MODEL_KEPT assertion, with a deadline wait replacing the fixed sleep; TestNudgeNeverTypesIntoAModelSwitchModalOnRealTmux was added beside it to pin the #3916/ga-3syh signature end-to-end (B1, b290985c9e)
+
 # --- check 3: restorations the merge got RIGHT --------------------------------
 # Check 3's finding is not automatically a defect. A lane that lost a symbol
 # during branch churn and a merge that hands it back is the guard working in the
@@ -108,8 +126,10 @@ restored	teardownServerForStop	the LANE lost upstream #5175/#5196's managed-stop
 # Nothing is parked here awaiting a decision, and that is the invariant this
 # section exists to state. ga-f7v2ft.182 (four internal/pidutil timeout
 # constants origin/main retired in #5427) was ADOPTED by cherry-pick at
-# c2da2c1624 rather than exempted, so check 1 reports no resurrection; and the
-# thirteen ga-f7v2ft.183 tests above are adjudicated, not absorbed.
+# c2da2c1624 rather than exempted, so check 1 reports no resurrection; the
+# thirteen ga-f7v2ft.183 tests above are adjudicated, not absorbed; and the three
+# B1 modal tests were ruled on by running their replacements, including on real
+# tmux, before a line was written here.
 #
 # readyDemandSnapshotFingerprint and writeReadyDemandFingerprintBead are NOT
 # here either. Check 3 reports them at 5ec88b1535 and must keep reporting them:

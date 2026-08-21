@@ -20,11 +20,23 @@ var tickDebounceRetirementScanSkipDirs = map[string]bool{
 	"testdata":     true,
 }
 
+// tickDebounceRetirementAllowed names the one file that may still spell a
+// retired name, and which name. internal/config/undecoded.go registers
+// daemon.tick_debounce in retiredKeys — the READ-side counterpart of deleting
+// the field, which is what makes a city still carrying the key load with a
+// warning that says the debounce behavior is gone instead of a bare "unknown
+// field". Removing that registration would silently re-classify the key as a
+// typo, so the entry is required, not merely tolerated (asserted below).
+var tickDebounceRetirementAllowed = map[string]string{
+	filepath.Join("internal", "config", "undecoded.go"): "tick_debounce",
+}
+
 // TestTickDebounceRetirementLeavesNoSourceReferences pins WD.0's deletion: the
 // tick debouncer, its config accessor and TOML key, and the dead IdleDrain
 // trace constant must not survive anywhere in production or test Go sources.
 // The retirement tests themselves are the only place the retired names may
-// appear, so they are skipped by filename.
+// appear, so they are skipped by filename; the retired-key registry is the one
+// named exemption (tickDebounceRetirementAllowed).
 func TestTickDebounceRetirementLeavesNoSourceReferences(t *testing.T) {
 	root := repoRoot(t)
 	// "TickDebounce" catches the retired config field, its accessor, and
@@ -56,14 +68,18 @@ func TestTickDebounceRetirementLeavesNoSourceReferences(t *testing.T) {
 			return readErr
 		}
 		content := string(data)
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
 		for _, needle := range retired {
-			if strings.Contains(content, needle) {
-				rel, relErr := filepath.Rel(root, path)
-				if relErr != nil {
-					rel = path
-				}
-				offenders = append(offenders, rel+": "+needle)
+			if !strings.Contains(content, needle) {
+				continue
 			}
+			if tickDebounceRetirementAllowed[rel] == needle {
+				continue
+			}
+			offenders = append(offenders, rel+": "+needle)
 		}
 		return nil
 	})
@@ -72,6 +88,17 @@ func TestTickDebounceRetirementLeavesNoSourceReferences(t *testing.T) {
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("retired tick-debounce/idle-drain references still present:\n%s", strings.Join(offenders, "\n"))
+	}
+
+	for rel, needle := range tickDebounceRetirementAllowed {
+		data, readErr := os.ReadFile(filepath.Join(root, rel))
+		if readErr != nil {
+			t.Fatalf("reading the exempted file %q: %v", rel, readErr)
+		}
+		if !strings.Contains(string(data), needle) {
+			t.Fatalf("%s no longer names %q: the retired-key registration is the read-side half of the retirement, "+
+				"and without it a city carrying the key gets an 'unknown field' warning that hides the behavior change", rel, needle)
+		}
 	}
 }
 

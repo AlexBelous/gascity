@@ -829,8 +829,16 @@ func TestWaitForShellReady_TransientShellBeforeExec(t *testing.T) {
 	// zsh. The leading "exec" on the outer command ensures tmux's own
 	// default-shell process is replaced immediately, so "sh" is the pane's
 	// only pre-transition identity.
+	//
+	// workDir is a fresh non-repo temp directory rather than "" (which
+	// defaults the pane's cwd to this package's directory, inside the git
+	// work tree): an interactive zsh's startup can shell out to git for a
+	// VCS-aware prompt right after it execs in, and pane_current_command
+	// reports that transient child instead of "zsh" for its duration. A
+	// directory with no .git gives it nothing to query, removing the
+	// transient read instead of tolerating it.
 	command := "exec sh -c 'read -t 0.15 dummy; exec zsh'"
-	if err := tm.NewSessionWithCommand(sessionName, "", command); err != nil {
+	if err := tm.NewSessionWithCommand(sessionName, t.TempDir(), command); err != nil {
 		t.Fatalf("NewSessionWithCommand: %v", err)
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()

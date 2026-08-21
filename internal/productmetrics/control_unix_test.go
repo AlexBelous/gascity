@@ -2284,7 +2284,7 @@ func startDisableAndPurge(t *testing.T, service *Service) <-chan purgeCallResult
 	return result
 }
 
-// waitForTestArm blocks until armed is closed, or until GoroutineRaceTimeout, so a
+// waitForTestArm blocks until armed is closed, or until hangBudget, so a
 // storage hook cannot inject before the test arms it under -p=N CPU starvation.
 func waitForTestArm(armed <-chan struct{}) bool {
 	timer := time.NewTimer(hangBudget)

@@ -1923,12 +1923,14 @@ type boundInputTarget struct {
 	sessionID string
 	windowID  string
 	paneID    string
+	attached  bool
+	inMode    bool
 }
 
 // NudgeSessionBound sends a nudge only when tmux can prove, in the same server
 // command queue entry as the input effect, that the named server and target
-// pane are still the observed ones and no client has attached or entered copy
-// mode. The false branch has no input effect and reports runtime.ErrInputFenced.
+// pane are still the observed ones and the pane has not entered copy mode.
+// The false branch has no input effect and reports runtime.ErrInputFenced.
 func (t *Tmux) NudgeSessionBound(session, message string) error {
 	return t.nudgeSessionBound(session, "", message)
 }
@@ -1947,16 +1949,9 @@ func (t *Tmux) nudgeSessionBound(session, expectedInstanceToken, message string)
 	if message == "" {
 		return nil
 	}
-	witness, err := t.captureAttachSocketWitness()
+	witness, target, err := t.boundEffectTarget(session)
 	if err != nil {
-		return fmt.Errorf("%w: witnessing tmux server: %w", runtime.ErrInputFenced, err)
-	}
-	target, err := t.boundInputTarget(session, witness)
-	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return err
-		}
-		return fmt.Errorf("%w: %w", runtime.ErrInputFenced, err)
+		return err
 	}
 
 	tmp, err := os.CreateTemp("", "gc-tmux-bound-input-*")
@@ -1986,9 +1981,9 @@ func (t *Tmux) nudgeSessionBound(session, expectedInstanceToken, message string)
 
 	debounce := t.nudgeSubmitDebounce(target.paneID)
 	commitPoke := t.beginPoke(session)
-	condition := boundInputCondition(target, witness, expectedInstanceToken)
+	condition := boundInputCondition(target, witness, expectedInstanceToken, panePlain)
 	elseCommand := fmt.Sprintf("delete-buffer -b %s ; display-message -p %s", bufferName, boundInputFenceMarker)
-	thenCommand := boundInputThenCommand(condition, target.windowID, target.paneID, bufferName, debounce+50*time.Millisecond, elseCommand)
+	thenCommand := boundInputThenCommand(condition, target, bufferName, debounce+50*time.Millisecond, elseCommand)
 	out, err := t.runForAttachWitness(witness, "if-shell", "-t", target.paneID, "-F", condition, thenCommand, elseCommand)
 	if err != nil {
 		return fmt.Errorf("sending bound tmux input: %w", err)
@@ -1996,7 +1991,7 @@ func (t *Tmux) nudgeSessionBound(session, expectedInstanceToken, message string)
 	switch strings.TrimSpace(out) {
 	case boundInputFenceMarker:
 		loaded = false
-		return fmt.Errorf("%w: tmux input target changed or is attached/copy-mode", runtime.ErrInputFenced)
+		return fmt.Errorf("%w: tmux input target changed under the certified guard", runtime.ErrInputFenced)
 	case boundInputDeliveredMarker:
 		loaded = false // paste-buffer -d consumed the buffer in the successful branch.
 		commitPoke()
@@ -2006,13 +2001,95 @@ func (t *Tmux) nudgeSessionBound(session, expectedInstanceToken, message string)
 	}
 }
 
-func boundInputThenCommand(condition, windowID, paneID, bufferName string, settle time.Duration, fenceCommand string) string {
-	inputCommand := fmt.Sprintf("paste-buffer -p -d -b %s -t %s ; send-keys -t %s Enter ; display-message -p %s", bufferName, paneID, paneID, boundInputDeliveredMarker)
-	recheck := shellquote.Join([]string{"if-shell", "-t", paneID, "-F", condition, inputCommand, fenceCommand})
+func boundInputThenCommand(condition string, target boundInputTarget, bufferName string, settle time.Duration, fenceCommand string) string {
+	inputCommand := fmt.Sprintf("paste-buffer -p -d -b %s -t %s ; send-keys -t %s Enter ; display-message -p %s", bufferName, target.paneID, target.paneID, boundInputDeliveredMarker)
+	recheck := shellquote.Join([]string{"if-shell", "-t", target.paneID, "-F", condition, inputCommand, fenceCommand})
+	if target.attached {
+		// A client is already servicing this pane's event loop, so the SIGWINCH
+		// wake below buys nothing — and resize-window on an attached window
+		// switches it to manual sizing, which would leave a human's window stuck
+		// at the wrong size long after the nudge. Deliver without the wake, still
+		// under the same certified predicate.
+		return recheck
+	}
 	return fmt.Sprintf(
 		"resize-window -t %s -D 1 ; run-shell 'sleep %.3f' ; resize-window -t %s -U 1 ; %s",
-		windowID, settle.Seconds(), windowID, recheck,
+		target.windowID, settle.Seconds(), target.windowID, recheck,
 	)
+}
+
+// runBoundPaneEffect runs thenCommand only if tmux still satisfies condition in
+// the same server command queue entry, and reports whether the effect ran.
+// thenCommand must print boundInputDeliveredMarker on its own success path.
+func (t *Tmux) runBoundPaneEffect(witness namedSocketWitness, target boundInputTarget, condition, thenCommand string) (bool, error) {
+	fenceCommand := "display-message -p " + boundInputFenceMarker
+	out, err := t.runForAttachWitness(witness, "if-shell", "-t", target.paneID, "-F", condition, thenCommand, fenceCommand)
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(out) {
+	case boundInputDeliveredMarker:
+		return true, nil
+	case boundInputFenceMarker:
+		return false, nil
+	default:
+		return false, fmt.Errorf("missing bound effect confirmation")
+	}
+}
+
+// clearParkedCopyMode force-exits copy mode on the session's certified agent
+// pane, under the same predicate (including expectedInstanceToken, when set)
+// that will guard the payload.
+//
+// The ga-c4w WheelUpPane binding parks an interactive pane on wheel-up and the
+// park outlives the human detaching; tmux then routes every controller keystroke
+// into the copy-mode key table instead of the agent. Refusing until someone
+// exits leaves the session permanently deaf with nobody watching, so the nudge
+// path cancels and delivers — but only on the pane it is about to type into, and
+// only through a certified effect. A park on some other pane of the session is
+// left alone: input is pane-targeted, so it cannot swallow the nudge.
+func (t *Tmux) clearParkedCopyMode(session, expectedInstanceToken string) error {
+	witness, target, err := t.boundEffectTarget(session)
+	if err != nil {
+		return err
+	}
+	if !target.inMode {
+		return nil
+	}
+	condition := boundInputCondition(target, witness, expectedInstanceToken, paneParked)
+	thenCommand := fmt.Sprintf("send-keys -t %s -X cancel ; display-message -p %s", target.paneID, boundInputDeliveredMarker)
+	// A fenced cancel is not itself a failure — the pane may have left copy mode
+	// on its own between the two observations — so the re-read below, not the
+	// effect's own verdict, decides whether this pane is safe to type into.
+	if _, err := t.runBoundPaneEffect(witness, target, condition, thenCommand); err != nil {
+		return fmt.Errorf("%w: canceling copy mode on tmux session %q: %w", runtime.ErrInputFenced, session, err)
+	}
+	after, err := t.boundInputTarget(session, witness)
+	if err != nil {
+		return fmt.Errorf("%w: reproving copy mode on tmux session %q: %w", runtime.ErrInputFenced, session, err)
+	}
+	if after.inMode {
+		return fmt.Errorf("%w: tmux session %q stayed in copy mode after cancel", runtime.ErrInputFenced, session)
+	}
+	return nil
+}
+
+// boundEffectTarget resolves the exact server, session, window, and pane that a
+// certified input effect will run against, classifying resolution failures as
+// fences rather than plain errors.
+func (t *Tmux) boundEffectTarget(session string) (namedSocketWitness, boundInputTarget, error) {
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return namedSocketWitness{}, boundInputTarget{}, fmt.Errorf("%w: witnessing tmux server: %w", runtime.ErrInputFenced, err)
+	}
+	target, err := t.boundInputTarget(session, witness)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return witness, boundInputTarget{}, err
+		}
+		return witness, boundInputTarget{}, fmt.Errorf("%w: %w", runtime.ErrInputFenced, err)
+	}
+	return witness, target, nil
 }
 
 func (t *Tmux) boundInputTarget(session string, witness namedSocketWitness) (boundInputTarget, error) {
@@ -2020,24 +2097,52 @@ func (t *Tmux) boundInputTarget(session string, witness namedSocketWitness) (bou
 	if pane, err := t.FindAgentPane(session); err == nil && pane != "" {
 		target = pane
 	}
-	out, err := t.runForAttachWitness(witness, "display-message", "-t", target, "-p", "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}")
+	out, err := t.runForAttachWitness(witness, "display-message", "-t", target, "-p", "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}\t#{session_attached}\t#{pane_in_mode}")
 	if err != nil {
 		return boundInputTarget{}, err
 	}
 	fields := strings.Split(strings.TrimSpace(out), "\t")
-	if len(fields) != 4 || fields[1] != session || !wellFormedTmuxID(fields[0], '$') || !wellFormedTmuxID(fields[2], '@') || !wellFormedTmuxID(fields[3], '%') {
+	if len(fields) != 6 || fields[1] != session || !wellFormedTmuxID(fields[0], '$') || !wellFormedTmuxID(fields[2], '@') || !wellFormedTmuxID(fields[3], '%') {
 		return boundInputTarget{}, fmt.Errorf("invalid exact tmux input target for session %q", session)
 	}
-	return boundInputTarget{sessionID: fields[0], windowID: fields[2], paneID: fields[3]}, nil
+	attached, err := parseNonnegativeTmuxCount(fields[4])
+	if err != nil {
+		return boundInputTarget{}, fmt.Errorf("invalid attachment count for session %q", session)
+	}
+	inMode, err := parseNonnegativeTmuxCount(fields[5])
+	if err != nil {
+		return boundInputTarget{}, fmt.Errorf("invalid copy-mode state for session %q", session)
+	}
+	return boundInputTarget{
+		sessionID: fields[0],
+		windowID:  fields[2],
+		paneID:    fields[3],
+		attached:  attached > 0,
+		inMode:    inMode > 0,
+	}, nil
 }
 
-func boundInputCondition(target boundInputTarget, witness namedSocketWitness, expectedInstanceToken string) string {
+// panePlain and paneParked are the two #{pane_in_mode} states a certified effect
+// can require: input is only ever delivered to a plain pane, and the copy-mode
+// cancel is only ever delivered to a parked one.
+const (
+	panePlain  = 0
+	paneParked = 1
+)
+
+// boundInputCondition builds the predicate tmux re-evaluates in the same server
+// command queue entry as the effect. Attachment is deliberately absent: tmux
+// routes pane-targeted input to the pane we name whether or not a client is
+// watching, so fencing on it would make `gc attach` silently stop the controller
+// from talking to the session under observation. Window-linked ownership stays,
+// because that is the case where the pane can be reached through a session we
+// never certified.
+func boundInputCondition(target boundInputTarget, witness namedSocketWitness, expectedInstanceToken string, paneInMode int) string {
 	checks := []string{
 		fmt.Sprintf("#{==:#{session_id},%s}", target.sessionID),
 		fmt.Sprintf("#{==:#{window_id},%s}", target.windowID),
 		fmt.Sprintf("#{==:#{pane_id},%s}", target.paneID),
-		"#{==:#{session_attached},0}",
-		"#{==:#{pane_in_mode},0}",
+		fmt.Sprintf("#{==:#{pane_in_mode},%d}", paneInMode),
 		"#{==:#{window_linked_sessions_list},#{session_name}}",
 	}
 	if witness.serverPID > 0 {
@@ -2594,49 +2699,55 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 // selection move before the confirm keypress, so Enter does not race the Down.
 const modelSwitchDismissConfirmDelay = 150 * time.Millisecond
 
-// dismissModelSwitchModal dismisses the Codex/GPT mid-session "approaching rate
-// limits — switch to a cheaper model?" modal by selecting "Keep current model"
-// (Down off the default "Switch" option, then Enter). It is a no-op unless the
-// high-confidence runtime.ContainsModelSwitchModal matcher fires, so it never
-// sends stray keystrokes into ordinary working panes. Side effects are injected
-// so the decision is unit-testable without a live tmux server. Returns whether
-// the modal was present (i.e. a dismiss was attempted).
-func dismissModelSwitchModal(content string, sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
-	if !runtime.ContainsModelSwitchModal(content) {
-		return false, nil
-	}
-	if err := sendKeys("Down"); err != nil {
-		return true, err
-	}
-	sleep(modelSwitchDismissConfirmDelay)
-	return true, sendKeys("Enter")
+// boundModalDismissThenCommand selects "Keep current model" (Down off the
+// default "Switch" option, then Enter) on one certified pane. The settle
+// between the two keys is a yield inside the server's command queue, so the
+// confirming Enter re-proves the full predicate first — the same shape the
+// payload uses around its wake.
+func boundModalDismissThenCommand(condition, paneID string, settle time.Duration, fenceCommand string) string {
+	confirm := fmt.Sprintf("send-keys -t %s Enter ; display-message -p %s", paneID, boundInputDeliveredMarker)
+	recheck := shellquote.Join([]string{"if-shell", "-t", paneID, "-F", condition, confirm, fenceCommand})
+	return fmt.Sprintf("send-keys -t %s Down ; run-shell 'sleep %.3f' ; %s", paneID, settle.Seconds(), recheck)
 }
 
-// DismissModelSwitchModalIfPresent clears a mid-session Codex/GPT model-switch
-// modal on the session's agent pane (keeping the current model — no downgrade,
-// no spend change) so a session that would otherwise hang on it can proceed.
-// No-op when the modal is absent. Best-effort: capture/send failures are
-// swallowed (the caller retries on the next wake).
-func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
-	target := session
-	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		target = agentPane
-	}
-	content, err := t.CapturePane(target, promptObservationLines)
+// clearModelSwitchModal clears a mid-session Codex/GPT "approaching rate limits
+// — switch to a cheaper model?" modal on the session's certified agent pane,
+// keeping the current model (no downgrade, no spend change). tmux cannot see a
+// TUI modal, so no pane predicate can fence one: left standing, it eats the next
+// nudge's text and turns its Enter into a confirmed model switch (#3916,
+// ga-3syh).
+//
+// Detection reads only the pane's visible screen, never its scrollback: a modal
+// is by definition on screen, while the same words sitting in history (an agent
+// discussing rate limits, a dismissed modal that scrolled) would otherwise make
+// every later nudge fire stray keystrokes. Success is the dismissal being
+// delivered under the certified guard — it is deliberately not re-read from the
+// pane afterwards, because a text matcher cannot distinguish "still up" from
+// "already scrolled into history", and guessing wrong there would fence a
+// healthy session forever.
+func (t *Tmux) clearModelSwitchModal(session, expectedInstanceToken string) error {
+	witness, target, err := t.boundEffectTarget(session)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = dismissModelSwitchModal(content,
-		func(keys ...string) error {
-			for _, k := range keys {
-				if _, err := t.run("send-keys", "-t", target, k); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-		time.Sleep,
-	)
+	content, err := t.capturePaneScreen(target.paneID)
+	if err != nil {
+		return fmt.Errorf("%w: reading tmux session %q for a model-switch modal: %w", runtime.ErrInputFenced, session, err)
+	}
+	if !runtime.ContainsModelSwitchModal(content) {
+		return nil
+	}
+	condition := boundInputCondition(target, witness, expectedInstanceToken, panePlain)
+	fenceCommand := "display-message -p " + boundInputFenceMarker
+	thenCommand := boundModalDismissThenCommand(condition, target.paneID, modelSwitchDismissConfirmDelay, fenceCommand)
+	dismissed, err := t.runBoundPaneEffect(witness, target, condition, thenCommand)
+	if err != nil {
+		return fmt.Errorf("%w: dismissing the model-switch modal on tmux session %q: %w", runtime.ErrInputFenced, session, err)
+	}
+	if !dismissed {
+		return fmt.Errorf("%w: could not certify tmux session %q to dismiss its model-switch modal", runtime.ErrInputFenced, session)
+	}
+	return nil
 }
 
 // GetPaneCommand returns the current command running in a pane.
@@ -3194,6 +3305,13 @@ func (t *Tmux) FindSessionByWorkDir(targetDir string, processNames []string) ([]
 func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	content, err := t.run("capture-pane", "-p", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 	return content, err
+}
+
+// capturePaneScreen captures only what is currently on the pane's screen, with
+// no scrollback. Use it for "is this on screen right now" questions, where
+// history would answer for a state the pane has already left.
+func (t *Tmux) capturePaneScreen(target string) (string, error) {
+	return t.run("capture-pane", "-p", "-t", target)
 }
 
 // CapturePaneAll captures all scrollback history.

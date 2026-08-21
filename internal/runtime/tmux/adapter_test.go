@@ -331,29 +331,46 @@ func TestProviderNudgeFencesCopyModeAndTokenAcrossRealNamedSocket(t *testing.T) 
 	if _, err := p.tm.run("select-window", "-t", "="+name+":^"); err != nil {
 		t.Fatalf("select input window: %v", err)
 	}
+	deliveredLines := func(what string) []string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		defer cancel()
+		if _, err := p.tm.runCtx(ctx, "wait-for", signal); err != nil {
+			t.Fatalf("wait for %s delivery: %v", what, err)
+		}
+		data, err := os.ReadFile(marker)
+		if err != nil {
+			t.Fatalf("read nudge marker after %s: %v", what, err)
+		}
+		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+	paneInMode := func(pane string) string {
+		t.Helper()
+		mode, err := p.tm.run("display-message", "-t", pane, "-p", "#{pane_in_mode}")
+		if err != nil {
+			t.Fatalf("read copy mode for pane %s: %v", pane, err)
+		}
+		return strings.TrimSpace(mode)
+	}
+
+	// A park on a pane the nudge is not typing into cannot swallow it: tmux
+	// routes paste-buffer and send-keys to the pane we name. Refusing here would
+	// let one scrolled-back side pane silence the agent for as long as the park
+	// lasts — and a wheel-up park outlives the human detaching.
 	if _, err := p.tm.run("copy-mode", "-t", secondPane); err != nil {
 		t.Fatalf("enter copy mode on second-window pane: %v", err)
 	}
-
-	if err := p.Nudge(name, runtime.TextContent(message)); !errors.Is(err, runtime.ErrInputFenced) {
-		t.Fatalf("Nudge during copy mode = %v, want ErrInputFenced", err)
+	unrelatedMessage := message + "-unrelated-park"
+	if err := p.Nudge(name, runtime.TextContent(unrelatedMessage)); err != nil {
+		t.Fatalf("Nudge with an unrelated pane parked in copy mode = %v, want delivery", err)
 	}
-	if err := p.NudgeNow(name, runtime.TextContent(message)); !errors.Is(err, runtime.ErrInputFenced) {
-		t.Fatalf("NudgeNow during copy mode = %v, want ErrInputFenced", err)
+	if got := deliveredLines("unrelated park"); len(got) != 1 || got[0] != unrelatedMessage {
+		t.Fatalf("nudge marker = %v, want [%q]", got, unrelatedMessage)
 	}
-	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("read nudge marker while copy mode is active: %v", err)
-	} else if len(data) != 0 {
-		t.Fatalf("nudge marker = %q while copy mode is active, want no delivery", data)
+	// The other pane keeps its scrollback: only the pane we type into is cleared.
+	if got := paneInMode(secondPane); got != "1" {
+		t.Fatalf("unrelated pane copy mode = %q after delivery, want it undisturbed", got)
 	}
-	mode, err := p.tm.run("display-message", "-t", secondPane, "-p", "#{pane_in_mode}")
-	if err != nil {
-		t.Fatalf("read copy mode after fenced nudge: %v", err)
-	}
-	if strings.TrimSpace(mode) != "1" {
-		t.Fatalf("copy mode after fenced nudge = %q, want 1", mode)
-	}
-
 	if _, err := p.tm.run("send-keys", "-t", secondPane, "-X", "cancel"); err != nil {
 		t.Fatalf("cancel copy mode on exact second pane: %v", err)
 	}
@@ -364,6 +381,24 @@ func TestProviderNudgeFencesCopyModeAndTokenAcrossRealNamedSocket(t *testing.T) 
 	if err != nil || !wellFormedTmuxID(inputPane, '%') {
 		t.Fatalf("resolve exact input pane: pane=%q err=%v", inputPane, err)
 	}
+
+	// ga-c4w: the target pane's own park swallows every keystroke, and it
+	// survives the human detaching, so the nudge path force-exits copy mode on
+	// the pane it is about to type into and delivers.
+	if _, err := p.tm.run("copy-mode", "-t", inputPane); err != nil {
+		t.Fatalf("park the input pane in copy mode: %v", err)
+	}
+	parkedMessage := message + "-parked-target"
+	if err := p.NudgeNow(name, runtime.TextContent(parkedMessage)); err != nil {
+		t.Fatalf("NudgeNow on a copy-mode-parked target = %v, want cancel-and-deliver", err)
+	}
+	if got := deliveredLines("parked target"); len(got) != 2 || got[1] != parkedMessage {
+		t.Fatalf("nudge marker = %v, want %q appended", got, parkedMessage)
+	}
+	if got := paneInMode(inputPane); got != "0" {
+		t.Fatalf("input pane copy mode = %q after delivery, want it cleared", got)
+	}
+
 	if _, err := p.tm.run("set-hook", "-t", name, "window-resized", "copy-mode -t "+inputPane); err != nil {
 		t.Fatalf("arm resize-to-copy-mode race: %v", err)
 	}
@@ -375,9 +410,9 @@ func TestProviderNudgeFencesCopyModeAndTokenAcrossRealNamedSocket(t *testing.T) 
 	if !errors.Is(raceErr, runtime.ErrInputFenced) {
 		t.Fatalf("NudgeNow when copy mode enters during guarded delay = %v, want ErrInputFenced", raceErr)
 	}
-	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if data, err := os.ReadFile(marker); err != nil {
 		t.Fatalf("read nudge marker after resize race: %v", err)
-	} else if len(data) != 0 {
+	} else if strings.Contains(string(data), raceMessage) {
 		t.Fatalf("nudge marker = %q after resize race, want zero input", data)
 	}
 	if _, err := p.tm.run("send-keys", "-t", inputPane, "-X", "cancel"); err != nil {
@@ -386,40 +421,43 @@ func TestProviderNudgeFencesCopyModeAndTokenAcrossRealNamedSocket(t *testing.T) 
 	if _, err := p.tm.run("set-hook", "-t", name, "window-resized", "set-environment -t ="+name+" GC_INSTANCE_TOKEN replacement-instance-token"); err != nil {
 		t.Fatalf("arm resize-to-token-change race: %v", err)
 	}
-	tokenRaceErr := p.NudgeFenced(name, instanceToken, runtime.TextContent(message+"-token-race"))
+	tokenRaceMessage := message + "-token-race"
+	tokenRaceErr := p.NudgeFenced(name, instanceToken, runtime.TextContent(tokenRaceMessage))
 	if _, err := p.tm.run("set-hook", "-u", "-t", name, "window-resized"); err != nil {
 		t.Fatalf("disarm resize-to-token-change race: %v", err)
 	}
 	if !errors.Is(tokenRaceErr, runtime.ErrInputFenced) {
 		t.Fatalf("NudgeFenced when token changes during guarded delay = %v, want ErrInputFenced", tokenRaceErr)
 	}
-	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if data, err := os.ReadFile(marker); err != nil {
 		t.Fatalf("read nudge marker after token race: %v", err)
-	} else if len(data) != 0 {
+	} else if strings.Contains(string(data), tokenRaceMessage) {
 		t.Fatalf("nudge marker = %q after token race, want zero input", data)
 	}
 	if err := p.SetMeta(name, "GC_INSTANCE_TOKEN", instanceToken); err != nil {
 		t.Fatalf("restore exact instance token: %v", err)
 	}
-	// A second provider's hidden PTY is intentionally opaque to p, exactly as a
-	// human client is. The provider's final if-shell fence, not the earlier
-	// census, must prevent this nudge from reaching stdin.
+
+	// An attached client is visibility, not an input hazard: tmux still routes
+	// pane-targeted input to the pane we named. Fencing on attachment would mean
+	// watching a session stops the controller from talking to it, with no
+	// recovery until the human detaches.
 	other := NewProviderWithConfig(cfg)
 	if err := other.tm.ensureHiddenAttachedClient(name); err != nil {
 		t.Fatalf("attach independent PTY: %v", err)
 	}
-	if err := p.NudgeNow(name, runtime.TextContent(message)); !errors.Is(err, runtime.ErrInputFenced) {
-		t.Fatalf("NudgeNow with attached PTY = %v, want ErrInputFenced", err)
+	attachedMessage := message + "-attached"
+	if err := p.NudgeNow(name, runtime.TextContent(attachedMessage)); err != nil {
+		t.Fatalf("NudgeNow with an attached PTY = %v, want delivery", err)
 	}
-	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("read nudge marker while PTY is attached: %v", err)
-	} else if len(data) != 0 {
-		t.Fatalf("nudge marker = %q while PTY is attached, want no delivery", data)
+	if got := deliveredLines("attached client"); len(got) != 3 || got[2] != attachedMessage {
+		t.Fatalf("nudge marker = %v, want %q appended", got, attachedMessage)
 	}
 	other.tm.CloseHiddenAttachClient(name)
 
-	// The same window can be visible through another attached session while
-	// this source session still reports detached. Refuse that linked ownership.
+	// The same window can be visible through another attached session while this
+	// source session still reports detached. That is ownership we never
+	// certified, so it stays fenced.
 	linkedName := name + "-linked"
 	if _, err := p.tm.run("new-session", "-d", "-s", linkedName, "sleep 300"); err != nil {
 		t.Fatalf("create linked witness session: %v", err)
@@ -434,12 +472,13 @@ func TestProviderNudgeFencesCopyModeAndTokenAcrossRealNamedSocket(t *testing.T) 
 	if err := linkedClient.tm.ensureHiddenAttachedClient(linkedName); err != nil {
 		t.Fatalf("attach client through linked session: %v", err)
 	}
-	if err := p.NudgeNow(name, runtime.TextContent(message)); !errors.Is(err, runtime.ErrInputFenced) {
+	linkedMessage := message + "-linked"
+	if err := p.NudgeNow(name, runtime.TextContent(linkedMessage)); !errors.Is(err, runtime.ErrInputFenced) {
 		t.Fatalf("NudgeNow through an attached linked session = %v, want ErrInputFenced", err)
 	}
-	if data, err := os.ReadFile(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if data, err := os.ReadFile(marker); err != nil {
 		t.Fatalf("read nudge marker through linked session: %v", err)
-	} else if len(data) != 0 {
+	} else if strings.Contains(string(data), linkedMessage) {
 		t.Fatalf("nudge marker = %q through linked session, want no delivery", data)
 	}
 	linkedClient.tm.CloseHiddenAttachClient(linkedName)
@@ -449,17 +488,8 @@ func TestProviderNudgeFencesCopyModeAndTokenAcrossRealNamedSocket(t *testing.T) 
 	if err := p.NudgeFenced(name, instanceToken, runtime.TextContent(message)); err != nil {
 		t.Fatalf("NudgeFenced with matching token after fences clear: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
-	defer cancel()
-	if _, err := p.tm.runCtx(ctx, "wait-for", signal); err != nil {
-		t.Fatalf("wait for flushed nudge marker: %v", err)
-	}
-	data, err := os.ReadFile(marker)
-	if err != nil {
-		t.Fatalf("read flushed nudge marker: %v", err)
-	}
-	if got := strings.Split(strings.TrimSpace(string(data)), "\n"); len(got) != 1 || got[0] != message {
-		t.Fatalf("nudge marker = %q, want one %q", data, message)
+	if got := deliveredLines("token-matched nudge"); len(got) != 4 || got[3] != message {
+		t.Fatalf("nudge marker = %v, want %q appended", got, message)
 	}
 
 	defaultAfter, defaultAfterErr := os.Lstat(defaultPath)

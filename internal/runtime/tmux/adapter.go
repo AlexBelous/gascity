@@ -543,7 +543,11 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	if err := p.nudgeInputFence(name); err != nil {
+	// Fence first so a blocked pane is cleared before the idle wait, not after:
+	// a standing model-switch modal is exactly what keeps a pane from ever going
+	// idle, and dismissing it up front lets the payload land on a live prompt
+	// instead of on the timeout fallback.
+	if err := p.nudgeInputFence(name, ""); err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return nil
 		}
@@ -557,14 +561,9 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
-		if err := p.tm.WaitForIdle(context.Background(), name, idleTimeout); err != nil {
-			if fenceErr := p.nudgeInputFence(name); fenceErr != nil {
-				if errors.Is(fenceErr, ErrSessionNotFound) || errors.Is(fenceErr, ErrNoServer) {
-					return nil
-				}
-				return fenceErr
-			}
-		}
+		// NudgeNow re-fences immediately after this wait with no yield in
+		// between, so it is the only post-wait recheck needed.
+		_ = p.tm.WaitForIdle(context.Background(), name, idleTimeout)
 	}
 	return p.NudgeNow(name, content)
 }
@@ -587,7 +586,7 @@ func (p *Provider) nudgeNow(name, expectedInstanceToken string, content []runtim
 	// Keep the whole-session census as the broad guard: a user can be in copy
 	// mode on a non-target pane. NudgeSessionBound repeats the target's state in
 	// the server-queued effect command so this preflight cannot open a race.
-	if err := p.nudgeInputFence(name); err != nil {
+	if err := p.nudgeInputFence(name, expectedInstanceToken); err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			if expectedInstanceToken == "" {
 				return nil
@@ -720,10 +719,19 @@ func (p *Provider) unattendedSessionCensus(name string) (unattendedSessionCensus
 	return p.exactSessionPaneCensus(name, "stopping unattended tmux session")
 }
 
-// nudgeInputFence proves that every pane in the exact named session is outside
-// copy mode before any input-affecting nudge path runs. An incomplete census is
-// unsafe for input too, so it is intentionally reported as a retryable fence.
-func (p *Provider) nudgeInputFence(name string) error {
+// nudgeInputFence makes the exact named session safe to type into, then proves
+// it, before any input-affecting nudge path runs. Two blockers are cleared in
+// place rather than refused, because both park a session indefinitely with
+// nobody watching: a copy-mode park swallows every keystroke (ga-c4w), and a
+// Codex/GPT model-switch modal turns the next Enter into a model downgrade
+// (#3916, ga-3syh). Both remediations are certified, server-queued effects on
+// the pane the nudge is about to use — never raw send-keys. Anything that
+// survives remediation, and any census we cannot complete, is reported as a
+// named runtime.ErrInputFenced so the caller leaves the input pending, retries
+// when the fence clears, and can say why from the log.
+// expectedInstanceToken, when set, holds every remediation to the same session
+// incarnation the payload will be delivered to.
+func (p *Provider) nudgeInputFence(name, expectedInstanceToken string) error {
 	census, err := p.exactSessionPaneCensus(name, "nudging tmux session")
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
@@ -732,9 +740,13 @@ func (p *Provider) nudgeInputFence(name string) error {
 		return fmt.Errorf("%w: %w", runtime.ErrInputFenced, err)
 	}
 	if census.copyModePanes != 0 {
-		return fmt.Errorf("%w: tmux session %q has %d copy-mode panes", runtime.ErrInputFenced, name, census.copyModePanes)
+		// The census is the cheap whole-session trigger; clearParkedCopyMode
+		// decides whether the pane we are about to type into is the parked one.
+		if err := p.tm.clearParkedCopyMode(name, expectedInstanceToken); err != nil {
+			return err
+		}
 	}
-	return nil
+	return p.tm.clearModelSwitchModal(name, expectedInstanceToken)
 }
 
 func (p *Provider) exactSessionPaneCensus(name, operation string) (unattendedSessionCensus, error) {

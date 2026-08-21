@@ -775,6 +775,16 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 
 // autocloseStoreRefLocked returns the storeRef string for the store that owns
 // beadID. Called under cs.mu read lock.
+//
+// A relocated-class id ("gcg-*", "gcm-*", ...) deliberately falls through to "",
+// and that is the right answer rather than a missing case. A storeRef is a
+// work-scope name — "city:<name>" or "rig:<name>" — used by
+// autocloseRootsForSourceBead to disambiguate a source-bead id across the work
+// scopes that could each hold one; a binding is not a work scope and has no such
+// name. "" is the documented ID-only matching mode, and a reserved class prefix
+// is minted by exactly one engine in the city, so an ID-only match cannot pick
+// up a bead from the wrong store. Naming a work scope here would be strictly
+// worse: it would scope the root lookup to a store the bead never lived in.
 func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 	if cs.cfg == nil {
 		return ""
@@ -871,6 +881,32 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
 	for _, rig := range cs.cfg.Rigs {
 		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+	}
+	// The relocated classes are candidates too, under their reserved prefixes.
+	// Without this arm a "gcg-*" close matched nothing, fell through to the
+	// all-work-stores broadcast, and handed autoclose stores[0] — an arbitrary
+	// work store that does not hold the bead. Every autoclose arm reads the
+	// just-closed bead from that store first, so all three returned on the
+	// not-found and no molecule, wisp or convoy in the binding was ever reaped.
+	//
+	// Reserved prefixes cannot collide with an HQ or rig prefix (config
+	// validation rejects a rig that claims one) and only a relocated class
+	// engine mints under them, so gating on `relocated` is what keeps a
+	// single-store city byte-identical: it relocates nothing, no id can carry a
+	// reserved prefix, and this loop adds no candidates.
+	//
+	// cs.storageRoutes is set once at construction and never reassigned, so
+	// reading it here does not depend on cs.mu — which is what lets this arm sit
+	// beside the raw-field reads instead of calling the class accessors that
+	// would re-take the lock this runs under.
+	for _, class := range infraMigrationClasses {
+		prefix, ok := config.ReservedClassPrefix(string(class))
+		if !ok {
+			continue
+		}
+		if store, relocated := cs.storageRoutes.storeFor(coordclassFor(string(class))); relocated {
+			match(prefix, store)
+		}
 	}
 	return matchedStore, matchedLen >= 0
 }

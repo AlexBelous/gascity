@@ -767,7 +767,7 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 	}
 
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -960,7 +960,7 @@ func TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity(t *testing.T
 	waitForSupervisorControllerStopHook = func(string, time.Duration) error { return nil }
 
 	var stdout, stderr lockedBuffer
-	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, time.Second, false, true)
+	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 0, false, true)
 	if code != 0 {
 		t.Fatalf("cmdStopJSON() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -1027,7 +1027,7 @@ func TestCmdStopJSONReportsUnregisteredTrueWhenSupervisorNotRunning(t *testing.T
 	}
 
 	var stdout, stderr lockedBuffer
-	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, time.Second, false, true)
+	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 0, false, true)
 	if code != 0 {
 		t.Fatalf("cmdStopJSON() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}

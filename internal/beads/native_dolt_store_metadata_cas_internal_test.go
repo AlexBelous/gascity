@@ -91,14 +91,6 @@ func assertMixedMetadataCASResult(t *testing.T, raw json.RawMessage, wantLargeNu
 	}
 }
 
-// TestNativeDoltStoreDeclaresConditionalWriterAndProbesPinnedStorageContract
-// pins the capability the pinned Storage contract actually supports.
-//
-// An earlier stance declared only the narrow MetadataCASWriter on the argument
-// that no sound revision token existed. That premise no longer holds at the
-// pinned beads: Storage requires UpdateIssueChecked/CloseIssueChecked fenced on
-// RowVersion (the row_lock column) plus RunInTransaction, so the revision-CAS
-// trio has a real backend fence and declaring ConditionalWriter is sound.
 func TestNativeDoltStoreDeclaresConditionalWriterAndProbesPinnedStorageContract(t *testing.T) {
 	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
 

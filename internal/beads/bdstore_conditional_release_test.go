@@ -302,13 +302,9 @@ func TestReleaseIfCurrentSurfacesInfraFailuresAsErrors(t *testing.T) {
 
 // TestReleaseIfCurrentFallsBackToSQLOnAnOldBd is the bd 1.0.4 compatibility
 // proof: the minimum supported bd rejects the flags, and the store must reach
-// the raw-SQL statement.
-//
-// The statement carries a minted revision. `bd sql` does not run bd's mutation
-// path, so nothing else would rewrite row_lock and the release would be
-// invisible to every revision-fenced reader; the verb path above needs no mint
-// because bd bumps it there. The assertion normalizes the minted value, which
-// is random per call.
+// the raw-SQL statement. The statement mints a fresh revision — a release that
+// left the pre-release token current would keep a stale fence valid — so the
+// token is the one part of it that cannot be pinned.
 func TestReleaseIfCurrentFallsBackToSQLOnAnOldBd(t *testing.T) {
 	runner := &releaseVerbRunner{}
 	runner.reply = func(args []string) ([]byte, error) {
@@ -332,11 +328,11 @@ func TestReleaseIfCurrentFallsBackToSQLOnAnOldBd(t *testing.T) {
 	}
 	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = <revision>" +
 		" WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-''1'"
-	want := []string{"bd", "sql", "--json", wantQuery}
 	got := append([]string(nil), calls[1]...)
 	got[len(got)-1] = normalizeReleaseRevisionQuery(t, got[len(got)-1])
+	want := []string{"bd", "sql", "--json", wantQuery}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("fallback argv = %q\nwant          %q", got, want)
+		t.Fatalf("fallback argv = %q\nwant          %q", calls[1], want)
 	}
 }
 

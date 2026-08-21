@@ -378,6 +378,21 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 	return lastOut, hookStore{}, nil
 }
 
+// hookTieBreakClock returns the time bestStoreWithWork uses to rotate an
+// exact-rank tie across stores (see its doc comment). A package-level var so
+// tests can pin it; production always uses the real clock.
+var hookTieBreakClock = time.Now
+
+// hookTieBreakIndex picks which of n exact-rank-tied stores wins, rotating
+// with t so the same tie does not resolve to the same store on every call. A
+// fresh process (gc hook's normal invocation shape) has no in-memory state to
+// round-robin with, so the rotation source has to be something that varies
+// between invocations on its own — wall-clock time — rather than a counter.
+// n must be > 0.
+func hookTieBreakIndex(n int, t time.Time) int {
+	return int(uint64(t.UnixNano()) % uint64(n))
+}
+
 // hookFederationPinnedToPrimary reports whether this store set is the shape
 // scopeFederatedHookStores USED to produce: the primary runs the city-wide
 // federated command and every extra carries its own single-store override. That

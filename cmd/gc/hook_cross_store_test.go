@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -118,35 +119,129 @@ func TestBestStoreWithWorkPrefersHigherPriorityInALaterStore(t *testing.T) {
 }
 
 // TestBestStoreWithWorkDoesNotInvertTheBug guards the other direction: a
-// higher-priority candidate in the agent's OWN store must still win, and so must
-// an equal-priority one (ties keep slice order). A fix that simply preferred the
-// federated store would pass the regression test above and be just as wrong.
+// higher-priority candidate in the agent's OWN store must still win. A fix
+// that simply preferred the federated store would pass the regression test
+// above and be just as wrong.
+//
+// (An "equal priority keeps slice order" case used to live here too,
+// asserting that a tie always resolved to the own store. That assertion WAS
+// the permanent-starvation bug ga-kbbg9a exists to fix — see
+// TestBestStoreWithWorkRotatesExactTies and
+// TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime below for its
+// replacement.)
 func TestBestStoreWithWorkDoesNotInvertTheBug(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"ci-1","priority":1}]`, nil
+		}
+		return `[{"id":"va-1","priority":3}]`, nil
+	}
+	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotStore.dir != "city" {
+		t.Fatalf("store.dir = %q, want city (P1 in own store beats rig P3)", gotStore.dir)
+	}
+}
+
+// withHookTieBreakClock pins bestStoreWithWork's tie-break clock for the
+// duration of the test, restoring the real clock on cleanup.
+func withHookTieBreakClock(t *testing.T, now time.Time) {
+	t.Helper()
+	orig := hookTieBreakClock
+	hookTieBreakClock = func() time.Time { return now }
+	t.Cleanup(func() { hookTieBreakClock = orig })
+}
+
+// TestBestStoreWithWorkRotatesExactTies is the fix ga-kbbg9a exists for: an
+// exact rank tie resolved to the same store on every call because the
+// selection loop only replaced its incumbent on a STRICT improvement — ties
+// left the first-seen store (stores[0], the agent's own store) as the
+// incumbent forever, starving every other tied store regardless of how many
+// hook calls ran. Pinning the tie-break clock to two different instants
+// proves the winner now depends on the clock rather than always being the
+// first store in the slice.
+func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"ci-1","priority":1}]`, nil
+		}
+		return `[{"id":"va-1","priority":1}]`, nil
+	}
+
+	withHookTieBreakClock(t, time.Unix(0, 0))
+	_, gotCity, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotCity.dir != "city" {
+		t.Fatalf("store.dir = %q, want city at tie-break clock offset 0", gotCity.dir)
+	}
+
+	withHookTieBreakClock(t, time.Unix(0, 1))
+	_, gotRiga, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotRiga.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga at tie-break clock offset 1 — an exact tie must not always resolve to the same store", gotRiga.dir)
+	}
+}
+
+// TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime is the direct
+// regression test for the reported symptom: gc hook run repeatedly against an
+// UNCHANGED four-way exact tie (mirroring the bead's live measurement — city,
+// gascity, cairn, and beads all at tier=routed/P1) must eventually surface
+// every tied store, not just the first one in the slice, forever.
+func TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "gascity"}, {dir: "cairn"}, {dir: "beads"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		return `[{"id":"tied-` + dir + `","priority":1}]`, nil
+	}
+
+	orig := hookTieBreakClock
+	defer func() { hookTieBreakClock = orig }()
+
+	seen := map[string]bool{}
+	for i := 0; i < len(stores); i++ {
+		offset := int64(i)
+		hookTieBreakClock = func() time.Time { return time.Unix(0, offset) }
+		_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+		if err != nil {
+			t.Fatalf("call %d: err: %v", i, err)
+		}
+		seen[gotStore.dir] = true
+	}
+
+	if len(seen) <= 1 {
+		t.Fatalf("repeated calls against an unchanged tie only ever selected %v — starvation is still permanent", seen)
+	}
+}
+
+// TestHookTieBreakIndex pins the rotation formula directly: it must stay
+// within [0, n) and must not collapse to a constant across varying clock
+// values, which is exactly what would silently reintroduce the starvation
+// bug.
+func TestHookTieBreakIndex(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		rigRow   string
-		wantDir  string
-		wantNote string
+		n    int
+		nano int64
+		want int
 	}{
-		{"own store higher priority", `[{"id":"va-1","priority":3}]`, "city", "P1 in own store beats rig P3"},
-		{"equal priority keeps slice order", `[{"id":"va-1","priority":1}]`, "city", "tie must not move the selection"},
+		{2, 0, 0},
+		{2, 1, 1},
+		{2, 2, 0},
+		{4, 0, 0},
+		{4, 3, 3},
+		{4, 4, 0},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-			run := func(_, dir string, _ []string) (string, error) {
-				if dir == "city" {
-					return `[{"id":"ci-1","priority":1}]`, nil
-				}
-				return tc.rigRow, nil
-			}
-			_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
-			if err != nil {
-				t.Fatalf("err: %v", err)
-			}
-			if gotStore.dir != tc.wantDir {
-				t.Fatalf("store.dir = %q, want %q (%s)", gotStore.dir, tc.wantDir, tc.wantNote)
-			}
-		})
+		got := hookTieBreakIndex(tc.n, time.Unix(0, tc.nano))
+		if got != tc.want {
+			t.Fatalf("hookTieBreakIndex(%d, unix-nano %d) = %d, want %d", tc.n, tc.nano, got, tc.want)
+		}
 	}
 }
 

@@ -274,3 +274,84 @@ func TestCmdSessionKill_ExactHandoffFailureIsNonFatal(t *testing.T) {
 		t.Fatalf("cmdSessionKill = %d, want 0 (handoff failure is best-effort); stderr=%s", code, stderr.String())
 	}
 }
+
+// TestCmdSessionKill_PokesControllerAfterSleep pins #3812: a successful
+// `gc session kill` on a shape with no exact-key handoff must poke the
+// controller so the reconciler observes the killed state promptly instead of
+// waiting a full patrol interval. The poke fires exactly once, with the
+// resolved cityPath, and only AFTER the bead has been synced asleep.
+//
+// Restored from origin/main under ga-f7v2ft.183. 84ba8cfa47 renamed this test
+// in place onto the exact-handoff seam it added, which left the generic-poke
+// branch (cmd_session.go's `else if sessionKillPokeController(...)`) live but
+// uncovered for both the ordering and the argument.
+func TestCmdSessionKill_PokesControllerAfterSleep(t *testing.T) {
+	store, bead, cityDir := newKillPokeSession(t, "on_demand")
+
+	exactCalls := 0
+	oldExact := sessionKillExactStartController
+	sessionKillExactStartController = func(string, string) error {
+		exactCalls++
+		return nil
+	}
+	t.Cleanup(func() { sessionKillExactStartController = oldExact })
+
+	calls := 0
+	var gotCityPath, stateAtPoke string
+	old := sessionKillPokeController
+	sessionKillPokeController = func(cityPath string) error {
+		calls++
+		gotCityPath = cityPath
+		if b, gErr := store.Get(bead.ID); gErr == nil {
+			stateAtPoke = b.Metadata["state"]
+		}
+		return nil
+	}
+	t.Cleanup(func() { sessionKillPokeController = old })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	if exactCalls != 0 {
+		t.Fatalf("exact start handoff called %d times, want 0 for the generic-poke shape", exactCalls)
+	}
+	if calls != 1 {
+		t.Fatalf("poke called %d times, want exactly 1", calls)
+	}
+	if gotCityPath != cityDir {
+		t.Errorf("poke cityPath = %q, want %q", gotCityPath, cityDir)
+	}
+	if stateAtPoke != string(sessionpkg.StateAsleep) {
+		t.Errorf("state at poke time = %q, want %q (the poke must run after the SleepPatch write)", stateAtPoke, sessionpkg.StateAsleep)
+	}
+}
+
+// TestCmdSessionKill_PokeFailureIsNonFatal pins the best-effort contract: a
+// generic poke failure (no controller running, say) must not fail the kill.
+// The session state is already synced asleep, so the reconciler observes it on
+// its normal convergence pass whether or not the poke landed.
+//
+// Restored from origin/main under ga-f7v2ft.183. The lane's
+// TestCmdSessionKill_ExactHandoffFailureIsNonFatal stubs the OTHER seam, so
+// nothing drove sessionKillPokeController to an error.
+func TestCmdSessionKill_PokeFailureIsNonFatal(t *testing.T) {
+	_, _, _ = newKillPokeSession(t, "on_demand")
+
+	oldExact := sessionKillExactStartController
+	sessionKillExactStartController = func(string, string) error {
+		t.Error("exact start handoff must not run for the generic-poke shape")
+		return nil
+	}
+	t.Cleanup(func() { sessionKillExactStartController = oldExact })
+
+	old := sessionKillPokeController
+	sessionKillPokeController = func(string) error { return errors.New("dial failed") }
+	t.Cleanup(func() { sessionKillPokeController = old })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0 (poke failure is best-effort); stderr=%s", code, stderr.String())
+	}
+}

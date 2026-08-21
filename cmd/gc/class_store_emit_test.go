@@ -49,15 +49,19 @@ import (
 // They stand up a city that has really converged onto a binding and enter
 // through the real constructors — resolveCLIStorageRoutes for the one-shot side
 // (TestOneShotCLIWritesEmitBeadEventsOnAMigratedCity) and openStorageRoutes for
-// the controller's (TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget)
+// the controller's (TestOpenStorageRoutesInstallsNoEmitTarget)
 // — so a mutation at either injection point reddens a DIFFERENT one of them.
 // The lesson generalizes: a gate that constructs the thing under test cannot
 // also be the gate that proves it is constructed.
 
 // splitClassRoutes builds the routes a split city resolves: every
 // infrastructure class served by one binding store, work left alone. It is the
-// shape openStorageRoutes produces, so a test that does NOT call
-// withCLIEmission is holding the CONTROLLER's routes.
+// shape openStorageRoutes produces — which is NOT the shape the controller
+// serves: newCityRuntime wires withControllerEmission(p.Rec) on top of it
+// (city_runtime.go), so unwrapped routes stand for the injection point's INPUT,
+// never for the controller's routes. The controller's own routes are asserted
+// through newCityRuntime in class_store_emit_controller_test.go
+// (TestControllerRoutesCarryAnEmitTarget).
 func splitClassRoutes(class beads.Store) *storageRoutes {
 	routes := &storageRoutes{stores: make(map[coordclass.Class]beads.Store), binding: "infra"}
 	for _, c := range coordclass.Classes() {

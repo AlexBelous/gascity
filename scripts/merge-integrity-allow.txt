@@ -43,8 +43,47 @@ test	TestCachingStoreOverNativeDoltStoreForwardsNarrowCAS	retired on BOTH sides;
 test	TestNativeDoltStoreConditionalWritesStillRefuseOrDegrade	retired on BOTH sides; superseded by the lane's ConditionalWriter capability assertion (5ec88b1535 ledger)
 test	TestNativeDoltStoreDeclaresNarrowCASButNotConditionalWriter	retired on BOTH sides; superseded by the lane's ConditionalWriter capability assertion (5ec88b1535 ledger)
 
+# --- ga-f7v2ft.183 adjudication (2026-08-21) --------------------------------
+# The thirteen tests origin/main still ships that the lane had lost. Each was
+# recovered from origin/main and run against lane code before a verdict.
+#
+# TWO were genuine losses and are RESTORED, not listed here:
+# TestCmdSessionKill_PokesControllerAfterSleep and
+# TestCmdSessionKill_PokeFailureIsNonFatal are back in
+# cmd/gc/cmd_session_kill_poke_test.go. The generic-poke branch they cover is
+# still live; 84ba8cfa47 renamed them onto the exact-handoff seam it added, and
+# mutation-probing proved the lane's replacements are blind to both the
+# after-the-SleepPatch ordering and the non-fatality.
+#
+# The eleven below are retirements with a subject that moved. Where a reason
+# claims supersession it NAMES the successor, and the successor was verified to
+# assert at least as much.
+
+# stop: 5b83c3acef stopped tearing down a provider-owned server scope on the
+# ordinary stop path (SESSION-RECON-018). The lane pins the INVERSE contract.
+test	TestCmdStopBodyTeardownRunsAfterStopOrphansBeforeBeadsShutdown	5b83c3acef deleted the teardownServerForStop call from cmdStopBodyWithoutSuccess per SESSION-RECON-018 (ordinary stop preserves certified runtime inventory); the inverse contract is pinned by TestCmdStopBodyPreservesDrainedServerInventory
+test	TestCmdStopBodySkipsTeardownForNonLifecycleProvider	renamed in place by 5b83c3acef to TestCmdStopBodyStopsWithNonServerProvider; its teardown assertions are subsumed by TestCmdStopBodyPreservesDrainedServerInventory, which rejects teardown even for a provider that DOES implement runtime.ServerLifecycleProvider
+test	TestCmdStopBodyReportsTeardownErrorWithoutFailing	the cmdStopBody teardown seam it asserted on was deleted by 5b83c3acef per SESSION-RECON-018; teardownServerForStop now runs only on the supervisor-managed path, covered by TestCityRuntimeShutdownTearsDownProviderServer
+
+# class-store emission: fb41ffc2b1 (ga-f7v2ft.164) renamed all three in place.
+# The first one's NAME is now false on this lane BY DESIGN — see the reason.
+test	TestControllerClassRoutesStayEventSilentUnderReconcileShapedWrites	renamed by fb41ffc2b1 to TestWiredClassRoutesEmitExactlyOnceAndTheResolverArgumentDoesNot (same fixture, same three assertions, field emitCityPath->emit). The upstream NAME is deliberately false here: newCityRuntime wires withControllerEmission(p.Rec), because the CachingStore upstream relied on sits on the WORK ledger and cannot cover a relocated class. Upstream only ever asserted controller silence through the splitClassRoutes test helper, which no longer stands for the controller; double-emit is closed by construction and pinned by TestWiringRoutesTwiceDoesNotDoubleTheEmission
+test	TestClassStoreEmitTargetHasExactlyOneInjectionSite	generalized by fb41ffc2b1 to TestClassStoreEmitTargetIsInjectedOncePerProcess, a strict superset: it keeps every upstream check on withCLIEmission (one call, cli_storage_routes.go, ident receiver, one arg named cityPath) and adds withControllerEmission and withEmission
+test	TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget	renamed by fb41ffc2b1 to TestOpenStorageRoutesInstallsNoEmitTarget; assertion-for-assertion identical body. openStorageRoutes still installs nothing — the per-process wiring moved up into newCityRuntime, so the old name's "the controller's routes" framing is what changed, not the invariant this seam holds
+
+# reconciler/runtime renames: covered function moved, assertions carried over.
+test	TestTraceHealClearedPendingCreateLeaseRecordsDecision	renamed in place by c481c15852 to TestTraceHealClearedPendingCreateLeaseInfoRecordsDecision (same trace site, reason, outcome and payload keys); the bead-form helper it pinned has no production caller even on origin/main. NOT the ga-f7v2ft.166 silent change: that was D-DEADLINE in session_deadline_reconcile.go, 24 days later
+test	TestCityRuntimeReadyDemandFingerprintLogsStableStoreError	renamed in place by 83049b52e8 to TestCityRuntimeReadyRoutedWorkViewLogsStableStoreError when the ready-demand scan was promoted to the sweep's routed-work view; all three assertions carried over. Deliberately NOT restored: readyDemandSnapshotFingerprint is a caller-less island the 5ec88b1535 merge resurrected, and restoring this would cement it (ga-f7v2ft.184)
+test	TestPackAddRemoveSerializeThroughConfigWriteLock	renamed in place by ad33f6ce93 to TestPackAddRemoveRouteThroughPackMutationTransaction, which adds packMutationCalls assertions; the upstream test still passes verbatim on the lane
+test	TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues	renamed in place by 24587284f5 to TestBdStoreListWispsPushesSlashValuesAndFallsBackForUnsafeQueryValues. The fallback is intact — quotes, spaces, '=' and the AND/OR/NOT tokens are still client-filtered; 24587284f5 widened the safe charset by exactly one character ('/') so path-style assignees push down. Lane-vs-upstream divergence, will re-conflict on the next merge (ga-f7v2ft.185)
+test	TestRuntimeStartCallSitesCleanOrphansFirst	renamed in place by 1654bac8d1 to TestRuntimeStartCallSitesHavePreEffectFence. The census narrowed by one deliberate exemption: StartRuntimeOnlyAuthorized, where orphan cleanup would kill the very replacement runtime whose appearance revokes start authority. The other four Start sites still require cleanup, and the exempt site's property is pinned by TestSessionHandleStartResolvedAuthorizedNeverAcceptsOrRecyclesExistingRuntime in internal/worker/handle_test.go
+
 # --- NOT allowlisted, deliberately ------------------------------------------
-# ga-f7v2ft.182 (four retired internal/pidutil timeout constants, #5427) and
-# ga-f7v2ft.183 (thirteen tests origin/main still ships) are OPEN findings, not
-# exemptions. The guard stays red on them until each one is adjudicated. Adding
-# them here to get a green run is the failure this file exists to prevent.
+# Nothing is parked here awaiting a decision, and that is the invariant this
+# section exists to state. ga-f7v2ft.182 (four internal/pidutil timeout
+# constants origin/main retired in #5427) was ADOPTED by cherry-pick at
+# c2da2c1624 rather than exempted, so check 1 reports no resurrection; and the
+# thirteen ga-f7v2ft.183 tests above are adjudicated, not absorbed.
+#
+# Adding a finding here to get a green run is the failure this file exists to
+# prevent. If the guard goes red, the red is the assignment.

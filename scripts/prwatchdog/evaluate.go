@@ -2,7 +2,10 @@
 // passing CI evidence for its current head commit.
 package prwatchdog
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Status mirrors a GitHub check run's status field.
 type Status string
@@ -85,9 +88,153 @@ type Evaluation struct {
 	Summary  Summary
 }
 
+// checkState classifies the latest observed run for one tracked check name.
+type checkState int
+
+const (
+	stateAbsent checkState = iota
+	stateQueuedOrInProgress
+	stateCompletedSuccess
+	stateCompletedOther
+)
+
+// latestRun returns the most recent CheckRun named name scoped to headSHA,
+// preferring the later StartedAt and, on an exact tie, the higher ID (the
+// later of two same-instant reruns).
+func latestRun(runs []CheckRun, headSHA, name string) (CheckRun, bool) {
+	var best CheckRun
+	found := false
+	for _, r := range runs {
+		if r.HeadSHA != headSHA || r.Name != name {
+			continue
+		}
+		if !found || r.StartedAt.After(best.StartedAt) || (r.StartedAt.Equal(best.StartedAt) && r.ID > best.ID) {
+			best = r
+			found = true
+		}
+	}
+	return best, found
+}
+
+func stateOf(runs []CheckRun, headSHA, name string) (checkState, CheckRun) {
+	run, found := latestRun(runs, headSHA, name)
+	if !found {
+		return stateAbsent, CheckRun{}
+	}
+	if run.Status != StatusCompleted {
+		return stateQueuedOrInProgress, run
+	}
+	if run.Conclusion == ConclusionSuccess {
+		return stateCompletedSuccess, run
+	}
+	return stateCompletedOther, run
+}
+
+type verdict int
+
+const (
+	verdictWait verdict = iota
+	verdictFail
+	verdictPass
+)
+
+// failKind distinguishes why a gate failed: a check that never concluded in
+// time reads very differently from one that concluded and did not succeed.
+type failKind int
+
+const (
+	failNone failKind = iota
+	failNotConcluded
+	failNonSuccess
+)
+
+// evaluateGate inspects one tracked check name and reports whether the
+// watchdog should keep waiting, treat it as a terminal failure, or move on.
+// absentWord/inProgressWord are the Summary text used while the check has
+// not concluded -- Check's "never ran" and the comprehensive checks'
+// "incomplete" use different vocabulary for the same underlying state.
+func evaluateGate(runs []CheckRun, headSHA, name, absentWord, inProgressWord string, atDeadline bool) (verdict, string, failKind) {
+	state, run := stateOf(runs, headSHA, name)
+	switch state {
+	case stateAbsent:
+		if atDeadline {
+			return verdictFail, absentWord, failNotConcluded
+		}
+		return verdictWait, absentWord, failNone
+	case stateQueuedOrInProgress:
+		if atDeadline {
+			return verdictFail, inProgressWord, failNotConcluded
+		}
+		return verdictWait, inProgressWord, failNone
+	case stateCompletedOther:
+		return verdictFail, string(run.Conclusion), failNonSuccess
+	default: // stateCompletedSuccess
+		return verdictPass, "success", failNone
+	}
+}
+
 // Evaluate inspects the observed check runs for in.HeadSHA and decides
 // whether the watchdog should keep observing, or stop with a pass/fail
 // verdict.
-func Evaluate(_ Input) Evaluation {
-	return Evaluation{}
+func Evaluate(in Input) Evaluation {
+	if in.FetchError != nil {
+		return Evaluation{Terminal: true, Reason: fmt.Sprintf("fetching CI evidence: %v", in.FetchError)}
+	}
+
+	atDeadline := in.Elapsed >= in.Deadline
+	var summary Summary
+
+	v, word, fk := evaluateGate(in.CheckRuns, in.HeadSHA, CheckName, "never ran", "in progress", atDeadline)
+	summary.Check = word
+	switch {
+	case v == verdictWait:
+		return Evaluation{Summary: summary}
+	case v == verdictFail && fk == failNotConcluded:
+		return Evaluation{Terminal: true, Reason: "tests never ran", Summary: summary}
+	case v == verdictFail:
+		return Evaluation{Terminal: true, Reason: "CI ran but preflight did not pass", Summary: summary}
+	}
+
+	v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, CIRequiredName, "incomplete", "incomplete", atDeadline)
+	summary.CIRequired = word
+	switch {
+	case v == verdictWait:
+		return Evaluation{Summary: summary}
+	case v == verdictFail && fk == failNotConcluded:
+		return Evaluation{Terminal: true, Reason: "incomplete comprehensive evidence", Summary: summary}
+	case v == verdictFail:
+		return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", CIRequiredName, word), Summary: summary}
+	}
+
+	if !in.NeedsMacLabel {
+		summary.Mac = "not requested (opt-in)"
+	} else {
+		v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, MacCheckName, "incomplete", "incomplete", atDeadline)
+		summary.Mac = word
+		switch {
+		case v == verdictWait:
+			return Evaluation{Summary: summary}
+		case v == verdictFail && fk == failNotConcluded:
+			return Evaluation{Terminal: true, Reason: "Mac regression requested but incomplete", Summary: summary}
+		case v == verdictFail:
+			return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", MacCheckName, word), Summary: summary}
+		}
+	}
+
+	if !in.NeedsReviewFormulasLabel {
+		summary.ReviewFormulas = "not explicitly requested; path routing may still apply"
+	} else {
+		v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, ReviewFormulasCheckName, "incomplete", "incomplete", atDeadline)
+		summary.ReviewFormulas = word
+		switch {
+		case v == verdictWait:
+			return Evaluation{Summary: summary}
+		case v == verdictFail && fk == failNotConcluded:
+			return Evaluation{Terminal: true, Reason: "Review formulas requested but incomplete", Summary: summary}
+		case v == verdictFail:
+			return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", ReviewFormulasCheckName, word), Summary: summary}
+		}
+	}
+
+	return Evaluation{Terminal: true, Pass: true, Reason: "all required CI evidence succeeded", Summary: summary}
 }

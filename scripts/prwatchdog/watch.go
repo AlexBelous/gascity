@@ -31,6 +31,24 @@ type PollOptions struct {
 
 // Watch polls fetcher for check runs on opts.HeadSHA, evaluating after each
 // poll, until the evaluation is terminal or opts.Deadline elapses.
-func Watch(_ context.Context, _ Fetcher, _ Clock, _ Sleeper, _ PollOptions) Evaluation {
-	return Evaluation{}
+func Watch(ctx context.Context, fetcher Fetcher, clock Clock, sleeper Sleeper, opts PollOptions) Evaluation {
+	start := clock.Now()
+	for {
+		elapsed := clock.Now().Sub(start)
+		runs, err := fetcher.FetchCheckRuns(ctx, opts.HeadSHA)
+
+		eval := Evaluate(Input{
+			HeadSHA:                  opts.HeadSHA,
+			CheckRuns:                runs,
+			Elapsed:                  elapsed,
+			Deadline:                 opts.Deadline,
+			NeedsMacLabel:            opts.NeedsMacLabel,
+			NeedsReviewFormulasLabel: opts.NeedsReviewFormulasLabel,
+			FetchError:               err,
+		})
+		if eval.Terminal {
+			return eval
+		}
+		sleeper.Sleep(ctx, opts.Interval)
+	}
 }

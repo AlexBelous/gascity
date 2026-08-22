@@ -1710,6 +1710,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("wait for exact reset stop trace: %v; traces=%#v controller stderr=%q", err, exactResetStops, controllerStderr.String())
 	}
 	var resetCommitRecords []SessionReconcilerTraceRecord
+	var resetCommitCandidates []SessionReconcilerTraceRecord
 	if err := waitExactStartStopState(t.Context(), 10*time.Second, func() (bool, error) {
 		records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 			RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartCommit,
@@ -1718,10 +1719,14 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		if readErr != nil {
 			return false, readErr
 		}
+		resetCommitCandidates = records
 		resetCommitRecords = resetCommitRecords[:0]
 		for _, record := range records {
+			// A socket admission folded onto a pending in_process one keeps
+			// in_process, so only demand membership survives coalescing here too.
+			admissionSource, _ := record.Fields["admission"].(string)
 			if record.SessionBeadID == created.SessionID &&
-				record.Fields["admission"] == string(sessionStartAdmissionSocket) &&
+				sessionStartAdmissionIsDemand(sessionStartAdmissionSource(admissionSource)) &&
 				record.Fields["session_id"] == created.SessionID &&
 				record.Fields["instance_token"] == restarted.InstanceToken &&
 				record.Fields["effect_applied"] == true {
@@ -1733,8 +1738,8 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		}
 		return len(resetCommitRecords) == 1, nil
 	}); err != nil {
-		t.Fatalf("exact reset start commit did not converge: %v; matching=%#v controller stderr=%q",
-			err, resetCommitRecords, controllerStderr.String())
+		t.Fatalf("exact reset start commit did not converge: %v; matching=%#v read=%#v restarted_token=%q controller stderr=%q",
+			err, resetCommitRecords, resetCommitCandidates, restarted.InstanceToken, controllerStderr.String())
 	}
 	resetStartRecords, err := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{
 		RecordType: TraceRecordOperation, SiteCode: TraceSiteLifecycleStartRun, SessionName: created.SessionName,

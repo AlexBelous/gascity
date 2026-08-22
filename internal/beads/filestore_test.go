@@ -117,6 +117,16 @@ func TestFileStoreConditionalWriterConformance(t *testing.T) {
 	)
 }
 
+func TestFileStoreConditionalAssignmentClaimConformance(t *testing.T) {
+	beadstest.RunConditionalAssignmentClaimConformance(t, "FileStore", func(t *testing.T) beads.Store {
+		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+		if err != nil {
+			t.Fatalf("OpenFileStore: %v", err)
+		}
+		return store
+	})
+}
+
 // TestFileStoreRevisionSurvivesReopen proves the ConditionalWriter revision
 // round-trips through disk — it is json:"-" on Bead, so it only survives via the
 // out-of-band Revisions map. reloadFromDisk runs before every write, so a

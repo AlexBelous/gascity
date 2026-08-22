@@ -60,6 +60,19 @@ func TestBeadsGraphAdapterReportsMissingCapabilities(t *testing.T) {
 	if ok {
 		t.Fatalf("a vetoed Claim reported success: %+v", claimed)
 	}
+	conditionalClaimer, ok := any(graph).(interface {
+		ClaimIfCurrent(string, string, string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		t.Fatalf("graph adapter %T hides the conditional-assignment claim capability", graph)
+	}
+	claimed, ok, err = conditionalClaimer.ClaimIfCurrent(created.ID, "pool-worker", "pool-worker-1")
+	if !errors.Is(err, ErrBeadsAdapterCapability) {
+		t.Fatalf("ClaimIfCurrent over a store without it = %v, want ErrBeadsAdapterCapability", err)
+	}
+	if ok {
+		t.Fatalf("a vetoed ClaimIfCurrent reported success: %+v", claimed)
+	}
 	metadata, ok, err := graph.DepMetadata(created.ID, "gc-1")
 	if !errors.Is(err, ErrBeadsAdapterCapability) {
 		t.Fatalf("DepMetadata over a store without it = %v, want ErrBeadsAdapterCapability", err)
@@ -82,6 +95,15 @@ type claimingMemStore struct {
 	beads.Store
 	lastID       string
 	lastAssignee string
+}
+
+func (s *claimingMemStore) ClaimIfCurrent(id, expectedAssignee, assignee string) (beads.Bead, bool, error) {
+	s.lastID, s.lastAssignee = id, expectedAssignee+"->"+assignee
+	bead, err := s.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	return bead, true, nil
 }
 
 func (s *claimingMemStore) Claim(id, assignee string) (beads.Bead, bool, error) {
@@ -107,5 +129,28 @@ func TestBeadsGraphAdapterDelegatesClaimWhenAvailable(t *testing.T) {
 	}
 	if backing.lastID != created.ID || backing.lastAssignee != "worker" {
 		t.Fatalf("adapter passed (%q, %q) to the store, want (%q, %q)", backing.lastID, backing.lastAssignee, created.ID, "worker")
+	}
+}
+
+func TestBeadsGraphAdapterDelegatesConditionalAssignmentClaimWhenAvailable(t *testing.T) {
+	backing := &claimingMemStore{Store: beads.NewMemStore()}
+	graph := graphAdapterOver(t, backing)
+	created, err := graph.Create(beads.Bead{Title: "pool target", Status: "open", Assignee: "pool-worker"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	claimer, ok := any(graph).(interface {
+		ClaimIfCurrent(string, string, string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		t.Fatalf("graph adapter %T dropped ClaimIfCurrent", graph)
+	}
+
+	claimed, won, err := claimer.ClaimIfCurrent(created.ID, "pool-worker", "pool-worker-1")
+	if err != nil || !won {
+		t.Fatalf("ClaimIfCurrent = (%+v, %v, %v), want a delegated success", claimed, won, err)
+	}
+	if backing.lastID != created.ID || backing.lastAssignee != "pool-worker->pool-worker-1" {
+		t.Fatalf("adapter passed (%q, %q), want (%q, %q)", backing.lastID, backing.lastAssignee, created.ID, "pool-worker->pool-worker-1")
 	}
 }

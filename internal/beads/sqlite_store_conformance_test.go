@@ -42,6 +42,12 @@ func TestSQLiteStoreConditionalWriterConformance(t *testing.T) {
 	})
 }
 
+func TestSQLiteStoreConditionalAssignmentClaimConformance(t *testing.T) {
+	beadstest.RunConditionalAssignmentClaimConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
+		return newSQLiteForConformance(t)
+	})
+}
+
 // TestSQLiteStoreFenceConformance proves the SQLite constructor persists
 // ownership generations instead of exposing a vacuous zero fence.
 func TestSQLiteStoreFenceConformance(t *testing.T) {

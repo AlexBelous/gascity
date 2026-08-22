@@ -27,6 +27,11 @@ func TestNativeDoltStoreConditionalWriterConformance(t *testing.T) {
 	)
 }
 
+func TestNativeDoltStoreConditionalAssignmentClaimConformance(t *testing.T) {
+	beadstest.RunConditionalAssignmentClaimConformance(t, "NativeDoltStore",
+		func(_ *testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() })
+}
+
 // TestMemStoreMetadataCASConformance and TestFileStoreMetadataCASConformance
 // run the SAME narrow suite against the two stores whose fixtures do provide
 // isolation (both guard the whole CAS under their own lock), so the contention

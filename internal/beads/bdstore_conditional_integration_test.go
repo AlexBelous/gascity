@@ -130,6 +130,21 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 	})
 }
 
+// TestBdStoreConditionalAssignmentClaimConformance holds the production bd
+// task-store path to the same exact-assignee, open-status transfer contract as
+// the in-process stores. Unlike revision-guarded whole-row writes, this claim
+// operation is required for configured pool workers and may not silently
+// degrade when the installed bd lacks a native verb.
+func TestBdStoreConditionalAssignmentClaimConformance(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skipf("bd not on PATH: %v", err)
+	}
+	beadstest.RunConditionalAssignmentClaimConformance(t, "BdStore", func(t *testing.T) beads.Store {
+		store, _ := newConditionalIntegrationBdStore(t)
+		return store
+	})
+}
+
 // newConditionalIntegrationBdStore stands up a REAL bd scope in a fresh
 // TempDir — git init + `bd init` in embedded (serverless) mode — and returns
 // the production BdStore over it plus the scope root. Environment is pinned

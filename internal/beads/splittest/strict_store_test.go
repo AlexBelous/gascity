@@ -11,6 +11,12 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
+type conditionalAssignmentClaimer interface {
+	ClaimIfCurrent(id, expectedAssignee, assignee string) (beads.Bead, bool, error)
+}
+
+type conditionalAssignmentClaimStrippedStore struct{ beads.Store }
+
 // graphWispID is a production-shaped wisp id: the graph class's reserved
 // prefix, the wisp segment, then an opaque suffix. Molecule steps run as beads
 // with exactly this shape.
@@ -533,6 +539,24 @@ func TestStrictStoreForwardsOptionalCapabilities(t *testing.T) {
 		}
 	})
 
+	t.Run("conditional assignment claim reaches the leaf", func(t *testing.T) {
+		assigned := "pool-worker"
+		if err := graph.Update(bead.ID, beads.UpdateOpts{Assignee: &assigned}); err != nil {
+			t.Fatalf("assign shared template: %v", err)
+		}
+		claimer, ok := graph.(conditionalAssignmentClaimer)
+		if !ok {
+			t.Fatal("strict store does not expose the conditional-assignment claim operation")
+		}
+		claimed, won, err := claimer.ClaimIfCurrent(bead.ID, "pool-worker", "pool-worker-1")
+		if err != nil || !won {
+			t.Fatalf("ClaimIfCurrent through strict store = (%+v, %v, %v), want a win", claimed, won, err)
+		}
+		if claimed.Status != "in_progress" || claimed.Assignee != "pool-worker-1" {
+			t.Fatalf("claimed bead = %+v, want concrete in-progress ownership", claimed)
+		}
+	})
+
 	t.Run("unsupported capabilities report the documented sentinel", func(t *testing.T) {
 		counter, ok := graph.(beads.Counter)
 		if !ok {
@@ -546,6 +570,22 @@ func TestStrictStoreForwardsOptionalCapabilities(t *testing.T) {
 		}
 		if _, ok := graph.(beads.StorageCreateStore); ok {
 			t.Error("strict store claimed StorageCreateStore for a MemStore leaf; the flag-based storage fallback would stop firing")
+		}
+
+		incapable := StrictWithPrefix(t,
+			conditionalAssignmentClaimStrippedStore{Store: beads.NewMemStore()},
+			"gcg", SQLiteSemantics)
+		claimer, ok := incapable.(conditionalAssignmentClaimer)
+		if !ok {
+			t.Fatalf("strict store %T hides whether conditional assignment claim is unsupported", incapable)
+		}
+		created := mustCreate(t, incapable, beads.Bead{Title: "pool work", Status: "open", Assignee: "pool-worker"})
+		claimed, won, err := claimer.ClaimIfCurrent(created.ID, "pool-worker", "pool-worker-1")
+		if err == nil {
+			t.Fatalf("ClaimIfCurrent over an incapable leaf = (%+v, %v, nil), want an explicit error", claimed, won)
+		}
+		if won {
+			t.Fatalf("unsupported ClaimIfCurrent reported a win: %+v", claimed)
 		}
 	})
 

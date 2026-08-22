@@ -37,11 +37,25 @@ func TestCachingStoreConditionalWriterConformance(t *testing.T) {
 		})
 }
 
+func TestCachingStoreConditionalAssignmentClaimConformance(t *testing.T) {
+	beadstest.RunConditionalAssignmentClaimConformance(t, "CachingStore", func(t *testing.T) beads.Store {
+		store := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+		if err := store.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		return store
+	})
+}
+
 // conditionalCapabilityStrippedStore embeds the Store INTERFACE, so the
 // wrapped store's optional ConditionalWriter methods are not promoted: this is
 // the natural shape of a backing with no conditional-write capability at all
 // (distinct from a disabled one, which still claims the interface).
 type conditionalCapabilityStrippedStore struct{ beads.Store }
+
+type conditionalAssignmentClaimCapability interface {
+	ClaimIfCurrent(id, expectedAssignee, assignee string) (beads.Bead, bool, error)
+}
 
 func TestCachingStoreConditionalWriterCapabilityAbsentBacking(t *testing.T) {
 	t.Parallel()
@@ -82,5 +96,36 @@ func TestCachingStoreConditionalWriterCapabilityAbsentBacking(t *testing.T) {
 	got, err := c.Get(b.ID)
 	if err != nil || got.ID != b.ID {
 		t.Fatalf("Get after unsupported verbs = (%+v, %v), want the cached bead", got, err)
+	}
+}
+
+func TestCachingStoreConditionalAssignmentClaimCapabilityAbsentBacking(t *testing.T) {
+	backing := conditionalCapabilityStrippedStore{Store: beads.NewMemStore()}
+	store := beads.NewCachingStoreForTest(backing, nil)
+	if err := store.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	created, err := store.Create(beads.Bead{Title: "pool work", Status: "open", Assignee: "pool-worker"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	claimer, ok := any(store).(conditionalAssignmentClaimCapability)
+	if !ok {
+		t.Fatalf("CachingStore %T hides whether conditional assignment claim is unsupported", store)
+	}
+
+	claimed, won, err := claimer.ClaimIfCurrent(created.ID, "pool-worker", "pool-worker-1")
+	if err == nil {
+		t.Fatalf("ClaimIfCurrent over an incapable backing = (%+v, %v, nil), want an explicit error", claimed, won)
+	}
+	if won {
+		t.Fatalf("unsupported ClaimIfCurrent reported a win: %+v", claimed)
+	}
+	got, getErr := store.Get(created.ID)
+	if getErr != nil {
+		t.Fatalf("Get after unsupported claim: %v", getErr)
+	}
+	if got.Status != "open" || got.Assignee != "pool-worker" {
+		t.Fatalf("unsupported claim fell back to a non-atomic write: %+v", got)
 	}
 }

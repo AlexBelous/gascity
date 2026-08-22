@@ -17,10 +17,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
+
+type graphConditionalAssignmentClaimer interface {
+	ClaimIfCurrent(id, expectedAssignee, assignee string) (beads.Bead, bool, error)
+}
 
 // GraphSuite configures one bare Graph class conformance run.
 type GraphSuite struct {
@@ -279,6 +284,67 @@ func RunGraphStoreTests(r Runner, suite GraphSuite) {
 			}
 		})
 	}
+
+	r.Run("ConditionalAssignmentClaimHasOneWinner", func(r Runner) {
+		store := suite.NewStore(r)
+		claimer, ok := any(store).(graphConditionalAssignmentClaimer)
+		if !ok {
+			r.Fatalf("Graph front door %T dropped the conditional-assignment claim operation", store)
+		}
+		created := mustCreateBead(r, store, beads.Bead{
+			Title:    "pool-assigned graph work",
+			Type:     "task",
+			Status:   "open",
+			Assignee: "pool-worker",
+		})
+
+		type result struct {
+			assignee string
+			claimed  beads.Bead
+			ok       bool
+			err      error
+		}
+		start := make(chan struct{})
+		results := make(chan result, 2)
+		var ready sync.WaitGroup
+		ready.Add(2)
+		for _, assignee := range []string{"pool-worker-1", "pool-worker-2"} {
+			go func(assignee string) {
+				ready.Done()
+				<-start
+				claimed, won, err := claimer.ClaimIfCurrent(created.ID, "pool-worker", assignee)
+				results <- result{assignee: assignee, claimed: claimed, ok: won, err: err}
+			}(assignee)
+		}
+		ready.Wait()
+		close(start)
+
+		winner := ""
+		for range 2 {
+			got := <-results
+			if got.err != nil {
+				r.Errorf("ClaimIfCurrent by %s: %v", got.assignee, got.err)
+				continue
+			}
+			if !got.ok {
+				continue
+			}
+			if winner != "" {
+				r.Errorf("both %s and %s won the graph assignment", winner, got.assignee)
+			}
+			winner = got.assignee
+			if got.claimed.Status != "in_progress" || got.claimed.Assignee != got.assignee {
+				r.Errorf("winner %s received %+v, want its concrete in-progress ownership", got.assignee, got.claimed)
+			}
+		}
+		if winner == "" {
+			r.Fatalf("neither pool member won the open graph assignment")
+		}
+		persisted := mustGetBead(r, store, created.ID)
+		if persisted.Status != "in_progress" || persisted.Assignee != winner {
+			r.Fatalf("persisted graph bead = status %q assignee %q, want in_progress owned by %s", persisted.Status, persisted.Assignee, winner)
+		}
+	})
 
 	if suite.Capability.Transactions {
 		r.Run("TransactionRollsBackEntirely", func(r Runner) {

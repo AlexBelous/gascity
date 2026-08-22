@@ -27,6 +27,7 @@ type fencePaneExecutor struct {
 	session   string
 	attached  string   // #{session_attached} reported by the census and the target probe
 	inMode    string   // #{pane_in_mode}, cleared by a bound `-X cancel`
+	dead      string   // #{pane_dead}; "1" is a remain-on-exit corpse
 	panes     []string // capture-pane answers; a dismissal advances to the next, the last repeats
 	fenced    bool     // every guarded effect reports the fence marker
 	effectErr error    // every guarded effect fails with this error instead
@@ -71,7 +72,11 @@ func (e *fencePaneExecutor) execute(args []string) (string, error) {
 	case strings.Contains(joined, "list-panes"):
 		return "%9\tsh\t123", nil
 	case strings.Contains(joined, "display-message") && strings.Contains(joined, "session_id"):
-		return strings.Join([]string{"$7", e.session, "@3", "%9", e.attached, e.inMode}, "\t"), nil
+		dead := e.dead
+		if dead == "" {
+			dead = "0"
+		}
+		return strings.Join([]string{"$7", e.session, "@3", "%9", e.attached, e.inMode, dead}, "\t"), nil
 	case strings.Contains(joined, "list-windows"):
 		return "123", nil
 	default:
@@ -141,6 +146,25 @@ func TestNudgeDismissesModelSwitchModalBeforeDeliveringPayload(t *testing.T) {
 	}
 	if call := unguardedInput(fe.calls); call != nil {
 		t.Fatalf("modal dismissal escaped the guard: %#v", call)
+	}
+}
+
+// Nudging a remain-on-exit corpse is a no-op, not a failure. Signaling is
+// best-effort — a pane with no process cannot lose the text — and tmux refuses
+// `paste-buffer` on a dead pane ("target pane has exited") where the `send-keys`
+// this path replaced exited 0. Interrupt leaves exactly such a corpse behind, so
+// treating it as an error makes an interrupt-then-nudge sequence fail.
+func TestNudgeOnDeadPaneIsANoOp(t *testing.T) {
+	fe := &fencePaneExecutor{session: "worker", attached: "0", inMode: "0", dead: "1", panes: []string{"ready >"}}
+	p := fe.provider(Config{})
+
+	if err := p.NudgeNow("worker", runtime.TextContent("claim-your-work")); err != nil {
+		t.Fatalf("NudgeNow on a dead pane = %v, want nil", err)
+	}
+	for _, call := range fe.calls {
+		if joined := strings.Join(call, " "); strings.Contains(joined, "paste-buffer") || strings.Contains(joined, "load-buffer") {
+			t.Fatalf("nudge staged input for a dead pane: %#v", call)
+		}
 	}
 }
 

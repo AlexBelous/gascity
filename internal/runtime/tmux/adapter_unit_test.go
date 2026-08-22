@@ -44,13 +44,13 @@ func TestBuildLaunchCommandUnsetsColorKillersForInteractiveExecutables(t *testin
 
 func TestNudgeSessionBoundFencesAtSingleTmuxEffectCommand(t *testing.T) {
 	fe := &fakeExecutor{outs: []string{
-		"41",                       // named socket server witness
-		"$7\tworker\t@3\t%9\t123",  // agent-pane scan
-		"$7\tworker\t@3\t%9\t0\t0", // exact target identity, detached, not parked
-		"",                         // load-buffer
-		"GC_PROVIDER=codex",        // submit debounce family
-		"123",                      // pre-effect activity snapshot
-		boundInputFenceMarker,      // if-shell false branch
+		"41",                          // named socket server witness
+		"$7\tworker\t@3\t%9\t123",     // agent-pane scan
+		"$7\tworker\t@3\t%9\t0\t0\t0", // exact target identity, detached, not parked
+		"",                            // load-buffer
+		"GC_PROVIDER=codex",           // submit debounce family
+		"123",                         // pre-effect activity snapshot
+		boundInputFenceMarker,         // if-shell false branch
 	}}
 	tm := NewTmuxWithConfig(Config{SocketName: "city-socket"})
 	tm.exec = fe
@@ -92,7 +92,7 @@ func TestNudgeSessionBoundFencedGuardsExpectedTokenBeforeAndAfterYield(t *testin
 	fe := &fakeExecutor{outs: []string{
 		"41",
 		"$7\tworker\t@3\t%9\t123",
-		"$7\tworker\t@3\t%9\t0\t0",
+		"$7\tworker\t@3\t%9\t0\t0\t0",
 		"",
 		"GC_PROVIDER=codex",
 		"123",
@@ -148,7 +148,7 @@ func TestNudgeSessionBoundRestoresDetachedSubmissionInsideGuard(t *testing.T) {
 	fe := &fakeExecutor{outs: []string{
 		"41",
 		"$7\tworker\t@3\t%9\t123",
-		"$7\tworker\t@3\t%9\t0\t0",
+		"$7\tworker\t@3\t%9\t0\t0\t0",
 		"",
 		"GC_PROVIDER=codex",
 		"123",

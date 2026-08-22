@@ -1929,6 +1929,7 @@ type boundInputTarget struct {
 	paneID    string
 	attached  bool
 	inMode    bool
+	dead      bool
 }
 
 // NudgeSessionBound sends a nudge only when tmux can prove, in the same server
@@ -1956,6 +1957,11 @@ func (t *Tmux) nudgeSessionBound(session, expectedInstanceToken, message string)
 	witness, target, err := t.boundEffectTarget(session)
 	if err != nil {
 		return err
+	}
+	// paste-buffer is the one input verb tmux refuses on a remain-on-exit corpse
+	// ("target pane has exited"); there is no reader left to lose the text to.
+	if target.dead {
+		return nil
 	}
 
 	tmp, err := os.CreateTemp("", "gc-tmux-bound-input-*")
@@ -2101,12 +2107,12 @@ func (t *Tmux) boundInputTarget(session string, witness namedSocketWitness) (bou
 	if pane, err := t.FindAgentPane(session); err == nil && pane != "" {
 		target = pane
 	}
-	out, err := t.runForAttachWitness(witness, "display-message", "-t", target, "-p", "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}\t#{session_attached}\t#{pane_in_mode}")
+	out, err := t.runForAttachWitness(witness, "display-message", "-t", target, "-p", "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}\t#{session_attached}\t#{pane_in_mode}\t#{pane_dead}")
 	if err != nil {
 		return boundInputTarget{}, err
 	}
 	fields := strings.Split(strings.TrimSpace(out), "\t")
-	if len(fields) != 6 || fields[1] != session || !wellFormedTmuxID(fields[0], '$') || !wellFormedTmuxID(fields[2], '@') || !wellFormedTmuxID(fields[3], '%') {
+	if len(fields) != 7 || fields[1] != session || !wellFormedTmuxID(fields[0], '$') || !wellFormedTmuxID(fields[2], '@') || !wellFormedTmuxID(fields[3], '%') {
 		return boundInputTarget{}, fmt.Errorf("invalid exact tmux input target for session %q", session)
 	}
 	attached, err := parseNonnegativeTmuxCount(fields[4])
@@ -2117,12 +2123,17 @@ func (t *Tmux) boundInputTarget(session string, witness namedSocketWitness) (bou
 	if err != nil {
 		return boundInputTarget{}, fmt.Errorf("invalid copy-mode state for session %q", session)
 	}
+	dead, err := parseNonnegativeTmuxCount(fields[6])
+	if err != nil {
+		return boundInputTarget{}, fmt.Errorf("invalid pane liveness for session %q", session)
+	}
 	return boundInputTarget{
 		sessionID: fields[0],
 		windowID:  fields[2],
 		paneID:    fields[3],
 		attached:  attached > 0,
 		inMode:    inMode > 0,
+		dead:      dead > 0,
 	}, nil
 }
 

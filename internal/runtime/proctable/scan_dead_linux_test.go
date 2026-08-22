@@ -139,7 +139,10 @@ func TestScanResidueSummaryCountsExcludedKernelDeadProcesses(t *testing.T) {
 	if !strings.Contains(msg, "2 kernel-dead") {
 		t.Fatalf("residue summary %q does not report the excluded zombies", msg)
 	}
-	if strings.Contains(msg, "920") || strings.Contains(msg, "921") {
+	// Scrub the fixture root first: t.TempDir() suffixes the directory with
+	// random digits that can themselves spell a zombie's pid (CI drew
+	// ...2784239216, whose "9216" contains "921").
+	if scrubbed := strings.ReplaceAll(msg, root, "<root>"); strings.Contains(scrubbed, "920") || strings.Contains(scrubbed, "921") {
 		t.Fatalf("residue summary %q names an excluded zombie; exclusions are counted, not itemized", msg)
 	}
 }

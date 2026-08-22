@@ -95,6 +95,14 @@ func newSessionBeadSnapshotWithError(err error) *sessionBeadSnapshot {
 }
 
 func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
+	return loadSessionBeadSnapshotLive(store, false)
+}
+
+// loadSessionBeadSnapshotLive is loadSessionBeadSnapshot with the cache-bypass
+// knob exposed. live=true costs a store round-trip and is for readers that must
+// observe a write made by another process; the cached default is for the
+// periodic reconciler feed, which converges on its own.
+func loadSessionBeadSnapshotLive(store beads.Store, live bool) (*sessionBeadSnapshot, error) {
 	if store == nil {
 		snap := newSessionBeadSnapshotFromInfos(nil)
 		snap.fingerprint = sessionpkg.SetFingerprint(nil)
@@ -113,7 +121,7 @@ func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 	// Closed history is intentionally not loaded here — the reconciler calls this
 	// several times per tick and closed history grows without bound. Callers that need
 	// a closed record must fetch that one ID explicitly.
-	rows, fingerprint, err := sessionFrontDoor(store).ListAllForReconcileWithFingerprint(sessionpkg.ListAllOptions{})
+	rows, fingerprint, err := sessionFrontDoor(store).ListAllForReconcileWithFingerprint(sessionpkg.ListAllOptions{Live: live})
 	if err != nil {
 		return nil, err
 	}

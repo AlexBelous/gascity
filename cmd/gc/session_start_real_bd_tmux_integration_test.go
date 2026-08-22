@@ -2352,11 +2352,18 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("legacy shadow session creation = %+v, want deferred ID and tmux name", shadowCreated)
 	}
 
-	var shadowStarted sessionpkg.Info
+	// lastShadowInfo/lastShadowBead are assigned on every poll: shadowStarted is
+	// only set on the success path, so reporting it on timeout prints a zero Info.
+	var shadowStarted, lastShadowInfo sessionpkg.Info
+	var lastShadowBead beads.Bead
 	if err := waitExactStartStopState(t.Context(), 45*time.Second, func() (bool, error) {
 		info, getErr := sessionFrontDoor(backingStore).Get(shadowCreated.SessionID)
 		if getErr != nil {
 			return false, getErr
+		}
+		lastShadowInfo = info
+		if bead, beadErr := backingStore.Get(shadowCreated.SessionID); beadErr == nil {
+			lastShadowBead = bead
 		}
 		view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromInfo(info))
 		if view.BaseState != sessionpkg.BaseStateActive || info.PendingCreateClaim {
@@ -2365,8 +2372,9 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		shadowStarted = info
 		return true, nil
 	}); err != nil {
-		t.Fatalf("legacy shadow start did not converge: %v; current=%+v controller stdout=%q stderr=%q",
-			err, shadowStarted, legacyControllerStdout.String(), legacyControllerStderr.String())
+		t.Fatalf("legacy shadow start did not converge: %v; current=%+v bead status=%q metadata=%#v controller stdout=%q stderr=%q",
+			err, lastShadowInfo, lastShadowBead.Status, lastShadowBead.Metadata,
+			legacyControllerStdout.String(), legacyControllerStderr.String())
 	}
 	shadowToken, err := tmuxClient.GetEnvironment(shadowCreated.SessionName, "GC_INSTANCE_TOKEN")
 	if err != nil {

@@ -3916,3 +3916,87 @@ func BenchmarkExactSessionStartPerKeyFleetSize(b *testing.B) {
 		})
 	}
 }
+
+// recordingListStore captures every ListQuery the session front door issues, so
+// a test can assert on the cache-bypass flag itself rather than on some cache's
+// observable behavior.
+type recordingListStore struct {
+	beads.Store
+	mu      sync.Mutex
+	queries []beads.ListQuery
+}
+
+func (s *recordingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	s.queries = append(s.queries, query)
+	s.mu.Unlock()
+	return s.Store.List(query)
+}
+
+func (s *recordingListStore) liveFlags() []bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	flags := make([]bool, 0, len(s.queries))
+	for _, q := range s.queries {
+		flags = append(flags, q.Live)
+	}
+	return flags
+}
+
+func (s *recordingListStore) reset() {
+	s.mu.Lock()
+	s.queries = nil
+	s.mu.Unlock()
+}
+
+// `gc session new` writes the session bead and then pokes the controller, so the
+// tick that services that poke has to observe a write made by another process —
+// which a CachingStore-served read cannot, until its own reconcile cycle catches
+// up. ga-0khp1: with the keyed reconciler off, the deferred ad-hoc start sat in
+// start-pending for a full cache cadence, and on a city whose patrol interval
+// outlives that wait, no tick ever followed the reconcile to start it.
+func TestPokedTickReadsSessionSnapshotLive(t *testing.T) {
+	store := &recordingListStore{Store: beads.NewMemStore()}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{},
+		standaloneCityStore: store,
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	if snap := cr.loadSessionBeadSnapshot(); snap == nil {
+		t.Fatal("cached load returned no snapshot")
+	}
+	for _, live := range store.liveFlags() {
+		if live {
+			t.Fatalf("an unpoked load bypassed the cache: %v", store.liveFlags())
+		}
+	}
+
+	store.reset()
+	cr.requireLiveSessionSnapshot()
+	if snap := cr.loadSessionBeadSnapshot(); snap == nil {
+		t.Fatal("live load returned no snapshot")
+	}
+	flags := store.liveFlags()
+	if len(flags) == 0 {
+		t.Fatal("live load issued no list at all")
+	}
+	for _, live := range flags {
+		if !live {
+			t.Fatalf("poked load served a leg from cache: %v", flags)
+		}
+	}
+
+	// One-shot: a live list absorbs its rows back into the cache, so the later
+	// loads in the same tick must not each pay another store round-trip.
+	store.reset()
+	cr.loadSessionBeadSnapshot()
+	for _, live := range store.liveFlags() {
+		if live {
+			t.Fatalf("the live request latched past its snapshot: %v", store.liveFlags())
+		}
+	}
+}

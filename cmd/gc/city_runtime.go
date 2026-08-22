@@ -315,6 +315,11 @@ type CityRuntime struct {
 	// A certified dependency-ready result upgrades the next coalesced poke so
 	// it does not wait behind the ordinary fleet-tick debounce.
 	sessionWaitDependencyReadyPokePending atomic.Bool
+	// A poked tick services a mutation this process did not make, so its first
+	// session snapshot must bypass the bead cache: a cached read cannot see a
+	// bead another process just wrote, and `gc session new` hands a deferred
+	// start to the controller through exactly that write-then-poke sequence.
+	sessionSnapshotLivePending atomic.Bool
 	// waitDependencyLiveResolve* throttle the bead.closed live dependent lookup
 	// on a city with no pending waits at all (ga-zo9h3 option (b)). Guarded by
 	// sessionWaitDependencyMu.
@@ -1219,6 +1224,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}, trigger)
 	}
 	if dirty.Load() {
+		cr.requireLiveSessionSnapshot()
 		runTick("startup-poke")
 		if ctx.Err() != nil {
 			return
@@ -1277,6 +1283,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// certified readiness is waiting on a tick; the tick that services
 			// the poke consumes them so they never latch true.
 			cr.sessionWaitDependencyReadyPokePending.Store(false)
+			cr.requireLiveSessionSnapshot()
 			runTick("poke")
 		case <-cr.nudgeWakeCh:
 			cr.safeTick(func() {
@@ -4060,6 +4067,22 @@ func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {
 	return sessionBeads
 }
 
+// requireLiveSessionSnapshot marks the next session-bead snapshot as a live
+// read. Callers use it when the work they are about to do was triggered by
+// another process's write, which the bead cache does not learn about until its
+// own reconcile cycle (up to a full cadence later, and never at all on a city
+// whose patrol interval outlives the wait).
+func (cr *CityRuntime) requireLiveSessionSnapshot() {
+	cr.sessionSnapshotLivePending.Store(true)
+}
+
+// takeLiveSessionSnapshot consumes the live-read request. It is a one-shot: a
+// live list absorbs its rows back into the cache, so the later loads in the
+// same tick see the same fresh set without paying another store round-trip.
+func (cr *CityRuntime) takeLiveSessionSnapshot() bool {
+	return cr.sessionSnapshotLivePending.Swap(false)
+}
+
 func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapshot, bool) {
 	var (
 		membership      *poolMembershipIndex
@@ -4094,7 +4117,7 @@ func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapsho
 		}
 		return nil, false
 	}
-	sessionBeads, err := loadSessionBeadSnapshot(store.Store)
+	sessionBeads, err := loadSessionBeadSnapshotLive(store.Store, cr.takeLiveSessionSnapshot())
 	if err != nil {
 		if membership != nil {
 			membership.invalidate(poolMembershipUncertifiedSnapshotGap)

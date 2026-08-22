@@ -61,7 +61,7 @@ func writeSyncFakeDolt(t *testing.T, dir string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+  *"SELECT name, url FROM dolt_remotes"*)
     printf 'name,url\norigin,https://example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
@@ -148,7 +148,7 @@ func writeSyncFakeDoltRemoteLookupFailure(t *testing.T, dir string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+  *"SELECT name, url FROM dolt_remotes"*)
     printf 'sql lookup failed\n' >&2
     exit 7
     ;;

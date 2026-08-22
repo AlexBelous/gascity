@@ -2178,7 +2178,6 @@ func reconcileCities(
 		}
 
 		cs.startBeadEventWatcher(cityCtx)
-		cs.startMaintenanceLoop(cityCtx)
 
 		// G13 §6 sweep-before-serve: reconcile this city's orphan in_flight
 		// rig-create idem records before it is published into the registry (and

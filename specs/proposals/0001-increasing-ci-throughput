@@ -1,0 +1,665 @@
+# Proposal: Increating CI Throughput to 10K Changes/Day
+
+TODO: update the pipeline to include directing the agents up front to make small, targeted changes to reduce their blast radius and therefore reduce the required tests to validate and... profit!
+
+TODO: bias towards multiple components in a monorepo, multiple repos, multiple services, etc. that are smallest and can be hardened independently with a smaller blast radius then "the entire system" with the tests filtered as appropriate.
+
+## From CI Queueing to Incremental, Reusable Verification
+
+**Gas City Engineering White Paper — Discussion Draft**  
+**August 21, 2026**
+
+> **Central objective:** Build an engineering system that can absorb **10,000 agent-generated logical changes per day**, while keeping the canonical branch trustworthy and avoiding proportional growth in CI compute or human review.
+
+> **Core thesis:** _Agents make changes. The system establishes facts. Policy decides what ships. Humans govern policy and handle exceptions._
+
+---
+
+## Executive Summary
+
+Gas City and Gas Town are already encountering a constraint that will become existential in an agent-heavy software factory: **code can now be produced faster than it can be admitted safely into the canonical branch**. The visible symptoms are familiar. A pull request becomes green; another pull request merges; `main` moves; the first PR must be rebased or restaged; expensive checks run again. Meanwhile, the arrival rate of new changes exceeds the throughput of CI. The result is a queue whose cost grows faster than the useful work it is protecting.
+
+This paper treats the target of **10,000 agentic changes per day** as the design requirement, not a distant aspiration. Ten thousand logical changes per 24 hours is about **417 per hour, 6.94 per minute, or one every 8.6 seconds on average**. Bursty working periods will be materially higher. If a complete verification cycle takes `T` minutes and each logical change requires a fresh full run, the steady-state concurrency required merely to keep up is approximately `6.94 × T`. A 20-minute full cycle implies about 139 concurrent full validations; a 30-minute cycle implies about 208 — before failures, retries, flakes, rebases, or queue churn.
+
+There are two coupled problems:
+
+1. **Moving-main invalidation.** Correctness is usually attached to a PR/commit SHA. When the base SHA changes, CI treats prior evidence as stale even when nothing relevant to that evidence changed.
+2. **Verification throughput.** Even with a perfect merge queue, the system can still demand more tests, builds, static analysis, and integration work than available compute can execute.
+
+Current systems attack important pieces. GitHub Merge Queue and Zuul speculatively test future integration states. Bors, Prow/Tide, Gas Town's Refinery design, Mergify, Aviator, and Graphite batch changes to amortize CI. Mergify, Trunk, and Aviator add scope- or target-aware parallel lanes. Bazel/Blaze, Buck2, Pants, and Nx use dependency graphs and content-addressed caches to avoid recomputing work whose inputs have not changed. Google's Rosie and TAP infrastructure showed how sharding, transitive affected-test selection, union testing, and anomaly-oriented review can drive thousands of automated source changes per day.
+
+The recommended near-term OSS experiment for Gas City is:
+
+**GitHub + Zuul (or an enhanced Gas Town Refinery) + Pants + Buildbarn/bazel-remote**, while keeping current GitHub Actions/Blacksmith execution where convenient. The queue layer establishes the future source states that need validation. Pants supplies fine-grained affectedness and precise process caching. Buildbarn (or bazel-remote for cache-only) shares results across workers. Refinery remains strategically interesting as the Gas Town-native coordinator, especially if it adopts Zuul-style speculative gating and scope-aware lanes.
+
+But that stack still leaves a deeper gap. Merge queues know **which source state** must be tested. Build systems know **which computations** can be reused. They do not provide a general mechanism for deciding whether an arbitrary correctness claim remains valid after the source graph changes.
+
+> **Don't re-establish a fact unless something that fact depends on has changed.**
+
+This paper proposes the missing abstraction as an **open verification graph**: a content-addressed graph in which each evidence node states a proposition, identifies the exact inputs and verifier that established it, and depends on content or other evidence nodes. A change to `main` invalidates only the downstream evidence whose actual dependencies changed. Everything else remains valid and reusable across PRs, agents, integration states, and CI workers.
+
+The strategic claim is therefore not “make CI faster.” It is:
+
+> **At 10,000 agentic changes per day, verification must become incremental, compositional, and reusable.**
+
+---
+
+## 1. The Design Requirement: 10,000 Agentic Changes per Day
+
+A **logical change** in this paper is one independently attributable proposed modification to source or configuration. It may be generated by a human, one coding agent, a swarm, a codemod, a dependency bot, or an automated optimizer. It does **not** have to map one-to-one to a GitHub pull request.
+
+That distinction matters. GitHub currently recommends no more than **one merged pull request per minute per repository** and six pushes per minute per repository. At 10,000 logical changes per day, one-change-per-PR would average almost seven merged PRs per minute continuously — roughly seven times GitHub's recommended per-repository merge rate. [4]
+
+Therefore a 10,000-change system eventually needs to distinguish:
+
+- **Logical changes:** independently generated, attributable, verifiable, revertible units.
+- **Integration transactions:** groups or sequences validated together.
+- **Publication transactions:** the smaller number of Git pushes/PR merges used to materialize accepted logical changes.
+
+The 10,000/day target also changes the economics of CI. Faster runners help only linearly. If generation scales by 10× while every change still triggers a complete validation universe, the organization simply purchases 10× more verification capacity — and still pays again every time `main` moves. That is not a scalable architecture.
+
+The desired system should instead make **marginal verification cost proportional to the new uncertainty introduced by a change**, not proportional to the size of the repository or the existence of a new commit SHA.
+
+## 2. The Immediate Problem at Gas City and Gas Town
+
+### 2.1 The moving-main loop
+
+The maintainer workflow is currently vulnerable to a destructive loop:
+
+```text
+PR B passes against main@100
+        ↓
+PR A merges → main@101
+        ↓
+B is now stale
+        ↓
+rebase/restage B
+        ↓
+rerun CI
+        ↓
+PR C merges → main@102
+        ↓
+repeat
+```
+
+This work is not merely annoying. It is **proof churn**: a previously established body of evidence is discarded because its base revision identifier changed, even when the facts being established had no dependency on the preceding change.
+
+GitHub's own documentation describes merge queues as a solution to the ordering problem: `merge_group` branches include the current base plus changes ahead in the queue. [3] Gas City's current CI workflow listens to `push` on `main` and `pull_request`, but not `merge_group`; it already contains substantial optimization machinery, including path-sensitive suite selection, a conservative `shared` barrier, affected-package linting, runner selection, caching, and sharding. [1]
+
+That matters: this is **not** a case where the team simply forgot to parallelize CI. Gas City is already applying the normal bag of tricks.
+
+### 2.2 Verification throughput
+
+The second problem appears when the rate of ready changes exceeds the rate at which the verification system can establish that they are safe. Even a fully automated rebase/retest loop can saturate. If each queued change requires another expensive integration state, the queue may continue growing while every available runner is busy.
+
+This is the more fundamental bottleneck in an agentic system. Models make code generation cheaper; the admission system does not become cheaper automatically.
+
+### 2.3 Gas Town Refinery already points toward batching
+
+Gas Town's architecture assigns the Refinery agent responsibility for merge processing and verification. The current architecture document specifies a **Bors-style batch-then-bisect** strategy: stack multiple merge requests on `main`, test the tip once, fast-forward the whole batch if green, and binary-bisect a failing batch. [2]
+
+That is a legitimate and important optimization. It converts `N` successful changes from `N` complete CI validations into approximately one validation per batch. The current architecture document also shows that this work is phased: parallel gates are listed as in progress, with batch-then-bisect and pre-verification following. [2]
+
+Batching reduces work, but it does not by itself answer what happens when changes are independent, when only one verifier's inputs changed, or when evidence from a failed speculative branch is still valid for another candidate.
+
+## 3. The Underlying Queueing Failure
+
+Traditional PR CI largely uses the commit SHA as an invalidation boundary:
+
+```text
+new SHA → new CI run → re-establish everything
+```
+
+That is conservative and simple, but extremely coarse. In a high-change-rate repository, each merge changes the base SHA and can invalidate many in-flight results. Prow/Tide documents this behavior explicitly: whenever a PR merges, existing test results for other PRs become stale and retesting is required. [20]
+
+The ideal invalidation question is not:
+
+> “Did the commit SHA change?”
+
+It is:
+
+> “Did any input to this particular verifier change?”
+
+For example:
+
+```text
+Evidence: unit tests for internal/mail
+Depends on:
+  internal/mail/**
+  transitive Go dependencies
+  relevant fixtures
+  go.mod / go.sum where applicable
+  Go toolchain digest
+  test command + flags
+  verifier implementation version
+
+A dashboard-only PR merges.
+None of those inputs changed.
+Therefore: the evidence is still valid.
+```
+
+This shift — from revision invalidation to dependency invalidation — is the key to making verification cost grow sublinearly with change volume.
+
+## 4. What Google Learned: Rosie, TAP, and Blaze
+
+Google encountered a related scaling problem long before LLM coding agents. Its large-scale-change infrastructure had to generate, test, review, and submit huge numbers of mechanically produced changes against a constantly evolving monorepo.
+
+### 4.1 Rosie: shard the logical change
+
+Google's Software Engineering at Google describes Rosie as the platform that splits a large master change into independently testable/reviewable/submittable shards. It can test, mail, review, and submit thousands of changes per day. [5]
+
+The important lesson is not that Rosie is a merge queue. It is that Google stopped treating a giant source transformation as one human-sized review transaction. The system creates many small, independently admissible units and manages them as cattle rather than pets.
+
+### 4.2 TAP: test affected transitive closure, then exploit union economics
+
+For each shard, Google's Large-Scale Change pipeline runs the transitive closure of tests that may be affected. When too many shards affect too many tests, TAP can group them: run the **union** of affected tests for the whole set, then use failures to determine which individual shards need narrower retesting. The Google SWE book notes that once a union is already large, adding additional similar changes can be nearly free. [5]
+
+Google also describes a “TAP train”: sample tests for candidate changes, combine the passing changes into an uber-change, run the union of affected tests, then isolate nonflaky failures back to individual changes. [5]
+
+That is directly relevant to the 10,000/day target: **share verification across changes instead of forcing every change to buy an isolated universe.**
+
+### 4.3 Review only anomalies when the change class permits it
+
+Rosie also attacks human-review throughput. Global approvers use pattern-based tooling to automatically approve expected changes and manually inspect the anomalous subset. [5] This is a precursor to the broader agentic thesis: humans define and govern the acceptance regime; routine instances flow automatically; unusual cases escalate.
+
+### 4.4 Blaze/Bazel: make computation reusable by exact inputs
+
+A terminology correction is useful here: **Blaze is Google's internal build system lineage; Bazel is its open-source relative. Meta/Facebook's analogous system is Buck/Buck2.** [7][10]
+
+Blaze/Bazel's critical contribution is precise, reproducible action identity. Bazel breaks work into actions with declared inputs, output names, command line, and environment. Its remote cache maps action hashes to results and stores artifacts in a content-addressable store. If the same action with the same inputs has already succeeded, the output can be reused instead of recomputed. [8]
+
+Google's distributed build documentation describes the internal stack around Blaze, including ObjFS for cached build outputs and Forge for remote execution. [9]
+
+The conceptual breakthrough is simple:
+
+> **A change to the repository should invalidate only the computations whose inputs changed.**
+
+### 4.5 Steve Yegge's connection: Grok as code-intelligence substrate
+
+Public sources most directly document Steve Yegge as the leader of Google's Grok project, a language-neutral code-intelligence platform. Steve's own writing describes Grok as powering automated refactoring infrastructure and explicitly calls out Rosie as a tool used to automate large migrations. [6]
+
+For this proposal, Grok's lesson is as important as Rosie's: **high-scale automation needs an explicit machine-readable graph of code relationships**, not just file diffs and shell scripts.
+
+## 5. Current Proprietary Solution Space
+
+No current commercial product appears to deliver the complete end state proposed here, but several have already converged on important components.
+
+| Product            | What it solves              | Key mechanism                                                                                                                              | What remains                                                                                 |
+| ------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| GitHub Merge Queue | Moving-main ordering        | `merge_group` future-state validation, up to 100 concurrent builds                                                                         | Does not combine merge-group builds; CI work still scales with validation states [3]         |
+| Mergify            | Queue throughput + CI cost  | Speculative checks, scope-aware parallel queues, batching, automatic splitting/bisection; batch lineage can inherit check results          | Reuse is queue/batch-lineage-oriented, not a general proof graph [11][12]                    |
+| Trunk Merge Queue  | Independent-lane throughput | Impacted-target dynamic queues; predictive cumulative testing; pending failure depth reuses downstream evidence against flaky predecessors | Reuse is structural/queue-specific rather than arbitrary verifier dependency reuse [13][14]  |
+| Aviator MergeQueue | High-volume monorepo queues | Affected targets, parallel queues, configurable batching, bisection                                                                        | Does not generalize result validity beyond queue/target logic [15][16]                       |
+| Graphite           | Stack-heavy teams           | Stack-aware speculative parallel CI, fast-forward reuse, batching                                                                          | Strong stack optimization; not a generic affectedness/evidence system [17]                   |
+| Develocity         | Test throughput             | Predictive test selection, build cache, test distribution; avoids re-running tests that already passed for identical inputs                | Probabilistic and primarily test/build-tool focused; not an integration admission graph [18] |
+
+The trend is clear. Commercial merge-queue vendors are moving from FIFO queues toward **dependency-aware DAG scheduling**, because simple serial queues cannot keep up when CI duration exceeds change arrival intervals. Commercial test platforms are separately moving toward **input-aware test reuse**. The seam between those two categories is where the proposed verification graph lives.
+
+## 6. Current Open-Source Solution Space
+
+### 6.1 Zuul: the strongest OSS speculative integration scheduler
+
+Zuul's dependent pipeline manager is purpose-built for gating. It tests each change exactly as it is expected to appear in the repository, but starts downstream speculative states in parallel. If an earlier change fails, downstream results that included it are discarded and rerun without it. [19]
+
+**What it accomplishes:** eliminates the human rebase/retest serialization loop while preserving future-main correctness.
+
+**What it does not accomplish:** it does not know that some downstream evidence may still be valid after an upstream candidate is removed. It reasons at integration-state granularity.
+
+### 6.2 Prow/Tide: mature batching with a documented invalidation ceiling
+
+Tide automatically batches and retests PRs and ensures they are validated against the current base. It explicitly advises maintainers not to force PR authors to keep rebasing manually. But its own maintainer documentation states that any merge makes other in-pool test results stale. [20]
+
+That is a crisp illustration of the gap: Tide automates the churn; it does not eliminate the churn.
+
+### 6.3 Bors: simple, proven gated batching
+
+The current Rust `rust-lang/bors` project is an actively used, MIT/Apache-2.0 merge queue implementation. Rust also uses rollups to combine multiple low-risk changes into one expensive CI cycle, a pragmatic response to multi-hour CI. [21]
+
+Bors is a strong model for “test exactly what will land” and for batching. It is intentionally not a general incremental verification engine.
+
+### 6.4 Gas Town Refinery: strategically aligned, not yet the whole answer
+
+Refinery's planned batch-then-bisect algorithm is conceptually Bors-like and directly attacks successful-case CI amplification. [2] Because Refinery already lives inside an agent-native orchestration system, it is a plausible long-term home for merge scheduling in Gas City/Gas Town.
+
+The natural extensions would be:
+
+1. Zuul-style speculative future-state windows.
+2. Mergify/Trunk-style scope-aware independent lanes.
+3. An affectedness interface supplied by Pants/Bazel/Buck2 or a repository-specific graph.
+4. A shared action/evidence cache.
+5. Eventually, verification-graph-aware invalidation instead of batch/commit invalidation.
+
+### 6.5 Pants: probably the lowest-friction OSS experiment for Gas City's Go-heavy repo
+
+Pants provides fine-grained invalidation, sandboxed/hermetic process execution, exact input-based caching, remote caching/execution via REAPI, and Git-aware changed-target operation. Its Go support includes per-package test-result caching and `--changed-since`, although Go support remains labeled beta. [22][23][24]
+
+For Gas City, that tradeoff is attractive: Pants can test the **incremental-verification hypothesis** without first converting the repository to Bazel.
+
+### 6.6 Bazel: the mature gold standard, with real migration cost
+
+Bazel is the strongest existing OSS demonstration of deterministic dependency graphs + content-addressed action caching + remote execution. [8] If Gas City were already a Bazel shop, it would be the obvious foundation. Adopting it primarily to fix CI is a much larger migration.
+
+`bazel-diff` and `target-determinator` can add affected-target analysis between revisions for Bazel-based repositories, making the relationship to merge scheduling even stronger.
+
+### 6.7 Buck2: important validation of the model
+
+Meta's Buck2 uses a single incremental dependency graph, hermetic rules, remote execution compatible with the Bazel Remote Execution API, and integration with virtual filesystems. Meta reports millions of internal builds per day. [10]
+
+Buck2 is evidence that the “incremental graph + remote cache/execution” pattern is not Google-specific. It is also a possible technical option, but less obvious than Pants for a low-risk Gas City pilot.
+
+### 6.8 Buildbarn / bazel-remote: shared compute memory
+
+Buildbarn is an Apache-2.0 implementation of the Remote Execution API, providing distributed content-addressed storage, action cache, scheduling, and remote execution. [25] For a lighter cache-only experiment, `bazel-remote` is an established REAPI-compatible cache.
+
+This layer is important because a verifier result that is reusable only on one runner is not useful at 10,000 changes/day. **The cache must be organizational, not local.**
+
+### 6.9 Nx: a parallel example from the JS/TS ecosystem
+
+Nx's `affected` command computes the minimal project set affected by Git changes using its project graph, and its task cache keys work from declared inputs. Nx now documents a self-hosted remote-cache API. [26][27]
+
+Nx is not the likely foundation for Gas City's Go code, but it validates the same architectural shape: affectedness first, then task-level cache reuse.
+
+## 7. Recommended OSS Reference Stack
+
+The fastest way to test the thesis is **not** to build the missing system first. Assemble the best existing pieces and measure what remains.
+
+```text
+                         GitHub
+                            │
+                            ▼
+                Integration / merge scheduler
+                Zuul  OR  Gas Town Refinery
+                            │
+                  future integration states
+                            │
+                            ▼
+               Affectedness + task graph
+                  Pants (pilot) / Bazel
+                            │
+                 exact process/action keys
+                            │
+                 ┌──────────┴──────────┐
+                 ▼                     ▼
+            cache hit              cache miss
+                 │                     │
+                 │             current runners /
+                 │             remote execution
+                 │                     │
+                 └──────────┬──────────┘
+                            ▼
+               Buildbarn / bazel-remote
+                     shared REAPI cache
+                            │
+                            ▼
+                    admission decision
+                            │
+                            ▼
+                          main
+```
+
+### Layer 1 — keep GitHub as source of record
+
+Do not replace Git or GitHub to solve this problem. Keep branches, review UI, permissions, status reporting, and canonical source history there. At 10,000 logical changes/day, batch logical changes into fewer publication transactions rather than assuming each logical change must consume a separate PR merge.
+
+### Layer 2 — eliminate human merge serialization
+
+**Reference implementation:** Zuul.
+
+**Strategic Gas Town path:** evolve Refinery toward the same semantics.
+
+The scheduler should construct and validate the future states changes will actually enter, and should allow independent scopes to advance concurrently.
+
+### Layer 3 — stop running obviously unaffected work
+
+Pilot Pants against the Go repository. Use it initially in shadow mode: ask Pants which tests/processes are affected, but continue running the existing full required checks as an audit. Compare Pants's predicted invalidation set to actual failures.
+
+If Pants's Go limitations prove material, evaluate a Bazel/Buck2 migration separately rather than contaminating the merge-queue experiment.
+
+### Layer 4 — share exact work across every runner
+
+Deploy `bazel-remote` first if a simple cache is sufficient; move to Buildbarn if remote execution or scalable CAS/action-cache topology becomes valuable.
+
+The objective is that identical verifier actions across PRs, agents, speculative states, and developer machines converge on a single cached result.
+
+### Layer 5 — preserve existing Actions/Blacksmith investment
+
+The experiment need not replace the current GitHub Actions pipeline. Current jobs can call Pants or other affectedness tooling, consume the remote cache, and report normal checks. Replace execution infrastructure only if measurement shows it is still a bottleneck.
+
+## 8. What This Stack Should Do for Julian and Steve
+
+For the moving-main problem:
+
+```text
+Before:
+B green on main@100
+A merges
+B's entire proof is stale
+rebase + rerun
+
+With merge scheduling:
+B is already tested against predicted main+A
+A merges
+B can continue without human intervention
+```
+
+For verification saturation:
+
+```text
+Before:
+new integration state
+→ run all required jobs
+
+With affectedness + exact action cache:
+new integration state
+→ compute affected task graph
+→ reuse tasks with identical inputs
+→ execute only cache misses
+```
+
+This should remove a large fraction of CTO/architect babysitting and make queue throughput depend more on **actual conflicts and changed dependencies** than on raw PR count.
+
+It still does not deliver the complete 10,000/day thesis, because the reuse boundary is mostly **process execution**. That is why the experiment is valuable: it tells us whether process-level caching is already sufficient or whether a more general evidence layer is required.
+
+## 9. The Experiment: Prove or Kill the Thesis
+
+The right test is not “does the demo feel faster?” It is a controlled measurement of proof churn and marginal verification cost.
+
+### 9.1 Instrument the current baseline
+
+Record, for every required check and every ready PR/change:
+
+- arrival time and ready-to-merge time;
+- base SHA when each check started;
+- reason a check/re-run was triggered;
+- changed files and current Gas City scope classification;
+- job identity/version and execution environment;
+- wall time and compute time;
+- pass/fail/flake classification;
+- cache hit/miss where available;
+- whether prior success was discarded solely because the base advanced;
+- human actions required to rebase, rerun, dequeue, or unblock;
+- final merge order and broken-main/revert outcomes.
+
+From those data, compute:
+
+**Proof churn ratio** = verification work repeated after a base advance / total verification work.
+
+**Marginal verification cost** = new verification compute consumed / merged logical change.
+
+**Queue amplification** = CI validations executed / logical changes merged.
+
+**Human serialization cost** = maintainer interventions / logical changes merged.
+
+### 9.2 Experiment A — scheduling only
+
+Run Zuul (or a Refinery implementation of equivalent semantics) in shadow mode on the live queue. Compare the future-state DAG it would have constructed with the actual sequence of rebases/retests.
+
+Then gate a low-risk subset through it.
+
+**Question:** How much of the pain disappears purely by removing human serialization?
+
+### 9.3 Experiment B — affectedness only
+
+Introduce Pants or an equivalent dependency engine in audit mode. For each CI run, record which packages/tests/actions it says can be skipped. Continue full verification in parallel so false non-invalidations are detectable.
+
+**Question:** What fraction of Gas City's current CI work is actually invalidated by an average change?
+
+### 9.4 Experiment C — shared action cache
+
+Connect the dependency engine to bazel-remote or Buildbarn. Run the same candidate stream across multiple workers and measure cache hits, bytes transferred, and compute avoided.
+
+**Question:** How much work is identical across different PRs and integration states once action identity is precise?
+
+### 9.5 Experiment D — combined stack
+
+Run the speculative merge DAG and affectedness/cache layer together. This is the real test: when an upstream candidate lands or fails, how much downstream verification survives?
+
+Suggested success metrics for the pilot should be agreed before running it. Reasonable starting targets to debate with the community are:
+
+| Metric                                                        |                                         Suggested pilot target |
+| ------------------------------------------------------------- | -------------------------------------------------------------: |
+| Manual rebase/retest interventions for queue-managed changes  |                                                 Reduce by ≥90% |
+| Verification compute repeated solely because base moved       |                                                 Reduce by ≥70% |
+| p95 ready-to-merged latency                                   |                          Approach ≤2 full CI cycles under load |
+| Cache/evidence reuse for unrelated or lightly related changes |                                          ≥70% of eligible work |
+| False non-invalidation in audited runs                        |                                                              0 |
+| Broken-main / revert rate                                     |                                         No worse than baseline |
+| Scheduler throughput                                          | Sustain ≥7 logical changes/minute in simulation; burst ≥20/min |
+
+The exact percentages are hypotheses, not promises. The non-negotiable safety target is **zero known false reuse** during the audit phase.
+
+### 9.6 Experiment E — 10,000/day control-plane stress test
+
+Do not create 10,000 real GitHub PRs. Feed 10,000 logical candidate events through the scheduler and verification planner using a distribution derived from real Gas City changes. Include realistic overlap, failures, flakes, shared-core changes, and bursts.
+
+The test should answer:
+
+- Does the queue remain bounded at a sustained average of ~6.94 logical changes/minute?
+- What percentage of verification nodes are newly executed vs reused?
+- How often does one failed upstream candidate destroy downstream work?
+- Can independent scopes proceed without waiting?
+- What publication batch size is needed to remain within GitHub's operational recommendations?
+- How many human escalations would 10,000 changes create under current policy?
+
+If the OSS stack keeps up economically and safely, stop. We have solved the problem with existing technology.
+
+If the queue still falls behind because useful verification results cannot survive changes to unrelated state, the missing abstraction has been isolated.
+
+## 10. The Missing Layer: An Open Verification Graph
+
+### 10.1 The one-line thesis
+
+> **Don't re-establish a fact unless something that fact depends on has changed.**
+
+An open verification graph generalizes the idea behind Bazel's action cache from **computations** to **claims about software**.
+
+### 10.2 Evidence is a first-class object
+
+A verifier should produce an immutable evidence record resembling:
+
+```text
+Evidence
+  proposition:  "internal/mail unit tests pass"
+  subject:      candidate tree / target digest
+  verifier:     mail-tests@<version-digest>
+  inputs:
+    - source/target digests
+    - transitive dependency digests
+    - fixture/config digests
+    - toolchain/environment digest
+    - command/flags
+  result:       PASS
+  outputs:      optional artifacts/logs
+  signature:    verifier identity
+```
+
+The evidence identifier is content-derived. Two independent candidates that require the same proposition over the same effective inputs should reference the same evidence node.
+
+### 10.3 The graph performs exact invalidation
+
+```text
+main advances
+     │
+     ▼
+Which content nodes changed?
+     │
+     ▼
+Traverse dependent evidence nodes
+     │
+ ┌───┴─────────────┐
+ │                 │
+still valid      invalid
+ │                 │
+reuse            recompute
+```
+
+This is conservative by construction: undeclared dependencies are a correctness bug. Early implementations should over-invalidate rather than risk false reuse. Hermetic verifier execution and dependency capture are therefore foundational.
+
+### 10.4 It goes beyond tests and builds
+
+Evidence nodes can represent:
+
+- compilation success;
+- unit/integration/e2e test outcomes;
+- lint/static-analysis results;
+- API/ABI compatibility;
+- schema migration properties;
+- dependency/license/security policy;
+- generated-code consistency;
+- benchmark bounds;
+- deterministic review rules;
+- canary/post-submit health;
+- even LLM reviewer opinions, provided they are treated as probabilistic/advisory evidence rather than hard truth.
+
+This is the distinction between an action cache and a verification graph.
+
+### 10.5 It deduplicates in-flight verification too
+
+If 37 candidates simultaneously require the same uncached fact, the scheduler should launch it once and attach all 37 consumers to that future. At 10,000/day, this can matter as much as caching completed work.
+
+### 10.6 It makes admission policy compositional
+
+A change class can declare the evidence required to ship:
+
+```text
+mechanical_refactor:
+  requires:
+    - affected compilation passes
+    - affected unit tests pass
+    - public API unchanged
+    - formatter/lint pass
+    - integration policy satisfied
+```
+
+Policy does not ask whether “CI is green.” It asks whether the required propositions are currently established for the candidate's exact integration state.
+
+SLSA's Verification Summary Attestation and the in-toto attestation framework are promising existing schemas for authenticated evidence, while OPA is a plausible policy engine with versioned policy bundles and auditable decision logs. [28][29][30] None of them supplies the invalidation/planning graph itself.
+
+## 11. Why the Open Verification Graph Could Matter Beyond Gas City
+
+The industry is converging on agents that can create more software changes than human-centric CI/CD was designed to absorb. The immediate response has been “more agents” on the generation side and “more runners” on the verification side. That scales cost, not architecture.
+
+An open verification graph could provide:
+
+1. **Sublinear verification cost.** The cost of one more change approaches the cost of the facts it actually invalidates.
+2. **Cross-agent reuse.** Thousands of agents share already-established truths rather than independently rediscovering them.
+3. **Cross-queue reuse.** Evidence can survive failed speculative parents when its real inputs are unaffected.
+4. **Vendor-neutral CI memory.** Evidence is not trapped in GitHub Actions, Buildkite, Jenkins, or one merge-queue vendor.
+5. **Auditable autonomous admission.** A policy decision can enumerate exactly which evidence justified publication.
+6. **A path from PR review to policy governance.** Humans can progressively automate well-understood change classes while escalating anomalies.
+7. **A common substrate for OSS.** Any verifier can publish evidence if it follows the schema and dependency rules.
+
+The sharpest formulation is:
+
+> **Merge queues cache ordering. Build systems cache computation. What is missing is a cache of verified truths.**
+
+If that statement is wrong — if Zuul/Refinery + Pants/Bazel + REAPI caching already makes 10,000/day practical — we should happily discover that through measurement and avoid building another subsystem.
+
+If it is right, then the verification graph is not “another CI product.” It is a potential **admission substrate for autonomous software factories**.
+
+## 12. Proposed Next Steps for Gas City and the OSS Community
+
+### Immediate
+
+1. Instrument Gas City's current pipeline to measure proof churn, queue amplification, and human serialization.
+2. Enable or prototype future-state merge scheduling (`merge_group`, Zuul, or Refinery-equivalent) rather than requiring every PR to chase `main`.
+3. Pilot Pants affectedness/caching on a representative Go slice in audit mode.
+4. Stand up a shared REAPI cache (bazel-remote first; Buildbarn if warranted).
+5. Replay historical/live change streams through the combined scheduler in shadow mode.
+
+### Then decide based on evidence
+
+If existing OSS keeps the queue bounded and compute affordable, adopt it and stop.
+
+If the remaining dominant cost is repeated verification whose actual dependencies are unchanged, prototype the **smallest possible verification graph** by wrapping existing CI jobs as coarse evidence nodes. Do not begin by inventing new test runners or a new forge. Refine the graph only where coarse invalidation is demonstrably expensive.
+
+### Questions for Julian, Steve, and the community
+
+- Which Gas City checks are genuinely hermetic today?
+- Which checks have undeclared dependencies that would make result reuse unsafe?
+- How much CI is repeated because `main` changed versus because relevant source actually changed?
+- Does Refinery want to own speculative integration scheduling, or should it consume an external scheduler such as Zuul?
+- Is Pants sufficiently accurate/mature for Gas City's Go dependency graph, or is Bazel/Buck2 worth the migration cost?
+- Which change classes could eventually be admitted by policy without per-change human review?
+- What is the right open schema for evidence identity and dependencies?
+- Can SLSA/in-toto be extended rather than inventing another attestation format?
+- How should probabilistic evidence (LLM review, predictive test selection) compose with deterministic evidence?
+- What is the minimum viable implementation that proves evidence survival across a moving `main`?
+
+## Conclusion
+
+Gas City's current pain is an early signal of a general transition. When coding agents can produce changes faster than a human team can integrate them, the bottleneck moves downstream: from **writing code** to **establishing that code is safe to admit**.
+
+The first step is not a new forge. It is to use the best existing integration and build-system ideas together: speculative merge scheduling, dependency-aware affectedness, batching, precise content-addressed caching, and shared execution. Google has demonstrated many of these principles independently at enormous scale through Rosie/TAP and Blaze; modern products and OSS systems have brought much of that machinery outside Google.
+
+But 10,000 autonomous changes per day pushes one step further. A commit SHA is too coarse a unit of invalidation, and a CI run is too coarse a unit of knowledge.
+
+The engineering target should be:
+
+> **A software factory in which each new change pays only for the uncertainty it creates.**
+
+That is the purpose of the proposed open verification graph. The next move is to measure whether we need it.
+
+---
+
+## References
+
+1. [Gas City repository: .github/workflows/ci.yml](https://github.com/gastownhall/gascity/blob/main/.github/workflows/ci.yml)
+
+2. [Gas Town Architecture: Merge Queue — Batch-then-Bisect](https://github.com/gastownhall/gastown/blob/main/docs/design/architecture.md)
+
+3. [GitHub Docs: Managing a merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
+
+4. [GitHub Docs: Repository limits](https://docs.github.com/en/repositories/creating-and-managing-repositories/repository-limits)
+
+5. [Software Engineering at Google, Chapter 22: Large-Scale Changes](https://abseil.io/resources/swe-book/html/ch22.html)
+
+6. [Steve Yegge: Dear Google Cloud — discussion of Grok and Rosie](https://yegge.ai/essays/dear-google-cloud-your-deprecation-policy-is-killing-you/)
+
+7. [Bazel FAQ: internal Blaze lineage and scale](https://bazel.build/about/faq)
+
+8. [Bazel Docs: Remote Caching](https://bazel.build/remote/caching)
+
+9. [Bazel docs: Distributed builds (ObjFS and Forge)](https://bazel.build/basics/distributed-builds)
+
+10. [Meta Engineering: Build faster with Buck2](https://engineering.fb.com/2023/04/06/open-source/buck2-open-source-large-scale-build-system/)
+
+11. [Mergify Docs: Queue Modes](https://docs.mergify.com/merge-queue/queue-modes/)
+
+12. [Mergify Docs: Merge Queue Batches](https://docs.mergify.com/merge-queue/batches/)
+
+13. [Trunk Docs: Parallel Queues](https://docs.trunk.io/merge-queue/optimizations/parallel-queues)
+
+14. [Trunk Docs: Pending Failure Depth](https://docs.trunk.io/merge-queue/optimizations/pending-failure-depth)
+
+15. [Aviator Docs: Affected Targets](https://docs.aviator.co/mergequeue/concepts/affected-targets)
+
+16. [Aviator Docs: Batching](https://docs.aviator.co/mergequeue/concepts/batching)
+
+17. [Graphite Docs: Merge Queue Optimizations](https://graphite.com/docs/merge-queue-optimizations)
+
+18. [Develocity Docs: Predictive Test Selection](https://docs.gradle.com/develocity/predictive-test-selection)
+
+19. [Zuul Docs: Project Gating](https://zuul-ci.org/docs/zuul/latest/gating.html)
+
+20. [Prow Docs: Tide](https://docs.prow.k8s.io/docs/components/core/tide/)
+
+21. [rust-lang/bors](https://github.com/rust-lang/bors)
+
+22. [Pants Docs: How does Pants work?](https://www.pantsbuild.org/stable/docs/introduction/how-does-pants-work)
+
+23. [Pants Docs: Go overview](https://www.pantsbuild.org/dev/docs/go)
+
+24. [Pants Docs: Remote caching & execution](https://www.pantsbuild.org/dev/docs/using-pants/remote-caching-and-execution)
+
+25. [Buildbarn: distributed cache and remote execution](https://github.com/buildbarn)
+
+26. [Nx Docs: Run Only Tasks Affected by a PR](https://nx.dev/docs/features/ci-features/affected)
+
+27. [Nx Docs: Self-hosted remote cache](https://nx.dev/docs/kb/self-hosted-caching)
+
+28. [SLSA v1.2: Verification Summary Attestation](https://slsa.dev/spec/v1.2/verification_summary)
+
+29. [in-toto: software supply-chain attestations](https://in-toto.io/docs/what-is-in-toto/)
+
+30. [Open Policy Agent: policy management and decision logs](https://www.openpolicyagent.org/docs/management-introduction)

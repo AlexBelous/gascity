@@ -3,9 +3,16 @@
 **Gas City Engineering White Paper — Discussion Draft**  
 **August 21, 2026**
 
-> **Objective:** Build an engineering system that can safely admit **10,000
-> agent-generated logical changes per day** without proportional growth in CI
-> compute or maintainer attention.
+> **Objective:** Design toward **10,000 agent-generated logical changes per
+> day** without verification compute growing as change volume multiplied by a
+> fresh full CI run, or routine maintainer attention growing with each change.
+> The number is a directional design horizon and stress case, not a traffic
+> forecast or universal release gate.
+
+> **Thesis:** Admission should scale with the uncertainty a change introduces,
+> not the number of changes produced. Durable work identity, integration,
+> proof selection, and publication must remain separate so the system can
+> batch, reuse, and recover without losing safety or accountability.
 
 > **Operating principle:** _Agents make changes. The system establishes facts.
 > Policy decides what ships. Humans govern policy and handle exceptions._
@@ -24,11 +31,19 @@ work it protects.
 Ten thousand logical changes per day is about **417 per hour, 6.94 per minute,
 or one every 8.6 seconds**. If every change buys a fresh full CI run, even a
 five-minute verification cycle requires roughly 35 concurrent validations to
-keep up. A 20-minute cycle requires about 139, before failures, flakes, retries,
-or queue churn.
+keep up. A 20-minute cycle requires about 139. Those are zero-headroom floors,
+before failures, flakes, retries, bursts, or queue churn; they are not safe
+capacity targets.
 
-Runner capacity alone will not solve this. Gas City must attack the problem at
-three points:
+The 10,000/day horizon is directional, not a hard operating requirement or a
+forecast of the current factory's traffic. It forces the design to confront
+four future shapes: one repository receiving most of the volume, work spread
+across a fleet, bursts against a shared core, and coordinated changes spanning
+repositories or services.
+
+Runner capacity can keep up with a raw arrival rate, but capacity alone would
+buy a fresh proof for every change and violate the objective. Gas City must
+attack the problem at three points:
 
 1. **Shape smaller changes.** Direct agents to make the smallest coherent
    change with the narrowest dependency and test blast radius. Split unrelated
@@ -54,41 +69,53 @@ measure the real queue, exercise GitHub's merge queue on `merge_group` states,
 and harden the existing affectedness model. Pilot Pants, Bazel, Zuul, Refinery,
 or a shared REAPI cache only where measurements expose a gap they can close.
 
-If that system safely keeps the queue bounded at 10,000 logical changes per
-day, stop. This proposal does not design a general-purpose verification graph,
-a new forge, or a new build system.
+If the experiments establish credible headroom toward that horizon within the
+registered safety and cost bounds, stop. This proposal does not design a
+general-purpose verification graph, a new forge, or a new build system.
 
-## 1. Define the target precisely
+## 1. Define the design horizon precisely
 
-A **logical change** is one independently attributable and revertible behavior
-change. It may come from a human, one coding agent, a swarm, a codemod, a
-dependency bot, or an optimizer. It does not have to map one-to-one to a commit
-or pull request, but the system must retain its identity after batching.
+A **logical change** is one independently attributable behavior change that can
+be selectively reversed or repaired subject to its dependency closure. It may
+come from a human, one coding agent, a swarm, a codemod, a dependency bot, or an
+optimizer. It does not have to map one-to-one to a commit or pull request, but
+the system must retain its identity after batching.
 
-Three units matter:
+Four units matter:
 
 | Unit | Meaning |
 | --- | --- |
-| Logical change | The independently attributable and revertible unit of intent |
+| Parent outcome | The user-visible result requested by the originating Bead or formula run |
+| Logical change | A publishable Bead, or dependency-closed Bead subgraph, that carries one attributable behavior change |
 | Integration candidate | One or more logical changes assembled into a source state for verification |
 | Publication transaction | The Git push or PR merge that makes accepted changes canonical |
 
-The throughput target counts **accepted logical changes**, not generated diffs.
+The throughput metric counts **accepted logical changes**, not generated diffs.
 Splitting one edit into ten commits does not create ten units of value. A useful
 logical change has a stable identity, an owner, an intended outcome, dependency
 relationships, verification results, and a path to individual rollback or
-forward repair.
+forward repair. Report completed parent outcomes beside logical-change
+throughput so decomposition cannot manufacture apparent value.
+
+Beads already provides the durable work identity. The originating Bead or
+formula-run root identifies the parent outcome; a designated publishable Bead
+or dependency-closed Bead subgraph identifies each logical change. The
+publication record maps those IDs to their source commits or patch, declared
+dependencies, proofs, candidate and batch membership, and final canonical SHA.
+No new work ledger is required.
 
 GitHub currently recommends no more than one merged PR per minute and six
-pushes per minute per repository. Ten thousand one-change PRs would require
-almost seven merges per minute continuously. Staying near the recommended merge
-rate requires publication transactions to carry at least seven logical changes
-on average, and more during working-hour bursts. [1]
+pushes per minute per repository. A repository receiving the entire target
+would need 6.94 logical changes per merged PR to stay near the first limit, or
+1.16 logical changes per push to stay near the second. This proposal uses
+reviewed PR publication as the primary pressure model. [1]
 
-This makes batching part of the design requirement rather than a later
-optimization. The batch is a transport unit. It must not erase the identity,
-dependency order, audit trail, or revertibility of the logical changes inside
-it.
+This makes batching a design requirement for a sufficiently hot repository,
+not for every fleet topology. GitHub Merge Queue grouping is publication
+scheduling: it does not create pre-PR logical batches or combine the underlying
+builds. A Gas City batch is a transport unit and must not erase the identity,
+dependency order, audit trail, or selective repair path of the logical changes
+inside it.
 
 ### 1.1 The workload model
 
@@ -101,13 +128,25 @@ test and capacity model must include:
 - conflicts and explicit dependencies between concurrent changes;
 - test, review, and integration failure rates;
 - flakes and infrastructure failures;
-- single-repository, cross-repository, and cross-service changes; and
-- publication batch size and failure-contamination rate.
+- single-repository, cross-repository, and cross-service changes;
+- publication batch size and failure-contamination rate;
+- offered load and sustainable service capacity for each constrained resource;
+  and
+- queue depth, oldest-ready age, tail latency, and post-burst drain time.
 
-The first model should come from recent Gas City history. Synthetic cases then
-stress the tails: a burst against one shared package, many independent component
-changes, a cache outage, a failing change at the front of the queue, and a
-coordinated change spanning Gas City, T3 Code, and the beads backend.
+Recent Gas City history should calibrate change shape, proof cost, failure rate,
+and human work. It does not set the target volume. Synthetic cases then exercise
+the four future workload shapes and stress the tails: a burst against one shared
+package, many independent component changes, a cache outage, a failing change
+at the front of the queue, and a coordinated change spanning Gas City, T3 Code,
+and the beads backend.
+
+For every constrained resource—the forge and its API, candidate construction,
+queues, runners, caches, publication, and human exception handling—offered load
+must remain below measured sustainable service capacity with positive headroom.
+Phase 0 establishes those service curves through baseline telemetry and
+controlled saturation tests. The capacity, tail-latency, compute, and
+human-work limits are then fixed before the combined load test.
 
 ## 2. Start from Gas City's current system
 
@@ -194,12 +233,15 @@ A directory, repository, or service is not independently hardenable merely
 because it has a name. It needs an explicit contract, a known dependency edge,
 and a focused proof that protects the boundary.
 
-Gas City should derive an initial component map from the path groups and test
-owners already present in CI. Tighten those boundaries where measurement shows
-that unrelated changes still force a full union. When two components can be
-changed, tested, deployed, and reverted independently, the scheduler can place
-them in parallel lanes. When a change crosses the contract between them, it
-becomes one coordinated integration candidate.
+Gas City's current path groups and test owners should seed component names and
+the proof inventory, not define dependency truth. Authoritative package and
+build graphs plus explicit contracts define dependency edges; `shared` remains
+the fail-closed answer when the graph cannot prove a narrower scope. Tighten
+those boundaries where measurement shows that unrelated changes still force a
+full union. When two components can be changed, tested, deployed, and repaired
+independently, the scheduler can place them in parallel lanes. When a change
+crosses the contract between them, it becomes one coordinated integration
+candidate.
 
 This model works at every scale:
 
@@ -230,17 +272,22 @@ limits do not combine the underlying `merge_group` builds. [5]
 
 That makes GitHub's queue the first scheduler to test. The pilot should:
 
-1. add `merge_group` handling to the reusable CI workflow;
-2. make changed-file and base-SHA logic work for both PR and merge-group events;
-3. report the same stable `CI / required` check on predicted integration states;
-4. run first on a test branch or bounded class of changes; and
-5. compare interventions, duplicate work, and time-to-merge against the current
+1. inventory the live required contexts and ruleset that govern admission;
+2. add `merge_group` handling to every required workflow, including CodeQL;
+3. make changed-file and base-SHA logic work for both PR and merge-group events;
+4. report the same stable `CI / required` check on predicted integration states;
+5. migrate the ruleset through a canary with an operator rollback path; and
+6. compare interventions, duplicate work, and time-to-merge against the current
    flow.
 
 If GitHub's queue keeps the admission queue bounded, use it. Bring in Zuul or
 extend Gas Town's Refinery only if measurements show that GitHub's state-level
 rebuilds, queue policy, batching, or cross-repository coordination are the
 remaining bottleneck. [10]
+
+This pilot can prove whether predicted integration states reduce rebase churn.
+It cannot prove logical batching, cross-repository atomicity, or incremental
+proof reuse; those are separate experiments.
 
 ### 4.1 Batch logical changes without losing them
 
@@ -251,7 +298,8 @@ publication transactions. A practical batcher should:
 - group changes with low overlap or an intentional dependency relationship;
 - build and test the combined tip or required union once where safe;
 - publish the whole batch when it passes; and
-- split or bisect a failing batch until the bad logical change is isolated.
+- split or bisect a failing batch until the minimal failing subset is isolated,
+  without violating dependency closure.
 
 Gas Town's Refinery design already describes Bors-style batch-then-bisect
 behavior. That is a plausible strategic home for Gas City-aware batching once
@@ -267,12 +315,14 @@ Ten thousand changes per day cannot require ten thousand human approvals. For a
 bounded change class with trustworthy deterministic proofs, policy should admit
 the routine cases and send exceptions to a person.
 
-Start with one narrow class whose risks and required proofs are well understood.
-A trusted classifier uses provenance, the diff, the dependency closure, and
-verification results. A new scope, failed proof, unexplained generated output,
-policy change, or unexpectedly broad blast radius escalates. Humans review the
-versioned admission policy, audit samples, and handle those exceptions. Go
-executes that policy; it does not contain the judgment itself.
+Start with one narrow class whose risks and required proofs are well understood,
+after affectedness and merge behavior have passed their own audits. A versioned,
+declarative policy names the admissible scope, provenance, dependency closure,
+and required proofs. The controller evaluates those predicates mechanically; it
+does not infer whether a change is safe. Missing or ambiguous evidence, a new
+scope, failed proof, unexplained generated output, policy change, or unexpectedly
+broad blast radius fails closed into human review. Humans govern the policy,
+audit samples, and handle exceptions.
 
 Expand automated admission one audited change class at a time. Track its
 escalation rate, escaped-defect rate, rollback rate, and human minutes per
@@ -296,15 +346,21 @@ larger invalidation sets even when the scheduler is perfect.
 
 ### 5.1 Improve the current planner before importing another one
 
-Use the existing path filters and `shared` fallback as the first affectedness
-model. Instrument which gates they select and compare that selection with
-full-union audit runs. Replace a coarse rule only when dependency or contract
-data can prove a narrower one.
+Use the existing path filters, package dependency graph, and `shared`
+fail-closed fallback as the first affectedness model. Instrument which gates
+they select and compare that selection with full-union audit runs. Replace a
+coarse rule only when dependency or contract data can prove a narrower one.
 
 Pants is a candidate for a shadow pilot because it offers Git-aware changed
 targets, per-package Go test caching, and REAPI-compatible remote caching. Its
 Go backend remains beta and has unsupported edges, so it is an experiment, not
 the default architecture. [7][8]
+
+Before the pilot, register the acceptable miss-rate bound, confidence target,
+sample size, workload strata, and delayed observation window. Exercise seeded
+hidden-dependency cases and retain random full-union runs after rollout so drift
+stays visible. Any missed failure broadens the rule and removes it from
+admission until it passes again.
 
 The pilot should answer concrete questions:
 
@@ -337,11 +393,13 @@ interesting if distributed CAS, scheduling, or remote execution is needed.
 Neither helps until Pants, Bazel, or another client emits trustworthy action
 keys. [11][12]
 
-A shared cache is part of the admission trust boundary. Untrusted pull requests
-must not be able to poison results later consumed by protected runs. Writes need
-an authenticated producer identity and a repository/toolchain namespace;
-untrusted work should be isolated or read-only. Cache failure must cause
-recomputation, never false success.
+A shared cache is part of the admission trust boundary. Authenticating a
+producer does not authorize its results for every consumer. Reuse and in-flight
+coalescing must be bound to a trust domain, workflow and policy revision,
+platform and environment, and the exact action inputs. Protected candidates
+must never consume results produced in an untrusted pull-request domain.
+Untrusted work should be isolated or read-only. A miss, corrupt entry, or cache
+failure causes recomputation, never false success.
 
 Do not reuse time-sensitive or environment-sensitive checks as though they were
 pure functions. Security scans, live-service tests, benchmarks, and probabilistic
@@ -350,14 +408,23 @@ reviews need explicit freshness and environment policy. When in doubt, run them.
 ## 6. Measure before choosing the final stack
 
 The experiment is a funnel. Each phase must isolate one source of throughput
-loss and has a stop condition.
+loss and has a stop condition. A control enters admission only after its own
+safety gate passes. Phase 0 supplies the baseline used to set capacity, tail
+latency, compute, human-work, and safety limits; those limits are registered
+before the combined test rather than chosen after seeing its results.
 
-### Phase 0: establish the baseline
+### Phase 0: establish identity and the baseline
+
+Define the Beads projection for parent outcomes and logical changes, then carry
+those IDs through candidates, proofs, batches, and publication transactions.
+Use controlled load to find each constrained resource's sustainable service
+curve rather than extrapolating from an underloaded production sample.
 
 For every required check and ready logical change, record:
 
 - creation, ready, queue-entry, verification, and publication times;
-- logical change, integration candidate, and publication transaction IDs;
+- parent outcome, logical change, integration candidate, batch, and publication
+  transaction IDs;
 - base SHA and reason each run or rerun was triggered;
 - changed components and predicted proof set;
 - suite mode (`filtered` or `full`) and actual jobs executed;
@@ -365,7 +432,9 @@ For every required check and ready logical change, record:
 - cache hits, misses, and bytes transferred;
 - pass, failure, flake, and infrastructure-failure classification;
 - prior successes discarded solely because the base advanced;
-- human actions required to rebase, rerun, dequeue, or unblock; and
+- human actions and minutes required to rebase, rerun, dequeue, or unblock;
+- queue depth, oldest-ready age, and post-burst drain time;
+- offered load and sustainable service rate at each constrained resource; and
 - merge order, rollback, and broken-`main` outcomes.
 
 Compute:
@@ -373,12 +442,15 @@ Compute:
 | Metric | Definition |
 | --- | --- |
 | Admission throughput | Accepted logical changes / day |
+| Outcome throughput | Completed parent outcomes / day |
 | Publication compression | Accepted logical changes / publication transactions |
 | Proof churn ratio | Verification compute repeated after a base advance / total verification compute |
 | Invalidation surface | Proof nodes selected / proof nodes available |
-| Marginal verification cost | New verification compute / accepted logical change |
+| Verification cost | Full-suite-equivalent compute / accepted logical change and completed parent outcome |
 | Queue amplification | Integration states validated / accepted logical changes |
-| Human serialization cost | Maintainer interventions / accepted logical changes |
+| Queue health | Queue depth, oldest-ready age, p95/p99 ready-to-canonical latency, and drain time |
+| Capacity headroom | Sustainable service capacity minus offered load at each constrained resource |
+| Human serialization cost | Maintainer interventions and minutes / accepted logical change |
 
 The timing work should extend the existing `ga-80po0c.4` telemetry rather than
 create a parallel measurement system. [3][4]
@@ -392,35 +464,47 @@ rollback size with the baseline.
 **Stop condition:** keep the guidance only if changes become narrower without
 increasing escaped defects, partial fixes, or human decomposition work.
 
-### Phase 2: bounded automated admission
+### Phase 2: affectedness shadow and audit
 
-Choose one routine change class with stable, deterministic proof requirements.
-Run its admission policy in shadow mode while humans continue reviewing it, then
-compare classifications, exceptions, escaped defects, and review effort.
+Shadow the current planner, then any Pants or repository-specific alternative,
+against full-union runs. Include seeded hidden-dependency cases and retain
+random full validation after rollout. Report the registered miss-rate bound,
+confidence, sample size, workload strata, and delayed observation window.
 
-**Stop condition:** automate only if the trusted classifier and proof set cover
-the class cleanly. Ambiguous scope or a high exception rate means the class is
-not ready.
+**Safety gate:** a missed failure fails the pilot, broadens the rule, and keeps
+it out of admission until the revised rule passes. A zero-observation result is
+reported with its actual confidence and coverage, not as proof of impossibility.
 
 ### Phase 3: merge scheduling
 
 Run GitHub Merge Queue on a bounded stream. Measure base-advance reruns, queue
-latency, duplicate compute, and manual intervention.
+latency, duplicate compute, and manual intervention. Exercise every required
+workflow, the live ruleset, the canary, and operator rollback.
 
 **Stop condition:** if moving-main churn becomes negligible, do not add Zuul or
 build equivalent scheduling machinery in Refinery.
 
-### Phase 4: affectedness audit
+### Phase 4: logical batching
 
-Shadow the current planner, then any Pants or repository-specific alternative,
-against full-union runs. Randomly retain full validation after the audit period
-so drift remains detectable.
+Replay and canary batches in the hot-repository workload. Measure publication
+compression, combined-proof reuse, failure contamination, split cost, and time
+to isolate the minimal failing dependency-closed subset.
 
-**Safety gate:** zero observed false non-invalidations, plus enough audited and
-randomly sampled full runs to report the confidence and workload coverage
-honestly. A missed failure fails the pilot and broadens the rule.
+**Stop condition:** keep batching only where it reduces publication or proof
+pressure without losing identity, dependency order, or failure containment.
 
-### Phase 5: shared cache
+### Phase 5: bounded automated admission
+
+Choose one routine change class with stable, deterministic proof requirements.
+Run its versioned declarative policy in shadow mode while humans continue
+reviewing it, then compare decisions, exceptions, escaped defects, and review
+effort.
+
+**Stop condition:** automate only if every admission decision is explained by
+explicit predicates and proofs. Missing or ambiguous evidence must fail closed;
+a high exception rate means the class is not ready.
+
+### Phase 6: shared cache
 
 Connect the selected client to a shared cache in an isolated trust domain.
 Measure hit rate, transfer cost, compute avoided, poisoning resistance, and
@@ -429,25 +513,37 @@ behavior during cache loss.
 **Stop condition:** keep the remote cache only if avoided compute and latency
 outweigh transfer, storage, operations, and security cost.
 
-### Phase 6: combined load test
+### Phase 7: combined load test
 
-Replay a representative stream plus synthetic worst cases through the complete
-planner and scheduler. Do not create 10,000 real GitHub PRs.
+Replay representative history plus synthetic versions of the four future
+workload shapes through the complete planner and scheduler. Model large-volume
+capacity offline and use smaller real GitHub canaries for forge behavior; do
+not create 10,000 real pull requests.
 
-The system passes when it:
+The directional 10,000/day scenario succeeds when it:
 
-- sustains at least 6.94 accepted logical changes per minute on average and the
-  agreed burst profile without an unbounded queue;
-- groups enough logical changes to remain near GitHub's publication guidance;
+- sustains an average 6.94 accepted logical changes per minute and the
+  registered burst profile with positive headroom at every constrained
+  resource;
+- keeps queue depth, oldest-ready age, p95/p99 ready-to-canonical latency, and
+  post-burst drain time within their registered bounds;
+- achieves the required publication compression in the hot-repository shape;
 - keeps p95 protected feedback within the `TESTING.md` target;
+- stays within the registered full-suite-equivalent compute budget per accepted
+  logical change and completed parent outcome;
+- stays within the registered maintainer-intervention and human-minute budgets;
+- meets the registered affectedness and admission safety bounds at their stated
+  confidence and workload coverage;
 - shows no worse broken-`main` or rollback rate than the baseline;
 - survives scheduler restart, cache loss, and a failing shared-core change;
 - keeps unrelated component lanes moving during localized failures; and
 - reports every logical change, proof result, batch membership, and publication
   outcome without silent loss.
 
-Percent-reduction targets for churn, cost, and intervention should be set after
-Phase 0. The safety and bounded-queue outcomes are not negotiable.
+This scenario is evidence about the architecture's future headroom, not a claim
+that today's workload needs 10,000 changes or that every deployment must clear
+that volume before it can ship. The safety, truthfulness, and bounded-queue
+outcomes remain requirements at every operating scale.
 
 ## 7. The practical architecture
 
@@ -456,75 +552,80 @@ agent formula / prompt
   shapes the smallest coherent logical change
                      │
                      ▼
-logical change stream
-  identity + dependencies + affectedness declaration
+Beads work graph
+  parent outcome + logical change IDs + dependency closure
                      │
                      ▼
-trusted integration planner
-  computes actual component/dependency blast radius
+candidate builder / batcher
+  preserves source, dependency, proof, and publication mappings
                      │
           ┌──────────┴──────────┐
           ▼                     ▼
- independent lanes       shared/cross-repo lane
+ component-local lanes    shared/cross-repo lane
+          │                     │
+          ▼                     ▼
+ per-repo Merge Queue     per-repo queues + cross-repo
+ predicted states         coordination when required
           │                     │
           └──────────┬──────────┘
-                     ▼
-future integration states / batches
-  GitHub Merge Queue first; Refinery or Zuul if justified
                      │
                      ▼
 affected proof planner
-  current Gas City graph first; Pants/Bazel pilot if justified
+  path filters + package graph + contracts + fail-closed fallback
                      │
           ┌──────────┴──────────┐
           ▼                     ▼
-      cache hit             cache miss
+ trusted cache hit      isolated miss / recompute
+ exact inputs + trust domain + workflow/policy revision
           │                     │
           └──────────┬──────────┘
                      ▼
              CI / required
                      │
                      ▼
-             admission policy
-  publishes routine cases; escalates exceptions
+      declarative admission policy
+  admits proved cases; fails closed on missing evidence
                      │
                      ▼
 publication transaction
-  preserves each logical change's identity and rollback path
+  canonical SHA ↔ logical change IDs and dependency closure
 ```
 
-GitHub remains the source of record. GitHub Actions and Blacksmith remain the
+GitHub remains the source of record for code and canonical publication. Beads
+remains the source of record for work identity and dependencies; the
+publication mapping connects the two. GitHub Actions and Blacksmith remain the
 execution layer until a measured bottleneck justifies replacing them. Gas City
 prompts shape the work; trusted CI code computes affectedness and establishes
 the facts used for admission.
 
 ## 8. Immediate next steps
 
-1. Extend the existing timing telemetry to measure logical changes,
-   publication transactions, proof churn, invalidation surface, and maintainer
-   intervention.
+1. Define the Beads projection for parent outcomes and logical changes, then
+   extend existing telemetry through candidates, proofs, batches, and canonical
+   publication.
 2. Add small-change and blast-radius guidance to the development formulas used
    by Gas City agents.
-3. Turn the existing CI path groups and test owners into an explicit initial
-   component/dependency map, retaining `shared` as the fail-closed fallback.
-4. Add and test `merge_group` support on a bounded branch or change class.
-5. Replay historical changes through the component planner and merge scheduler
-   before either controls admission.
-6. Define one bounded change class for audited policy-based admission, with
-   explicit required proofs and escalation triggers.
-7. Pilot batching with stable logical-change identities and batch-then-bisect
-   failure isolation.
-8. Run a Pants shadow pilot only if the current affectedness model remains a
+3. Build the initial component and dependency model from authoritative package
+   and build graphs plus explicit contracts; run affectedness in shadow mode
+   with `shared` as the fail-closed fallback.
+4. Inventory required contexts and add `merge_group` support to every required
+   workflow, then canary the ruleset migration with an operator rollback path.
+5. Pilot dependency-aware batching in the hot-repository shape, preserving
+   logical identity and isolating minimal failing subsets.
+6. Define one bounded change class for declarative admission and run its policy
+   in shadow mode with explicit proofs and fail-closed escalation.
+7. Run a Pants shadow pilot only if the audited affectedness model remains a
    material source of excess work.
-9. Add a shared action-cache pilot only after a client can produce safe,
-   reproducible keys and the cache trust boundary is defined.
-10. Run the 10,000/day load test, publish the measurements, and choose the
-   smallest stack that keeps the queue bounded.
+8. Add a shared action-cache pilot only after a selected client can produce
+   exact keys and authorization between trust domains is defined.
+9. Run the combined directional 10,000/day scenario, publish the measurements,
+   and choose the smallest stack that keeps queues bounded with positive
+   headroom.
 
 ## Conclusion
 
-Gas City gets to 10,000 changes per day by controlling the entire admission
-path, beginning with the shape of the change itself.
+Gas City designs toward the 10,000/day horizon by controlling the entire
+admission path, beginning with the shape of the change itself.
 
 Agents should produce the smallest independently useful changes. Component
 boundaries should let unrelated work proceed and harden independently. The
@@ -532,13 +633,14 @@ merge scheduler should test future states and publish groups of logical changes
 without making every PR chase `main`. CI should run the smallest truthful proof
 set and reuse exact work behind a clear trust boundary.
 
-The target is straightforward:
+The thesis is straightforward:
 
-> **Each new change pays only for the uncertainty it creates, and the queue
-> stays bounded while 10,000 useful changes become canonical every day.**
+> **Each new change pays only for the uncertainty it creates. Work identity,
+> integration, proof, and publication stay separate so queues and human effort
+> remain bounded as volume grows.**
 
 Measure each layer, add machinery only where the measurements require it, and
-stop when the target is met.
+use the 10,000/day scenario to expose where the design runs out of headroom.
 
 ---
 

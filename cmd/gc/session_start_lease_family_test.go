@@ -97,7 +97,7 @@ func TestEveryAdmissionLeaseIsNamedOrExplicitlyExcluded(t *testing.T) {
 	admissionType := reflect.TypeOf(sessionStartAdmission{})
 	for i := range admissionType.NumField() {
 		field := admissionType.Field(i)
-		if field.Type.Kind() != reflect.Ptr || field.Type.Elem().Kind() != reflect.Struct ||
+		if field.Type.Kind() != reflect.Pointer || field.Type.Elem().Kind() != reflect.Struct ||
 			!strings.HasSuffix(field.Type.Elem().Name(), "Lease") {
 			continue
 		}

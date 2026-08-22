@@ -416,6 +416,16 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	}
 	runtimeDir := t.TempDir()
 	gcHome := t.TempDir()
+	// gc init's author-identity gate shells out to `dolt config --get`, which reads
+	// $DOLT_ROOT_PATH; without a seeded root it finds the developer's config or none.
+	doltRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(doltRoot, ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir dolt root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(doltRoot, ".dolt", "config_global.json"),
+		[]byte(`{"user.name":"gc-test","user.email":"gc-test@test.local"}`), 0o644); err != nil {
+		t.Fatalf("seed dolt identity: %v", err)
+	}
 	commandEnv := append([]string(nil), os.Environ()...)
 	commandEnv = replaceEnvEntry(commandEnv, "PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	commandEnv = replaceEnvEntry(commandEnv, "GC_HOME", gcHome)
@@ -427,6 +437,7 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	commandEnv = replaceEnvEntry(commandEnv, "BEADS_DIR", filepath.Join(cityPath, ".beads"))
 	commandEnv = replaceEnvEntry(commandEnv, "BEADS_DOLT_AUTO_START", "1")
 	commandEnv = replaceEnvEntry(commandEnv, "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS", "1")
+	commandEnv = replaceEnvEntry(commandEnv, "DOLT_ROOT_PATH", doltRoot)
 
 	runGC := func(timeout time.Duration, args ...string) string {
 		t.Helper()

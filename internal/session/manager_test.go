@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func immediateStaleKeyDetectionWaiter(context.Context, string) error { return nil }
@@ -62,7 +62,7 @@ func awaitStaleKeyWaiterEntry(t *testing.T, waiter *manualStaleKeyDetectionWaite
 		if got != want {
 			t.Fatalf("stale-key waiter entered for %q, want %q", got, want)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for stale-key waiter entry for %q", want)
 	}
 }
@@ -72,7 +72,7 @@ func awaitSessionOperation(t *testing.T, result <-chan error, description string
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for %s", description)
 		return nil
 	}
@@ -1185,6 +1185,38 @@ func TestCreateSessionBeadOnly(t *testing.T) {
 	}
 }
 
+// TestCreateSessionBeadOnlyStampsPendingCreateStartedAtFromManagerClock pins
+// that pending_create_started_at is read from the Manager's injected clock,
+// not the real wall clock. The never-started pending-create lease
+// (cmd/gc/session_reconciler.go pendingCreateNeverStartedLeaseExpiredInfo)
+// anchors on this timestamp and compares it against clock.Fake in reconciler
+// tests; if the stamp comes from real time instead, the anchor and the
+// comparison live on different timelines and the lease can never expire in
+// those tests, silently disabling the rollback safety net.
+func TestCreateSessionBeadOnlyStampsPendingCreateStartedAtFromManagerClock(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+	fakeNow := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	mgr.clk = &clock.Fake{Time: fakeNow}
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
+	if err != nil {
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	got, err := time.Parse(time.RFC3339, b.Metadata["pending_create_started_at"])
+	if err != nil {
+		t.Fatalf("pending_create_started_at = %q, not RFC3339: %v", b.Metadata["pending_create_started_at"], err)
+	}
+	if !got.Equal(fakeNow) {
+		t.Errorf("pending_create_started_at = %v, want %v (manager clock, not real wall clock)", got, fakeNow)
+	}
+}
+
 func TestGetSurfacesAgentNameMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -1696,7 +1728,7 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(
-		context.Background(), CreateOptions{Alias: "mayor", ExplicitName: "test-city--mayor", Template: "reviewer", Title: "Mayor", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GC_AGENT": "stale"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
+		context.Background(), CreateOptions{Alias: "", ExplicitName: "test-city--mayor", Template: "reviewer", Title: "Mayor", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GC_AGENT": "stale"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
 			"configured_named_session":  "true",
 			"configured_named_identity": "mayor",
 			"session_origin":            "named",
@@ -1723,6 +1755,7 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 		"GC_TEMPLATE":       "reviewer",
 		"GC_SESSION_ORIGIN": "named",
 		"GC_AGENT":          "mayor",
+		"BEADS_ACTOR":       "mayor",
 	} {
 		if got := env[key]; got != want {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
@@ -1817,10 +1850,11 @@ func TestCreateAliaslessMultiSessionUsesConcreteRuntimeIdentity(t *testing.T) {
 	for key, want := range map[string]string{
 		"GC_SESSION_ID":     info.ID,
 		"GC_SESSION_NAME":   "ant-adhoc-123",
-		"GC_ALIAS":          "demo/ant-adhoc-123",
+		"GC_ALIAS":          "",
 		"GC_TEMPLATE":       "demo/ant",
 		"GC_SESSION_ORIGIN": "manual",
-		"GC_AGENT":          "demo/ant-adhoc-123",
+		"GC_AGENT":          "ant-adhoc-123",
+		"BEADS_ACTOR":       "ant-adhoc-123",
 	} {
 		if got := env[key]; got != want {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
@@ -2397,6 +2431,78 @@ func TestBuildResumeCommand(t *testing.T) {
 	}
 }
 
+// TestBuildResumeCommandWarnsOnMissingSessionKey pins the observability half of
+// the silent-fresh-restart fix: a resume-capable provider with no session key
+// still falls back to the plain command (behavior unchanged), but that fallback
+// must now say so. A provider with no resume flag at all is not a degraded
+// resume and must stay silent.
+func TestBuildResumeCommandWarnsOnMissingSessionKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		info     Info
+		wantWarn bool
+	}{
+		{
+			name: "resume capable but no key warns",
+			info: Info{
+				ID:         "gc-7",
+				Command:    "claude --dangerously-skip-permissions",
+				Provider:   "claude",
+				ResumeFlag: "--resume",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "no resume flag stays silent",
+			info: Info{
+				ID:       "gc-8",
+				Command:  "amp",
+				Provider: "amp",
+			},
+			wantWarn: false,
+		},
+		{
+			name: "resume flag with key stays silent",
+			info: Info{
+				ID:         "gc-9",
+				Command:    "claude --dangerously-skip-permissions",
+				Provider:   "claude",
+				ResumeFlag: "--resume",
+				SessionKey: "5f0d9c1e-6a2b-4c3d-8e4f-1a2b3c4d5e6f",
+			},
+			wantWarn: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			prevOut := log.Writer()
+			prevFlags := log.Flags()
+			log.SetOutput(&buf)
+			log.SetFlags(0)
+			t.Cleanup(func() {
+				log.SetOutput(prevOut)
+				log.SetFlags(prevFlags)
+			})
+
+			BuildResumeCommand(tt.info)
+
+			logged := buf.String()
+			gotWarn := strings.Contains(logged, "resume requested but no session key")
+			if gotWarn != tt.wantWarn {
+				t.Fatalf("warning logged = %v, want %v (log: %q)", gotWarn, tt.wantWarn, logged)
+			}
+			if tt.wantWarn {
+				for _, want := range []string{tt.info.ID, tt.info.Provider, tt.info.ResumeFlag} {
+					if !strings.Contains(logged, want) {
+						t.Errorf("warning %q missing context %q", logged, want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestStripResumeFlagArgRoundTripsBuildResumeCommand(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2541,12 +2647,14 @@ func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
 		t.Fatalf("UpdatePresentation(alias): %v", err)
 	}
 
-	got, err := sp.GetMeta(info.SessionName, "GC_ALIAS")
-	if err != nil {
-		t.Fatalf("GetMeta(GC_ALIAS): %v", err)
-	}
-	if got != nextAlias {
-		t.Fatalf("GC_ALIAS = %q, want %q", got, nextAlias)
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT", "BEADS_ACTOR"} {
+		got, err := sp.GetMeta(info.SessionName, key)
+		if err != nil {
+			t.Fatalf("GetMeta(%s): %v", key, err)
+		}
+		if got != nextAlias {
+			t.Fatalf("%s = %q, want %q", key, got, nextAlias)
+		}
 	}
 
 	bead, err := store.Get(info.ID)

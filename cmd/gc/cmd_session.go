@@ -2421,6 +2421,24 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		return 1
 	}
 
+	// Record the sleep intent BEFORE tearing the runtime down. Until this write
+	// lands the row still claims a live runtime, so a reconciler tick landing
+	// between the teardown and the sync sees claims-live + dead-runtime and acts
+	// on it twice: it restarts the session the operator just killed and closes
+	// the row as dead-runtime (ga-rk41a). The wake half stays after the kill —
+	// a wake request on a row whose runtime is alive invites a duplicate.
+	syncedAt := time.Now().UTC()
+	sleepSynced := false
+	if infoErr == nil {
+		sleepPatch := session.SleepPatch(syncedAt, "killed")
+		sleepPatch["synced_at"] = syncedAt.Format(time.RFC3339)
+		if err := sessStore.SetMetadataBatch(sessionID, sleepPatch); err != nil {
+			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+		} else {
+			sleepSynced = true
+		}
+	}
+
 	killErr := handle.Kill(context.Background())
 	if killErr != nil && (identity == "" || !runtimeAlreadyInactive) {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
@@ -2442,16 +2460,14 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		fmt.Fprintf(stderr, "gc session kill: warning: session %s runtime was already inactive; cleared named-session circuit breaker\n", sessionID) //nolint:errcheck // best-effort stderr
 	}
 
-	// Sync the bead to asleep so a later `gc session wake` / reconcile starts
-	// a fresh runtime instead of short-circuiting on the stale live state the
-	// kill leaves behind (#3629). Written here at the CLI layer rather than in
-	// Manager.Kill so the drain-ack async-stop path (verifiedStop ->
-	// handle.Kill -> Manager.Kill) keeps owning its own lifecycle state.
+	// Publish the wake half of the kill. The asleep sync itself already ran
+	// above, before the teardown (#3629 records why the CLI layer owns it at
+	// all: Manager.Kill must keep the drain-ack async-stop path — verifiedStop
+	// -> handle.Kill -> Manager.Kill — owning its own lifecycle state).
 	exactHandoff := false
-	if infoErr == nil {
+	if sleepSynced {
 		now := time.Now().UTC()
-		patch := session.SleepPatch(now, "killed")
-		patch["synced_at"] = now.Format(time.RFC3339)
+		patch := session.MetadataPatch{}
 		if current, getErr := sessionFrontDoor(sessStore).Get(sessionID); getErr == nil && cfg != nil {
 			identity := namedSessionIdentityInfo(current)
 			cityName := loadedCityName(cfg, cityPath)
@@ -2477,9 +2493,11 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 				}
 			}
 		}
-		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
-			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
-			exactHandoff = false
+		if len(patch) > 0 {
+			if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
+				fmt.Fprintf(stderr, "gc session kill: warning: recording explicit wake for session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+				exactHandoff = false
+			}
 		}
 	}
 

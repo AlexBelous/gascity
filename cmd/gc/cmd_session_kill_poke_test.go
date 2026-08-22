@@ -355,3 +355,74 @@ func TestCmdSessionKill_PokeFailureIsNonFatal(t *testing.T) {
 		t.Fatalf("cmdSessionKill = %d, want 0 (poke failure is best-effort); stderr=%s", code, stderr.String())
 	}
 }
+
+// killOrderProvider observes the durable row at the instant the runtime is torn
+// down — the only place the awake+dead window can be proven closed.
+type killOrderProvider struct {
+	runtime.Provider
+	onStop func()
+}
+
+func (p *killOrderProvider) Stop(name string) error {
+	p.onStop()
+	return p.Provider.Stop(name)
+}
+
+// TestCmdSessionKill_RecordsSleepIntentBeforeTearingDownTheRuntime pins
+// ga-rk41a: a reconciler tick that lands between the teardown and the asleep
+// sync sees a row claiming a live runtime whose runtime is already dead, and
+// acts on it twice over — it restarts the session the operator just killed and
+// closes the row as dead-runtime.
+func TestCmdSessionKill_RecordsSleepIntentBeforeTearingDownTheRuntime(t *testing.T) {
+	store, bead, _ := newKillPokeSession(t, "always")
+
+	oldExact := sessionKillExactStartController
+	sessionKillExactStartController = func(string, string) error { return nil }
+	t.Cleanup(func() { sessionKillExactStartController = oldExact })
+	oldPoke := sessionKillPokeController
+	sessionKillPokeController = func(string) error { return nil }
+	t.Cleanup(func() { sessionKillPokeController = oldPoke })
+
+	stopCalls := 0
+	var metadataAtStop map[string]string
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+		p, err := oldBuild(cfg, name, sc, cityName, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		return &killOrderProvider{Provider: p, onStop: func() {
+			stopCalls++
+			if b, getErr := store.Get(bead.ID); getErr == nil {
+				metadataAtStop = b.Metadata
+			}
+		}}, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stopCalls != 1 {
+		t.Fatalf("runtime teardown calls = %d, want exactly 1; stderr=%s", stopCalls, stderr.String())
+	}
+	if got := metadataAtStop["state"]; got != string(sessionpkg.StateAsleep) {
+		t.Errorf("state at runtime teardown = %q, want %q", got, sessionpkg.StateAsleep)
+	}
+	if got := metadataAtStop["sleep_reason"]; got != "killed" {
+		t.Errorf("sleep_reason at runtime teardown = %q, want killed", got)
+	}
+	// The wake half must still be published after the teardown: a wake request
+	// on a row whose runtime is alive invites a duplicate incarnation.
+	if got := metadataAtStop["wake_request"]; got != "" {
+		t.Errorf("wake_request at runtime teardown = %q, want empty", got)
+	}
+	final, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", bead.ID, err)
+	}
+	if got := final.Metadata["wake_request"]; got != string(sessionpkg.WakeCauseExplicit) {
+		t.Errorf("wake_request after kill = %q, want %q", got, sessionpkg.WakeCauseExplicit)
+	}
+}

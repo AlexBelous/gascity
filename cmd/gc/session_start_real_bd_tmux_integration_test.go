@@ -426,6 +426,9 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		[]byte(`{"user.name":"gc-test","user.email":"gc-test@test.local"}`), 0o644); err != nil {
 		t.Fatalf("seed dolt identity: %v", err)
 	}
+	// testenv.Init scrubs DOLT_ROOT_PATH, so in-process helpers (ensureBeadsProvider)
+	// need it back on the parent env; commandEnv carries it to gc subprocesses.
+	t.Setenv("DOLT_ROOT_PATH", doltRoot)
 	commandEnv := append([]string(nil), os.Environ()...)
 	commandEnv = replaceEnvEntry(commandEnv, "PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	commandEnv = replaceEnvEntry(commandEnv, "GC_HOME", gcHome)
@@ -1945,10 +1948,12 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 	if err := json.Unmarshal([]byte(exactStartStopJSONPayload(drainAckOutput)), &drainAck); err != nil {
 		t.Fatalf("decode exact routed-work drain acknowledgement: %v\n%s", err, drainAckOutput)
 	}
+	// Target echoes the name the command was addressed by, which is the ID above;
+	// Info.Alias is an optional create-time alias this pool fixture never sets.
 	if !drainAck.OK || drainAck.Action != "drain-ack" || drainAck.Status != "acknowledged" ||
-		drainAck.Session != firstPool.info.SessionName || drainAck.Target != firstPool.info.Alias {
-		t.Fatalf("exact routed-work drain acknowledgement = %+v, want resolved target %q and runtime %q acknowledged",
-			drainAck, firstPool.info.Alias, firstPool.info.SessionName)
+		drainAck.Session != firstPool.info.SessionName || drainAck.Target != firstPool.info.ID {
+		t.Fatalf("exact routed-work drain acknowledgement = %+v, want target %q and runtime %q acknowledged",
+			drainAck, firstPool.info.ID, firstPool.info.SessionName)
 	}
 	for key, want := range map[string]string{
 		"GC_DRAIN_ACK":                    "1",
@@ -2099,9 +2104,9 @@ func testExactSessionStartNativeV59RealBDTmuxJourney(t *testing.T) {
 		t.Fatalf("decode sibling routed-work drain acknowledgement: %v\n%s", err, secondDrainAckOutput)
 	}
 	if !secondDrainAck.OK || secondDrainAck.Action != "drain-ack" || secondDrainAck.Status != "acknowledged" ||
-		secondDrainAck.Session != secondPool.info.SessionName || secondDrainAck.Target != secondPool.info.Alias {
-		t.Fatalf("sibling routed-work drain acknowledgement = %+v, want resolved target %q and runtime %q acknowledged",
-			secondDrainAck, secondPool.info.Alias, secondPool.info.SessionName)
+		secondDrainAck.Session != secondPool.info.SessionName || secondDrainAck.Target != secondPool.info.ID {
+		t.Fatalf("sibling routed-work drain acknowledgement = %+v, want target %q and runtime %q acknowledged",
+			secondDrainAck, secondPool.info.ID, secondPool.info.SessionName)
 	}
 	t.Run("routed_work_sibling_retirement", func(t *testing.T) {
 		if err := waitExactStartStopState(t.Context(), 30*time.Second, func() (bool, error) {

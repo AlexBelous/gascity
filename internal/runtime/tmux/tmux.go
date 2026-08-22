@@ -3937,18 +3937,49 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 	return t.SetCycleBindings(session)
 }
 
+// keyBindingLine returns the single tmux "list-keys" output line describing
+// the binding for key in the given table, or "" if no such binding exists.
+//
+// tmux's own single-key-filtered query (list-keys -T <table> <key>) is not
+// reliable across tmux builds: on some hosts (observed on tmux 3.7b) it
+// silently returns nothing for a key that IS bound -- including both
+// compiled-in defaults (e.g. "prefix n") and bindings set moments earlier
+// in the same session via bind-key -- even though the unfiltered form used
+// here (list-keys -T <table>, no key argument) correctly lists them. See
+// ga-afqddr. Querying the whole table and matching the key positionally
+// works around this: the key is located by its position after "-T <table>"
+// in each line rather than by substring search, so a key name that happens
+// to also appear inside another binding's command text (for example the
+// literal "n" inside a display-menu label) cannot be mismatched onto the
+// wrong line.
+func (t *Tmux) keyBindingLine(table, key string) string {
+	output, err := t.run("list-keys", "-T", table)
+	if err != nil || output == "" {
+		return ""
+	}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "-T" && i+2 < len(fields) && fields[i+1] == table && fields[i+2] == key {
+				return line
+			}
+		}
+	}
+	return ""
+}
+
 // isGTBinding checks if the given key already has a Gas Town if-shell binding.
 // Used to skip redundant re-binding on repeated ConfigureGasTownSession calls,
 // preserving the user's original fallback captured on the first call.
 func (t *Tmux) isGTBinding(table, key string) bool {
-	output, err := t.run("list-keys", "-T", table, key)
-	if err != nil || output == "" {
+	line := t.keyBindingLine(table, key)
+	if line == "" {
 		return false
 	}
 	// GT bindings use if-shell with a run-shell/display-popup invoking "gt ".
 	// Require both "if-shell" and "gt " to avoid false positives on user
 	// bindings that happen to contain "gt " without the if-shell guard.
-	return strings.Contains(output, "if-shell") && strings.Contains(output, "gt ")
+	return strings.Contains(line, "if-shell") && strings.Contains(line, "gt ")
 }
 
 // getKeyBinding returns the current tmux command bound to the given key in the
@@ -3971,8 +4002,8 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 	//   bind-key [-r] -T <table> <key> <command...>
 	// If tmux changes this format, parsing fails safely (returns ""),
 	// which causes the caller to use its default fallback.
-	output, err := t.run("list-keys", "-T", table, key)
-	if err != nil || output == "" {
+	line := t.keyBindingLine(table, key)
+	if line == "" {
 		return ""
 	}
 
@@ -3980,35 +4011,18 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 	// don't capture it — we'd end up wrapping our own if-shell in another if-shell.
 	// We check for both "if-shell" and "gt " to avoid false-positiving on user
 	// bindings that happen to contain the substring "gt ".
-	if strings.Contains(output, "if-shell") && strings.Contains(output, "gt ") {
+	if strings.Contains(line, "if-shell") && strings.Contains(line, "gt ") {
 		return ""
 	}
 
-	// Parse the binding command from list-keys output.
-	// Format: "bind-key [-r] -T <table> <key> <command...>"
-	// We need everything after the key name.
-	// Find the key in the output and take everything after it.
-	fields := strings.Fields(output)
-	keyIdx := -1
-	for i, f := range fields {
-		if f == "-T" && i+2 < len(fields) {
-			// Skip table name, the next field is the key
-			keyIdx = i + 2
-			break
-		}
-	}
-	if keyIdx < 0 || keyIdx >= len(fields)-1 {
-		return ""
-	}
-
-	// Everything after the key is the command
-	// Rejoin from keyIdx+1 onward, but we need to preserve the original spacing.
-	// Find the key token in the original string and take everything after it.
-	idx := strings.Index(output, " "+fields[keyIdx]+" ")
+	// Everything after the key is the command. Slice the original line
+	// (rather than rejoining Fields) so embedded quoting/spacing in the
+	// command is preserved exactly.
+	idx := strings.Index(line, " "+key+" ")
 	if idx < 0 {
 		return ""
 	}
-	cmd := strings.TrimSpace(output[idx+len(" "+fields[keyIdx]+" "):])
+	cmd := strings.TrimSpace(line[idx+len(" "+key+" "):])
 	if cmd == "" {
 		return ""
 	}

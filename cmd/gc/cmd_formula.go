@@ -950,15 +950,24 @@ store, copy them into the binding with
 					_, _ = fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id)
 				}
 
+				attachBead, err := attachStore.Get(attach)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, fmt.Errorf("attach bead %s: %w", attach, err))
+				}
+
 				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
-					// attach names its own root: a workflow_id/molecule_id it
-					// carries is a separate attachment (just ruled out above),
-					// not a container it lives inside, so ResolveRunID's
-					// chain-walk must not run here.
-					SelfRoot: true,
+					// CheckNoMoleculeChildren above only rules out a molecule
+					// already ATTACHED TO attach (downward). It says nothing
+					// about whether attach is itself a step INSIDE a live
+					// workflow (upward, via gc.root_bead_id) -- self-root
+					// only when attach carries no gc.root_bead_id of its own,
+					// otherwise ResolveRunID's chain-walk must run so a
+					// workflow step grafts onto the real root, not itself
+					// (ga-er5u7k).
+					SelfRoot: attachBead.Metadata[beadmeta.RootBeadIDMetadataKey] == "",
 				})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)

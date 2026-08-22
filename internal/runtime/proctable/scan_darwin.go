@@ -68,7 +68,9 @@ func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error)
 
 // ScanBySessionIDSinceInScope returns the Darwin session-ID scan. Scope facts
 // are irrelevant on Darwin: the ps snapshot has no per-process inspection
-// failures for the scope proofs to adjudicate.
+// failures for the scope proofs to adjudicate, and no completeness domain for
+// the Linux kernel-dead exclusion (ga-f7v2ft.194) to narrow — a Darwin zombie
+// carries no environment in the ps snapshot, so it never looks like a runtime.
 func ScanBySessionIDSinceInScope(id string, _ time.Time, _ SessionScope) ([]runtime.LiveRuntime, error) {
 	return ScanBySessionID(id)
 }

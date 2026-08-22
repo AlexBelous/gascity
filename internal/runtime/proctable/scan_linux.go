@@ -42,7 +42,8 @@ func ScanBySessionIDSince(id string, incarnationStartedAt time.Time) ([]runtime.
 // host: unreadable owned processes provably outside that scope (predating the
 // incarnation, living in another live pane's spawn scope, or rooted in a
 // foreign pre-incarnation lineage) do not cost the sweep its completeness
-// (ga-lp5w6).
+// (ga-lp5w6). Processes the kernel has already killed leave the domain before
+// any of that: a corpse cannot be a living runtime (ga-f7v2ft.194).
 func ScanBySessionIDSinceInScope(id string, incarnationStartedAt time.Time, scope SessionScope) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
@@ -114,6 +115,14 @@ func scanWithRootSinceInScope(root, id string, incarnationStartedAt time.Time, s
 			continue
 		}
 		if !owned {
+			continue
+		}
+		if processProvenKernelDead(root, pid) {
+			// A zombie (state Z) or dead (X) process has already been killed:
+			// its address space is gone, no code will ever run under that pid
+			// again, and it therefore cannot be this session's living runtime.
+			// It owes the sweep no proof, readable or not (ga-f7v2ft.194).
+			residue.excludeKernelDead()
 			continue
 		}
 		env, err := parseEnvironFile(filepath.Join(root, entry.Name(), "environ"))
@@ -213,13 +222,16 @@ func scanWithRootSinceInScope(root, id string, incarnationStartedAt time.Time, s
 // that spawned it and keep carrying its GC_SESSION_ID — but some can be PROVEN
 // outside the incarnation's reachable scope: predating it, living in another
 // live pane's spawn scope, or rooted in a foreign pre-incarnation lineage
-// (the unreadableProcessProven* adjudications, ga-lp5w6). What remains in the
+// (the unreadableProcessProven* adjudications, ga-lp5w6). Kernel-dead
+// processes never reach here at all: processProvenKernelDead drops them
+// before the environ read, counted rather than itemized. What remains in the
 // residue is the genuinely undecidable set, each failure still costs the sweep
 // its proof of absence, and err() keeps a non-nil verdict whenever one
 // remains — so a nil verdict means absence proven within the session's
 // reachable scope, not inspected across the host.
 type scanResidue struct {
-	errs []error
+	errs              []error
+	excludedDeadCount int
 }
 
 func (r *scanResidue) add(err error) {
@@ -228,17 +240,30 @@ func (r *scanResidue) add(err error) {
 	}
 }
 
-// err returns nil only when every process was inspected, so callers keep
-// reading a nil error as their proof that absence is complete.
+// excludeKernelDead records a process the kernel already killed. Those are
+// dropped from the completeness domain rather than proven, so they carry no
+// error — but a host running hundreds of them is worth seeing, and the count
+// rides the existing summary instead of a line per corpse.
+func (r *scanResidue) excludeKernelDead() {
+	r.excludedDeadCount++
+}
+
+// err returns nil only when every process was inspected or proven irrelevant,
+// so callers keep reading a nil error as their proof that absence is complete.
 func (r *scanResidue) err() error {
+	var err error
 	switch len(r.errs) {
 	case 0:
 		return nil
 	case 1:
-		return r.errs[0]
+		err = r.errs[0]
 	default:
-		return &inspectionResidueError{errs: r.errs}
+		err = &inspectionResidueError{errs: r.errs}
 	}
+	if r.excludedDeadCount > 0 {
+		return fmt.Errorf("%w (excluded %d kernel-dead processes)", err, r.excludedDeadCount)
+	}
+	return err
 }
 
 // inspectionResidueError renders a sweep's uninspectable processes as a count
@@ -258,6 +283,40 @@ const (
 	linuxUserHZ                  = 100
 	linuxProcessStartUncertainty = time.Second + time.Second/linuxUserHZ
 )
+
+// processProvenKernelDead reports whether /proc/<pid>/stat proves the process
+// already terminated. It is a proof, not a query: a stat file that is missing,
+// unreadable or malformed grants no exclusion and returns false, leaving the
+// process on its ordinary fail-closed path.
+//
+// The state field is world-readable and needs no ptrace access, which is why
+// it can be consulted before environ. A zombie's environ, by contrast, is
+// denied even to its own uid (measured on the incident host: EACCES on
+// /proc/<zombie>/environ while status still reported our uid), so before this
+// check every unreaped process cost the sweep its completeness — and orphaned
+// zombies re-parent to init, the one lineage shape both ga-lp5w6 scope proofs
+// decline. 522 of them on one supervisor host held every acked drain, and
+// every drain's pool seat, forever (ga-f7v2ft.194).
+func processProvenKernelDead(root string, pid int) bool {
+	stat, exists, err := readProcessStat(root, pid)
+	if err != nil || !exists {
+		return false
+	}
+	return processStateIsKernelDead(stat.State)
+}
+
+// processStateIsKernelDead reports whether a /proc/<pid>/stat process state is
+// terminal: Z is a zombie awaiting its parent's wait(), X (x on older kernels)
+// is dead. Every other state — including the uninterruptible D and the stopped
+// T/t — describes a process that can still run.
+func processStateIsKernelDead(state string) bool {
+	switch state {
+	case "Z", "X", "x":
+		return true
+	default:
+		return false
+	}
+}
 
 func processPredatesIncarnation(root string, pid int, incarnationStartedAt time.Time) (bool, error) {
 	if incarnationStartedAt.IsZero() || incarnationStartedAt.After(time.Now()) {
@@ -287,6 +346,7 @@ func processDefinitelyPredatesIncarnation(startedAt, incarnationStartedAt time.T
 type processIdentity struct {
 	PID        int
 	PPID       int
+	State      string
 	StartTicks uint64
 	Cgroup     string
 }
@@ -324,7 +384,11 @@ func unreadableProcessProvenOutsideIncarnation(
 	if err != nil || !exists {
 		return false, err
 	}
+	// The parent's environ is this proof's evidence, so a parent the kernel
+	// already killed decides nothing: a corpse has no address space, and its
+	// environ reads empty (or EACCES) whatever it once carried.
 	if parentBefore.Cgroup != candidateBefore.Cgroup ||
+		processStateIsKernelDead(parentBefore.State) ||
 		!processDefinitelyPredatesIncarnation(
 			processStartedAt(bootedAt, parentBefore.StartTicks),
 			incarnationStartedAt,
@@ -374,8 +438,10 @@ const maxUnreadableProofChainHops = 32
 // pane would hang off the same spawner only when the caller-supplied license —
 // a same-generation COMPLETE tmux observation proving the target session
 // absent — could not have been granted. Every undecidable link (an ancestor
-// re-parented to init, an unreadable or post-incarnation spawner, an unstable
-// chain) declines, leaving the process in the residue.
+// re-parented to init, an unreadable, kernel-dead or post-incarnation spawner,
+// an unstable chain) declines, leaving the process in the residue. Dead
+// intermediate links are fine: a zombie's ppid still records who spawned it,
+// so the walk passes through it to the scope's live exit.
 func unreadableProcessProvenInForeignLivePaneScope(
 	root string,
 	pid int,
@@ -418,6 +484,9 @@ func unreadableProcessProvenInForeignLivePaneScope(
 			continue
 		}
 		// parent is the scope-exit ancestor: the live spawner of this pane.
+		if processStateIsKernelDead(parent.State) {
+			return false, nil
+		}
 		if !processDefinitelyPredatesIncarnation(
 			processStartedAt(bootedAt, parent.StartTicks),
 			incarnationStartedAt,
@@ -526,6 +595,7 @@ func readProcessIdentity(root string, pid int) (processIdentity, bool, error) {
 	return processIdentity{
 		PID:        stat.PID,
 		PPID:       stat.PPID,
+		State:      stat.State,
 		StartTicks: stat.StartTicks,
 		Cgroup:     cgroup,
 	}, true, nil
@@ -591,8 +661,10 @@ func readBootTime(root string) (time.Time, error) {
 }
 
 type processStat struct {
-	PID        int
-	PPID       int
+	PID   int
+	PPID  int
+	State string
+	// StartTicks is the process start time in USER_HZ ticks since boot.
 	StartTicks uint64
 }
 
@@ -615,6 +687,10 @@ func readProcessStat(root string, pid int) (processStat, bool, error) {
 	if err != nil || observedPID != pid {
 		return processStat{}, false, fmt.Errorf("invalid pid in stat file %s", path)
 	}
+	// comm is arbitrary process-controlled text that may contain spaces and
+	// parens, so the fields after it can only be found from the LAST ')'. From
+	// there fields[0] is the state, fields[1] the ppid, fields[19] the start
+	// time (stat fields 3, 4 and 22).
 	fields := strings.Fields(text[closeParen+1:])
 	const starttimeIndexAfterComm = 19
 	if len(fields) <= starttimeIndexAfterComm {
@@ -631,6 +707,7 @@ func readProcessStat(root string, pid int) (processStat, bool, error) {
 	return processStat{
 		PID:        observedPID,
 		PPID:       ppid,
+		State:      fields[0],
 		StartTicks: startTicks,
 	}, true, nil
 }

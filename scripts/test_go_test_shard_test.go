@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/execretry"
 )
 
 type goTestShardFixture struct {
@@ -159,9 +161,14 @@ func shardTestCommand(name string, args ...string) *exec.Cmd {
 	return exec.Command(name, args...)
 }
 
+// runShardCommand runs cmd, retrying via execretry when the run fails on
+// the fork/exec ETXTBSY race documented in internal/execretry: under this
+// file's heavy t.Parallel() fan-out (many fixtures writing scripts and then
+// exec'ing scripts/test-go-test-shard) that race is externally observed,
+// not a defect in the manifest logic under test.
 func runShardCommand(t *testing.T, cmd *exec.Cmd) (int, []byte) {
 	t.Helper()
-	out, err := cmd.CombinedOutput()
+	out, err := execretry.Run(cmd, execretry.DefaultAttempts, (*exec.Cmd).CombinedOutput)
 	if err == nil {
 		return 0, out
 	}

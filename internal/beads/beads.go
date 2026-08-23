@@ -69,9 +69,9 @@ type Bead struct {
 	Priority  *int      `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
-	UpdatedAt   time.Time `json:"updated_at,omitempty,omitzero"`
-	Assignee    string    `json:"assignee,omitempty"`
-	From        string    `json:"from,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
+	Assignee  string    `json:"assignee,omitempty"`
+	From      string    `json:"from,omitempty"`
 	// ParentID is a CITY-SCOPED bead id held as a WEAK reference: step →
 	// molecule, matching bd's wire format.
 	//
@@ -83,17 +83,26 @@ type Bead struct {
 	// should — a create that moved the child to reach its parent would mint it
 	// under the wrong prefix, which is unfixable afterwards.
 	//
-	// Weak, therefore, is the contract and not an admission: a store persists
+	// Weak, therefore, is the contract and not an admission. A store persists
 	// and filters this verbatim (Children and ListQuery.ParentID are string
-	// matches), and NEVER resolves it, validates it, or places a bead to
-	// co-locate with it. A store that started rejecting an id it cannot see
-	// would break every cross-store molecule at once, and a store that started
-	// placing by it would strand the child in the parent's namespace.
-	ParentID    string    `json:"parent,omitempty"`
-	Ref         string    `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string  `json:"needs,omitempty"`       // dependency step refs
-	Description string    `json:"description,omitempty"` // step instructions
-	Labels      []string  `json:"labels,omitempty"`
+	// matches), and for any id OUTSIDE the namespace it mints it must never
+	// resolve, validate, rewrite, or place by it. A store that started
+	// rejecting an id it cannot see would break every cross-store molecule at
+	// once, and a store that started placing by it would strand the child in
+	// the parent's namespace, where no later copy can move it.
+	//
+	// The boundary is drawn at the namespace, not at the field, because that is
+	// where the backends can actually agree. A dangling id INSIDE a store's own
+	// namespace is a row that store can see the absence of, and the strong
+	// backends refuse it before writing anything; the weak ones cannot detect
+	// it at all. That divergence is left explicit rather than papered over —
+	// what every backend owes, and what the conformance suite pins, is that a
+	// foreign parent is carried without question.
+	ParentID    string   `json:"parent,omitempty"`
+	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs       []string `json:"needs,omitempty"`       // dependency step refs
+	Description string   `json:"description,omitempty"` // step instructions
+	Labels      []string `json:"labels,omitempty"`
 	// Metadata uses StringMap (not map[string]string) so decode tolerates the
 	// non-string JSON values the external bd CLI emits — `--set-metadata
 	// key=true` is type-inferred to a JSON boolean, and a strict decode of a

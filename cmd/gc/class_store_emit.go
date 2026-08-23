@@ -101,6 +101,13 @@ import (
 // gets that same wrapper value. Store identity is load-bearing: callers dedup
 // scan candidates in a map[beads.Store], so a wrapper per class would turn one
 // binding into five and re-scan it five times.
+//
+// The relic census is re-keyed onto the wrappers for that same reason. The
+// census ran against the leaf stores this struct was opened with; leaving its
+// map keyed there would make hasLegacyResidents miss on every lookup once the
+// classes resolve to wrappers, and a miss reads as the pessimistic "assume
+// relics". The whole CLI plane would then keep probing a binding it had just
+// paid a full scan to certify clean.
 func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 	cityPath = strings.TrimSpace(cityPath)
 	if r == nil || cityPath == "" || len(r.stores) == 0 {
@@ -117,6 +124,16 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 			emitting[store] = wrapped
 		}
 		r.stores[class] = wrapped
+	}
+	if len(r.relics) > 0 {
+		relics := make(map[beads.Store]bool, len(r.relics))
+		for store, verdict := range r.relics {
+			if wrapped, ok := emitting[store]; ok {
+				store = wrapped
+			}
+			relics[store] = verdict
+		}
+		r.relics = relics
 	}
 	r.emitCityPath = cityPath
 	return r

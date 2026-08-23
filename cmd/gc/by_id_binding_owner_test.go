@@ -63,6 +63,7 @@ func TestConvoyResolutionServesTheBindingCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the control: %v", err)
 	}
+	classStore = recensusAfterSeedingARelic(t, cityPath)
 
 	storereftest.RunBindingWins(t,
 		storereftest.BindingWinsStores{
@@ -105,6 +106,7 @@ func TestConvoyResolutionServesTheBindingCopy(t *testing.T) {
 func TestConvoyResolutionReportsTheCityDirForABindingHit(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
 	resident := classResidentWorkShapedBead(t, classStore, "gc-relic1", "a relocated patrol root")
+	classStore = recensusAfterSeedingARelic(t, cityPath)
 
 	store, dir := resolveThroughTheConvoyScan(t, cityPath, resident.ID)
 	if store != classStore {
@@ -132,6 +134,7 @@ func TestConvoyResolutionDoesNotRefuseDualResidenceAsAmbiguous(t *testing.T) {
 		t.Fatalf("seeding the work store: %v", err)
 	}
 	resident := classResidentWorkShapedBead(t, classStore, shadow.ID, "the class-binding copy")
+	classStore = recensusAfterSeedingARelic(t, cityPath)
 
 	store, _, err := resolveOwningStoreDir(resident.ID, convoyCityConfig(t, cityPath), cityPath, func(storeDir string) (beads.Store, error) {
 		return openStoreAtForCity(storeDir, cityPath)
@@ -250,6 +253,7 @@ func TestBeadsShowFallbackServesTheBindingCopy(t *testing.T) {
 		t.Fatalf("seeding the work store: %v", err)
 	}
 	resident := classResidentWorkShapedBead(t, classStore, shadow.ID, "the class-binding copy")
+	recensusAfterSeedingARelic(t, cityPath)
 
 	var stdout, stderr bytes.Buffer
 	if code := doBeadsShowFallback(cityPath, resident.ID, "json", &stdout, &stderr); code != 0 {

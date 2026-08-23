@@ -261,3 +261,40 @@ func TestCensusOfIdentityRoutesIsANoOp(t *testing.T) {
 		t.Errorf("nil routes produced %d bindings", len(bindings))
 	}
 }
+
+// The census has to survive the one-shot funnel's emission wrapping.
+//
+// withCLIEmission replaces every value in routes.stores with an
+// *emittingClassStore so a one-shot command's writes are observable. The census
+// ran before that, against the leaf stores the boot opened, and its verdict is
+// keyed by store identity — so a relics map left keyed on the leaves misses on
+// every lookup once the classes resolve to wrappers, and a miss is the
+// pessimistic default. The whole CLI plane would keep probing a binding it had
+// just paid a full scan to certify clean, and nothing would say so: the answers
+// stay correct, only slower, forever.
+func TestCLIEmissionKeepsTheCensusVerdict(t *testing.T) {
+	cityPath, cfg := convergedEmptyInfraCity(t)
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc bd", nil, &stderr)
+	if err != nil {
+		t.Fatalf("booting a converged city: %v (stderr: %s)", err, stderr.String())
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	if soleBinding(t, routes).HasLegacyResidents {
+		t.Fatal("the boot gate handed back a binding still marked as holding relics, so this row cannot tell a lost verdict from a real one")
+	}
+
+	routes = routes.withCLIEmission(cityPath)
+
+	binding := soleBinding(t, routes)
+	if _, ok := binding.Leg.Store.(*emittingClassStore); !ok {
+		t.Fatalf("the binding resolves to %T, not the emitting wrapper — this row is no longer exercising the re-keying it exists to pin", binding.Leg.Store)
+	}
+	if binding.HasLegacyResidents {
+		t.Error("wrapping the class stores for emission lost the census verdict; every one-shot read now probes a binding the boot already certified clean")
+	}
+	if bindingLegRead(t, routes, "ga-1") {
+		t.Error("a work-shaped by-id read through the funnel's routes still probes the binding — the probe the census retires is back on the CLI plane only")
+	}
+}

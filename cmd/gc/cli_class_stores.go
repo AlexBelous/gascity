@@ -3,7 +3,6 @@ package main
 import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // cliSessionsRelocated reports whether the city at cityPath binds the sessions
@@ -11,8 +10,14 @@ import (
 // scopes need this: class routing is city-keyed, so under a relocation every
 // scope's cliSessionStore resolves to the SAME sessions store and a per-scope
 // session pass repeats itself once per rig.
+//
+// The answer comes from the resolver's own grouping, not from a second reading
+// of the routes — the same reason graphClassBinding was retired. A refused or
+// fan-out topology answers true, which is the safe direction here: dedupe runs,
+// and the store errors on its own terms rather than being sorted into "this
+// city relocates nothing" by a gate that never asked it.
 func cliSessionsRelocated(cityPath string) bool {
-	_, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassSessions)
+	_, relocated := cliSoleClassBindingStore(cityPath)
 	return relocated
 }
 

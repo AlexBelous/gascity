@@ -43,9 +43,16 @@ a:convoyStoreCandidates	(^|[^A-Za-z0-9_])convoyStoreCandidates\(
 #     same accessor for the callers with no error channel, and a spelling the
 #     census could not see would be a place to hide exactly the surfaces this
 #     row exists to count.
+#
+#     storeFor is matched on ANY receiver, not a variable literally spelled
+#     `routes`. The receiver name carries no information — cliStorageRoutes(p)
+#     .storeFor(c) and cr.storageRoutes.storeFor(c) ask the same question the
+#     same way — and the narrow spelling had already let one live site through
+#     (cliSessionsRelocated), which is the sessions twin of the accessor C6
+#     retired for graph.
 b:graphClassBinding	(^|[^A-Za-z0-9_])graphClassBinding\(
 b:cliSoleClassBinding	(^|[^A-Za-z0-9_])cliSoleClassBinding(Store)?\(
-b:routes.storeFor	(^|[^A-Za-z0-9_])routes\.storeFor\(
+b:storeFor	\.storeFor\(
 b:storeref.ClassCandidates	(^|[^A-Za-z0-9_])storeref\.ClassCandidates\(
 # (c) hand-rolled probe lists and plan disassembly. The executor
 #     (ResolveOwner/Union) is the only place leg order and per-leg error policy

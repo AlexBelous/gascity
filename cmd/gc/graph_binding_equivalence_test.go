@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // TestSoleClassBindingStoreMatchesTheRoutesGraphAnswer compares the two
@@ -93,7 +94,15 @@ func TestSoleClassBindingStoreRefusesAFanOut(t *testing.T) {
 	if !relocated {
 		t.Fatal("a fan-out city reports relocated=false; its control reads would fall back to the work ledger the classes were migrated off")
 	}
-	if _, err := store.Get("ga-1"); err == nil {
-		t.Error("a fan-out city's binding answered a read; the topology fault has to surface at the read, since there is no error channel to carry it")
+	// Not merely "the read errored": an empty healthy store says ErrNotFound to
+	// every id, so err != nil would be satisfied by returning a fresh memstore
+	// here — and a topology fault read as absence is the silent wrong answer
+	// this whole seam exists to prevent. The read has to carry the refusal.
+	_, err := store.Get("ga-1")
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("a fan-out city's binding answered %v — absence, which is what an empty SERVING store says; the fault has to be distinguishable from an id that simply is not there", err)
+	}
+	if !storeref.IsStandingRefusal(err) {
+		t.Errorf("the read returned %v, which does not carry the topology fault; there is no error channel on this accessor, so the store is the only thing left to carry it", err)
 	}
 }

@@ -161,19 +161,26 @@ func (cr *CityRuntime) relocatedOrdersStore() beads.Store {
 	return resolveOrderStore(cr.storageRoutes, nil, cr.cfg, cr.cityPath, cr.rec)
 }
 
-// relocatedGraphStore returns the runtime's GRAPH-class binding store when
-// [storage] relocates the graph class, and nil when it does not — the twin of
-// relocatedOrdersStore for the class control beads and convergence roots live
-// in.
+// graphClassRelocated reports whether [storage] relocates the GRAPH class —
+// the class control beads and convergence roots live in — for the city this
+// runtime serves.
+//
+// A bool rather than the store, because the only thing asking is a scope
+// builder deciding whether the convergence scan has a second place to look;
+// handing out a store nobody reads would be a store handle to keep straight for
+// no reason. (internal/api has its own relocatedGraphStore, which does return a
+// store and answers over a different substrate — the names are deliberately not
+// shared.)
 //
 // It resolves through the routes this process opened at boot, NOT through the
 // one-shot CLI funnel: a controller that entered the funnel would hold a second
 // handle on the same binding for the lifetime of the process, which is the
-// double-handle hazard residency_topology.go names. The nil is what keeps a
-// single-store city byte-identical — passing no work store means "answer only
-// if this class was actually relocated".
-func (cr *CityRuntime) relocatedGraphStore() beads.Store {
-	return resolveGraphStore(cr.storageRoutes, nil, cr.cfg, cr.cityPath, cr.rec)
+// double-handle hazard residency_topology.go names. Passing no work store is
+// what keeps a single-store city byte-identical — it means "answer only if this
+// class was actually relocated", so the nil resolveGraphStore returns there
+// becomes false rather than a store this city does not have.
+func (cr *CityRuntime) graphClassRelocated() bool {
+	return resolveGraphStore(cr.storageRoutes, nil, cr.cfg, cr.cityPath, cr.rec) != nil
 }
 
 // cityWorkStore returns the runtime's city-level WORK-class bead store. Work is

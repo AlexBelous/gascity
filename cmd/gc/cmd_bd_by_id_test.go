@@ -145,15 +145,47 @@ func foreignProviderCity(t *testing.T) (cityPath string, classStore beads.Store)
 	resetCLIStorageRoutes(t)
 	captureCLIStorageStderr(t)
 
-	// Read the store off the routes rather than through cliSoleClassBindingStore:
-	// the residency grouping is memoized per city, and a fixture that primes that
-	// memo would hand the door a store captured BEFORE failClassBindingReads swaps
-	// the routes, so the fault-path rows would silently exercise a healthy store.
-	store, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassGraph)
+	// Resolved through the accessor production uses, so the fixture proves the
+	// same path the door takes. That primes the per-city residency memo, which is
+	// safe only because failClassBindingReads and stubClassBindingStore drop it
+	// when they swap the routes — without that, the fault-path rows would hold a
+	// store captured before the swap and pass against a healthy one.
+	store, relocated := cliSoleClassBindingStore(cityPath)
 	if !relocated {
 		t.Fatal("a city serving its classes from a foreign provider resolved no class binding")
 	}
 	return cityPath, store
+}
+
+// recensusAfterSeedingARelic reopens the funnel so the binding's relic census
+// runs again, and returns the class store on the far side of it.
+//
+// The census runs when the funnel OPENS a binding, and a fixture that plants a
+// work-shaped id afterwards has produced a verdict that was true when it was
+// taken and is false by the time the row asserts on it. The residence probe
+// retires on that stale verdict — MintsReserved && !HasLegacyResidents — and the
+// row then reads the retained work copy while claiming to test that the binding
+// wins.
+//
+// Reopening is not a workaround for the ordering: it IS what production does.
+// Relics are what `gc storage migrate` leaves behind, so every process that
+// meets them starts after they exist, censuses once at boot, and sees them. A
+// one-shot `gc` invocation against a migrated city is exactly this.
+//
+// The returned store is a NEW handle — the engine is a real sqlite database
+// under .gc/, so the seeded relic is still there, but the pointer the fixture
+// handed back before the reopen is closed and no longer the one the door
+// resolves. Rows that compare store identity must use this one.
+func recensusAfterSeedingARelic(t *testing.T, cityPath string) beads.Store {
+	t.Helper()
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the funnel so the binding is censused again: %v", err)
+	}
+	store, relocated := cliSoleClassBindingStore(cityPath)
+	if !relocated {
+		t.Fatal("the reopened funnel resolved no class binding; the fixture's city stopped being split across the reopen")
+	}
+	return store
 }
 
 // mustCreateClassBead creates a bead in the class binding and proves it carries
@@ -681,6 +713,7 @@ func failClassBindingReads(t *testing.T, cityPath string, cause error) {
 		restore[class] = previous
 		routes.stores[class] = store
 	}
+	dropDerivedResidencyMemo(t, cityPath)
 	t.Cleanup(func() {
 		for class, previous := range restore {
 			routes.stores[class] = previous
@@ -1827,11 +1860,27 @@ func stubClassBindingStore(t *testing.T, cityPath string, store beads.Store) {
 		restore[class] = previous
 		routes.stores[class] = store
 	}
+	dropDerivedResidencyMemo(t, cityPath)
 	t.Cleanup(func() {
 		for class, previous := range restore {
 			routes.stores[class] = previous
 		}
 	})
+}
+
+// dropDerivedResidencyMemo invalidates the grouping derived from these routes.
+//
+// Swapping routes.stores in place is invisible to cliResidencyBindings, which
+// caches the class-to-store grouping it read out of those routes: anything that
+// already resolved the grouping keeps handing out the stores that were there
+// BEFORE the swap. A test that routed one command before installing its failing
+// store would then exercise a healthy store while asserting on a fault path,
+// and pass for the wrong reason. Dropping the memo here makes that ordering bug
+// unwritable rather than merely currently absent.
+func dropDerivedResidencyMemo(t *testing.T, cityPath string) {
+	t.Helper()
+	dropCLIResidencyBindings(filepath.Clean(cityPath))
+	t.Cleanup(func() { dropCLIResidencyBindings(filepath.Clean(cityPath)) })
 }
 
 // TestDoorUpdateAfterFoundSurfacesStoreErrorVerbatim pins the OTHER proximate

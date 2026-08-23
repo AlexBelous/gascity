@@ -51,10 +51,11 @@ cmd/gc/city_runtime.go	syncBeadsAndUpdateIndex	a:rigBeadStores	1
 cmd/gc/city_runtime.go	tick	a:rigBeadStores	4
 cmd/gc/claim_class_route.go	holds	d:bdIDIsClassReserved	1
 cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:cliSoleClassBinding	1
-cmd/gc/class_store.go	resolveClassStore	b:routes.storeFor	1
+cmd/gc/class_store.go	resolveClassStore	b:storeFor	1
 cmd/gc/class_store.go	unwrapWorkStores	ast:returns-store-list	1
 cmd/gc/class_store.go	workBeadStores	a:BeadStores	1
 cmd/gc/class_store.go	workBeadStores	a:rigBeadStores	1
+cmd/gc/cli_class_stores.go	cliSessionsRelocated	b:cliSoleClassBinding	1
 cmd/gc/cmd_bd_by_id.go	bdByIDRefusedVerb	d:bdIDIsClassReserved	1
 cmd/gc/cmd_bd_by_id.go	bdFirstReservedClassID	d:bdIDIsClassReserved	1
 cmd/gc/cmd_bd_by_id.go	bdIDIsClassReserved	d:bdIDIsClassReserved	1

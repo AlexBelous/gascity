@@ -149,12 +149,20 @@ func registeredCityWorkStore(cityPath string) beads.Store {
 // # What the memo drop does and does not do
 //
 // dropCLIResidencyBindings clears only the DERIVED per-city binding grouping
-// this file memoizes, so a later resolution re-reads the registry instead of a
+// this file memoizes, so a later resolution re-derives instead of returning a
 // pre-registration answer. It does NOT close or invalidate the one-shot
 // cliStorageRoutes funnel: a handle that funnel already opened in this process
-// stays open, and the 21 non-test sites that call cliStorageRoutes directly
+// stays open, and the 19 non-test sites that call cliStorageRoutes directly
 // keep using it. Neutralizing the funnel is not this slice's scope; keeping the spine off
 // it is.
+//
+// Note what "re-derives" reaches, because the two consumers differ.
+// residencyTopologyForCity — the assigned-work spine — reads the registry, so
+// the drop is what makes a controller's newly registered routes visible to it.
+// cliResidencyBindings does not: it re-reads the FUNNEL. So the by-id door, the
+// claim route and the control-dispatch gates still resolve through a funnel
+// handle even inside a controller process, which is the double-handle residual
+// ga-wqpas tracks — pre-existing, and not something the drop closes.
 // work is the runtime's city WORK-store accessor, read lazily (see
 // registeredCityWorkStore); pass nil from a caller that has none.
 func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func() beads.Store) {
@@ -359,10 +367,17 @@ func cliSoleClassBinding(cityPath string) (cliRelocatedBinding, bool, error) {
 // directory, which enumerates the copies `gc storage migrate` retained there and
 // no longer mutates. A confidently stale answer is the failure this lane exists
 // to close, and a topology this build refuses to serve must not produce one.
+//
+// The carried error is marked a STANDING refusal, the same as a boot-gate
+// refusal, because that is what it is: a verdict about the city's storage
+// configuration, not a fault the read ran into. The distinction is what lets
+// the by-id door and the claim route keep serving work-shaped ids out of the
+// work ledger — which is correct for a fan-out city too, since work never left
+// it — while refusing anything only a relocated class could own.
 func cliSoleClassBindingStore(cityPath string) (beads.Store, bool) {
 	binding, relocated, err := cliSoleClassBinding(cityPath)
 	if err != nil {
-		return refusedClassStore{err: err}, true
+		return refusedClassStore{err: standingStorageRefusal{err: err}}, true
 	}
 	if !relocated {
 		return nil, false

@@ -90,7 +90,7 @@ func (cr *CityRuntime) buildConvergenceScopes() map[string]*convergenceScope {
 	if cityStore == nil {
 		return nil
 	}
-	graphRelocated := cr.relocatedGraphStore() != nil
+	graphRelocated := cr.graphClassRelocated()
 	scopes := map[string]*convergenceScope{
 		"": cr.newConvergenceScope("", cr.graphBeadStore().Store, cr.cityPath, cr.cfg.FormulaLayers.City, graphRelocated),
 	}

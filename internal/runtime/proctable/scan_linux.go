@@ -351,6 +351,25 @@ type processIdentity struct {
 	Cgroup     string
 }
 
+// sameAdjudicatedProcess reports whether a stability recheck re-observed the
+// same process in the same adjudication position: same pid incarnation
+// (PID + StartTicks), same parent link (PPID) and same scope membership
+// (Cgroup). The scheduler state is deliberately NOT identity: on a loaded
+// host a busy process flips S<->R between the evidence read and the recheck,
+// and comparing state made every scope proof an independent per-sweep coin
+// flip — measured live at ~3-5% declines per candidate walk, which under the
+// all-or-nothing completeness verdict kept drain-ack observations incomplete
+// essentially forever (ga-i20db). Kernel death between the reads is a
+// separate question: callers whose evidence was the process's environ must
+// decline a kernel-dead recheck explicitly (the ga-f7v2ft.194 vacuous-environ
+// guard), which processStateIsKernelDead answers from the recheck's State.
+func (p processIdentity) sameAdjudicatedProcess(other processIdentity) bool {
+	return p.PID == other.PID &&
+		p.PPID == other.PPID &&
+		p.StartTicks == other.StartTicks &&
+		p.Cgroup == other.Cgroup
+}
+
 func unreadableProcessProvenOutsideIncarnation(
 	root string,
 	pid int,
@@ -417,7 +436,8 @@ func unreadableProcessProvenOutsideIncarnation(
 	if parentAfter.PID != parentBefore.PID ||
 		parentAfter.StartTicks != parentBefore.StartTicks ||
 		parentAfter.Cgroup != parentBefore.Cgroup ||
-		candidateAfter != candidateBefore {
+		processStateIsKernelDead(parentAfter.State) ||
+		!candidateAfter.sameAdjudicatedProcess(candidateBefore) {
 		return false, nil
 	}
 	return true, nil
@@ -510,7 +530,13 @@ func unreadableProcessProvenInForeignLivePaneScope(
 		if err != nil || !exists {
 			return false, err
 		}
-		if parentAfter != parent || candidateAfter != candidateBefore {
+		// The recheck proves the observation held still while the evidence was
+		// read: same processes in the same positions, and the spawner — whose
+		// environ IS the evidence — still alive. Scheduler-state flips are not
+		// movement (ga-i20db); a spawner that died mid-proof is (ga-f7v2ft.194).
+		if !parentAfter.sameAdjudicatedProcess(parent) ||
+			processStateIsKernelDead(parentAfter.State) ||
+			!candidateAfter.sameAdjudicatedProcess(candidateBefore) {
 			return false, nil
 		}
 		return true, nil
@@ -573,7 +599,7 @@ func unreadableProcessProvenForeignLineage(
 			if err != nil || !exists {
 				return false, err
 			}
-			if candidateAfter != candidateBefore {
+			if !candidateAfter.sameAdjudicatedProcess(candidateBefore) {
 				return false, nil
 			}
 			return true, nil
@@ -666,6 +692,17 @@ type processStat struct {
 	State string
 	// StartTicks is the process start time in USER_HZ ticks since boot.
 	StartTicks uint64
+}
+
+// sameAdjudicatedProcess is the processStat form of
+// processIdentity.sameAdjudicatedProcess: same pid incarnation and parent
+// link, scheduler state excluded (ga-i20db). The foreign-lineage proof's
+// evidence is the ancestor chain's uids and start times, never an environ, so
+// no kernel-dead recheck rides on it.
+func (p processStat) sameAdjudicatedProcess(other processStat) bool {
+	return p.PID == other.PID &&
+		p.PPID == other.PPID &&
+		p.StartTicks == other.StartTicks
 }
 
 func readProcessStat(root string, pid int) (processStat, bool, error) {

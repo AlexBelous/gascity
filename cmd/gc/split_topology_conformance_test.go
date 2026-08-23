@@ -825,7 +825,7 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 
 	// The CLOSURE, asserted on the production resolver: the claim-time class
 	// route exists exactly when the city relocates a class, decided by store
-	// identity through graphClassBinding and read off the city on disk — the
+	// identity through the residency grouping and read off the city on disk — the
 	// same authority cityQueryTopology asks for the read half.
 	cityRoute, err := hookClaimClassRouteForCity(e.cityPath)
 	if err != nil {
@@ -969,7 +969,7 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 // split city can hand it.
 //
 // The route is opened over the fixture's class leg — a real beads.SQLiteStore,
-// what graphClassBinding(e.routes) resolves to — so the routed claim acquires
+// what the fixture routes serve the graph class from — so the routed claim acquires
 // through the binding's own compare-and-swap and the write lands where the row
 // minted the bead. The base Claim is bound to the fixture's real WORK store, so
 // the not-found that opens the escalation is the store's own answer rather than
@@ -2440,7 +2440,7 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 // the rule here instead would let the fixture model a topology production does
 // not serve.
 func fixtureGraphLeg(e splitEnv) beads.Store {
-	binding, relocated := graphClassBinding(e.routes)
+	binding, relocated := e.routes.storeFor(coordclass.ClassGraph)
 	return relocatedGraphLegFrom(binding, relocated, e.work)
 }
 
@@ -2455,8 +2455,9 @@ func fixtureGraphLeg(e splitEnv) beads.Store {
 // It asserts three things, in the order they have to hold:
 //
 //  1. The seam answers. cityQueryTopology is the production resolver, and it
-//     rides on graphClassBinding — the same question resolveClassStore asks —
-//     so a city that relocates nothing federates nothing.
+//     rides on the routes' own graph-class answer — the same question
+//     resolveClassStore asks — so a city that relocates nothing federates
+//     nothing.
 //  2. The command changes, and only in the reader. The single-store row is the
 //     byte-identity claim (its exact bytes are pinned by
 //     internal/config's TestWorkQueryGolden); here it is the command WORD that

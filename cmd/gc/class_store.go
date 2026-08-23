@@ -161,6 +161,21 @@ func (cr *CityRuntime) relocatedOrdersStore() beads.Store {
 	return resolveOrderStore(cr.storageRoutes, nil, cr.cfg, cr.cityPath, cr.rec)
 }
 
+// relocatedGraphStore returns the runtime's GRAPH-class binding store when
+// [storage] relocates the graph class, and nil when it does not — the twin of
+// relocatedOrdersStore for the class control beads and convergence roots live
+// in.
+//
+// It resolves through the routes this process opened at boot, NOT through the
+// one-shot CLI funnel: a controller that entered the funnel would hold a second
+// handle on the same binding for the lifetime of the process, which is the
+// double-handle hazard residency_topology.go names. The nil is what keeps a
+// single-store city byte-identical — passing no work store means "answer only
+// if this class was actually relocated".
+func (cr *CityRuntime) relocatedGraphStore() beads.Store {
+	return resolveGraphStore(cr.storageRoutes, nil, cr.cfg, cr.cityPath, cr.rec)
+}
+
 // cityWorkStore returns the runtime's city-level WORK-class bead store. Work is
 // the default/residual coordination class; this is its typed accessor, distinct
 // from the federation/by-id/default cityBeadStore() root. Returned as the
@@ -403,17 +418,6 @@ func recipeCoordClass(recipe *formula.Recipe) coordclass.Class {
 		}
 	}
 	return coordclass.ClassWork
-}
-
-// graphClassBinding returns the store these routes serve the graph class from,
-// and whether they relocate it at all — the same question resolveClassStore asks
-// to choose its branch, exposed for the callers that must BEHAVE differently
-// rather than merely read elsewhere. A reader that answers by shelling `bd` in
-// the work directory cannot follow a relocated class, so it has to know it must
-// go in-process instead; resolveGraphStore alone cannot tell it, because a
-// relocated store and an unrelocated one are both just a beads.Store.
-func graphClassBinding(routes *storageRoutes) (beads.Store, bool) {
-	return routes.storeFor(coordclassFor(config.BeadClassGraph))
 }
 
 // cityQueryTopology answers the two questions a generated work_query or

@@ -145,7 +145,11 @@ func foreignProviderCity(t *testing.T) (cityPath string, classStore beads.Store)
 	resetCLIStorageRoutes(t)
 	captureCLIStorageStderr(t)
 
-	store, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	// Read the store off the routes rather than through cliSoleClassBindingStore:
+	// the residency grouping is memoized per city, and a fixture that primes that
+	// memo would hand the door a store captured BEFORE failClassBindingReads swaps
+	// the routes, so the fault-path rows would silently exercise a healthy store.
+	store, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassGraph)
 	if !relocated {
 		t.Fatal("a city serving its classes from a foreign provider resolved no class binding")
 	}
@@ -772,14 +776,15 @@ func TestBdByIDSurfaceResolvesOneStoreNotAProviderPerOperation(t *testing.T) {
 	if counts["cliSoleClassBinding"] != 1 {
 		t.Errorf("%s calls cliSoleClassBinding %d time(s), want exactly 1: one store resolution per command", file, counts["cliSoleClassBinding"])
 	}
-	// The two calls cliSoleClassBinding replaced. Asking the graph class
-	// specifically cannot tell a whole split from a per-class fan-out, and
-	// re-entering the funnel beside the resolver is how the two answers get to
-	// disagree; both are now the resolver's job and neither belongs in this file.
-	for _, replaced := range []string{"cliStorageRoutes", "graphClassBinding"} {
-		if counts[replaced] != 0 {
-			t.Errorf("%s calls %s %d time(s); the by-ID surface resolves its binding through cliSoleClassBinding alone", file, replaced, counts[replaced])
-		}
+	// The call cliSoleClassBinding replaced. Re-entering the funnel beside the
+	// resolver is how the two answers get to disagree; resolving the binding is
+	// the resolver's job and does not belong in this file. (The other call it
+	// replaced, graphClassBinding, no longer exists anywhere — asking the graph
+	// class specifically cannot tell a whole split from a per-class fan-out, so
+	// it was retired rather than merely banned here, and the residency-boundary
+	// ratchet is what keeps it retired.)
+	if counts["cliStorageRoutes"] != 0 {
+		t.Errorf("%s calls cliStorageRoutes %d time(s); the by-ID surface resolves its binding through cliSoleClassBinding alone", file, counts["cliStorageRoutes"])
 	}
 }
 

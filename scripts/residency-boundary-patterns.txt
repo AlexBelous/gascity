@@ -32,13 +32,19 @@ a:convoyStoreCandidates	(^|[^A-Za-z0-9_])convoyStoreCandidates\(
 #     reason storeref.EachLeg is: sanctioned is not free. Each call site is a
 #     surface asserting "this city serves all five infrastructure classes from
 #     one binding, and I am about to act on that" — the condition the accessor
-#     checks and refuses a fan-out for. Two are baselined today (the `gc bd`
-#     by-id front door and the claim-time class route). A third is a reviewed
-#     baseline change, because the review that matters is not whether the
-#     accessor was called correctly but whether that surface should be routing
-#     class-reserved ids at all.
+#     checks and refuses a fan-out for. Five are baselined today: the `gc bd`
+#     by-id front door, the claim-time class route, the two control-dispatch
+#     routing gates and the graft-class refusal. A sixth is a reviewed baseline
+#     change, because the review that matters is not whether the accessor was
+#     called correctly but whether that surface should be routing class-reserved
+#     ids at all.
+#
+#     The pattern matches cliSoleClassBindingStore( too. That wrapper is the
+#     same accessor for the callers with no error channel, and a spelling the
+#     census could not see would be a place to hide exactly the surfaces this
+#     row exists to count.
 b:graphClassBinding	(^|[^A-Za-z0-9_])graphClassBinding\(
-b:cliSoleClassBinding	(^|[^A-Za-z0-9_])cliSoleClassBinding\(
+b:cliSoleClassBinding	(^|[^A-Za-z0-9_])cliSoleClassBinding(Store)?\(
 b:routes.storeFor	(^|[^A-Za-z0-9_])routes\.storeFor\(
 b:storeref.ClassCandidates	(^|[^A-Za-z0-9_])storeref\.ClassCandidates\(
 # (c) hand-rolled probe lists and plan disassembly. The executor

@@ -14,9 +14,9 @@ import (
 //
 // They have different sources and neither can be derived from the other. Beads
 // comes from [beads] in city.toml. FederatedReady comes from the storage routes
-// the process resolved — cmd/gc asks graphClassBinding, the same question
-// resolveClassStore asks to choose its branch — and a city that has served a
-// split can answer yes with no [storage] section left to read.
+// the process resolved — cmd/gc reads the residency grouping the same resolver
+// builds, rather than re-asking the routes — and a city that has served a split
+// can answer yes with no [storage] section left to read.
 type QueryTopology struct {
 	// Beads carries the bd CLI semantics this city may rely on.
 	Beads BeadsConfig

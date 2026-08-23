@@ -758,8 +758,8 @@ func assertSplitTopology(t *testing.T, e splitEnv) {
 	if got := resolveGraphStore(e.routes, e.work, e.cfg, e.cityPath, events.Discard); !sameStorePtr(got, e.class) {
 		t.Error("resolveGraphStore routed off the class store on a split city")
 	}
-	if store, relocated := graphClassBinding(e.routes); !relocated || !sameStorePtr(store, e.class) {
-		t.Error("graphClassBinding does not report the graph class as relocated to the class store")
+	if store, relocated := e.routes.storeFor(coordclass.ClassGraph); !relocated || !sameStorePtr(store, e.class) {
+		t.Error("the routes do not report the graph class as relocated to the class store")
 	}
 	assertPrefixDisjoint(t, e)
 }
@@ -836,8 +836,8 @@ func assertSingleStoreTopology(t *testing.T, e splitEnv) {
 	if got := resolveGraphStore(e.routes, e.work, e.cfg, e.cityPath, events.Discard); !sameStorePtr(got, e.work) {
 		t.Error("resolveGraphStore did not collapse to the work store on a single-store city")
 	}
-	if _, relocated := graphClassBinding(e.routes); relocated {
-		t.Error("graphClassBinding reports the graph class as relocated on a single-store city")
+	if _, relocated := e.routes.storeFor(coordclass.ClassGraph); relocated {
+		t.Error("the routes report the graph class as relocated on a single-store city")
 	}
 }
 

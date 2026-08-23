@@ -24,10 +24,10 @@ package main
 // routes this process already resolved. It does not decide which rigs are
 // serving — a suspended rig is simply absent from the map it is given — and it
 // does not decide whether a binding mints truthfully: it asks the store, which
-// declares the namespace it mints into. The residence probe nonetheless stays
-// in every plan, because retirement also needs a binding known to hold no
-// relics and nothing here censuses residents. The corpus already carries the
-// retired row, so the day the census ships this is a bit, not a redesign.
+// declares the namespace it mints into. Nor does it decide whether the binding
+// holds relics: the boot that opened the routes censused them, and the verdict
+// rides on the routes. Both halves of the retirement condition are therefore
+// observations this file carries rather than judgments it makes.
 
 import (
 	"fmt"
@@ -79,9 +79,9 @@ func cliResidencyTopology(cityPath string, cfg *config.City, work beads.Store, r
 // (buildSuspendedRigPathsForCity, threaded through the census arms) rather than
 // being re-derived here: the constructor is told, it does not decide.
 //
-// The residence probe stays in every plan for the same reason it does
-// everywhere else: the mint bit is observed, but nothing censuses a binding's
-// relics, so the retirement condition's other half is never satisfied.
+// The residence probe retires only when both halves of the condition hold: the
+// mint bit observed from the store, and the relic bit from the census this
+// process's boot took over the same routes.
 func (cr *CityRuntime) residencyTopology(servingRigs map[string]beads.Store) storeref.Topology {
 	bindings, refused := residencyBindingsFromRoutes(cr.storageRoutes)
 	return assembleResidencyTopology(cr.cfg, cr.cityBeadStore(), servingRigs, bindings, refused)
@@ -307,9 +307,9 @@ type cliRelocatedBinding struct {
 //
 // # It turns a comment into a check
 //
-// The by-id front door and the claim route both used to ask
-// graphClassBinding — "which store serves the graph class" — and then answer
-// for sessions, convoy and mail ids out of that same store. That is correct
+// The by-id front door and the claim route both used to ask the routes which
+// store serves the GRAPH class, and then answer for sessions, convoy and mail
+// ids out of that same store. That is correct
 // only because storageSplitShapeOf admits a split only when all five
 // infrastructure classes name the same binding and refuses a per-class fan-out
 // outright, and until now that argument lived entirely in a comment. Reading
@@ -345,6 +345,29 @@ func cliSoleClassBinding(cityPath string) (cliRelocatedBinding, bool, error) {
 			"this city serves its coordination classes from %d separate bindings; %s",
 			len(bindings), storageSupportedTopologyStatement)
 	}
+}
+
+// cliSoleClassBindingStore is cliSoleClassBinding for the callers that have no
+// error channel: the control-dispatch routing gates, which answer "can this
+// scope's own `bd` reach its control beads?" on every tick and have nowhere to
+// report a topology fault to.
+//
+// The fan-out — the only error cliSoleClassBinding returns — comes back as a
+// store whose every operation returns it, and as relocated=TRUE. That is the
+// same fail-loud shape a refused city already takes through here, and it is the
+// safe direction: answering "not relocated" sends the scan to `bd` in the work
+// directory, which enumerates the copies `gc storage migrate` retained there and
+// no longer mutates. A confidently stale answer is the failure this lane exists
+// to close, and a topology this build refuses to serve must not produce one.
+func cliSoleClassBindingStore(cityPath string) (beads.Store, bool) {
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return refusedClassStore{err: err}, true
+	}
+	if !relocated {
+		return nil, false
+	}
+	return binding.Store, true
 }
 
 // resetCLIResidencyBindings drops the memo wholesale. closeCLIStorageRoutes

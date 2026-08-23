@@ -743,8 +743,8 @@ func (d bdByIDClassDoor) bindingName() string {
 //
 // cliSoleClassBinding is how that condition is CHECKED rather than assumed: it
 // reports the city's relocated bindings grouped by store and refuses to name a
-// sole one when there is more than one. Asking the graph class specifically
-// (graphClassBinding) could not tell the two shapes apart.
+// sole one when there is more than one. Asking the graph class specifically —
+// the derivation this replaced — could not tell the two shapes apart.
 func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 	binding, relocated, err := cliSoleClassBinding(cityPath)
 	if err != nil {

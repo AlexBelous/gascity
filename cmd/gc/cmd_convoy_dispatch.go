@@ -658,11 +658,16 @@ func controlScopeTakesGraphClass(cityPath, storePath string) bool {
 // It is the question a shell-based readiness scan has to ask before running:
 // `bd ready` in the work directory enumerates the copies the migration retained
 // there, which no longer receive the workflow's mutations.
+//
+// The binding comes from the resolver's own grouping rather than from a second
+// reading of the routes. Control beads are graph class, but every reserved
+// prefix is served from the one binding here, and cliSoleClassBindingStore is
+// where that is CHECKED rather than assumed.
 func controlGraphBinding(cityPath, storePath string) (beads.Store, bool) {
 	if !controlScopeTakesGraphClass(cityPath, storePath) {
 		return nil, false
 	}
-	return graphClassBinding(cliStorageRoutes(cityPath))
+	return cliSoleClassBindingStore(cityPath)
 }
 
 // controlGraphRelocated reports whether this scope's control beads are served by
@@ -720,7 +725,7 @@ func controlGraphExtraLeg(cityPath, storePath string) (beads.Store, bool) {
 	if controlScopeTakesGraphClass(cityPath, storePath) {
 		return nil, false
 	}
-	binding, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	binding, relocated := cliSoleClassBindingStore(cityPath)
 	if !relocated || binding == nil {
 		return nil, false
 	}

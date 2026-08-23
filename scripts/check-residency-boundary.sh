@@ -23,7 +23,8 @@
 #   (b) direct binding-gate re-derivation — graphClassBinding(,
 #       routes.storeFor(, storeref.ClassCandidates(. Asking "is this class
 #       relocated" a second time is how the split-store bug class reproduces
-#       (#5125, #5127).
+#       (#5125, #5127). graphClassBinding is retired and its rows are gone, so
+#       its pattern now guards a zero: reintroducing the accessor is a new site.
 #   (c) hand-rolled probe lists and plan disassembly — a []beads.Store{ literal,
 #       and reaching a PlanLeg's .Leg.Store directly. The executor
 #       (ResolveOwner/Union) is the only place leg order and per-leg error policy

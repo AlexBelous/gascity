@@ -72,7 +72,11 @@ import (
 //     a bad topology. The arms' own "attach bead <id>: bead not found" is a
 //     better answer than a topology lecture, so it is left to them.
 func attachGraftClassRefusal(cityPath, scopeRoot, attachBeadID string, scope, attachStore beads.Store) error {
-	class, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return fmt.Errorf("--attach %s: resolving this city's class binding: %w", attachBeadID, err)
+	}
+	class := binding.Store
 	if !relocated || class == nil || class == scope {
 		return nil
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -227,7 +228,7 @@ func TestClassRoutedStoreForIDKeepsThePreSeamCandidateOrder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cityPath, work := tt.setup(t)
-			class, _ := graphClassBinding(cliStorageRoutes(cityPath))
+			class, _ := cliStorageRoutes(cityPath).storeFor(coordclass.ClassGraph)
 			want := legacyClassRouteCandidates(tt.id, class, work)
 			got := planLegStoresForID(t, cityPath, tt.id, work)
 			if len(got) != len(want) {

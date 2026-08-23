@@ -21,10 +21,10 @@
 # governs that — stated beside the pattern in residency-boundary-patterns.txt —
 # requires a cross-plane router-agreement pin to land with it.
 #
-# The two b:cliSoleClassBinding rows are the same kind of census one layer down:
+# The b:cliSoleClassBinding rows are the same kind of census one layer down:
 # the surfaces that answer every reserved prefix from ONE store, which is a
 # claim about the city's topology and not just a call. The accessor checks that
-# claim and refuses a fan-out, so a third row is not a correctness bug — it is a
+# claim and refuses a fan-out, so another row is not a correctness bug — it is a
 # new surface routing class-reserved ids, which is the thing worth seeing.
 cmd/gc/api_state.go	BeadStores	a:BeadStores	1
 cmd/gc/api_state.go	BeadStores	ast:returns-store-list	1
@@ -51,8 +51,6 @@ cmd/gc/city_runtime.go	syncBeadsAndUpdateIndex	a:rigBeadStores	1
 cmd/gc/city_runtime.go	tick	a:rigBeadStores	4
 cmd/gc/claim_class_route.go	holds	d:bdIDIsClassReserved	1
 cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:cliSoleClassBinding	1
-cmd/gc/class_store.go	graphClassBinding	b:graphClassBinding	1
-cmd/gc/class_store.go	graphClassBinding	b:routes.storeFor	1
 cmd/gc/class_store.go	resolveClassStore	b:routes.storeFor	1
 cmd/gc/class_store.go	unwrapWorkStores	ast:returns-store-list	1
 cmd/gc/class_store.go	workBeadStores	a:BeadStores	1
@@ -75,18 +73,17 @@ cmd/gc/cmd_convoy.go	openConvoyStores	a:openConvoyStores	1
 cmd/gc/cmd_convoy.go	resolveOwningStoreDir	a:openConvoyStores	1
 cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	a:openConvoyStores	1
 cmd/gc/cmd_convoy_dispatch.go	collectSourceWorkflowMatches	a:openSourceWorkflowStores	1
-cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	b:graphClassBinding	1
-cmd/gc/cmd_convoy_dispatch.go	controlGraphExtraLeg	b:graphClassBinding	1
+cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	b:cliSoleClassBinding	1
+cmd/gc/cmd_convoy_dispatch.go	controlGraphExtraLeg	b:cliSoleClassBinding	1
 cmd/gc/cmd_convoy_dispatch.go	findUniqueBeadAcrossStoresView	a:openSourceWorkflowStores	1
 cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStores	a:openSourceWorkflowStores	1
 cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherWithStoreAndConfig	c:beads.Store-literal	1
 cmd/gc/cmd_wait.go	loadWaitDependencyBead	a:convoyStoreCandidates	1
 cmd/gc/convergence_tick.go	buildConvergenceScopes	a:rigBeadStores	1
-cmd/gc/convergence_tick.go	buildConvergenceScopes	b:graphClassBinding	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	ast:returns-store-list	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	c:beads.Store-literal	3
 cmd/gc/doctor_order_tracking_retention.go	Run	c:beads.Store-literal	1
-cmd/gc/formula_cook_attach_class.go	attachGraftClassRefusal	b:graphClassBinding	1
+cmd/gc/formula_cook_attach_class.go	attachGraftClassRefusal	b:cliSoleClassBinding	1
 cmd/gc/order_dispatch.go	gateStoresFor	ast:returns-store-list	1
 cmd/gc/order_dispatch.go	gateStoresFor	c:beads.Store-literal	1
 cmd/gc/order_store.go	appendOrdersSweepStore	ast:returns-store-list	1

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // This file pins the --rig RULE for `gc bd`'s by-id surface.
@@ -77,7 +78,8 @@ func riggedForeignProviderCity(t *testing.T) (cityPath string, classStore beads.
 	resetCLIStorageRoutes(t)
 	captureCLIStorageStderr(t)
 
-	store, relocated := graphClassBinding(cliStorageRoutes(cityPath))
+	// Off the routes, not through the memoized grouping — see foreignProviderCity.
+	store, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassGraph)
 	if !relocated {
 		t.Fatal("a city serving its classes from a foreign provider resolved no class binding")
 	}

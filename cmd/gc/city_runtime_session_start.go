@@ -406,12 +406,13 @@ func (cr *CityRuntime) observeSessionStartReconcile(cfg *config.City, mode rollo
 		result.DrainAckRefusals%drainAckRefusalDiagnosticInterval == 0 {
 		cr.recordDrainAckAdmissionBoundTrace(cfg, result, TraceOutcomeRetry)
 	}
-	// The escalation crossing is loud exactly once per refusal streak: the
-	// obligation-scoped count passes the threshold once, and escalated
+	// The escalation crossing is loud exactly once per obligation: the
+	// controller marks the single bound check on which the obligation's own
+	// streak first crossed the threshold (ga-f7v2ft.191), and escalated
 	// re-examinations after it are quiet by design — the slow cadence is the
 	// bound, the named line is the signal (ga-f7v2ft.173).
 	if result.Outcome == sessionStartReconcileDrainAckEscalated &&
-		result.DrainAckRefusals == drainAckRefusalEscalationThreshold {
+		result.DrainAckEscalationCrossing {
 		fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation escalated for %s: unresolvable after %d consecutive refusals: %v; re-examining every %s until the row or runtime changes\n", //nolint:errcheck // the escalation must be visible: it replaces the per-retry storm
 			cr.sessionStartLogPrefix(), result.Admission.SessionID, result.DrainAckRefusals, result.Err, drainAckEscalatedRetryInterval)
 		cr.recordDrainAckAdmissionBoundTrace(cfg, result, TraceOutcomeEscalated)

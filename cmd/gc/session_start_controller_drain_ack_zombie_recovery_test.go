@@ -186,7 +186,7 @@ func TestSessionStartControllerEscalatedDrainAckResolvesWhenTheRuntimeBecomesAZo
 		t.Fatal("resolution retained the admission; the obligation must end when the stop finalizes")
 	}
 	controller.mu.Lock()
-	refusals := controller.drainAckRefusalHistory[lease.SessionID]
+	refusals := controller.drainAckRefusalHistory[lease.SessionID].Count
 	controller.mu.Unlock()
 	if refusals != 0 {
 		t.Fatalf("refusal history after resolution = %d, want the obligation's streak cleared", refusals)

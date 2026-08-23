@@ -134,6 +134,110 @@ func TestSessionStartControllerDrainAckRefusalsSurviveDeadlineRelease(t *testing
 	}
 }
 
+// TestSessionStartControllerDrainAckRefusalsResetForNewObligation is the
+// other half of the obligation scoping (ga-f7v2ft.191, field-proven on the
+// mc-enterprise6h soak): the count is the OBLIGATION's, so a release or
+// re-seed that genuinely starts a NEW obligation — a fresh drain of a fresh
+// incarnation under the same pool identity — starts a fresh streak at one. A
+// session-keyed count that survives across incarnations turns the display
+// into a monotonic climb into the thousands (06:20=24 … 08:20=389 on the
+// soak) and makes every new drain of that identity start life escalated,
+// skipping the hot retry cadence it is entitled to.
+func TestSessionStartControllerDrainAckRefusalsResetForNewObligation(t *testing.T) {
+	start := time.Date(2026, 8, 23, 6, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	clockNow := start
+	attempts := 0
+	results := make(chan sessionStartReconcileResult, 256)
+	controller := drainAckEscalationTestController(t,
+		func(context.Context, sessionStartAdmission) error {
+			mu.Lock()
+			attempts++
+			if attempts >= 3 {
+				clockNow = start.Add(drainAckAdmissionBudget + time.Second)
+			}
+			mu.Unlock()
+			return errSessionStartPoolDrainAckPending
+		},
+		func(result sessionStartReconcileResult) {
+			select {
+			case results <- result:
+			default:
+			}
+		},
+		func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return clockNow
+		},
+	)
+
+	if _, err := controller.AdmitPoolDrainAck(testDrainAckEscalationLease()); err != nil {
+		t.Fatalf("admit drain ack: %v", err)
+	}
+	released := awaitDrainAckResult(t, results, func(result sessionStartReconcileResult) bool {
+		return result.Outcome == sessionStartReconcileDeadlineExceeded
+	}, "the deadline release")
+	if released.DrainAckRefusals < 3 {
+		t.Fatalf("released refusal count = %d, want the accumulated count", released.DrainAckRefusals)
+	}
+
+	// The pool identity re-drains as a NEW incarnation: a different instance
+	// token is a different obligation, and its streak starts at one.
+	mu.Lock()
+	clockNow = start.Add(drainAckAdmissionBudget + 2*time.Second)
+	mu.Unlock()
+	next := testDrainAckEscalationLease()
+	next.InstanceToken = "tok-esc-next-incarnation"
+	next.RequesterInstanceToken = next.InstanceToken
+	if _, err := controller.AdmitPoolDrainAck(next); err != nil {
+		t.Fatalf("admit next incarnation's drain ack: %v", err)
+	}
+	fresh := awaitDrainAckResult(t, results, func(result sessionStartReconcileResult) bool {
+		return result.Outcome == sessionStartReconcileRetrying ||
+			result.Outcome == sessionStartReconcileDrainAckEscalated ||
+			result.Outcome == sessionStartReconcileDeadlineExceeded
+	}, "the new obligation's first refusal")
+	if fresh.DrainAckRefusals != 1 {
+		t.Fatalf("new obligation's first refusal count = %d, want 1: the previous incarnation's streak must not leak into a genuinely new obligation", fresh.DrainAckRefusals)
+	}
+}
+
+// TestSessionStartControllerNewObligationCrossesEscalationLoudly pins the
+// crossing signal's scope: the >= transition is announced once PER OBLIGATION.
+// A new obligation that inherits nothing climbs from one and crosses at the
+// threshold with the crossing mark set; the same obligation's re-examinations
+// after the crossing carry no mark.
+func TestSessionStartControllerNewObligationCrossesEscalationLoudly(t *testing.T) {
+	start := time.Date(2026, 8, 23, 7, 0, 0, 0, time.UTC)
+	results := make(chan sessionStartReconcileResult, 256)
+	controller := drainAckEscalationTestController(t,
+		func(context.Context, sessionStartAdmission) error {
+			return errSessionStartPoolDrainAckPending
+		},
+		func(result sessionStartReconcileResult) {
+			select {
+			case results <- result:
+			default:
+			}
+		},
+		func() time.Time { return start },
+	)
+
+	if _, err := controller.AdmitPoolDrainAck(testDrainAckEscalationLease()); err != nil {
+		t.Fatalf("admit drain ack: %v", err)
+	}
+	crossed := awaitDrainAckResult(t, results, func(result sessionStartReconcileResult) bool {
+		return result.Outcome == sessionStartReconcileDrainAckEscalated
+	}, "the escalation crossing")
+	if !crossed.DrainAckEscalationCrossing {
+		t.Fatalf("the first crossing of the threshold carried no crossing mark (refusals=%d); the named line would never fire", crossed.DrainAckRefusals)
+	}
+	if crossed.DrainAckRefusals != drainAckRefusalEscalationThreshold {
+		t.Fatalf("crossing at %d refusals, want the threshold %d", crossed.DrainAckRefusals, drainAckRefusalEscalationThreshold)
+	}
+}
+
 // TestSessionStartControllerEscalatesUnresolvableDrainAckAfterThreshold is the
 // bound itself: at the escalation threshold the outcome becomes the NAMED
 // escalated state, the hot rate-limited retry stops (slow re-examination
@@ -246,7 +350,7 @@ func TestSessionStartControllerEscalatedDrainAckResolvesWhenReconcileSucceeds(t 
 		t.Fatal("resolution retained the admission; the obligation must end when the stop finalizes")
 	}
 	controller.mu.Lock()
-	refusals := controller.drainAckRefusalHistory[lease.SessionID]
+	refusals := controller.drainAckRefusalHistory[lease.SessionID].Count
 	controller.mu.Unlock()
 	if refusals != 0 {
 		t.Fatalf("refusal history after resolution = %d, want the obligation's streak cleared", refusals)
@@ -255,7 +359,8 @@ func TestSessionStartControllerEscalatedDrainAckResolvesWhenReconcileSucceeds(t 
 
 // TestObserveSessionStartReconcileEmitsNamedEscalationOnceAtThreshold pins the
 // loud-not-silent half: the runtime's observer emits ONE named supervisor line
-// at the crossing, and escalated re-examinations after it are quiet.
+// on the obligation's crossing mark (ga-f7v2ft.191), and escalated
+// re-examinations after it — which carry no mark — are quiet.
 func TestObserveSessionStartReconcileEmitsNamedEscalationOnceAtThreshold(t *testing.T) {
 	var buf bytes.Buffer
 	cr := &CityRuntime{stderr: &buf}
@@ -266,6 +371,7 @@ func TestObserveSessionStartReconcileEmitsNamedEscalationOnceAtThreshold(t *test
 	}
 
 	result.DrainAckRefusals = drainAckRefusalEscalationThreshold
+	result.DrainAckEscalationCrossing = true
 	cr.observeSessionStartReconcile(nil, rollout.Auto, result)
 	crossing := buf.String()
 	if !strings.Contains(crossing, "drain-ack reconciliation escalated for gc-drain-esc") ||
@@ -275,6 +381,7 @@ func TestObserveSessionStartReconcileEmitsNamedEscalationOnceAtThreshold(t *test
 
 	buf.Reset()
 	result.DrainAckRefusals = drainAckRefusalEscalationThreshold + 5
+	result.DrainAckEscalationCrossing = false
 	cr.observeSessionStartReconcile(nil, rollout.Auto, result)
 	if got := buf.String(); got != "" {
 		t.Fatalf("post-crossing escalated re-examination logged %q, want silence", got)

@@ -186,6 +186,14 @@ type sessionStartReconcileResult struct {
 	// result, carried out so the runtime's observer can emit the throttled
 	// diagnostic without the controller learning how to trace.
 	DrainAckRefusals int
+	// DrainAckEscalationCrossing marks the single bound check on which this
+	// obligation's consecutive-refusal count first crossed
+	// drainAckRefusalEscalationThreshold. The crossing is OBLIGATION-scoped
+	// (ga-f7v2ft.191): the same wedged obligation announces its escalation
+	// once and re-examines quietly afterward, while a genuinely new
+	// obligation earns its own crossing when — and only when — its own streak
+	// reaches the threshold.
+	DrainAckEscalationCrossing bool
 }
 
 type sessionStartAuthoritativeSeedResult struct {
@@ -221,12 +229,14 @@ type sessionStartController struct {
 	stderr      io.Writer
 	admissions  map[string]sessionStartAdmission
 	// drainAckRefusalHistory is the OBLIGATION-scoped consecutive-refusal
-	// count for retained drain-acks, keyed by session ID. It deliberately
+	// streak for retained drain-acks, keyed by session ID. It deliberately
 	// survives the deadline release (which deletes the admission and arms an
 	// audit) so the release → re-detect → retry macro cycle cannot reset the
-	// escalation bound; any resolution of the admission clears it
-	// (ga-f7v2ft.173).
-	drainAckRefusalHistory    map[string]int
+	// escalation bound for the SAME obligation; a re-admission carrying a
+	// different instance token is a genuinely NEW obligation — a fresh drain
+	// of a fresh incarnation — and starts a fresh streak (ga-f7v2ft.191). Any
+	// resolution of the admission clears it (ga-f7v2ft.173).
+	drainAckRefusalHistory    map[string]drainAckRefusalStreak
 	nextVersion               uint64
 	auditPending              bool
 	seedOutstanding           map[string]struct{}
@@ -281,7 +291,7 @@ func newSessionStartController(opts sessionStartControllerOptions) (*sessionStar
 		now:                    now,
 		stderr:                 stderr,
 		admissions:             make(map[string]sessionStartAdmission, opts.MaxDistinct),
-		drainAckRefusalHistory: make(map[string]int, opts.MaxDistinct),
+		drainAckRefusalHistory: make(map[string]drainAckRefusalStreak, opts.MaxDistinct),
 		seedOutstanding:        make(map[string]struct{}),
 		inFlight:               make(map[string]uint64, opts.MaxDistinct),
 		seedCapacity:           make(chan struct{}, 1),
@@ -1407,8 +1417,9 @@ func (c *sessionStartController) reconcileKey(key string) {
 	// re-detection re-owns the row instead of being fenced out of it forever
 	// (ga-f7v2ft.112 ruling 1b).
 	if admission.PoolDrainAck != nil || admission.PoolDrainAckUncertain || errors.Is(err, errSessionStartPoolDrainAckPending) {
-		expired, refusals := c.boundRetainedDrainAck(key, admission.Version)
+		expired, refusals, crossing := c.boundRetainedDrainAck(key, admission.Version)
 		result.DrainAckRefusals = refusals
+		result.DrainAckEscalationCrossing = crossing
 		if expired {
 			c.queue.Forget(key)
 			c.releaseAdmission(key, admission.Version)
@@ -1486,26 +1497,60 @@ const drainAckRefusalEscalationThreshold = 3 * drainAckRefusalDiagnosticInterval
 // liveness from scratch.
 const drainAckEscalatedRetryInterval = drainAckAdmissionBudget
 
+// drainAckRefusalStreak is one drain-ack obligation's consecutive-refusal
+// history. InstanceToken names the obligation — the incarnation whose drain
+// the acknowledgement completes — so the streak survives the deadline
+// release's re-detection of the SAME obligation while a fresh incarnation's
+// drain starts a fresh streak (ga-f7v2ft.191). An empty token (the
+// PoolDrainAckUncertain retention, which could not reconstruct its lease)
+// matches whatever streak the session carries: an uncertain re-seed of a
+// wedged drain is the same obligation, not a new one. EscalationLogged makes
+// the >= threshold crossing announce itself exactly once per obligation.
+type drainAckRefusalStreak struct {
+	InstanceToken    string
+	Count            int
+	EscalationLogged bool
+}
+
 // boundRetainedDrainAck stamps the drain's own deadline on first retention and
 // counts the consecutive refusal. The count is OBLIGATION-scoped
 // (drainAckRefusalHistory): it survives version coalescing AND the deadline
 // release, so the release → audit → re-detect macro cycle cannot reset the
-// escalation bound. It reports whether the obligation has outlived its
-// deadline bound.
-func (c *sessionStartController) boundRetainedDrainAck(key string, version uint64) (bool, int) {
+// escalation bound for the same obligation — while a re-admission carrying a
+// different instance token starts a genuinely new obligation's streak at one.
+// It reports whether the obligation has outlived its deadline bound, the
+// streak's count, and whether this check is the streak's single escalation
+// crossing.
+func (c *sessionStartController) boundRetainedDrainAck(key string, version uint64) (bool, int, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	current, ok := c.admissions[key]
 	if !ok || current.Version != version {
-		return false, 0
+		return false, 0, false
 	}
 	if current.DrainAckDeadline.IsZero() {
 		current.DrainAckDeadline = c.now().Add(drainAckAdmissionBudget)
 	}
-	c.drainAckRefusalHistory[key]++
-	current.DrainAckRefusals = c.drainAckRefusalHistory[key]
+	token := ""
+	if current.PoolDrainAck != nil {
+		token = current.PoolDrainAck.InstanceToken
+	}
+	streak := c.drainAckRefusalHistory[key]
+	if token != "" && streak.InstanceToken != "" && streak.InstanceToken != token {
+		streak = drainAckRefusalStreak{}
+	}
+	if token != "" && streak.InstanceToken == "" {
+		streak.InstanceToken = token
+	}
+	streak.Count++
+	crossing := !streak.EscalationLogged && streak.Count >= drainAckRefusalEscalationThreshold
+	if crossing {
+		streak.EscalationLogged = true
+	}
+	c.drainAckRefusalHistory[key] = streak
+	current.DrainAckRefusals = streak.Count
 	c.admissions[key] = current
-	return !c.now().Before(current.DrainAckDeadline), current.DrainAckRefusals
+	return !c.now().Before(current.DrainAckDeadline), streak.Count, crossing
 }
 
 func (c *sessionStartController) readAdmission(key string) (sessionStartAdmission, bool) {

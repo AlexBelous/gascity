@@ -3322,6 +3322,19 @@ func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	return content, err
 }
 
+// CapturePaneJoined captures the visible content of a pane with wrapped lines
+// rejoined (-J).
+//
+// [Tmux.CapturePane] returns the pane as displayed, which means tmux has
+// inserted a newline at every point a line reached the pane width. A value
+// wider than the pane therefore arrives split, and substring matching over it —
+// redaction, prompt detection — cannot see it whole. Callers that scan captured
+// text for a known string want this variant; callers that reason about the
+// visible layout want the plain one.
+func (t *Tmux) CapturePaneJoined(session string, lines int) (string, error) {
+	return t.run("capture-pane", "-p", "-J", "-t", session, "-S", fmt.Sprintf("-%d", lines))
+}
+
 // capturePaneScreen captures only what is currently on the pane's screen, with
 // no scrollback. Use it for "is this on screen right now" questions, where
 // history would answer for a state the pane has already left.

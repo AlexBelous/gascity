@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -163,9 +164,9 @@ func handoffMailIDFromOutput(t *testing.T, out, marker string) string {
 	return id
 }
 
-// TestCLIMailMessagesStoreServesTheBinding is the unit under the end-to-end test
-// above: the route itself, asserted without a command around it.
-func TestCLIMailMessagesStoreServesTheBinding(t *testing.T) {
+// TestCLIMailStoreServesTheBinding is the unit under the end-to-end test above:
+// the route itself, asserted without a command around it.
+func TestCLIMailStoreServesTheBinding(t *testing.T) {
 	cityPath, cfg := migratedOneShotCLICity(t)
 	captureCLIStorageStderr(t)
 
@@ -175,23 +176,26 @@ func TestCLIMailMessagesStoreServesTheBinding(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
 
-	if got := cliMailMessagesStore(work, cfg, cityPath); got == work {
+	if got := cliMailStore(work, cfg, cityPath).Store; got == work {
 		t.Error("the messaging route returned the work store on a city that has migrated messaging onto its binding")
 	}
 }
 
-// TestCLIMailMessagesStoreIsIdentityWhenNothingRelocates is the compatibility
-// control. A city that authors no [storage] must get back the EXACT store value
-// it passed in — one-shot callers assert optional capabilities on whatever comes
-// back, so a wrapper here would change behavior on every city that has not
-// migrated.
-func TestCLIMailMessagesStoreIsIdentityWhenNothingRelocates(t *testing.T) {
+// TestCLIMailStoreIsIdentityWhenNothingRelocates is the compatibility control. A
+// city that authors no [storage] must get back the EXACT store value it passed
+// in — one-shot callers assert optional capabilities on whatever comes back, so
+// a wrapper here would change behavior on every city that has not migrated.
+//
+// The assertion is on the EMBEDDED store, not on the beads.MailStore around it.
+// The wrapper is always a new value, so a row that compared the wrapper would
+// pass on nothing at all.
+func TestCLIMailStoreIsIdentityWhenNothingRelocates(t *testing.T) {
 	cityPath := oneShotCLICity(t, "")
 	refuseInfraMigrationSource(t)
 	captureCLIStorageStderr(t)
 
 	work := beads.NewMemStore()
-	if got := cliMailMessagesStore(work, nil, cityPath); got != beads.Store(work) {
+	if got := cliMailStore(work, nil, cityPath).Store; got != beads.Store(work) {
 		t.Errorf("the one-shot messaging route returned %p, want the work store %p", got, work)
 	}
 }
@@ -221,13 +225,28 @@ func TestHandoffRootsRouteMailThroughTheMessagingClassStore(t *testing.T) {
 	content := handoffCommandSource(t)
 	for _, needle := range handoffMessagingForbidden {
 		if strings.Contains(content, needle) {
-			t.Errorf("cmd_handoff.go contains unrouted messaging-class write %q — the handoff roots must derive their message store through cliMailMessagesStore(store, cfg, cityPath) so a [beads.classes.messaging] relocation reaches them", needle)
+			t.Errorf("cmd_handoff.go contains unrouted messaging-class write %q — the handoff roots must derive their message store through cliMailStore(store, cfg, cityPath).Store so a [beads.classes.messaging] relocation reaches them", needle)
 		}
 	}
-	if strings.Count(content, "cliMailMessagesStore(") != 2 {
-		t.Errorf("cmd_handoff.go calls cliMailMessagesStore( %d time(s), want 2 — one per command root (cmdHandoff, cmdHandoffRemote); a third root needs its own store-identity row beside the two above, not just this scan", strings.Count(content, "cliMailMessagesStore("))
+	calls := strings.Count(content, "cliMailStore(")
+	if calls != 2 {
+		t.Errorf("cmd_handoff.go calls cliMailStore( %d time(s), want 2 — one per command root (cmdHandoff, cmdHandoffRemote); a third root needs its own store-identity row beside the two above, not just this scan", calls)
+	}
+	// Every one of those calls must unwrap. beads.MailStore embeds beads.Store,
+	// so handing the wrapper to doHandoff* compiles and delivers mail correctly
+	// — and moves every optional-capability assertion downstream onto the
+	// wrapper, which answers no to all of them. Nothing else in the tree fails
+	// on that, so the shape is pinned here.
+	if unwrapped := len(mailStoreUnwrapCall.FindAllString(content, -1)); unwrapped != calls {
+		t.Errorf("cmd_handoff.go unwraps %d of its %d cliMailStore( call(s); the messaging leg of beadmail.NewWithStores is a beads.Store and must be the embedded store, not the typed wrapper around it", unwrapped, calls)
 	}
 }
+
+// mailStoreUnwrapCall matches a cliMailStore call that reads its embedded store.
+// The argument list is matched without nested parens because both roots pass
+// three plain identifiers; a call that grew a nested expression would stop
+// matching and fail the count above, which is the direction that wants a human.
+var mailStoreUnwrapCall = regexp.MustCompile(`cliMailStore\([^()]*\)\.Store`)
 
 // TestHandoffMessagingScanDetectsTheDefectItGuards is the control the scan above
 // cannot supply for itself. A source scan over a clean file passes identically

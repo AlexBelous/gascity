@@ -165,7 +165,7 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 	// cfg as the session leg above: a handoff whose mail lands in the ledger the
 	// class moved off is sent and never delivered at once, and the session that
 	// sent it is already gone.
-	msgStore := cliMailMessagesStore(store, routeCfg, current.cityPath)
+	msgStore := cliMailStore(store, routeCfg, current.cityPath).Store
 	rec := openCityRecorderAt(current.cityPath, stderr)
 	if auto {
 		return doHandoffAuto(msgStore, sessStore, rec, current.display, args, hookFormat, stdout, stderr)
@@ -218,7 +218,7 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 	// session coordination-class store; identity today, so byte-identical.
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	// Same messaging-class routing as the local arm; see cmdHandoff.
-	msgStore := cliMailMessagesStore(store, cfg, cityPath)
+	msgStore := cliMailStore(store, cfg, cityPath).Store
 	sender, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, sessStore, stderr, "gc handoff")
 	if !ok {
 		return 1
@@ -357,7 +357,7 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 	// two-store provider (mirroring newCityMailProvider): message-bead persistence
 	// goes to the messaging-class store while beadmail's session addressing/identity
 	// reads follow the session-class store. Both legs arrive routed — the callers
-	// derive them through cliMailMessagesStore/cliSessionStore — and this function
+	// derive them through cliMailStore/cliSessionStore — and this function
 	// cannot check that, which is why the routing is pinned at the two command
 	// roots (TestHandoffRootsRouteMailThroughTheMessagingClassStore).
 	provider := beadmail.NewWithStores(msgStore, sessStore)

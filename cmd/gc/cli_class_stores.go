@@ -43,6 +43,14 @@ func cliNudgesStore(store beads.Store, cfg *config.City, cityPath string) beads.
 // split shape (storageSplitWhole) puts them in the same binding: a mail bead is
 // ClassMessaging, the mailbox identity it resolves against is ClassSessions, and
 // the two route independently.
+//
+// This is the ONE messaging-class accessor the CLI has, and one accessor is the
+// point: a second derivation of the same routing question is a second answer
+// waiting to disagree. A caller that needs a raw beads.Store — beadmail's
+// two-store provider takes one — reads the embedded .Store field. The unwrap
+// has to be written out, because beads.MailStore satisfies beads.Store itself,
+// so handing the wrapper straight through would compile while moving every
+// optional-capability assertion onto the wrapper instead of the store.
 func cliMailStore(store beads.Store, cfg *config.City, cityPath string) beads.MailStore {
 	return beads.MailStore{Store: resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}
 }

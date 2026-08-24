@@ -75,14 +75,24 @@
 # so these rows are a MIGRATION pinned open, not a sanctioned shape: ga-qdt5y.16
 # retires both.
 #
-# cmd/gc/cmd_wait.go's newWaitDependencyStoreSet is the third of that family, and
-# it surfaced only when the signature rule learned to see through a local type
-# name: `type waitDependencyStoreSet []beads.Store` made the constructor's result
-# an *ast.Ident, and the rule had been reading spellings. The set's Get does hand
-# its list to storeref.Resolve — the executor applies the per-leg policy — but the
-# LIST is assembled here, city store first and rig stores in sorted-name order,
-# which is the leg-order decision the resolver owns. Same shape as the drain.go
-# pair and pinned for the same reason; ga-qdt5y.16 covers it.
+# cmd/gc/cmd_wait.go's newWaitDependencyStoreSet was the third of that family and
+# is the second retired. It had surfaced only when the signature rule learned to
+# see through a local type name: `type waitDependencyStoreSet []beads.Store` made
+# the constructor's result an *ast.Ident, and the rule had been reading spellings.
+# ga-qdt5y.16 collapsed it onto Plan(RoutedWork) executed by Walk, over the
+# topology the controller already registered at boot, with the suspension frame
+# threaded in the way the census arms thread it. Both halves mattered: the list
+# had no binding leg at all, so a relocated dependency was not merely invisible
+# but actively FAILED the waiter; and it read every rig the runtime held open,
+# including suspended ones, whose stores are dark — one suspended rig made every
+# dependency read in the city error, and the wake pass aborts on a dependency
+# error, so no wait in the city could be readied. A degraded pass now answers
+# "absence not proved" rather than a clean not-found, which is what keeps a dark
+# leg from failing a live waiter.
+#
+# cmd_wait.go still appears below on the loadWaitDependencyBead row, which is the
+# one-shot registration/wake path (a:convoyStoreCandidates, reached only from
+# prepareWaitWakeStateForCity) and a different slice.
 #
 # cmd/gc/claim_class_route.go's holds was the fourth of that family and is the
 # first retired: ga-qdt5y.16 collapsed it onto storeref's ByID plan over a frame
@@ -152,7 +162,6 @@ cmd/gc/cmd_convoy_dispatch.go	openSourceWorkflowStores	a:openSourceWorkflowStore
 cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherWithStoreAndConfig	c:beads.Store-literal	1
 cmd/gc/cmd_storage.go	reportBindingRelics	d:AllReservedClassPrefixes	1
 cmd/gc/cmd_wait.go	loadWaitDependencyBead	a:convoyStoreCandidates	1
-cmd/gc/cmd_wait.go	newWaitDependencyStoreSet	ast:returns-store-list	1
 cmd/gc/convergence_tick.go	buildConvergenceScopes	a:rigBeadStores	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	ast:returns-store-list	1
 cmd/gc/dispatch_control_ready.go	controlReadyCacheSources	c:beads.Store-literal	3

@@ -1028,12 +1028,30 @@ func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpk
 	return closedCount == len(depIDs), nil
 }
 
+// loadWaitDependencyBead reads a wait's dependency on the ONE-SHOT plane.
+//
+// The binding is resolved FIRST, and the scan below is only what answers for an
+// id no binding holds. The scan's work axis is the city's store DIRECTORIES, and
+// a relocated class binding is not one of them — so before this leg went in
+// front, a dependency `gc storage migrate` had moved was not merely unrouted. The
+// scan answered, successfully, with the permanently-open copy the migration
+// retained in the city store, and a waiter on that dependency slept forever.
+//
+// Same defect the controller arm carried (newWaitDependencyStoreSet, ga-qdt5y.16
+// slice B), reached by a different code path; both arms now end on this seam.
 func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string) (beads.Bead, error) {
 	if strings.TrimSpace(cityPath) == "" {
 		if cityStore == nil {
 			return beads.Bead{}, beads.ErrNotFound
 		}
 		return cityStore.Get(depID)
+	}
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, depID)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if ownedByBinding {
+		return beadForOwner(owner, depID)
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {

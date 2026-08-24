@@ -25,8 +25,9 @@ import (
 )
 
 // openSplitBindingRoutes opens the routes a converged whole-split city boots
-// with, against a real sqlite binding on disk.
-func openSplitBindingRoutes(t *testing.T) *storageRoutes {
+// with, against a real sqlite binding on disk. It returns the city the routes
+// belong to, because the census reads and writes a note under it.
+func openSplitBindingRoutes(t *testing.T) (string, *storageRoutes) {
 	t.Helper()
 	root := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(root, "store"))
@@ -39,7 +40,7 @@ func openSplitBindingRoutes(t *testing.T) *storageRoutes {
 		t.Fatalf("openStorageRoutes: %v", err)
 	}
 	t.Cleanup(func() { _ = routes.close() })
-	return routes
+	return root, routes
 }
 
 // soleBinding is the one binding a whole-split city relocates every class onto.
@@ -72,6 +73,19 @@ func bindingLegRead(t *testing.T, routes *storageRoutes, id string) bool {
 	return false
 }
 
+// censusLive takes the census against a city with no relic note, so the verdict
+// comes from a real read of the binding.
+//
+// The note only ever remembers TRUE, so in production it can only keep a probe
+// alive — but a row whose whole claim is about what the SCAN concludes has to
+// reach the scan. Censusing under the routes' own city would let a note written
+// by an earlier boot answer for it, and the row would pass with the scan
+// regressed to anything at all.
+func censusLive(t *testing.T, routes *storageRoutes) {
+	t.Helper()
+	censusBindingRelics(t.TempDir(), routes, "gc start", nil)
+}
+
 func mustBindings(t *testing.T, routes *storageRoutes) []storeref.ClassBinding {
 	t.Helper()
 	bindings, err := residencyBindingsFromRoutes(routes)
@@ -82,8 +96,8 @@ func mustBindings(t *testing.T, routes *storageRoutes) []storeref.ClassBinding {
 }
 
 func TestBootCensusRetiresTheProbeOnACleanBinding(t *testing.T) {
-	routes := openSplitBindingRoutes(t)
-	censusBindingRelics(routes)
+	cityPath, routes := openSplitBindingRoutes(t)
+	censusBindingRelics(cityPath, routes, "gc start", nil)
 
 	binding := soleBinding(t, routes)
 	if !binding.MintsReserved {
@@ -101,7 +115,7 @@ func TestBootCensusRetiresTheProbeOnACleanBinding(t *testing.T) {
 // across is enough to keep every work-shaped read probing, because that bead
 // is reachable no other way.
 func TestBootCensusKeepsTheProbeForAMigratedBead(t *testing.T) {
-	routes := openSplitBindingRoutes(t)
+	cityPath, routes := openSplitBindingRoutes(t)
 	store, ok := routes.storeFor(coordclass.ClassGraph)
 	if !ok {
 		t.Fatal("the split city relocated no graph store")
@@ -113,7 +127,7 @@ func TestBootCensusKeepsTheProbeForAMigratedBead(t *testing.T) {
 	if _, err := creator.CreateWithForeignID(beads.Bead{ID: "ga-relic", Title: "carried across", Type: "task"}); err != nil {
 		t.Fatalf("seeding the relic the way `gc storage migrate` does: %v", err)
 	}
-	censusBindingRelics(routes)
+	censusBindingRelics(cityPath, routes, "gc start", nil)
 
 	if !soleBinding(t, routes).HasLegacyResidents {
 		t.Fatal("the census missed a bead sitting open in the binding under a work-shaped id")
@@ -127,7 +141,7 @@ func TestBootCensusKeepsTheProbeForAMigratedBead(t *testing.T) {
 // building bindings from routes the boot never censused, must not retire
 // anything: an unasked question is not a clean answer.
 func TestUncensusedRoutesKeepTheirProbe(t *testing.T) {
-	routes := openSplitBindingRoutes(t)
+	_, routes := openSplitBindingRoutes(t)
 
 	if !soleBinding(t, routes).HasLegacyResidents {
 		t.Error("routes that were never censused reported a clean binding")
@@ -245,7 +259,7 @@ func TestBootCensusKeepsTheProbeForAClosedRelic(t *testing.T) {
 	if open, err := storeref.OpenLegacyResidents(binding.Leg.Store, config.AllReservedClassPrefixes()); err != nil || len(open) != 0 {
 		t.Fatalf("after the close the binding still reports %v open relics (err %v); this row cannot distinguish a widened census from an undrained one", open, err)
 	}
-	censusBindingRelics(routes)
+	censusLive(t, routes)
 
 	if !soleBinding(t, routes).HasLegacyResidents {
 		t.Fatal("the boot certified a binding clean because its only relic had CLOSED; the probe retires and every read of that id is answered by the migration's frozen open copy")
@@ -280,7 +294,7 @@ func TestClosingTheLastRelicDrainsTheCountAndKeepsTheProbe(t *testing.T) {
 	if err := soleBinding(t, routes).Leg.Store.Close(carried[0]); err != nil {
 		t.Fatalf("closing the carried-across bead %s: %v", carried[0], err)
 	}
-	censusBindingRelics(routes)
+	censusLive(t, routes)
 	stubInfraControllerPing(t, 0)
 
 	var stdout, stderr bytes.Buffer
@@ -342,7 +356,7 @@ func TestStorageStatusReportsNoRelicsOnACleanCutover(t *testing.T) {
 // A city that relocates nothing has no binding to census, and the census must
 // not care.
 func TestCensusOfIdentityRoutesIsANoOp(t *testing.T) {
-	censusBindingRelics(nil)
+	censusBindingRelics(t.TempDir(), nil, "gc start", nil)
 	if bindings := mustBindings(t, nil); len(bindings) != 0 {
 		t.Errorf("nil routes produced %d bindings", len(bindings))
 	}

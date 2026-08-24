@@ -137,9 +137,22 @@ func (r *storageRoutes) hasLegacyResidents(store beads.Store) bool {
 // is the busiest one-shot route in the CLI: the door no longer keeps a probe of
 // its own, so a binding certified clean here is a binding that path will not
 // read. A false clean is a lost bead, which is why every unknown answers true.
-func censusBindingRelics(routes *storageRoutes) {
+//
+// A binding a previous process already found relics in is not read again — see
+// storage_relic_memo.go for why only that direction may be remembered. The
+// scan's cost is the binding's whole history (82ms at 10k rows, and linear), so
+// on a migrated city this is the difference between paying it once and paying it
+// in front of every one-shot command forever.
+func censusBindingRelics(cityPath string, routes *storageRoutes, logPrefix string, stderr io.Writer) {
 	if routes == nil {
 		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	known, err := readRelicCensusMemo(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: reading the relic-census note: %v; censusing the bindings live instead\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 	// Built with the pessimistic default still in force — the census reads the
 	// bindings' stores and prefixes, never their relic bits — so this is not
@@ -148,13 +161,28 @@ func censusBindingRelics(routes *storageRoutes) {
 	// probe.
 	bindings, _ := residencyBindingsFromRoutes(routes)
 	relics := make(map[beads.Store]bool, len(bindings))
+	learned := false
 	for _, binding := range bindings {
 		if !binding.MintsReserved {
 			continue
 		}
-		relics[binding.Leg.Store] = storeref.HasLegacyResidents(binding) // residency:allow — indexes a census result by the binding it was taken from; resolves nothing
+		ref := string(binding.Leg.Ref)
+		verdict := known[ref]
+		if !verdict {
+			verdict = storeref.HasLegacyResidents(binding)
+			if verdict {
+				known[ref] = true
+				learned = true
+			}
+		}
+		relics[binding.Leg.Store] = verdict // residency:allow — indexes a census result by the binding it was taken from; resolves nothing
 	}
 	routes.relics = relics
+	if learned {
+		if err := writeRelicCensusMemo(cityPath, known); err != nil {
+			fmt.Fprintf(stderr, "%s: recording the relic-census note: %v; the next process will census this binding again\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}
 }
 
 // storeFor returns the store serving a class and whether these routes relocate
@@ -356,7 +384,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// through — the controller's boot and the one-shot CLI's memoized routes.
 	// Taking it anywhere downstream would put a store read inside a per-tick
 	// topology constructor.
-	censusBindingRelics(routes)
+	censusBindingRelics(cityPath, routes, logPrefix, stderr)
 	return routes, nil
 }
 

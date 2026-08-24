@@ -415,15 +415,11 @@ func defaultAttachGitHubPRRepairWorkflow(cityPath string, store beads.Store, cfg
 		IdempotencyKey: "github-pr-repair-workflow:" + bead.ID,
 		Vars:           githubPRRepairWorkflowVars(bead, result),
 	}
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, workflow, searchPaths, opts.Vars)
+	graphStore := scopeGraphStore(cityPath, rig.Path, cfg, store)
+	_, _, err := molecule.CookChoosingStore(ctx, workflow, searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
+		return moleculeClassStore(recipe, store, graphStore)
+	})
 	if err != nil {
-		return fmt.Errorf("instantiating repair workflow %q: compiling formula: %w", workflow, err)
-	}
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-		return fmt.Errorf("instantiating repair workflow %q: %w", workflow, err)
-	}
-	rootStore := moleculeClassStore(recipe, store, scopeGraphStore(cityPath, rig.Path, cfg, store))
-	if _, err := molecule.Instantiate(ctx, rootStore, recipe, opts); err != nil {
 		return fmt.Errorf("instantiating repair workflow %q: %w", workflow, err)
 	}
 	return nil

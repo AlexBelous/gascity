@@ -212,7 +212,8 @@
               "storage-status",
               "ready",
               "storage-recover-stranded",
-              "beads-metadata-cas"
+              "beads-metadata-cas",
+              "storage-preflight"
             ]
           },
           "event_id": {

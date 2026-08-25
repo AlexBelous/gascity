@@ -12196,7 +12196,7 @@
             "session.work_query_failed": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed",
             "storage.binding.converged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingConverged",
             "storage.binding.genesis": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingGenesis",
-            "storage.binding.not-configured": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingNotConfigured",
+            "storage.binding.not_configured": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingNotConfigured",
             "storage.binding.uncheckable": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
@@ -13767,7 +13767,7 @@
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
-                "storage.binding.not-configured"
+                "storage.binding.not_configured"
               ]
             },
             "type": "string"
@@ -17417,7 +17417,7 @@
             "type": "string"
           },
           "type": {
-            "const": "storage.binding.not-configured",
+            "const": "storage.binding.not_configured",
             "type": "string"
           },
           "workflow": {
@@ -17431,7 +17431,7 @@
           "actor",
           "payload"
         ],
-        "title": "TypedEventStreamEnvelope storage.binding.not-configured",
+        "title": "TypedEventStreamEnvelope storage.binding.not_configured",
         "type": "object"
       },
       "TypedEventStreamEnvelopeStorageBindingUncheckable": {
@@ -18034,7 +18034,7 @@
             "session.work_query_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed",
             "storage.binding.converged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingConverged",
             "storage.binding.genesis": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingGenesis",
-            "storage.binding.not-configured": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured",
+            "storage.binding.not_configured": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured",
             "storage.binding.uncheckable": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
@@ -19688,7 +19688,7 @@
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
-                "storage.binding.not-configured"
+                "storage.binding.not_configured"
               ]
             },
             "type": "string"
@@ -23594,7 +23594,7 @@
             "type": "string"
           },
           "type": {
-            "const": "storage.binding.not-configured",
+            "const": "storage.binding.not_configured",
             "type": "string"
           },
           "workflow": {
@@ -23609,7 +23609,7 @@
           "payload",
           "city"
         ],
-        "title": "TypedTaggedEventStreamEnvelope storage.binding.not-configured",
+        "title": "TypedTaggedEventStreamEnvelope storage.binding.not_configured",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeStorageBindingUncheckable": {

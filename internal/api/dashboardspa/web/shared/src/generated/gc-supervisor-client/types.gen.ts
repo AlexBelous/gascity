@@ -5342,7 +5342,7 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedEventStreamEnvelopeStorageBindingGenesis) | ({
-    type: 'storage.binding.not-configured';
+    type: 'storage.binding.not_configured';
 } & TypedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
@@ -6878,7 +6878,7 @@ export type TypedEventStreamEnvelopeStorageBindingGenesis = {
 };
 
 /**
- * TypedEventStreamEnvelope storage.binding.not-configured
+ * TypedEventStreamEnvelope storage.binding.not_configured
  */
 export type TypedEventStreamEnvelopeStorageBindingNotConfigured = {
     actor: string;
@@ -6891,7 +6891,7 @@ export type TypedEventStreamEnvelopeStorageBindingNotConfigured = {
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'storage.binding.not-configured';
+    type: 'storage.binding.not_configured';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7229,7 +7229,7 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedTaggedEventStreamEnvelopeStorageBindingGenesis) | ({
-    type: 'storage.binding.not-configured';
+    type: 'storage.binding.not_configured';
 } & TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
@@ -8849,7 +8849,7 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingGenesis = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope storage.binding.not-configured
+ * TypedTaggedEventStreamEnvelope storage.binding.not_configured
  */
 export type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = {
     actor: string;
@@ -8863,7 +8863,7 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = {
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'storage.binding.not-configured';
+    type: 'storage.binding.not_configured';
     workflow?: WorkflowEventProjection;
 };
 

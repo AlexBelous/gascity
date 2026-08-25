@@ -4918,7 +4918,7 @@ export const zTypedEventStreamEnvelopeStorageBindingGenesis = z.object({
 });
 
 /**
- * TypedEventStreamEnvelope storage.binding.not-configured
+ * TypedEventStreamEnvelope storage.binding.not_configured
  */
 export const zTypedEventStreamEnvelopeStorageBindingNotConfigured = z.object({
     actor: z.string(),
@@ -4931,7 +4931,7 @@ export const zTypedEventStreamEnvelopeStorageBindingNotConfigured = z.object({
     step_id: z.string().optional(),
     subject: z.string().optional(),
     ts: z.iso.datetime(),
-    type: z.literal('storage.binding.not-configured'),
+    type: z.literal('storage.binding.not_configured'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5186,7 +5186,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeSessionWorkQueryFailed.extend({ type: z.literal('session.work_query_failed') }),
     zTypedEventStreamEnvelopeStorageBindingConverged.extend({ type: z.literal('storage.binding.converged') }),
     zTypedEventStreamEnvelopeStorageBindingGenesis.extend({ type: z.literal('storage.binding.genesis') }),
-    zTypedEventStreamEnvelopeStorageBindingNotConfigured.extend({ type: z.literal('storage.binding.not-configured') }),
+    zTypedEventStreamEnvelopeStorageBindingNotConfigured.extend({ type: z.literal('storage.binding.not_configured') }),
     zTypedEventStreamEnvelopeStorageBindingUncheckable.extend({ type: z.literal('storage.binding.uncheckable') }),
     zTypedEventStreamEnvelopeStorageBindingUnconverged.extend({ type: z.literal('storage.binding.unconverged') }),
     zTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.extend({ type: z.literal('supervisor.fs_pressure.skipped_tick') }),
@@ -6804,7 +6804,7 @@ export const zTypedTaggedEventStreamEnvelopeStorageBindingGenesis = z.object({
 });
 
 /**
- * TypedTaggedEventStreamEnvelope storage.binding.not-configured
+ * TypedTaggedEventStreamEnvelope storage.binding.not_configured
  */
 export const zTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = z.object({
     actor: z.string(),
@@ -6818,7 +6818,7 @@ export const zTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = z.obje
     step_id: z.string().optional(),
     subject: z.string().optional(),
     ts: z.iso.datetime(),
-    type: z.literal('storage.binding.not-configured'),
+    type: z.literal('storage.binding.not_configured'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -7082,7 +7082,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed.extend({ type: z.literal('session.work_query_failed') }),
     zTypedTaggedEventStreamEnvelopeStorageBindingConverged.extend({ type: z.literal('storage.binding.converged') }),
     zTypedTaggedEventStreamEnvelopeStorageBindingGenesis.extend({ type: z.literal('storage.binding.genesis') }),
-    zTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured.extend({ type: z.literal('storage.binding.not-configured') }),
+    zTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured.extend({ type: z.literal('storage.binding.not_configured') }),
     zTypedTaggedEventStreamEnvelopeStorageBindingUncheckable.extend({ type: z.literal('storage.binding.uncheckable') }),
     zTypedTaggedEventStreamEnvelopeStorageBindingUnconverged.extend({ type: z.literal('storage.binding.unconverged') }),
     zTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.extend({ type: z.literal('supervisor.fs_pressure.skipped_tick') }),

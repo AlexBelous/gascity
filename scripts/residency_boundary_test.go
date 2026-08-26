@@ -151,9 +151,10 @@ type residencyTree struct {
 // each rule by rewriting real files in a t.TempDir() tree and rescanning, so a
 // cache keyed by root would hand a control the tree from before its own edit
 // and report that the guard bit when it had not been asked. One walk per scan
-// is the honest shape; sharing the walk BETWEEN the two AST rules of a single
-// scan is what this exists for, and the duplicated prune logic it removes was
-// worth more than the milliseconds.
+// is the honest shape, and it is what this delivers: one walk-and-prune
+// IMPLEMENTATION shared by both AST rules, each of which still calls it once
+// per scan. Removing the duplicated prune logic was worth more than the
+// milliseconds the second walk costs.
 func residencyParseTree(root string, dirs []string) (residencyTree, error) {
 	out := residencyTree{fset: token.NewFileSet()}
 	fset := out.fset

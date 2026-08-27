@@ -444,8 +444,9 @@ fi
 declare -A baseline_count=()
 declare -A current_count=()
 
-# `ast:` rows belong to the OTHER half of the guard (TestResidencyResolverBoundary,
-# scripts/residency_signature_rule_test.go), which shares this baseline file so
+# `ast:` rows belong to the AST half of the guard
+# (scripts/residency_signature_rule_test.go and
+# scripts/residency_expression_rules_test.go), which shares this baseline file so
 # there is one ratchet rather than two that can disagree. This half ignores them.
 while IFS=$'\t' read -r path fn pattern count; do
 	[[ -z "${path:-}" || "${path:0:1}" == "#" ]] && continue

@@ -2448,13 +2448,13 @@ func TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace(t *testing.T) {
 // writer-race defer: the gain+drift quarantine is downgraded to a skip, so the
 // run exits 0, logs the defer message, writes NO quarantine marker, and does not
 // run DOLT_GC (GC is left for the next run after the writer settles).
-func assertCompactWriterRaceDeferred(t *testing.T, fixture compactScriptFixture, out string, err error) {
+func assertCompactWriterRaceDeferred(t *testing.T, fixture compactScriptFixture, out string, err error, expectedDeferMessage string) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("writer-race defer must exit 0 (skip, not failure): %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "writer race detected during flatten") ||
-		!strings.Contains(out, "deferring full GC until the next quiet run") {
+		!strings.Contains(out, expectedDeferMessage) {
 		t.Fatalf("output missing writer-race defer message:\n%s", out)
 	}
 	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
@@ -2490,7 +2490,7 @@ func TestCompactScriptDefersWhenWriterCommitsBeforeFlatten(t *testing.T) {
 	if !strings.Contains(out, "pre_reset_HEAD=writercommit") {
 		t.Fatalf("defer message should report the pre-reset writer HEAD:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // A writer that commits during/after the post-flatten verify moves HEAD past
@@ -2506,7 +2506,7 @@ func TestCompactScriptDefersWhenWriterCommitsDuringVerify(t *testing.T) {
 	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // The whole-database value hash also drifts when a concurrent writer adds rows.
@@ -2522,7 +2522,7 @@ func TestCompactScriptDefersWhenWriterCommitsCausingDatabaseHashDrift(t *testing
 	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 func TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash(t *testing.T) {
@@ -2534,7 +2534,7 @@ func TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash(t *testing.T) {
 	if !strings.Contains(out, "post_db_hash_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving across the database hash probe:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // A writer can commit after the database-hash probes have both completed but
@@ -2547,7 +2547,7 @@ func TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC(t *testin
 		!strings.Contains(out, "final_verify_HEAD=writercommit") {
 		t.Fatalf("output missing final verification writer-race fence:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring full GC until the next quiet run")
 }
 
 func TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProvesWriter(t *testing.T) {
@@ -2560,7 +2560,7 @@ func TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProve
 		!strings.Contains(out, "post_db_hash_HEAD=writercommit") {
 		t.Fatalf("defer message should report empty pre-probe HEAD and writer post-probe HEAD:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // A concurrent UPDATE that lands during the post-flatten verify leaves the
@@ -2579,7 +2579,7 @@ func TestCompactScriptDefersProvenWriterRaceSameCountHashDrift(t *testing.T) {
 	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // Same proven writer race (HEAD moves past the flatten commit) but the
@@ -2632,7 +2632,7 @@ func TestCompactScriptRetriesPendingGCAfterWriterRaceDefer(t *testing.T) {
 	}
 
 	firstOut, err := fixture.run(t, "writer_race_during_verify", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	assertCompactWriterRaceDeferred(t, fixture, firstOut, err)
+	assertCompactWriterRaceDeferred(t, fixture, firstOut, err, "deferring, will retry next run")
 	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 	if compactedFrom := compactMarkerValue(t, pendingGC, "compacted_from_head"); compactedFrom != "headcommit" {
 		t.Fatalf("pending-GC marker should preserve compaction source HEAD, got %q", compactedFrom)
@@ -2668,7 +2668,7 @@ func TestCompactScriptRetriesRemotePendingGCAfterBeforeFlattenWriterRace(t *test
 	fixture := newCompactScriptFixture(t)
 
 	firstOut, err := fixture.run(t, "remote_writer_race_before_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	assertCompactWriterRaceDeferred(t, fixture, firstOut, err)
+	assertCompactWriterRaceDeferred(t, fixture, firstOut, err, "deferring, will retry next run")
 	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 	marker, err := os.ReadFile(pendingGC)
 	if err != nil {

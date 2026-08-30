@@ -3053,12 +3053,11 @@ if [ -r "$enospc_helper" ]; then
 else
     # Some focused shell harnesses execute gc-beads-bd's prelude as a single
     # temporary file without sibling assets. Keep the production helper as the
-    # canonical copy, but preserve the same detector behavior for those harnesses.
+    # canonical copy and fail closed when it is unavailable; silently retaining
+    # an older duplicate detector here would let harness and production safety
+    # semantics drift apart.
     recovery_should_skip_due_to_enospc() {
-        [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
-        tail -n 1000 "$LOG_FILE" 2>/dev/null \
-            | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
-            || return 1
+        DOLT_ENOSPC_GUARD_REASON="dolt ENOSPC guard helper unavailable: $enospc_helper"
         return 0
     }
 fi
@@ -3078,8 +3077,8 @@ op_recover() {
     # Require manual intervention (free disk space) before recovery
     # resumes. See gastownhall/gascity#2158.
     if recovery_should_skip_due_to_enospc; then
-        echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
-        echo "  free disk space, then re-run health checks" >&2
+        echo "skipping dolt recovery: ${DOLT_ENOSPC_GUARD_REASON:-ENOSPC recovery guard failed closed}" >&2
+        echo "  resolve the reported guard condition, then re-run health checks" >&2
         die "dolt recovery skipped: ENOSPC detected"
     fi
 

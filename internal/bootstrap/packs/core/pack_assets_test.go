@@ -13,6 +13,8 @@ import (
 )
 
 var (
+	lifecycleStatusUpdate = regexp.MustCompile(`\bgc[[:space:]]+bd[[:space:]]+update\b[^\r\n]*--status(?:=|[[:space:]]+)`)
+	lifecycleClose        = regexp.MustCompile(`\bgc[[:space:]]+bd[[:space:]]+close\b`)
 	bareBDSubcommand       = regexp.MustCompile(`\bbd[[:space:]\\]+(?:blocked|children|close|comment|comments|completion|config|count|create|delete|dep|doctor|dolt|epic|export|formula|gate|graph|help|hook|hooks|import|info|init|label|list|migrate|mol|orphans|prime|prune|ready|remember|rename-prefix|reopen|restore|search|show|sql|stale|stats|status|sync|update|version|where|worktree)\b`)
 	bareBDDynamicArg       = regexp.MustCompile(`\bbd[[:space:]\\]+["']\$(?:\{)?[A-Za-z_]`)
 	bareBDLeadingFlag      = regexp.MustCompile(`\bbd[[:space:]\\]+--[A-Za-z0-9]`)
@@ -84,6 +86,36 @@ func TestCoreShippedAssetsRouteBDCommandsThroughGC(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walking embedded core pack: %v", err)
+	}
+}
+
+// TestCoreFormulaAndPromptLifecycleCommandsUseDedicatedVerbs keeps worker-facing
+// assets on ownership-aware lifecycle commands instead of the generic status API.
+func TestCoreFormulaAndPromptLifecycleCommandsUseDedicatedVerbs(t *testing.T) {
+	err := fs.WalkDir(PackFS, ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !(strings.HasPrefix(path, "formulas/") || strings.HasPrefix(path, "assets/prompts/") || strings.HasPrefix(path, "overlay/") || strings.HasPrefix(path, "skills/")) {
+			return nil
+		}
+
+		data, err := fs.ReadFile(PackFS, path)
+		if err != nil {
+			return err
+		}
+		for lineNumber, line := range strings.Split(string(data), "\n") {
+			if lifecycleStatusUpdate.MatchString(line) {
+				t.Errorf("%s:%d: lifecycle transitions must not use gc bd update --status", path, lineNumber+1)
+			}
+			if lifecycleClose.MatchString(line) && !strings.Contains(line, "--reason") {
+				t.Errorf("%s:%d: every gc bd close needs a nonblank --reason", path, lineNumber+1)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking embedded core lifecycle assets: %v", err)
 	}
 }
 

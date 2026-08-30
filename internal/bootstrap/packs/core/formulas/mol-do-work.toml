@@ -59,7 +59,7 @@ gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim
 the actor to this runtime's durable session identity makes the later heartbeat
 and close use the same claimant, rather than relying on `bd`'s ambient actor
 fallback. Then run
-`gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
+`gc bd --actor "$CLAIM_ACTOR" heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
 expect to run for many minutes (long builds, test sweeps). It refreshes your
 claim's lease so the dashboard can tell you are alive and working rather than
 wedged. If a heartbeat ever fails, your claim was reclaimed or closed out from

@@ -221,7 +221,7 @@ func TestMolDoWorkUsesOneExplicitClaimantAndCloseContract(t *testing.T) {
 
 	claimActor := `CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"`
 	claim := `gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim`
-	heartbeat := `gc bd heartbeat "$WORK_BEAD_ID"`
+	heartbeat := `gc bd --actor "$CLAIM_ACTOR" heartbeat "$WORK_BEAD_ID"`
 	if !strings.Contains(doWork, claimActor) {
 		t.Fatal("mol-do-work must derive a durable explicit claimant identity")
 	}
@@ -229,6 +229,21 @@ func TestMolDoWorkUsesOneExplicitClaimantAndCloseContract(t *testing.T) {
 	heartbeatAt := strings.Index(doWork, heartbeat)
 	if claimAt < 0 || heartbeatAt < 0 || claimAt > heartbeatAt {
 		t.Fatalf("mol-do-work must claim with its explicit actor before heartbeat:\n%s", doWork)
+	}
+	if strings.Contains(body, "gc bd heartbeat") {
+		t.Fatalf("mol-do-work must not let an ambient actor heartbeat a claimed bead:\n%s", body)
+	}
+
+	// The instructions execute as a sequence, not a transaction. Requiring the
+	// claimant on every bead mutation makes a duplicate/recycled formula runner
+	// fail its ownership check instead of reviving or closing another session's
+	// work with the ambient actor fallback.
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		mutatesBead := strings.Contains(line, " update ") || strings.Contains(line, " heartbeat ") || strings.Contains(line, " close ")
+		if strings.HasPrefix(line, "gc bd ") && mutatesBead && !strings.HasPrefix(line, `gc bd --actor "$CLAIM_ACTOR" `) {
+			t.Errorf("mol-do-work bead command must use the durable claimant: %s", line)
+		}
 	}
 
 	if strings.Contains(body, "--status=closed") {

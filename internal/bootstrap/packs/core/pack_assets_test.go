@@ -13,8 +13,10 @@ import (
 )
 
 var (
-	lifecycleStatusUpdate = regexp.MustCompile(`\bgc[[:space:]]+bd[[:space:]]+update\b[^\r\n]*--status(?:=|[[:space:]]+)`)
-	lifecycleClose        = regexp.MustCompile(`\bgc[[:space:]]+bd[[:space:]]+close\b`)
+	// bd accepts global flags before its subcommand, so scan the normalized
+	// command rather than assuming "bd update" and "bd close" are adjacent.
+	lifecycleStatusUpdate  = regexp.MustCompile(`\bgc[ \t]+bd(?:[ \t]+--[A-Za-z][A-Za-z0-9_-]*(?:=[^ \t]+|[ \t]+(?:"[^"]*"|'[^']*'|[^ \t]+))?)*[ \t]+update\b[^\r\n]*--status(?:=|[ \t]+)`)
+	lifecycleClose         = regexp.MustCompile(`\bgc[ \t]+bd(?:[ \t]+--[A-Za-z][A-Za-z0-9_-]*(?:=[^ \t]+|[ \t]+(?:"[^"]*"|'[^']*'|[^ \t]+))?)*[ \t]+close\b`)
 	bareBDSubcommand       = regexp.MustCompile(`\bbd[[:space:]\\]+(?:blocked|children|close|comment|comments|completion|config|count|create|delete|dep|doctor|dolt|epic|export|formula|gate|graph|help|hook|hooks|import|info|init|label|list|migrate|mol|orphans|prime|prune|ready|remember|rename-prefix|reopen|restore|search|show|sql|stale|stats|status|sync|update|version|where|worktree)\b`)
 	bareBDDynamicArg       = regexp.MustCompile(`\bbd[[:space:]\\]+["']\$(?:\{)?[A-Za-z_]`)
 	bareBDLeadingFlag      = regexp.MustCompile(`\bbd[[:space:]\\]+--[A-Za-z0-9]`)
@@ -25,6 +27,13 @@ var (
 	gcImmediatelyBefore    = regexp.MustCompile(`(?:^|[^A-Za-z0-9_-])gc(?:[ \t]+--(?:city|rig)(?:=[^ \t\r\n]+|[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^ \t\r\n]+)))*(?:[ \t]|\\\r?\n)+$`)
 	gcSerializedBefore     = regexp.MustCompile(`["']gc["'][[:space:]]*,(?:(?:[[:space:]]*["']--(?:city|rig)=[^"']+["'][[:space:]]*,)|(?:[[:space:]]*["']--(?:city|rig)["'][[:space:]]*,[[:space:]]*["'][^"']+["'][[:space:]]*,))*[[:space:]]*$`)
 )
+
+var shellLineContinuation = regexp.MustCompile(`\\\r?\n[ \t]*`)
+
+// lifecycleAssetLines joins shell continuations so policy checks see one command.
+func lifecycleAssetLines(data []byte) []string {
+	return strings.Split(shellLineContinuation.ReplaceAllString(string(data), " "), "\n")
+}
 
 func findBareBDCommands(data []byte) []int {
 	body := string(data)
@@ -104,7 +113,7 @@ func TestCoreFormulaAndPromptLifecycleCommandsUseDedicatedVerbs(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for lineNumber, line := range strings.Split(string(data), "\n") {
+		for lineNumber, line := range lifecycleAssetLines(data) {
 			if lifecycleStatusUpdate.MatchString(line) {
 				t.Errorf("%s:%d: lifecycle transitions must not use gc bd update --status", path, lineNumber+1)
 			}
@@ -116,6 +125,33 @@ func TestCoreFormulaAndPromptLifecycleCommandsUseDedicatedVerbs(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walking embedded core lifecycle assets: %v", err)
+	}
+}
+
+func TestLifecycleAssetScannerRejectsWrappedAndFlaggedBypasses(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "wrapped status update",
+			body: `gc bd update $ID \
+  --status closed`,
+		},
+		{
+			name: "bd global flag before close",
+			body: "gc bd --actor worker close $ID",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			line := lifecycleAssetLines([]byte(tt.body))[0]
+			if lifecycleStatusUpdate.MatchString(line) || lifecycleClose.MatchString(line) {
+				return
+			}
+			t.Fatalf("lifecycle scanner missed bypass %q", tt.body)
+		})
 	}
 }
 

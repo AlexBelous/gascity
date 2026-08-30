@@ -761,7 +761,7 @@ case "$query" in
     # probe, which reports writercommit so HEAD has moved past the flatten's own
     # commit. verify_counts still sees compactcommit (gain+drift) because it does
     # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ] || [ "$mode" = "writer_race_after_db_hash" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -769,7 +769,11 @@ case "$query" in
       fi
       calls=$((calls + 1))
       printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$calls" -ge 2 ]; then
+      if [ "$mode" = "writer_race_after_db_hash" ] && [ "$calls" -ge 5 ]; then
+        print_cell writercommit
+        exit 0
+      fi
+      if [ "$mode" != "writer_race_after_db_hash" ] && [ "$calls" -ge 2 ]; then
         print_cell writercommit
         exit 0
       fi
@@ -2450,7 +2454,7 @@ func assertCompactWriterRaceDeferred(t *testing.T, fixture compactScriptFixture,
 		t.Fatalf("writer-race defer must exit 0 (skip, not failure): %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "writer race detected during flatten") ||
-		!strings.Contains(out, "deferring, will retry next run") {
+		!strings.Contains(out, "deferring full GC until the next quiet run") {
 		t.Fatalf("output missing writer-race defer message:\n%s", out)
 	}
 	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
@@ -2529,6 +2533,19 @@ func TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash(t *testing.T) {
 	}
 	if !strings.Contains(out, "post_db_hash_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving across the database hash probe:\n%s", out)
+	}
+	assertCompactWriterRaceDeferred(t, fixture, out, err)
+}
+
+// A writer can commit after the database-hash probes have both completed but
+// immediately before full GC. The final HEAD fence must defer that run so GC
+// never starts from a state that changed after flatten verification.
+func TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_after_db_hash", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if !strings.Contains(out, "writer race detected during flatten verification") ||
+		!strings.Contains(out, "final_verify_HEAD=writercommit") {
+		t.Fatalf("output missing final verification writer-race fence:\n%s", out)
 	}
 	assertCompactWriterRaceDeferred(t, fixture, out, err)
 }

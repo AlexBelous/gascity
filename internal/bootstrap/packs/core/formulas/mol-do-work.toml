@@ -48,10 +48,17 @@ Read the bead's title and description carefully. This is your task.
 claimed by the routing step that assigned you — claim it explicitly before your
 first heartbeat:
 ```bash
-gc bd update "$WORK_BEAD_ID" --claim
+CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+if [ -z "$CLAIM_ACTOR" ]; then
+  echo "mol-do-work requires a session, session name, or agent identity to claim work" >&2
+  exit 1
+fi
+gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim
 ```
-`--claim` is idempotent and self-assigns regardless of current state, so this is
-safe even if the bead was already claimed some other way. Then run
+`--claim` is idempotent and self-assigns regardless of current state. Pinning
+the actor to this runtime's durable session identity makes the later heartbeat
+and close use the same claimant, rather than relying on `bd`'s ambient actor
+fallback. Then run
 `gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
 expect to run for many minutes (long builds, test sweeps). It refreshes your
 claim's lease so the dashboard can tell you are alive and working rather than
@@ -101,23 +108,25 @@ from `gc.work_outcome`.
 COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
 WORK_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 [ "$WORK_BRANCH" = "HEAD" ] && WORK_BRANCH=""   # detached HEAD — no stable branch
-gc bd update "$WORK_BEAD_ID" \
+CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" \
   --set-metadata gc.outcome=pass \
   --set-metadata gc.work_outcome=shipped \
   --set-metadata gc.work_commit="$COMMIT" \
   --set-metadata gc.work_branch="$WORK_BRANCH" \
   --set-metadata gc.work_verification="<commands you ran>" \
-  --status=closed \
-  --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
+  --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}." && \
+gc bd --actor "$CLAIM_ACTOR" close "$WORK_BEAD_ID" --reason "Shipped: <brief summary of what you did>."
 ```
 
 **No-op** (the bead needed no change — already satisfied / duplicate):
 ```bash
-gc bd update "$WORK_BEAD_ID" \
+CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" \
   --set-metadata gc.outcome=pass \
   --set-metadata gc.work_outcome=no-op \
-  --status=closed \
-  --notes "No-op: <why no change was needed>."
+  --notes "No-op: <why no change was needed>." && \
+gc bd --actor "$CLAIM_ACTOR" close "$WORK_BEAD_ID" --reason "No-op: <why no change was needed>."
 ```
 For `blocked` / `abandoned`, use that value for `gc.work_outcome` and also mail
 Witness.
@@ -129,7 +138,9 @@ prevents `mol-do-work` wrapper beads from remaining ready after the real work
 is complete.
 ```bash
 if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
-  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
+  CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+  gc bd --actor "$CLAIM_ACTOR" update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}." && \
+  gc bd --actor "$CLAIM_ACTOR" close "$GC_BEAD_ID" --reason "Target $WORK_BEAD_ID completed."
 fi
 ```
 
@@ -153,7 +164,9 @@ session:
 ```bash
 DRAIN_BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-}}"
 if [ -n "$DRAIN_BEAD_ID" ]; then
-  gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
+  CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+  gc bd --actor "$CLAIM_ACTOR" update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --notes "Drain acknowledged." && \
+  gc bd --actor "$CLAIM_ACTOR" close "$DRAIN_BEAD_ID" --reason "Drain acknowledged."
 fi
 gc runtime drain-ack
 ```

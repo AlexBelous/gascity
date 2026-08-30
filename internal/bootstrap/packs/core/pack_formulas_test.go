@@ -208,6 +208,47 @@ func TestCoreShippedAssetsAvoidNonexistentBDListSearchFlag(t *testing.T) {
 	}
 }
 
+// TestMolDoWorkUsesOneExplicitClaimantAndCloseContract keeps the lightweight
+// workflow from splitting ownership across bd's ambient actor fallbacks. The
+// target must be claimed before heartbeat, and every terminal path has to keep
+// its metadata write coupled to a reasoned bd close rather than bypassing the
+// close contract with a raw status transition.
+func TestMolDoWorkUsesOneExplicitClaimantAndCloseContract(t *testing.T) {
+	formula := readFormula(t, "mol-do-work.toml")
+	doWork := formulaStep(t, formula, "do-work")
+	drain := formulaStep(t, formula, "drain")
+	body := doWork + "\n" + drain
+
+	claimActor := `CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"`
+	claim := `gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim`
+	heartbeat := `gc bd heartbeat "$WORK_BEAD_ID"`
+	if !strings.Contains(doWork, claimActor) {
+		t.Fatal("mol-do-work must derive a durable explicit claimant identity")
+	}
+	claimAt := strings.Index(doWork, claim)
+	heartbeatAt := strings.Index(doWork, heartbeat)
+	if claimAt < 0 || heartbeatAt < 0 || claimAt > heartbeatAt {
+		t.Fatalf("mol-do-work must claim with its explicit actor before heartbeat:\n%s", doWork)
+	}
+
+	if strings.Contains(body, "--status=closed") {
+		t.Fatalf("mol-do-work must not bypass bd close with --status=closed:\n%s", body)
+	}
+	for _, want := range []string{
+		`gc bd --actor "$CLAIM_ACTOR" close "$WORK_BEAD_ID" --reason`,
+		`gc bd --actor "$CLAIM_ACTOR" close "$GC_BEAD_ID" --reason`,
+		`gc bd --actor "$CLAIM_ACTOR" close "$DRAIN_BEAD_ID" --reason`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mol-do-work missing explicit reasoned close %q", want)
+		}
+	}
+	closeCount := strings.Count(body, `gc bd --actor "$CLAIM_ACTOR" close `)
+	if strings.Count(body, "--notes") != closeCount {
+		t.Errorf("every mol-do-work close must be coupled to its metadata/notes write; notes=%d closes=%d", strings.Count(body, "--notes"), closeCount)
+	}
+}
+
 // TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree pins the fix for a
 // stranded-worktree bug: `git worktree remove` resolves the repo from cwd,
 // and this step `cd`s away from the worktree before removing it, so the bare

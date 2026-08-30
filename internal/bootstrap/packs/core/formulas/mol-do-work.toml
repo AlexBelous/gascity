@@ -48,16 +48,16 @@ Read the bead's title and description carefully. This is your task.
 claimed by the routing step that assigned you — claim it explicitly before your
 first heartbeat:
 ```bash
-CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+CLAIM_ACTOR="${GC_AGENT:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"
 if [ -z "$CLAIM_ACTOR" ]; then
-  echo "mol-do-work requires a session, session name, or agent identity to claim work" >&2
+  echo "mol-do-work requires an agent, session, or session-name identity to claim work" >&2
   exit 1
 fi
 gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim
 ```
-`--claim` is idempotent and self-assigns regardless of current state. Pinning
-the actor to this runtime's durable session identity makes the later heartbeat
-and close use the same claimant, rather than relying on `bd`'s ambient actor
+`--claim` is idempotent and self-assigns regardless of current state. Prefer
+the hook's durable agent identity when it is available, so the later heartbeat
+and close use the same claimant rather than relying on `bd`'s ambient actor
 fallback. Then run
 `gc bd --actor "$CLAIM_ACTOR" heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
 expect to run for many minutes (long builds, test sweeps). It refreshes your
@@ -108,7 +108,7 @@ from `gc.work_outcome`.
 COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
 WORK_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 [ "$WORK_BRANCH" = "HEAD" ] && WORK_BRANCH=""   # detached HEAD — no stable branch
-CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+CLAIM_ACTOR="${GC_AGENT:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"
 gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" \
   --set-metadata gc.outcome=pass \
   --set-metadata gc.work_outcome=shipped \
@@ -121,7 +121,7 @@ gc bd --actor "$CLAIM_ACTOR" close "$WORK_BEAD_ID" --reason "Shipped: <brief sum
 
 **No-op** (the bead needed no change — already satisfied / duplicate):
 ```bash
-CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+CLAIM_ACTOR="${GC_AGENT:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"
 gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" \
   --set-metadata gc.outcome=pass \
   --set-metadata gc.work_outcome=no-op \
@@ -138,7 +138,7 @@ prevents `mol-do-work` wrapper beads from remaining ready after the real work
 is complete.
 ```bash
 if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
-  CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+  CLAIM_ACTOR="${GC_AGENT:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"
   gc bd --actor "$CLAIM_ACTOR" update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}." && \
   gc bd --actor "$CLAIM_ACTOR" close "$GC_BEAD_ID" --reason "Target $WORK_BEAD_ID completed."
 fi
@@ -164,7 +164,7 @@ session:
 ```bash
 DRAIN_BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-}}"
 if [ -n "$DRAIN_BEAD_ID" ]; then
-  CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
+  CLAIM_ACTOR="${GC_AGENT:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"
   gc bd --actor "$CLAIM_ACTOR" update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --notes "Drain acknowledged." && \
   gc bd --actor "$CLAIM_ACTOR" close "$DRAIN_BEAD_ID" --reason "Drain acknowledged."
 fi

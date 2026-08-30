@@ -219,11 +219,11 @@ func TestMolDoWorkUsesOneExplicitClaimantAndCloseContract(t *testing.T) {
 	drain := formulaStep(t, formula, "drain")
 	body := doWork + "\n" + drain
 
-	claimActor := `CLAIM_ACTOR="${GC_SESSION_ID:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"`
+	claimActor := `CLAIM_ACTOR="${GC_AGENT:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"`
 	claim := `gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim`
 	heartbeat := `gc bd --actor "$CLAIM_ACTOR" heartbeat "$WORK_BEAD_ID"`
 	if !strings.Contains(doWork, claimActor) {
-		t.Fatal("mol-do-work must derive a durable explicit claimant identity")
+		t.Fatal("mol-do-work must prefer the hook's durable agent identity for its explicit claimant")
 	}
 	claimAt := strings.Index(doWork, claim)
 	heartbeatAt := strings.Index(doWork, heartbeat)

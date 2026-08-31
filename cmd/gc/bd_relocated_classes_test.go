@@ -1380,7 +1380,12 @@ func TestBdCreateRefusesInfraShapedCreateOnSplitCity(t *testing.T) {
 		"nudge by label":                {[]string{"create", "--type", "chore", "-l", "gc:nudge", "x"}, []string{"nudges-class", `"gcn-"`, "gc nudge"}},
 		"order tracking by label":       {[]string{"create", "--type", "task", "-l", "order-tracking", "x"}, []string{"orders-class", `"gco-"`, "gc order run"}},
 		"wisp by metadata":              {[]string{"create", "--metadata", `{"gc.kind":"wisp"}`, "x"}, []string{"graph-class", `"gcg-"`, "gc sling"}},
-		"graph node by metadata":        {[]string{"create", "--metadata", `{"gc.root_bead_id":"gcg-abc123"}`, "x"}, []string{"graph-class", "gc sling"}},
+		// A routed workflow root is still graph-owned even when its bd type is
+		// the ordinary task type. This is the exact shape that escaped through
+		// the passthrough after a split-store cutover and stranded the root in
+		// the retained work ledger.
+		"workflow root by metadata": {[]string{"create", "--type", "task", "--metadata", `{"gc.routed_to":"worker","gc.kind":"workflow","source_payload_fingerprint":"sha256:incident"}`, "x"}, []string{"graph-class", `"gcg-"`, "gc sling"}},
+		"graph node by metadata":    {[]string{"create", "--metadata", `{"gc.root_bead_id":"gcg-abc123"}`, "x"}, []string{"graph-class", "gc sling"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), tc.args)

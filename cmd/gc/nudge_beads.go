@@ -31,6 +31,20 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 	return store
 }
 
+// borrowedNudgeStore is a per-call handle over the process-scoped store owned
+// by cliStorageRoutes. Poll helpers close the handles they open after every
+// pass; that close must not release the shared route before the process exit
+// path calls closeCLIStorageRoutes.
+type borrowedNudgeStore struct {
+	beads.Store
+}
+
+func (borrowedNudgeStore) CloseStore() error { return nil }
+
+// ConditionalWritesResolveTarget preserves optional conditional-write support
+// through the ownership wrapper.
+func (s borrowedNudgeStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
 // openNudgeBeadStoreErr is openNudgeBeadStore with the open failure kept instead
 // of swallowed into a nil-safe zero store.
 //
@@ -41,11 +55,18 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 // use this form and print the reason; the seam above stays for the poll/drain
 // helpers whose contract is already "a nil store means do nothing".
 func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
+	// Resolve the process-scoped route first. A relocated nudge class borrows
+	// that memoized store, so do not open an unused work-store handle and do not
+	// let a per-poll close release the shared route.
+	if routed := resolveNudgesStore(cliStorageRoutes(cityPath), nil, nil, cityPath, nil); routed != nil {
+		return beads.NudgesStore{Store: borrowedNudgeStore{Store: routed}}, nil
+	}
+
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, nil
+	return beads.NudgesStore{Store: store}, nil
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

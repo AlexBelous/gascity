@@ -306,3 +306,28 @@ func TestCLIStorageRoutesOpenTheBindingOncePerProcess(t *testing.T) {
 		t.Errorf("the funnel constructed %d provider registr(ies) across a close, want 2", *registries)
 	}
 }
+
+// TestOpenNudgeBeadStoreBorrowsTheMemoizedCLIRoute pins the ownership boundary
+// between per-poll nudge handles and the process-scoped CLI storage funnel.
+// Closing one poll handle must not close the shared routed store that the next
+// supervisor tick will receive from cliStorageRoutes.
+func TestOpenNudgeBeadStoreBorrowsTheMemoizedCLIRoute(t *testing.T) {
+	cityPath, _ := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+
+	first, err := openNudgeBeadStoreErr(cityPath)
+	if err != nil {
+		t.Fatalf("opening the first nudge store: %v", err)
+	}
+	if err := closeBeadStoreHandle(first.Store); err != nil {
+		t.Fatalf("closing the first per-poll nudge handle: %v", err)
+	}
+
+	second, err := openNudgeBeadStoreErr(cityPath)
+	if err != nil {
+		t.Fatalf("opening the second nudge store: %v", err)
+	}
+	if _, err := second.Get("missing-nudge"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the next poll received a closed memoized route: %v", err)
+	}
+}

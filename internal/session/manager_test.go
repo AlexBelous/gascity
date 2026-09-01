@@ -1516,6 +1516,42 @@ func TestCreateRoutesACPSessionsThroughAutoProvider(t *testing.T) {
 	}
 }
 
+func TestSuspendRepairsMissingUserHoldOnAlreadySuspendedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	now := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+	mgr := NewManagerWithOptions(store, sp, WithClock(&clock.Fake{Time: now}))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("stopping fixture runtime: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "state", string(StateSuspended)); err != nil {
+		t.Fatalf("seeding a legacy direct-suspend record: %v", err)
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	got, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["sleep_intent"] != "user-hold" {
+		t.Fatalf("sleep_intent = %q, want user-hold", got.Metadata["sleep_intent"])
+	}
+	heldUntil, err := time.Parse(time.RFC3339, got.Metadata["held_until"])
+	if err != nil {
+		t.Fatalf("held_until = %q: %v", got.Metadata["held_until"], err)
+	}
+	if !heldUntil.After(now.Add(99 * 365 * 24 * time.Hour)) {
+		t.Fatalf("held_until = %s, want an indefinite future hold", heldUntil)
+	}
+}
+
 func TestSuspendAndResume(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

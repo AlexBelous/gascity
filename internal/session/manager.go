@@ -71,6 +71,11 @@ const LabelSession = "gc:session"
 // the wall-clock time of the most recent successful queued-nudge delivery.
 const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
 
+// indefiniteSuspendHoldDuration keeps an operator-suspended conversation out
+// of reconciler wake decisions until an explicit wake clears the hold. One
+// hundred years is effectively indefinite without risking time overflow.
+const indefiniteSuspendHoldDuration = 100 * 365 * 24 * time.Hour
+
 // Info holds the user-facing details of a chat session.
 type Info struct {
 	ID string
@@ -1226,7 +1231,10 @@ func (m *Manager) Suspend(id string) error {
 		}
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
-			return nil // idempotent: already suspended
+			// Older direct-suspend paths persisted only state=suspended. Repair
+			// those records in place so a supervisor restart cannot interpret
+			// ordinary demand as permission to wake an operator-held session.
+			return m.persistSuspensionHold(id, b.Metadata["suspended_at"] == "")
 		}
 		// failed-create is a create-rollback terminal state: the create never
 		// reached creation_complete, so there is no live turn to suspend — only
@@ -1282,17 +1290,26 @@ func (m *Manager) Suspend(id string) error {
 
 		// Update state and suspension timestamp together so stores with a
 		// write-through cache preserve one coherent lifecycle transition.
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
-			"state":        string(StateSuspended),
-			"suspended_at": time.Now().UTC().Format(time.RFC3339),
-			"slept_at":     "",
-			"sleep_reason": "",
-		}}); err != nil {
-			return fmt.Errorf("updating suspension state: %w", err)
-		}
-
-		return nil
+		return m.persistSuspensionHold(id, true)
 	})
+}
+
+func (m *Manager) persistSuspensionHold(id string, stampSuspendedAt bool) error {
+	now := m.now().UTC()
+	metadata := map[string]string{
+		"state":        string(StateSuspended),
+		"held_until":   now.Add(indefiniteSuspendHoldDuration).Format(time.RFC3339),
+		"sleep_intent": "user-hold",
+		"slept_at":     "",
+		"sleep_reason": "",
+	}
+	if stampSuspendedAt {
+		metadata["suspended_at"] = now.Format(time.RFC3339)
+	}
+	if err := m.store.Update(id, beads.UpdateOpts{Metadata: metadata}); err != nil {
+		return fmt.Errorf("updating suspension state: %w", err)
+	}
+	return nil
 }
 
 // RequestFreshRestart marks a session for a controller-owned fresh restart

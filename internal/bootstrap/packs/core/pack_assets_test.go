@@ -105,7 +105,7 @@ func TestCoreFormulaAndPromptLifecycleCommandsUseDedicatedVerbs(t *testing.T) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || !(strings.HasPrefix(path, "formulas/") || strings.HasPrefix(path, "assets/prompts/") || strings.HasPrefix(path, "overlay/") || strings.HasPrefix(path, "skills/")) {
+		if entry.IsDir() || (!strings.HasPrefix(path, "formulas/") && !strings.HasPrefix(path, "assets/prompts/") && !strings.HasPrefix(path, "overlay/") && !strings.HasPrefix(path, "skills/")) {
 			return nil
 		}
 

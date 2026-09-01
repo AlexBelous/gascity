@@ -53,17 +53,24 @@ if [ -z "$CLAIM_ACTOR" ]; then
   echo "mol-do-work requires an agent, session, or session-name identity to claim work" >&2
   exit 1
 fi
-gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim
+if ! gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim; then
+  echo "mol-do-work could not claim $WORK_BEAD_ID as $CLAIM_ACTOR; another actor may own it" >&2
+  exit 1
+fi
+if ! gc bd --actor "$CLAIM_ACTOR" heartbeat "$WORK_BEAD_ID"; then
+  echo "mol-do-work lost the claim on $WORK_BEAD_ID before work began" >&2
+  exit 1
+fi
 ```
-`--claim` is idempotent and self-assigns regardless of current state. Prefer
-the hook's durable agent identity when it is available, so the later heartbeat
-and close use the same claimant rather than relying on `bd`'s ambient actor
-fallback. Then run
-`gc bd --actor "$CLAIM_ACTOR" heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
-expect to run for many minutes (long builds, test sweeps). It refreshes your
-claim's lease so the dashboard can tell you are alive and working rather than
-wedged. If a heartbeat ever fails, your claim was reclaimed or closed out from
-under you — stop working this bead immediately.
+`--claim` is idempotent for the same actor and fails when another actor already
+owns the target. Prefer the hook's durable agent identity when it is available,
+so the heartbeat and close use the same claimant rather than relying on `bd`'s
+ambient actor fallback. Run
+`gc bd --actor "$CLAIM_ACTOR" heartbeat "$WORK_BEAD_ID"` again before any shell
+command you expect to run for many minutes (long builds, test sweeps). It
+refreshes your claim's lease so the dashboard can tell you are alive and
+working rather than wedged. If a heartbeat ever fails, your claim was reclaimed
+or closed out from under you — stop working this bead immediately.
 
 **2. Implement the solution and verify it:**
 

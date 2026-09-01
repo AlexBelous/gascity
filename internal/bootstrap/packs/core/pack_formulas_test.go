@@ -3,6 +3,7 @@ package core
 import (
 	"io/fs"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -262,6 +263,111 @@ func TestMolDoWorkUsesOneExplicitClaimantAndCloseContract(t *testing.T) {
 	if strings.Count(body, "--notes") != closeCount {
 		t.Errorf("every mol-do-work close must be coupled to its metadata/notes write; notes=%d closes=%d", strings.Count(body, "--notes"), closeCount)
 	}
+}
+
+// TestMolDoWorkTargetClaimHeartbeatProtocolHasSingleRaceWinner exercises the
+// target lifecycle that the formula tells an agent to run. The static contract
+// above pins command spelling; this regression pins the important execution
+// consequence: two formula runners racing for one open target produce one
+// owner, only that owner proceeds to heartbeat, and the loser stops at the
+// claim conflict instead of heartbeating work it does not own.
+func TestMolDoWorkTargetClaimHeartbeatProtocolHasSingleRaceWinner(t *testing.T) {
+	doWork := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	claim := `gc bd --actor "$CLAIM_ACTOR" update "$WORK_BEAD_ID" --claim`
+	heartbeat := `gc bd --actor "$CLAIM_ACTOR" heartbeat "$WORK_BEAD_ID"`
+	protocol := fencedBashBlockContaining(t, doWork, claim)
+
+	claimAt := strings.Index(protocol, claim)
+	heartbeatAt := strings.Index(protocol, heartbeat)
+	if !strings.Contains(protocol, "if ! "+claim+"; then") {
+		t.Fatalf("mol-do-work target claim must have an explicit conflict branch:\n%s", protocol)
+	}
+	if heartbeatAt < 0 || claimAt > heartbeatAt {
+		t.Fatalf("mol-do-work target heartbeat must follow claim in the same executable block:\n%s", protocol)
+	}
+	claimConflictPath := protocol[claimAt:heartbeatAt]
+	if !strings.Contains(claimConflictPath, "exit 1") {
+		t.Fatalf("mol-do-work must stop before heartbeat when target claim loses a race:\n%s", protocol)
+	}
+	if !strings.Contains(protocol, "if ! "+heartbeat+"; then") || !strings.Contains(protocol[heartbeatAt:], "exit 1") {
+		t.Fatalf("mol-do-work must stop when the winning actor's initial heartbeat is rejected:\n%s", protocol)
+	}
+
+	type attempt struct {
+		actor              string
+		claimed            bool
+		heartbeatAttempted bool
+		heartbeatAccepted  bool
+	}
+	// Model bd's atomic owner transition at the formula boundary. The bd store
+	// itself owns claim concurrency; this test owns whether the prompt proceeds
+	// to heartbeat after the winner/conflict result.
+	var owner atomic.Pointer[string]
+	var acceptedHeartbeats atomic.Int32
+	start := make(chan struct{})
+	results := make(chan attempt, 2)
+	for _, actor := range []string{"rig/worker-a", "rig/worker-b"} {
+		go func() {
+			<-start
+			claimant := new(string)
+			*claimant = actor
+			claimed := owner.CompareAndSwap(nil, claimant)
+			result := attempt{actor: actor, claimed: claimed}
+			if !claimed {
+				// This is the formula's explicit claim-conflict exit path: the
+				// losing runner never reaches the heartbeat command.
+				results <- result
+				return
+			}
+			result.heartbeatAttempted = true
+			result.heartbeatAccepted = owner.Load() == claimant
+			if result.heartbeatAccepted {
+				acceptedHeartbeats.Add(1)
+			}
+			results <- result
+		}()
+	}
+	close(start)
+
+	var winners, conflicts int
+	for range 2 {
+		result := <-results
+		if result.claimed {
+			winners++
+			if !result.heartbeatAttempted || !result.heartbeatAccepted {
+				t.Errorf("winning runner %q did not heartbeat as the target owner: %+v", result.actor, result)
+			}
+			continue
+		}
+		conflicts++
+		if result.heartbeatAttempted {
+			t.Errorf("conflicting runner %q reached heartbeat: %+v", result.actor, result)
+		}
+	}
+	if winners != 1 || conflicts != 1 {
+		t.Fatalf("claim race = %d winners, %d conflicts; want exactly one of each", winners, conflicts)
+	}
+	if got := acceptedHeartbeats.Load(); got != 1 {
+		t.Fatalf("claim race emitted %d accepted heartbeats, want exactly one from the winning actor", got)
+	}
+}
+
+func fencedBashBlockContaining(t *testing.T, body, needle string) string {
+	t.Helper()
+	needleAt := strings.Index(body, needle)
+	if needleAt < 0 {
+		t.Fatalf("formula step is missing %q", needle)
+	}
+	start := strings.LastIndex(body[:needleAt], "```bash\n")
+	if start < 0 {
+		t.Fatalf("formula command %q is not in a bash block", needle)
+	}
+	start += len("```bash\n")
+	endOffset := strings.Index(body[needleAt:], "\n```")
+	if endOffset < 0 {
+		t.Fatalf("formula bash block containing %q is not terminated", needle)
+	}
+	return body[start : needleAt+endOffset]
 }
 
 // TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree pins the fix for a

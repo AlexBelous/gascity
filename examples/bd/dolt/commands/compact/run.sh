@@ -3028,13 +3028,13 @@ flatten_database() {
       "$db"
   fi
 
-  # The post-db-hash HEAD probe closes the hash query itself, but a writer can
-  # still commit in the small gap before DOLT_GC starts. Full GC rewrites the
-  # store and must not start against a state that changed after every
-  # flatten/verification proof passed. Take one final HEAD fence immediately
-  # before GC: a move past the flatten commit is an ordinary writer, so retain
-  # the compacted data and defer the reclamation for a quiet retry instead of
-  # racing the writer or manufacturing a later quarantine signal.
+  # Treat HEAD movement after the database-hash probes as a final signal that
+  # this is not a quiet compaction window. Deferring here avoids starting an
+  # expensive full GC while a writer is already known to be active. This probe
+  # is intentionally not described as quiescence: a writer can still commit
+  # after it. Concurrent-GC correctness comes from Dolt's online-GC safepoint
+  # controller; this check only detects the residual window we can observe and
+  # leaves reclamation for a quieter retry.
   final_verify_head=$(head_commit "$db" || true)
   if [ -n "$flatten_head" ] && [ -n "$final_verify_head" ] && [ "$final_verify_head" != "$flatten_head" ]; then
     printf 'compact: db=%s writer race detected during flatten verification (snapshot_HEAD=%s flatten_HEAD=%s final_verify_HEAD=%s) — deferring full GC until the next quiet run\n' \

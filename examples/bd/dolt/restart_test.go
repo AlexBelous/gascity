@@ -82,6 +82,22 @@ func writeRestartLog(t *testing.T, cityPath, body string) {
 	}
 }
 
+func writeDeadDoltLaunchState(t *testing.T, cityPath, startedAt string) {
+	t.Helper()
+	const deadPID = 2147483647
+	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.WriteFile(filepath.Join(stateDir, "dolt.pid"), []byte(strconv.Itoa(deadPID)+"\n"), 0o644); err != nil {
+		t.Fatalf("write dead dolt pid: %v", err)
+	}
+	state := fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":3307,"data_dir":%q,"started_at":%q}`+"\n",
+		deadPID, filepath.Join(cityPath, ".beads", "dolt"), startedAt,
+	)
+	if err := os.WriteFile(filepath.Join(stateDir, "dolt-provider-state.json"), []byte(state), 0o644); err != nil {
+		t.Fatalf("write dead dolt provider state: %v", err)
+	}
+}
+
 func runRestart(t *testing.T, cityPath, root string, port int) ([]byte, error) {
 	t.Helper()
 	return runRestartWithEnv(t, cityPath, root, []string{fmt.Sprintf("GC_DOLT_PORT=%d", port)})
@@ -95,7 +111,7 @@ func runRestartWithEnv(t *testing.T, cityPath, root string, extraEnv []string, a
 		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
 		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
 		"GC_CITY_RUNTIME_DIR", "GC_PACK_STATE_DIR", "GC_DOLT_LOG_FILE",
-		"GC_BEADS_BD_SCRIPT",
+		"GC_DOLT_STATE_FILE", "GC_DOLT_PID_FILE", "GC_BEADS_BD_SCRIPT",
 	),
 		"PATH="+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -249,6 +265,73 @@ func TestRestartAllowsStaleENOSPCBeforeCurrentProcessStart(t *testing.T) {
 	}
 }
 
+func TestRestartAllowsStaleENOSPCBeforeDeadProcessLaunch(t *testing.T) {
+	root := repoRoot(t)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	bdLog := writeFakeBeadsBDForRestart(t, cityPath, root, map[string]int{"stop": 0, "start": 0})
+	writeDeadDoltLaunchState(t, cityPath, "2026-09-01T00:00:00Z")
+	writeRestartLog(t, cityPath, "time=\"2026-08-31T23:59:59Z\" level=error msg=\"ENOSPC\"\n")
+
+	out, err := runRestart(t, cityPath, root, port)
+	if err != nil {
+		t.Fatalf("gc dolt restart blocked stale ENOSPC after the managed process died: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	if got := strings.Join(strings.Fields(string(data)), " "); got != "stop start" {
+		t.Fatalf("expected stale ENOSPC to allow stop then start for dead PID, got %q\noutput:\n%s", got, out)
+	}
+}
+
+func TestRestartRefusesCurrentENOSPCAfterDeadProcessLaunch(t *testing.T) {
+	root := repoRoot(t)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	bdLog := writeFakeBeadsBDForRestart(t, cityPath, root, map[string]int{"stop": 0, "start": 0})
+	writeDeadDoltLaunchState(t, cityPath, "2026-09-01T00:00:00Z")
+	writeRestartLog(t, cityPath, "time=\"2026-09-01T00:00:00Z\" level=error msg=\"ENOSPC\"\n")
+
+	out, err := runRestart(t, cityPath, root, port)
+	if err == nil {
+		t.Fatalf("gc dolt restart ignored ENOSPC from the dead process's launch interval:\n%s", out)
+	}
+	if !strings.Contains(string(out), "ENOSPC at or after managed Dolt launch") {
+		t.Fatalf("restart did not explain current-launch ENOSPC refusal; output:\n%s", out)
+	}
+	if data, err := os.ReadFile(bdLog); err == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("restart invoked gc-beads-bd despite dead-PID ENOSPC refusal; ops log:\n%s\noutput:\n%s", data, out)
+	}
+}
+
+func TestRestartRefusesUnparseableENOSPCWithDeadProcess(t *testing.T) {
+	root := repoRoot(t)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	bdLog := writeFakeBeadsBDForRestart(t, cityPath, root, map[string]int{"stop": 0, "start": 0})
+	writeDeadDoltLaunchState(t, cityPath, "2026-09-01T00:00:00Z")
+	writeRestartLog(t, cityPath, "time=\"not-a-timestamp\" level=error msg=\"ENOSPC\"\n")
+
+	out, err := runRestart(t, cityPath, root, port)
+	if err == nil {
+		t.Fatalf("gc dolt restart allowed unparseable ENOSPC after the managed process died:\n%s", out)
+	}
+	if !strings.Contains(string(out), "cannot parse ENOSPC log timestamp") {
+		t.Fatalf("restart did not fail closed on dead-PID unparseable ENOSPC; output:\n%s", out)
+	}
+	if data, err := os.ReadFile(bdLog); err == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("restart invoked gc-beads-bd after dead-PID timestamp failure; ops log:\n%s\noutput:\n%s", data, out)
+	}
+}
+
 func TestRestartRefusesFreshENOSPCUnlessForced(t *testing.T) {
 	root := repoRoot(t)
 	port, cleanup := startReachableTCPListener(t)
@@ -264,7 +347,7 @@ func TestRestartRefusesFreshENOSPCUnlessForced(t *testing.T) {
 	if err == nil {
 		t.Fatalf("gc dolt restart unexpectedly ignored ENOSPC after the current process start:\n%s", out)
 	}
-	if !strings.Contains(string(out), "ENOSPC after current Dolt process start") {
+	if !strings.Contains(string(out), "ENOSPC at or after managed Dolt launch") {
 		t.Fatalf("restart did not explain ENOSPC refusal; output:\n%s", out)
 	}
 	if data, err := os.ReadFile(bdLog); err == nil && strings.TrimSpace(string(data)) != "" {

@@ -3,8 +3,9 @@
 # Dolt restart/recovery guard shared by the managed lifecycle commands.
 #
 # The guard has two independent inputs:
-#   1. ENOSPC evidence must belong to the current Dolt process. A match before
-#      that process's start time is stale and does not block recovery.
+#   1. ENOSPC evidence must belong to the current Dolt launch. A match before
+#      that launch's durable start boundary is stale and does not block
+#      recovery, even after the managed process has exited.
 #   2. The filesystem holding the live databases must have at least twice the
 #      allocated size of the largest database available. Dolt conjoin writes a
 #      replacement before deleting its inputs, so less headroom can reproduce
@@ -44,17 +45,40 @@ dolt_epoch_from_ps_lstart() (
     LC_ALL=C date -j -f '%a %b %e %T %Y' "$_dolt_raw" +%s 2>/dev/null
 )
 
-dolt_current_process_start_epoch() (
+dolt_provider_state_field() (
+    [ -n "${STATE_FILE:-}" ] && [ -r "$STATE_FILE" ] || return 1
+    _dolt_field="$1"
+    sed -n 's/.*"'"$_dolt_field"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' "$STATE_FILE" \
+        | head -1
+)
+
+dolt_current_launch_start_epoch() (
     [ -n "${PID_FILE:-}" ] && [ -r "$PID_FILE" ] || return 1
     IFS= read -r _dolt_pid < "$PID_FILE" || return 1
     case "$_dolt_pid" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    kill -0 "$_dolt_pid" 2>/dev/null || return 1
-    _dolt_started=$(LC_ALL=C ps -p "$_dolt_pid" -o lstart= 2>/dev/null \
-        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [ -n "$_dolt_started" ] || return 1
-    dolt_epoch_from_ps_lstart "$_dolt_started"
+
+    # Prefer the kernel-backed boundary while the process is alive. Recovery
+    # normally runs after death, so fall back to provider state below.
+    if kill -0 "$_dolt_pid" 2>/dev/null; then
+        _dolt_started=$(LC_ALL=C ps -p "$_dolt_pid" -o lstart= 2>/dev/null \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ -n "$_dolt_started" ]; then
+            dolt_epoch_from_ps_lstart "$_dolt_started" && return 0
+        fi
+    fi
+
+    # dolt-provider-state.json is written with a pre-launch timestamp and
+    # survives process death. Require its PID and running marker to match the
+    # retained PID file so a stopped/prior launch cannot become the boundary.
+    _dolt_state_pid=$(dolt_provider_state_field pid) || return 1
+    _dolt_state_running=$(dolt_provider_state_field running) || return 1
+    _dolt_state_started=$(dolt_provider_state_field started_at) || return 1
+    [ "$_dolt_state_pid" = "$_dolt_pid" ] || return 1
+    [ "$_dolt_state_running" = "true" ] || return 1
+    [ -n "$_dolt_state_started" ] || return 1
+    dolt_epoch_from_rfc3339 "$_dolt_state_started"
 )
 
 dolt_available_kib() (
@@ -122,8 +146,8 @@ dolt_enospc_log_guard_reason() (
     ')
     [ -n "$_dolt_matches" ] || return 1
 
-    _dolt_start_epoch=$(dolt_current_process_start_epoch) || {
-        printf 'cannot determine current Dolt process start time while ENOSPC exists in the last 1000 log lines\n'
+    _dolt_start_epoch=$(dolt_current_launch_start_epoch) || {
+        printf 'cannot determine managed Dolt launch boundary while ENOSPC exists in the last 1000 log lines\n'
         return 0
     }
 
@@ -140,7 +164,7 @@ dolt_enospc_log_guard_reason() (
             return 0
         }
         if [ "$_dolt_match_epoch" -ge "$_dolt_start_epoch" ]; then
-            printf 'ENOSPC after current Dolt process start: timestamp=%s tail_line=%s\n' \
+            printf 'ENOSPC at or after managed Dolt launch: timestamp=%s tail_line=%s\n' \
                 "$_dolt_timestamp" "$_dolt_line_number"
             return 0
         fi

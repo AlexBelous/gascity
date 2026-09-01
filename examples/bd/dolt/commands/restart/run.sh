@@ -53,6 +53,7 @@ CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
 DATA_DIR="${GC_DOLT_DATA_DIR:-$GC_CITY_PATH/.beads/dolt}"
 LOG_FILE="${GC_DOLT_LOG_FILE:-$PACK_STATE_DIR/dolt.log}"
+STATE_FILE="${GC_DOLT_STATE_FILE:-$PACK_STATE_DIR/dolt-provider-state.json}"
 PID_FILE="${GC_DOLT_PID_FILE:-$PACK_STATE_DIR/dolt.pid}"
 BD_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$GC_BEADS_BD_SCRIPT")" && pwd)"
 if [ ! -f "$BD_SCRIPT_DIR/dolt-enospc.sh" ]; then

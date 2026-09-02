@@ -333,6 +333,15 @@ var (
 	drainAckStopConfirmDeadPoll    = 250 * time.Millisecond
 )
 
+// settleDrainAckLateAssignedWork leaves a short commit/replication window
+// between the durable stop-pending transition and the final assigned-work
+// fence. A claim can already be in flight when stop-pending is emitted; without
+// this window, the final read can still win by a few milliseconds and kill the
+// worker immediately before that claim becomes visible.
+func settleDrainAckLateAssignedWork() {
+	time.Sleep(2 * time.Second)
+}
+
 // cancelDrainAckAsyncStopForLateAssignedWork closes the gap between the
 // reconciler's no-work decision and the detached provider kill. Only
 // reconciler-owned no-wake/orphan drains are cancelable here; an explicit
@@ -394,7 +403,7 @@ func cancelDrainAckAsyncStopForLateAssignedWork(
 	return true
 }
 
-func queueDrainAckAsyncStop(cityPath string, store beads.Store, rigStores map[string]beads.Store, sp runtime.Provider, cfg *config.City, info sessionpkg.Info, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer) {
+func queueDrainAckAsyncStop(cityPath string, store beads.Store, rigStores map[string]beads.Store, sp runtime.Provider, cfg *config.City, info sessionpkg.Info, name, expectedToken string, processNames []string, lateClaimSettle func(), tracker *asyncStartTracker, stderr io.Writer) {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return
@@ -432,6 +441,22 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, rigStores map[st
 			if actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actualToken != "" && actualToken != expectedToken {
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
 				return
+			}
+		}
+		// A reconciler-owned no-wake/orphan stop is cancelable when work lands
+		// late. Give an already-running claim mutation enough time to become
+		// visible before the final work query. Agent-authored acknowledgements do
+		// not enter this window and retain their prompt stop semantics.
+		if reason, reconcilerOwned := reconcilerDrainAckMatchesSessionInfo(info, sp, name); reconcilerOwned && assignedWorkDrainReasonCancelable(reason) && lateClaimSettle != nil {
+			lateClaimSettle()
+			// The runtime name can be reused while the goroutine settles. Re-check
+			// the token immediately afterward so the final query/kill never targets
+			// a replacement incarnation.
+			if expectedToken != "" {
+				if actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actualToken != "" && actualToken != expectedToken {
+					fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped after late-claim settle: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
+					return
+				}
 			}
 		}
 		if cancelDrainAckAsyncStopForLateAssignedWork(cityPath, store, rigStores, sp, cfg, info, name, expectedToken, stderr) {
@@ -780,7 +805,7 @@ func reconcileDrainAckStopPending(
 		// (applyTo no-op) matches the caller-visible row. The full typed Info is
 		// carried into that check so a late claim can durably cancel a
 		// reconciler-owned no-wake/orphan stop before the provider kill.
-		queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, info, name, info.InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+		queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, info, name, info.InstanceToken, tp.Hints.ProcessNames, settleDrainAckLateAssignedWork, asyncStopTracker, stderr)
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
@@ -849,7 +874,7 @@ func finalizeDrainAckStopPendingSessions(
 			// Observation unavailable, not "still alive". Re-queue the stop and
 			// say nothing to the agent: a reminder is a claim about the row's
 			// state, and this tick has none.
-			queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, info, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+			queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, info, name, info.InstanceToken, processNames, settleDrainAckLateAssignedWork, asyncStopTracker, stderr)
 			continue
 		}
 		if obs.Running || obs.Alive {
@@ -860,7 +885,7 @@ func finalizeDrainAckStopPendingSessions(
 			// killing the pane. Ask the agent to acknowledge and leave.
 			// See drain_reminder.go.
 			remindStopPendingDrain(sp, store, info, clk, stderr)
-			queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, info, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+			queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, info, name, info.InstanceToken, processNames, settleDrainAckLateAssignedWork, asyncStopTracker, stderr)
 			continue
 		}
 		// Pool-managed stop-pending beads close here instead of staying open as
@@ -2136,7 +2161,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Token fence off the typed snapshot: the stop-pending fold
 								// preserves instance_token, so infoByID[id].InstanceToken is the
 								// token we intend to stop (mirrors verifiedStop).
-								queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, infoByID[id], name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+								queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, infoByID[id], name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, settleDrainAckLateAssignedWork, asyncStopTracker, stderr)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
@@ -2550,7 +2575,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							clearDrainTrackerForStopPending(id, dt)
 							// Token fence off the typed snapshot (mirrors verifiedStop); the
 							// stop-pending fold preserves instance_token.
-							queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, infoByID[id], name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+							queueDrainAckAsyncStop(cityPath, store, rigStores, sp, cfg, infoByID[id], name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, settleDrainAckLateAssignedWork, asyncStopTracker, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}

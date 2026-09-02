@@ -208,6 +208,7 @@ func queueTestDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.P
 		"worker",
 		expectedToken,
 		processNames,
+		nil,
 		tracker,
 		stderr,
 	)
@@ -1562,6 +1563,7 @@ func TestQueueDrainAckAsyncStopCancelsForLateRigClaim(t *testing.T) {
 		"worker",
 		"live-token",
 		nil,
+		nil,
 		tracker,
 		&stderr,
 	)
@@ -1602,6 +1604,157 @@ func TestQueueDrainAckAsyncStopCancelsForLateRigClaim(t *testing.T) {
 	}
 }
 
+// TestQueueDrainAckAsyncStopSettlesBeforeFinalLateClaimCheck covers the
+// narrower live race observed after the first gc-agd05u canary: stop-pending
+// was already durable, the initial pre-kill fence saw no work, and the claim
+// committed a few milliseconds later. The production settle hook must run
+// before the final query so that in-flight mutation cancels the kill.
+func TestQueueDrainAckAsyncStopSettlesBeforeFinalLateClaimCheck(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":       "worker",
+			"session_name":   "worker",
+			"state":          string(sessionpkg.StateDraining),
+			"state_reason":   sessionpkg.DrainAckStopPendingReason,
+			"drain_at":       time.Now().UTC().Format(time.RFC3339),
+			"generation":     "1",
+			"pool_managed":   "true",
+			"instance_token": "live-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	info := sessionInfosFromBeads([]beads.Bead{session})[0]
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "live-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	settleStarted := make(chan struct{})
+	releaseSettle := make(chan struct{})
+	tracker := &asyncStartTracker{}
+	var stderr synchronizedBuffer
+	queueDrainAckAsyncStop(
+		"", store, nil, sp, &config.City{}, info, "worker", "live-token", nil,
+		func() {
+			close(settleStarted)
+			<-releaseSettle
+		},
+		tracker, &stderr,
+	)
+
+	select {
+	case <-settleStarted:
+	case <-time.After(time.Second):
+		t.Fatal("async stop did not enter the late-claim settle window")
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "claim committed during settle",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create late work: %v", err)
+	}
+	close(releaseSettle)
+
+	if !tracker.wait(time.Second) {
+		t.Fatal("async stop did not finish after the settle window")
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("claim committed during settle did not cancel the queued stop")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateActive) || got.Metadata["state_reason"] != "" || got.Metadata["drain_at"] != "" {
+		t.Fatalf("session was not restored after settle claim: metadata=%v", got.Metadata)
+	}
+	if !strings.Contains(stderr.String(), "canceled: assigned work appeared before kill") {
+		t.Fatalf("stderr = %q, want late-claim cancellation diagnostic", stderr.String())
+	}
+}
+
+func TestQueueDrainAckAsyncStopRechecksTokenAfterLateClaimSettle(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":       "worker",
+			"session_name":   "worker",
+			"state":          string(sessionpkg.StateDraining),
+			"state_reason":   sessionpkg.DrainAckStopPendingReason,
+			"generation":     "1",
+			"instance_token": "old-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	info := sessionInfosFromBeads([]beads.Bead{session})[0]
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "old-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(sp, "worker", &drainState{reason: "no-wake-reason", generation: 1, ackSet: true}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	settleStarted := make(chan struct{})
+	releaseSettle := make(chan struct{})
+	tracker := &asyncStartTracker{}
+	var stderr synchronizedBuffer
+	queueDrainAckAsyncStop(
+		"", store, nil, sp, &config.City{}, info, "worker", "old-token", nil,
+		func() {
+			close(settleStarted)
+			<-releaseSettle
+		},
+		tracker, &stderr,
+	)
+	select {
+	case <-settleStarted:
+	case <-time.After(time.Second):
+		t.Fatal("async stop did not enter the late-claim settle window")
+	}
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "replacement-token"); err != nil {
+		t.Fatalf("replace GC_INSTANCE_TOKEN: %v", err)
+	}
+	close(releaseSettle)
+
+	if !tracker.wait(time.Second) {
+		t.Fatal("async stop did not finish after replacement token was installed")
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("post-settle token fence killed a replacement runtime")
+	}
+	if !strings.Contains(stderr.String(), "skipped after late-claim settle: instance token mismatch") {
+		t.Fatalf("stderr = %q, want post-settle token mismatch diagnostic", stderr.String())
+	}
+}
+
 func TestQueueDrainAckAsyncStopFailsClosedWhenLateClaimQueryFails(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	session, err := cityStore.Create(beads.Bead{
@@ -1637,7 +1790,7 @@ func TestQueueDrainAckAsyncStopFailsClosedWhenLateClaimQueryFails(t *testing.T) 
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not finish")
 	}
@@ -1699,7 +1852,7 @@ func TestQueueDrainAckAsyncStopFailsClosedWhenLateClaimCancellationWriteFails(t 
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not finish")
 	}
@@ -1755,7 +1908,7 @@ func TestQueueDrainAckAsyncStopPreservesAgentAuthoredStopSemantics(t *testing.T)
 	}
 
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, tracker, io.Discard)
+	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, nil, tracker, io.Discard)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not finish")
 	}

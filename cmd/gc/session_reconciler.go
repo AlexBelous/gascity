@@ -3231,10 +3231,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// exceeds the agent's max_session_age threshold. Motivation: provider
 		// SDKs that cache credentials at session start (e.g., Claude Code via
 		// Bedrock) can wedge silently when the underlying token expires. This
-		// is session age, not idle time — a busy session is still subject to
-		// the threshold — but the restart is skipped while the agent is
-		// mid-turn (pending interaction) or holds an open assigned work bead,
-		// so no work is lost mid-flight. The next tick retries.
+		// is session age, not idle time — a busy unattended session is still
+		// subject to the threshold — but the restart is skipped while a user is
+		// attached, the agent is mid-turn (pending interaction), or it holds an
+		// open assigned work bead, so neither an operator terminal nor in-flight
+		// work is lost. The next tick after detach retries.
 		// sessionpkg.DecideMaxSessionAge owns the decision ladder (blocker,
 		// then pending interaction, then assigned work, then stop); this
 		// block gathers the facts it asks for and executes the outcome. The
@@ -3245,6 +3246,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			creationCompleteAt, hasAnchor := parseRFC3339Metadata(infoByID[id].CreationCompleteAt)
 			facts := sessionpkg.TimerFacts{
 				Triggered: hasAnchor && maxAgeTr.shouldRestart(name, tp.TemplateName, creationCompleteAt, clk.Now()),
+			}
+			if facts.Triggered {
+				attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
+				if attachErr != nil {
+					// Fail safe: an unreadable attachment probe must not tear down a
+					// terminal that may currently have an operator connected.
+					fmt.Fprintf(stderr, "session reconciler: checking attachment before max-age restart for %s: %v\n", name, attachErr) //nolint:errcheck // best-effort stderr
+					facts.Triggered = false
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, TraceReasonAttachmentError, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{"error": attachErr.Error()})
+					}
+				} else if attached {
+					facts.Triggered = false
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, TraceReasonAttached, TraceOutcomeDeferredAttached, tp.TemplateName, name, nil)
+					}
+				}
 			}
 			if facts.Triggered {
 				facts.Blocker = maxSessionAgeBlockerInfo(infoByID[id], clk.Now())
@@ -3332,6 +3350,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if it != nil && alive {
 			facts := sessionpkg.TimerFacts{
 				Triggered: it.checkIdle(name, tp.TemplateName, sp, clk.Now()),
+			}
+			if facts.Triggered {
+				attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
+				if attachErr != nil {
+					// Fail safe for the same reason as max-session-age: an
+					// attachment probe failure is not permission to disconnect a
+					// possibly active operator terminal.
+					fmt.Fprintf(stderr, "session reconciler: checking attachment before idle timeout for %s: %v\n", name, attachErr) //nolint:errcheck // best-effort stderr
+					facts.Triggered = false
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerIdleTimeout, TraceReasonAttachmentError, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{"error": attachErr.Error()})
+					}
+				} else if attached {
+					facts.Triggered = false
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerIdleTimeout, TraceReasonAttached, TraceOutcomeDeferredAttached, tp.TemplateName, name, nil)
+					}
+				}
 			}
 			if facts.Triggered {
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())

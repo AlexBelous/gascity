@@ -9499,6 +9499,35 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_IdleTimeoutDefersWhileAttached(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.SetAttached("worker", true)
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+	rec := events.NewFake()
+	env.rec = rec
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attached worker must not be stopped by idle timeout")
+	}
+	for _, event := range rec.Events {
+		if event.Type == events.SessionIdleKilled {
+			t.Fatal("SessionIdleKilled must not fire while an operator is attached")
+		}
+	}
+}
+
 // TestReconcileSessionBeads_IdleTimeoutKeepsMinFloorWarm is the sc-5mtyhy
 // acceptance-1 end-to-end proof: a pool session within the min_active_sessions
 // floor, idle past its timeout with no assigned work, is NOT idle-killed — it
@@ -10100,6 +10129,34 @@ func TestReconcileSessionBeads_MaxSessionAgeKillsAgedSession(t *testing.T) {
 	}
 	if !fired {
 		t.Error("expected SessionMaxAgeKilled event")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeDefersWhileAttached(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.sp.SetAttached("witness", true)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Fatal("attached witness must not be stopped by max session age")
+	}
+	for _, event := range rec.Events {
+		if event.Type == events.SessionMaxAgeKilled {
+			t.Fatal("SessionMaxAgeKilled must not fire while an operator is attached")
+		}
 	}
 }
 

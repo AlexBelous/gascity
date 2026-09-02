@@ -175,6 +175,8 @@ const (
 	TraceReasonConfigDriftAttached           TraceReasonCode = "config_drift_attached"
 	TraceReasonConfigDriftRecentlyAttached   TraceReasonCode = "config_drift_recently_attached"
 	TraceReasonPending                       TraceReasonCode = "pending"
+	TraceReasonAttached                      TraceReasonCode = "attached"
+	TraceReasonAttachmentError               TraceReasonCode = "attachment_error"
 	TraceReasonAcknowledged                  TraceReasonCode = "acknowledged"
 	TraceReasonMinFloorIdleWorker            TraceReasonCode = "min_floor_idle_worker"
 	TraceReasonLiveDrift                     TraceReasonCode = "live_drift"

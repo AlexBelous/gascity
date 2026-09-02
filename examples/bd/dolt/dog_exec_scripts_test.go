@@ -3886,6 +3886,62 @@ func TestCompactScriptExistingQuarantineNotificationDoesNotMutateEvidenceMarker(
 	}
 }
 
+func TestCompactScriptMigratesLegacyMarkerNotifyStateWithoutMutationOrRemail(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+
+	const (
+		reason    = "post-flatten table value hash changed without row-count increase"
+		createdAt = "2026-08-29T07:11:12Z"
+	)
+	lastNotifiedAt := time.Now().UTC().Format(time.RFC3339)
+	markerData := []byte(fmt.Sprintf(
+		"db=beads\nreason=%s\ncreated_at=%s\nseen_count=1\nnotify_count=1\nlast_notified_ts=%s\nlast_notified_reason=%s\nlast_notify_error=\n",
+		reason, createdAt, lastNotifiedAt, reason,
+	))
+	if err := os.WriteFile(marker, markerData, 0o600); err != nil {
+		t.Fatalf("write legacy quarantine marker: %v", err)
+	}
+
+	out, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("compact succeeded despite legacy quarantine marker:\n%s", out)
+	}
+	if !strings.Contains(out, "integrity quarantine marker exists") {
+		t.Fatalf("compact missing quarantine refusal:\n%s", out)
+	}
+
+	gotMarkerData, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read legacy quarantine marker: %v", err)
+	}
+	if string(gotMarkerData) != string(markerData) {
+		t.Fatalf("legacy notify-state migration mutated the evidence marker\nwant:\n%s\ngot:\n%s", markerData, gotMarkerData)
+	}
+
+	log := readCompactGCLog(t, fixture)
+	if mailLines := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mailLines) != 0 {
+		t.Fatalf("recent legacy notification state should migrate without re-mailing, got %d mail attempt(s)\nlog:\n%s", len(mailLines), log)
+	}
+
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	for key, want := range map[string]string{
+		"seen_count":               "2",
+		"notify_count":             "1",
+		"last_notified_ts":         lastNotifiedAt,
+		"last_notified_reason":     reason,
+		"last_notified_created_at": createdAt,
+		"last_notify_error":        "",
+	} {
+		if got := compactMarkerValue(t, notifyState, key); got != want {
+			t.Fatalf("migrated notify sidecar %s=%q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestCompactScriptQuarantineMailFailureIsRetriedNextCycle(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	if err := os.WriteFile(fixture.mailFailFile, nil, 0o644); err != nil {

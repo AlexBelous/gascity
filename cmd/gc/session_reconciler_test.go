@@ -506,6 +506,43 @@ func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads
 	)
 }
 
+// Two passes model the initial supervisor reconcile and the first patrol after
+// reload. A stale desired-state entry plus a nudge-materialized pending create
+// must remain durable but inert for the entire suspended interval.
+func TestReconcileSessionBeads_SuspendedCityNeverStartsPendingCreateAcrossRestartPasses(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{SuspendedOnStart: true},
+		Agents:    []config.Agent{{Name: "sentinel", Dir: "cloud"}},
+	}
+	env.addDesired("cloud-sentinel", "cloud/sentinel", false)
+	session := env.createSessionBead("cloud-sentinel", "cloud/sentinel")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "creating",
+		"pending_create_claim": "true",
+	})
+
+	for pass := 1; pass <= 2; pass++ {
+		current, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("pass %d get session: %v", pass, err)
+		}
+		if got := env.reconcile([]beads.Bead{current}); got != 0 {
+			t.Fatalf("pass %d planned wakes = %d, want 0", pass, got)
+		}
+	}
+	if got := env.sp.CountCalls("Start", "cloud-sentinel"); got != 0 {
+		t.Fatalf("provider Start calls = %d, want 0; calls=%#v", got, env.sp.SnapshotCalls())
+	}
+	current, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get preserved pending session: %v", err)
+	}
+	if current.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want preserved until city resume", current.Metadata["pending_create_claim"])
+	}
+}
+
 func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

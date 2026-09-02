@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -115,5 +119,66 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 	}
 	if start.Config.Command != "claude --resume seeded" {
 		t.Fatalf("start command = %q, want claude --resume seeded", start.Config.Command)
+	}
+}
+
+// Suspension can land after the awake decision and after a start candidate has
+// been prepared. The execution boundary must re-check it immediately before
+// touching the provider, and a canceled pending create must remain durable for
+// a later resume rather than being committed or rolled back as a failed start.
+func TestRunPreparedStartCandidate_CitySuspendedAfterPreparationSkipsProviderStart(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	bead, err := store.Create(beads.Bead{
+		Title:  "cloud-sentinel",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"state":                "creating",
+			"session_name":         "cloud-sentinel",
+			"template":             "cloud/sentinel",
+			"pending_create_claim": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessiontest.SeedBead(t, bead),
+			tp: TemplateParams{
+				Command:      "sleep 60",
+				SessionName:  "cloud-sentinel",
+				TemplateName: "cloud/sentinel",
+			},
+		},
+		cfg: runtime.Config{Command: "sleep 60", WorkDir: t.TempDir()},
+	}
+	cfg := &config.City{Workspace: config.Workspace{SuspendedOnStart: true}}
+	clk := &clock.Fake{Time: time.Date(2026, 9, 2, 22, 0, 0, 0, time.UTC)}
+
+	result := runPreparedStartCandidate(
+		context.Background(), item, t.TempDir(), sp, store, cfg, 0,
+		nil, nil, nil,
+	)
+	if !result.suppressed {
+		t.Fatalf("result = %+v, want start suppressed by current city suspension", result)
+	}
+	if result.err != nil {
+		t.Fatalf("suppressed start err = %v, want nil (not a provider failure)", result.err)
+	}
+	if sp.CountCalls("Start", "cloud-sentinel") != 0 || sp.IsRunning("cloud-sentinel") {
+		t.Fatalf("runtime calls = %#v, suspended city must not reach provider Start", sp.SnapshotCalls())
+	}
+	if commitStartResult(result, sessionFrontDoor(store), clk, events.NewFake(), 0, io.Discard, io.Discard) {
+		t.Fatal("suppressed start unexpectedly committed")
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want durable claim preserved for resume", got.Metadata["pending_create_claim"])
 	}
 }

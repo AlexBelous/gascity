@@ -46,6 +46,21 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 	}
 }
 
+func TestBuildAwakeInputFromReconcilerCarriesEffectiveCitySuspension(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{SuspendedOnStart: true},
+		Agents:    []config.Agent{{Name: "sentinel", Dir: "cloud"}},
+	}
+	input := buildAwakeInputFromReconciler(
+		cfg, "", nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, runtime.NewFake(), time.Now().UTC(),
+	)
+
+	if !input.CitySuspended {
+		t.Fatal("CitySuspended = false, want effective workspace suspension carried as a hard barrier")
+	}
+}
+
 // TestBuildAwakeInputFromReconcilerReadsInfoSnapshot pins that the scan projects
 // the typed session.Info it is handed rather than re-deriving any field: it sets a
 // SleepReason on the Info that no raw bead projection would carry and asserts that

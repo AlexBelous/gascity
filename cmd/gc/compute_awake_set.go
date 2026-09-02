@@ -19,6 +19,7 @@ const defaultOnDemandIdleTimeout = 5 * time.Minute
 // should be awake. All external I/O (shell commands, tmux checks, store
 // queries) happens before this function is called.
 type AwakeInput struct {
+	CitySuspended            bool // hard barrier: no wake cause may start or retain a session
 	Agents                   []AwakeAgent
 	NamedSessions            []AwakeNamedSession
 	SessionBeads             []AwakeSessionBead
@@ -129,6 +130,21 @@ type AwakeDecision struct {
 // Dependency ordering is NOT enforced here — the reconciler's
 // executePlannedStarts handles it via wave-based starts.
 func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
+	// City suspension is stronger than every ordinary wake/retention cause.
+	// In particular, pending-create, attached, pending-interaction, and
+	// ready-wait used to bypass the per-agent suspension projection and could
+	// transiently launch a runtime that the next patrol immediately drained.
+	if input.CitySuspended {
+		result := make(map[string]AwakeDecision, len(input.SessionBeads))
+		for _, bead := range input.SessionBeads {
+			if strings.TrimSpace(bead.SessionName) == "" {
+				continue
+			}
+			result[bead.SessionName] = AwakeDecision{Reason: "city-suspended"}
+		}
+		return result
+	}
+
 	agentsByName := make(map[string]AwakeAgent, len(input.Agents))
 	agentsByBaseName := make(map[string]AwakeAgent, len(input.Agents))
 	duplicateBaseNames := make(map[string]bool)
@@ -166,6 +182,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	// is no longer visible on the very next tick.
 	for _, bead := range input.SessionBeads {
 		if !bead.PendingCreate {
+			continue
+		}
+		if agent, ok := lookupAgent(bead.Template); ok && agent.Suspended {
 			continue
 		}
 		desired[bead.SessionName] = "pending-create"

@@ -2155,6 +2155,48 @@ func TestNamedAlways_CitySuspended_AllSleep(t *testing.T) {
 	assertAsleep(t, result, "refinery")
 }
 
+// A pending-create claim is durable launch work, not permission to bypass an
+// effective suspension. The supervisor used to wake these beads for one tick
+// and drain them on the next, which made a suspended city's sentinel churn.
+func TestPendingCreate_EffectivelySuspendedAgentDoesNotWake(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "cloud/sentinel", Suspended: true}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-sentinel",
+			SessionName:   "cloud-sentinel",
+			Template:      "cloud/sentinel",
+			State:         "creating",
+			PendingCreate: true,
+		}},
+		Now: now,
+	})
+
+	assertAsleep(t, result, "cloud-sentinel")
+}
+
+func TestComputeAwakeSet_CitySuspendedOverridesEveryWakeCause(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		CitySuspended: true,
+		Agents:        []AwakeAgent{{QualifiedName: "cloud/sentinel"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "cloud/sentinel", Template: "cloud/sentinel", Mode: "always"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-sentinel", SessionName: "cloud-sentinel", Template: "cloud/sentinel", State: "creating",
+			PendingCreate: true, ExplicitWake: true, ManualSession: true, Pinned: true,
+		}},
+		WorkBeads:        []AwakeWorkBead{{ID: "work-1", Assignee: "cloud-sentinel", Status: "in_progress"}},
+		ScaleCheckCounts: map[string]int{"cloud/sentinel": 1},
+		WorkSet:          map[string]bool{"cloud/sentinel": true},
+		RunningSessions:  map[string]bool{"cloud-sentinel": true},
+		AttachedSessions: map[string]bool{"cloud-sentinel": true},
+		PendingSessions:  map[string]bool{"cloud-sentinel": true},
+		ReadyWaitSet:     map[string]bool{"mc-sentinel": true},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, "cloud-sentinel")
+	assertReason(t, result, "cloud-sentinel", "city-suspended")
+}
+
 func TestNamedAlways_NotSuspended_StillWakes(t *testing.T) {
 	// Regression guard: not suspended → named-always still wakes.
 	result := ComputeAwakeSet(AwakeInput{

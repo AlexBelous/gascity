@@ -30,6 +30,15 @@ func loadSuspensionStateBestEffort(cityPath string) suspensionstate.State {
 	return st
 }
 
+// cityWakeBarrierActive re-reads the runtime override for the execution-time
+// start fence. Awake-set computation is the primary decision boundary, but a
+// suspend can land after that snapshot and before an asynchronous provider
+// Start. Re-checking here closes that race without consuming or rolling back
+// the durable wake cause.
+func cityWakeBarrierActive(cfg *config.City, cityPath string) bool {
+	return effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cityPath))
+}
+
 // suspendRigInState records an explicit "suspended" runtime
 // preference for the rig. Returns false (no-op) when an explicit
 // suspend is already in place.

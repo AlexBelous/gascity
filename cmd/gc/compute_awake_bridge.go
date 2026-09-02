@@ -48,6 +48,7 @@ func buildAwakeInputFromReconciler(
 	// city path so suspension resolves against the controlled city
 	// rather than the process cwd.
 	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	input.CitySuspended = effectiveCitySuspended(cfg, suspState)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		agent := AwakeAgent{

@@ -46,6 +46,8 @@ const (
 // instead of mutating this policy.
 const staleKeyDetectDelay = 2 * time.Second
 
+var errStartSuppressedByCitySuspension = errors.New("start suppressed: city is suspended")
+
 type startStabilityWaiter func(context.Context, string) bool
 
 func waitForStartStability(ctx context.Context, _ string) bool {
@@ -237,6 +239,7 @@ type startResult struct {
 	prepared        preparedStart
 	err             error
 	outcome         TraceOutcomeCode
+	suppressed      bool // start was canceled by a current hard wake barrier
 	started         time.Time
 	finished        time.Time
 	rollbackPending bool
@@ -1475,6 +1478,18 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	if errors.Is(err, errStartSuppressedByCitySuspension) {
+		finished := time.Now()
+		phases.StartCall = time.Since(startCallBegin)
+		return startResult{
+			prepared:   item,
+			outcome:    TraceOutcomeSkipped,
+			suppressed: true,
+			started:    started,
+			finished:   finished,
+			phases:     phases,
+		}
+	}
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
 	// API which can dominate start_call when the runtime is wedged.
@@ -1715,6 +1730,9 @@ func commitAsyncStartResultWithContext(
 			committed = false
 		}
 	}()
+	if result.suppressed {
+		return commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, trace)
+	}
 
 	refreshBegin := time.Now()
 	refreshed, ok, cleanupRuntime, releaseInFlight := refreshAsyncStartResult(result, store, stderr)
@@ -1889,6 +1907,12 @@ func startPreparedStartCandidate(
 	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
 	warmClaim warmClaimTriggerProbe,
 ) (bool, error) {
+	// Final execution-time fence. The awake decision and preparation can be
+	// stale by the time an async goroutine reaches the provider; suspension is
+	// the one global state that must veto every start cause at this boundary.
+	if cityWakeBarrierActive(cfg, cityPath) {
+		return false, errStartSuppressedByCitySuspension
+	}
 	name := item.candidate.name()
 	if sp != nil {
 		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
@@ -2136,6 +2160,14 @@ func commitStartResultTraced(
 	info := result.prepared.candidate.info
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
+	// This is a policy cancellation, not a provider failure. Release only the
+	// transient in-flight lease; preserve pending_create_claim / wake_request so
+	// the same durable demand can proceed after gc resume.
+	if result.suppressed {
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "city_suspended", result.started, result.finished, nil, result.phases)
+		return false
+	}
 	// Session still starting up — back off silently without recording failure.
 	// The reconciler will retry on the next patrol tick.
 	if result.outcome == TraceOutcomeSessionInitializing {
@@ -2809,6 +2841,10 @@ func executePlannedStartsTraced(
 			for _, candidate := range batchCandidates {
 				if ctx != nil && ctx.Err() != nil {
 					return wakeCount
+				}
+				if cityWakeBarrierActive(cfg, cityPath) {
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "city_suspended", time.Time{}, time.Time{}, nil)
+					continue
 				}
 				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)

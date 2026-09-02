@@ -132,6 +132,14 @@ func (s *Store) BeginDrainAckStopPending(id string, now time.Time) error {
 	return s.ApplyPatch(id, DrainAckStopPendingPatch(now))
 }
 
+// CancelDrainAckStopPending restores a still-running session whose queued
+// reconciler-owned stop was superseded by newly assigned work. The metadata
+// cluster is emitted through one Update so every supported backend observes
+// the state, reason, and drain timestamp transition together.
+func (s *Store) CancelDrainAckStopPending(info Info) (Info, error) {
+	return s.UpdateMetadataInfo(info, CancelDrainAckStopPendingPatch())
+}
+
 // RequestRestart records a controller handoff to a fresh provider conversation
 // via RestartRequestPatch. Replaces the restart-request write in session_reconciler.go.
 func (s *Store) RequestRestart(id, sessionKey string, now time.Time) error {

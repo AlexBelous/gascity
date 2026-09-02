@@ -761,3 +761,36 @@ func TestUpdateMetadataInfoFailedWritePersistsNothingAndReturnsInputUnchanged(t 
 		}
 	}
 }
+
+func TestCancelDrainAckStopPendingEmitsSingleUpdateAndReturnsActiveInfo(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": DrainAckStopPendingReason,
+		"drain_at":     "2026-09-02T12:00:00Z",
+	})
+	is, rec := recordingStore(t, b)
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	got, err := is.CancelDrainAckStopPending(pre)
+	if err != nil {
+		t.Fatalf("CancelDrainAckStopPending: %v", err)
+	}
+	updates := rec.CallsForOp("Update")
+	if len(updates) != 1 {
+		t.Fatalf("want exactly 1 Update op, got %d (all ops: %v)", len(updates), opsOf(rec.Calls()))
+	}
+	wantPatch := map[string]string{
+		"state":        string(StateActive),
+		"state_reason": "",
+		"drain_at":     "",
+	}
+	if !reflect.DeepEqual(updates[0].Opts.Metadata, wantPatch) {
+		t.Fatalf("Update metadata = %#v, want %#v", updates[0].Opts.Metadata, wantPatch)
+	}
+	if got.State != StateActive || got.StateReason != "" {
+		t.Fatalf("returned Info did not fold cancellation: %+v", got)
+	}
+}

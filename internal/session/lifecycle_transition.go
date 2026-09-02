@@ -419,6 +419,18 @@ func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
 	return patch
 }
 
+// CancelDrainAckStopPendingPatch restores a still-running session after work
+// appears between the reconciler's no-work decision and its asynchronous
+// provider stop. It clears only the durable stop-pending markers; runtime and
+// conversation continuity metadata remain unchanged.
+func CancelDrainAckStopPendingPatch() MetadataPatch {
+	return MetadataPatch{
+		"state":        string(StateActive),
+		"state_reason": "",
+		"drain_at":     "",
+	}
+}
+
 // SleepPatch records a non-terminal sleep/drain result.
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{

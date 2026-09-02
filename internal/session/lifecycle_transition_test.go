@@ -148,6 +148,15 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			},
 		},
 		{
+			name:  "cancel drain-ack stop pending",
+			patch: CancelDrainAckStopPendingPatch(),
+			want: MetadataPatch{
+				"state":        string(StateActive),
+				"state_reason": "",
+				"drain_at":     "",
+			},
+		},
+		{
 			name:  "sleep",
 			patch: SleepPatch(now, "idle-timeout"),
 			want: MetadataPatch{

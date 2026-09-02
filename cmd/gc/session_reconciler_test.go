@@ -139,6 +139,29 @@ func (p *panicStopProvider) Stop(name string) error {
 	panic("stop exploded")
 }
 
+type blockingInstanceTokenProvider struct {
+	*runtime.Fake
+	readStarted chan struct{}
+	releaseRead chan struct{}
+	once        sync.Once
+}
+
+func newBlockingInstanceTokenProvider() *blockingInstanceTokenProvider {
+	return &blockingInstanceTokenProvider{
+		Fake:        runtime.NewFake(),
+		readStarted: make(chan struct{}),
+		releaseRead: make(chan struct{}),
+	}
+}
+
+func (p *blockingInstanceTokenProvider) GetMeta(name, key string) (string, error) {
+	if key == "GC_INSTANCE_TOKEN" {
+		p.once.Do(func() { close(p.readStarted) })
+		<-p.releaseRead
+	}
+	return p.Fake.GetMeta(name, key)
+}
+
 type shutdownWaitStopProvider struct {
 	*blockingStopProvider
 	listCalled chan struct{}
@@ -174,6 +197,22 @@ func (b *synchronizedBuffer) String() string {
 	return b.buf.String()
 }
 
+func queueTestDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer) {
+	queueDrainAckAsyncStop(
+		cityPath,
+		store,
+		nil,
+		sp,
+		cfg,
+		sessionpkg.Info{ID: "gc-worker", SessionNameMetadata: "worker"},
+		"worker",
+		expectedToken,
+		processNames,
+		tracker,
+		stderr,
+	)
+}
+
 type delayedSessionExistsProvider struct {
 	*runtime.Fake
 	pendingConflict map[string]bool
@@ -186,6 +225,16 @@ type failRateLimitHoldStore struct {
 	failRateLimitHold  bool
 	rateLimitHoldCalls int
 }
+
+// failingUpdateBeadsStore leaves reads available but rejects durable writes.
+// The late-claim stop fence uses it to prove a failed cancellation never falls
+// through to the destructive provider stop.
+type failingUpdateBeadsStore struct {
+	beads.Store
+	err error
+}
+
+func (s failingUpdateBeadsStore) Update(string, beads.UpdateOpts) error { return s.err }
 
 type failSessionHealStore struct {
 	beads.Store
@@ -1207,7 +1256,7 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueTestDrainAckAsyncStop("", store, sp, &config.City{}, "", nil, tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1248,14 +1297,14 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", nil, firstTracker, &stderr)
+	queueTestDrainAckAsyncStop("", store, first, &config.City{}, "", nil, firstTracker, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", nil, secondTracker, &stderr)
+	queueTestDrainAckAsyncStop("", store, second, &config.City{}, "", nil, secondTracker, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):
@@ -1281,7 +1330,7 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueTestDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "", nil, tracker, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1324,7 +1373,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueTestDrainAckAsyncStop("", store, sp, &config.City{}, "", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1361,7 +1410,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueTestDrainAckAsyncStop("", store, sp, &config.City{}, "", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1405,7 +1454,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	// We queued the stop for the OLD session (stale token).
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", nil, tracker, &stderr)
+	queueTestDrainAckAsyncStop("", store, sp, &config.City{}, "stale-token", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1438,7 +1487,7 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, &stderr)
+	queueTestDrainAckAsyncStop("", store, sp, &config.City{}, "live-token", nil, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1447,6 +1496,271 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 	}
 	if got := stderr.String(); strings.Contains(got, "instance token mismatch") {
 		t.Fatalf("stderr = %q, unexpected mismatch on matching token", got)
+	}
+}
+
+// TestQueueDrainAckAsyncStopCancelsForLateRigClaim reproduces the production
+// race behind gc-agd05u: the reconciler has already marked a no-work session
+// stop-pending and queued its asynchronous kill, then the worker claims a rig
+// bead before the kill executes. The final pre-kill decision must see that
+// claim, restore the live session to active, and clear the reconciler-owned
+// drain instead of killing useful work.
+func TestQueueDrainAckAsyncStopCancelsForLateRigClaim(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "riga", Path: filepath.Join(cityPath, "riga")}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "riga"}},
+	}
+
+	session, err := cityStore.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":       "riga/worker",
+			"session_name":   "worker",
+			"state":          string(sessionpkg.StateDraining),
+			"state_reason":   sessionpkg.DrainAckStopPendingReason,
+			"drain_at":       time.Now().UTC().Format(time.RFC3339),
+			"generation":     "1",
+			"pool_managed":   "true",
+			"instance_token": "live-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	info := sessionInfosFromBeads([]beads.Bead{session})[0]
+
+	sp := newBlockingInstanceTokenProvider()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "live-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop(
+		cityPath,
+		cityStore,
+		map[string]beads.Store{"riga": rigStore},
+		sp,
+		cfg,
+		info,
+		"worker",
+		"live-token",
+		nil,
+		tracker,
+		&stderr,
+	)
+
+	select {
+	case <-sp.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("async stop did not reach the instance-token fence")
+	}
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "work claimed after stop was queued",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create late rig claim: %v", err)
+	}
+	close(sp.releaseRead)
+
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not finish after releasing the token fence")
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("late rig claim did not cancel the queued async stop")
+	}
+	got, err := cityStore.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("state = %q, want active after late-claim cancellation", got.Metadata["state"])
+	}
+	if got.Metadata["state_reason"] != "" || got.Metadata["drain_at"] != "" {
+		t.Fatalf("stop-pending metadata survived cancellation: state_reason=%q drain_at=%q", got.Metadata["state_reason"], got.Metadata["drain_at"])
+	}
+	if ack, _ := sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared", ack)
+	}
+}
+
+func TestQueueDrainAckAsyncStopFailsClosedWhenLateClaimQueryFails(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	session, err := cityStore.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker",
+			"state":        string(sessionpkg.StateDraining),
+			"state_reason": sessionpkg.DrainAckStopPendingReason,
+			"drain_at":     time.Now().UTC().Format(time.RFC3339),
+			"generation":   "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	info := sessionInfosFromBeads([]beads.Bead{session})[0]
+	store := failingListStore{Store: cityStore}
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not finish")
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("assigned-work query failure killed the runtime; destructive uncertainty must fail closed")
+	}
+	got, err := cityStore.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Metadata["state_reason"] != sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("state_reason = %q, want stop-pending retained for retry", got.Metadata["state_reason"])
+	}
+	if gotStderr := stderr.String(); !strings.Contains(gotStderr, "late assigned-work check failed") {
+		t.Fatalf("stderr = %q, want fail-closed query diagnostic", gotStderr)
+	}
+}
+
+func TestQueueDrainAckAsyncStopFailsClosedWhenLateClaimCancellationWriteFails(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	session, err := cityStore.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker",
+			"state":        string(sessionpkg.StateDraining),
+			"state_reason": sessionpkg.DrainAckStopPendingReason,
+			"drain_at":     time.Now().UTC().Format(time.RFC3339),
+			"generation":   "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := cityStore.Create(beads.Bead{
+		Title:    "late work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create late work: %v", err)
+	}
+	info := sessionInfosFromBeads([]beads.Bead{session})[0]
+	store := failingUpdateBeadsStore{Store: cityStore, err: errors.New("update rejected")}
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not finish")
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("failed durable cancellation fell through to provider stop")
+	}
+	got, err := cityStore.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Metadata["state_reason"] != sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("state_reason = %q, want stop-pending retained for retry", got.Metadata["state_reason"])
+	}
+	if gotStderr := stderr.String(); !strings.Contains(gotStderr, "persisting late-claim drain cancellation") {
+		t.Fatalf("stderr = %q, want fail-closed persistence diagnostic", gotStderr)
+	}
+}
+
+func TestQueueDrainAckAsyncStopPreservesAgentAuthoredStopSemantics(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker",
+			"state":        string(sessionpkg.StateDraining),
+			"state_reason": sessionpkg.DrainAckStopPendingReason,
+			"drain_at":     time.Now().UTC().Format(time.RFC3339),
+			"generation":   "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "assigned work must not override an explicit agent ack",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create assigned work: %v", err)
+	}
+	info := sessionInfosFromBeads([]beads.Bead{session})[0]
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("worker", "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+	}
+
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, nil, sp, &config.City{}, info, "worker", "", nil, tracker, io.Discard)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not finish")
+	}
+	if sp.IsRunning("worker") {
+		t.Fatal("assigned work canceled an explicit agent-authored drain ack")
 	}
 }
 
@@ -1479,7 +1793,7 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", []string{"claude"}, tracker, &stderr)
+	queueTestDrainAckAsyncStop("", store, sp, &config.City{}, "", []string{"claude"}, tracker, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1510,7 +1824,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", nil, &cr.asyncStops, &synchronizedBuffer{})
+	queueTestDrainAckAsyncStop("", store, sp, cr.cfg, "", nil, &cr.asyncStops, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:

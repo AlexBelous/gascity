@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -4839,6 +4840,40 @@ func TestNudgePollHelpersCloseEveryStoreTheyOpen(t *testing.T) {
 	}
 	if *opens != *closes {
 		t.Fatalf("bead store leak: opens=%d closes=%d (every per-tick open must be released)", *opens, *closes)
+	}
+}
+
+// TestNudgeMaintenanceStoreKeepsMemoizedRelocatedBindingOpen guards the split
+// city regression where claimDueQueuedNudgesMatching closed the relocated
+// SQLite binding owned by cliStorageRoutes. The immediately-following ack then
+// reused that closed memoized handle, so an injected reminder returned to the
+// queue and was delivered again every lease interval.
+func TestNudgeMaintenanceStoreKeepsMemoizedRelocatedBindingOpen(t *testing.T) {
+	cityPath := t.TempDir()
+	closes := 0
+	binding := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &closes}
+	seedCLIStorageRoutes(t, cityPath, &storageRoutes{
+		stores: map[coordclass.Class]beads.Store{
+			coordclass.ClassNudges: binding,
+		},
+	})
+
+	previous := openNudgeBeadStore
+	openNudgeBeadStore = func(string) beads.NudgesStore {
+		return beads.NudgesStore{Store: binding}
+	}
+	t.Cleanup(func() { openNudgeBeadStore = previous })
+
+	maintenance := nudgeMaintenanceStore{cityPath: cityPath}
+	maintenance.ensureOpen()
+	if err := maintenance.close(); err != nil {
+		t.Fatalf("close memoized relocated binding: %v", err)
+	}
+	if closes != 0 {
+		t.Fatalf("memoized relocated binding closed %d times, want 0", closes)
+	}
+	if _, err := binding.List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Fatalf("memoized relocated binding is unusable after helper close: %v", err)
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
@@ -1914,6 +1915,18 @@ func (m *nudgeMaintenanceStore) ensureOpen() beads.NudgesStore {
 func (m *nudgeMaintenanceStore) close() error {
 	if !m.opened {
 		return nil
+	}
+	// A relocated class store returned by openNudgeBeadStore belongs to the
+	// process-wide cliStorageRoutes memo. Closing it here poisons every later
+	// nudge operation in the same process: claim closes the binding, then ack
+	// sees "bead store closed" and the leased item returns to pending forever.
+	// The CLI exit path (or the controller's storage shutdown) owns that handle.
+	// A non-relocated nudge store is the per-call work-store handle opened by
+	// openNudgeBeadStore, so retain the existing close discipline for it.
+	if routes := cliStorageRoutes(m.cityPath); routes != nil {
+		if _, relocated := routes.storeFor(coordclass.ClassNudges); relocated {
+			return nil
+		}
 	}
 	return closeBeadStoreHandle(m.store.Store)
 }

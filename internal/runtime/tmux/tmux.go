@@ -2296,14 +2296,16 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		}
 		delivered = true
 		if !confirmed {
-			// Do NOT collapse this to nil: a caller that treats nil as "clean
-			// delivery" would ack a queued nudge for a message that may still
-			// be sitting drafted-but-unsubmitted in the pane. Surfacing this
-			// as an error leaves the item unacked, so it requeues after the
-			// normal retry delay and spends one of its bounded attempts —
-			// the same handling as any other delivery failure — instead of
-			// silently losing the nudge.
-			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
+			// Every submit send reached tmux and the bounded idle-side retries
+			// have already given a dropped first Enter two more chances to
+			// land. A missing busy indicator is therefore ambiguous: the TUI
+			// may have accepted a fast turn without ever rendering a frame our
+			// polling caught. Reporting an error here made queue dispatchers
+			// re-paste the entire message, which produced duplicate prompts and
+			// repeated model turns. Preserve the historical best-effort
+			// contract once all tmux sends succeeded; genuine send failures
+			// still return above and remain retryable.
+			return nil
 		}
 		return nil
 	}

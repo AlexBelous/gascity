@@ -3,7 +3,6 @@
 package tmux
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -129,15 +128,11 @@ func TestNudgeSessionReEntersUntilSubmittedForClaude(t *testing.T) {
 	}
 }
 
-// TestNudgeSessionReturnsUnconfirmedErrorWhenNeverBusyForClaude is the
-// regression test for ra-3x46cy finding 1: pre-fix, NudgeSession discarded
-// the confirmed bool from submitEnterAndConfirm and reported nil ("clean
-// delivery") even when the agent's busy indicator was never observed within
-// budget — the exact condition that let a drafted-but-unsubmitted nudge go
-// undetected for 15+ minutes. NudgeSession must now surface
-// ErrNudgeSubmitUnconfirmed instead, so a retry-capable caller (the queue
-// dispatcher) does not ack the item.
-func TestNudgeSessionReturnsUnconfirmedErrorWhenNeverBusyForClaude(t *testing.T) {
+// TestNudgeSessionAcceptsSuccessfulTmuxDeliveryWhenNeverBusyForClaude pins the
+// no-repaste contract: after every bounded submit send reaches tmux, absence
+// of a sampled busy frame must not make a queue dispatcher paste the same
+// prompt again. Genuine tmux send errors remain retryable.
+func TestNudgeSessionAcceptsSuccessfulTmuxDeliveryWhenNeverBusyForClaude(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -158,11 +153,7 @@ func TestNudgeSessionReturnsUnconfirmedErrorWhenNeverBusyForClaude(t *testing.T)
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	err := tm.NudgeSession(sessionName, "hello-unconfirmed")
-	if err == nil {
-		t.Fatal("NudgeSession err = nil, want ErrNudgeSubmitUnconfirmed (an unconfirmed submit must not report clean delivery)")
-	}
-	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
-		t.Fatalf("err = %v, want errors.Is(err, ErrNudgeSubmitUnconfirmed)", err)
+	if err := tm.NudgeSession(sessionName, "hello-unconfirmed"); err != nil {
+		t.Fatalf("NudgeSession err = %v, want nil after successful bounded tmux delivery", err)
 	}
 }

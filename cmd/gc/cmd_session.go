@@ -685,7 +685,11 @@ func sessionNewAliasOwner(cfg *config.City, agent *config.Agent) string {
 	}
 	for i := range cfg.NamedSessions {
 		named := &cfg.NamedSessions[i]
-		if named.TemplateQualifiedName() == agent.QualifiedName() && named.IdentityName() == agent.Name {
+		identity := named.Name
+		if identity == "" {
+			identity = named.Template
+		}
+		if named.TemplateQualifiedName() == agent.QualifiedName() && identity == agent.Name {
 			return named.QualifiedName()
 		}
 	}

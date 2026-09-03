@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -895,6 +896,46 @@ func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
 	}
 	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplatePromptUsesFederatedQueriesForSplitCity(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nAssigned={{ .AssignedReadyQuery }}")
+
+	routes := splitRoutes(beads.NewMemStore())
+	registerResidencyRoutes(cityPath, routes, nil)
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	cfg := &config.City{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}}
+	params := &agentBuildParams{
+		city:       cfg,
+		fs:         fs,
+		cityName:   "demo-city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "opencode"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.template.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, `gc ready --include-ephemeral`) {
+		t.Fatalf("Prompt missing federated ready query: %q", tp.Prompt)
+	}
+	if strings.Contains(tp.Prompt, `bd ready --include-ephemeral`) {
+		t.Fatalf("Prompt retained single-store ready query in split city: %q", tp.Prompt)
 	}
 }
 

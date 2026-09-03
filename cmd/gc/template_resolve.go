@@ -353,19 +353,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		packDirs = p.city.PackDirsForRig(rigName)
 	}
-	topo := config.QueryTopology{}
-	if p.city != nil {
-		topo.Beads = p.city.Beads
-	}
-	// Controller-owned: config.QueryTopology{Beads: ...} and NOT
-	// cityQueryTopology. Resolving the federation fact means asking the
-	// storage routes, and the one-shot funnel that answers for a CLI command
-	// (cliStorageRoutes) is explicitly for the half of the program that
-	// "never builds a CityRuntime" — a controller reaching it would open the
-	// city's binding a second time in a process that already holds it open.
-	// The controller's own routes are the right source; threading them into
-	// this plumbing is a change to controller wiring, not part of swapping
-	// the reader, so it stays with the claim-routing slice (ga-601v2).
+	// The startup prompt must ask the same store federation as `gc prime` and
+	// provider hooks. In particular, a city-scoped pool may be woken by work in
+	// a rig store; rendering single-store `bd` queries here makes the worker see
+	// an empty queue, drain, and get recreated forever. cityQueryTopology only
+	// projects the already-resolved residency shape into the generated command;
+	// it does not open or own another store handle.
+	topo := cityQueryTopology(p.cityPath, p.city)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,

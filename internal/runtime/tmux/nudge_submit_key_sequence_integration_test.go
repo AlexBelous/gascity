@@ -94,3 +94,34 @@ func TestNudgeSessionUsesDeclaredSequenceForProviderFamily(t *testing.T) {
 		t.Fatalf("CapturePaneAll missing Escape for testfam's declared [Escape, Enter] submit sequence:\n%s", out)
 	}
 }
+
+func TestNudgeSessionAtStartupDoesNotInterruptCodex(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-codex-startup-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+		"GC_PROVIDER": "codex",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.NudgeSessionAtStartup(sessionName, "hello-startup"); err != nil {
+		t.Fatalf("NudgeSessionAtStartup: %v", err)
+	}
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if strings.Contains(out, "^[") {
+		t.Fatalf("startup nudge sent Escape into codex and can interrupt MCP initialization:\n%s", out)
+	}
+	if !strings.Contains(out, "hello-startup") {
+		t.Fatalf("startup nudge was not delivered:\n%s", out)
+	}
+}

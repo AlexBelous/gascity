@@ -992,7 +992,7 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 }
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
-	return o.tm.NudgeSession(name, text)
+	return o.tm.NudgeSessionAtStartup(name, text)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {

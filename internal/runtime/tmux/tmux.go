@@ -105,6 +105,17 @@ func nudgeSubmitKeySequenceForFamily(family string) []string {
 	return defaultNudgeSubmitKeySequence
 }
 
+// startupNudgeSubmitKeySequenceForFamily keeps steady-state provider behavior
+// intact while avoiding semantic interrupt keys during cold initialization.
+// Codex renders its composer before MCP startup is finished; Escape at that
+// point cancels initialization and strands the following prompt as a draft.
+func startupNudgeSubmitKeySequenceForFamily(family string) []string {
+	if family == "codex" {
+		return defaultNudgeSubmitKeySequence
+	}
+	return nudgeSubmitKeySequenceForFamily(family)
+}
+
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
 type Config struct {
@@ -2155,6 +2166,16 @@ func (t *Tmux) nudgeSubmitKeySequence(target string) []string {
 	return defaultNudgeSubmitKeySequence
 }
 
+func (t *Tmux) startupNudgeSubmitKeySequence(target string) []string {
+	if provider := t.providerEnv(target); provider != "" {
+		return startupNudgeSubmitKeySequenceForFamily(sessionlog.ProviderFamily(provider))
+	}
+	if t.targetLooksLikeProvider(target, "codex") {
+		return startupNudgeSubmitKeySequenceForFamily("codex")
+	}
+	return t.nudgeSubmitKeySequence(target)
+}
+
 // nudgeSubmitKeySettle is the pause between successive keys within a
 // multi-key submit sequence (e.g. a hypothetical Escape-then-Enter entry) —
 // long enough for the TUI to process the first key's effect before the next
@@ -2194,6 +2215,17 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 // queue up and execute one at a time. This prevents garbled input when
 // SessionStart hooks and nudges arrive simultaneously.
 func (t *Tmux) NudgeSession(session, message string) error {
+	return t.nudgeSession(session, message, false)
+}
+
+// NudgeSessionAtStartup delivers the first prompt after the runtime readiness
+// probe. It avoids provider control keys that are safe at an idle prompt but
+// destructive while background startup is still settling.
+func (t *Tmux) NudgeSessionAtStartup(session, message string) error {
+	return t.nudgeSession(session, message, true)
+}
+
+func (t *Tmux) nudgeSession(session, message string, startup bool) error {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
@@ -2251,7 +2283,11 @@ func (t *Tmux) NudgeSession(session, message string) error {
 
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
-	time.Sleep(t.nudgeSubmitDebounce(target))
+	debounce := t.nudgeSubmitDebounce(target)
+	if startup {
+		debounce = t.startupNudgeSubmitDebounce(target)
+	}
+	time.Sleep(debounce)
 
 	// 4. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
@@ -2276,6 +2312,9 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// dependence on an external observer re-kicking the session. Providers
 	// without a reliable indicator keep best-effort delivery.
 	submitKeys := t.nudgeSubmitKeySequence(target)
+	if startup {
+		submitKeys = t.startupNudgeSubmitKeySequence(target)
+	}
 	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
 	// Escape is only safe to repeat while the pane is still idle. If the first
 	// attempt actually submitted and the pane went busy, a re-sent Escape is an
@@ -2419,6 +2458,16 @@ func (t *Tmux) nudgeSubmitDebounce(target string) time.Duration {
 		return 1500 * time.Millisecond
 	}
 	return 500 * time.Millisecond
+}
+
+const codexStartupNudgeDebounce = 2 * time.Second
+
+func (t *Tmux) startupNudgeSubmitDebounce(target string) time.Duration {
+	provider := sessionlog.ProviderFamily(t.providerEnv(target))
+	if provider == "codex" || (provider == "" && t.targetLooksLikeProvider(target, "codex")) {
+		return codexStartupNudgeDebounce
+	}
+	return t.nudgeSubmitDebounce(target)
 }
 
 func (t *Tmux) targetLooksLikeProvider(target, provider string) bool {

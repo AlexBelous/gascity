@@ -39,6 +39,20 @@ func TestCodexNudgeSubmitsWithExactlyOneEscapeThenEnter(t *testing.T) {
 	}
 }
 
+// A cold Codex startup is different from a steady-state nudge: its input box
+// is already visible while MCP initialization is still running. Escape is an
+// interrupt in that state, so the normal Escape+Enter sequence aborts startup
+// and leaves the prompt as an unsubmitted draft. A settled plain Enter is the
+// startup-safe sequence; steady-state delivery keeps the #4706 sequence above.
+func TestCodexStartupNudgeSubmitsWithPlainEnter(t *testing.T) {
+	if got, want := startupNudgeSubmitKeySequenceForFamily("codex"), []string{"Enter"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("codex startup submit sequence = %v, want %v", got, want)
+	}
+	if got, want := startupNudgeSubmitKeySequenceForFamily("claude"), nudgeSubmitKeySequenceForFamily("claude"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("claude startup submit sequence = %v, want unchanged %v", got, want)
+	}
+}
+
 // Control: the claude path is byte-identical to what it has always been. If the
 // codex entry had been added to a shared default, or the skip list had been
 // edited instead of the table, this row would move too.
@@ -116,7 +130,7 @@ func nudgeSessionSource(t *testing.T) string {
 		t.Fatalf("reading tmux.go: %v", err)
 	}
 	body := string(src)
-	start := strings.Index(body, "func (t *Tmux) NudgeSession(")
+	start := strings.Index(body, "func (t *Tmux) nudgeSession(")
 	if start < 0 {
 		t.Fatal("NudgeSession not found in tmux.go")
 	}

@@ -838,6 +838,31 @@ func buildDesiredStateWithSessionBeadsAt(
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
 			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, demandReadyCache)
+			// A scoped detail trace must show the input that made a cold pool
+			// wake (or fail to wake), not only the final desired-state result.
+			// Keep this silent for normal baseline traces: production cities can
+			// have hundreds of targets, while an explicitly armed template needs
+			// only its aggregate count and the bead IDs/store refs behind it.
+			for _, target := range defaultScaleTargets {
+				template := strings.TrimSpace(target.template)
+				if template == "" || !trace.detailEnabled(template) {
+					continue
+				}
+				entry := defaultDemand[template]
+				trace.RecordDecision(
+					TraceSiteDemandSnapshot,
+					TraceReasonRetained,
+					TraceOutcomeComplete,
+					template,
+					"",
+					map[string]any{
+						"demand_count":    defaultCounts[template],
+						"target_store":    target.storeKey,
+						"work_bead_ids":   entry.WorkBeadIDs,
+						"work_store_refs": entry.StoreRefs,
+					},
+				)
+			}
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})

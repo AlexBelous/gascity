@@ -1558,7 +1558,7 @@ func collectAssignedWorkBeadsWithStores(
 			// unassigned pool work that needs to be reopened. This pass runs
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
-			if inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
+			if inProgress, err := listFreshBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
@@ -2323,6 +2323,35 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 		return handles.Live.List(query)
 	}
 	return rows, err
+}
+
+func listFreshBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+	handles := beads.HandlesFor(store)
+	// Claims are written by agent processes, outside the controller's cache
+	// coordinator. Reading the cache first can therefore miss the exact
+	// open -> in_progress transition that must keep the claimant alive: the
+	// ready-demand row disappears, no assigned-work row replaces it, and the
+	// reconciler drains the live worker as an orphan. Prefer the authoritative
+	// read. A partial/unavailable live tier may still retain cached rows, but it
+	// must report the result as partial so callers suppress destructive drains.
+	liveRows, liveErr := handles.Live.List(query)
+	if liveErr == nil {
+		return liveRows, nil
+	}
+	if !beads.IsPartialResult(liveErr) {
+		liveRows = nil
+	}
+
+	cachedRows, cachedErr := handles.Cached.List(query)
+	if cachedErr != nil && !beads.IsPartialResult(cachedErr) {
+		cachedRows = nil
+	}
+	rows := mergeReadyRowsByID(cachedRows, liveRows)
+	joined := errors.Join(liveErr, cachedErr)
+	if joined != nil && len(rows) > 0 && !beads.IsPartialResult(joined) {
+		joined = &beads.PartialResultError{Op: "controller assigned-work demand", Err: joined}
+	}
+	return rows, joined
 }
 
 // listOpenForControllerDemandLive reads open work for the controller-demand and

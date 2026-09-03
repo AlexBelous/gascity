@@ -1885,11 +1885,13 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 					continue
 				}
 				var routeRows []map[string]any
+				readyIDs := make([]string, 0, len(ready))
 				readyError := ""
 				if readyErr != nil {
 					readyError = readyErr.Error()
 				}
 				for _, b := range ready {
+					readyIDs = append(readyIDs, b.ID)
 					for _, candidate := range controllerDemandRouteCandidates(b) {
 						if agentutil.NormalizePoolRouteTarget(cfg, candidate) != template {
 							continue
@@ -1915,6 +1917,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 					map[string]any{
 						"probe_store":   group.storeKey,
 						"ready_count":   len(ready),
+						"ready_ids":     readyIDs,
 						"ready_error":   readyError,
 						"matching_rows": routeRows,
 					},

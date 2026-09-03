@@ -1340,6 +1340,10 @@ func runController(
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
 	cityName := loadedCityName(cfg, cityPath)
+	var buildFnWithClassStores func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
+	if buildFnWithSessionBeads != nil {
+		buildFnWithClassStores = standaloneBuildAgentsFnWithClassStores(cityName, cityPath, time.Now(), stderr)
+	}
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
@@ -1356,6 +1360,7 @@ func runController(
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,
 		BuildFnWithSessionBeads: buildFnWithSessionBeads,
+		BuildFnWithClassStores:  buildFnWithClassStores,
 		Dops:                    dops,
 		Rec:                     rec,
 		PoolSessions:            poolSessions,

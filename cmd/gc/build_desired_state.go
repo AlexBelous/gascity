@@ -852,6 +852,20 @@ func buildDesiredStateWithClassStoresAt(
 		// claimable in the same tick instead of neither.
 		collapseSlotSuffixedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
+		// The eligibility pass above records WHICH templates need a default
+		// routed-work probe. Resolve WHERE those probes read only after that pass,
+		// through the same Plan(RoutedWork), narrowed to the runtime plane used by
+		// the broad open snapshot and kept as a subsequence of the claim plan. On
+		// a converged split city routed graph
+		// work lives in the infra binding, not in the retained work ledger; using
+		// the raw work-class store here leaves every cold pool blind even though
+		// `gc ready` in a separate process can see and claim the bead.
+		defaultScaleTargets = retargetScaleCheckTargetsToRoutedWorkPlane(
+			cityPath, cfg, store, rigStores, suspendedRigPaths, defaultScaleTargets,
+		)
+		defaultNamedScaleTargets = retargetScaleCheckTargetsToRoutedWorkPlane(
+			cityPath, cfg, store, rigStores, suspendedRigPaths, defaultNamedScaleTargets,
+		)
 		// canonicalizeLegacyBound* above rewrote gc.routed_to on open ready
 		// work, so the assigned-work snapshot is now stale for demand
 		// bucketing. Read the post-rewrite state from a fresh per-store
@@ -1829,6 +1843,89 @@ func defaultScaleCheckTargetForAgent(
 	target.store = nil
 	target.err = fmt.Errorf("default scale_check %s: rig store %q unavailable", target.template, rigName)
 	return target
+}
+
+// retargetScaleCheckTargetsToRoutedWorkPlane keeps the template eligibility
+// decisions made by the agent loop, but replaces its provisional physical
+// stores with the authoritative runtime-plane RoutedWork leg set.
+//
+// The provisional targets still matter: a rig-scoped pool whose own work store
+// is unavailable carries an error target and must remain partial rather than be
+// woken through another store. Healthy targets, however, are only evidence that
+// a probe is allowed; they are not residency answers. Residency comes from the
+// shared resolver so the controller counts the same binding-resident rows that
+// the claim path serves. Multiple provisional targets for one template collapse
+// onto one copy of every resolved leg, preserving the one-read-per-store demand
+// cache and the cross-store bead-ID dedup downstream.
+func retargetScaleCheckTargetsToRoutedWorkPlane(
+	cityPath string,
+	cfg *config.City,
+	workStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+	targets []defaultScaleCheckTarget,
+) []defaultScaleCheckTarget {
+	if len(targets) == 0 {
+		return nil
+	}
+
+	type templateTarget struct {
+		template string
+		healthy  bool
+	}
+	byTemplate := make(map[string]*templateTarget)
+	order := make([]string, 0, len(targets))
+	var preservedErrors []defaultScaleCheckTarget
+	for _, target := range targets {
+		template := strings.TrimSpace(target.template)
+		if template == "" {
+			continue
+		}
+		state := byTemplate[template]
+		if state == nil {
+			state = &templateTarget{template: template}
+			byTemplate[template] = state
+			order = append(order, template)
+		}
+		if target.err != nil || target.store == nil {
+			preservedErrors = append(preservedErrors, target)
+			continue
+		}
+		state.healthy = true
+	}
+
+	legs, resolveErr := routedWorkStoreCandidates(
+		cityPath, cfg, workStore, rigStores, suspendedRigPaths, censusRefScoped,
+	)
+	out := append([]defaultScaleCheckTarget(nil), preservedErrors...)
+	for _, template := range order {
+		state := byTemplate[template]
+		if state == nil || !state.healthy {
+			continue
+		}
+		if resolveErr != nil {
+			out = append(out, defaultScaleCheckTarget{
+				template: template,
+				err:      fmt.Errorf("default scale_check %s: resolving routed-work stores: %w", template, resolveErr),
+			})
+			continue
+		}
+		if len(legs) == 0 {
+			out = append(out, defaultScaleCheckTarget{
+				template: template,
+				err:      fmt.Errorf("default scale_check %s: routed-work store unavailable", template),
+			})
+			continue
+		}
+		for _, leg := range legs {
+			out = append(out, defaultScaleCheckTarget{
+				template: template,
+				storeKey: leg.ref,
+				store:    leg.store,
+			})
+		}
+	}
+	return out
 }
 
 // defaultScaleCheckCounts reports ready, unassigned, routed work as fresh

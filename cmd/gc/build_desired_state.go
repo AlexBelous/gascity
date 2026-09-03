@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -826,6 +827,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
 		demandReadyCache := newReadyDemandCache()
+		demandReadyCache.trace = trace
 		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
@@ -1877,6 +1879,48 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				ready = nil
 			}
 		}
+		if cache != nil && cache.trace != nil {
+			for template := range group.templates {
+				if !cache.trace.detailEnabled(template) {
+					continue
+				}
+				var routeRows []map[string]any
+				readyError := ""
+				if readyErr != nil {
+					readyError = readyErr.Error()
+				}
+				for _, b := range ready {
+					for _, candidate := range controllerDemandRouteCandidates(b) {
+						if agentutil.NormalizePoolRouteTarget(cfg, candidate) != template {
+							continue
+						}
+						routeRows = append(routeRows, map[string]any{
+							"id":       b.ID,
+							"status":   b.Status,
+							"type":     b.Type,
+							"assignee": b.Assignee,
+							"route":    candidate,
+							"labels":   b.Labels,
+							"servable": demandRowServable(b),
+						})
+						break
+					}
+				}
+				cache.trace.RecordDecision(
+					TraceSiteDemandSnapshot,
+					TraceReasonRetained,
+					TraceOutcomeComplete,
+					template,
+					"",
+					map[string]any{
+						"probe_store":   group.storeKey,
+						"ready_count":   len(ready),
+						"ready_error":   readyError,
+						"matching_rows": routeRows,
+					},
+				)
+			}
+		}
 		for _, b := range ready {
 			// AGREEMENT: count only rows a T-worker's own query would serve it.
 			// A routed epic, a bead on a dispatch hold, or a slot-suffixed route
@@ -2365,6 +2409,7 @@ type readyDemandCache struct {
 	mu     sync.Mutex
 	live   map[beads.Store]*readyDemandEntry
 	cached map[beads.Store]*readyDemandEntry
+	trace  *sessionReconcilerTraceCycle
 }
 
 type readyDemandEntry struct {

@@ -441,15 +441,48 @@ func buildDesiredStateWithSessionBeadsAt(
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
+	return buildDesiredStateWithClassStoresAt(
+		cityName,
+		cityPath,
+		beaconTime,
+		poolDecisionTime,
+		cfg,
+		sp,
+		store,
+		store,
+		rigStores,
+		sessionBeads,
+		trace,
+		stderr,
+	)
+}
+
+// buildDesiredStateWithClassStoresAt keeps the two city-level roles explicit:
+// sessionStore owns session-bead mutations and occupancy reads, while
+// workStore supplies ordinary routed work and pool demand. They are identical
+// on a single-store city, but a split city must not ask its relocated sessions
+// binding whether business work exists.
+func buildDesiredStateWithClassStoresAt(
+	cityName, cityPath string,
+	beaconTime, poolDecisionTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	sessionStore beads.Store,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
+	stderr io.Writer,
+) DesiredStateResult {
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
 	}
 
-	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, sessionStore, stderr)
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
-	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
+	bp.sessionSnapshotComplete = sessionStore == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
 
 	// Pre-compute suspended rig paths (config + runtime state).
 	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
@@ -461,7 +494,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	// not swallowed: undercounting running sessions can misclassify a pool as
 	// cold and trigger a spurious scale-from-zero probe.
 	subPhaseStart := time.Now()
-	allOpenSessionInfos, openSessionBeadsErr := collectAllOpenSessionInfos(cityPath, cfg, store, rigStores, suspendedRigPaths)
+	allOpenSessionInfos, openSessionBeadsErr := collectAllOpenSessionInfos(cityPath, cfg, sessionStore, rigStores, suspendedRigPaths)
 	bp.sessionOccupancyInfos = allOpenSessionInfos
 	recordDemandSubPhase(trace, "demand_snapshot.collect_open_session_beads", subPhaseStart, map[string]any{
 		"beads":   len(allOpenSessionInfos),

@@ -117,6 +117,7 @@ type CityRuntime struct {
 	publication             supervisor.PublicationConfig
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
+	buildFnWithClassStores  func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
 	dops                    drainOps
 	ct                      crashTracker
@@ -292,6 +293,7 @@ type CityRuntimeParams struct {
 	Publication             supervisor.PublicationConfig
 	BuildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	BuildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
+	BuildFnWithClassStores  func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 	Dops                    drainOps
 
 	Rec events.Recorder
@@ -424,6 +426,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		publication:             p.Publication,
 		buildFn:                 p.BuildFn,
 		buildFnWithSessionBeads: p.BuildFnWithSessionBeads,
+		buildFnWithClassStores:  p.BuildFnWithClassStores,
 		dops:                    p.Dops,
 		ct:                      ct,
 		it:                      it,
@@ -3281,14 +3284,9 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
-	// The control-dispatcher tick threads one city store as two roles at once:
-	// the session-bead store the desired-state build creates and updates session
-	// beads through (sessions — the build-fn's leading store param flows into
-	// agentBuildParams.beadStore and the collectAllOpenSessionInfos "city" arm)
-	// and the per-rig work tail (work). The session-sync and reconcile arms below
-	// take the same sessions store. Split into the class accessors so a future
-	// per-class backend routes each role independently; both collapse to the same
-	// store today, so the tick is byte-identical.
+	// The control-dispatcher tick keeps session mutations/occupancy on the
+	// sessions class and routed demand on the work class. They collapse to one
+	// store on an unsplit city but must remain distinct after class relocation.
 	sessionsStore := cr.sessionsBeadStore()
 	if sessionsStore.Store == nil || cr.sessionDrains == nil {
 		return
@@ -3303,7 +3301,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	tickTime := time.Now()
-	wfcResult := buildDesiredStateWithSessionBeadsAt(
+	wfcResult := buildDesiredStateWithClassStoresAt(
 		cr.cityName,
 		cr.cityPath,
 		tickTime,
@@ -3311,6 +3309,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		filteredCfg,
 		cr.sp,
 		sessionsStore.Store,
+		cr.cityWorkStore().Store,
 		unwrapWorkStores(cr.workBeadStores()),
 		sessionBeads,
 		nil,
@@ -3536,13 +3535,15 @@ func filterReconcileRowsByName(snapshot *sessionBeadSnapshot, names map[string]b
 }
 
 func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
-	// The desired-state build threads two store roles: the session-bead store the
-	// build-fn's leading store param flows into (sessions — it becomes
-	// agentBuildParams.beadStore, which creates and updates session beads, and the
-	// collectAllOpenSessionInfos "city" arm) and the per-rig work tail. Split the
-	// single city store into the class accessors so a future per-class backend
-	// routes each role independently; both collapse to the same store today.
+	// The full build has two independent city-store roles: session mutations and
+	// occupancy belong to the sessions class; routed work and scale demand belong
+	// to the work class. Keep the legacy callback for tests/older embedders, but
+	// production runtimes use the class-aware callback whenever it is present.
 	sessionsStore := cr.sessionsBeadStore()
+	workStore := cr.cityWorkStore()
+	if cr.buildFnWithClassStores != nil {
+		return cr.buildFnWithClassStores(cr.cfg, cr.sp, sessionsStore.Store, workStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
+	}
 	if cr.buildFnWithSessionBeads != nil {
 		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
 	}

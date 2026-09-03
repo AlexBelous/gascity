@@ -1985,6 +1985,21 @@ func TestSessionNewAliasOwner_UsesConfiguredNamedIdentity(t *testing.T) {
 	}
 }
 
+func TestSessionNewAliasOwner_UsesConfiguredNamedIdentityFromBoundPack(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor", BindingName: "gastown"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", BindingName: "gastown"},
+		},
+	}
+
+	if got := sessionNewAliasOwner(cfg, &cfg.Agents[0]); got != "gastown.mayor" {
+		t.Fatalf("sessionNewAliasOwner(gastown.mayor) = %q, want gastown.mayor", got)
+	}
+}
+
 func TestCmdSessionListJSONNoSessionsReturnsEmptyEnvelope(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")

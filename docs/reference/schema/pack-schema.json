@@ -174,6 +174,10 @@
           "type": "boolean",
           "description": "WorkQueryFederated declares that the custom WorkQuery reads every reachable\nwork store, including relocated coordination classes and ephemeral work.\ngc hook runs it once in the primary query environment instead of once per\nstore. False preserves legacy custom-query fan-out. Ignored without WorkQuery."
         },
+        "work_query_federated": {
+          "type": "boolean",
+          "description": "WorkQueryFederated declares that the custom WorkQuery reads every reachable\nwork store, including relocated coordination classes and ephemeral work.\ngc hook runs it once in the primary query environment instead of once per\nstore. False preserves legacy custom-query fan-out. Ignored without WorkQuery."
+        },
         "sling_query": {
           "type": "string",
           "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}\nwith the bead ID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."

@@ -327,3 +327,34 @@ func TestRefreshDesiredStateDefersFreshSessionCreationOnSingleStoreCity(t *testi
 		t.Fatalf("city store holds %d bead(s), want only the seeded root until the next full census", len(all))
 	}
 }
+
+// Retargeting adds the relocated runtime binding, not new work-store access.
+func TestRetargetScaleCheckKeepsUnsplitStoreEligibility(t *testing.T) {
+	city := beads.NewMemStore()
+	rig := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: "/rigs/fixture"}},
+	}
+	targets := []defaultScaleCheckTarget{
+		{template: "worker", storeKey: "city", store: city},
+		{template: "fixture/worker", storeKey: "rig:fixture", store: rig},
+	}
+	got := retargetScaleCheckTargetsToRoutedWorkPlane(t.TempDir(), cfg, city, map[string]beads.Store{"fixture": rig}, nil, targets)
+	if len(got) != len(targets) {
+		t.Fatalf("got %d targets, want %d original eligible targets", len(got), len(targets))
+	}
+	for i, want := range targets {
+		if got[i].template != want.template || got[i].storeKey != want.storeKey || got[i].store != want.store || got[i].err != nil {
+			t.Fatalf("target %d = %+v, want original eligibility %+v", i, got[i], want)
+		}
+	}
+}
+
+func TestRetargetScaleCheckKeepsUnavailableRuntimeError(t *testing.T) {
+	target := defaultScaleCheckTarget{template: "worker", storeKey: "city", store: beads.NewMemStore()}
+	got := retargetScaleCheckTargetsToRoutedWorkPlane(t.TempDir(), &config.City{}, nil, nil, nil, []defaultScaleCheckTarget{target})
+	if len(got) != 1 || got[0].err == nil || !strings.Contains(got[0].err.Error(), "routed-work store unavailable") {
+		t.Fatalf("targets = %+v, want unavailable runtime error", got)
+	}
+}

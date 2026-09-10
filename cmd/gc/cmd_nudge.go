@@ -1924,7 +1924,7 @@ func (m *nudgeMaintenanceStore) close() error {
 	// A non-relocated nudge store is the per-call work-store handle opened by
 	// openNudgeBeadStore, so retain the existing close discipline for it.
 	if routes := cliStorageRoutes(m.cityPath); routes != nil {
-		if _, relocated := routes.storeFor(coordclass.ClassNudges); relocated {
+		if _, relocated := routes.storeFor(coordclass.ClassNudges); relocated { // residency:allow — tests handle ownership for closing; does not enumerate or read residents
 			return nil
 		}
 	}

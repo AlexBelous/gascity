@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -109,7 +110,9 @@ func TestNudgeSessionAtStartupDoesNotInterruptCodex(t *testing.T) {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
+	if err := tm.WaitForCommand(context.Background(), sessionName, []string{"bash", "zsh", "sh", "dash"}, 5*time.Second); err != nil {
+		t.Fatalf("waiting for cat fixture: %v", err)
+	}
 
 	if err := tm.NudgeSessionAtStartup(sessionName, "hello-startup"); err != nil {
 		t.Fatalf("NudgeSessionAtStartup: %v", err)

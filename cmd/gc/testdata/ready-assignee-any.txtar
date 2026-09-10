@@ -1,0 +1,33 @@
+# Multiple exact identities form a union before ordering and limiting.
+env GC_SESSION=fake
+env GC_BEADS=file
+cd $WORK/city
+
+exec gc ready --status=in_progress --assignee-any=session-17 --assignee-any=worker-a --limit=1 --json
+stdout '"id":"gc-2"'
+! stdout '"id":"gc-1"'
+! stdout '"id":"gc-3"'
+
+exec gc ready --status=in_progress --assignee=session-17 --json
+stdout '"id":"gc-1"'
+! stdout '"id":"gc-2"'
+
+! exec gc ready --assignee-any=' '
+stderr '--assignee-any'
+! exec gc ready --assignee-any=worker-a --unassigned
+stderr '--assignee-any'
+! exec gc ready --assignee-any=worker-a --assignee=session-17
+stderr '--assignee-any'
+
+exec gc ready --help
+stdout '--assignee-any'
+
+-- city/city.toml --
+[workspace]
+name = "city"
+[beads]
+provider = "file"
+-- city/.gc/file-beads-layout --
+scope-local-v1
+-- city/.gc/beads.json --
+{"seq":3,"beads":[{"id":"gc-1","title":"durable identity","status":"in_progress","issue_type":"task","assignee":"session-17","priority":2},{"id":"gc-2","title":"runtime alias","status":"in_progress","issue_type":"task","assignee":"worker-a","priority":1},{"id":"gc-3","title":"another worker","status":"in_progress","issue_type":"task","assignee":"worker-b","priority":0}],"revisions":{"gc-1":1,"gc-2":1,"gc-3":1},"revisions_sealed":true}

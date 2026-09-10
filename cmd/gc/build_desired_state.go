@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1897,6 +1898,14 @@ func retargetScaleCheckTargetsToRoutedWorkPlane(
 	legs, resolveErr := routedWorkStoreCandidates(
 		cityPath, cfg, workStore, rigStores, suspendedRigPaths, censusRefScoped,
 	)
+	if resolveErr == nil && len(legs) > 0 && !slices.ContainsFunc(legs, func(leg classStoreCandidate) bool {
+		return storeref.IsClassRef(leg.ref)
+	}) {
+		// Without a relocated binding, the original targets already name the
+		// runtime stores. Preserve their eligibility: store-scoped dispatchers
+		// cannot execute work from another scope after a failed route repair.
+		return targets
+	}
 	out := append([]defaultScaleCheckTarget(nil), preservedErrors...)
 	for _, template := range order {
 		state := byTemplate[template]

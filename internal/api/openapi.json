@@ -515,6 +515,12 @@
               "string",
               "null"
             ]
+          },
+          "WorkQueryFederated": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -571,6 +577,7 @@
           "MaxActiveSessions",
           "MinActiveSessions",
           "ScaleCheck",
+          "WorkQueryFederated",
           "OptionDefaults"
         ],
         "type": "object"

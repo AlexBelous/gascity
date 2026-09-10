@@ -3375,6 +3375,11 @@ The flags mirror the "bd ready" contract the default work_query builds:
            --exclude-type=epic --exclude-label "hold:mayor" \
            --sort oldest --limit 20 --json
 
+Use repeated --assignee-any to read work owned under several exact identities
+in one query (for example a session ID and its runtime alias). This union is
+applied before dependency enrichment. It cannot be combined with --assignee
+or --unassigned; every identity must be non-empty.
+
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
 read is the true top-N of the merged set rather than the top-N of whichever
@@ -3391,6 +3396,7 @@ gc ready [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--assignee` | string |  | only work assigned to this identity |
+| `--assignee-any` | stringArray |  | only work assigned to any of these exact identities (repeatable; incompatible with --assignee and --unassigned) |
 | `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
 | `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |

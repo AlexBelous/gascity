@@ -392,9 +392,11 @@ becoming more useful as models improve — it becomes LESS useful instead.
   fails the build: `TestAgentFieldSync` (struct field sets),
   `TestApplyAgentPatchCoversAllFields` / `TestApplyAgentOverrideCoversAllFields`
   (merge + `toAgentPatch` completeness), and `TestAgentCloneIsDeep` (clone
-  deepness). Both patch and rig override share `applyAgentMutation`, and both
-  the pack-load cache (`deepCopyAgents`) and pool expansion
-  (`cmd/gc/pool.go` `deepCopyAgent`) share `Agent.Clone`.
+  deepness). Also copy the field in `cmd/gc/pool.go` `deepCopyAgent` and
+  populate its `TestDeepCopyAgentCoversAllFields` fixture. Persist it through
+  `internal/migrate/migrate.go` `agentFile`, `agentConfigFromAgent`, and
+  `isZeroAgentConfig`; update `TestAgentConfigFromAgentCoversPersistedFields`.
+  These paths currently copy fields explicitly, independently of `Agent.Clone`.
 - **Adding rig config fields:** When adding a field to `config.Rig`, also
   add the corresponding optional field to `RigPatch` and wire the merge
   into `applyRigPatch` so layered configs (fragments, patches) can

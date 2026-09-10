@@ -114,6 +114,7 @@ export type AgentPatch = {
     Upstream: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
+    WorkQueryFederated: boolean | null;
 };
 
 export type AgentPatchSetInputBody = {

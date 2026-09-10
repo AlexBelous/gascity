@@ -327,6 +327,8 @@ func TestFederationBlindOverridesNamesTheBlindKeys(t *testing.T) {
 		want  []string
 	}{
 		{"no overrides", &Agent{Name: "worker"}, nil},
+		{"declared federated custom", &Agent{Name: "worker", WorkQuery: "read-all", WorkQueryFederated: true}, nil},
+		{"declared custom with scale override", &Agent{Name: "worker", WorkQuery: "read-all", WorkQueryFederated: true, ScaleCheck: "echo 1"}, []string{"scale_check"}},
 		{"work_query", &Agent{Name: "worker", WorkQuery: "bd ready --json"}, []string{"work_query"}},
 		{"scale_check", &Agent{Name: "worker", ScaleCheck: "echo 1"}, []string{"scale_check"}},
 		{"both", &Agent{Name: "worker", WorkQuery: "bd ready --json", ScaleCheck: "echo 1"}, []string{"work_query", "scale_check"}},
@@ -486,5 +488,19 @@ func TestWorkQueryGolden(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestFederatedWorkQueryDeclarationCanBeDisabled(t *testing.T) {
+	a := Agent{Name: "worker", WorkQuery: "read-all", WorkQueryFederated: true}
+	disabled := false
+	applyAgentMutation(&a, &AgentPatch{WorkQueryFederated: &disabled}, SessionSleepSourceAgentPatch)
+	if a.HasFederatedWorkQuery() {
+		t.Fatal("false patch did not restore custom-query fan-out")
+	}
+	a.WorkQueryFederated = true
+	applyAgentMutation(&a, (&AgentOverride{WorkQueryFederated: &disabled}).toAgentPatch(), SessionSleepSourceAgentPatch)
+	if a.HasFederatedWorkQuery() {
+		t.Fatal("false rig override did not restore custom-query fan-out")
 	}
 }

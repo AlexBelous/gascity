@@ -1199,6 +1199,12 @@ const (
 	scaleCheckOverrideKey = "scale_check"
 )
 
+// HasFederatedWorkQuery reports whether a custom query explicitly owns discovery
+// across all reachable stores. Generated queries retain topology-derived scope.
+func (a *Agent) HasFederatedWorkQuery() bool {
+	return a.WorkQueryFederated && strings.TrimSpace(a.WorkQuery) != ""
+}
+
 // FederationBlindOverrides names the user-supplied query overrides that will not
 // see a relocated coordination class on this topology.
 //
@@ -1210,14 +1216,15 @@ const (
 // of the federated reader is that a short array cannot be told apart from "no
 // work", and an override reintroduces exactly that, invisibly.
 //
-// So the fact is returned instead of guessed at. Callers that hold a real city
-// print it; a single-store city returns nil and nothing is printed anywhere.
+// Undeclared overrides are reported conservatively; work_query_federated is
+// the explicit coverage contract for a custom work query. It does not change
+// scale_check coverage. Callers print the result only on a federated topology.
 func (a *Agent) FederationBlindOverrides(topo QueryTopology) []string {
 	if !topo.FederatedReady {
 		return nil
 	}
 	var keys []string
-	if strings.TrimSpace(a.WorkQuery) != "" {
+	if strings.TrimSpace(a.WorkQuery) != "" && !a.HasFederatedWorkQuery() {
 		keys = append(keys, workQueryOverrideKey)
 	}
 	if strings.TrimSpace(a.ScaleCheck) != "" {

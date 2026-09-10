@@ -796,6 +796,8 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// WorkQueryFederated overrides the custom work-query coverage declaration.
+	WorkQueryFederated *bool `toml:"work_query_federated,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -3325,6 +3327,11 @@ type Agent struct {
 	// When the controller probes for demand without session context, only the
 	// routed_to tier applies. Override to integrate with external task systems.
 	WorkQuery string `toml:"work_query,omitempty"`
+	// WorkQueryFederated declares that the custom WorkQuery reads every reachable
+	// work store, including relocated coordination classes and ephemeral work.
+	// gc hook runs it once in the primary query environment instead of once per
+	// store. False preserves legacy custom-query fan-out. Ignored without WorkQuery.
+	WorkQueryFederated bool `toml:"work_query_federated,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,

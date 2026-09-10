@@ -66,8 +66,8 @@ func hookStoreCommand(st hookStore, command string) string {
 // federatedCommand and singleStoreCommand are the two forms of the same agent's
 // query. They are EQUAL for a custom (verbatim) work_query and on a city that
 // relocates nothing, and the call is then a no-op returning stores unchanged.
-// That is not an optimization detail: a custom work_query reads one store
-// whatever the topology, so the fan-out is its only coverage and must survive.
+// Undeclared custom queries retain their per-store coverage. An explicitly
+// federated custom query is already limited to one leg by hookWorkQueryStores.
 func scopeFederatedHookStores(stores []hookStore, federatedCommand, singleStoreCommand string) []hookStore {
 	singleStoreCommand = strings.TrimSpace(singleStoreCommand)
 	if len(stores) < 2 || singleStoreCommand == "" || singleStoreCommand == strings.TrimSpace(federatedCommand) {
@@ -106,6 +106,9 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
 func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) []hookStore {
 	stores := []hookStore{{dir: workDir, env: queryEnv}}
+	if a != nil && a.HasFederatedWorkQuery() {
+		return stores
+	}
 	if agentIsCrossStoreEligible(a) {
 		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides)
 	}

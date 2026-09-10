@@ -419,13 +419,8 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 
 	stores := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
-	// On a split city the ready tiers of workQuery are already city-wide, so
-	// running the whole query once per store re-asks the same question R+1 times
-	// and re-opens every leg each time. Pin the city-wide read to the primary
-	// entry and leave the extras on the single-store command they ran before the
-	// swap, which still covers the per-store crash-recovery and ephemeral tiers
-	// `gc ready` does not answer. No-op on a single-store city and for a custom
-	// work_query, where both forms are the same string.
+	// Generated queries use their topology-derived coverage. Explicitly federated
+	// custom queries already have one leg; undeclared custom queries retain fan-out.
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus

@@ -1176,13 +1176,9 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 	}
 	defer closeBeadStoreHandle(destination) //nolint:errcheck // best-effort close
 
-	copied, err := destination.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	have, err := infraDestinationMembership(destination, rows)
 	if err != nil {
-		return infraContainmentGap{}, fmt.Errorf("listing binding: %w", err)
-	}
-	have := make(map[string]bool, len(copied))
-	for _, b := range copied {
-		have[b.ID] = true
+		return infraContainmentGap{}, err
 	}
 	gap := infraContainmentGap{}
 	for _, b := range rows {
@@ -1197,6 +1193,31 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 	}
 	sort.Strings(gap.Stranded)
 	return gap, nil
+}
+
+// infraDestinationMembership checks only identities still retained in the source.
+// Unrelated binding rows are not integrity-checked here. The batches are live
+// reads, not an atomic snapshot; this check does not prevent concurrent GC.
+func infraDestinationMembership(destination beads.Store, rows []beads.Bead) (map[string]bool, error) {
+	// Bound SQL parameters and decoded payloads even when the retained source is
+	// large. Closed and ephemeral rows still prove containment just like live work.
+	const batchSize = 256
+	have := make(map[string]bool, len(rows))
+	for start := 0; start < len(rows); start += batchSize {
+		end := min(start+batchSize, len(rows))
+		ids := make([]string, 0, end-start)
+		for _, row := range rows[start:end] {
+			ids = append(ids, row.ID)
+		}
+		copied, err := destination.List(beads.ListQuery{IDs: ids, IncludeClosed: true, TierMode: beads.TierBoth})
+		if err != nil {
+			return nil, fmt.Errorf("listing binding: %w", err)
+		}
+		for _, b := range copied {
+			have[b.ID] = true
+		}
+	}
+	return have, nil
 }
 
 // writeInfraCopyManifest records the ids the equality stage proved the binding

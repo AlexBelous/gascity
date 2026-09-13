@@ -4786,3 +4786,17 @@ func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
 		t.Fatalf("expected the conflict warning for an unmatched pool-session claim, got none")
 	}
 }
+
+func TestCrossRigRefusalDiagnostic(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "destination", Prefix: "dest"}}}
+	target := config.Agent{Name: "worker", Dir: "destination"}
+	err := CrossRigRouteError("source-123", target, cfg)
+	if err == nil {
+		t.Fatal("expected cross-rig refusal")
+	}
+	for _, want := range []string{"refusing", "nothing was routed", "--force", "source-123", "destination/worker"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic %q missing %q", err, want)
+		}
+	}
+}

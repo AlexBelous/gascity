@@ -701,6 +701,10 @@ func readManagedRuntimeState(fs fsys.FS, cityRoot string) (managedRuntimeState, 
 }
 
 func validManagedRuntimeState(state managedRuntimeState, cityRoot string) bool {
+	return validManagedRuntimeStateWithProbe(state, cityRoot, contractPortReachable)
+}
+
+func validManagedRuntimeStateWithProbe(state managedRuntimeState, cityRoot string, reachable func(string, string) bool) bool {
 	if !state.Running || state.Port <= 0 || state.PID <= 0 {
 		return false
 	}
@@ -712,7 +716,7 @@ func validManagedRuntimeState(state managedRuntimeState, cityRoot string) bool {
 	if managedCityHostRequiresLocalPID(host) && !contractPIDAlive(state.PID) {
 		return false
 	}
-	return contractPortReachable(host, strconv.Itoa(state.Port))
+	return reachable(host, strconv.Itoa(state.Port))
 }
 
 func contractPIDAlive(pid int) bool {

@@ -1167,26 +1167,24 @@ func TestResolveDoltConnectionTargetManagedCity_EnvOverride(t *testing.T) {
 	}
 }
 
-// TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToTarget sets
-// the env to an invalid host and asserts the liveness check fails — proving
-// the override reaches the reachability probe, not just the returned target.
-// If the probe were still hardcoded to 127.0.0.1, it would succeed (the
-// listener is on loopback) and this test would fail.
-func TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToReachability(t *testing.T) {
-	// Use a non-routable TEST-NET-1 address so DialTimeout fails fast.
+// TestValidManagedRuntimeState_EnvOverrideAppliesToReachability proves the
+// selected host reaches the probe without relying on TEST-NET routing or VPNs.
+func TestValidManagedRuntimeState_EnvOverrideAppliesToReachability(t *testing.T) {
 	t.Setenv(ManagedCityHostEnv, "192.0.2.1")
-	fs := fsys.OSFS{}
-	city := t.TempDir()
-	writeCanonicalConfig(t, fs, city, ConfigState{
-		IssuePrefix:    "gc",
-		EndpointOrigin: EndpointOriginManagedCity,
-		EndpointStatus: EndpointStatusVerified,
+	city := "/city"
+	state := managedRuntimeState{
+		Running: true, PID: os.Getpid(), Port: 43127,
+		DataDir: filepath.Join(city, ".beads", "dolt"),
+	}
+	called := false
+	valid := validManagedRuntimeStateWithProbe(state, city, func(host, port string) bool {
+		called = true
+		if host != "192.0.2.1" || port != "43127" {
+			t.Errorf("probe target = %s:%s, want 192.0.2.1:43127", host, port)
+		}
+		return false
 	})
-	writeCanonicalMetadata(t, fs, city, "hq")
-	writeReachableRuntimeState(t, fs, city)
-
-	_, err := ResolveDoltConnectionTarget(fs, city, city)
-	if err == nil || !strings.Contains(err.Error(), "dolt runtime state unavailable") {
-		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want unavailable (override routed liveness probe elsewhere)", err)
+	if valid || !called {
+		t.Fatalf("valid = %v, probe called = %v; want false, true", valid, called)
 	}
 }

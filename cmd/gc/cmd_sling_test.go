@@ -9150,3 +9150,41 @@ func TestCmdSlingMultiDefaultTargetsEmptyEntryRejected(t *testing.T) {
 		t.Errorf("stderr = %q, want to mention 'empty entry'", stderr.String())
 	}
 }
+
+func TestDoSlingCrossRigRefusalDiagnostic(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "destination", Prefix: "dest"}}}
+	target := config.Agent{Name: "worker", Dir: "destination", MaxActiveSessions: intPtr(1)}
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	before, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := doSling(testOpts(target, "BL-42"), deps, nil, stdout, stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d; want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("refusal printed success output: %s", stdout)
+	}
+	for _, want := range []string{"refusing", "nothing was routed", "--force"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q missing %q", stderr.String(), want)
+		}
+	}
+	after, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Assignee != before.Assignee || after.Metadata["gc.routed_to"] != before.Metadata["gc.routed_to"] {
+		t.Fatal("refusal changed route or assignee")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("refusal invoked runner")
+	}
+	preview := checkCrossRig("BL-42", target, cfg)
+	if preview != strings.TrimSpace(stderr.String()) {
+		t.Errorf("preview %q differs from actual refusal %q", preview, stderr.String())
+	}
+	t.Logf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+}

@@ -21,7 +21,13 @@ const (
 // City-scoped store probe before store-dependent checks (also used at gc start warmup). Tests override.
 var doctorBeadStorePreflight = defaultDoctorBeadStorePreflight
 
-func defaultDoctorBeadStorePreflight(cityPath string, _ func(string) (beads.Store, error)) error {
+func defaultDoctorBeadStorePreflight(cityPath string, storeFactory func(string) (beads.Store, error)) error {
+	if rawBeadsProviderForScope(cityPath, cityPath) == "file" {
+		// Opening a file store validates its backing JSON without probing an
+		// unrelated bd installation or Dolt server.
+		_, err := storeFactory(cityPath)
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), doctorBeadStorePreflightTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {

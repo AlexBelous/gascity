@@ -34,6 +34,29 @@ var doctorCityStoreDependentNames = []string{
 	"hold-label-conventions:city",
 }
 
+func TestDoctorFileStorePreflightUsesFactoryWithoutBd(t *testing.T) {
+	cityPath, store := newPhase0DoctorCity(t)
+	// An isolated PATH containing no bd makes an accidental external probe fail.
+	putExecutableOnPath(t, "unrelated-tool")
+	openErr := errors.New("file store cannot be read")
+	for _, wantErr := range []error{nil, openErr} {
+		calls := 0
+		factory := func(path string) (beads.Store, error) {
+			calls++
+			if path != cityPath {
+				t.Errorf("store path = %q, want %q", path, cityPath)
+			}
+			return store, wantErr
+		}
+		if err := defaultDoctorBeadStorePreflight(cityPath, factory); !errors.Is(err, wantErr) {
+			t.Errorf("preflight error = %v, want %v", err, wantErr)
+		}
+		if calls != 1 {
+			t.Errorf("factory calls = %d, want 1", calls)
+		}
+	}
+}
+
 func TestIsBeadStoreUnreachable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

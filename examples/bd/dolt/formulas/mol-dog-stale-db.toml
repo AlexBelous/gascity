@@ -18,8 +18,10 @@ The drain-ack tells the controller this session is done.
 This formula shells out to `gc dolt-cleanup --json`, parses the
 `gc.dolt.cleanup.v1` envelope, and emits one summary line per stage
 to `gc events` so operators skimming a long scrollback can spot
-trends. The full JSON report is appended to the work bead so a
-follow-up reader can `bd show <id>` to see details.
+trends. The full scan and apply reports are persisted in work bead metadata
+(`gc.stale_db.scan_report` and `gc.stale_db.apply_report`). Read them
+with `gc bd show <id> --json`. Report persistence is required before
+applying cleanup or closing the work bead.
 
 ## Dog Contract
 
@@ -91,7 +93,9 @@ TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dolt-cleanup.XXXXXX")
 DRAIN_ACKED=0
 
 cleanup() {
-  rm -rf "$TMP_DIR"
+  if ! rm -f -- "$TMP_DIR/scan.json" "$TMP_DIR/apply.json" || ! rmdir -- "$TMP_DIR"; then
+    echo "temporary report cleanup failed: $TMP_DIR" >&2
+  fi
   if [ "$DRAIN_ACKED" -ne 1 ]; then
     gc runtime drain-ack || true
   fi
@@ -101,13 +105,16 @@ trap cleanup EXIT
 SCAN_FILE="$TMP_DIR/scan.json"
 APPLY_FILE="$TMP_DIR/apply.json"
 
-append_report_note() {
+persist_report() {
   local title="$1"
   local file="$2"
-  if [ -s "$file" ]; then
-    if ! bd update "$WORK_BEAD" --append-notes "$(printf '## %s %s\n\n```json\n%s\n```' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$(cat "$file")")"; then
-      echo "failed to append ${title} report; continuing to drain-ack" >&2
-    fi
+  local phase="${title%% *}"
+  if [ ! -s "$file" ]; then
+    fail_open_after_drain "missing ${title} report; leaving work bead open"
+  fi
+  # Class-store by-ID updates support metadata, not append-notes.
+  if ! gc bd update "$WORK_BEAD" --set-metadata "gc.stale_db.${phase}_report=$(printf '## %s %s\n\n```json\n%s\n```' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$(cat "$file")")"; then
+    fail_open_after_drain "failed to persist ${title} report; leaving work bead open"
   fi
 }
 
@@ -172,13 +179,13 @@ fail_open_after_drain() {
 }
 
 if ! gc dolt-cleanup --json --probe > "$SCAN_FILE"; then
-  append_report_note "scan (dry-run failed)" "$SCAN_FILE"
+  persist_report "scan (dry-run failed)" "$SCAN_FILE"
   run_or_warn "emit dry-run failure escalation" gc event emit mol-dog-stale-db.escalate \
     --message "dry-run failed before a valid cleanup decision; leaving work bead open"
   fail_open_after_drain "gc dolt-cleanup dry-run failed; leaving work bead open"
 fi
 if ! jq -e '.schema == "gc.dolt.cleanup.v1"' "$SCAN_FILE" >/dev/null; then
-  append_report_note "scan (invalid JSON)" "$SCAN_FILE"
+  persist_report "scan (invalid JSON)" "$SCAN_FILE"
   run_or_warn "emit invalid dry-run JSON escalation" gc event emit mol-dog-stale-db.escalate \
     --message "dry-run returned invalid JSON; leaving work bead open"
   fail_open_after_drain "gc dolt-cleanup dry-run returned invalid JSON; leaving work bead open"
@@ -197,7 +204,7 @@ run_or_warn "emit scan event" gc event emit mol-dog-stale-db.scan \
   --message "$ORPHAN_DBS orphans (${DISK_BYTES} bytes), $ORPHAN_PROCS procs (${RSS_BYTES} bytes)" \
   --payload "$(jq -c '{dropped: .dropped.count, purge_bytes: .purge.bytes_reclaimed, procs: (.reaped.targets | length), rss_bytes: .summary.bytes_freed_rss, errors: .summary.errors_total, invalid_identifier_skips: ([.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length), force_blockers: ([.force_blockers[]?] | length)}' "$SCAN_FILE")"
 
-append_report_note "scan (dry-run)" "$SCAN_FILE"
+persist_report "scan (dry-run)" "$SCAN_FILE"
 
 APPLIED=0
 ESCALATED=0
@@ -231,7 +238,7 @@ elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
 else
   if ! gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"; then
     ESCALATED=1
-    append_report_note "apply (--force, failed)" "$APPLY_FILE"
+    persist_report "apply (--force, failed)" "$APPLY_FILE"
     run_or_warn "send apply refusal escalation" send_escalation \
       "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
       "gc dolt-cleanup --probe --force refused. Do not retry from an agent. Operator must confirm dolt is stopped (process gone AND port closed), then use the separate gc dolt cleanup --server-down-ok fallback if appropriate."
@@ -240,7 +247,7 @@ else
     fail_open_after_drain "gc dolt-cleanup apply failed; leaving work bead open"
   fi
   if ! jq -e '.schema == "gc.dolt.cleanup.v1"' "$APPLY_FILE" >/dev/null; then
-    append_report_note "apply (--force, invalid JSON)" "$APPLY_FILE"
+    persist_report "apply (--force, invalid JSON)" "$APPLY_FILE"
     run_or_warn "emit invalid apply JSON escalation" gc event emit mol-dog-stale-db.escalate \
       --message "apply returned invalid JSON; leaving work bead open"
     fail_open_after_drain "gc dolt-cleanup apply returned invalid JSON; leaving work bead open"
@@ -254,7 +261,7 @@ else
     if [ "$APPLY_MAX_ORPHAN_REFUSALS" -gt 0 ]; then
       APPLY_REFUSAL_MESSAGE="apply refused by max-orphan safety guard; leaving work bead open"
     fi
-    append_report_note "apply (--force, refused)" "$APPLY_FILE"
+    persist_report "apply (--force, refused)" "$APPLY_FILE"
     run_or_warn "send apply refusal escalation" send_escalation \
       "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
       "gc dolt-cleanup --probe --force refused or reported ${APPLY_ERRS} error(s). Do not retry from an agent. Operator must inspect the attached apply report before deciding whether any manual cleanup is appropriate."
@@ -289,7 +296,7 @@ else
   run_or_warn "emit reap event" gc event emit mol-dog-stale-db.reap \
     --message "${REAP_KILLED}/${REAP_TOTAL} procs killed"
 
-  append_report_note "apply (--force)" "$APPLY_FILE"
+  persist_report "apply (--force)" "$APPLY_FILE"
 fi
 
 if [ "$APPLIED" -eq 1 ]; then
@@ -317,7 +324,14 @@ if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
-bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
+CLOSE_REASON="Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
+if ! gc bd update "$WORK_BEAD" --set-metadata "gc.close_reason=$CLOSE_REASON"; then
+  fail_open_after_drain "failed to persist close reason metadata; leaving work bead open"
+fi
+# DO NOT add --reason here. This wisp is class-store owned: its Close contract
+# cannot represent --reason, so the reason is persisted in metadata above and
+# the only supported closing operation is the bare by-ID command below.
+gc bd close "$WORK_BEAD"
 drain_ack_once # drain-ack before normal exit
 exit
 ```

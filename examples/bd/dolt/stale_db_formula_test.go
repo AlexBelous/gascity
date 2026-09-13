@@ -1,6 +1,7 @@
 package dolt_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,9 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`drain_ack_once()`,
 		`gc dolt-cleanup --json --probe > "$SCAN_FILE"`,
 		`gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"`,
+		`gc bd update "$WORK_BEAD" --set-metadata "gc.stale_db.${phase}_report=`,
+		`gc bd update "$WORK_BEAD" --set-metadata "gc.close_reason=$CLOSE_REASON"`,
+		`gc bd close "$WORK_BEAD"`,
 		`jq -r '.dropped.count // 0'`,
 		`jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length'`,
 		`jq -r '[.force_blockers[]?] | length'`,
@@ -71,6 +75,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`GC_BEAD_ID:-<work-bead>`,
 		`GC_BEAD_ID:?`,
 		`Dolt orphan(s) detected`,
+		`gc bd close "$WORK_BEAD" --reason`,
 	} {
 		if strings.Contains(desc, bad) {
 			t.Errorf("formula step still contains retired or leaky pattern %q", bad)
@@ -129,7 +134,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd update"|"bd close")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -171,7 +176,7 @@ esac
 		t.Fatalf("rendered script exited successfully; want apply errors to fail before success close\nlog:\n%s\noutput:\n%s", log, out)
 	}
 	for _, want := range []string{
-		"bd update bead-1 --append-notes",
+		"bd update bead-1 --set-metadata gc.stale_db.",
 		"## apply (--force, refused)",
 		"gc event emit mol-dog-stale-db.escalate",
 		"gc runtime drain-ack",
@@ -227,7 +232,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd update"|"bd close")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -301,7 +306,7 @@ case "${1:-} ${2:-}" in
     cat "$GC_TEST_SCAN_JSON"
     exit 42
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd update"|"bd close")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -341,7 +346,7 @@ esac
 	if err == nil {
 		t.Fatalf("rendered script exited successfully; want dry-run failure to keep work open\nlog:\n%s\noutput:\n%s", log, out)
 	}
-	if !strings.Contains(log, "bd update bead-1 --append-notes") {
+	if !strings.Contains(log, "bd update bead-1 --set-metadata gc.stale_db.") {
 		t.Fatalf("dry-run failure did not append scan JSON to work bead\nlog:\n%s\noutput:\n%s", log, out)
 	}
 	if strings.Contains(log, "bd close bead-1") {
@@ -379,7 +384,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd update"|"bd close")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -475,7 +480,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd update"|"bd close")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -606,7 +611,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd update"|"bd close")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -694,7 +699,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd update"|"bd close")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -737,7 +742,7 @@ esac
 	}
 	for _, want := range []string{
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
-		"bd update bead-1 --append-notes",
+		"bd update bead-1 --set-metadata gc.stale_db.",
 		"## apply (--force, failed)",
 		`"stage":"purge"`,
 	} {
@@ -776,7 +781,7 @@ func TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvent
 		}
 	}
 	for _, want := range []string{
-		"bd update bead-1 --append-notes",
+		"bd update bead-1 --set-metadata gc.stale_db.",
 		"## apply (--force, refused)",
 		"apply refused by max-orphan safety guard",
 		"gc event emit mol-dog-stale-db.escalate",
@@ -828,6 +833,8 @@ func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T)
 }
 
 type staleDBFailureCase struct {
+	failCleanup  bool
+	wantReports  map[string]string
 	scanJSON     string
 	scanExit     string
 	applyJSON    string
@@ -933,6 +940,67 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 	}
 }
 
+// A class-resident work bead must retain both reports before it can close.
+// The recording CLI below models the existing by-ID metadata-only update door.
+func TestStaleDBFormulaClassStoreReportsRequiredBeforeClose(t *testing.T) {
+	scan := `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0},"detail":"scan = full report"}`
+	apply := strings.ReplaceAll(scan, "scan = full report", "apply = full report")
+	for _, phase := range []string{"", "scan", "apply", "close_reason"} {
+		t.Run("write failure="+phase, func(t *testing.T) {
+			spec := staleDBFailureCase{scanJSON: scan, applyJSON: apply}
+			switch phase {
+			case "":
+				spec.wantReports = map[string]string{"gc.stale_db.scan_report": scan, "gc.stale_db.apply_report": apply}
+			case "close_reason":
+				spec.failContains = "--set-metadata gc.close_reason="
+			default:
+				spec.failContains = "--set-metadata gc.stale_db." + phase + "_report="
+			}
+			log, out, err := runStaleDBFormulaFailureCase(t, spec)
+			if phase == "" {
+				if err != nil || !strings.Contains(log, "gc bd close bead-1") {
+					t.Fatalf("supported report writes must permit close: %v\n%s\n%s", err, log, out)
+				}
+				previous := -1
+				for _, step := range []string{"--set-metadata gc.stale_db.scan_report=", "gc dolt-cleanup --json --probe --force", "--set-metadata gc.stale_db.apply_report=", "--set-metadata gc.close_reason=", "gc bd close bead-1", "gc runtime drain-ack"} {
+					at := strings.Index(log, step)
+					if at <= previous {
+						t.Fatalf("report/close ordering violated at %q: %s", step, log)
+					}
+					previous = at
+				}
+			} else {
+				if err == nil || strings.Contains(log, "gc bd close bead-1") {
+					t.Fatalf("missing %s persistence must leave work open: %v\n%s\n%s", phase, err, log, out)
+				}
+				if phase == "scan" && strings.Contains(log, "--probe --force") {
+					t.Fatalf("apply ran without durable scan: %s", log)
+				}
+			}
+			if !strings.Contains(log, "gc runtime drain-ack") {
+				t.Fatalf("missing drain-ack: %s", log)
+			}
+		})
+	}
+}
+
+// A secondary temp cleanup failure must not prevent the EXIT trap's drain-ack.
+func TestStaleDBFormulaCleanupFailureStillDrains(t *testing.T) {
+	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+		scanJSON:    `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":"invalid_count"},"reaped":{"targets":[]}}`,
+		failCleanup: true,
+	})
+	if err == nil {
+		t.Fatal("invalid count must fail the script")
+	}
+	if !strings.Contains(log, "gc runtime drain-ack") || strings.Contains(log, "gc bd close bead-1") {
+		t.Fatalf("cleanup failure lost drain-ack or closed failed work: %s\n%s", log, out)
+	}
+	if !strings.Contains(string(out), "temporary report cleanup failed") {
+		t.Fatalf("missing cleanup warning: %s", out)
+	}
+}
+
 func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not found: %v", err)
@@ -952,8 +1020,9 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			fail: "gc event emit mol-dog-stale-db.scan",
 		},
 		{
-			name: "scan note failure",
-			fail: "bd update bead-1 --append-notes",
+			name:        "scan report failure",
+			fail:        "bd update bead-1 --set-metadata gc.stale_db.scan_report=",
+			wantFailure: true,
 		},
 		{
 			name:        "close failure",
@@ -995,6 +1064,8 @@ func runStaleDBFormulaFailureCase(t *testing.T, tc staleDBFailureCase) (string, 
 	}
 
 	logPath := filepath.Join(dir, "commands.log")
+	reportsPath := filepath.Join(dir, "reports.json")
+	writeTestFile(t, reportsPath, "{}")
 	scanPath := filepath.Join(dir, "scan.json")
 	applyPath := filepath.Join(dir, "apply.json")
 	if tc.applyJSON == "" {
@@ -1024,7 +1095,20 @@ case "${1:-} ${2:-}" in
         ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update")
+    rendered="gc $*"
+    echo "$rendered" >> "$GC_TEST_LOG"
+    if [ "$#" -ne 5 ] || [ "$4" != "--set-metadata" ]; then
+      echo "class-store update refuses unsupported flag: ${4:-}" >&2
+      exit 64
+    fi
+    maybe_fail "$rendered"
+    key="${5%%=*}"
+    value="${5#*=}"
+    jq --arg key "$key" --arg value "$value" '.[$key] = $value' "$GC_TEST_REPORTS" > "$GC_TEST_REPORTS.next"
+    mv "$GC_TEST_REPORTS.next" "$GC_TEST_REPORTS"
+    ;;
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd close")
     rendered="gc $*"
     echo "$rendered" >> "$GC_TEST_LOG"
     maybe_fail "$rendered"
@@ -1056,13 +1140,18 @@ case "${1:-}" in
 esac
 `, 0o755)
 
+	if tc.failCleanup {
+		writeTestFile(t, filepath.Join(binDir, "rmdir"), "#!/bin/sh\nexit 73\n", 0o755)
+	}
+
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS", "GC_TEST_REPORTS"),
 		"GC_BEAD_ID=bead-1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
 		"GC_TEST_LOG="+logPath,
+		"GC_TEST_REPORTS="+reportsPath,
 		"GC_TEST_SCAN_JSON="+scanPath,
 		"GC_TEST_SCAN_EXIT="+tc.scanExit,
 		"GC_TEST_APPLY_JSON="+applyPath,
@@ -1073,6 +1162,21 @@ esac
 	logData, readErr := os.ReadFile(logPath)
 	if readErr != nil {
 		t.Fatalf("ReadFile(%s): %v\noutput:\n%s", logPath, readErr, out)
+	}
+	if len(tc.wantReports) > 0 {
+		saved, readErr := os.ReadFile(reportsPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var reports map[string]string
+		if decodeErr := json.Unmarshal(saved, &reports); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		for key, report := range tc.wantReports {
+			if !strings.Contains(reports[key], report) {
+				t.Errorf("durable metadata %s missing full report %q; got %q; CLI output: %s", key, report, reports[key], out)
+			}
+		}
 	}
 	return string(logData), out, err
 }

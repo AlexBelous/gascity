@@ -103,6 +103,11 @@ type Server struct {
 	// nothing material has changed.
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
+	// responseCacheEpochs fences cache builds that started before a control
+	// mutation invalidated their key. Without the fence, an in-flight
+	// stale-while-revalidate build can repopulate the cache with the state the
+	// mutation just replaced.
+	responseCacheEpochs map[string]uint64
 
 	// responseRefreshing tracks response-cache keys with a background
 	// stale-while-revalidate refresh already in flight (ra-4u2eqc), guarded

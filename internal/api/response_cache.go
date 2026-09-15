@@ -234,6 +234,35 @@ func (s *Server) invalidateResponseCache(keys ...string) {
 	}
 }
 
+// alignResponseCacheVersion invalidates keys when their external source
+// generation changes. Unlike invalidateResponseCache, this is safe to call on
+// every read: an unchanged generation is a no-op. The epoch advance also
+// fences a response build that started before the external write was seen.
+func (s *Server) alignResponseCacheVersion(version string, keys ...string) {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEpochs == nil {
+		s.responseCacheEpochs = make(map[string]uint64)
+	}
+	if s.responseCacheVersions == nil {
+		s.responseCacheVersions = make(map[string]string)
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		previous, observed := s.responseCacheVersions[key]
+		if observed && previous == version {
+			continue
+		}
+		if observed {
+			delete(s.responseCacheEntries, key)
+			s.responseCacheEpochs[key]++
+		}
+		s.responseCacheVersions[key] = version
+	}
+}
+
 // evictResponseCache drops expired entries, and — if the cache is still
 // over cap — the single oldest-stored remaining entry. Called under
 // the cache mutex.

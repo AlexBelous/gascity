@@ -108,6 +108,10 @@ type Server struct {
 	// stale-while-revalidate build can repopulate the cache with the state the
 	// mutation just replaced.
 	responseCacheEpochs map[string]uint64
+	// responseCacheVersions tracks external source generations for cache keys
+	// whose state can be mutated outside this Server process. It is guarded by
+	// responseCacheMu and lets a read invalidate stale entries before lookup.
+	responseCacheVersions map[string]string
 
 	// responseRefreshing tracks response-cache keys with a background
 	// stale-while-revalidate refresh already in flight (ra-4u2eqc), guarded

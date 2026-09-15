@@ -13,6 +13,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestHandleAgentCreate(t *testing.T) {
@@ -417,6 +419,56 @@ func TestHandleCityPatchInvalidatesStatusCache(t *testing.T) {
 	}
 	if after.Suspended {
 		t.Fatal("status immediately after successful resume is stale: suspended=true, want false")
+	}
+}
+
+// A CLI whose API discovery fails writes suspension-state.json directly.
+// The running supervisor must observe that out-of-process write before serving
+// its cached /status body, including when the state returns to an older value.
+func TestHandleStatusInvalidatesCacheAfterExternalSuspensionStateChange(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
+
+	fs := newFakeMutatorState(t)
+	h := newTestCityHandler(t, fs)
+	readSuspended := func() bool {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/status"), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var got statusResponse
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode status: %v", err)
+		}
+		return got.Suspended
+	}
+
+	if readSuspended() {
+		t.Fatal("initial status is suspended, want false")
+	}
+	suspended := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, fs.cityPath, &suspended); err != nil {
+		t.Fatalf("external suspend: %v", err)
+	}
+	if !readSuspended() {
+		t.Fatal("status after external suspend is stale: suspended=false, want true")
+	}
+
+	suspended = false
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, fs.cityPath, &suspended); err != nil {
+		t.Fatalf("external resume: %v", err)
+	}
+	if readSuspended() {
+		t.Fatal("status after external resume is stale: suspended=true, want false")
 	}
 }
 

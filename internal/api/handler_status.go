@@ -87,6 +87,18 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	if err := cacheLiveOr503(store); err != nil {
 		return nil, err
 	}
+	// gc suspend/resume normally reaches the API, whose PATCH handler
+	// invalidates this cache directly. If API discovery fails, however, the CLI
+	// deliberately falls back to updating suspension-state.json itself. Observe
+	// that file's write generation before any cache lookup so the next status
+	// read reflects the completed out-of-process mutation immediately.
+	if suspension, err := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath()); err == nil {
+		s.alignResponseCacheVersion(
+			suspension.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			"status",
+			"status?lite",
+		)
+	}
 	bp := input.toBlockingParams()
 	blocking := bp.isBlocking()
 	if blocking {

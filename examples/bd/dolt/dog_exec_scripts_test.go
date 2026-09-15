@@ -2634,8 +2634,10 @@ func TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash(t *testing.T) {
 }
 
 // A writer can commit after the database-hash probes have both completed but
-// immediately before full GC. The final HEAD fence must defer that run so GC
-// never starts from a state that changed after flatten verification.
+// immediately before full GC. The final HEAD fence must defer that run when it
+// observes that movement. This is not quiescence — a writer can still commit
+// after the probe — it narrows the window in which full GC starts against a
+// known-active store.
 func TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "writer_race_after_db_hash", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")

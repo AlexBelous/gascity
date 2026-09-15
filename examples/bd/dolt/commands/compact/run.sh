@@ -2384,6 +2384,7 @@ flatten_database() {
   head_before_reset=""
   flatten_head=""
   post_verify_head=""
+  final_verify_head=""
   preflight_hash=""
   postflight_hash=""
   writer_race_detected=0
@@ -3148,6 +3149,9 @@ flatten_database() {
   # after it. Concurrent-GC correctness comes from Dolt's online-GC safepoint
   # controller; this check only detects the residual window we can observe and
   # leaves reclamation for a quieter retry.
+  # A failed HEAD probe (empty result) is treated as quiet and allows GC: this
+  # fence is an optimization, not a safety boundary, and the pending-GC retry
+  # path is unfenced regardless.
   final_verify_head=$(head_commit "$db" || true)
   if [ -n "$flatten_head" ] && [ -n "$final_verify_head" ] && [ "$final_verify_head" != "$flatten_head" ]; then
     printf 'compact: db=%s writer race detected during flatten verification (snapshot_HEAD=%s flatten_HEAD=%s final_verify_HEAD=%s) — deferring full GC until the next quiet run\n' \

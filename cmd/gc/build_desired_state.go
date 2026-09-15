@@ -2226,7 +2226,10 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if entry.StoreRefs == nil {
 				entry.StoreRefs = make(map[string]string)
 			}
-			entry.StoreRefs[b.ID] = group.storeKey
+			// The probe keeps the physical class ref so it reads the relocated
+			// binding, while a spawned session records the binding's logical city
+			// scope. Claim-side snapshots retain their physical refs separately.
+			entry.StoreRefs[b.ID] = normalizeDemandStoreRef(group.storeKey)
 			spec, specErr := worktreeSpecForBead(b, group.storeKey)
 			if specErr != nil {
 				if entry.WorktreeErrors == nil {

@@ -183,6 +183,57 @@ func (s *Server) storeResponse(key string, index uint64, v any) {
 	}
 }
 
+// responseCacheEpoch returns the current invalidation generation for key.
+// Callers that build a response outside responseCacheMu can retain this value
+// and use storeResponseAtEpoch so a concurrent control mutation cannot put a
+// pre-mutation body back into the cache.
+func (s *Server) responseCacheEpoch(key string) uint64 {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	return s.responseCacheEpochs[key]
+}
+
+// storeResponseAtEpoch stores v only when key has not been invalidated since
+// the caller started building it. It returns false when the build lost that
+// race and must be discarded.
+func (s *Server) storeResponseAtEpoch(key string, index uint64, v any, epoch uint64) bool {
+	if key == "" {
+		return false
+	}
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEpochs[key] != epoch {
+		return false
+	}
+	if s.responseCacheEntries == nil {
+		s.responseCacheEntries = make(map[string]responseCacheEntry)
+	}
+	now := time.Now()
+	if _, exists := s.responseCacheEntries[key]; !exists && len(s.responseCacheEntries) >= responseCacheMaxEntries {
+		s.evictResponseCache(now)
+	}
+	s.responseCacheEntries[key] = responseCacheEntry{index: index, storedAt: now, value: v}
+	return true
+}
+
+// invalidateResponseCache removes the named entries and advances their
+// generations. Advancing the generation also rejects an older build that is
+// already running and reaches storeResponseAtEpoch after this call.
+func (s *Server) invalidateResponseCache(keys ...string) {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEpochs == nil {
+		s.responseCacheEpochs = make(map[string]uint64)
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		delete(s.responseCacheEntries, key)
+		s.responseCacheEpochs[key]++
+	}
+}
+
 // evictResponseCache drops expired entries, and — if the cache is still
 // over cap — the single oldest-stored remaining entry. Called under
 // the cache mutex.

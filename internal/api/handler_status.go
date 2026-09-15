@@ -109,6 +109,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	if input.Lite {
 		cacheKey = "status?lite"
 	}
+	cacheEpoch := s.responseCacheEpoch(cacheKey)
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
@@ -149,7 +150,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 
 	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
-		s.storeResponse(cacheKey, bucket, resp)
+		s.storeResponseAtEpoch(cacheKey, bucket, resp, cacheEpoch)
 	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
@@ -168,6 +169,7 @@ func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
 	if !s.beginResponseRefresh(cacheKey) {
 		return
 	}
+	cacheEpoch := s.responseCacheEpoch(cacheKey)
 	s.runBackground(func(ctx context.Context) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -180,7 +182,7 @@ func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
 		}()
 		defer s.endResponseRefresh(cacheKey)
 		resp := s.buildStatusBody(ctx, lite)
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), resp)
+		s.storeResponseAtEpoch(cacheKey, responseCacheTimeBucket(time.Now()), resp, cacheEpoch)
 	})
 }
 

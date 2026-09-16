@@ -381,6 +381,7 @@ The normative authoring rules are specified here.
 | `on_death` | string | Command run when a session dies unexpectedly. |
 | `namepool` | string | Path to newline-separated display aliases. |
 | `work_query` | string | Work discovery command. |
+| `work_query_federated` | boolean | Declare that a custom work query already reads the full routed-work topology. Required for custom queries on cities with relocated coordination classes. |
 | `sling_query` | string | Work routing command template. |
 | `idle_timeout` | string | Go duration string. Empty disables idle checking. |
 | `sleep_after_idle` | string | Go duration string or `off`. |

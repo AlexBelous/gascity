@@ -3281,6 +3281,14 @@ type Agent struct {
 	// When the controller probes for demand without session context, only the
 	// routed_to tier applies. Override to integrate with external task systems.
 	WorkQuery string `toml:"work_query,omitempty"`
+	// WorkQueryFederated declares that a custom WorkQuery already reads every
+	// store in the city's routed-work topology (normally by using `gc ready`).
+	// On a city with relocated coordination classes, gc then runs the command
+	// once from the primary work directory instead of repeating the same
+	// city-wide read once per bd workspace. Without this explicit declaration a
+	// custom query is treated as single-store and gc hook fails closed rather
+	// than reporting an ambiguous empty queue.
+	WorkQueryFederated bool `toml:"work_query_federated,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,

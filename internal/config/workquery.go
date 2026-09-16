@@ -977,7 +977,7 @@ func (a *Agent) FederationBlindOverrides(topo QueryTopology) []string {
 		return nil
 	}
 	var keys []string
-	if strings.TrimSpace(a.WorkQuery) != "" {
+	if strings.TrimSpace(a.WorkQuery) != "" && !a.WorkQueryFederated {
 		keys = append(keys, workQueryOverrideKey)
 	}
 	if strings.TrimSpace(a.ScaleCheck) != "" {

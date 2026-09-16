@@ -535,12 +535,15 @@ func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *co
 // Nothing is printed on a city that relocates nothing, which is every city with
 // no [storage] section: FederationBlindOverrides returns nil there, so the
 // diagnostic cannot become per-tick noise on a legacy deployment.
-func warnFederationBlindOverrides(stderr io.Writer, a *config.Agent, topo config.QueryTopology) {
+func warnFederationBlindOverrides(stderr io.Writer, a *config.Agent, topo config.QueryTopology) bool {
 	if stderr == nil || a == nil {
-		return
+		return false
 	}
+	workQueryBlind := false
 	for _, key := range a.FederationBlindOverrides(topo) {
 		fmt.Fprintf(stderr, "gc hook: agent %q sets a custom %s, which reads one store; this city serves a coordination class from a relocated binding, so that command cannot see graph-class work (the generated query uses %q)\n", //nolint:errcheck // best-effort stderr
 			a.QualifiedName(), key, "gc ready")
+		workQueryBlind = workQueryBlind || key == "work_query"
 	}
+	return workQueryBlind
 }

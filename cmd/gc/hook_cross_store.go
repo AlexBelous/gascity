@@ -76,6 +76,21 @@ func scopeFederatedHookStores(stores []hookStore, federatedCommand, singleStoreC
 	return stores[:1:1]
 }
 
+// scopeHookStoresForAgent applies the explicit capability declaration for a
+// custom work_query before falling back to generated-query comparison.
+//
+// A custom query is byte-identical across QueryTopology values, so the generic
+// comparison above cannot tell whether it is a one-store `bd ready` script or a
+// city-wide helper built on `gc ready`. work_query_federated is the operator's
+// reviewed assertion that the latter is true. On a split city that makes every
+// extra bd-workspace leg a duplicate execution of the same city-wide query.
+func scopeHookStoresForAgent(stores []hookStore, federatedCommand, singleStoreCommand string, a *config.Agent, topo config.QueryTopology) []hookStore {
+	if topo.FederatedReady && a != nil && a.WorkQueryFederated && len(stores) > 1 {
+		return stores[:1:1]
+	}
+	return scopeFederatedHookStores(stores, federatedCommand, singleStoreCommand)
+}
+
 // hookStoreRunner runs a work query against one federated store's dir and env.
 // Injectable so the cross-store selection and claim paths can be tested without
 // a real bd subprocess.

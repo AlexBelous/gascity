@@ -371,7 +371,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 
 	cityName := loadedCityName(cfg, cityPath)
 	topo := cityQueryTopology(cityPath, cfg)
-	warnFederationBlindOverrides(stderr, &a, topo)
+	if warnFederationBlindOverrides(stderr, &a, topo) {
+		fmt.Fprintf(stderr, "gc hook: refusing incomplete custom work_query for agent %q: this city serves routed work from a relocated binding; use a city-wide reader and set work_query_federated=true only after verifying that contract\n", a.QualifiedName()) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	workQuery := a.EffectiveWorkQueryFor(topo)
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
@@ -424,7 +427,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// swap, which still covers the per-store crash-recovery and ephemeral tiers
 	// `gc ready` does not answer. No-op on a single-store city and for a custom
 	// work_query, where both forms are the same string.
-	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
+	stores = scopeHookStoresForAgent(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr), &a, topo)
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as

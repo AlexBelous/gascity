@@ -1825,6 +1825,8 @@ func TestPoolRoundTrip(t *testing.T) {
 		Agents: []Agent{{
 			Name:              "worker",
 			MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(5), ScaleCheck: "echo 3",
+			WorkQuery:          "gc ready --json",
+			WorkQueryFederated: true,
 		}},
 	}
 	data, err := c.Marshal()
@@ -1847,6 +1849,9 @@ func TestPoolRoundTrip(t *testing.T) {
 	}
 	if a.ScaleCheck != "echo 3" {
 		t.Errorf("ScaleCheck = %q, want %q", a.ScaleCheck, "echo 3")
+	}
+	if !a.WorkQueryFederated {
+		t.Error("WorkQueryFederated = false, want true after marshal/parse round trip")
 	}
 }
 

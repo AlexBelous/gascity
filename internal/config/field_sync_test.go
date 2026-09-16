@@ -30,6 +30,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"ProcessNames":                 "provider field, set via ResolveProvider",
 		"EmitsPermissionWarning":       "provider field, set via ResolveProvider",
 		"WorkQuery":                    "agent-specific, derived from name — not a patch concern",
+		"WorkQueryFederated":           "agent-specific work-query capability declaration, not a patch concern",
 		"SlingQuery":                   "agent-specific, derived from name/pool — not a patch concern",
 		"MaxActiveSessions":            "cap field, inherits from rig/workspace — not a patch concern",
 		"MinActiveSessions":            "cap field, inherits from rig/workspace — not a patch concern",

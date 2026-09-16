@@ -67,6 +67,35 @@ func TestFederatedHookStoresIssueTheCityWideReaderOnce(t *testing.T) {
 	}
 }
 
+// A reviewed custom helper can already perform the same city-wide read as the
+// generated query. Its command is identical across topology values, so only the
+// explicit work_query_federated declaration can safely collapse the fan-out.
+func TestDeclaredFederatedCustomWorkQueryRunsOnce(t *testing.T) {
+	a := &config.Agent{
+		Name:               "worker",
+		WorkQuery:          "gc ready --metadata-field gc.routed_to=worker --unassigned --json",
+		WorkQueryFederated: true,
+	}
+	topo := federatedHookTopology()
+	stores := fiveRigHookStores()
+
+	scoped := scopeHookStoresForAgent(stores, a.WorkQuery, "", a, topo)
+	if len(scoped) != 1 {
+		t.Fatalf("declared federated custom work_query runs on %d stores, want one primary execution", len(scoped))
+	}
+	if !sameHookStore(scoped[0], stores[0]) {
+		t.Fatalf("declared federated custom work_query kept %q, want primary %q", scoped[0].dir, stores[0].dir)
+	}
+
+	// The declaration is topology-specific: on a single-store city it must not
+	// alter the long-standing per-workspace behavior.
+	topo.FederatedReady = false
+	unscoped := scopeHookStoresForAgent(stores, a.WorkQuery, "", a, topo)
+	if len(unscoped) != len(stores) {
+		t.Fatalf("declaration collapsed an unfederated city to %d stores, want %d", len(unscoped), len(stores))
+	}
+}
+
 // The other half of the collapse, stated as the property it rests on: every tier
 // of the SINGLE-STORE command an extra leg used to run is answered by the
 // primary's federated command.

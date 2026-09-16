@@ -321,7 +321,9 @@ func TestFederationBlindOverridesNamesTheBlindKeys(t *testing.T) {
 	}{
 		{"no overrides", &Agent{Name: "worker"}, nil},
 		{"work_query", &Agent{Name: "worker", WorkQuery: "bd ready --json"}, []string{"work_query"}},
+		{"declared federated work_query", &Agent{Name: "worker", WorkQuery: "gc ready --json", WorkQueryFederated: true}, nil},
 		{"scale_check", &Agent{Name: "worker", ScaleCheck: "echo 1"}, []string{"scale_check"}},
+		{"declared federated work_query with blind scale_check", &Agent{Name: "worker", WorkQuery: "gc ready --json", WorkQueryFederated: true, ScaleCheck: "echo 1"}, []string{"scale_check"}},
 		{"both", &Agent{Name: "worker", WorkQuery: "bd ready --json", ScaleCheck: "echo 1"}, []string{"work_query", "scale_check"}},
 	} {
 		if got := tt.agent.FederationBlindOverrides(single); got != nil {

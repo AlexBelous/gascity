@@ -85,6 +85,7 @@ type agentFile struct {
 	OnBoot                 string            `toml:"on_boot,omitempty"`
 	OnDeath                string            `toml:"on_death,omitempty"`
 	WorkQuery              string            `toml:"work_query,omitempty"`
+	WorkQueryFederated     bool              `toml:"work_query_federated,omitempty"`
 	SlingQuery             string            `toml:"sling_query,omitempty"`
 	IdleTimeout            string            `toml:"idle_timeout,omitempty"`
 	MaxSessionAge          string            `toml:"max_session_age,omitempty"`
@@ -941,6 +942,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		OnBoot:                 agent.OnBoot,
 		OnDeath:                agent.OnDeath,
 		WorkQuery:              agent.WorkQuery,
+		WorkQueryFederated:     agent.WorkQueryFederated,
 		SlingQuery:             agent.SlingQuery,
 		IdleTimeout:            agent.IdleTimeout,
 		MaxSessionAge:          agent.MaxSessionAge,
@@ -994,6 +996,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.OnBoot == "" &&
 		cfg.OnDeath == "" &&
 		cfg.WorkQuery == "" &&
+		!cfg.WorkQueryFederated &&
 		cfg.SlingQuery == "" &&
 		cfg.IdleTimeout == "" &&
 		cfg.MaxSessionAge == "" &&

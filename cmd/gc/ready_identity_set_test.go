@@ -180,3 +180,39 @@ func TestReadyOneIdentityIsLeftExactlyAsItWas(t *testing.T) {
 		t.Fatalf("served %v, want all %d rows of the single identity", readyWireIDs(before), len(ids))
 	}
 }
+
+// TestReadyBlankIdentitySetServesNobody is the trap the shell callers will walk
+// into when their per-identity loop is collapsed into one call.
+//
+// The loop skipped blanks and, when every identity was unset, asked for nobody
+// and got nothing. Collapsed naively the same session passes --assignee="" three
+// times; if the surviving set being empty meant "no assignee filter", a session
+// with no identity at all would be handed the whole city's ready work. Presence
+// of the flag is what arms the filter, so that cannot happen.
+func TestReadyBlankIdentitySetServesNobody(t *testing.T) {
+	store := splittest.NewWorkStore(t, "gc")
+	mustCreateReadyBead(t, store, beads.Bead{Title: "somebody else's", Type: "task"})
+	owned := mustCreateReadyBead(t, store, beads.Bead{Title: "owned", Type: "task"})
+	owner := "gastown.mayor"
+	if err := store.Update(owned.ID, beads.UpdateOpts{Assignee: &owner}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	legs := []readyLeg{readyTestLeg("city", store)}
+
+	blank, err := readyBeadsForOpts(legs, readyOpts{assignees: []string{"", "", ""}})
+	if err != nil {
+		t.Fatalf("gc ready: %v", err)
+	}
+	if got := readyWireIDs(blank); len(got) != 0 {
+		t.Fatalf("--assignee with only blank values served %v, want nothing: an identity-less session must be served nobody's work, never everybody's", got)
+	}
+	// The flag being absent is a different question and must still mean "no
+	// assignee filter", or every unfiltered reader would start serving nothing.
+	all, err := readyBeadsForOpts(legs, readyOpts{})
+	if err != nil {
+		t.Fatalf("gc ready without --assignee: %v", err)
+	}
+	if got := readyWireIDs(all); len(got) != 2 {
+		t.Fatalf("no --assignee at all served %v, want both rows: absence of the flag is not an empty set", got)
+	}
+}

@@ -466,6 +466,14 @@ func readyStatusSelector(status string) (string, error) {
 // evaluated once over the merged set gives one answer instead of one answer per
 // store.
 func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) []beads.Bead {
+	// A caller that named --assignee at all is asking for SOMEBODY's work,
+	// so the flag being present is what turns the filter on — not the set
+	// surviving the blank drop. The shell callers assemble the set from
+	// environment variables, and an unset variable arrives as "": if every
+	// value were blank and emptiness meant "no filter", a session with no
+	// identity at all would be served the whole city's ready work instead of
+	// nothing. The loop this replaces skipped blanks and asked for nobody.
+	filterByAssignee := len(opts.assignees) > 0
 	assigneeRank := readyAssigneeRanks(opts.assignees)
 	exclude := make(map[string]bool, len(opts.excludeTypes))
 	for _, t := range opts.excludeTypes {
@@ -478,7 +486,7 @@ func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFie
 		if opts.unassigned && strings.TrimSpace(b.Assignee) != "" {
 			continue
 		}
-		if len(assigneeRank) > 0 {
+		if filterByAssignee {
 			if _, owned := assigneeRank[strings.TrimSpace(b.Assignee)]; !owned {
 				continue
 			}

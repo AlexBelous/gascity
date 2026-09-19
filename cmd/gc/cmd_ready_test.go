@@ -800,7 +800,7 @@ func TestReadyFiltersAreAppliedOverTheMergedSet(t *testing.T) {
 		want []string
 	}{
 		{"unassigned drops claimed work", readyOpts{unassigned: true}, []string{plain.ID, held.ID, epic.ID}},
-		{"assignee keeps only that identity", readyOpts{assignee: owner}, []string{assigned.ID}},
+		{"assignee keeps only that identity", readyOpts{assignees: []string{owner}}, []string{assigned.ID}},
 		{"exclude-type drops epics", readyOpts{excludeTypes: []string{"epic"}}, []string{plain.ID, held.ID, assigned.ID}},
 		{"exclude-label drops held work", readyOpts{excludeLabels: []string{"hold:mayor"}}, []string{plain.ID, epic.ID, assigned.ID}},
 	}

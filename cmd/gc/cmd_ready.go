@@ -161,7 +161,13 @@ func toReadyBeadDeps(deps []beads.Dep) []readyBeadDep {
 // tiers on every leg unconditionally (beads.FederatedReadTier), so the flag
 // selects nothing. See newReadyCmd.
 type readyOpts struct {
-	assignee       string
+	// assignees is the identity set this query owns work under, in priority
+	// order. A session legitimately answers to several exact strings, and the
+	// caller used to ask once per string in a shell loop that stopped at the
+	// first hit. Stating the set here collapses that loop into one call, and
+	// the ORDER is what keeps the collapse faithful: earlier values win, so a
+	// --limit=1 read returns the same bead the loop's first hit did.
+	assignees      []string
 	unassigned     bool
 	metadataFields []string
 	excludeTypes   []string
@@ -231,7 +237,7 @@ orchestration step runs as are claimable work here whether or not
 // A test that re-declared these flags would be testing its own copy of the
 // contract, which is the drift this whole lane exists to remove.
 func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, jsonOut *bool) {
-	cmd.Flags().StringVar(&opts.assignee, "assignee", "", "only work assigned to this identity")
+	cmd.Flags().StringArrayVar(&opts.assignees, "assignee", nil, "only work assigned to this identity (repeatable; earlier values win)")
 	cmd.Flags().BoolVar(&opts.unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.metadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.excludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")
@@ -324,6 +330,12 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	}
 	items = filterReadyBeads(items, opts, filters)
 	order(items)
+	// Identity priority is applied AFTER the requested order and BEFORE the
+	// bound, which is the only arrangement that reproduces the caller's loop:
+	// the loop asked each identity separately, so the requested order held
+	// WITHIN an identity while the identity order decided which rows the bound
+	// could reach at all.
+	orderByAssigneePriority(items, opts.assignees)
 	if opts.limit > 0 && len(items) > opts.limit {
 		items = items[:opts.limit]
 	}
@@ -454,7 +466,7 @@ func readyStatusSelector(status string) (string, error) {
 // evaluated once over the merged set gives one answer instead of one answer per
 // store.
 func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) []beads.Bead {
-	assignee := strings.TrimSpace(opts.assignee)
+	assigneeRank := readyAssigneeRanks(opts.assignees)
 	exclude := make(map[string]bool, len(opts.excludeTypes))
 	for _, t := range opts.excludeTypes {
 		if t = strings.TrimSpace(t); t != "" {
@@ -466,8 +478,10 @@ func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFie
 		if opts.unassigned && strings.TrimSpace(b.Assignee) != "" {
 			continue
 		}
-		if assignee != "" && strings.TrimSpace(b.Assignee) != assignee {
-			continue
+		if len(assigneeRank) > 0 {
+			if _, owned := assigneeRank[strings.TrimSpace(b.Assignee)]; !owned {
+				continue
+			}
 		}
 		if exclude[b.Type] {
 			continue
@@ -481,6 +495,41 @@ func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFie
 		out = append(out, b)
 	}
 	return out
+}
+
+// readyAssigneeRanks turns the ordered --assignee list into a membership set
+// that remembers where each identity stood. Blanks are dropped and repeats keep
+// their FIRST position: a caller that names the same identity twice must not
+// have its second mention silently outrank a later, distinct one.
+func readyAssigneeRanks(assignees []string) map[string]int {
+	ranks := make(map[string]int, len(assignees))
+	for _, a := range assignees {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if _, seen := ranks[a]; seen {
+			continue
+		}
+		ranks[a] = len(ranks)
+	}
+	return ranks
+}
+
+// orderByAssigneePriority puts the rows of an earlier-named identity ahead of a
+// later one while leaving the order within each identity untouched.
+//
+// A single identity cannot reorder anything, so the sort is skipped entirely
+// there — that is what keeps the one-identity call, which is every existing
+// caller, byte-identical to its behavior before the set existed.
+func orderByAssigneePriority(items []beads.Bead, assignees []string) {
+	ranks := readyAssigneeRanks(assignees)
+	if len(ranks) < 2 {
+		return
+	}
+	slices.SortStableFunc(items, func(a, b beads.Bead) int {
+		return ranks[strings.TrimSpace(a.Assignee)] - ranks[strings.TrimSpace(b.Assignee)]
+	})
 }
 
 func beadCarriesExcludedLabel(b beads.Bead, excluded []string) bool {

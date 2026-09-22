@@ -19,7 +19,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/pflag"
 )
 
@@ -688,6 +690,44 @@ func TestRigStoreOpenPolicyDiffersByCaller(t *testing.T) {
 	}
 	if want := "rig \"" + readyBrokenRigName + "\" store:"; !strings.Contains(err.Error(), want) {
 		t.Fatalf("gc ready's opener error = %v, want it to contain %q", err, want)
+	}
+}
+
+// TestReadyDoesNotOpenSuspendedRigStores pins the lifecycle boundary on the
+// expensive reader path. The fixture's broken rig would make gc ready fail if
+// it were opened; marking it suspended must remove that leg before the opener
+// runs while leaving the active rig present.
+func TestReadyDoesNotOpenSuspendedRigStores(t *testing.T) {
+	cityDir := newReadyCityWithBrokenRig(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == readyBrokenRigName {
+			cfg.Rigs[i].SuspendedOnStart = true
+		}
+	}
+
+	stores, err := readyRigLegStores(cfg, cityDir)
+	if err != nil {
+		t.Fatalf("gc ready opened the suspended broken rig: %v", err)
+	}
+	if _, ok := stores[readyBrokenRigName]; ok {
+		t.Fatalf("gc ready returned the suspended rig store: %v", stores)
+	}
+	if _, ok := stores["good"]; !ok {
+		t.Fatalf("gc ready dropped the active rig while skipping the suspended one: %v", stores)
+	}
+
+	// Runtime state wins over the authored default. Once explicitly resumed,
+	// the same broken rig must be opened and therefore make the query fail loud.
+	resumed := false
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, readyBrokenRigName, &resumed); err != nil {
+		t.Fatalf("record runtime resume: %v", err)
+	}
+	if stores, err := readyRigLegStores(cfg, cityDir); err == nil {
+		t.Fatalf("gc ready skipped the explicitly resumed broken rig and returned %v; runtime resume must restore the leg", stores)
 	}
 }
 

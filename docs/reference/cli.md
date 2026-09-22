@@ -3483,7 +3483,8 @@ store answered first.
 
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
---include-ephemeral is passed.
+--include-ephemeral is passed. Effectively suspended rigs are not opened or
+read; resuming a rig makes its store part of the next query again.
 
 ```
 gc ready [flags]

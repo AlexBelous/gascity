@@ -70,13 +70,10 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		if credentialsFile != "" {
 			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 		}
-		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		if err := applyHostedBeadsCredentialEnvSelected(env, hosted); err != nil {
 			return nil, err
 		}
-		runner, err := beadsCommandRunnerForHostedCity(cityPath, env)
-		if err != nil {
-			return nil, err
-		}
+		runner := beadsCommandRunnerForHostedSelection(env, hosted)
 		return runner(dir, name, args...)
 	}
 }
@@ -592,7 +589,7 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 	if credentialsFile != "" {
 		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 	}
-	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+	if err := applyHostedBeadsCredentialEnvSelected(env, hosted); err != nil {
 		return true, err
 	}
 	bdBin, err := workspacePinnedBdBinary(cityPath)
@@ -608,13 +605,23 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 // the exact hosted beads-workspace storage selector, gc installs its fixed
 // bridge to the credential-provider protocol.
 func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error {
+	return applyHostedBeadsCredentialEnvWithConfig(env, cityPath, nil)
+}
+
+// cfg belongs to this store open only. Callers that rebuild an environment
+// later (including reconnects) pass nil to re-read the current selector.
+func applyHostedBeadsCredentialEnvWithConfig(env map[string]string, cityPath string, cfg *config.City) error {
 	if env == nil {
 		return nil
 	}
-	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	selected, err := citySelectsHostedBeadsCredentialProviderFS(fsys.OSFS{}, cityPath, cfg)
 	if err != nil {
 		return err
 	}
+	return applyHostedBeadsCredentialEnvSelected(env, selected)
+}
+
+func applyHostedBeadsCredentialEnvSelected(env map[string]string, selected bool) error {
 	if selected {
 		// Exact hosted bindings must not inherit any part of the BEADS_*
 		// namespace. Explicit compatibility values below are projected into the
@@ -661,10 +668,14 @@ func beadsCommandRunnerForHostedCity(cityPath string, env map[string]string) (be
 	if err != nil {
 		return nil, err
 	}
+	return beadsCommandRunnerForHostedSelection(env, selected), nil
+}
+
+func beadsCommandRunnerForHostedSelection(env map[string]string, selected bool) beads.CommandRunner {
 	if selected {
-		return beadsExecCommandRunnerWithEnvWithoutAmbientBeads(env), nil
+		return beadsExecCommandRunnerWithEnvWithoutAmbientBeads(env)
 	}
-	return beadsExecCommandRunnerWithEnv(env), nil
+	return beadsExecCommandRunnerWithEnv(env)
 }
 
 // withholdAmbientHostedBeadsEnv pins every ambient BEADS_* key absent from an
@@ -702,17 +713,24 @@ func projectCredentialProviderEnv(env map[string]string) {
 }
 
 func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
+	return citySelectsHostedBeadsCredentialProviderFS(fsys.OSFS{}, cityPath, nil)
+}
+
+func citySelectsHostedBeadsCredentialProviderFS(fs fsys.FS, cityPath string, cfg *config.City) (bool, error) {
+	if cfg != nil {
+		return configSelectsHostedBeadsCredentialProvider(cfg), nil
+	}
 	cityConfigPath := filepath.Join(cityPath, "city.toml")
-	if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
+	if _, err := fs.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	} else if err != nil {
 		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
 	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityConfigPath)
+	loaded, _, err := config.LoadWithIncludes(fs, cityConfigPath)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
 	}
-	return configSelectsHostedBeadsCredentialProvider(cfg), nil
+	return configSelectsHostedBeadsCredentialProvider(loaded), nil
 }
 
 func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {
@@ -1576,7 +1594,15 @@ func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigP
 }
 
 func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
-	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
+	// Command runners can retain cfg across calls. Credential selection must
+	// still read current configuration on every invocation.
+	return bdRuntimeEnvForRigWithCredentialConfigContext(ctx, cityPath, cfg, nil, rigPath, allowRecovery)
+}
+
+// credentialCfg is supplied only by an individual native store open; cfg may
+// also be a retained rig-routing snapshot from a long-lived command runner.
+func bdRuntimeEnvForRigWithCredentialConfigContext(ctx context.Context, cityPath string, cfg, credentialCfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	env, cityErr := bdRuntimeEnvWithConfigRecoveryContext(ctx, cityPath, credentialCfg, allowRecovery)
 	rigPath = normalizePathForCompare(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
 	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
@@ -1620,7 +1646,7 @@ func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot stri
 func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if samePath(scopeRoot, cityPath) {
-		return bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
+		return bdRuntimeEnvWithConfigRecoveryContext(ctx, cityPath, cfg, true)
 	}
 	if cfg == nil {
 		loaded, err := loadCityConfig(cityPath, io.Discard)
@@ -1629,7 +1655,7 @@ func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg 
 		}
 		cfg = loaded
 	}
-	return bdRuntimeEnvForRigWithErrorRecoveryContext(ctx, cityPath, cfg, scopeRoot, true)
+	return bdRuntimeEnvForRigWithCredentialConfigContext(ctx, cityPath, cfg, cfg, scopeRoot, true)
 }
 
 // nativeDoltOneShotOpenEnvForScope is nativeDoltOpenEnvForScope for a
@@ -1703,6 +1729,10 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 }
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
+	return bdRuntimeEnvWithConfigRecoveryContext(ctx, cityPath, nil, allowRecovery)
+}
+
+func bdRuntimeEnvWithConfigRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, allowRecovery bool) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
 	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
 		return env, err
@@ -1742,7 +1772,7 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
-	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+	if err := applyHostedBeadsCredentialEnvWithConfig(env, cityPath, cfg); err != nil {
 		return env, err
 	}
 	if scopeBackendIsDoltlite(cityPath, cityPath) {

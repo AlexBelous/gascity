@@ -144,11 +144,15 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
+	return resolveCLIStorageRoutesWithCheck(cityPath, checkInfraClassConvergence)
+}
+
+func resolveCLIStorageRoutesWithCheck(cityPath string, check infraConvergenceCheck) *storageRoutes {
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return nil
 	}
-	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr)
+	routes, err := storageBootGateWithConvergenceCheck(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr, check)
 	if err == nil {
 		// The one and only place a class store is given an emit target. A
 		// one-shot command has no live event bus, so without this its writes to

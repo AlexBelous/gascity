@@ -289,6 +289,11 @@ func TestCLIStorageRoutesOpenTheBindingOncePerProcess(t *testing.T) {
 	if second := cliStorageRoutes(cityPath); second != first {
 		t.Errorf("the second call opened the binding again (%p, then %p)", first, second)
 	}
+	unused := &containmentProjectionSource{Store: beads.NewMemStore(), err: errors.New("resolved memo must not read a replacement source")}
+	primeReadyStorageRoutes(cityPath, unused)
+	if unused.reads != 0 || cliStorageRoutes(cityPath) != first {
+		t.Fatal("priming replaced or rechecked an already-resolved route memo")
+	}
 	if *registries != 1 {
 		t.Errorf("the funnel constructed %d provider registr(ies) for one city, want 1", *registries)
 	}
@@ -329,5 +334,26 @@ func TestOpenNudgeBeadStoreBorrowsTheMemoizedCLIRoute(t *testing.T) {
 	}
 	if _, err := second.Get("missing-nudge"); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("the next poll received a closed memoized route: %v", err)
+	}
+}
+
+// A ready invocation already owns the city work handle; a marked convergence
+// check must read it rather than reopen the same source.
+func TestReadyBorrowsCitySourceForMarkedConvergence(t *testing.T) {
+	cityPath, _ := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	opens := 0
+	previous := openInfraMigrationSource
+	openInfraMigrationSource = func(path string) (beads.Store, error) { opens++; return previous(path) }
+	t.Cleanup(func() { openInfraMigrationSource = previous })
+	var stdout, stderr bytes.Buffer
+	if code := cmdReady(readyOpts{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("ready exit=%d stderr=%s", code, stderr.String())
+	}
+	if opens != 0 {
+		t.Fatalf("ready reopened the already-owned city source %d time(s)", opens)
+	}
+	if cliStorageRoutes(cityPath) == nil {
+		t.Fatal("ready did not resolve marked city routes")
 	}
 }

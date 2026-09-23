@@ -15,6 +15,20 @@ var _ ClassificationReader = (*NativeDoltStore)(nil)
 func (s *NativeDoltStore) ReadClassification() ([]ClassificationRow, error) {
 	var result []ClassificationRow
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		if provider, ok := storage.(nativeClassificationQuerier); ok {
+			rows, err := readNativeClassificationSQL(ctx, provider)
+			if err == nil {
+				s.noteRows(len(rows))
+				result = rows
+				return nil
+			}
+			// The canonical backend owns optional wisps/empty-tier schema
+			// semantics. Only a missing table delegates to that guarded read;
+			// it must still produce a complete census or return its error.
+			if !nativeClassificationMissingTable(err) {
+				return err
+			}
+		}
 		filter := nativeIssueFilterFromListQuery(ListQuery{IncludeClosed: true, TierMode: TierBoth})
 		filter.Lite = true
 		filter.IncludeDependencies = false

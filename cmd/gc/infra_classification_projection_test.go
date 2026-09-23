@@ -108,3 +108,26 @@ func TestInfraContainmentClassificationUnsupportedFallsBack(t *testing.T) {
 		t.Fatalf("fallback=%+v %v", gap, err)
 	}
 }
+
+type containmentBorrowedSource struct {
+	*containmentProjectionSource
+	closes   int
+	closeErr error
+}
+
+func (s *containmentBorrowedSource) CloseStore() error { s.closes++; return s.closeErr }
+
+// Borrowing is synchronous and never owns the source, including error exits.
+func TestInfraContainmentBorrowedSourceStaysLiveAndOwnedByCaller(t *testing.T) {
+	source := &containmentBorrowedSource{containmentProjectionSource: &containmentProjectionSource{Store: beads.NewMemStore(), refuseFull: true}}
+	if _, err := classifyInfraContainmentGapFromSource(source, infraBindingTarget{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	source.err = errors.New("fresh read failed")
+	if _, err := classifyInfraContainmentGapFromSource(source, infraBindingTarget{}, nil); !errors.Is(err, source.err) {
+		t.Fatalf("fresh read error lost: %v", err)
+	}
+	if source.reads != 2 || source.closes != 0 || source.fullReads != 0 {
+		t.Fatalf("reads=%d closes=%d full=%d", source.reads, source.closes, source.fullReads)
+	}
+}

@@ -3,6 +3,7 @@
 package beads
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
@@ -12,6 +13,9 @@ import (
 // carries the body and dependencies required by migration.
 func TestNativeClassificationProjectionAgainstIsolatedDolt(t *testing.T) {
 	store := openRealNativeDoltStoreForCAS(t, "classification-projection")
+	if _, ok := store.storage.(nativeClassificationQuerier); !ok {
+		t.Fatal("real native backend lacks guarded classification query capability")
+	}
 	var created []Bead
 	for _, row := range []Bead{
 		{Title: "closed session", Type: "task", Description: "full closed body", Labels: []string{"gc:session"}},
@@ -54,5 +58,40 @@ func TestNativeClassificationProjectionAgainstIsolatedDolt(t *testing.T) {
 	}
 	if len(want) != 3 || !reflect.DeepEqual(got, want) {
 		t.Fatalf("classification parity: got=%#v want=%#v", got, want)
+	}
+	// Compare with the pinned canonical SearchIssues reader, hiding only the
+	// optional optimized capability on the same isolated database.
+	legacy := newNativeDoltStoreForTest(readyOutcomeLegacyStorage{store.storage})
+	canonical, err := legacy.ReadClassification()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyMap := map[string]ClassificationRow{}
+	for _, row := range canonical {
+		legacyMap[row.ID] = row
+	}
+	if !reflect.DeepEqual(got, legacyMap) {
+		t.Fatalf("guarded projection differs from canonical census: got=%#v old=%#v", got, legacyMap)
+	}
+	raw, ok := store.storage.(testRawDBGetter)
+	if !ok {
+		t.Fatal("isolated schema proof needs DB accessor")
+	}
+	// These schema mutations affect only this test's freshly created database.
+	if _, err := raw.DB().ExecContext(context.Background(), "RENAME TABLE wisp_labels TO classification_saved_labels"); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := store.ReadClassification(); err == nil || rows != nil {
+		t.Fatalf("required labels silently absent: %#v %v", rows, err)
+	}
+	if _, err := raw.DB().ExecContext(context.Background(), "RENAME TABLE classification_saved_labels TO wisp_labels"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.DB().ExecContext(context.Background(), "RENAME TABLE wisps TO classification_saved_wisps"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.ReadClassification()
+	if err != nil || len(rows) != 1 || rows[0].ID != created[0].ID {
+		t.Fatalf("optional absent wisps fallback: %#v %v", rows, err)
 	}
 }

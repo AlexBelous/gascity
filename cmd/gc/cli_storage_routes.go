@@ -118,6 +118,11 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 	return entry.routes
 }
 
+// cliStorageRoutesLoad omits the revision snapshot: route resolution uses the
+// composed configuration but never its revision provenance. Capturing a snapshot
+// would content-hash every pack directory on each one-shot CLI invocation.
+var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+
 // resolveCLIStorageRoutes takes the verdict for one city, exactly once, and
 // turns each of its three arms into routes: nil for a city that relocates
 // nothing, the opened binding for one that has converged, and refusing stores
@@ -144,7 +149,7 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
 	if err != nil {
 		return nil
 	}

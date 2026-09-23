@@ -1555,20 +1555,25 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 // s.DepList/s.List (each of which reacquire s.withReadRetry's lock): this
 // method runs INSIDE Ready's withReadRetry closure, so nesting another
 // withReadRetry call would risk a sync.RWMutex RLock reentrancy hazard.
-// GetDependenciesWithMetadata is a base beadslib.Storage method (no
-// capability probe needed, unlike DependencyBatchLister) and returns each
-// blocker's full Issue row — status and metadata together — alongside the
-// edge type in one call per candidate, so no second batched issue fetch is
-// needed the way BdStore's mirror image requires.
+// A backing store with batched raw dependency reads avoids one metadata query
+// per candidate. Extension stores without that capability retain the base
+// Storage read path.
 func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
 	if len(candidates) == 0 {
 		return candidates, nil
 	}
+	batched, hasBatch, err := nativeReadyOutcomeDependencies(ctx, storage, candidates)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {
-		blockers, err := storage.GetDependenciesWithMetadata(ctx, c.ID)
-		if err != nil {
-			return nil, fmt.Errorf("checking blocking dependency outcomes for %s: %w", c.ID, err)
+		blockers := batched[c.ID]
+		if !hasBatch {
+			blockers, err = storage.GetDependenciesWithMetadata(ctx, c.ID)
+			if err != nil {
+				return nil, fmt.Errorf("checking blocking dependency outcomes for %s: %w", c.ID, err)
+			}
 		}
 		blocked := false
 		for _, dep := range blockers {

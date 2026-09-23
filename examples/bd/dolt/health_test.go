@@ -5,6 +5,7 @@
 package dolt_test
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2249,9 +2250,25 @@ func TestHealthUsesDurablePerDatabaseBackupReceipt(t *testing.T) {
 	receipts := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "backup-receipts")
 	writeReceipt := func(outcome string) {
 		t.Helper()
-		cmd := exec.Command("python3", filepath.Join(repoRoot(t), "assets", "scripts", "backup_receipt.py"), receipts, "office", outcome, manifest)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("write %s receipt: %v\n%s", outcome, err, out)
+		if err := os.MkdirAll(receipts, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifestTime, manifestSize, manifestHash := int64(0), int64(0), "-"
+		if outcome == "success" {
+			info, err := os.Stat(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifestTime, manifestSize = info.ModTime().Unix(), info.Size()
+			manifestHash = fmt.Sprintf("%x", sha256.Sum256(data))
+		}
+		receipt := fmt.Sprintf("v1 %s %d %d %d %s\n", outcome, time.Now().Unix(), manifestTime, manifestSize, manifestHash)
+		if err := os.WriteFile(filepath.Join(receipts, "office"), []byte(receipt), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
 	find := func() (bool, string) {

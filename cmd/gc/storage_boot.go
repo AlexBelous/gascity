@@ -250,6 +250,12 @@ func storageSplitShapeOf(storage config.StorageConfig) (storageSplitShape, strin
 // A non-nil error is a refusal, already carrying the operator instruction; the
 // caller prints it and stops.
 func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec events.Recorder, stderr io.Writer) (*storageRoutes, error) {
+	return storageBootGateWithConvergenceCheck(cityPath, cfg, logPrefix, rec, stderr, checkInfraClassConvergence)
+}
+
+// storageBootGateWithConvergenceCheck keeps every admission check while allowing
+// a one-shot caller to supply the same live containment read on its owned source.
+func storageBootGateWithConvergenceCheck(cityPath string, cfg *config.City, logPrefix string, rec events.Recorder, stderr io.Writer, check infraConvergenceCheck) (*storageRoutes, error) {
 	// The bypass, first — and now with the one question a city that HAS served
 	// a split can answer differently from a city that never did.
 	//
@@ -325,7 +331,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	}
 	var report infraMigrationReport
 	if ok {
-		report = checkInfraClassConvergence(cityPath, cfg, logPrefix, stderr)
+		report = check(cityPath, cfg, logPrefix, stderr)
 	} else {
 		// The shape is the supported one, so the only thing that can have
 		// refused the target is the provider: this build carries the migration

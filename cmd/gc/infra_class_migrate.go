@@ -755,6 +755,10 @@ func resolveInfraBindingTarget(cityPath string, cfg *config.City) (infraBindingT
 // that a city with nothing to move has nothing to move. That is the zero-row
 // degenerate of the copy the operator command performs, not a copy of its own.
 func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix string, stderr io.Writer) infraMigrationReport {
+	return checkInfraClassConvergenceWithReader(cityPath, cfg, logPrefix, stderr, classifyInfraContainmentGap)
+}
+
+func checkInfraClassConvergenceWithReader(cityPath string, cfg *config.City, logPrefix string, stderr io.Writer, read infraContainmentReader) infraMigrationReport {
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
 	if err != nil {
 		// The destination did not resolve, so there is no binding to read
@@ -767,7 +771,7 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 	if !ok {
 		return infraMigrationReport{Outcome: infraMigrationNotConfigured}
 	}
-	report := inspectInfraConvergence(cityPath, target, logPrefix, stderr)
+	report := inspectInfraConvergenceWithReader(cityPath, target, logPrefix, stderr, read)
 	report.Target = target
 	report.BindingProvenEmpty, report.BindingProbe = infraBindingHoldsNothing(target)
 	return report
@@ -783,7 +787,7 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 // convergence re-proved; a city without one is either a genesis (nothing to
 // move, so it is admitted and recorded) or a city whose infrastructure state is
 // still in the work store, which is the refusal that names the command.
-func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+func inspectInfraConvergenceWithReader(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer, read infraContainmentReader) infraMigrationReport {
 	say := func(outcome infraMigrationOutcome, err error) infraMigrationReport {
 		fmt.Fprintf(stderr, "%s: storage class migration: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		// The fault rides along so the outcome that could not decide can say what
@@ -801,7 +805,7 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	}
 	switch state {
 	case infraConvergenceMarked:
-		return confirmInfraConvergence(cityPath, target, logPrefix, stderr)
+		return confirmInfraConvergenceWithReader(cityPath, target, logPrefix, stderr, read)
 	case infraConvergenceStale:
 		// The marker's claim about the past still holds, so this is not a city
 		// that never converged and the revert stays withheld by the marker the
@@ -1246,6 +1250,10 @@ func readInfraConvergenceState(target infraBindingTarget) (infraConvergenceState
 // reporting the city unconverged and handing it the revert, which is the one
 // instruction that would abandon everything written since cutover.
 func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+	return confirmInfraConvergenceWithReader(cityPath, target, logPrefix, stderr, classifyInfraContainmentGap)
+}
+
+func confirmInfraConvergenceWithReader(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer, read infraContainmentReader) infraMigrationReport {
 	proven, recorded, err := readInfraCopyManifest(target)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
@@ -1263,7 +1271,7 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 				target.Database, target.ManifestPath()),
 		}
 	}
-	gap, err := classifyInfraContainmentGap(cityPath, target, proven)
+	gap, err := read(cityPath, target, proven)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
@@ -1334,7 +1342,12 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 		return infraContainmentGap{}, fmt.Errorf("opening work store: %w", err)
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
+	return classifyInfraContainmentGapFromSource(source, target, proven)
+}
 
+// classifyInfraContainmentGapFromSource borrows a live city work handle. Its
+// caller owns that handle; only the destination opened here is closed here.
+func classifyInfraContainmentGapFromSource(source beads.Store, target infraBindingTarget, proven map[string]bool) (infraContainmentGap, error) {
 	ids, err := readInfraContainmentIDs(source)
 	if err != nil {
 		return infraContainmentGap{}, err

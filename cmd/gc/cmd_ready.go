@@ -281,6 +281,7 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	primeReadyStorageRoutes(cityPath, cityStore)
 	legs, err := readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
 	if err != nil {
 		// A refused city: the plan carries the refusal that names the remedy, and

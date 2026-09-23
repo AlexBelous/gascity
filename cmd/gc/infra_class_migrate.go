@@ -1335,11 +1335,11 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 
-	rows, err := readInfraSnapshot(source)
+	ids, err := readInfraContainmentIDs(source)
 	if err != nil {
 		return infraContainmentGap{}, err
 	}
-	if len(rows) == 0 {
+	if len(ids) == 0 {
 		return infraContainmentGap{}, nil
 	}
 
@@ -1349,6 +1349,12 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 	}
 	defer closeBeadStoreHandle(destination) //nolint:errcheck // best-effort close
 
+	// The existing destination check deliberately retains its full decode and
+	// corruption checks. Only the source classification read is projected.
+	rows := make([]beads.Bead, len(ids))
+	for i, id := range ids {
+		rows[i].ID = id
+	}
 	have, err := infraDestinationMembership(destination, rows)
 	if err != nil {
 		return infraContainmentGap{}, err

@@ -502,3 +502,14 @@ func policyTierFromOpts(opts []beads.QueryOpt) beads.TierMode {
 	}
 	return tier
 }
+
+// ReadClassification forwards a fresh closed-inclusive, both-tier census.
+// This read already includes every tier, so policy expansion changes nothing.
+// Missing capability remains explicit; callers may use their full-read fallback.
+func (s *beadPolicyStore) ReadClassification() ([]beads.ClassificationRow, error) {
+	reader, ok := s.Store.(beads.ClassificationReader)
+	if !ok {
+		return nil, beads.ErrClassificationUnsupported
+	}
+	return reader.ReadClassification()
+}

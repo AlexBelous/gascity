@@ -2229,7 +2229,61 @@ type backupsReport struct {
 		AgeSec int    `json:"age_sec"`
 		Fresh  string `json:"freshness"`
 		Stale  bool   `json:"stale"`
+		Status string `json:"last_sync_status"`
 	} `json:"dolt_databases"`
+}
+
+func TestHealthUsesDurablePerDatabaseBackupReceipt(t *testing.T) {
+	cityPath := t.TempDir()
+	manifest := filepath.Join(cityPath, ".dolt-backup", "office", "manifest")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("restorable backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-20 * time.Hour)
+	if err := os.Chtimes(manifest, old, old); err != nil {
+		t.Fatal(err)
+	}
+	receipts := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "backup-receipts")
+	writeReceipt := func(outcome string) {
+		t.Helper()
+		cmd := exec.Command("python3", filepath.Join(repoRoot(t), "assets", "scripts", "backup_receipt.py"), receipts, "office", outcome, manifest)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("write %s receipt: %v\n%s", outcome, err, out)
+		}
+	}
+	find := func() (bool, string) {
+		t.Helper()
+		backups, out := runHealthBackupsJSON(t, cityPath)
+		if len(backups.Databases) != 1 {
+			t.Fatalf("databases = %v, want office\n%s", backups.Databases, out)
+		}
+		return backups.Databases[0].Stale, backups.Databases[0].Status
+	}
+
+	if stale, status := find(); !stale || status != "absent" {
+		t.Fatalf("before receipt: stale=%v status=%q", stale, status)
+	}
+	writeReceipt("success") // Dolt returned 0 but left the manifest unchanged.
+	if stale, status := find(); stale || status != "success" {
+		t.Fatalf("successful no-op: stale=%v status=%q", stale, status)
+	}
+	writeReceipt("failure")
+	if stale, status := find(); !stale || status != "failure" {
+		t.Fatalf("latest sync failed: stale=%v status=%q", stale, status)
+	}
+	writeReceipt("success")
+	if err := os.WriteFile(manifest, []byte("restorable backux"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(manifest, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if stale, status := find(); !stale || status != "invalid" {
+		t.Fatalf("receipt no longer matches manifest: stale=%v status=%q", stale, status)
+	}
 }
 
 // runHealthBackupsJSON runs the health command against cityPath with no live

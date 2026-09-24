@@ -453,21 +453,59 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 // standardAssignedInProgressWorkQueryScript behavior: callers asking for that
 // tier alone still receive the anchor.
 func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
+	if !topo.FederatedReady {
+		return `gc_assigned_workflow_anchor_json=""; ` +
+			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+			`[ -z "$id" ] && continue; ` +
+			assignedInProgressTierCommand("id", topo) +
+			`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+			inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true) +
+			`fi; ` +
+			`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+			assignedInProgressCandidatesTierCommand("id", topo) +
+			`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+			serveOrdinaryInProgressCandidateScript(false, true) +
+			`fi; ` +
+			`fi; ` +
+			ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("id", topo) +
+			`done; `
+	}
 	return `gc_assigned_workflow_anchor_json=""; ` +
+		federatedAssignedBatchRead("gc_assigned_in_progress_all_json", ` --status in_progress`) +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		assignedInProgressTierCommand("id", topo) +
+		selectAssignedIdentityFromBatch("gc_assigned_in_progress_all_json", 1) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true, true) +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
-		assignedInProgressCandidatesTierCommand("id", topo) +
+		selectAssignedIdentityFromBatch("gc_assigned_in_progress_all_json", 20) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		serveOrdinaryInProgressCandidateScript(true, true) +
 		`fi; ` +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("id", topo) +
 		`done; `
+}
+
+// federatedAssignedBatchRead reads the optional runtime identities in one
+// city-wide scan. The shell builds repeated --assignee-any arguments only for
+// non-empty variables, so gc ready keeps its fail-loud empty-selector contract.
+// The result stays unbounded here so the caller can preserve the historical
+// identity precedence (session id, session name, alias) without one identity's
+// backlog hiding another identity before selection.
+func federatedAssignedBatchRead(dst, extraArgs string) string {
+	return `gc_read_assigned_batch() { set --; ` +
+		`for gc_identity in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$gc_identity" ] && continue; set -- "$@" "--assignee-any=$gc_identity"; done; ` +
+		`[ "$#" -gt 0 ] || { printf "[]"; return 0; }; ` +
+		gcReadyCommand + extraArgs + ` "$@" --json --limit=0; }; ` +
+		dst + `=$(gc_read_assigned_batch)` + readyReaderFailurePropagation(true) + `; `
+}
+
+func selectAssignedIdentityFromBatch(src string, limit int) string {
+	filter := `[.[] | select((.assignee // "") == $id)] | .[:` + strconv.Itoa(limit) + `]`
+	return `r=$(printf "%s" "$` + src + `" | jq --arg id "$id" ` + shellquote.Quote(filter) + ` 2>/dev/null); `
 }
 
 // assignedInProgressTierCommand is the crash-recovery read for one identity.
@@ -518,11 +556,22 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
 func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+	if !topo.FederatedReady {
+		return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+			`[ -z "$id" ] && continue; ` +
+			assignedInProgressTierCommand("id", topo) +
+			`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+			inProgressBlockedByEnrichmentScript(false, true) +
+			`fi; ` +
+			ephemeralAssignedInProgressProbeScript("id", topo) +
+			`done; `
+	}
+	return federatedAssignedBatchRead("gc_assigned_in_progress_all_json", ` --status in_progress`) +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		assignedInProgressTierCommand("id", topo) +
+		selectAssignedIdentityFromBatch("gc_assigned_in_progress_all_json", 1) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScript(true, true) +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", topo) +
 		`done; `
@@ -690,9 +739,18 @@ func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 }
 
 func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+	if !topo.FederatedReady {
+		return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+			`[ -z "$id" ] && continue; ` +
+			assignedReadyTierCommand("id", topo) +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			ephemeralAssignedReadyProbeScript("id", topo) +
+			`done; `
+	}
+	return federatedAssignedBatchRead("gc_assigned_ready_all_json", "") +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		assignedReadyTierCommand("id", topo) +
+		selectAssignedIdentityFromBatch("gc_assigned_ready_all_json", 1) +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		ephemeralAssignedReadyProbeScript("id", topo) +
 		`done; `

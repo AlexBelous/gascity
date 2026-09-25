@@ -224,9 +224,9 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // run's model and compute facts carry the same RunID and group together in
 // gc costs. The session bead id is carried verbatim as SessionID (the join key to
 // the manifold spend plane's EIA session_id and to recall transcripts), distinct
-// from the resolved RunID and from Worker (the session name). StepID is left
-// unset: model usage is attributed at run level, not per formula step (see the
-// StepID note in the body). The dedup identity is the invocation's provider message id (or the
+// from the resolved RunID and from Worker (the session name). StepID carries the
+// exact work-bead id from the session's existing claim/assignment pointers when
+// either is present. The dedup identity is the invocation's provider message id (or the
 // transcript entry uuid when none), so the best-effort cursor races noted on
 // recordInvocationTelemetry collapse a re-recorded invocation to one fact at the
 // sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
@@ -241,11 +241,7 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 	// handle's currentSessionID == the session bead id); the params stay distinct
 	// so the run-chain precedence contract is preserved verbatim.
 	runID := beadmeta.ResolveRunID(meta, beadID, sessionID)
-	// Model usage is attributed at run level: StepID stays unset. Per-step
-	// attribution was retired along with the gc.active_work_bead session pointer —
-	// the claim hook no longer stamps it (that was an unsafe fuzzy session-bead
-	// write), so no production source names the current step. Compute facts are
-	// already run-level, so both usage Kinds now roll up per run, matching events.
+	workBeadID := modelUsageWorkBeadID(meta)
 	reqID := usageIdentity(u)
 	if !priced {
 		cost = 0
@@ -255,9 +251,9 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 		at = u.Timestamp
 	}
 	return usage.Fact{
-		RunID:     runID,
-		SessionID: strings.TrimSpace(sessionID),
-		// StepID intentionally unset — run-level attribution (see body note).
+		RunID:               runID,
+		SessionID:           strings.TrimSpace(sessionID),
+		StepID:              workBeadID,
 		Worker:              strings.TrimSpace(worker),
 		Kind:                usage.KindModel,
 		Model:               strings.TrimSpace(u.Model),
@@ -272,6 +268,27 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 		At:                  at.UnixMilli(),
 		IdempotencyKey:      usage.ModelIdempotencyKey(runID, reqID),
 	}
+}
+
+// modelUsageWorkBeadID resolves the concrete work bead active in a session
+// snapshot. A self-claim is authoritative because it records work the session
+// actually claimed through gc hook. The reconciler's current-bead pointer is the
+// fallback for controller-assigned sessions that do not self-claim.
+//
+// Both keys already have relocation-aware writers and clear-on-release paths.
+// Reading them avoids reviving gc.active_work_bead, whose post-claim fuzzy
+// session update was retired because it could update a prefix-colliding bead.
+// Empty means the invocation is deliberately left at run/session level.
+func modelUsageWorkBeadID(meta map[string]string) string {
+	for _, key := range []string{
+		beadmeta.CurrentClaimBeadIDMetadataKey,
+		sessionpkg.CurrentBeadIDKey,
+	} {
+		if id := strings.TrimSpace(meta[key]); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // invocationUsageSpec binds one transcript provider family to its bounded

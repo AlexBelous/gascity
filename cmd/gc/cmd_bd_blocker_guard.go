@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // bdBlockerPatch extracts the final metadata patch before either bd's work
@@ -41,8 +42,8 @@ func bdBlockerPatch(bdArgs []string) (map[string]string, bool, error) {
 				i++
 				value = args[i]
 			}
-			unsetTyped = unsetTyped || value == "gc.blocker.v2"
-			unsetText = unsetText || value == "gc.blocked_on"
+			unsetTyped = unsetTyped || value == beadmeta.BlockerV2MetadataKey
+			unsetText = unsetText || value == beadmeta.BlockedOnMetadataKey
 			continue
 		}
 		if name != "--set-metadata" && name != "--metadata" {
@@ -78,8 +79,8 @@ func bdBlockerPatch(bdArgs []string) (map[string]string, bool, error) {
 			patch[key] = v
 		}
 	}
-	_, hasText := patch["gc.blocked_on"]
-	_, hasTyped := patch["gc.blocker.v2"]
+	_, hasText := patch[beadmeta.BlockedOnMetadataKey]
+	_, hasTyped := patch[beadmeta.BlockerV2MetadataKey]
 	touched := hasText || hasTyped
 	if unsetTyped && (!unsetText || touched) {
 		return nil, true, fmt.Errorf("gc.blocker.v2 removal requires gc.blocked_on removal in the same operation and no replacement blocker")

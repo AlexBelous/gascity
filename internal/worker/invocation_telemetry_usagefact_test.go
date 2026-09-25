@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -210,9 +211,12 @@ func TestModelUsageFact(t *testing.T) {
 		CacheReadTokens:     10,
 		CacheCreationTokens: 5,
 	}
-	// modelUsageFact resolves RunID from the run chain; StepID is intentionally
-	// left unset — model usage is attributed at run level, not per formula step.
-	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
+	// modelUsageFact resolves RunID from the run chain and carries the session's
+	// exact current claim as the acting work bead.
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{
+		"molecule_id":                          "mol-7",
+		beadmeta.CurrentClaimBeadIDMetadataKey: " work-42 ",
+	}}
 
 	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
 	if priced.Kind != usage.KindModel {
@@ -227,10 +231,8 @@ func TestModelUsageFact(t *testing.T) {
 	if priced.SessionID != "session-1" {
 		t.Fatalf("SessionID = %q, want the session bead id session-1", priced.SessionID)
 	}
-	// StepID is intentionally unset: model usage is attributed at run level, not per
-	// formula step (the gc.active_work_bead session pointer was retired).
-	if priced.StepID != "" {
-		t.Fatalf("StepID = %q, want empty (run-level attribution)", priced.StepID)
+	if priced.StepID != "work-42" {
+		t.Fatalf("StepID = %q, want current claimed work bead work-42", priced.StepID)
 	}
 	if priced.Worker != "myrig/polecat-1" || priced.Model != "claude-opus-4-7" || priced.Provider != "claude" {
 		t.Fatalf("identity wrong: %+v", priced)
@@ -288,6 +290,44 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
 	if fallback.At != now.UnixMilli() {
 		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
+	}
+	return nil
+}
+
+func TestModelUsageFactWorkAttribution(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	u := sessionlog.TailUsage{EntryUUID: "entry-1", MessageID: "msg-1"}
+
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		want string
+	}{
+		{
+			name: "self claim wins over controller assignment",
+			meta: map[string]string{
+				beadmeta.CurrentClaimBeadIDMetadataKey: "claimed-work",
+				sessionpkg.CurrentBeadIDKey:            "assigned-work",
+			},
+			want: "claimed-work",
+		},
+		{
+			name: "controller assignment is fallback",
+			meta: map[string]string{sessionpkg.CurrentBeadIDKey: " assigned-work "},
+			want: "assigned-work",
+		},
+		{
+			name: "no current work stays unattributed",
+			meta: map[string]string{},
+			want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fact := modelUsageFact(u, tc.meta, "session-1", "session-1", "worker", "codex", 0, false, now)
+			if fact.StepID != tc.want {
+				t.Fatalf("StepID = %q, want %q", fact.StepID, tc.want)
+			}
+		})
 	}
 }
 

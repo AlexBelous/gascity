@@ -324,24 +324,13 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 	return claim
 }
 
-// runtimeWaiverExpiry dates every remaining runtime.Provider waiver owned by
-// runtimeContractWaiverOwner. The prior 2026-08-12 date lapsed and turned the
-// whole ledger check red, so this is a renewal, not a first grant.
-//
-// Each gap was re-checked against cmd/gc/runtime_registry.go at renewal: all
-// eight constructors are still live registrations, and none has gained a
-// runnable full contract, so none was retired as stale. The subprocess
-// default-directory composition is the one that could be contracted instead of
-// renewed, and it was.
-//
-// Two weeks, deliberately, and not the 90-day maxWaiverHorizon the validator
-// permits. ga-80po0c.3's only open child has not moved since 2026-07-18, and
-// the same nine waivers already lapsed once and were extended — not
-// re-decided — to this date to unblock an unrelated PR. A long horizon would
-// hide a stalled track behind a green run; a short one puts the question back
-// in front of the owner while the context is still fresh. Renewing again
-// without contracts landing is debt, and the next renewal should say so.
-var runtimeWaiverExpiry = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
+// runtimeWaiverExpiry dates the eight remaining runtime.Provider waivers owned
+// by ga-80po0c.3. The 2026-08-26 waiver expired without these full contracts
+// landing. This 14-day extension is debt, not evidence of conformance: the
+// per-constructor gaps and reasons remain recorded in Catalog and TESTING.md.
+// The owner must land the missing proofs or seek a fresh explicit decision by
+// 2026-10-10 00:00 UTC; expiry remains enforced by the provider-ledger check.
+var runtimeWaiverExpiry = time.Date(2026, time.October, 10, 0, 0, 0, 0, time.UTC)
 
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{

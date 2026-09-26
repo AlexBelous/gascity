@@ -1,7 +1,9 @@
 package scripts_test
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -78,6 +80,23 @@ func TestBDVersionPins(t *testing.T) {
 	}
 	if !strings.Contains(dockerfile, "ARG BD_BUILD="+bdCurrentRef[:10]) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_BUILD must equal the first 10 characters of BD_CURRENT_REF (%s)", bdCurrentRef[:10])
+	}
+	// A tagged module has no commit suffix. Read its VCS origin so the source
+	// built contract cell cannot drift away from the embedded Go module.
+	moduleJSON, err := exec.Command("go", "mod", "download", "-json", "github.com/steveyegge/beads@"+bdCurrent).Output()
+	if err != nil {
+		t.Fatalf("resolve beads module origin for %s: %v", bdCurrent, err)
+	}
+	var module struct {
+		Origin struct {
+			Hash string
+		}
+	}
+	if err := json.Unmarshal(moduleJSON, &module); err != nil {
+		t.Fatalf("decode beads module origin: %v", err)
+	}
+	if module.Origin.Hash != bdCurrentRef {
+		t.Fatalf("beads module origin = %q, want BD_CURRENT_REF %q", module.Origin.Hash, bdCurrentRef)
 	}
 
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly

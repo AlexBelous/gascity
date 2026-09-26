@@ -78,6 +78,8 @@ const (
 	// effect ever lands. See molecule.ClaimExact's doc for the exact
 	// guarantee this does and does not provide.
 	ClaimGenerationMetadataKey           = "gc.claim_generation"
+	BlockedOnMetadataKey                 = "gc.blocked_on"
+	BlockerV2MetadataKey                 = "gc.blocker.v2"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
@@ -441,6 +443,8 @@ var KnownMetadataKeys = []string{
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
+	BlockedOnMetadataKey,
+	BlockerV2MetadataKey,
 	BrainParentSIDMetadataKey,
 	BudgetDeferredUntilMetadataKey,
 	CancelRequestedMetadataKey,

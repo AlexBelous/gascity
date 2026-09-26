@@ -958,6 +958,24 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = err
 			return
 		}
+		providerState, err := readDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath))
+		if err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("read template provider state: %w", err)
+			return
+		}
+		for _, scope := range []struct {
+			root     string
+			database string
+		}{
+			{root: cityPath, database: "hq"},
+			{root: rigPath, database: "fe"},
+		} {
+			metadataPath := filepath.Join(scope.root, ".beads", "metadata.json")
+			if _, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", fmt.Sprint(providerState.Port), "root", scope.database, cityPath, nil); err != nil {
+				managedBdWaitTemplateErr = fmt.Errorf("ensure template project identity for %s: %w", scope.root, err)
+				return
+			}
+		}
 		stopCmd := exec.Command(script, "stop")
 		stopCmd.Env = env
 		if out, err := stopCmd.CombinedOutput(); err != nil {

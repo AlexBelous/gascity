@@ -2480,6 +2480,33 @@ run_bd_pinned() {
     )
 }
 
+# bd v1.3's cross-era guard requires a local version witness before ordinary
+# commands may reopen a server-mode workspace with a local Dolt root. In shared
+# server mode bd init does not write that witness itself (upstream #5682).
+# Record only the version reported by the exact pinned bd binary, and only
+# after bd init has completed successfully; never pre-authorize an unverified
+# or genuinely historical workspace.
+write_bd_current_version_witness() {
+    local dir="$1"
+    local output version major witness tmp
+    output=$(run_bd_pinned "$dir" version 2>/dev/null) || die "failed to read pinned bd version after init for $dir"
+    version=$(printf '%s\n' "$output" | sed -n 's/^bd version \([^[:space:]]*\).*/\1/p' | head -1)
+    major="${version%%.*}"
+    case "$major" in
+        ""|*[!0-9]*)
+            die "invalid pinned bd version after init for $dir: $version"
+            ;;
+    esac
+    if [ "$major" -lt 1 ]; then
+        die "refusing to mark pre-1.0 bd workspace current after init for $dir: $version"
+    fi
+    witness="$dir/.beads/.local_version"
+    tmp=$(mktemp "$witness.tmp.XXXXXX") || die "failed to allocate bd version witness for $dir"
+    printf '%s\n' "$version" > "$tmp" || die "failed to write bd version witness for $dir"
+    chmod 600 "$tmp" || die "failed to protect bd version witness for $dir"
+    mv "$tmp" "$witness" || die "failed to publish bd version witness for $dir"
+}
+
 run_bd_init_pinned() {
     local dir="$1"
     local prefix="$2"
@@ -2487,13 +2514,15 @@ run_bd_init_pinned() {
     local host="$4"
     local force_init="${5:-false}"
     if [ "$force_init" = "true" ]; then
-        run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+        BEADS_DOLT_SHARED_SERVER=1 BD_ALLOW_REMOTE_MIGRATE=1 run_bd_pinned "$dir" init --force --quiet --server --external -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
             --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+        write_bd_current_version_witness "$dir"
         return 0
     fi
 
-    run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+    BEADS_DOLT_SHARED_SERVER=1 BD_ALLOW_REMOTE_MIGRATE=1 run_bd_pinned "$dir" init --quiet --server --external -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
         --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+    write_bd_current_version_witness "$dir"
 }
 
 run_bd_doltlite() {

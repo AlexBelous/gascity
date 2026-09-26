@@ -5968,6 +5968,10 @@ case "${1:-}" in
 JSON
     exit 0
     ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   config|migrate|list)
     exit 0
     ;;
@@ -6105,7 +6109,7 @@ capture_dir="` + captureDir + `"
 cmd="${1:-}"
 record() {
   name="$1"
-  printf '%s|%s|%s|%s|%s\n' "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DIR:-}" > "$capture_dir/$name"
+  printf '%s|%s|%s|%s|%s|%s|%s\n' "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DIR:-}" "${BEADS_DOLT_SHARED_SERVER:-}" "${BD_ALLOW_REMOTE_MIGRATE:-}" > "$capture_dir/$name"
 }
 case "$cmd" in
   init)
@@ -6115,6 +6119,10 @@ case "$cmd" in
     done
     mkdir -p "$last/.beads"
     record init.env
+    exit 0
+    ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
     exit 0
     ;;
   config)
@@ -6165,6 +6173,8 @@ esac
 		"rig-db.example.com",
 		"3307",
 		filepath.Join(rigDir, ".beads"),
+		"1",
+		"1",
 	}, "|")
 	data, err := os.ReadFile(filepath.Join(captureDir, "init.env"))
 	if err != nil {
@@ -6172,6 +6182,13 @@ esac
 	}
 	if got := strings.TrimSpace(string(data)); got != wantPinned {
 		t.Fatalf("init.env = %q, want %q", got, wantPinned)
+	}
+	versionData, err := os.ReadFile(filepath.Join(rigDir, ".beads", ".local_version"))
+	if err != nil {
+		t.Fatalf("read .local_version: %v", err)
+	}
+	if got := strings.TrimSpace(string(versionData)); got != "1.3.0-rc.2" {
+		t.Fatalf(".local_version = %q, want %q", got, "1.3.0-rc.2")
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "config.env")); !os.IsNotExist(err) {
 		t.Fatalf("config.env exists after init; err=%v", err)
@@ -6181,14 +6198,17 @@ esac
 		t.Fatalf("read list.env: %v", err)
 	}
 	parts := strings.Split(strings.TrimSpace(string(listData)), "|")
-	if len(parts) != 5 {
-		t.Fatalf("list.env = %q, want 5 fields", strings.TrimSpace(string(listData)))
+	if len(parts) != 7 {
+		t.Fatalf("list.env = %q, want 7 fields", strings.TrimSpace(string(listData)))
 	}
 	if parts[0] != "rig-db.example.com" || parts[1] != "3307" {
 		t.Fatalf("list.env host/port = %q|%q, want rig-db.example.com|3307", parts[0], parts[1])
 	}
 	if parts[4] != filepath.Join(rigDir, ".beads") {
 		t.Fatalf("list.env BEADS_DIR = %q, want %q", parts[4], filepath.Join(rigDir, ".beads"))
+	}
+	if parts[5] != "" || parts[6] != "" {
+		t.Fatalf("list.env leaked init-only migration flags: shared=%q allow_remote_migrate=%q", parts[5], parts[6])
 	}
 }
 
@@ -6225,6 +6245,10 @@ cmd="${1:-}"
 	case "$cmd" in
   init)
     : > "$capture_dir/init.called"
+    exit 0
+    ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
     exit 0
     ;;
   migrate)
@@ -6490,6 +6514,10 @@ case "$cmd" in
 JSON
     exit 0
     ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   migrate)
     : > "$capture_dir/migrate.called"
     exit 0
@@ -6577,6 +6605,10 @@ func TestGcBeadsBdInitUsesExplicitDoltDatabaseForRegistration(t *testing.T) {
 	fakeBdScript := `#!/bin/sh
 set -eu
 case "${1:-}" in
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   config|migrate|list)
     exit 0
     ;;
@@ -7266,6 +7298,10 @@ case "$cmd" in
     printf '%%s\n' "$@" > %q
     exit 0
     ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   config|migrate|list)
     exit 0
     ;;
@@ -7365,6 +7401,10 @@ func TestGcBeadsBdInitWaitsForSchemaVisibilityBeforeRuntimeRepair(t *testing.T) 
 	fakeBdScript := `#!/bin/sh
 set -eu
 case "${1:-}" in
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   init|config|migrate|list)
     exit 0
     ;;
@@ -7479,6 +7519,10 @@ case "${1:-}" in
     printf '%%s\n' "$*" >> %q
     exit 0
     ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   config|migrate|list)
     exit 0
     ;;
@@ -7578,7 +7622,7 @@ esac
 		t.Fatalf("read init args: %v", err)
 	}
 	gotArgs := string(argsData)
-	for _, want := range []string{"init --quiet --server -p gc --database hq"} {
+	for _, want := range []string{"init --quiet --server --external -p gc --database hq"} {
 		if !strings.Contains(gotArgs, want) {
 			t.Fatalf("bd init retry args missing %q:\n%s", want, gotArgs)
 		}
@@ -7630,6 +7674,10 @@ case "${1:-}" in
       printf 'metadata=no args=%%s\n' "$*" >> %q
     fi
     printf '%%s\n' "$*" >> %q
+    exit 0
+    ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
     exit 0
     ;;
   config|migrate|list)
@@ -7708,8 +7756,8 @@ esac
 	}
 	gotState := string(stateData)
 	for _, want := range []string{
-		"metadata=yes args=init --force --quiet --server -p gc --database hq",
-		"metadata=no args=init --quiet --server -p gc --database hq",
+		"metadata=yes args=init --force --quiet --server --external -p gc --database hq",
+		"metadata=no args=init --quiet --server --external -p gc --database hq",
 	} {
 		if !strings.Contains(gotState, want) {
 			t.Fatalf("init state missing %q:\n%s", want, gotState)
@@ -11258,6 +11306,10 @@ YAML
 	: > "$last/.beads/dolt-server.log"
 	printf '3307\n' > "$last/.beads/dolt-server.port"
 	printf '%s\n' "$*" > "` + bdInitLog + `"
+	exit 0
+	;;
+  version)
+	echo 'bd version 1.3.0-rc.2 (test)'
 	exit 0
 	;;
   *)

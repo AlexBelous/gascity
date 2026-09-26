@@ -3688,7 +3688,11 @@ op_init() {
     # For a database proven to have been created above by this invocation,
     # record the current bd version before bd's legacy-workspace guard runs.
     # Pre-existing databases deliberately receive no marker here.
-    if [ "$database_created_by_gc" = true ]; then
+    # The narrowly fenced remote-migration path publishes its version witness
+    # only after schema and L1/L2/L3 identity verification. Keep the older
+    # pre-seed compatibility path for other newly registered databases, but do
+    # not let it create a premature witness for the verified-fresh path.
+    if [ "$database_created_by_gc" = true ] && [ "$fresh_empty_db" != true ]; then
         seed_fresh_managed_bd_version_witness "$dir"
     fi
 

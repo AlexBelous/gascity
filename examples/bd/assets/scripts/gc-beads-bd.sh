@@ -2557,6 +2557,12 @@ run_bd_init_pinned() {
                 --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for fresh database $dolt_database"
         fi
         wait_for_bd_runtime_schema "$dolt_database" || die "fresh database $dolt_database has no bd schema after init; version witness withheld"
+        # bd v1.3 writes config.yaml for a fresh external workspace but may
+        # not create GC's canonical metadata.json. Materialize that L2 input
+        # before identity reconciliation; otherwise ensure_project_identity
+        # has no database name to reconcile and the following L1/L2/L3
+        # readback correctly fails on an otherwise healthy fresh database.
+        normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
         ensure_project_identity "$dir"
         verify_bd_project_identity "$dir" "$dolt_database" || die "fresh database $dolt_database has inconsistent L1/L2/L3 project identity; version witness withheld"
         write_bd_current_version_witness "$dir"

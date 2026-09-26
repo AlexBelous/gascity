@@ -47,6 +47,7 @@ run_bd_pinned() {
     case "$*" in *' ready') [ "${TEST_READY_FAIL:-0}" != 1 ] ;; esac
 }
 wait_for_bd_runtime_schema() { printf 'schema\n' >> "$TEST_CAPTURE"; }
+normalize_scope_after_init() { printf 'normalize\n' >> "$TEST_CAPTURE"; }
 ensure_project_identity() { printf 'identity\n' >> "$TEST_CAPTURE"; }
 verify_bd_project_identity() { printf 'verify\n' >> "$TEST_CAPTURE"; }
 write_bd_current_version_witness() {
@@ -123,7 +124,7 @@ esac
 			}
 			if tc.wantMigration {
 				last := -1
-				for _, marker := range []string{" init --force", "schema\n", "identity\n", "verify\n", "witness\n", " ready\n"} {
+				for _, marker := range []string{" init --force", "schema\n", "normalize\n", "identity\n", "verify\n", "witness\n", " ready\n"} {
 					at := strings.Index(string(calls), marker)
 					if at <= last {
 						t.Fatalf("fresh init proof order missing %q after offset %d:\n%s", marker, last, calls)

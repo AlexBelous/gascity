@@ -17,6 +17,9 @@ func TestBdFreshInitMigrationFlagFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(scriptBytes)
+	if !strings.Contains(source, `if [ "$database_created_by_gc" = true ] && [ "$fresh_empty_db" != true ]; then`) {
+		t.Fatal("fresh migration path must not publish the legacy pre-init version witness")
+	}
 	functions := []string{"fresh_bd_database_absent", "fresh_bd_database_empty", "run_bd_init_pinned"}
 	var program strings.Builder
 	for _, name := range functions {

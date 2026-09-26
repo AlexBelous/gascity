@@ -6085,7 +6085,7 @@ exec %q "$@"
 	}
 }
 
-func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
+func TestGcBeadsBdInitPinsManagedDoltEnvWithoutMigrationAuthority(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -6173,8 +6173,8 @@ esac
 		"rig-db.example.com",
 		"3307",
 		filepath.Join(rigDir, ".beads"),
-		"1",
-		"1",
+		"",
+		"",
 	}, "|")
 	data, err := os.ReadFile(filepath.Join(captureDir, "init.env"))
 	if err != nil {
@@ -6183,12 +6183,8 @@ esac
 	if got := strings.TrimSpace(string(data)); got != wantPinned {
 		t.Fatalf("init.env = %q, want %q", got, wantPinned)
 	}
-	versionData, err := os.ReadFile(filepath.Join(rigDir, ".beads", ".local_version"))
-	if err != nil {
-		t.Fatalf("read .local_version: %v", err)
-	}
-	if got := strings.TrimSpace(string(versionData)); got != "1.3.0-rc.2" {
-		t.Fatalf(".local_version = %q, want %q", got, "1.3.0-rc.2")
+	if _, err := os.Stat(filepath.Join(rigDir, ".beads", ".local_version")); !os.IsNotExist(err) {
+		t.Fatalf("ambiguous managed init published .local_version; err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "config.env")); !os.IsNotExist(err) {
 		t.Fatalf("config.env exists after init; err=%v", err)
@@ -7622,10 +7618,13 @@ esac
 		t.Fatalf("read init args: %v", err)
 	}
 	gotArgs := string(argsData)
-	for _, want := range []string{"init --quiet --server --external -p gc --database hq"} {
+	for _, want := range []string{"init --quiet --server -p gc --database hq"} {
 		if !strings.Contains(gotArgs, want) {
 			t.Fatalf("bd init retry args missing %q:\n%s", want, gotArgs)
 		}
+	}
+	if strings.Contains(gotArgs, "--external") {
+		t.Fatalf("ambiguous schema retry received fresh-database authority, got:\n%s", gotArgs)
 	}
 	if strings.Contains(gotArgs, "--force") {
 		t.Fatalf("post-init schema retry should rerun plain init, got:\n%s", gotArgs)
@@ -7756,12 +7755,15 @@ esac
 	}
 	gotState := string(stateData)
 	for _, want := range []string{
-		"metadata=yes args=init --force --quiet --server --external -p gc --database hq",
-		"metadata=no args=init --quiet --server --external -p gc --database hq",
+		"metadata=yes args=init --force --quiet --server -p gc --database hq",
+		"metadata=no args=init --quiet --server -p gc --database hq",
 	} {
 		if !strings.Contains(gotState, want) {
 			t.Fatalf("init state missing %q:\n%s", want, gotState)
 		}
+	}
+	if strings.Contains(gotState, "--external") {
+		t.Fatalf("forced fallback or retry received fresh-database authority:\n%s", gotState)
 	}
 }
 

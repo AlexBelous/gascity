@@ -408,6 +408,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestBDVersionPins",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "gc-ysdfep.2",
+			Invariant:       "exact tagged beads module origin must match BD_CURRENT_REF",
+			ResourceOwner:   "the go mod download subprocess is confined to TestBDVersionPins to verify the tagged module origin commit",
+			MigrationTarget: "PR2 dependency compatibility",
+			Expires:         "2026-10-10",
+		},
+		{
 			PackageDir:      "internal/doctor",
 			PackageName:     "doctor",
 			Owner:           "TestCustomTypesCheck_TableDrift",

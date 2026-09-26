@@ -297,6 +297,17 @@ migration_target = "P0.1"
 expires = "2026-10-01"
 
 [[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestBDVersionPins"
+resources = ["subprocess"]
+owner_bead = "gc-ysdfep.2"
+invariant = "exact tagged beads module origin must match BD_CURRENT_REF"
+resource_owner = "the go mod download subprocess is confined to TestBDVersionPins to verify the tagged module origin commit"
+migration_target = "PR2 dependency compatibility"
+expires = "2026-10-10"
+
+[[medium]]
 package_dir = "internal/doctor"
 package_name = "doctor"
 owner = "TestCustomTypesCheck_TableDrift"

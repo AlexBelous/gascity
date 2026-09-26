@@ -1,9 +1,7 @@
 package scripts_test
 
 import (
-	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -50,38 +48,23 @@ func TestBDVersionPins(t *testing.T) {
 	if !regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrent) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
 	}
-	// The native Go store and the bleeding-edge contract-matrix cell must use
-	// the same beads version. Pseudo-versions carry the source commit in their
-	// suffix; release tags are checked against BD_CURRENT_VERSION. The agent
-	// image separately rebuilds the installable BD_VERSION from its pinned
-	// source, so its BD_SOURCE_REF is intentionally independent of this cell.
+	// The native Go store, the bleeding-edge contract-matrix cell, and the
+	// source-built agent image must all use the same upstream commit. A drift
+	// here can pair one schema catalog with another version's write behavior.
 	goMod := readFile(t, root, "go.mod")
-	goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+(v\S+)\s*$`).FindStringSubmatch(goMod)
+	goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+v\S+-([0-9a-f]{12})\s*$`).FindStringSubmatch(goMod)
 	if goModMatch == nil {
-		t.Fatal("go.mod missing a version pin for github.com/steveyegge/beads")
+		t.Fatal("go.mod missing a pseudo-version pin for github.com/steveyegge/beads")
 	}
-	if got := goModMatch[1]; got != bdCurrent {
-		t.Fatalf("go.mod beads version = %q, want BD_CURRENT_VERSION %q", got, bdCurrent)
+	if got, want := goModMatch[1], bdCurrentRef[:12]; got != want {
+		t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
 	}
-	if pseudoCommit := regexp.MustCompile(`-([0-9a-f]{12})$`).FindStringSubmatch(bdCurrent); pseudoCommit != nil && pseudoCommit[1] != bdCurrentRef[:12] {
-		t.Fatalf("BD_CURRENT_VERSION pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", pseudoCommit[1], bdCurrentRef[:12])
+	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
 	}
-	// A tagged module has no commit suffix. Read its VCS origin so the source
-	// built contract cell cannot drift away from the embedded Go module.
-	moduleJSON, err := exec.Command("go", "mod", "download", "-json", "github.com/steveyegge/beads@"+bdCurrent).Output()
-	if err != nil {
-		t.Fatalf("resolve beads module origin for %s: %v", bdCurrent, err)
-	}
-	var module struct {
-		Origin struct {
-			Hash string
-		}
-	}
-	if err := json.Unmarshal(moduleJSON, &module); err != nil {
-		t.Fatalf("decode beads module origin: %v", err)
-	}
-	if module.Origin.Hash != bdCurrentRef {
-		t.Fatalf("beads module origin = %q, want BD_CURRENT_REF %q", module.Origin.Hash, bdCurrentRef)
+	if !strings.Contains(dockerfile, "ARG BD_BUILD="+bdCurrentRef[:10]) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_BUILD must equal the first 10 characters of BD_CURRENT_REF (%s)", bdCurrentRef[:10])
 	}
 
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly

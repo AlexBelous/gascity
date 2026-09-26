@@ -2480,31 +2480,64 @@ run_bd_pinned() {
     )
 }
 
-# bd v1.3's cross-era guard requires a local version witness before ordinary
-# commands may reopen a server-mode workspace with a local Dolt root. In shared
-# server mode bd init does not write that witness itself (upstream #5682).
-# Record only the version reported by the exact pinned bd binary, and only
-# after bd init has completed successfully; never pre-authorize an unverified
-# or genuinely historical workspace.
+# A newly registered database is eligible for bd's remote migration opt-in
+# only when the exact target was absent in both the live catalog and managed
+# data directory before CREATE DATABASE, and has no tables afterward.
+fresh_bd_database_absent() {
+    local db="$1" host output count
+    valid_sql_name "$db" || return 1
+    [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ] || return 1
+    [ ! -e "$DATA_DIR/$db" ] && [ ! -L "$DATA_DIR/$db" ] || return 1
+    server_reachable || return 1
+    # A failed USE is ambiguous (missing database or failed SQL probe). Count
+    # catalog entries directly, and treat SQL/parse errors as unknown.
+    host=$(connect_host)
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS schema_count FROM information_schema.schemata WHERE schema_name = '$db'" 2>/dev/null) || return 1
+    count=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
+    [ "$count" = "0" ]
+}
+
+fresh_bd_database_empty() {
+    local db="$1" host output count
+    valid_sql_name "$db" || return 1
+    database_exists "$db" || return 1
+    host=$(connect_host)
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS table_count FROM information_schema.tables WHERE table_schema = '$db'" 2>/dev/null) || return 1
+    count=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
+    [ "$count" = "0" ]
+}
+
+# bd v1.3's cross-era guard requires this local witness to reopen a freshly
+# initialized shared-server workspace. Publish it only after schema and
+# identity readback; never pre-authorize an existing or partial workspace.
 write_bd_current_version_witness() {
-    local dir="$1"
-    local output version major witness tmp
+    local dir="$1" output version major witness tmp
     output=$(run_bd_pinned "$dir" version 2>/dev/null) || die "failed to read pinned bd version after init for $dir"
     version=$(printf '%s\n' "$output" | sed -n 's/^bd version \([^[:space:]]*\).*/\1/p' | head -1)
     major="${version%%.*}"
-    case "$major" in
-        ""|*[!0-9]*)
-            die "invalid pinned bd version after init for $dir: $version"
-            ;;
-    esac
-    if [ "$major" -lt 1 ]; then
-        die "refusing to mark pre-1.0 bd workspace current after init for $dir: $version"
-    fi
+    case "$major" in ""|*[!0-9]*) die "invalid pinned bd version after init for $dir: $version" ;; esac
+    [ "$major" -ge 1 ] || die "refusing pre-1.0 bd version witness for $dir"
     witness="$dir/.beads/.local_version"
     tmp=$(mktemp "$witness.tmp.XXXXXX") || die "failed to allocate bd version witness for $dir"
     printf '%s\n' "$version" > "$tmp" || die "failed to write bd version witness for $dir"
     chmod 600 "$tmp" || die "failed to protect bd version witness for $dir"
     mv "$tmp" "$witness" || die "failed to publish bd version witness for $dir"
+}
+
+verify_bd_project_identity() {
+    local dir="$1" db="$2" host file_id metadata_id output database_id
+    valid_sql_name "$db" || return 1
+    [ -f "$dir/.beads/identity.toml" ] || return 1
+    file_id=$(sed -n 's/^[[:space:]]*id[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/.beads/identity.toml" | head -1)
+    metadata_id=$(read_metadata_string_field "$dir/.beads/metadata.json" project_id)
+    [ -n "$file_id" ] && [ "$file_id" = "$metadata_id" ] || return 1
+    host=$(connect_host)
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT value FROM \`$db\`.metadata WHERE \`key\` = '_project_id' LIMIT 1" 2>/dev/null) || return 1
+    database_id=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
+    [ "$file_id" = "$database_id" ]
 }
 
 run_bd_init_pinned() {
@@ -2513,16 +2546,35 @@ run_bd_init_pinned() {
     local dolt_database="$3"
     local host="$4"
     local force_init="${5:-false}"
-    if [ "$force_init" = "true" ]; then
-        BEADS_DOLT_SHARED_SERVER=1 BD_ALLOW_REMOTE_MIGRATE=1 run_bd_pinned "$dir" init --force --quiet --server --external -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+    local fresh_empty_db="${6:-false}"
+    if [ "$fresh_empty_db" = "true" ]; then
+        fresh_bd_database_empty "$dolt_database" || die "fresh database $dolt_database is not empty; remote migration refused"
+        if [ "$force_init" = "true" ]; then
+            BEADS_DOLT_SHARED_SERVER=1 BD_ALLOW_REMOTE_MIGRATE=1 run_bd_pinned "$dir" init --force --quiet --server --external -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+                --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for fresh database $dolt_database"
+        else
+            BEADS_DOLT_SHARED_SERVER=1 BD_ALLOW_REMOTE_MIGRATE=1 run_bd_pinned "$dir" init --quiet --server --external -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+                --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for fresh database $dolt_database"
+        fi
+        wait_for_bd_runtime_schema "$dolt_database" || die "fresh database $dolt_database has no bd schema after init; version witness withheld"
+        ensure_project_identity "$dir"
+        verify_bd_project_identity "$dir" "$dolt_database" || die "fresh database $dolt_database has inconsistent L1/L2/L3 project identity; version witness withheld"
         write_bd_current_version_witness "$dir"
+        if ! BEADS_DOLT_SHARED_SERVER=1 run_bd_pinned "$dir" ready >/dev/null; then
+            # The schema and L1/L2/L3 identity are verified. Keep this witness
+            # so a transient reopen failure can be retried on the next init.
+            die "fresh database $dolt_database could not reopen after init; validated version witness retained for retry"
+        fi
+        return 0
+    fi
+    if [ "$force_init" = "true" ]; then
+        run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
         return 0
     fi
 
-    BEADS_DOLT_SHARED_SERVER=1 BD_ALLOW_REMOTE_MIGRATE=1 run_bd_pinned "$dir" init --quiet --server --external -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+    run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
         --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
-    write_bd_current_version_witness "$dir"
 }
 
 run_bd_doltlite() {
@@ -2686,6 +2738,7 @@ op_init() {
     local existing_db=""
     local allow_reserved_existing=false
     local bd_init_force=""
+    local fresh_empty_db=false
     if [ -z "$dir" ] || [ -z "$prefix" ]; then
         die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
     fi
@@ -2795,6 +2848,17 @@ op_init() {
         exit 0
     fi
 
+    # gc pre-seeds metadata.json even for a new scope. An absent target in
+    # BOTH catalog and managed data directory, with no prior identity/version
+    # witness, is the only path allowed to opt in to bd's remote migration.
+    # Reachability must be established before treating an absent USE as proof.
+    if ! is_remote && [ ! -e "$dir/.beads/identity.toml" ] && [ ! -e "$dir/.beads/.local_version" ] \
+        && { [ ! -f "$metadata_path" ] || { [ "$existing_db" = "$dolt_database" ] && ! grep -q '"project_id"' "$metadata_path"; }; }; then
+        if fresh_bd_database_absent "$dolt_database"; then
+            fresh_empty_db=true
+        fi
+    fi
+
     # If already initialized on disk, ensure the database is also registered
     # with the running server. gc's normalizeCanonicalBdScopeFilesForInit
     # writes metadata.json (dolt_database/dolt_mode) BEFORE invoking us, so a
@@ -2831,6 +2895,14 @@ op_init() {
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
                 ensure_project_identity "$dir"
+                # A prior fresh init may have verified schema/identity and
+                # published .local_version, then failed its first bd ready.
+                # Never report this schema-ready early exit as healthy until
+                # that exact store reopens. No migration authority is granted.
+                if [ -f "$dir/.beads/.local_version" ]; then
+                    BEADS_DOLT_SHARED_SERVER=1 run_bd_pinned "$dir" ready >/dev/null \
+                        || die "database $dolt_database has schema but bd cannot reopen; validated version witness retained for retry"
+                fi
                 exit 0
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
@@ -2866,7 +2938,7 @@ op_init() {
     # visible issue prefix, while `--database` tells bd which existing Dolt
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
-    run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
+    run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}" "$fresh_empty_db"
 
     # Re-register post-init: if bd init didn't catalog-register the DB
     # (server-mode quirk), do it now. After a successful bd init this is a

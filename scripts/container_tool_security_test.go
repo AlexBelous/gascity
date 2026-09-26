@@ -13,7 +13,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		ghVersion                 = "2.96.0"
 		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
 		doltSourceRef             = "781cbb730221ea7df4fc7995255bb336df9c3864"
-		grpcVersion               = "1.83.1"
+		grpcVersion               = "1.83.2"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
 		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
@@ -69,7 +69,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
 		bdBuild        = "bf97b73749"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.83.1"
+		grpcVersion    = "1.83.2"
 	)
 
 	root := repoRoot(t)
@@ -132,7 +132,8 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.57",
+		"gitpython==3.1.59",
+		"anyio==4.14.2",
 		"aiohttp>=3.14.3",
 		"pillow>=12.3.0",
 	} {
@@ -147,7 +148,8 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.58 \\",
+		"gitpython==3.1.59 \\",
+		"anyio==4.14.2 \\",
 		"aiohttp==3.14.3 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
@@ -181,16 +183,9 @@ func TestRebuiltToolsAssertPatchedGRPCArtifact(t *testing.T) {
 	}
 }
 
-// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
-// source tools (bd, dolt, gh) carry no Go-stdlib CVE waiver. The image build rebuilds
-// them with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, so a waiver
-// on those paths would let the scan gate keep masking a regressed rebuild instead of
-// proving the fix holds. CVE-2026-56852 is the one explicit non-stdlib exception:
-// the pinned gh and Dolt sources, plus external kubectl, still select vulnerable x/text
-// versions. The residual
-// x/net / x/crypto module waivers that bd and dolt legitimately keep (external binaries
-// the grpc-only rebuild does not touch) are out of scope here; gc's x/net / x/crypto
-// module waivers are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools ensures that the scan checks
+// every finding on source-rebuilt bd, Dolt, and gh. Their Docker builds pin
+// patched Go and module versions; only external kubectl retains reviewed waivers.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -209,16 +204,8 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		"usr/local/bin/dolt": true,
 		"usr/bin/gh":         true,
 	}
-	stdlibCVEs := map[string]bool{
-		"CVE-2026-33811": true, "CVE-2026-33814": true, "CVE-2026-39820": true,
-		"CVE-2026-39822": true, "CVE-2026-39823": true, "CVE-2026-39825": true,
-		"CVE-2026-39826": true, "CVE-2026-39836": true, "CVE-2026-42499": true,
-		"CVE-2026-42504": true, "CVE-2026-27145": true,
-	}
 	allowedXTextWaivers := map[string]map[string]bool{
 		"CVE-2026-56852": {
-			"usr/bin/gh":            true,
-			"usr/local/bin/dolt":    true,
 			"usr/local/bin/kubectl": true,
 		},
 	}
@@ -226,8 +213,8 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
-			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.5 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
+			if rebuiltPaths[p] {
+				t.Errorf("%s still waives rebuilt tool %q; drop the path so the image scan proves the patched binary is clean", v.ID, p)
 			}
 			if allowedPaths, ok := allowedXTextWaivers[v.ID]; ok && allowedPaths[p] {
 				if foundAllowed[v.ID] == nil {
@@ -235,9 +222,6 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 				}
 				foundAllowed[v.ID][p] = true
 				continue
-			}
-			if p == "usr/bin/gh" {
-				t.Errorf("%s waives rebuilt gh without a reviewed module-specific exception", v.ID)
 			}
 		}
 	}

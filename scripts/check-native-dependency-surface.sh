@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-729}"
+# Re-baselined 2026-09-26 for beads v1.3.0-rc.2: the measured graph moves from
+# 729 to 737 modules. Twenty existing module paths change version and eight new
+# paths enter through bd's OpenAPI toolchain: dprotaso/go-yit, getkin/kin-openapi,
+# oapi-codegen/v2, oasdiff/{yaml,yaml3}, speakeasy-api/{jsonpath,openapi}, and
+# vmware-labs/yaml-jsonpath. Keep the cap at the measured graph; re-baseline
+# again only with an enumerated module diff.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
 max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
@@ -51,7 +57,7 @@ fi
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM HUP
-go build -o "$tmpdir/gc" ./cmd/gc
+CGO_ENABLED=0 go build -trimpath -o "$tmpdir/gc" ./cmd/gc
 
 go tool nm "$tmpdir/gc" > "$tmpdir/gc.nm"
 for forbidden_symbol in \

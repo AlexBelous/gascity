@@ -59,6 +59,8 @@ const (
 	// cmd/gc/cmd_hook_claim.go). Feeds the created→claimed and
 	// claimed→started latency-watch transitions (OBS-001).
 	ClaimedAtMetadataKey                 = "gc.claimed_at"
+	BlockedOnMetadataKey                 = "gc.blocked_on"
+	BlockerV2MetadataKey                 = "gc.blocker.v2"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
@@ -362,6 +364,8 @@ var KnownMetadataKeys = []string{
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
+	BlockedOnMetadataKey,
+	BlockerV2MetadataKey,
 	BrainParentSIDMetadataKey,
 	CancelRequestedMetadataKey,
 	CheckInfraRetryMetadataKey,

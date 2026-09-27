@@ -648,6 +648,9 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 	if storedToken == "" || storedToken != strings.TrimSpace(instanceToken) {
 		return hookClaimSessionStale, "runtime instance token does not match the session bead"
 	}
+	if committedAt, _, pending := resetPendingCommittedAtInfo(info); pending {
+		return hookClaimSessionStale, fmt.Sprintf("session reset committed at %s", committedAt)
+	}
 	switch state := session.State(strings.TrimSpace(info.MetadataState)); state {
 	case session.StateNone, session.StateActive, session.StateAwake, session.StateCreating, session.StateStartPending:
 		return hookClaimSessionEligible, ""

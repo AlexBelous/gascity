@@ -104,17 +104,15 @@ vulnerabilities:
       - "usr/bin/gh"
       - "usr/local/bin/dolt"
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
     expired_at: 2026-09-21
-    statement: google.golang.org/grpc CVE, fixed in 1.83.1. The gh and Dolt rebuilds pin grpc 1.82.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), the bd rebuild pins 1.83.0 (GRPC_VERSION in contrib/k8s/Dockerfile.agent), and gc takes 1.83.0 from go.mod. Durable fix is raising each of those pins to 1.83.1 or later; bd and gc are tracked in ga-rl1l10. Remove each path once its pin moves.
+    statement: google.golang.org/grpc CVE, fixed in 1.83.1. The gh and Dolt rebuilds pin grpc 1.82.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), and the bd rebuild pins 1.83.0 (GRPC_VERSION in contrib/k8s/Dockerfile.agent). gc takes fixed 1.83.2 from go.mod, so its path is no longer waived. Raise the remaining rebuild pins to fixed versions; bd is tracked in ga-rl1l10.
   - id: CVE-2026-84445
     paths:
       - "usr/bin/gh"
       - "usr/local/bin/dolt"
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
     expired_at: 2026-09-21
-    statement: google.golang.org/grpc xDS CVE, fixed in 1.82.2 and 1.83.2. The gh and Dolt rebuilds pin grpc 1.82.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), the bd rebuild pins 1.83.0 (GRPC_VERSION in contrib/k8s/Dockerfile.agent), and gc takes 1.83.0 from go.mod. Durable fix is raising each of those pins to 1.83.2 or later, which also clears CVE-2026-84304; bd and gc are tracked in ga-rl1l10. Remove each path once its pin moves.
+    statement: google.golang.org/grpc xDS CVE, fixed in 1.82.2 and 1.83.2. The gh and Dolt rebuilds pin grpc 1.82.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), and the bd rebuild pins 1.83.0 (GRPC_VERSION in contrib/k8s/Dockerfile.agent). gc takes fixed 1.83.2 from go.mod, so its path is no longer waived. Raise the remaining rebuild pins to fixed versions; bd is tracked in ga-rl1l10.
   - id: CVE-2026-43871
     paths:
       - "usr/local/bin/dolt"

@@ -493,6 +493,35 @@ func TestHookClaimSessionEligibility(t *testing.T) {
 			want:  hookClaimSessionEligible,
 		},
 		{
+			name: "awake after committed reset",
+			info: session.Info{
+				ID: "s", MetadataState: string(session.StateAwake), InstanceToken: token,
+				ContinuationResetPending: "true", ResetCommittedAt: "2026-09-27T05:58:12Z",
+			},
+			token:   token,
+			want:    hookClaimSessionStale,
+			wantMsg: "reset",
+		},
+		{
+			name: "active after committed reset",
+			info: session.Info{
+				ID: "s", MetadataState: string(session.StateActive), InstanceToken: token,
+				ContinuationResetPending: "true", ResetCommittedAt: "2026-09-27T05:58:12Z",
+			},
+			token:   token,
+			want:    hookClaimSessionStale,
+			wantMsg: "reset",
+		},
+		{
+			name: "awake with uncommitted reset",
+			info: session.Info{
+				ID: "s", MetadataState: string(session.StateAwake), InstanceToken: token,
+				ContinuationResetPending: "true", ResetCommittedAt: "invalid",
+			},
+			token: token,
+			want:  hookClaimSessionEligible,
+		},
+		{
 			name:  "creating",
 			info:  session.Info{ID: "s", MetadataState: string(session.StateCreating), InstanceToken: token},
 			token: token,

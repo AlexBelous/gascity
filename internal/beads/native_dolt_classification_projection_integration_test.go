@@ -4,15 +4,20 @@ package beads
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+
+	beadslib "github.com/steveyegge/beads"
 )
 
 // The pinned real backend must preserve classification across full/lite reads,
 // including closed, ephemeral and no-history rows, while ordinary List still
 // carries the body and dependencies required by migration.
 func TestNativeClassificationProjectionAgainstIsolatedDolt(t *testing.T) {
-	store := openRealNativeDoltStoreForCAS(t, "classification-projection")
+	store := openRealNativeDoltServerStoreForClassification(t)
 	if _, ok := store.storage.(nativeClassificationQuerier); !ok {
 		t.Fatal("real native backend lacks guarded classification query capability")
 	}
@@ -94,4 +99,33 @@ func TestNativeClassificationProjectionAgainstIsolatedDolt(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].ID != created[0].ID {
 		t.Fatalf("optional absent wisps fallback: %#v %v", rows, err)
 	}
+}
+
+// The guarded QueryContext capability is exposed by the upstream server-mode
+// Dolt store. The generic CAS fixture opens embedded Dolt, which does not expose
+// that capability and cannot prove this projection's production read path.
+func openRealNativeDoltServerStoreForClassification(t *testing.T) *NativeDoltStore {
+	t.Helper()
+	port := startTestDoltServer(t)
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := fmt.Sprintf(`{"backend":"dolt","database":"beads","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d}`, port)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := beadslib.OpenBestAvailable(context.Background(), beadsDir)
+	if err != nil {
+		t.Fatalf("open isolated native Dolt server: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Errorf("close isolated native Dolt server storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(context.Background(), "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set isolated issue prefix: %v", err)
+	}
+	return newNativeDoltStoreWithStorageAndPrefix(storage, "classification-projection", "gc")
 }

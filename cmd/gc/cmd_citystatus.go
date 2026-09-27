@@ -200,7 +200,10 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 	}
 
 	// API rendering only needs the runtime provider for drain-state display;
-	// a nil session snapshot deliberately avoids a bead-store read here.
+	// a nil session snapshot deliberately avoids a bead-store read here. ACP
+	// route registration then uses deterministic session names, so ACP agents
+	// with custom runtime session names may not show "(draining)" in
+	// API-rendered text.
 	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
 	if err != nil {
 		message := fmt.Sprintf("gc status: %v", err)
@@ -211,7 +214,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 	dops := newDrainOps(sp)
-	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr, localFallback)
+	return routeCityStatus(cityPath, dops, c, reason, jsonOutput, stdout, stderr, localFallback)
 }
 
 // cmdCityStatusLocalFallback builds the direct-store status view only when no
@@ -267,29 +270,13 @@ var cityStatusAPIClient = supervisorFallthroughAPIClient
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeCityStatus(
 	cityPath string,
-	cfg *config.City,
-	sp runtime.Provider,
 	dops drainOps,
 	c *api.Client,
 	nilReason string,
 	jsonOutput bool,
 	stdout, stderr io.Writer,
-	fallbacks ...func() int,
+	fallback func() int,
 ) int {
-	fallback := func() int {
-		store, diagnostic, code := openCityStatusStore(cityPath, stderr)
-		if code != 0 {
-			return code
-		}
-		statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-		if jsonOutput {
-			return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
-		}
-		return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
-	}
-	if len(fallbacks) > 0 && fallbacks[0] != nil {
-		fallback = fallbacks[0]
-	}
 	var cr api.CachedRead[api.StatusView]
 	return routeRead(c, "status", nilReason, stderr,
 		func() error {

@@ -50,6 +50,7 @@ func TestLiveCityPoolAdmissionProviderScanner(t *testing.T) {
 func TestExecutePlannedStartsTraced_PoolResumeUsesSharedAdmission(t *testing.T) {
 	now := time.Date(2026, 9, 27, 1, 40, 0, 0, time.UTC)
 	cityPath := t.TempDir()
+	writePoolScope(t, cityPath)
 	writeJSON := func(name string, value any) {
 		t.Helper()
 		path := filepath.Join(cityPath, ".gc", "runtime", name)
@@ -108,6 +109,16 @@ func TestExecutePlannedStartsTraced_PoolResumeUsesSharedAdmission(t *testing.T) 
 	if woken != 1 {
 		t.Fatalf("started %d pool providers with one shared admission; want 1", woken)
 	}
+	// Isolate ledger reuse from the separate live census discrepancy gate.
+	running, err := provider.ListRunning("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range running {
+		if err := provider.Stop(name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ledgerPath := filepath.Join(cityPath, ".gc", "runtime", "pool-capacity-admission", "reservations.json")
 	data, err := os.ReadFile(ledgerPath)
 	if err != nil {
@@ -148,6 +159,7 @@ func TestClaimPoolStartAdmission_FailsClosedOnUnsafeCapacityState(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := t.TempDir()
+			writePoolScope(t, cityPath)
 			write := func(name string, value any) {
 				t.Helper()
 				path := filepath.Join(cityPath, ".gc", "runtime", name)
@@ -194,6 +206,84 @@ func TestClaimPoolStartAdmission_ConfiguredCityMissingAllRuntimeState(t *testing
 	allowed, reason := claimPoolStartAdmission(cityPath, "deal-executor", "session-1", time.Now().UTC(), runtime.NewFake(), beads.NewMemStore())
 	if allowed || reason != "capacity_state_unavailable" {
 		t.Fatalf("configured managed route bypassed missing state: allowed=%t reason=%q", allowed, reason)
+	}
+}
+
+func TestClaimPoolStartAdmission_MissingScopeWithResidualState(t *testing.T) {
+	now := time.Date(2026, 9, 27, 1, 40, 0, 0, time.UTC)
+	cityPath := t.TempDir()
+	writePoolAdmissionState(t, cityPath, now, map[string]any{
+		"managed_active_count": 0, "managed_worker_cap": 2, "over_cap_by": 0, "active": []any{},
+	})
+	allowed, reason := claimPoolStartAdmission(cityPath, "deal-executor", "candidate", now, runtime.NewFake(), beads.NewMemStore())
+	if allowed || reason != "capacity_scope_unavailable" {
+		t.Fatalf("residual state without scope admitted: allowed=%t reason=%q", allowed, reason)
+	}
+}
+
+func TestClaimPoolStartAdmission_RejectsMissingCapacityFields(t *testing.T) {
+	now := time.Date(2026, 9, 27, 1, 40, 0, 0, time.UTC)
+	for _, field := range []string{"managed_active_count", "managed_worker_cap", "over_cap_by", "active"} {
+		for _, replacement := range []any{nil, "missing"} {
+			name := field + "_null"
+			if replacement == "missing" {
+				name = field + "_missing"
+			}
+			t.Run(name, func(t *testing.T) {
+				cityPath := t.TempDir()
+				writePoolScope(t, cityPath)
+				capacity := map[string]any{"managed_active_count": 0, "managed_worker_cap": 2, "over_cap_by": 0, "active": []any{}}
+				if replacement == "missing" {
+					delete(capacity, field)
+				} else {
+					capacity[field] = nil
+				}
+				writePoolAdmissionState(t, cityPath, now, capacity)
+				allowed, reason := claimPoolStartAdmission(cityPath, "deal-executor", "candidate", now, runtime.NewFake(), beads.NewMemStore())
+				if allowed || reason != "capacity_snapshot_invalid" {
+					t.Fatalf("incomplete %s admitted: allowed=%t reason=%q", field, allowed, reason)
+				}
+			})
+		}
+	}
+}
+
+func writePoolScope(t *testing.T, cityPath string) {
+	t.Helper()
+	path := filepath.Join(cityPath, "config", "capacity-scheduler-v2.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[queue]\nmanaged_exact_routes = [\"deal-executor\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writePoolAdmissionState(t *testing.T, cityPath string, now time.Time, capacity map[string]any) {
+	t.Helper()
+	for name, value := range map[string]any{
+		"capacity-scheduler-v2/snapshot.json": map[string]any{
+			"generated_at": now.Format(time.RFC3339), "zone": "green",
+			"hysteresis": map[string]any{"green_streak": 3, "cooldown_until": now.Add(-time.Hour).Format(time.RFC3339)},
+			"capacity":   capacity,
+		},
+		"pool-capacity-admission/reservations.json": map[string]any{
+			"schema": 1, "reservations": map[string]any{
+				"deal-executor": map[string]any{"slots": 1, "active_at_reservation": 0, "created_at": now.Format(time.RFC3339)},
+			},
+		},
+	} {
+		path := filepath.Join(cityPath, ".gc", "runtime", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -265,6 +355,7 @@ func TestClaimPoolStartAdmission_RejectsLiveProcessMissingFromSnapshot(t *testin
 func TestExecutePlannedStartsTraced_AssignedPoolResumeSpendsOneGrant(t *testing.T) {
 	now := time.Date(2026, 9, 27, 1, 40, 0, 0, time.UTC)
 	cityPath := t.TempDir()
+	writePoolScope(t, cityPath)
 	write := func(name string, value any) {
 		t.Helper()
 		path := filepath.Join(cityPath, ".gc", "runtime", name)

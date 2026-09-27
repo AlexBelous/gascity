@@ -63,6 +63,7 @@ gc [flags]
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
+| [gc pool-admission-probe](#gc-pool-admission-probe) | Read-only probe of the pool start live census |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
 | [gc ready](#gc-ready) | List ready (claimable) work across every store in the city |
@@ -3337,6 +3338,14 @@ gc pack release verify <source> [flags]
 | `--commit` | string |  | git commit or ref to verify |
 | `--hash` | string |  | expected sha256:&lt;64hex&gt; content hash |
 | `--path` | string |  | pack path inside the source repository |
+
+## gc pool-admission-probe
+
+Read-only probe of the pool start live census
+
+```
+gc pool-admission-probe
+```
 
 ## gc prime
 

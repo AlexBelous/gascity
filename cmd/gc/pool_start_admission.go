@@ -55,6 +55,9 @@ func claimPoolStartAdmission(cityPath, route, sessionID string, now time.Time, s
 		errors.Is(snapshotDirErr, os.ErrNotExist) && errors.Is(ledgerDirErr, os.ErrNotExist) {
 		return true, "not_configured"
 	}
+	if !scopeConfigured {
+		return false, "capacity_scope_unavailable"
+	}
 	if snapshotErr != nil || ledgerErr != nil {
 		return false, "capacity_state_unavailable"
 	}
@@ -92,6 +95,24 @@ func claimPoolStartAdmission(cityPath, route, sessionID string, now time.Time, s
 	}
 	data, err := os.ReadFile(snapshotPath)
 	if err != nil || json.Unmarshal(data, &snap) != nil {
+		return false, "capacity_snapshot_invalid"
+	}
+	var snapshotFields map[string]json.RawMessage
+	var capacityFields map[string]json.RawMessage
+	if json.Unmarshal(data, &snapshotFields) != nil ||
+		json.Unmarshal(snapshotFields["capacity"], &capacityFields) != nil || capacityFields == nil {
+		return false, "capacity_snapshot_invalid"
+	}
+	for _, key := range []string{"managed_active_count", "managed_worker_cap", "over_cap_by"} {
+		raw := capacityFields[key]
+		var value int
+		if len(raw) == 0 || string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
+			return false, "capacity_snapshot_invalid"
+		}
+	}
+	activeRaw := capacityFields["active"]
+	var active []json.RawMessage
+	if len(activeRaw) == 0 || string(activeRaw) == "null" || json.Unmarshal(activeRaw, &active) != nil {
 		return false, "capacity_snapshot_invalid"
 	}
 	generated, err := time.Parse(time.RFC3339Nano, snap.GeneratedAt)

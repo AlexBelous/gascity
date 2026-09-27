@@ -10,7 +10,29 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+func TestHookSessionClaimExitPendingInfo(t *testing.T) {
+	committed := session.Info{State: session.StateAwake, ContinuationResetPending: "true", ResetCommittedAt: "2026-09-27T05:58:12Z"}
+	for _, tc := range []struct {
+		name string
+		info session.Info
+		want bool
+	}{
+		{name: "committed reset", info: committed, want: true},
+		{name: "draining", info: session.Info{State: session.StateDraining}, want: true},
+		{name: "closed", info: session.Info{Closed: true, State: session.StateAwake, ContinuationResetPending: "true", ResetCommittedAt: committed.ResetCommittedAt}},
+		{name: "uncommitted reset", info: session.Info{State: session.StateAwake, ContinuationResetPending: "true", ResetCommittedAt: "invalid"}},
+		{name: "healthy", info: session.Info{State: session.StateAwake}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hookSessionClaimExitPendingInfo(tc.info); got != tc.want {
+				t.Fatalf("pending = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
 
 // drainPendingProbe records the session ids a claim asked about and answers with
 // a fixed verdict, so a test can prove both WHAT the fence asked and that it
@@ -241,6 +263,30 @@ func TestHookClaimRefusesADrainingSessionHoldingAnExistingAssignment(t *testing.
 	result := e.result(t)
 	if result.Action != "drain" || result.Reason != hookClaimReasonDrainPending {
 		t.Fatalf("result = %+v, want the drain refusal, not an adopted assignment", result)
+	}
+}
+
+func TestHookClaimCommittedResetRefusesExistingAssignmentBeforeQuery(t *testing.T) {
+	e := newDrainPendingClaimEnv()
+	e.probe.pending = hookSessionClaimExitPendingInfo(session.Info{
+		State: session.StateAwake, ContinuationResetPending: "true", ResetCommittedAt: "2026-09-27T05:58:12Z",
+	})
+	ops := e.ops()
+	ops.Runner = func(string, string) (string, error) {
+		e.queries++
+		return `[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	opts := e.opts(true)
+	opts.IdentityCandidates = []string{"worker-1"}
+
+	if code := doHookClaim("query", "/rig", opts, ops, &e.stdout, &e.stderr); code != 0 {
+		t.Fatalf("code = %d, want acknowledged drain; stderr=%s", code, e.stderr.String())
+	}
+	if e.queries != 0 || len(e.claimed) != 0 {
+		t.Fatalf("query count = %d, claims = %v; want no query, adoption, or mutation", e.queries, e.claimed)
+	}
+	if result := e.result(t); result.Action != "drain" || result.Reason != hookClaimReasonDrainPending {
+		t.Fatalf("result = %+v, want drain_pending refusal", result)
 	}
 }
 

@@ -57,7 +57,7 @@ func hookStampSessionCurrentClaim(sessionID, beadID string) error {
 }
 
 // hookSessionDrainPending reports whether the session identified by sessionID is
-// already draining. It is the production implementation of the
+// already draining or has a committed continuation reset. It is the production implementation of the
 // hookClaimOps.DrainPending seam — the F-D claim fence's only input.
 //
 // The SESSION ROW is the source, not provider meta. `gc runtime drain-check`
@@ -66,8 +66,7 @@ func hookStampSessionCurrentClaim(sessionID, beadID string) error {
 // through the same routed front door the claim back-channel writes through, so a
 // [beads.classes.sessions] relocation reaches the fence too.
 //
-// Any state OTHER than draining — including a closed row, whose runtime state
-// GetState reports as empty — is not this fence's business. A closed or
+// A closed row is not this fence's business. A closed or
 // superseded incarnation is the runtime-identity fence's stale-session lane, and
 // answering false here leaves that lane's verdict intact rather than relabelling
 // it. Errors are returned rather than swallowed: the caller fails OPEN on them,
@@ -81,11 +80,22 @@ func hookSessionDrainPending(sessionID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	state, _, err := sessFront.GetState(sessionID)
+	info, err := sessFront.Get(sessionID)
 	if err != nil {
 		return false, err
 	}
-	return state == session.StateDraining, nil
+	return hookSessionClaimExitPendingInfo(info), nil
+}
+
+func hookSessionClaimExitPendingInfo(info session.Info) bool {
+	if info.Closed {
+		return false
+	}
+	if info.State == session.StateDraining {
+		return true
+	}
+	_, _, pending := resetPendingCommittedAtInfo(info)
+	return pending
 }
 
 // hookResolveSessionWorkDir returns the checkout the session identified by

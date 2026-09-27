@@ -3510,6 +3510,19 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
+				if candidate.info.PoolManaged {
+					allowed, reason := claimPoolStartAdmission(cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, store)
+					if !allowed {
+						if release != nil {
+							release()
+						}
+						if done != nil {
+							done()
+						}
+						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), reason, time.Time{}, time.Time{}, nil)
+						continue
+					}
+				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)

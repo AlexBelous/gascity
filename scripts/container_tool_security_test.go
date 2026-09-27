@@ -70,6 +70,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdBuild        = "c185735c38"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.0"
+		gcGRPCVersion  = "1.83.2"
 	)
 
 	root := repoRoot(t)
@@ -130,7 +131,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 
 	goMod := readFile(t, root, "go.mod")
-	wantGRPCModule := "google.golang.org/grpc v" + grpcVersion
+	wantGRPCModule := "google.golang.org/grpc v" + gcGRPCVersion
 	if got := strings.Count(goMod, wantGRPCModule); got != 1 {
 		t.Errorf("go.mod contains %q %d times, want exactly 1 so the gc binary embeds the patched grpc", wantGRPCModule, got)
 	}
@@ -581,12 +582,12 @@ func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	wantEntries := []wantEntry{
 		{
 			id:         "CVE-2026-84304",
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
+			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd"),
 			substrings: []string{"grpc", "1.83.1", "GRPC_VERSION", "go.mod"},
 		},
 		{
 			id:         "CVE-2026-84445",
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
+			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd"),
 			substrings: []string{"grpc", "1.83.2", "GRPC_VERSION", "go.mod"},
 		},
 		{

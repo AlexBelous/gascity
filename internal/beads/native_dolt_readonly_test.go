@@ -53,17 +53,20 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"DepRemove":        nativeStoreMutation,
 
 	// beads.Store, reads.
-	"Get":            nativeStoreRead,
-	"List":           nativeStoreRead,
-	"ListOpen":       nativeStoreRead,
-	"Ready":          nativeStoreRead,
-	"Children":       nativeStoreRead,
-	"ListByLabel":    nativeStoreRead,
-	"ListByAssignee": nativeStoreRead,
-	"ListByMetadata": nativeStoreRead,
-	"GetLocalString": nativeStoreRead,
-	"Ping":           nativeStoreRead,
-	"DepList":        nativeStoreRead,
+	"Get":      nativeStoreRead,
+	"List":     nativeStoreRead,
+	"ListOpen": nativeStoreRead,
+	"Ready":    nativeStoreRead,
+	// Classification census reads (convergence verdict cache, production fork).
+	"ReadClassification":        nativeStoreRead,
+	"ClassificationFingerprint": nativeStoreRead,
+	"Children":                  nativeStoreRead,
+	"ListByLabel":               nativeStoreRead,
+	"ListByAssignee":            nativeStoreRead,
+	"ListByMetadata":            nativeStoreRead,
+	"GetLocalString":            nativeStoreRead,
+	"Ping":                      nativeStoreRead,
+	"DepList":                   nativeStoreRead,
 
 	// Optional capabilities that write. ApplyGraphPlanWithStorage is the one
 	// H4 is about: policy middleware selects the graph applier at wrap time, so

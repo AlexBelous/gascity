@@ -144,11 +144,13 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
-	return resolveCLIStorageRoutesWithCheck(cityPath, checkInfraClassConvergence)
+	return resolveCLIStorageRoutesWithCheck(cityPath, checkInfraClassConvergenceForCLI)
 }
 
 func resolveCLIStorageRoutesWithCheck(cityPath string, check infraConvergenceCheck) *storageRoutes {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	// Provenance is dropped, so the revision snapshot is skipped like every other
+	// one-shot loader; see skipRevisionSnapshot.
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		return nil
 	}

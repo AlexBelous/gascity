@@ -432,7 +432,7 @@ esac
 	for _, want := range []string{
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
-		"bd close bead-1 --actor dog-alpha",
+		"gc bd close bead-1",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
@@ -444,7 +444,14 @@ esac
 }
 
 // TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool pins the close
-// actor chain for an unaliased pool dog, the shape every bd-pack dog has. Such
+// for an unaliased pool dog, the shape every bd-pack dog has. On this fork the
+// wisp is class-store owned and `gc bd close` serves only a bare id (see
+// parseBdByIDCloseArgs): --actor, like --reason, is refused rather than
+// silently dropped. The claim identity therefore travels in the environment
+// (BEADS_ACTOR) that gc hands to bd on an unrelocated city, and the rendered
+// command must stay bare whatever identity variables are set.
+//
+// Upstream background:  Such
 // a session claims its wisp under its session bead ID (gc hook --claim records
 // alias > GC_SESSION_ID) and exports that same ID as BEADS_ACTOR, while
 // GC_SESSION_NAME stays the runtime name (<template>-<beadID>). bd fences the
@@ -461,17 +468,17 @@ func TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool(t *testing.T) {
 		{
 			name: "beads actor",
 			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=gc-dog7", "GC_SESSION_ID=gc-dog7", "GC_SESSION_NAME=dolt__dog-gc-dog7"},
-			want: "bd close bead-1 --actor gc-dog7",
+			want: "gc bd close bead-1",
 		},
 		{
 			name: "session id when beads actor absent",
 			env:  []string{"GC_ALIAS=", "GC_SESSION_ID=gc-dog7", "GC_SESSION_NAME=dolt__dog-gc-dog7"},
-			want: "bd close bead-1 --actor gc-dog7",
+			want: "gc bd close bead-1",
 		},
 		{
 			name: "session name last",
 			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=", "GC_SESSION_NAME=dog-session-7"},
-			want: "bd close bead-1 --actor dog-session-7",
+			want: "gc bd close bead-1",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -511,7 +518,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send"|"bd update"|"bd close")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -561,6 +568,9 @@ esac
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
 		}
+	}
+	if strings.Contains(log, "close bead-1 --") {
+		t.Fatalf("class-store close must be a bare by-ID command\nlog:\n%s\noutput:\n%s", log, out)
 	}
 	if strings.Contains(log, "mol-dog-stale-db.escalate") {
 		t.Fatalf("rendered script escalated at dropped.count == max_orphans_for_sql; want apply because threshold is >\nlog:\n%s\noutput:\n%s", log, out)

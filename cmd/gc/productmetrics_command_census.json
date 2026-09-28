@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 209,
+  "next_id": 210,
   "permanent_ids": [
     {
       "name": "help",
@@ -3117,6 +3117,21 @@
       "classification": "perf-session-new",
       "owner": "immediate",
       "id": 115
+    },
+    {
+      "path": "gc pool-admission-probe",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pool-admission-probe",
+      "owner": "immediate",
+      "id": 209
     },
     {
       "path": "gc prime",

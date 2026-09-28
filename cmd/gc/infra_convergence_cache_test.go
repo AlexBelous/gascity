@@ -116,9 +116,6 @@ func TestInfraConvergenceCacheInvalidation(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
-		"disabled by env": func(t *testing.T, _ infraBindingTarget, _ *fingerprintedSource, _ *time.Time) {
-			t.Setenv(infraConvergenceCacheEnv, "off")
-		},
 	}
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {

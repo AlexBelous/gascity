@@ -1352,6 +1352,12 @@ func classifyInfraContainmentGapFromSource(source beads.Store, target infraBindi
 	if err != nil {
 		return infraContainmentGap{}, err
 	}
+	return classifyInfraContainmentGapFromIDs(ids, target, proven)
+}
+
+// classifyInfraContainmentGapFromIDs classifies source infrastructure ids
+// already read from the work store.
+func classifyInfraContainmentGapFromIDs(ids []string, target infraBindingTarget, proven map[string]bool) (infraContainmentGap, error) {
 	if len(ids) == 0 {
 		return infraContainmentGap{}, nil
 	}

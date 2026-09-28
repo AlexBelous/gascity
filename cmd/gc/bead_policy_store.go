@@ -546,3 +546,14 @@ func (s *beadPolicyStore) ReadClassification() ([]beads.ClassificationRow, error
 	}
 	return reader.ReadClassification()
 }
+
+// ClassificationFingerprint forwards the wrapped store's working-set
+// fingerprint. A store without one stays explicit, so no caller can mistake a
+// missing capability for an unchanged store.
+func (s *beadPolicyStore) ClassificationFingerprint() (string, error) {
+	fp, ok := s.Store.(beads.ClassificationFingerprinter)
+	if !ok {
+		return "", beads.ErrClassificationUnsupported
+	}
+	return fp.ClassificationFingerprint()
+}

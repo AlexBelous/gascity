@@ -129,3 +129,7 @@ func openRealNativeDoltServerStoreForClassification(t *testing.T) *NativeDoltSto
 	}
 	return newNativeDoltStoreWithStorageAndPrefix(storage, "classification-projection", "gc")
 }
+
+// readyOutcomeLegacyStorage hides optional optimized capabilities of the
+// wrapped storage so a test reads through the base beadslib.Storage methods.
+type readyOutcomeLegacyStorage struct{ beadslib.Storage }

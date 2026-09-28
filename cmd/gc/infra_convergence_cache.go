@@ -42,9 +42,6 @@ import (
 // through here; it always checks in full.
 const infraConvergenceVerdictTTL = 60 * time.Second
 
-// infraConvergenceCacheEnv set to "off" disables the reuse.
-const infraConvergenceCacheEnv = "GC_INFRA_CONVERGENCE_CACHE"
-
 // infraConvergenceMaxUnproven bounds the ids a verdict carries. A city with
 // more unproven ids than this is not in a state worth short-circuiting.
 const infraConvergenceMaxUnproven = 1024
@@ -84,9 +81,6 @@ func checkInfraClassConvergenceForCLI(cityPath string, cfg *config.City, logPref
 // classifyInfraContainmentGapCached is classifyInfraContainmentGap with a
 // clean verdict reused while it still holds.
 func classifyInfraContainmentGapCached(cityPath string, target infraBindingTarget, proven map[string]bool) (infraContainmentGap, error) {
-	if os.Getenv(infraConvergenceCacheEnv) == "off" {
-		return classifyInfraContainmentGap(cityPath, target, proven)
-	}
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		return infraContainmentGap{}, fmt.Errorf("opening work store: %w", err)

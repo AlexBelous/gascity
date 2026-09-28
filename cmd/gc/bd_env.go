@@ -708,7 +708,9 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	} else if err != nil {
 		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
 	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityConfigPath)
+	// Provenance is dropped, so the load-time revision snapshot (a content hash
+	// of every pack directory) is pure cost here; see skipRevisionSnapshot.
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, skipRevisionSnapshot)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
 	}

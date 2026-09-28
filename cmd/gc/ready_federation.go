@@ -312,7 +312,7 @@ func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bea
 			if _, seen := owner[b.ID]; seen {
 				continue
 			}
-			authoritative, authoritativeIndex, found, err := authoritativeReadyCopy(legs, b.ID)
+			authoritative, authoritativeIndex, found, err := authoritativeReadyCopy(legs, i, b)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -334,11 +334,13 @@ func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bea
 // in_progress after the relocated class copy closed, and first-row-wins would
 // resurrect it forever as an existing assignment.
 //
-// Every probe is live because this function exists specifically for crash
-// recovery. Returning the bead read by the ownership probe also closes the
-// List/Get race: if an in_progress row closes between those reads, the current
-// status suppresses it instead of dispatching one final stale claim.
-func authoritativeReadyCopy(legs []readyLeg, id string) (beads.Bead, int, bool, error) {
+// Every ownership probe is live because this function exists specifically for
+// crash recovery. The candidate row itself already came from the current leg's
+// status-scoped List. Once no class binding and no earlier work leg contains
+// the id, that row is authoritative; probing the current and all later legs
+// cannot change the answer and turns one list into O(rows*legs) round trips.
+func authoritativeReadyCopy(legs []readyLeg, candidateIndex int, candidate beads.Bead) (beads.Bead, int, bool, error) {
+	id := candidate.ID
 	probe := func(i int) (beads.Bead, bool, error) {
 		b, err := beads.HandlesFor(legs[i].store).Live.Get(id)
 		switch {
@@ -355,11 +357,14 @@ func authoritativeReadyCopy(legs []readyLeg, id string) (beads.Bead, int, bool, 
 		if !legs[i].classBinding {
 			continue
 		}
+		if i == candidateIndex {
+			return candidate, i, true, nil
+		}
 		if b, found, err := probe(i); err != nil || found {
 			return b, i, found, err
 		}
 	}
-	for i := range legs {
+	for i := 0; i < candidateIndex; i++ {
 		if legs[i].classBinding {
 			continue
 		}
@@ -367,7 +372,7 @@ func authoritativeReadyCopy(legs []readyLeg, id string) (beads.Bead, int, bool, 
 			return b, i, found, err
 		}
 	}
-	return beads.Bead{}, -1, false, nil
+	return candidate, candidateIndex, true, nil
 }
 
 // federateBeadLegs runs read against every leg in order and merges the results,

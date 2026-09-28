@@ -86,6 +86,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -105,9 +106,10 @@ import (
 // this reader is overriding a policy that really is PartialDegrade, rather than
 // quietly agreeing with a plan that never said so.
 type readyLeg struct {
-	label   string
-	store   beads.Store
-	onError storeref.ErrPolicy
+	label        string
+	store        beads.Store
+	onError      storeref.ErrPolicy
+	classBinding bool
 }
 
 // readyFederationLegs assembles the ordered leg list from Plan(RoutedWork): the
@@ -168,7 +170,12 @@ func readyLegsForTopology(topo storeref.Topology) ([]readyLeg, error) {
 	}
 	var legs []readyLeg
 	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, onError storeref.ErrPolicy) {
-		legs = append(legs, readyLeg{label: readyLegLabel(leg.Ref), store: leg.Store, onError: onError})
+		legs = append(legs, readyLeg{
+			label:        readyLegLabel(leg.Ref),
+			store:        leg.Store,
+			onError:      onError,
+			classBinding: storeref.IsClassRef(string(leg.Ref)),
+		})
 	})
 	return legs, nil
 }
@@ -298,7 +305,7 @@ func federateListBeads(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, error)
 func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, map[string]readyLeg, error) {
 	var merged []beads.Bead
 	owner := make(map[string]readyLeg)
-	for _, leg := range legs {
+	for i, leg := range legs {
 		rows, err := leg.store.List(q)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s store: %w", leg.label, err)
@@ -307,11 +314,62 @@ func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bea
 			if _, seen := owner[b.ID]; seen {
 				continue
 			}
+			authoritative, authoritativeIndex, found, err := authoritativeReadyCopy(legs, b.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !found || authoritativeIndex != i || !strings.EqualFold(strings.TrimSpace(authoritative.Status), strings.TrimSpace(q.Status)) {
+				continue
+			}
 			owner[b.ID] = leg
-			merged = append(merged, b)
+			merged = append(merged, authoritative)
 		}
 	}
 	return merged, owner, nil
+}
+
+// authoritativeReadyCopy resolves an id with the same ownership rule as the
+// by-id command path: a relocated class binding owns every id it contains,
+// including ids that kept their old work prefix during migration; otherwise
+// the normal federation order owns the id. Status-scoped List cannot establish
+// that rule by itself. In particular, a retained work-ledger copy may still be
+// in_progress after the relocated class copy closed, and first-row-wins would
+// resurrect it forever as an existing assignment.
+//
+// Every probe is live because this function exists specifically for crash
+// recovery. Returning the bead read by the ownership probe also closes the
+// List/Get race: if an in_progress row closes between those reads, the current
+// status suppresses it instead of dispatching one final stale claim.
+func authoritativeReadyCopy(legs []readyLeg, id string) (beads.Bead, int, bool, error) {
+	probe := func(i int) (beads.Bead, bool, error) {
+		b, err := beads.HandlesFor(legs[i].store).Live.Get(id)
+		switch {
+		case err == nil:
+			return b, true, nil
+		case errors.Is(err, beads.ErrNotFound):
+			return beads.Bead{}, false, nil
+		default:
+			return beads.Bead{}, false, fmt.Errorf("%s store: resolving authoritative copy of %q: %w", legs[i].label, id, err)
+		}
+	}
+
+	for i := range legs {
+		if !legs[i].classBinding {
+			continue
+		}
+		if b, found, err := probe(i); err != nil || found {
+			return b, i, found, err
+		}
+	}
+	for i := range legs {
+		if legs[i].classBinding {
+			continue
+		}
+		if b, found, err := probe(i); err != nil || found {
+			return b, i, found, err
+		}
+	}
+	return beads.Bead{}, -1, false, nil
 }
 
 // federateBeadLegs runs read against every leg in order and merges the results,

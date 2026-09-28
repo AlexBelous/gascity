@@ -518,6 +518,117 @@ func TestReadyDedupeIsFirstLegWins(t *testing.T) {
 	}
 }
 
+// TestReadyInProgressDoesNotResurrectAStaleSecondaryCopy protects crash
+// recovery from a split-store duplicate whose authoritative, earlier-leg copy
+// has already closed. Querying each leg only for in_progress rows used to hide
+// the closed city copy from the merge, so the later stale copy was emitted and
+// gc hook --claim returned it forever as an existing_assignment.
+func TestReadyInProgressDoesNotResurrectAStaleSecondaryCopy(t *testing.T) {
+	city := splittest.NewWorkStore(t, "gc")
+	rig := splittest.NewWorkStore(t, "ra")
+
+	canonical := mustCreateReadyBead(t, city, beads.Bead{
+		Title: "completed city work",
+		Type:  "task",
+	})
+	if err := city.Close(canonical.ID); err != nil {
+		t.Fatalf("close canonical city row: %v", err)
+	}
+	forced, ok := rig.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatalf("rig store %T cannot stage a preserved duplicate id", rig)
+	}
+	if _, err := forced.CreateWithForeignID(beads.Bead{
+		ID:    canonical.ID,
+		Title: "stale rig copy",
+		Type:  "task",
+	}); err != nil {
+		t.Fatalf("stage stale secondary copy: %v", err)
+	}
+	status, assignee := readyStatusInProgress, "worker-1"
+	if err := rig.Update(canonical.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("mark secondary copy in progress: %v", err)
+	}
+
+	rows, err := readyBeadsForOpts(
+		mustReadyLegs(t, "mycity", city, map[string]beads.Store{"rig-A": rig}, nil),
+		readyOpts{status: readyStatusInProgress, assignee: "worker-1"},
+	)
+	if err != nil {
+		t.Fatalf("gc ready: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("gc ready resurrected stale secondary copy %s after the canonical city row closed: %v", canonical.ID, readyWireIDs(rows))
+	}
+}
+
+// A migrated bead keeps its work-style id, but the relocated class binding is
+// still its by-id authority. This is the production shape that originally
+// exposed the bug: the retained work copy was in_progress while the class copy
+// had closed, so ordinary first-leg order kept reviving the old assignment.
+func TestReadyInProgressPrefersClosedRelocatedCopyOverStaleWorkCopy(t *testing.T) {
+	work := splittest.NewWorkStore(t, "gc")
+	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+
+	stale := mustCreateReadyBead(t, work, beads.Bead{
+		Title: "retained work copy",
+		Type:  "task",
+	})
+	status, assignee := readyStatusInProgress, "worker-1"
+	if err := work.Update(stale.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("mark retained work copy in progress: %v", err)
+	}
+	forced, ok := graph.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatalf("class store %T cannot stage a preserved migrated id", graph)
+	}
+	if _, err := forced.CreateWithForeignID(beads.Bead{
+		ID:    stale.ID,
+		Title: "authoritative relocated copy",
+		Type:  "task",
+	}); err != nil {
+		t.Fatalf("stage relocated copy: %v", err)
+	}
+	if err := graph.Close(stale.ID); err != nil {
+		t.Fatalf("close authoritative relocated copy: %v", err)
+	}
+
+	rows, err := readyBeadsForOpts(
+		mustReadyLegs(t, "mycity", work, nil, graph),
+		readyOpts{status: readyStatusInProgress, assignee: assignee},
+	)
+	if err != nil {
+		t.Fatalf("gc ready: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("gc ready resurrected retained work copy %s after the relocated authority closed: %v", stale.ID, readyWireIDs(rows))
+	}
+}
+
+func TestReadyInProgressFailsLoudWhenCanonicalOwnershipCannotBeChecked(t *testing.T) {
+	city := readyGetFailingStore{
+		Store: splittest.NewWorkStore(t, "gc"),
+		err:   errors.New("canonical lookup unavailable"),
+	}
+	rig := splittest.NewWorkStore(t, "ra")
+	stale := mustCreateReadyBead(t, rig, beads.Bead{Title: "assigned rig work", Type: "task"})
+	status, assignee := readyStatusInProgress, "worker-1"
+	if err := rig.Update(stale.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("mark rig work in progress: %v", err)
+	}
+
+	_, err := readyBeadsForOpts(
+		mustReadyLegs(t, "mycity", city, map[string]beads.Store{"rig-A": rig}, nil),
+		readyOpts{status: readyStatusInProgress, assignee: "worker-1"},
+	)
+	if err == nil {
+		t.Fatal("canonical ownership failure produced a successful crash-recovery answer")
+	}
+	if !strings.Contains(err.Error(), "city store") || !strings.Contains(err.Error(), "canonical lookup unavailable") {
+		t.Fatalf("error = %v, want the authoritative leg and lookup failure", err)
+	}
+}
+
 // TestReadyFederationLegOrderMatchesTheAPIContract pins the leg SEQUENCE:
 // city, rigs by name ascending, graph last.
 func TestReadyFederationLegOrderMatchesTheAPIContract(t *testing.T) {
@@ -874,6 +985,15 @@ func (s readyFailingStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
 
 func (s readyFailingStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, s.err
+}
+
+type readyGetFailingStore struct {
+	beads.Store
+	err error
+}
+
+func (s readyGetFailingStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, s.err
 }
 
 // TestReadyDeclaresJSONSupport keeps `gc ready --json` from tripping the CLI's

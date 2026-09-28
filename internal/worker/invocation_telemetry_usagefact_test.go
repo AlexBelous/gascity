@@ -291,7 +291,6 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	if fallback.At != now.UnixMilli() {
 		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
 	}
-	return nil
 }
 
 func TestModelUsageFactWorkAttribution(t *testing.T) {

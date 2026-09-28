@@ -605,6 +605,60 @@ func TestReadyInProgressPrefersClosedRelocatedCopyOverStaleWorkCopy(t *testing.T
 	}
 }
 
+// A row returned by the first work leg needs only the class-binding ownership
+// check. Re-reading that same row (and probing later work legs) made the Clerk's
+// broad in_progress recovery query issue one Dolt Get per candidate per leg.
+func TestReadyInProgressDoesNotRegetAuthoritativeCityCandidate(t *testing.T) {
+	city := &readyGetCountingStore{Store: splittest.NewWorkStore(t, "gc")}
+	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	row := mustCreateReadyBead(t, city, beads.Bead{Title: "assigned city work", Type: "task"})
+	status, assignee := readyStatusInProgress, "worker-1"
+	if err := city.Update(row.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("mark city row in progress: %v", err)
+	}
+
+	rows, err := readyBeadsForOpts(
+		mustReadyLegs(t, "mycity", city, nil, graph),
+		readyOpts{status: readyStatusInProgress, assignee: assignee},
+	)
+	if err != nil {
+		t.Fatalf("gc ready: %v", err)
+	}
+	if got := readyWireIDs(rows); !reflect.DeepEqual(got, []string{row.ID}) {
+		t.Fatalf("rows = %v, want [%s]", got, row.ID)
+	}
+	if city.getCalls != 0 {
+		t.Fatalf("authoritative city candidate was re-read %d times, want 0", city.getCalls)
+	}
+}
+
+// A row from a later work leg still has to check every earlier work leg. This
+// is the check that suppresses a stale rig assignment after the city copy has
+// closed; optimizing the common first-leg case must not weaken it.
+func TestReadyInProgressChecksEarlierLegBeforeAcceptingRigCandidate(t *testing.T) {
+	city := &readyGetCountingStore{Store: splittest.NewWorkStore(t, "gc")}
+	rig := splittest.NewWorkStore(t, "ra")
+	row := mustCreateReadyBead(t, rig, beads.Bead{Title: "assigned rig work", Type: "task"})
+	status, assignee := readyStatusInProgress, "worker-1"
+	if err := rig.Update(row.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("mark rig row in progress: %v", err)
+	}
+
+	rows, err := readyBeadsForOpts(
+		mustReadyLegs(t, "mycity", city, map[string]beads.Store{"rig-A": rig}, nil),
+		readyOpts{status: readyStatusInProgress, assignee: assignee},
+	)
+	if err != nil {
+		t.Fatalf("gc ready: %v", err)
+	}
+	if got := readyWireIDs(rows); !reflect.DeepEqual(got, []string{row.ID}) {
+		t.Fatalf("rows = %v, want [%s]", got, row.ID)
+	}
+	if city.getCalls != 1 {
+		t.Fatalf("earlier city leg was checked %d times, want 1", city.getCalls)
+	}
+}
+
 func TestReadyInProgressFailsLoudWhenCanonicalOwnershipCannotBeChecked(t *testing.T) {
 	city := readyGetFailingStore{
 		Store: splittest.NewWorkStore(t, "gc"),
@@ -994,6 +1048,16 @@ type readyGetFailingStore struct {
 
 func (s readyGetFailingStore) Get(string) (beads.Bead, error) {
 	return beads.Bead{}, s.err
+}
+
+type readyGetCountingStore struct {
+	beads.Store
+	getCalls int
+}
+
+func (s *readyGetCountingStore) Get(id string) (beads.Bead, error) {
+	s.getCalls++
+	return s.Store.Get(id)
 }
 
 // TestReadyDeclaresJSONSupport keeps `gc ready --json` from tripping the CLI's

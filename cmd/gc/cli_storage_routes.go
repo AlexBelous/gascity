@@ -153,7 +153,7 @@ var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
-	return resolveCLIStorageRoutesWithCheck(cityPath, checkInfraClassConvergence)
+	return resolveCLIStorageRoutesWithCheck(cityPath, checkInfraClassConvergenceForCLI)
 }
 
 func resolveCLIStorageRoutesWithCheck(cityPath string, check infraConvergenceCheck) *storageRoutes {

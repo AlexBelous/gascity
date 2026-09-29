@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -60,10 +62,10 @@ func (s *NativeDoltStore) ClearBlockerPairIfMatch(id string, expected BlockerPai
 		if err != nil {
 			return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
 		}
-		if metadata["gc.blocked_on"] != expected.Text ||
-			metadata["gc.blocker.v2"] != expected.Typed ||
-			metadata["gc.routed_to"] != expected.Route ||
-			metadata["gc.next_owner"] != expected.Owner ||
+		if metadata[beadmeta.BlockedOnMetadataKey] != expected.Text ||
+			metadata[beadmeta.BlockerV2MetadataKey] != expected.Typed ||
+			metadata[beadmeta.RoutedToMetadataKey] != expected.Route ||
+			metadata[beadmeta.NextOwnerMetadataKey] != expected.Owner ||
 			metadata["workflow.gate_id"] != expected.GateID {
 			return nil
 		}
@@ -71,8 +73,8 @@ func (s *NativeDoltStore) ClearBlockerPairIfMatch(id string, expected BlockerPai
 		if err != nil {
 			return fmt.Errorf("parsing raw metadata for bead %q: %w", id, err)
 		}
-		delete(rawMetadata, "gc.blocked_on")
-		delete(rawMetadata, "gc.blocker.v2")
+		delete(rawMetadata, beadmeta.BlockedOnMetadataKey)
+		delete(rawMetadata, beadmeta.BlockerV2MetadataKey)
 		rawBytes, err := json.Marshal(rawMetadata)
 		if err != nil {
 			return fmt.Errorf("marshaling metadata: %w", err)
@@ -93,10 +95,10 @@ func (s *NativeDoltStore) ClearBlockerPairIfMatch(id string, expected BlockerPai
 		if err != nil {
 			return fmt.Errorf("readback metadata for bead %q: %w", id, err)
 		}
-		if _, exists := resultMetadata["gc.blocked_on"]; exists {
+		if _, exists := resultMetadata[beadmeta.BlockedOnMetadataKey]; exists {
 			return fmt.Errorf("blocker text survived paired release on %q", id)
 		}
-		if _, exists := resultMetadata["gc.blocker.v2"]; exists {
+		if _, exists := resultMetadata[beadmeta.BlockerV2MetadataKey]; exists {
 			return fmt.Errorf("typed blocker survived paired release on %q", id)
 		}
 		swapped = true

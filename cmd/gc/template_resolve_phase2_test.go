@@ -66,7 +66,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantProcessNames:      []string{"node", "claude"},
 			wantEmitsPermission:   true,
 			overrideValue:         "sonnet",
-			wantOverrideArgs:      []string{"--model", "claude-sonnet-5"},
+			wantOverrideArgs:      []string{"--model", "claude-sonnet-5-5"},
 		},
 		{
 			profileID:             "codex/tmux-cli",

@@ -285,7 +285,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				modelAlias("opus", "Opus", "claude-opus-4-8"),
 				modelAlias("opus-5", "Opus 5", "claude-opus-5"),
 				modelAlias("opus-4-7", "Opus 4.7", "claude-opus-4-7"),
-				modelAlias("sonnet", "Sonnet", "claude-sonnet-5"),
+				modelAlias("sonnet", "Sonnet", "claude-sonnet-5-5"),
+				modelAlias("sonnet-5-5", "Sonnet 5.5", "claude-sonnet-5-5"),
 				modelAlias("sonnet-5", "Sonnet 5", "claude-sonnet-5"),
 				modelAlias("sonnet-4-6", "Sonnet 4.6", "claude-sonnet-4-6"),
 				modelAlias("haiku", "Haiku", "claude-haiku-4-5-20251001"),
@@ -298,6 +299,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				// same class of surprise these entries exist to eliminate.
 				modelChoice("claude-opus-5[1m]", "Opus 5 1M (canonical id)"),
 				modelChoice("claude-sonnet-5", "Sonnet 5 (canonical id)"),
+				modelChoice("claude-sonnet-5-5", "Sonnet 5.5 (canonical id)"),
 				modelChoice("claude-fable-5", "Fable 5 (canonical id)"),
 			),
 		},

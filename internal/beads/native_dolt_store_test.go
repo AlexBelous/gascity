@@ -2858,6 +2858,22 @@ func (s *nativeDoltMemStorage) UpdateIssue(_ context.Context, id string, updates
 	if err != nil {
 		return err
 	}
+	// The native Dolt API treats a direct metadata field update as a full JSON
+	// column replacement. MemStore.Update merges metadata, so emulate the
+	// native replacement for this test adapter's metadata-only path.
+	if len(updates) == 1 && opts.Metadata != nil {
+		s.store.mu.Lock()
+		defer s.store.mu.Unlock()
+		for i := range s.store.beads {
+			if s.store.beads[i].ID == id {
+				s.store.beads[i].Metadata = maps.Clone(opts.Metadata)
+				s.store.beads[i].Revision++
+				s.store.beads[i].UpdatedAt = time.Now()
+				return nil
+			}
+		}
+		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
 	return s.store.Update(id, opts)
 }
 

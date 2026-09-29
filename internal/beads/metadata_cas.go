@@ -3,7 +3,7 @@
 // ConditionalWriter (beads.go) bundles four methods: the revision-CAS trio
 // (UpdateIfMatch/CloseIfMatch/DeleteIfMatch) plus CompareAndSetMetadataKey.
 // The trio needs a backend fence token — a revision that advances on every
-// mutation and is never reused. The beads v1.1.0 schema cannot supply one:
+// mutation and is never reused. The older beads v1.1.0 schema could not supply one:
 // types.Issue carries no revision field (Get().Revision is 0 and never
 // advances), the issues DDL has no version column, and updated_at is
 // second-granularity — so two same-second writes yield an EQUAL token and a
@@ -13,19 +13,20 @@
 // CLI, other gascity processes, graph-apply), and a counter only the fencer
 // maintains fences nothing.
 //
-// CompareAndSetMetadataKey needs no such token — it guards on the key's own
-// current value — so it is soundly implementable today on stores where the
-// trio is not. MetadataCASWriter is that half, split out so a store can
+// Current native Dolt backends expose RowVersion and implement the trio in
+// native_dolt_store_conditional.go. Other backends may still lack that fence.
+// CompareAndSetMetadataKey needs no row token — it guards on the key's own
+// current value — so it remains sound where the trio is unavailable.
+// MetadataCASWriter is that half, split out so a store can
 // declare the capability it actually has. Declaring the whole of
 // ConditionalWriter just to expose the CAS method would make
 // ResolveConditionalWriter RESOLVE under require mode and hand the trio's
-// callers a silently-wrong fence — converting today's loud typed refusal into
+// callers a silently-wrong fence — converting a loud typed refusal into
 // exactly the silent legacy write under require that the seam exists to make
 // inexpressible. See the condWritesStamp comment in native_dolt_store.go.
 //
-// Upstream beads #4697 (claim_fence) is the missing backend primitive. When it
-// lands, a store can implement the trio soundly and declare ConditionalWriter;
-// until then a narrow-only store declares MetadataCASWriter and nothing more.
+// Backends still awaiting a claim fence declare MetadataCASWriter only;
+// backends with a sound row-version fence may declare ConditionalWriter.
 //
 // Resolution is deliberately SEPARATE from ResolveConditionalWriter: this is a
 // capability lookup, not the operator-policy seam. It carries no

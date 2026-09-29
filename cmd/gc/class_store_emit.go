@@ -569,6 +569,22 @@ func (s *emittingClassStore) CompareAndSetMetadataKey(id, key, expected, next st
 	return swapped, err
 }
 
+// ClearBlockerPairIfMatch emits only when the paired release landed, for the
+// same reason as CompareAndSetMetadataKey: a refused match changed nothing.
+func (s *emittingClassStore) ClearBlockerPairIfMatch(id string, expected beads.BlockerPairSnapshot) (bool, error) {
+	clearer, ok := s.Store.(interface {
+		ClearBlockerPairIfMatch(string, beads.BlockerPairSnapshot) (bool, error)
+	})
+	if !ok {
+		return false, beads.ErrConditionalWriteUnsupported
+	}
+	cleared, err := clearer.ClearBlockerPairIfMatch(id, expected)
+	if err == nil && cleared {
+		s.emitUpdated(id)
+	}
+	return cleared, err
+}
+
 func (s *emittingClassStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 	claimer, ok := s.Store.(interface {
 		Claim(string, string) (beads.Bead, bool, error)

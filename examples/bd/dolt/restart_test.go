@@ -40,6 +40,16 @@ esac
 	if err != nil {
 		t.Fatalf("read production enospc helper: %v", err)
 	}
+	// Keep disk-capacity injection at the smallest owning seam. The production
+	// helper still owns all classification logic; only df's observed value is
+	// replaced for the insufficient-headroom branch.
+	enospcHelper = append(enospcHelper, []byte(`
+if [ -n "${GC_TEST_DOLT_AVAILABLE_KIB:-}" ]; then
+  dolt_available_kib() {
+    printf '%s\n' "$GC_TEST_DOLT_AVAILABLE_KIB"
+  }
+fi
+`)...)
 	if err := os.WriteFile(filepath.Join(scriptDir, "dolt-enospc.sh"), enospcHelper, 0o644); err != nil {
 		t.Fatalf("write fake enospc helper: %v", err)
 	}
@@ -50,6 +60,13 @@ esac
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, "dolt.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
 		t.Fatalf("write fake dolt pid: %v", err)
+	}
+	databaseDir := filepath.Join(cityPath, ".beads", "dolt", "hq")
+	if err := os.MkdirAll(databaseDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake dolt database: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(databaseDir, "seed"), []byte("allocated database block\n"), 0o644); err != nil {
+		t.Fatalf("write fake dolt database: %v", err)
 	}
 	return logPath
 }
@@ -348,6 +365,68 @@ func TestRestartRefusesFreshENOSPCUnlessForced(t *testing.T) {
 	got := strings.Join(strings.Fields(string(data)), " ")
 	if got != "stop start" {
 		t.Fatalf("expected forced restart to call stop then start, got %q\noutput:\n%s", got, out)
+	}
+}
+
+func TestRestartAllowsNoENOSPCWithSufficientDiskHeadroom(t *testing.T) {
+	root := repoRoot(t)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	bdLog := writeFakeBeadsBDForRestart(t, cityPath, root, map[string]int{"stop": 0, "start": 0})
+	writeRestartLog(t, cityPath, "time=\"2000-01-01T00:00:00Z\" level=warning msg=\"ordinary warning\"\n")
+
+	out, err := runRestartWithEnv(t, cityPath, root, []string{
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_TEST_DOLT_AVAILABLE_KIB=1048576",
+	})
+	if err != nil {
+		t.Fatalf("gc dolt restart blocked with no ENOSPC and sufficient disk headroom: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	if got := strings.Join(strings.Fields(string(data)), " "); got != "stop start" {
+		t.Fatalf("expected sufficient headroom to allow stop then start, got %q\noutput:\n%s", got, out)
+	}
+}
+
+func TestRestartRefusesInsufficientDiskHeadroomUnlessForced(t *testing.T) {
+	root := repoRoot(t)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	bdLog := writeFakeBeadsBDForRestart(t, cityPath, root, map[string]int{"stop": 0, "start": 0})
+	writeRestartLog(t, cityPath, "time=\"2000-01-01T00:00:00Z\" level=warning msg=\"ordinary warning\"\n")
+	extraEnv := []string{
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_TEST_DOLT_AVAILABLE_KIB=0",
+	}
+
+	out, err := runRestartWithEnv(t, cityPath, root, extraEnv)
+	if err == nil {
+		t.Fatalf("gc dolt restart unexpectedly ignored insufficient disk headroom:\n%s", out)
+	}
+	if !strings.Contains(string(out), "insufficient Dolt disk headroom") {
+		t.Fatalf("restart did not explain the headroom refusal; output:\n%s", out)
+	}
+	if data, err := os.ReadFile(bdLog); err == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("restart invoked gc-beads-bd despite insufficient headroom; ops log:\n%s\noutput:\n%s", data, out)
+	}
+
+	out, err = runRestartWithEnv(t, cityPath, root, extraEnv, "--force")
+	if err != nil {
+		t.Fatalf("gc dolt restart --force failed despite fake stop/start success: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	if got := strings.Join(strings.Fields(string(data)), " "); got != "stop start" {
+		t.Fatalf("expected --force to remain an explicit headroom override, got %q\noutput:\n%s", got, out)
 	}
 }
 

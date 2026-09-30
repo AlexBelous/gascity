@@ -2,14 +2,10 @@
 
 # Dolt restart/recovery guard shared by the managed lifecycle commands.
 #
-# The guard has two independent inputs:
-#   1. ENOSPC evidence must belong to the current Dolt launch. A match before
-#      that launch's durable start boundary is stale and does not block
-#      recovery, even after the managed process has exited.
-#   2. The filesystem holding the live databases must have at least twice the
-#      allocated size of the largest database available. Dolt conjoin writes a
-#      replacement before deleting its inputs, so less headroom can reproduce
-#      the disk-full cascade even when the log has no ENOSPC match yet.
+# ENOSPC evidence must belong to the current Dolt launch. A match before that
+# launch's durable start boundary is stale and does not block recovery, even
+# after the managed process has exited. Fresh or unparseable evidence fails
+# closed.
 #
 # Callers inspect DOLT_ENOSPC_GUARD_REASON after a true (0) return from
 # recovery_should_skip_due_to_enospc. --force remains the caller-owned,
@@ -81,51 +77,6 @@ dolt_current_launch_start_epoch() (
     dolt_epoch_from_rfc3339 "$_dolt_state_started"
 )
 
-dolt_available_kib() (
-    df -Pk "$1" 2>/dev/null \
-        | awk 'NR > 1 { available = $4 } END { if (available ~ /^[0-9]+$/) print available }'
-)
-
-dolt_largest_database_kib() (
-    _dolt_data_dir="$1"
-    _dolt_largest=0
-
-    for _dolt_database in "$_dolt_data_dir"/*; do
-        [ -d "$_dolt_database" ] || continue
-        _dolt_size=$(du -sk "$_dolt_database" 2>/dev/null | awk 'NR == 1 { print $1 }') || return 1
-        case "$_dolt_size" in
-            ''|*[!0-9]*) return 1 ;;
-        esac
-        if [ "$_dolt_size" -gt "$_dolt_largest" ]; then
-            _dolt_largest="$_dolt_size"
-        fi
-    done
-    printf '%s\n' "$_dolt_largest"
-)
-
-dolt_disk_headroom_guard_reason() (
-    # No database directory means there is no existing store to conjoin.
-    [ -n "${DATA_DIR:-}" ] && [ -d "$DATA_DIR" ] || return 1
-    _dolt_largest=$(dolt_largest_database_kib "$DATA_DIR") || {
-        printf 'cannot measure Dolt database sizes under %s\n' "$DATA_DIR"
-        return 0
-    }
-    _dolt_available=$(dolt_available_kib "$DATA_DIR") || true
-    case "$_dolt_available" in
-        ''|*[!0-9]*)
-            printf 'cannot determine free disk headroom for %s\n' "$DATA_DIR"
-            return 0
-            ;;
-    esac
-    _dolt_required=$((_dolt_largest * 2))
-    if [ "$_dolt_available" -lt "$_dolt_required" ]; then
-        printf 'insufficient Dolt disk headroom: available=%s KiB required=%s KiB (2x largest database=%s KiB) under %s\n' \
-            "$_dolt_available" "$_dolt_required" "$_dolt_largest" "$DATA_DIR"
-        return 0
-    fi
-    return 1
-)
-
 dolt_enospc_log_guard_reason() (
     [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
     _dolt_matches=$(tail -n 1000 "$LOG_FILE" 2>/dev/null | awk '
@@ -175,15 +126,11 @@ DOLT_ENOSPC_MATCHES
 )
 
 # recovery_should_skip_due_to_enospc returns 0 (true) when recovery is unsafe.
-# It returns 1 only when both the log classification and disk-headroom check are
-# safe. Each blocking path sets a precise diagnostic for the caller.
+# It returns 1 when the log has no ENOSPC evidence from the current launch. Each
+# blocking path sets a precise diagnostic for the caller.
 recovery_should_skip_due_to_enospc() {
     # shellcheck disable=SC2034 # Read by the scripts that source this helper.
     DOLT_ENOSPC_GUARD_REASON=""
-    _dolt_guard_reason=$(dolt_disk_headroom_guard_reason) && {
-        DOLT_ENOSPC_GUARD_REASON="$_dolt_guard_reason"
-        return 0
-    }
     _dolt_guard_reason=$(dolt_enospc_log_guard_reason) && {
         DOLT_ENOSPC_GUARD_REASON="$_dolt_guard_reason"
         return 0

@@ -3099,7 +3099,7 @@ op_recover() {
     if recovery_should_skip_due_to_enospc; then
         echo "skipping dolt recovery: ${DOLT_ENOSPC_GUARD_REASON:-ENOSPC recovery guard failed closed}" >&2
         echo "  resolve the reported guard condition, then re-run health checks" >&2
-        die "dolt recovery skipped: ENOSPC detected"
+        die "dolt recovery skipped: ${DOLT_ENOSPC_GUARD_REASON:-ENOSPC recovery guard failed closed}"
     fi
 
     if load_recover_managed_from_gc; then

@@ -23,17 +23,19 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// nudgePostWriteDrainTimeout caps the wait for sc.done after a Nudge stdin
-// write fails. Sized to match terminateProcess's SIGTERM grace period so a
-// Nudge racing with Stop still converges to the best-effort nil contract
-// rather than surfacing a spurious error before SIGKILL lands.
-const nudgePostWriteDrainTimeout = 5 * time.Second
+// stopSocketReplyMargin is how much longer a cross-process stop waits for the
+// owner's "ok" than the stop grace itself, covering the SIGKILL and reap that
+// follow an expired grace.
+const stopSocketReplyMargin = 2 * time.Second
 
 // Config holds ACP provider settings.
 type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
 	NudgeBusyTimeout  time.Duration // default 60s
 	OutputBufferLines int           // default 1000
+	// StopGrace is how long Stop waits after SIGTERM before escalating to
+	// SIGKILL. Default runtime.ManagedProcessStopGrace.
+	StopGrace time.Duration
 }
 
 func (c *Config) handshakeTimeout() time.Duration {
@@ -48,6 +50,23 @@ func (c *Config) nudgeBusyTimeout() time.Duration {
 		return 60 * time.Second
 	}
 	return c.NudgeBusyTimeout
+}
+
+// stopGrace returns the SIGTERM-to-SIGKILL grace. A Nudge whose stdin write
+// fails waits the same bound for the exiting agent, so a Nudge racing with
+// Stop still converges to the best-effort nil contract rather than surfacing
+// a spurious error before SIGKILL lands.
+func (c *Config) stopGrace() time.Duration {
+	if c.StopGrace <= 0 {
+		return runtime.ManagedProcessStopGrace
+	}
+	return c.StopGrace
+}
+
+// stopSocketTimeout bounds a cross-process stop request: the owner replies
+// only after its grace has run out and the process is gone.
+func (c *Config) stopSocketTimeout() time.Duration {
+	return c.stopGrace() + stopSocketReplyMargin
 }
 
 func (c *Config) outputBufferLines() int {
@@ -235,6 +254,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
+	// The control-socket marker lets any gc process attribute this agent, and
+	// the tool children that inherit its environment, to a live owner; see
+	// [Provider.FindRuntimesBySessionID]. It is appended after the cfg.Env
+	// loop above and deliberately outranks a caller's entry for this key,
+	// including the empty spelling that would otherwise withhold it:
+	// attribution must not be caller-settable, or a caller could point the
+	// marker at any live listener to make its agent read as tracked, or
+	// withhold it to hide the agent from its own owner's handshake rescue.
+	env = append(envWithoutKey(env, controlSocketEnv), controlSocketEnv+"="+p.controlSocketMarker(name))
 	cmd.Env = env
 
 	// Set up stdio pipes for JSON-RPC.
@@ -355,11 +383,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
-		// Include stderr tail in the error for diagnostics.
-		if stderr := stderrBuf.String(); stderr != "" {
-			return fmt.Errorf("acp handshake for %q: %w\nagent stderr:\n%s", name, err, stderr)
-		}
-		return fmt.Errorf("acp handshake for %q: %w", name, err)
+		// The monitor closed done after cmd.Wait returned, so ProcessState is
+		// safe to read. An agent that already exited on its own keeps its exit
+		// status; one our SIGKILL ended reports a signal (ExitCode -1), so a 75
+		// here is always the agent's own choice.
+		return acpHandshakeStartError(name, err, cmd.ProcessState.ExitCode(), stderrBuf.String())
 	}
 
 	// Before committing the real conn, check whether Stop was called
@@ -423,6 +451,23 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	return nil
+}
+
+// acpHandshakeStartError formats a failed handshake's Start error, including
+// the agent's stderr tail for diagnostics. exitCode is the reaped agent's
+// [os.ProcessState.ExitCode]: -1 when a signal ended it (including Start's own
+// SIGKILL) or it was never reaped. When the agent exited with
+// [runtime.ExitCodeTempFail], the launcher declared an endpoint capacity
+// refusal and the error is a [runtime.CapacityError].
+func acpHandshakeStartError(name string, hsErr error, exitCode int, stderr string) error {
+	err := fmt.Errorf("acp handshake for %q: %w", name, hsErr)
+	if stderr != "" {
+		err = fmt.Errorf("acp handshake for %q: %w\nagent stderr:\n%s", name, hsErr, stderr)
+	}
+	if exitCode == runtime.ExitCodeTempFail {
+		return &runtime.CapacityError{ExitCode: exitCode, Source: runtime.CapacitySourceExitStatus, Err: err}
+	}
+	return err
 }
 
 func envWithoutKey(env []string, key string) []string {
@@ -546,7 +591,7 @@ func (p *Provider) Stop(name string) error {
 			return nil
 		}
 		_ = sc.stdin.Close()
-		err := terminateProcess(sc)
+		err := terminateProcess(sc, p.cfg.stopGrace())
 		if err == nil || runtime.IsSessionGone(err) {
 			p.cleanupMeta(name)
 			return nil
@@ -685,7 +730,7 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 			// from "agent died mid-write."
 			fmt.Fprintf(os.Stderr, "acp: nudge to %q skipped (agent exiting): %v\n", name, err)
 			return nil
-		case <-time.After(nudgePostWriteDrainTimeout):
+		case <-time.After(p.cfg.stopGrace()):
 			return fmt.Errorf("sending prompt to %q: %w", name, err)
 		}
 	}
@@ -974,14 +1019,15 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd, done)
+			go handleControlConn(conn, cmd, done, p.cfg.stopGrace())
 		}
 	}()
 	return lis, nil
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
+// A "stop" escalates from SIGTERM to SIGKILL after stopGrace.
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -990,7 +1036,7 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
+		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
 		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
@@ -1060,7 +1106,7 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 
 // stopBySocket connects to a session's control socket and asks it to stop.
 func (p *Provider) stopBySocket(name string) error {
-	err := p.sendSocketCommand(name, "stop", 7*time.Second)
+	err := p.sendSocketCommand(name, "stop", p.cfg.stopSocketTimeout())
 	if err != nil {
 		if isUnavailableSocketError(err) {
 			os.Remove(p.sockPath(name)) //nolint:errcheck
@@ -1105,7 +1151,8 @@ func isPipeWriteError(err error) bool {
 	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
 }
 
-// terminateProcess sends SIGTERM then SIGKILL to a tracked process group.
-func terminateProcess(sc *sessionConn) error {
-	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+// terminateProcess sends SIGTERM then, after grace, SIGKILL to a tracked
+// process group.
+func terminateProcess(sc *sessionConn, grace time.Duration) error {
+	return runtime.TerminateManagedProcess(sc.cmd, sc.done, grace)
 }

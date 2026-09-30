@@ -72,7 +72,21 @@ const (
 	// Merged with main's reviewed delta: cmd-gc-productmetrics-testhook
 	// timeout-minutes 5 -> 12 (#6396: canceled at the 5-minute budget with no
 	// failing test).
-	expectedCIExecutionHash     = "71bfa3a539e5dd0cb7973c5f265ef6582a1ed943ccbd36fb39f39fda744c1cd2"
+	//
+	// Bumped again (#6385): the integration path filter also matches
+	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
+	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
+	// no new job, trigger or permission.
+	//
+	// Bumped again (F9): beads-topology-acceptance gains one step running
+	// TestBeadsProxiedIgnoresUserLevelSharedServer (-timeout 15m) and its job
+	// cap moves 90 -> 105 minutes to keep the step budget under it. Reviewed
+	// delta: one test step and the cap, no new job, trigger or permission.
+	//
+	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 pin: every job's
+	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
+	// only, no new job, step, trigger or permission.
+	expectedCIExecutionHash     = "00c7da41fd7f67a986f1fec6e8730b14632e725063ea977636bd0da2f6cb5ed0"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -81,8 +95,12 @@ const (
 	// PR jobs' resolve-pin / build-bd-from-BD_CURRENT_REF / verify steps
 	// verbatim, and one `go test -tags acceptance_a -timeout 45m -run
 	// 'TestBeadsProxiedDefault$'` step. No new trigger, no new permission, no
-	// provider selector.
-	expectedNightlyExecutionHash = "04ca67750b129d1e4b52702116e79f0c0547e67d1a1f050932511cf3fed10db2"
+	// provider selector. Then (v1.5.0 Tier C first-run drain) the tier-c job's
+	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
+	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
+	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
+	// pin: the workflow and job BD_VERSION env values only.
+	expectedNightlyExecutionHash = "95cdfa034e95e92beb2e1d01d29b7a6e4ccd323614caa4e8c2932f3ebe3de243"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

@@ -919,7 +919,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -987,13 +987,6 @@ export type EventStreamEnvelope = {
     ts: string;
     type: string;
     workflow?: WorkflowEventProjection;
-};
-
-export type ExecutionClaimStalledPayload = {
-    attempts: number;
-    bead_id: string;
-    root_bead_id?: string;
-    session_id: string;
 };
 
 export type ExecutionClaimWindowExpiredPayload = {
@@ -2176,6 +2169,18 @@ export type OrderRunOutputBody = {
      * Tracking bead id for the dispatch.
      */
     tracking_id?: string;
+};
+
+export type OrderSkippedPayload = {
+    order_name: string;
+    outcome: string;
+    reason: string;
+    scopes: Array<OrderSkippedScope> | null;
+};
+
+export type OrderSkippedScope = {
+    reason: string;
+    scope: string;
 };
 
 export type OrderSuppressedPayload = {
@@ -5346,8 +5351,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
-    type: 'execution.claim_stalled';
-} & TypedEventStreamEnvelopeExecutionClaimStalled) | ({
     type: 'execution.claim_window_expired';
 } & TypedEventStreamEnvelopeExecutionClaimWindowExpired) | ({
     type: 'execution.run_anchored';
@@ -5410,6 +5413,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.skipped';
+} & TypedEventStreamEnvelopeOrderSkipped) | ({
     type: 'order.suppressed';
 } & TypedEventStreamEnvelopeOrderSuppressed) | ({
     type: 'project.identity.stamped';
@@ -5970,24 +5975,6 @@ export type TypedEventStreamEnvelopeEventsRotated = {
 };
 
 /**
- * TypedEventStreamEnvelope execution.claim_stalled
- */
-export type TypedEventStreamEnvelopeExecutionClaimStalled = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: ExecutionClaimStalledPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'execution.claim_stalled';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope execution.claim_window_expired
  */
 export type TypedEventStreamEnvelopeExecutionClaimWindowExpired = {
@@ -6542,6 +6529,24 @@ export type TypedEventStreamEnvelopeOrderFired = {
     subject?: string;
     ts: string;
     type: 'order.fired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope order.skipped
+ */
+export type TypedEventStreamEnvelopeOrderSkipped = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OrderSkippedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.skipped';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7393,8 +7398,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
-    type: 'execution.claim_stalled';
-} & TypedTaggedEventStreamEnvelopeExecutionClaimStalled) | ({
     type: 'execution.claim_window_expired';
 } & TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired) | ({
     type: 'execution.run_anchored';
@@ -7457,6 +7460,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.skipped';
+} & TypedTaggedEventStreamEnvelopeOrderSkipped) | ({
     type: 'order.suppressed';
 } & TypedTaggedEventStreamEnvelopeOrderSuppressed) | ({
     type: 'project.identity.stamped';
@@ -8039,25 +8044,6 @@ export type TypedTaggedEventStreamEnvelopeEventsRotated = {
     subject?: string;
     ts: string;
     type: 'events.rotated';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope execution.claim_stalled
- */
-export type TypedTaggedEventStreamEnvelopeExecutionClaimStalled = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: ExecutionClaimStalledPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'execution.claim_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8647,6 +8633,25 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
     subject?: string;
     ts: string;
     type: 'order.fired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope order.skipped
+ */
+export type TypedTaggedEventStreamEnvelopeOrderSkipped = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OrderSkippedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.skipped';
     workflow?: WorkflowEventProjection;
 };
 
@@ -17741,6 +17746,10 @@ export type SendSessionMessageData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -17988,6 +17997,70 @@ export type PostV0CityByCityNameSessionByIdRenameResponses = {
 
 export type PostV0CityByCityNameSessionByIdRenameResponse = PostV0CityByCityNameSessionByIdRenameResponses[keyof PostV0CityByCityNameSessionByIdRenameResponses];
 
+export type PostV0CityByCityNameSessionByIdResetData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/reset';
+};
+
+export type PostV0CityByCityNameSessionByIdResetErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdResetError = PostV0CityByCityNameSessionByIdResetErrors[keyof PostV0CityByCityNameSessionByIdResetErrors];
+
+export type PostV0CityByCityNameSessionByIdResetResponses = {
+    /**
+     * OK
+     */
+    200: OkWithIdResponseBody;
+};
+
+export type PostV0CityByCityNameSessionByIdResetResponse = PostV0CityByCityNameSessionByIdResetResponses[keyof PostV0CityByCityNameSessionByIdResetResponses];
+
 export type RespondSessionData = {
     body: SessionRespondInputBody;
     headers: {
@@ -17995,6 +18068,10 @@ export type RespondSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -18280,6 +18357,10 @@ export type SubmitSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**

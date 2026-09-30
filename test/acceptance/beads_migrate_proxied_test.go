@@ -270,8 +270,7 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 		assertCheckOK(t, city, "dolt-config", "a migrated legacy city")
 		// Migration moves the city off gc's managed server and onto bd's proxy,
 		// which is also the moment its backup coverage goes to zero: the rig
-		// shares the city's proxy root, and nothing has registered a bd backup
-		// destination for it yet.
+		// shares the city's proxy root, and v1.3.0 refuses backup on that path.
 		// The advisory has to follow the topology, not the way the city was
 		// created.
 		assertProxiedBackupAdvisory(t, city, "a migrated legacy city", true, "city", "testrig")

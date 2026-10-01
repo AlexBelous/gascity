@@ -203,7 +203,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 35
+    # Cold lint exceeded 33 minutes before fmt/vet/docs could start. This
+    # bounds total runner occupancy; it does not relax any command/test gate.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -273,8 +275,8 @@ jobs:
       - name: Run make test-mac
         run: make test-mac
 
-  # cmd/gc unit/process tests — sharded 12-way so each shard comfortably fits
-  # the per-shard timeout even on slower Mac ARM runners. Mirrors the Linux
+  # cmd/gc unit/process tests — sharded 12-way with a separate outer budget
+  # for cold compilation and the retained product-test deadline. Mirrors Linux
   # cmd-gc-process matrix in ci.yml. cmd/gc is excluded from mac-unit's
   # make test-mac sweep; coverage is preserved here across all 12 shards.
   mac-cmd-gc-process:
@@ -284,7 +286,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 20
+    # Cold test listing consumed 12m25s inside the old 20m job envelope.
+    # Leave room for compilation plus the unchanged 20m product-test budget.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:

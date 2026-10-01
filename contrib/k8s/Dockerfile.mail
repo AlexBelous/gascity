@@ -25,6 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # These three landed in trixie/main as a point release rather than in
 # trixie-security, so they resolve off the base image's own apt source.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends --only-upgrade \
     bsdutils \
     gzip \

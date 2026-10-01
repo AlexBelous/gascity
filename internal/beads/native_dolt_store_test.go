@@ -2558,6 +2558,7 @@ func assertNativeDependency(t *testing.T, deps []Dep, issueID, dependsOnID, depT
 }
 
 type nativeDoltTransactionTestStorage interface {
+	GetLabels(context.Context, string) ([]string, error)
 	CreateIssue(context.Context, *beadslib.Issue, string) error
 	CreateIssues(context.Context, []*beadslib.Issue, string) error
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
@@ -2596,6 +2597,10 @@ func (tx nativeDoltTransactionForTest) GetIssue(ctx context.Context, id string) 
 	return tx.storage.GetIssue(ctx, id)
 }
 
+func (tx nativeDoltTransactionForTest) GetLabels(ctx context.Context, id string) ([]string, error) {
+	return tx.storage.GetLabels(ctx, id)
+}
+
 func (tx nativeDoltTransactionForTest) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	return tx.storage.UpdateIssue(ctx, id, updates, actor)
 }
@@ -2625,6 +2630,7 @@ type nativeDoltStorageSpy struct {
 	createIssue                 func(context.Context, *beadslib.Issue, string) error
 	createIssues                func(context.Context, []*beadslib.Issue, string) error
 	getIssue                    func(context.Context, string) (*beadslib.Issue, error)
+	getLabels                   func(context.Context, string) ([]string, error)
 	updateIssue                 func(context.Context, string, map[string]interface{}, string) error
 	updateIssueChecked          func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error
 	runInTransaction            func(context.Context, string, func(beadslib.Transaction) error) error
@@ -2670,6 +2676,13 @@ func (s *nativeDoltStorageSpy) GetIssue(ctx context.Context, id string) (*beadsl
 		return nil, nil
 	}
 	return s.getIssue(ctx, id)
+}
+
+func (s *nativeDoltStorageSpy) GetLabels(ctx context.Context, id string) ([]string, error) {
+	if s.getLabels == nil {
+		return nil, nil
+	}
+	return s.getLabels(ctx, id)
 }
 
 func (s *nativeDoltStorageSpy) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
@@ -2842,6 +2855,14 @@ func runNativeDoltMemStorageTransactionForTest(storage *nativeDoltMemStorage, fn
 	return nil
 }
 
+func (s *nativeDoltMemStorage) GetLabels(ctx context.Context, id string) ([]string, error) {
+	issue, err := s.GetIssue(ctx, id)
+	if err != nil || issue == nil {
+		return nil, err
+	}
+	return issue.Labels, nil
+}
+
 func (s *nativeDoltMemStorage) CreateIssue(_ context.Context, issue *beadslib.Issue, _ string) error {
 	withoutDependencies := *issue
 	withoutDependencies.Dependencies = nil
@@ -2882,6 +2903,22 @@ func (s *nativeDoltMemStorage) UpdateIssue(_ context.Context, id string, updates
 	opts, err := nativeDoltMemUpdateOpts(updates)
 	if err != nil {
 		return err
+	}
+	// The native Dolt API treats a direct metadata field update as a full JSON
+	// column replacement. MemStore.Update merges metadata, so emulate the
+	// native replacement for this test adapter's metadata-only path.
+	if len(updates) == 1 && opts.Metadata != nil {
+		s.store.mu.Lock()
+		defer s.store.mu.Unlock()
+		for i := range s.store.beads {
+			if s.store.beads[i].ID == id {
+				s.store.beads[i].Metadata = maps.Clone(opts.Metadata)
+				s.store.beads[i].Revision++
+				s.store.beads[i].UpdatedAt = time.Now()
+				return nil
+			}
+		}
+		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
 	return s.store.Update(id, opts)
 }

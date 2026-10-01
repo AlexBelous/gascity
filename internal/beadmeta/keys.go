@@ -189,6 +189,7 @@ const (
 	MissingRootBeadIDMetadataKey        = "gc.missing_root_bead_id"
 	ModelMetadataKey                    = "gc.model"
 	NativeStepDependenciesMetadataKey   = "gc.native_step_dependencies.v1"
+	NextOwnerMetadataKey                = "gc.next_owner"
 	NextAttemptMetadataKey              = "gc.next_attempt"
 	OnExhaustedMetadataKey              = "gc.on_exhausted"
 	OnFailMetadataKey                   = "gc.on_fail"

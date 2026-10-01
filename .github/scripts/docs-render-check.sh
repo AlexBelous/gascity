@@ -127,7 +127,7 @@ def check():
     save()
     if not Path("docs/docs.json").is_file():
         return 0, "no-docs"
-    kind, head_links = mint(Path.cwd(), "head")
+    kind, head_links = mint(Path.cwd() / "docs", "head")
     if kind not in ("clean", "completed-report"):
         return 125, kind
     if kind == "clean":
@@ -146,7 +146,7 @@ def check():
         root.mkdir()
         with tarfile.open(archive) as tree:
             tree.extractall(root, filter="data")
-        kind, base_links = mint(root, "base")
+        kind, base_links = mint(root / "docs", "base")
         if kind not in ("clean", "completed-report"):
             return 125, "baseline-" + kind
         new_links = sorted(set(head_links) - set(base_links))

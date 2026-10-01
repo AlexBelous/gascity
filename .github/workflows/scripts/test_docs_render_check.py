@@ -20,7 +20,7 @@ def report(*links, tree=False):
 
 
 class DocsRenderCheckTests(unittest.TestCase):
-    def run_case(self, head, base=None):
+    def run_case(self, head, base=None, require_docs_root=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -47,7 +47,12 @@ class DocsRenderCheckTests(unittest.TestCase):
         tool = root / "fake-mint"
         tool.write_text(f"#!{sys.executable}\n" +
             "import json,os,pathlib,sys\n"
-            "side=pathlib.Path('docs/fixture-side').read_text()\n"
+            "cwd=pathlib.Path.cwd()\n"
+            "with pathlib.Path(os.environ['MINT_CWD_LOG']).open('a') as log: log.write(str(cwd)+'\\n')\n"
+            "if os.environ.get('MINT_EXPECT_DOCS_ROOT')=='1' and not pathlib.Path('docs.json').is_file():\n"
+            " print('erro wrong docroot',file=sys.stderr); sys.exit(1)\n"
+            "sidefile=pathlib.Path('fixture-side') if pathlib.Path('docs.json').is_file() else pathlib.Path('docs/fixture-side')\n"
+            "side=sidefile.read_text()\n"
             "case=json.loads(pathlib.Path(os.environ['MINT_FIXTURE']).read_text())[side]\n"
             "print(case.get('out',''),end='')\n"
             "print(case.get('err',''),end='',file=sys.stderr)\n"
@@ -55,13 +60,25 @@ class DocsRenderCheckTests(unittest.TestCase):
         tool.chmod(0o755)
         diagnostics = root / "diagnostics"
         env.update(MINT_CMD=str(tool), MINT_FIXTURE=str(scenario),
-                   DOCS_CHECK_DIAGNOSTICS=str(diagnostics))
+                   DOCS_CHECK_DIAGNOSTICS=str(diagnostics), MINT_CWD_LOG=str(root / "cwd-calls.jsonl"),
+                   MINT_EXPECT_DOCS_ROOT="1" if require_docs_root else "0")
         result = subprocess.run(["bash", str(SCRIPT), "HEAD"], cwd=root, env=env,
                                 capture_output=True, text=True, timeout=10)
         return result, diagnostics
 
     def receipt(self, diagnostics):
         return json.loads((diagnostics / "result.json").read_text())
+
+    def test_head_and_baseline_use_the_configured_docs_root(self):
+        case = {"rc": 1, "out": report("/same/page")}
+        result, diagnostics = self.run_case(case, case, require_docs_root=True)
+        calls = (diagnostics.parent / "cwd-calls.jsonl").read_text().splitlines()
+        self.assertEqual(calls, [str((diagnostics.parent / "docs").resolve()),
+                                 str((diagnostics / "base-docs" / "docs").resolve())])
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.receipt(diagnostics)["reason"], "baseline-existing")
+        self.assertEqual((diagnostics / "head.rc").read_text().strip(), "1")
+        self.assertEqual((diagnostics / "base.rc").read_text().strip(), "1")
 
     def test_real_normal_report_is_not_silently_green(self):
         result, diagnostics = self.run_case({"rc": 1, "out": report("/new/page")})

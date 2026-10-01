@@ -1008,8 +1008,10 @@ jobs:
           - shard_name: packages-core-4-of-4
             timeout_minutes: 15
             command: ./scripts/test-integration-shard packages-core-4-of-4
+          # The Go test has a 30m runtime deadline; allow setup, compilation,
+          # and job completion to finish outside that product budget.
           - shard_name: packages-cmd-gc-integration
-            timeout_minutes: 15
+            timeout_minutes: 35
             command: ./scripts/test-integration-shard packages-cmd-gc-integration
           - shard_name: packages-runtime-tmux-1-of-6
             timeout_minutes: 10

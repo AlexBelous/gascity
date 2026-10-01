@@ -244,7 +244,30 @@ jobs:
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
+        run: |
+          # Standard ARM64 runners have 7 GB RAM. Leave headroom for the OS
+          # and compiler children; retain the full package and linter set.
+          diagnostics="$RUNNER_TEMP/gc-mac-lint-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$diagnostics"
+          sysctl hw.memsize hw.ncpu > "$diagnostics/host-before.txt"
+          vm_stat >> "$diagnostics/host-before.txt"
+          set +e
+          make lint LINT_GOMEMLIMIT=3GiB \
+            LINT_FLAGS="--concurrency=2 --timeout=45m --verbose --show-stats --cpu-profile-path=$diagnostics/cpu.pprof --mem-profile-path=$diagnostics/memory.pprof"
+          lint_rc=$?
+          set -e
+          printf '%s\n' "$lint_rc" > "$diagnostics/lint-exit-code.txt"
+          sysctl hw.memsize hw.ncpu > "$diagnostics/host-after.txt"
+          vm_stat >> "$diagnostics/host-after.txt"
+          exit "$lint_rc"
+      - name: Upload lint diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-lint-diagnostics-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gc-mac-lint-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       - name: Format
         run: make fmt-check
       - name: Vet

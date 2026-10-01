@@ -119,3 +119,91 @@ func TestPinnedBeadsModuleDirUsesResolvedReplacement(t *testing.T) {
 		t.Fatal("unversioned replacement accepted as exact cached source")
 	}
 }
+
+func TestPinnedBeadsSourceWithoutBuildInfoRetainsReplacement(t *testing.T) {
+	manifest := []byte("module fixture.test/pin\nrequire github.com/steveyegge/beads v1.3.0\nreplace github.com/steveyegge/beads => github.com/AlexBelous/beads v1.1.1-0.20260928222722-da08f27390f1\n")
+	for _, bi := range []*debug.BuildInfo{nil, {}, {Deps: []*debug.Module{{Path: "unrelated.test/module", Version: "v1.0.0"}}}} {
+		dep, err := pinnedBeadsSourceForBuild(bi, manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dep.Path != PinnedBeadsModulePath || dep.Version != "v1.3.0" || dep.Replace == nil || dep.Replace.Path != "github.com/AlexBelous/beads" || dep.Replace.Version != "v1.1.1-0.20260928222722-da08f27390f1" {
+			t.Fatalf("resolved source=%#v", dep)
+		}
+		cache := t.TempDir()
+		want := filepath.Join(cache, "github.com/!alex!belous/beads@v1.1.1-0.20260928222722-da08f27390f1")
+		if err := os.MkdirAll(want, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got, err := pinnedBeadsResolvedModuleDir(cache, dep)
+		if err != nil || got != want {
+			t.Fatalf("cache source=%q err=%v want=%q", got, err, want)
+		}
+	}
+}
+
+func TestPinnedBeadsSourcePrefersCompiledDependency(t *testing.T) {
+	dep := &debug.Module{Path: PinnedBeadsModulePath, Version: "v1.3.0", Replace: &debug.Module{Path: "compiled.test/beads", Version: "v1.2.0"}}
+	got, err := pinnedBeadsSourceForBuild(&debug.BuildInfo{Deps: []*debug.Module{dep}}, []byte("invalid go.mod"))
+	if err != nil || got != dep {
+		t.Fatalf("compiled source=%#v err=%v", got, err)
+	}
+}
+
+func TestPinnedBeadsManifestReplacementSelection(t *testing.T) {
+	base := "module fixture.test/pin\nrequire github.com/steveyegge/beads v1.3.0\n"
+	wildcard := "replace github.com/steveyegge/beads => wildcard.test/beads v1.0.0\n"
+	specific := "replace github.com/steveyegge/beads v1.3.0 => specific.test/beads v1.2.0\n"
+	for _, tc := range []struct{ name, replacements, want string }{
+		{"specific last", wildcard + specific, "specific.test/beads"},
+		{"specific first", specific + wildcard, "specific.test/beads"},
+		{"unrelated version", "replace github.com/steveyegge/beads v1.2.0 => ignored.test/beads v1.0.0\n", ""},
+		{"unreplaced", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dep, err := pinnedBeadsSourceForBuild(nil, []byte(base+tc.replacements))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if dep.Replace != nil {
+					t.Fatalf("unexpected replacement %#v", dep.Replace)
+				}
+			} else if dep.Replace == nil || dep.Replace.Path != tc.want || dep.Replace.Version != "v1.2.0" {
+				t.Fatalf("replacement=%#v", dep.Replace)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, manifest string }{
+		{"missing require", "module fixture.test/pin\n"},
+		{"malformed", "invalid go.mod"},
+		{"local source", base + "replace github.com/steveyegge/beads => ../beads\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := pinnedBeadsSourceForBuild(nil, []byte(tc.manifest)); err == nil {
+				t.Fatal("invalid source accepted")
+			}
+		})
+	}
+}
+
+func TestPinnedBeadsSourceDoesNotFallbackFromCompiledCacheFailure(t *testing.T) {
+	dep := &debug.Module{Path: PinnedBeadsModulePath, Version: "v1.3.0", Replace: &debug.Module{Path: "compiled.test/beads", Version: "v1.2.0"}}
+	manifest := []byte("module fixture.test/pin\nrequire github.com/steveyegge/beads v1.3.0\n")
+	got, err := pinnedBeadsSourceForBuild(&debug.BuildInfo{Deps: []*debug.Module{dep}}, manifest)
+	if err != nil || got != dep {
+		t.Fatalf("compiled source changed: %#v %v", got, err)
+	}
+	cache := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cache, filepath.FromSlash(PinnedBeadsModulePath)+"@v1.3.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reporter := &recordingModuleDirReporter{}
+	if dir := pinnedBeadsModuleDirOrFatal(reporter, cache, got); dir != "" || len(reporter.fatals) != 1 || len(reporter.skips) != 0 {
+		t.Fatalf("missing compiled source fell back or skipped: dir=%q reporter=%#v", dir, reporter)
+	}
+	dep.Replace = &debug.Module{Path: "../beads"}
+	if _, err := pinnedBeadsResolvedModuleDir(cache, got); err == nil {
+		t.Fatal("compiled local source accepted")
+	}
+}

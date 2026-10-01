@@ -8,24 +8,20 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 )
 
 // PinnedBeadsModulePath is the module gc links its native store against.
 const PinnedBeadsModulePath = "github.com/steveyegge/beads"
 
-// PinnedBeadsModuleDir resolves the unpacked source directory of the beads
-// source this test binary links, including a replacement, and FAILS when absent.
-//
-// Failing rather than skipping is the point. The packages that call this import
-// github.com/steveyegge/beads, so if the test binary compiled at all then cmd/go
-// resolved the pinned module — which means an absent directory does not say "the
-// module is not here", it says the resolution below disagreed with cmd/go's. That
-// is exactly the situation the drift check must shout about: a skip would let a
-// resolver bug read as green, and the check it silences is the one standing
-// between gc and a library that migrates somebody's shared database on open. A
-// quiet skip was demonstrated with nothing more than GOMODCACHE pointed
-// somewhere else.
+// PinnedBeadsModuleDir resolves the unpacked beads source and FAILS when absent.
+// Compiled dependency metadata takes priority, including its replacement. Go
+// test binaries may omit that metadata; only then does this resolve the require
+// and matching replace declared by this repository's go.mod. That fallback
+// proves the checkout's declared pin, not an embedded binary source identity.
+// A missing or unversioned source is fatal: skipping would silence the drift
+// check that guards against unexpected shared-database migrations.
 //
 // It resolves the cache the way the go command does rather than by reading
 // GOMODCACHE, because `go test` does not export that variable into the test
@@ -48,15 +44,74 @@ func PinnedBeadsModuleDir(t *testing.T) string {
 		return dir
 	}
 	bi, ok := debug.ReadBuildInfo()
-	if ok {
+	if !ok {
+		bi = nil
+	}
+	var data []byte
+	if compiledPinnedBeadsModule(bi) == nil {
+		var err error
+		data, err = os.ReadFile(filepath.Join(RepositoryRoot(t), "go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	dep, err := pinnedBeadsSourceForBuild(bi, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), dep)
+}
+
+func compiledPinnedBeadsModule(bi *debug.BuildInfo) *debug.Module {
+	if bi != nil {
 		for _, dep := range bi.Deps {
 			if dep.Path == PinnedBeadsModulePath {
-				return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), dep)
+				return dep
 			}
 		}
 	}
-	t.Fatalf("%s not found in this test binary's build info", PinnedBeadsModulePath)
-	return ""
+	return nil
+}
+
+func pinnedBeadsSourceForBuild(bi *debug.BuildInfo, manifest []byte) (*debug.Module, error) {
+	if dep := compiledPinnedBeadsModule(bi); dep != nil {
+		return dep, nil
+	}
+	mf, err := modfile.Parse("go.mod", manifest, nil)
+	if err != nil {
+		return nil, fmt.Errorf("parse repository beads pin: %w", err)
+	}
+	var dep *debug.Module
+	for _, req := range mf.Require {
+		if req.Mod.Path == PinnedBeadsModulePath {
+			dep = &debug.Module{Path: req.Mod.Path, Version: req.Mod.Version}
+			break
+		}
+	}
+	if dep == nil {
+		return nil, fmt.Errorf("go.mod does not require %s", PinnedBeadsModulePath)
+	}
+	// A version-specific replacement wins over a wildcard, regardless of order.
+	var replacement *modfile.Replace
+	for _, repl := range mf.Replace {
+		if repl.Old.Path != dep.Path {
+			continue
+		}
+		if repl.Old.Version == dep.Version {
+			replacement = repl
+			break
+		}
+		if repl.Old.Version == "" {
+			replacement = repl
+		}
+	}
+	if replacement != nil {
+		if replacement.New.Version == "" {
+			return nil, fmt.Errorf("pinned beads replacement %s has no versioned source", replacement.New.Path)
+		}
+		dep.Replace = &debug.Module{Path: replacement.New.Path, Version: replacement.New.Version}
+	}
+	return dep, nil
 }
 
 // bazelRunfilesBeadsModule locates the pinned beads module inside the bazel
@@ -107,7 +162,7 @@ func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache string, dep *debug.M
 	dir, err := pinnedBeadsResolvedModuleDir(cache, dep)
 	if err != nil {
 		t.Fatalf("%v\n"+
-			"The test binary links %s, so the go command resolved it; this resolution did not. "+
+			"The pinned %s source could not be resolved. "+
 			"Check GOMODCACHE, GOPATH and GOENV (resolved cache: %s), and whether go.mod gained a "+
 			"replace or the build moved to vendor mode — the pinned-cursor drift check cannot run "+
 			"without the module's own migration directories, and it must not pass without running.",
@@ -122,8 +177,8 @@ func pinnedBeadsModuleDir(cache, version string) (string, error) {
 	return pinnedBeadsResolvedModuleDir(cache, &debug.Module{Path: PinnedBeadsModulePath, Version: version})
 }
 
-// pinnedBeadsResolvedModuleDir follows the compiled dependency's replacement
-// and the Go module cache's case escaping, without reading another checkout.
+// pinnedBeadsResolvedModuleDir follows the selected source replacement and
+// the Go module cache's case escaping, without reading another checkout.
 func pinnedBeadsResolvedModuleDir(cache string, dep *debug.Module) (string, error) {
 	if dep.Replace != nil {
 		dep = dep.Replace

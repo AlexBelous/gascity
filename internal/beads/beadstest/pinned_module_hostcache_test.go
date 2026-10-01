@@ -4,9 +4,10 @@ import "testing"
 
 // TestPinnedBeadsModuleDirResolvesThisBuildsOwnCache is the live half of the
 // resolver's fence: the subtests in pinned_module_test.go feed it temporary
-// directories, and this one asks it to resolve the cache the running test binary
-// was actually linked from, because that is the resolution the pinned-cursor
-// drift check depends on.
+// directories, and this one resolves the real host cache. Compiled metadata
+// identifies the source when present; otherwise the repository manifest supplies
+// its declared pin. Both paths must retain the replacement used by the checkout
+// whose pinned-cursor drift check calls this helper.
 //
 // It lives in a file of its own because it is the one test in this package that
 // cannot run hermetically. PinnedBeadsModuleDir walks up from os.Getwd() for

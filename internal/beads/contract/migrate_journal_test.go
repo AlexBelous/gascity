@@ -1,12 +1,15 @@
 package contract
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
 // TestMigrateJournalFileMatchesPinnedBeads reads the name out of the pinned
@@ -31,10 +34,22 @@ import (
 // that ratchet is shrink-only, so the resolution is inlined instead.
 func TestMigrateJournalFileMatchesPinnedBeads(t *testing.T) {
 	modCache := goModuleCache(t)
-	version := pinnedBeadsVersion(t)
-	source, err := os.ReadFile(filepath.Join(modCache, "github.com/steveyegge/beads@"+version, "cmd", "bd", "migrate_dolt_mode.go"))
+	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "go.mod"))
 	if err != nil {
-		t.Skipf("pinned beads %s is not unpacked in the local module cache: %v", version, err)
+		t.Fatal(err)
+	}
+	resolved, err := pinnedBeadsSource(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := resolved.Version
+	file, err := pinnedBeadsJournalFile(modCache, resolved, []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read resolved beads journal source %s: %v", file, err)
 	}
 
 	const decl = `migrateJournalFileName = "`
@@ -115,24 +130,129 @@ func goEnvFileValue(name string) string {
 	return ""
 }
 
-// pinnedBeadsVersion reads the beads version this module requires.
-func pinnedBeadsVersion(t *testing.T) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "go.mod"))
+// pinnedBeadsJournalFile uses declared Bazel data before the Go module cache.
+// A Bazel sandbox must not silently fall back to undeclared host files.
+func pinnedBeadsJournalFile(cache string, source module.Version, runfileRoots []string) (string, error) {
+	bazel := false
+	for _, root := range runfileRoots {
+		if root == "" {
+			continue
+		}
+		bazel = true
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return "", err
+		}
+		for _, entry := range entries {
+			if !strings.Contains(entry.Name(), "go_deps+com_github_steveyegge_beads") {
+				continue
+			}
+			file := filepath.Join(root, entry.Name(), "cmd", "bd", "migrate_dolt_mode.go")
+			if info, err := os.Stat(file); err == nil && !info.IsDir() {
+				return file, nil
+			}
+		}
+	}
+	if bazel {
+		return "", fmt.Errorf("pinned beads migration journal source is absent from declared Bazel runfiles")
+	}
+	path, err := module.EscapePath(source.Path)
 	if err != nil {
-		t.Fatalf("read go.mod: %v", err)
+		return "", err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 && fields[0] == "github.com/steveyegge/beads" {
-			return fields[1]
-		}
-		if len(fields) >= 3 && fields[0] == "require" && fields[1] == "github.com/steveyegge/beads" {
-			return fields[2]
+	version, err := module.EscapeVersion(source.Version)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cache, path+"@"+version, "cmd", "bd", "migrate_dolt_mode.go"), nil
+}
+
+func TestPinnedBeadsJournalUsesDeclaredRunfiles(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "gazelle++go_deps+com_github_steveyegge_beads", "cmd", "bd", "migrate_dolt_mode.go")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := module.Version{Path: "github.com/AlexBelous/beads", Version: "v1.3.0"}
+	got, err := pinnedBeadsJournalFile("/unused-host-cache", source, []string{root})
+	if err != nil || got != want {
+		t.Fatalf("runfile=%q err=%v, want %q", got, err, want)
+	}
+	if _, err := pinnedBeadsJournalFile("/unused-host-cache", source, []string{t.TempDir()}); err == nil {
+		t.Fatal("missing Bazel data fell back to host cache")
+	}
+}
+
+// pinnedBeadsSource reads the requirement from go.mod, then applies a
+// matching version-specific replacement before a wildcard replacement.
+func pinnedBeadsSource(data []byte) (module.Version, error) {
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return module.Version{}, err
+	}
+	var source module.Version
+	for _, dep := range f.Require {
+		if dep.Mod.Path == "github.com/steveyegge/beads" {
+			source = dep.Mod
+			break
 		}
 	}
-	t.Fatal("go.mod does not require github.com/steveyegge/beads")
-	return ""
+	if source.Path == "" {
+		return source, fmt.Errorf("go.mod does not require beads")
+	}
+	var wildcard *modfile.Replace
+	for _, replacement := range f.Replace {
+		if replacement.Old.Path != source.Path {
+			continue
+		}
+		if replacement.Old.Version == source.Version {
+			if replacement.New.Version == "" {
+				return module.Version{}, fmt.Errorf("unversioned beads source %s", replacement.New.Path)
+			}
+			return replacement.New, nil
+		}
+		if replacement.Old.Version == "" {
+			wildcard = replacement
+		}
+	}
+	if wildcard != nil {
+		source = wildcard.New
+	}
+	if source.Version == "" {
+		return module.Version{}, fmt.Errorf("unversioned beads source %s", source.Path)
+	}
+	return source, nil
+}
+
+func TestPinnedBeadsJournalSourceUsesMatchingReplacement(t *testing.T) {
+	manifest := []byte("module example.test/fixture\nrequire github.com/steveyegge/beads v1.3.0\nreplace (\ngithub.com/steveyegge/beads => github.com/other/beads v1.2.0\ngithub.com/steveyegge/beads v1.3.0 => github.com/AlexBelous/beads v1.1.1-0.20260928222722-da08f27390f1\n)\n")
+	got, err := pinnedBeadsSource(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := (module.Version{Path: "github.com/AlexBelous/beads", Version: "v1.1.1-0.20260928222722-da08f27390f1"})
+	if got != want {
+		t.Fatalf("journal source = %#v, want resolved fork %#v", got, want)
+	}
+	for _, test := range []struct {
+		name, manifest string
+		want           module.Version
+		wantError      bool
+	}{
+		{"unreplaced", "module example.test/fixture\nrequire github.com/steveyegge/beads v1.3.0\n", module.Version{Path: "github.com/steveyegge/beads", Version: "v1.3.0"}, false},
+		{"wildcard with unrelated version", "module example.test/fixture\nrequire github.com/steveyegge/beads v1.3.0\nreplace github.com/steveyegge/beads v1.2.0 => github.com/wrong/beads v1.2.0\nreplace github.com/steveyegge/beads => github.com/AlexBelous/beads v1.3.0\n", module.Version{Path: "github.com/AlexBelous/beads", Version: "v1.3.0"}, false},
+		{"local source", "module example.test/fixture\nrequire github.com/steveyegge/beads v1.3.0\nreplace github.com/steveyegge/beads => ../beads\n", module.Version{}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := pinnedBeadsSource([]byte(test.manifest))
+			if (err != nil) != test.wantError || (!test.wantError && got != test.want) {
+				t.Fatalf("source=%#v err=%v, want %#v error=%v", got, err, test.want, test.wantError)
+			}
+		})
+	}
 }
 
 // TestGoModuleCacheResolutionOrder pins the precedence the skip regression turned

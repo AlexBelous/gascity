@@ -58,6 +58,7 @@ go_test(
     ) + [
         "//:go.mod",
         "//:repo_source_tree",
+        "@com_github_steveyegge_beads//cmd/bd:migration_journal_src",
     ],
     embed = [":contract"],
     deps = [
@@ -65,6 +66,8 @@ go_test(
         "//internal/fsys",
         "//internal/testenv",
         "@in_gopkg_yaml_v3//:yaml_v3",
+        "@org_golang_x_mod//modfile",
+        "@org_golang_x_mod//module",
     ],
 )
 

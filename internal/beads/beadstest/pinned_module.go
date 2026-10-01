@@ -4,15 +4,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
+
+	"golang.org/x/mod/module"
 )
 
 // PinnedBeadsModulePath is the module gc links its native store against.
 const PinnedBeadsModulePath = "github.com/steveyegge/beads"
 
 // PinnedBeadsModuleDir resolves the unpacked source directory of the beads
-// version this module requires, and FAILS the calling test when it cannot.
+// source this test binary links, including a replacement, and FAILS when absent.
 //
 // Failing rather than skipping is the point. The packages that call this import
 // github.com/steveyegge/beads, so if the test binary compiled at all then cmd/go
@@ -44,7 +47,16 @@ func PinnedBeadsModuleDir(t *testing.T) string {
 	if dir := bazelRunfilesBeadsModule(); dir != "" {
 		return dir
 	}
-	return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), PinnedBeadsVersion(t))
+	bi, ok := debug.ReadBuildInfo()
+	if ok {
+		for _, dep := range bi.Deps {
+			if dep.Path == PinnedBeadsModulePath {
+				return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), dep)
+			}
+		}
+	}
+	t.Fatalf("%s not found in this test binary's build info", PinnedBeadsModulePath)
+	return ""
 }
 
 // bazelRunfilesBeadsModule locates the pinned beads module inside the bazel
@@ -90,9 +102,9 @@ type moduleDirReporter interface {
 
 // pinnedBeadsModuleDirOrFatal reports an unresolved module cache as a test
 // failure. See PinnedBeadsModuleDir for why it cannot be a skip.
-func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, version string) string {
+func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache string, dep *debug.Module) string {
 	t.Helper()
-	dir, err := pinnedBeadsModuleDir(cache, version)
+	dir, err := pinnedBeadsResolvedModuleDir(cache, dep)
 	if err != nil {
 		t.Fatalf("%v\n"+
 			"The test binary links %s, so the go command resolved it; this resolution did not. "+
@@ -107,13 +119,33 @@ func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, version string) str
 // pinnedBeadsModuleDir is the resolution itself, separated from the test so that
 // the failure path has a test of its own.
 func pinnedBeadsModuleDir(cache, version string) (string, error) {
-	dir := filepath.Join(cache, filepath.FromSlash(PinnedBeadsModulePath)+"@"+version)
+	return pinnedBeadsResolvedModuleDir(cache, &debug.Module{Path: PinnedBeadsModulePath, Version: version})
+}
+
+// pinnedBeadsResolvedModuleDir follows the compiled dependency's replacement
+// and the Go module cache's case escaping, without reading another checkout.
+func pinnedBeadsResolvedModuleDir(cache string, dep *debug.Module) (string, error) {
+	if dep.Replace != nil {
+		dep = dep.Replace
+	}
+	if dep.Version == "" {
+		return "", fmt.Errorf("pinned beads %s has no versioned source", dep.Path)
+	}
+	path, err := module.EscapePath(dep.Path)
+	if err != nil {
+		return "", err
+	}
+	version, err := module.EscapeVersion(dep.Version)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(cache, filepath.FromSlash(path)+"@"+version)
 	info, err := os.Stat(dir)
 	switch {
 	case err != nil:
-		return "", fmt.Errorf("pinned beads %s is not unpacked in the module cache at %s: %w", version, dir, err)
+		return "", fmt.Errorf("pinned beads %s@%s is not unpacked in the module cache at %s: %w", dep.Path, dep.Version, dir, err)
 	case !info.IsDir():
-		return "", fmt.Errorf("pinned beads %s resolved to %s, which is not a directory", version, dir)
+		return "", fmt.Errorf("pinned beads %s@%s resolved to %s, which is not a directory", dep.Path, dep.Version, dir)
 	default:
 		return dir, nil
 	}

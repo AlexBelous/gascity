@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -62,7 +63,7 @@ func TestPinnedBeadsModuleDirRefusesAnUnresolvedCache(t *testing.T) {
 // reproduced with nothing more than GOMODCACHE pointed somewhere else.
 func TestPinnedBeadsModuleDirFailsRatherThanSkips(t *testing.T) {
 	reporter := &recordingModuleDirReporter{}
-	if dir := pinnedBeadsModuleDirOrFatal(reporter, filepath.Join(t.TempDir(), "empty"), "v1.3.0"); dir != "" {
+	if dir := pinnedBeadsModuleDirOrFatal(reporter, filepath.Join(t.TempDir(), "empty"), &debug.Module{Path: PinnedBeadsModulePath, Version: "v1.3.0"}); dir != "" {
 		t.Fatalf("an unresolved cache produced the directory %q", dir)
 	}
 	if len(reporter.skips) != 0 {
@@ -95,4 +96,26 @@ func (r *recordingModuleDirReporter) Fatalf(format string, args ...any) {
 
 func (r *recordingModuleDirReporter) Skipf(format string, args ...any) {
 	r.skips = append(r.skips, fmt.Sprintf(format, args...))
+}
+
+func TestPinnedBeadsModuleDirUsesResolvedReplacement(t *testing.T) {
+	dep := &debug.Module{Path: PinnedBeadsModulePath, Version: "v1.3.0", Replace: &debug.Module{Path: "github.com/AlexBelous/beads", Version: "v1.1.1-0.20260928222722-da08f27390f1"}}
+	cache := t.TempDir()
+	want := filepath.Join(cache, "github.com/!alex!belous/beads@v1.1.1-0.20260928222722-da08f27390f1")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The prior resolver discarded the replacement and searched the upstream
+	// require path; a cache containing only the compiler's fork source exposes it.
+	got, err := pinnedBeadsResolvedModuleDir(cache, dep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("resolved source = %q, want fork %q", got, want)
+	}
+	dep.Replace = &debug.Module{Path: "../beads"}
+	if _, err := pinnedBeadsResolvedModuleDir(cache, dep); err == nil {
+		t.Fatal("unversioned replacement accepted as exact cached source")
+	}
 }

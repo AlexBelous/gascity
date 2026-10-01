@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // healthScript is the on-disk path to the health command script. The
@@ -31,6 +33,9 @@ const healthScript = "commands/health/run.sh"
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "examples", "bd", "dolt")
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Dir(filename)
 }
@@ -1504,6 +1509,15 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 			name:      "quoted port",
 			rigConfig: "dolt.port: \"19902\"\n",
 		},
+		{
+			// bd >= 1.3.1 writes `bd config set dolt.port` nested.
+			name:      "nested port",
+			rigConfig: "dolt:\n    disable-event-flush: true\n    port: 19902\n",
+		},
+		{
+			name:      "nested quoted port with comment",
+			rigConfig: "dolt:\n  port: '19902' # rig server\n",
+		},
 	}
 
 	for _, tc := range tests {
@@ -2247,6 +2261,7 @@ func TestHealthUsesDurablePerDatabaseBackupReceipt(t *testing.T) {
 	if err := os.Chtimes(manifest, old, old); err != nil {
 		t.Fatal(err)
 	}
+	destinationHash := healthDestinationHash(t, manifest)
 	receipts := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "backup-receipts")
 	writeReceipt := func(outcome string) {
 		t.Helper()
@@ -2254,7 +2269,7 @@ func TestHealthUsesDurablePerDatabaseBackupReceipt(t *testing.T) {
 			t.Fatal(err)
 		}
 		manifestTime, manifestSize, manifestHash := int64(0), int64(0), "-"
-		if outcome == "success" {
+		if outcome == "success" || outcome == "noop" {
 			info, err := os.Stat(manifest)
 			if err != nil {
 				t.Fatal(err)
@@ -2266,14 +2281,14 @@ func TestHealthUsesDurablePerDatabaseBackupReceipt(t *testing.T) {
 			manifestTime, manifestSize = info.ModTime().Unix(), info.Size()
 			manifestHash = fmt.Sprintf("%x", sha256.Sum256(data))
 		}
-		receipt := fmt.Sprintf("v1 %s %d %d %d %s\n", outcome, time.Now().Unix(), manifestTime, manifestSize, manifestHash)
+		receipt := fmt.Sprintf("v3 %s %d %d %d %s %s %s %x\n", outcome, time.Now().Unix(), manifestTime, manifestSize, manifestHash, strings.Repeat("a", 32), strings.Repeat("a", 32), destinationHash)
 		if err := os.WriteFile(filepath.Join(receipts, "office"), []byte(receipt), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	find := func() (bool, string) {
+	find := func(extraEnv ...string) (bool, string) {
 		t.Helper()
-		backups, out := runHealthBackupsJSON(t, cityPath)
+		backups, out := runHealthBackupsJSON(t, cityPath, extraEnv...)
 		if len(backups.Databases) != 1 {
 			t.Fatalf("databases = %v, want office\n%s", backups.Databases, out)
 		}
@@ -2283,13 +2298,50 @@ func TestHealthUsesDurablePerDatabaseBackupReceipt(t *testing.T) {
 	if stale, status := find(); !stale || status != "absent" {
 		t.Fatalf("before receipt: stale=%v status=%q", stale, status)
 	}
-	writeReceipt("success") // Dolt returned 0 but left the manifest unchanged.
-	if stale, status := find(); stale || status != "success" {
+	writeReceipt("noop") // bd returned synced=true but left the manifest unchanged.
+	if stale, status := find(); stale || status != "noop" {
 		t.Fatalf("successful no-op: stale=%v status=%q", stale, status)
+	}
+	alternate := filepath.Join(cityPath, "alternate-backups")
+	copied := filepath.Join(alternate, "office", "manifest")
+	if err := os.MkdirAll(filepath.Dir(copied), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copied, []byte("restorable backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(copied, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if stale, status := find("GC_BACKUP_ARTIFACT_DIR=" + alternate); !stale || status != "invalid" {
+		t.Fatalf("copied manifest at different destination must be reverified: stale=%v status=%q", stale, status)
 	}
 	writeReceipt("failure")
 	if stale, status := find(); !stale || status != "failure" {
 		t.Fatalf("latest sync failed: stale=%v status=%q", stale, status)
+	}
+	writeReceipt("skipped")
+	if stale, status := find(); !stale || status != "skipped" {
+		t.Fatalf("skipped sync: stale=%v status=%q", stale, status)
+	}
+	if err := os.RemoveAll(filepath.Dir(manifest)); err != nil {
+		t.Fatal(err)
+	}
+	if stale, status := find(); !stale || status != "skipped" {
+		t.Fatalf("skipped scope without artifact: stale=%v status=%q", stale, status)
+	}
+	writeReceipt("failure")
+	if stale, status := find(); !stale || status != "failure" {
+		t.Fatalf("failed scope without artifact: stale=%v status=%q", stale, status)
+	}
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("restorable backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(manifest, old, old); err != nil {
+		t.Fatal(err)
 	}
 	writeReceipt("success")
 	if err := os.WriteFile(manifest, []byte("restorable backux"), 0o644); err != nil {
@@ -2303,17 +2355,83 @@ func TestHealthUsesDurablePerDatabaseBackupReceipt(t *testing.T) {
 	}
 }
 
+func healthDestinationHash(t *testing.T, manifest string) [32]byte {
+	t.Helper()
+	destination, err := filepath.EvalSymlinks(filepath.Dir(manifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha256.Sum256([]byte(destination))
+}
+
+func writeHealthSuccessReceipt(t *testing.T, cityPath, db string, at time.Time) {
+	t.Helper()
+	manifest := filepath.Join(cityPath, ".dolt-backup", db, "manifest")
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "backup-receipts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	receipt := fmt.Sprintf("v3 success %d %d %d %x %s %s %x\n", at.Unix(), info.ModTime().Unix(), info.Size(), sha256.Sum256(data), strings.Repeat("a", 32), strings.Repeat("a", 32), healthDestinationHash(t, manifest))
+	if err := os.WriteFile(filepath.Join(dir, db), []byte(receipt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHealthDoesNotTrustFreshManifestWithoutReceipt(t *testing.T) {
+	cityPath := t.TempDir()
+	manifest := filepath.Join(cityPath, ".dolt-backup", "office", "manifest")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("fresh but unverified"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backups, out := runHealthBackupsJSON(t, cityPath)
+	if len(backups.Databases) != 1 || !backups.Databases[0].Stale || backups.Databases[0].Status != "absent" {
+		t.Fatalf("missing receipt must alert even with a fresh manifest: %+v\n%s", backups.Databases, out)
+	}
+	if err := os.RemoveAll(filepath.Dir(manifest)); err != nil {
+		t.Fatal(err)
+	}
+	metadata := filepath.Join(cityPath, ".beads", "metadata.json")
+	if err := os.MkdirAll(filepath.Dir(metadata), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadata, []byte(`{"dolt_database":"office"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backups, out = runHealthBackupsJSON(t, cityPath)
+	if len(backups.Databases) != 1 || !backups.Databases[0].Stale || backups.Databases[0].AgeSec != -1 {
+		t.Fatalf("known database without receipt or artifact must be stale: %s", out)
+	}
+}
+
 // runHealthBackupsJSON runs the health command against cityPath with no live
 // server and returns the decoded backups block. The server is deliberately
 // absent: backup freshness is a filesystem measurement, so this exercises it
 // in isolation, and JSON mode always exits 0.
-func runHealthBackupsJSON(t *testing.T, cityPath string) (backupsReport, []byte) {
+func runHealthBackupsJSON(t *testing.T, cityPath string, extraEnv ...string) (backupsReport, []byte) {
 	t.Helper()
 	binDir := t.TempDir()
 	for _, name := range []string{"gc", "lsof", "nc", "dolt"} {
 		writeExecutable(t, filepath.Join(binDir, name), "#!/bin/sh\nexit 1\n")
 	}
 	root := repoRoot(t)
+	writeExecutable(t, filepath.Join(binDir, "date"), `#!/bin/sh
+if [ "$*" = +%s ] && [ -n "${FAKE_HEALTH_NOW:-}" ]; then
+  printf '%s\n' "$FAKE_HEALTH_NOW"
+else
+  exec /bin/date "$@"
+fi
+`)
 	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "GC_BACKUP_ARTIFACT_DIR", "GC_HEALTH_BACKUP_STALE_S", "GC_DOCTOR_BACKUP_STALE_S", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -2324,6 +2442,7 @@ func runHealthBackupsJSON(t *testing.T, cityPath string) (backupsReport, []byte)
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
+	env = append(env, extraEnv...)
 	out, err := newHealthScriptCmd(root, env, "--json").Output()
 	if err != nil {
 		t.Fatalf("health run.sh --json failed: %v\n%s", err, out)
@@ -2409,6 +2528,8 @@ func TestHealthReportsStaleBackupPerDatabase(t *testing.T) {
 	if err := os.WriteFile(fresh, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write aa manifest: %v", err)
 	}
+	writeHealthSuccessReceipt(t, cityPath, "hq", staleAt)
+	writeHealthSuccessReceipt(t, cityPath, "aa", time.Now())
 
 	backups, out := runHealthBackupsJSON(t, cityPath)
 
@@ -2521,12 +2642,14 @@ func TestHealthReportsFreshnessForABackupWrittenThisSecond(t *testing.T) {
 	if err := os.WriteFile(manifest, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	ahead := time.Now().Add(5 * time.Second)
+	now := time.Now()
+	ahead := now.Add(5 * time.Second)
 	if err := os.Chtimes(manifest, ahead, ahead); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
+	writeHealthSuccessReceipt(t, cityPath, "hq", now)
 
-	backups, out := runHealthBackupsJSON(t, cityPath)
+	backups, out := runHealthBackupsJSON(t, cityPath, "FAKE_HEALTH_NOW="+strconv.FormatInt(now.Unix(), 10))
 
 	if backups.DoltStale == nil || *backups.DoltStale {
 		t.Fatalf("dolt_stale = %v for a backup written this second, want false\n%s", backups.DoltStale, out)
@@ -2536,6 +2659,11 @@ func TestHealthReportsFreshnessForABackupWrittenThisSecond(t *testing.T) {
 	}
 	if backups.DoltFresh != "0s" {
 		t.Errorf("dolt_freshness = %q, want \"0s\"; an empty string here is what an unmeasured probe reports\n%s", backups.DoltFresh, out)
+	}
+	writeHealthSuccessReceipt(t, cityPath, "hq", ahead)
+	backups, out = runHealthBackupsJSON(t, cityPath, "FAKE_HEALTH_NOW="+strconv.FormatInt(now.Unix(), 10))
+	if len(backups.Databases) != 1 || !backups.Databases[0].Stale || backups.Databases[0].Status != "invalid" {
+		t.Fatalf("future receipt must be invalid: %s", out)
 	}
 }
 
@@ -2575,6 +2703,8 @@ func TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk(t *testing.T) {
 	stamp(filepath.Join(artifactDir, "hq", "chunk.darc"), now)
 	stamp(filepath.Join(artifactDir, "aa", "manifest"), now)
 	stamp(filepath.Join(artifactDir, "aa", "chunk.darc"), old)
+	writeHealthSuccessReceipt(t, cityPath, "hq", old)
+	writeHealthSuccessReceipt(t, cityPath, "aa", now)
 
 	backups, out := runHealthBackupsJSON(t, cityPath)
 

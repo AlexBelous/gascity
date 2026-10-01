@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/test/toolhome"
 	"golang.org/x/mod/semver"
 )
 
@@ -480,6 +481,7 @@ func TestWriteWaitDetail_RendersWaitInfo(t *testing.T) {
 }
 
 func TestWaitJSONSchemasDoNotExposeRawMetadata(t *testing.T) {
+	chdirToRealPackageDir(t)
 	for _, path := range []string{
 		filepath.Join("..", "..", "schemas", "wait", "list", "result.schema.json"),
 		filepath.Join("..", "..", "schemas", "wait", "inspect", "result.schema.json"),
@@ -770,7 +772,11 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
 	}
-	out, err := exec.Command(bdPath, "version").CombinedOutput()
+	// bd resolves user-level state from HOME and writes machine-id, event and
+	// metrics state there even for `version`; never let it see the real one.
+	versionCmd := exec.Command(bdPath, "version")
+	versionCmd.Env = toolhome.Environ(os.Environ(), t.TempDir())
+	out, err := versionCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
 	}

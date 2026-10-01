@@ -348,22 +348,29 @@ backup_age_sec=0
 backup_db_list=""
 now=$(date +%s)
 
-# A database is backup-eligible when the artifact directory holds a
-# same-named subdirectory, which is where the backup order points every remote
-# it configures (file://$BACKUP_ARTIFACT_DIR/<db>). This costs no dolt call, so
-# it stays inside the patrol's fork budget. An eligible database whose
-# directory holds no manifest yet is measured and reported stale: never
-# having been backed up is a known-bad state, not an unknown one.
+# Known databases come from existing scope metadata, artifact directories,
+# and receipts. No additional server probes are needed. A known database
+# without a verified receipt is stale, including one never backed up.
 #
-# The manifest's mtime is the age of the newest restorable backup. `dolt backup
-# sync` writes chunk data first and adopts it by rewriting the manifest last,
-# so a sync cut off in between leaves chunks newer than anything the manifest
-# references, and the newest file of any kind would date a backup that does
-# not exist.
-if [ -d "$backup_artifact_dir" ]; then
-  for bdir in "$backup_artifact_dir"/*/; do
-    [ -d "$bdir" ] || continue
-    bname="$(basename "$bdir")"
+# A successful `bd backup sync` is the authority for a completed snapshot.
+# Its per-database receipt records the stable source HEAD and the adopted
+# manifest fingerprint. A no-op sync leaves the manifest unchanged, so its
+# verified receipt time (rather than manifest mtime) measures freshness.
+{
+  backup_names=$(
+    for bpath in "$backup_artifact_dir"/*/ "$backup_receipt_dir"/*; do
+      [ -e "$bpath" ] || continue
+      bpath="${bpath%/}"
+      printf '%s\n' "${bpath##*/}"
+    done
+    while IFS= read -r backup_meta; do
+      [ -f "$backup_meta" ] || continue
+      metadata_db "$backup_meta"
+    done < "$_meta_cache"
+  )
+  backup_names=$(printf '%s\n' "$backup_names" | sort -u)
+  for bname in $backup_names; do
+    bdir="$backup_artifact_dir/$bname/"
     case "$(printf '%s' "$bname" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
     case "$bname" in
       [A-Za-z0-9_]*)
@@ -377,21 +384,22 @@ if [ -d "$backup_artifact_dir" ]; then
     sync_status=absent
     force_stale=false
     if [ -f "$backup_receipt_dir/$bname" ]; then
-      receipt_version= receipt_outcome= receipt_time= receipt_mtime= receipt_size= receipt_hash=
-      read -r receipt_version receipt_outcome receipt_time receipt_mtime receipt_size receipt_hash < "$backup_receipt_dir/$bname" || true
-      if [ "$receipt_version" = v1 ]; then
+      receipt_version= receipt_outcome= receipt_time= receipt_mtime= receipt_size= receipt_hash= receipt_head= receipt_backup_head= receipt_destination= receipt_extra=
+      read -r receipt_version receipt_outcome receipt_time receipt_mtime receipt_size receipt_hash receipt_head receipt_backup_head receipt_destination receipt_extra < "$backup_receipt_dir/$bname" || true
+      if [ "$receipt_version" = v3 ]; then
         case "$receipt_outcome" in
-          failure|unverified) sync_status="$receipt_outcome"; force_stale=true ;;
-          success)
+          failure|skipped|unverified) sync_status="$receipt_outcome"; force_stale=true ;;
+          success|noop)
             if case "$receipt_time:$receipt_mtime:$receipt_size" in
                 *[!0-9:]*|*::*|:*|*:) false ;;
                 *) true ;;
-              esac; then
+              esac && [ "$receipt_time" -le "$now" ] && [ -z "$receipt_extra" ] && [ "$receipt_destination" = "$(backup_destination_sha256 "$bdir")" ] && [ "$receipt_backup_head" = "$receipt_head" ] && [ "${#receipt_head}" -eq 32 ] &&
+              ! printf '%s' "$receipt_head" | grep -q '[^0-9a-v]'; then
                 manifest_size=$(stat -c %s "${bdir}manifest" 2>/dev/null || stat -f %z "${bdir}manifest" 2>/dev/null || echo -1)
                 manifest_hash=$(backup_manifest_sha256 "${bdir}manifest")
                 if [ "$db_newest" -gt 0 ] && [ "$db_newest" = "$receipt_mtime" ] && [ "$manifest_size" = "$receipt_size" ] && [ -n "$manifest_hash" ] && [ "$manifest_hash" = "$receipt_hash" ]; then
                   db_newest="$receipt_time"
-                  sync_status=success
+                  sync_status="$receipt_outcome"
                 else
                   sync_status=invalid
                   force_stale=true
@@ -407,6 +415,8 @@ if [ -d "$backup_artifact_dir" ]; then
         sync_status=invalid
         force_stale=true
       fi
+    else
+      force_stale=true
     fi
     if [ "$db_newest" -le 0 ]; then
       db_age=-1
@@ -449,7 +459,7 @@ if [ -d "$backup_artifact_dir" ]; then
       fi
     fi
   done
-fi
+}
 if [ "$backup_measured" != true ]; then
   backup_age_sec=0
   backup_freshness=""
@@ -592,7 +602,8 @@ fi
 # positives from processes that merely mention "dolt" in their args
 # (e.g., Claude sessions whose prompt text contains "dolt sql-server").
 #
-# Rig-local Dolt servers (configured via dolt.port in config.yaml)
+# Rig-local Dolt servers (configured via dolt.port in config.yaml, flat or
+# nested)
 # are legitimate — exclude any PID listening on a known rig port.
 #
 # Foreign Dolt servers (managed by OTHER cities on the same host) are
@@ -627,7 +638,7 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     [ -f "$meta" ] || continue
     config_file="$(dirname "$meta")/config.yaml"
     [ -f "$config_file" ] || continue
-    rig_port=$(grep '^dolt\.port:' "$config_file" 2>/dev/null | sed "s/^dolt\\.port:[[:space:]]*//; s/[[:space:]]*#.*$//; s/['\\\"]//g; s/[[:space:]]*$//" | head -1)
+    rig_port=$(beads_config_value "$config_file" dolt.port)
     case "$rig_port" in ''|*[!0-9]*) continue ;; esac
     [ "$rig_port" = "$GC_DOLT_PORT" ] && continue
     rig_pid=$(managed_runtime_listener_pid "$rig_port" || true)

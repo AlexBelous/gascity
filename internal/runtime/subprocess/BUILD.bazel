@@ -20,6 +20,7 @@ go_test(
     srcs = [
         "meta_privacy_test.go",
         "seams_test.go",
+        "socket_probe_test.go",
         "subprocess_test.go",
         "testenv_import_test.go",
     ],
@@ -29,4 +30,16 @@ go_test(
         "//internal/testenv",
         "//internal/testutil",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

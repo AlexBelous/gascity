@@ -5,7 +5,9 @@ go_library(
     srcs = [
         "beacon.go",
         "carrier.go",
+        "control_socket.go",
         "dialog.go",
+        "dialog_midsession.go",
         "envsecret.go",
         "fake.go",
         "fingerprint.go",
@@ -16,12 +18,15 @@ go_library(
         "privatedir.go",
         "probe.go",
         "process_control.go",
+        "process_table_scanner.go",
         "protocol.go",
         "provider_core.go",
         "redact.go",
+        "router.go",
         "runtime.go",
         "seam_adapter.go",
         "session_events.go",
+        "session_events_merge.go",
         "setupcommand.go",
         "staging.go",
         "startup_hints.go",
@@ -35,14 +40,20 @@ go_library(
 go_test(
     name = "runtime_test",
     srcs = [
+        "attach_observer_test.go",
         "beacon_test.go",
+        "capacity_test.go",
         "carrier_test.go",
+        "dialog_midsession_test.go",
         "dialog_model_switch_test.go",
         "dialog_test.go",
+        "dialog_trust_closed_loop_test.go",
+        "dialog_trust_selection_test.go",
         "envsecret_test.go",
         "fake_conformance_test.go",
         "fake_test.go",
         "fingerprint_breakdown_v1_test.go",
+        "fingerprint_config_env_test.go",
         "fingerprint_golden_test.go",
         "fingerprint_partition_test.go",
         "fingerprint_test.go",
@@ -51,20 +62,51 @@ go_test(
         "liveness_test.go",
         "privatedir_test.go",
         "probe_test.go",
+        "process_table_scanner_test.go",
         "provider_core_test.go",
         "redact_test.go",
+        "router_test.go",
         "runtime_test.go",
         "seam_adapter_test.go",
+        "session_events_contract_test.go",
+        "session_events_merge_test.go",
         "setupcommand_test.go",
         "staging_hash_test.go",
+        "staging_preserve_test.go",
         "staging_skip_mergeable_test.go",
         "staging_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":runtime"],
     deps = [
+        "//internal/runtime/auto",
+        "//internal/runtime/hybrid",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
     ],
+)
+
+filegroup(
+    name = "all_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

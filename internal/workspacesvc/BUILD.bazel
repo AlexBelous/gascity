@@ -19,6 +19,7 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/citylayout",
+        "//internal/config",
         "//internal/execenv",
         "//internal/pidutil",
         "//internal/runtime",
@@ -31,6 +32,7 @@ go_test(
     srcs = [
         "manager_test.go",
         "orphan_reap_test.go",
+        "proxy_process_ready_test.go",
         "proxy_process_test.go",
         "publication_test.go",
         "testenv_import_test.go",
@@ -40,10 +42,23 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/citylayout",
+        "//internal/config",
         "//internal/execenv",
         "//internal/pidutil",
         "//internal/runtime",
         "//internal/supervisor",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

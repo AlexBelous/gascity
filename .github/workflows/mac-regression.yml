@@ -252,7 +252,9 @@ jobs:
           sysctl hw.memsize hw.ncpu > "$diagnostics/host-before.txt"
           vm_stat >> "$diagnostics/host-before.txt"
           set +e
-          make lint LINT_GOMEMLIMIT=3GiB \
+          python3 -S .github/workflows/scripts/mac_lint_guard.py \
+            --diagnostics "$diagnostics" --timeout-seconds 2700 --grace-seconds 5 \
+            -- make lint LINT_GOMEMLIMIT=3GiB \
             LINT_FLAGS="--concurrency=2 --timeout=45m --verbose --show-stats --cpu-profile-path=$diagnostics/cpu.pprof --mem-profile-path=$diagnostics/memory.pprof"
           lint_rc=$?
           set -e

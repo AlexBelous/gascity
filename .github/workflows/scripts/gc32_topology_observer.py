@@ -22,6 +22,7 @@ TRACE_KEYS = ('seq', 'trace_id', 'tick_id', 'record_type', 'ts', 'tick_trigger',
               'controller_started_at', 'record_count', 'dropped_record_count', 'dropped_batch_count')
 FIELD_KEYS = ('operation_name', 'phase', 'reason', 'trigger', 'avg60', 'threshold',
               'consecutive_skips', 'max_consecutive_skips', 'outcome')
+BUDGET_LINE = re.compile(r'gc: order dispatch: per-tick budget ([0-9]+) spent; the rotation did not reach ([0-9]+) more order\(s\) this tick \(due-ness not evaluated\): (.{1,512})$')
 FS_LINE = re.compile(r'supervisor: FS pressure high \(some avg60=[0-9.]+ > threshold=[0-9.]+\), (?:skipping order dispatch|forcing order dispatch after [0-9]+ skipped passes)$')
 
 
@@ -112,10 +113,32 @@ def candidates(root_fd, gaps=None):
     return result
 
 
-def project(line, kind):
+def project(line, kind, cycles=None, owner=""):
+    if cycles is None:
+        cycles = set()
     if kind == 'log':
         match = FS_LINE.search(line)
-        return {'fs_pressure_line': match.group(0)} if match else None
+        if match:
+            return {'fs_pressure_line': match.group(0)}
+        budget = BUDGET_LINE.search(line)
+        if budget:
+            suffix = budget.group(3)
+            omitted = re.search(r'\(\+([0-9]+) more\)$', suffix)
+            sample = [name.strip() for name in suffix.split(',')]
+            if omitted:
+                sample = sample[:-1]
+            omitted_count = int(omitted.group(1)) if omitted else 0
+            if (not sample or len(sample) > 8 or any(not name or '(+' in name for name in sample)
+                    or (omitted and (omitted_count < 1 or len(sample) != 8))
+                    or len(sample) + omitted_count != int(budget.group(2))):
+                raise ValueError('inconsistent bounded budget sample')
+            health_listed = 'dolt-health' in sample
+            return {'dispatch_budget': int(budget.group(1)), 'unreached_count': int(budget.group(2)),
+                    'omitted_count': omitted_count,
+                    'dolt_health_in_logged_sample': health_listed,
+                    'dolt_health_unreached': True if health_listed else (None if omitted else False),
+                    'due_ness_evaluated': False}
+        return None
     obj = json.loads(line)
     if not isinstance(obj, dict):
         return None
@@ -124,12 +147,28 @@ def project(line, kind):
                                    'order.skipped', 'order.suppressed', 'controller.started', 'controller.stopped'):
             return None
         return {k: obj[k] for k in ('seq', 'ts', 'type', 'subject') if k in obj}
-    if obj.get('tick_trigger') != 'orders':
+    trace_id = obj.get('trace_id')
+    if not isinstance(trace_id, str) or not trace_id or len(trace_id) > 128:
+        return None
+    key = (owner, trace_id)
+    record_kind = obj.get('record_type')
+    if record_kind == 'cycle_start':
+        if obj.get('tick_trigger') != 'orders':
+            if key in cycles:
+                raise ValueError('conflicting cycle ownership')
+            return None
+        if len(cycles) >= 256 and key not in cycles:
+            raise ValueError('in-flight cycle ownership cap')
+        cycles.add(key)
+    elif key not in cycles or record_kind not in ('operation', 'decision', 'cycle_result'):
         return None
     out = {k: obj[k] for k in TRACE_KEYS if k in obj and isinstance(obj[k], (str, int, float, bool))}
     fields = obj.get('fields', {})
     if isinstance(fields, dict):
         out['fields'] = {k: fields[k] for k in FIELD_KEYS if k in fields and isinstance(fields[k], (str, int, float, bool))}
+    out['joined_orders_cycle'] = True
+    if record_kind == 'cycle_result':
+        cycles.discard(key)
     return out
 
 
@@ -138,6 +177,7 @@ def main():
     output.mkdir(exist_ok=False)
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     state, read_bytes, records, errors, limits, gaps = {}, 0, 0, [], set(), set()
+    cycles = set()
     started = time.monotonic()
     (output / 'ready').write_text(utc() + '\n')
     try:
@@ -170,7 +210,8 @@ def main():
                             state[key] = (offset + len(data), lines.pop())
                             for line in lines:
                                 try:
-                                    value = project(line.decode('utf-8'), kind)
+                                    owner = rel.split('/.gc/runtime/session-reconciler-trace/')[0]
+                                    value = project(line.decode('utf-8'), kind, cycles, owner)
                                     if value is not None:
                                         evidence.write(json.dumps({'observed_at': utc(), 'source': rel, 'inode': info.st_ino, 'record': value}) + '\n')
                                         records += 1
@@ -191,6 +232,7 @@ def main():
         receipt = {'utc': utc(), 'root': str(root), 'elapsed_seconds': time.monotonic() - started,
                    'bytes_read': read_bytes, 'records_exported': records,
                    'read_cap': READ_CAP, 'file_cap': FILE_CAP, 'errors': errors[:100], 'limits': sorted(limits), 'discovery_gaps': sorted(gaps),
+                   'incomplete_inflight_cycle_joins': len(cycles),
                    'files': [{'source': k[0], 'inode': k[2], 'offset': v[0], 'pending_bytes': len(v[1])} for k, v in state.items()],
                    'stopped_by_owner': (output.parent / 'observer-stop').exists(),
                    'limitation': 'Orders cycles are buffered until End; no proof of current in-flight phase. Typed projection omits arbitrary payloads/messages/env/argv and free-form trace degradation logs/drop-reason details; absence of degradation is not proved.'}

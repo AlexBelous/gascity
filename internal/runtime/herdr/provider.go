@@ -152,7 +152,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// binding BEFORE the launch. The launch below blocks for seconds (shell
 	// readiness + herdr's TUI detection), and reconcile ticks that fire in
 	// that window read both stores: the pending-create ownership check
-	// (runningSessionMatchesPendingCreateInfo) reads GC_SESSION_ID /
+	// (attributePendingCreateRuntime) reads GC_SESSION_ID /
 	// GC_INSTANCE_TOKEN via GetMeta — with an unseeded sidecar it misreads
 	// the fresh runtime as "live runtime belongs to another session" and
 	// rolls it back mid-boot — and liveness reads the pane binding. tmux gets
@@ -195,7 +195,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		p.waitPaneShellReady(ctx, paneID)
 		for attempt := 0; ; attempt++ {
 			info, adopted, err = p.startAgentAdopting(ctx, name, spec.Kind, paneID, spec.Args)
-			if err == nil || herdrErrorCode(err) != "agent_pane_busy" || attempt >= paneBusyRetries {
+			if err == nil || herdrCodeAnyShape(err) != "agent_pane_busy" || attempt >= paneBusyRetries {
 				break
 			}
 			// Back off before re-probing: herdr's own shell-prompt detection
@@ -817,7 +817,7 @@ func livenessFromAgent(info agentInfo, present bool, err error) runtime.Liveness
 // and non-destructive) is the acceptable direction to err. The terminal set is
 // validated against live herdr output during rollout; extend it there.
 func agentAliveFromStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
+	switch normalizeAgentState(status) {
 	case "exited", "stopped", "dead", "gone", "terminated", "closed", "crashed":
 		return false
 	default:

@@ -1,6 +1,6 @@
 # Controlled #32 diagnostic only: not a required release or acceptance gate.
-# Frozen source, original C2/full scope/budgets; add attributed GC observability.
-name: GC32 Mac attributed GC measurement
+# Frozen source, full roots per analyzer group; one unchanged aggregate budget.
+name: GC32 Mac analyzer partition diagnostic
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: gc32-mac-gctrace-diagnostic-${{ github.ref }}
+  group: gc32-mac-analyzer-partition-diagnostic-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -40,7 +40,7 @@ jobs:
           python3 .github/workflows/scripts/runner_policy.py
 
   mac-quality:
-    name: Diagnostic / attributed full Mac lint GC measurement
+    name: Diagnostic / full Mac lint analyzer partition
     needs:
       - runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
@@ -54,6 +54,8 @@ jobs:
       - name: Retain measurement helper from definition
         run: |
           cp .github/workflows/scripts/gc32_mac_gc_measurement.py "$RUNNER_TEMP/gc32_mac_gc_measurement.py"
+          cp .github/workflows/scripts/gc32_mac_partition.py "$RUNNER_TEMP/gc32_mac_partition.py"
+          shasum -a 256 "$RUNNER_TEMP/gc32_mac_partition.py" > "$RUNNER_TEMP/gc32-partition-helper-sha256.txt"
           shasum -a 256 "$RUNNER_TEMP/gc32_mac_gc_measurement.py" > "$RUNNER_TEMP/gc32-measurement-helper-sha256.txt"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -104,6 +106,7 @@ jobs:
           diagnostics="$RUNNER_TEMP/gc-mac-lint-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$diagnostics"
           cp "$RUNNER_TEMP/gc32-measurement-helper-sha256.txt" "$diagnostics/"
+          cp "$RUNNER_TEMP/gc32-partition-helper-sha256.txt" "$diagnostics/"
           git rev-parse HEAD > "$diagnostics/source-sha.txt"
           git rev-parse HEAD^{tree} > "$diagnostics/source-tree-before.txt"
           git status --porcelain > "$diagnostics/source-status-before.txt"
@@ -120,8 +123,7 @@ jobs:
           python3 -S "$RUNNER_TEMP/gc32_mac_gc_measurement.py" prepare-run "$diagnostics" "$real_go" "$lint_tool" -- \
             python3 -S .github/workflows/scripts/mac_lint_guard.py \
             --diagnostics "$diagnostics" --timeout-seconds 2700 --grace-seconds 5 \
-            -- make lint LINT_GOMEMLIMIT=3GiB \
-            LINT_FLAGS="--concurrency=2 --timeout=45m --verbose --show-stats --cpu-profile-path=$diagnostics/cpu.pprof --mem-profile-path=$diagnostics/memory.pprof" 2> "$diagnostics/gc-runtime.stderr"
+            -- python3 -S "$RUNNER_TEMP/gc32_mac_partition.py" "$diagnostics" "$lint_tool" 2> "$diagnostics/gc-runtime.stderr"
           lint_rc=$?
           set -e
           printf '%s\n' "$lint_rc" > "$diagnostics/lint-exit-code.txt"

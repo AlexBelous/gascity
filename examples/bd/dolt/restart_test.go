@@ -48,9 +48,9 @@ esac
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("mkdir fake dolt state dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(stateDir, "dolt.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
-		t.Fatalf("write fake dolt pid: %v", err)
-	}
+	// Bind the live-PID fixture to a recorded launch so the guard does not
+	// depend on the test binary's process name or kernel start time.
+	writeDoltLaunchState(t, cityPath, os.Getpid(), time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
 	return logPath
 }
 
@@ -68,16 +68,30 @@ func writeRestartLog(t *testing.T, cityPath, body string) {
 func writeDeadDoltLaunchState(t *testing.T, cityPath, startedAt string) {
 	t.Helper()
 	const deadPID = 2147483647
+	writeDoltLaunchState(t, cityPath, deadPID, startedAt)
+}
+
+func writeDoltPIDFile(t *testing.T, cityPath string, pid int) {
+	t.Helper()
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
-	if err := os.WriteFile(filepath.Join(stateDir, "dolt.pid"), []byte(strconv.Itoa(deadPID)+"\n"), 0o644); err != nil {
-		t.Fatalf("write dead dolt pid: %v", err)
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir dolt state dir: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(stateDir, "dolt.pid"), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("write dolt pid: %v", err)
+	}
+}
+
+func writeDoltLaunchState(t *testing.T, cityPath string, pid int, startedAt string) {
+	t.Helper()
+	writeDoltPIDFile(t, cityPath, pid)
+	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
 	state := fmt.Sprintf(
 		`{"running":true,"pid":%d,"port":3307,"data_dir":%q,"started_at":%q}`+"\n",
-		deadPID, filepath.Join(cityPath, ".beads", "dolt"), startedAt,
+		pid, filepath.Join(cityPath, ".beads", "dolt"), startedAt,
 	)
 	if err := os.WriteFile(filepath.Join(stateDir, "dolt-provider-state.json"), []byte(state), 0o644); err != nil {
-		t.Fatalf("write dead dolt provider state: %v", err)
+		t.Fatalf("write dolt provider state: %v", err)
 	}
 }
 
@@ -369,6 +383,63 @@ func TestRestartRefusesUnparseableFreshENOSPCWithDiagnostic(t *testing.T) {
 	}
 	if data, err := os.ReadFile(bdLog); err == nil && strings.TrimSpace(string(data)) != "" {
 		t.Fatalf("restart invoked gc-beads-bd after fail-closed timestamp parsing; ops log:\n%s\noutput:\n%s", data, out)
+	}
+}
+
+// TestRestartRefusesCurrentENOSPCWhenRetainedPIDWasReused pins the PID-reuse
+// fail-closed contract: a crashed Dolt leaves dolt.pid behind, and when an
+// unrelated process later takes that PID its start time must not become the
+// launch boundary that reclassifies current-launch ENOSPC as stale.
+func TestRestartRefusesCurrentENOSPCWhenRetainedPIDWasReused(t *testing.T) {
+	root := repoRoot(t)
+	for _, tc := range []struct {
+		name       string
+		writeState bool
+		wantReason string
+	}{
+		{name: "with provider state", writeState: true, wantReason: "ENOSPC at or after managed Dolt launch"},
+		{name: "without provider state", writeState: false, wantReason: "cannot determine managed Dolt launch boundary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			port, cleanup := startReachableTCPListener(t)
+			defer cleanup()
+
+			reused := exec.Command("sleep", "60")
+			if err := reused.Start(); err != nil {
+				t.Fatalf("start non-Dolt process: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = reused.Process.Kill()
+				_ = reused.Wait()
+			})
+
+			cityPath := t.TempDir()
+			bdLog := writeFakeBeadsBDForRestart(t, cityPath, root, map[string]int{"stop": 0, "start": 0})
+			stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+			if err := os.Remove(filepath.Join(stateDir, "dolt-provider-state.json")); err != nil {
+				t.Fatalf("remove default provider state: %v", err)
+			}
+			now := time.Now().UTC()
+			if tc.writeState {
+				writeDoltLaunchState(t, cityPath, reused.Process.Pid, now.Add(-time.Hour).Format(time.RFC3339))
+			} else {
+				writeDoltPIDFile(t, cityPath, reused.Process.Pid)
+			}
+			// After the recorded launch, but before the reused PID's process started.
+			writeRestartLog(t, cityPath, fmt.Sprintf("time=\"%s\" level=error msg=\"ENOSPC\"\n",
+				now.Add(-30*time.Minute).Format(time.RFC3339)))
+
+			out, err := runRestart(t, cityPath, root, port)
+			if err == nil {
+				t.Fatalf("gc dolt restart trusted a reused non-Dolt PID's start time:\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.wantReason) {
+				t.Fatalf("restart output missing %q; output:\n%s", tc.wantReason, out)
+			}
+			if data, err := os.ReadFile(bdLog); err == nil && strings.TrimSpace(string(data)) != "" {
+				t.Fatalf("restart invoked gc-beads-bd despite reused-PID refusal; ops log:\n%s\noutput:\n%s", data, out)
+			}
+		})
 	}
 }
 

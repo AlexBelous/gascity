@@ -55,26 +55,46 @@ dolt_current_launch_start_epoch() (
         ''|*[!0-9]*) return 1 ;;
     esac
 
-    # Prefer the kernel-backed boundary while the process is alive. Recovery
-    # normally runs after death, so fall back to provider state below.
-    if kill -0 "$_dolt_pid" 2>/dev/null; then
-        _dolt_started=$(LC_ALL=C ps -p "$_dolt_pid" -o lstart= 2>/dev/null \
-            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        if [ -n "$_dolt_started" ]; then
-            dolt_epoch_from_ps_lstart "$_dolt_started" && return 0
-        fi
-    fi
-
     # dolt-provider-state.json is written with a pre-launch timestamp and
     # survives process death. Require its PID and running marker to match the
     # retained PID file so a stopped/prior launch cannot become the boundary.
-    _dolt_state_pid=$(dolt_provider_state_field pid) || return 1
-    _dolt_state_running=$(dolt_provider_state_field running) || return 1
-    _dolt_state_started=$(dolt_provider_state_field started_at) || return 1
-    [ "$_dolt_state_pid" = "$_dolt_pid" ] || return 1
-    [ "$_dolt_state_running" = "true" ] || return 1
-    [ -n "$_dolt_state_started" ] || return 1
-    dolt_epoch_from_rfc3339 "$_dolt_state_started"
+    _dolt_state_epoch=""
+    _dolt_state_pid=$(dolt_provider_state_field pid) || _dolt_state_pid=""
+    _dolt_state_running=$(dolt_provider_state_field running) || _dolt_state_running=""
+    _dolt_state_started=$(dolt_provider_state_field started_at) || _dolt_state_started=""
+    if [ "$_dolt_state_pid" = "$_dolt_pid" ] && [ "$_dolt_state_running" = "true" ] && \
+        [ -n "$_dolt_state_started" ]; then
+        _dolt_state_epoch=$(dolt_epoch_from_rfc3339 "$_dolt_state_started") || _dolt_state_epoch=""
+    fi
+
+    # A live PID only contributes a kernel-backed boundary when it is still a
+    # Dolt process. A crashed launch leaves its PID file behind, and a recycled
+    # PID must never move the boundary past the recorded pre-launch time.
+    if kill -0 "$_dolt_pid" 2>/dev/null; then
+        _dolt_comm=$(LC_ALL=C ps -p "$_dolt_pid" -o comm= 2>/dev/null \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        case "$_dolt_comm" in
+            *dolt*)
+                _dolt_started=$(LC_ALL=C ps -p "$_dolt_pid" -o lstart= 2>/dev/null \
+                    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                _dolt_ps_epoch=""
+                if [ -n "$_dolt_started" ]; then
+                    _dolt_ps_epoch=$(dolt_epoch_from_ps_lstart "$_dolt_started") || _dolt_ps_epoch=""
+                fi
+                if [ -n "$_dolt_ps_epoch" ]; then
+                    if [ -n "$_dolt_state_epoch" ] && [ "$_dolt_state_epoch" -lt "$_dolt_ps_epoch" ]; then
+                        printf '%s\n' "$_dolt_state_epoch"
+                    else
+                        printf '%s\n' "$_dolt_ps_epoch"
+                    fi
+                    return 0
+                fi
+                ;;
+        esac
+    fi
+
+    [ -n "$_dolt_state_epoch" ] || return 1
+    printf '%s\n' "$_dolt_state_epoch"
 )
 
 dolt_enospc_log_guard_reason() (

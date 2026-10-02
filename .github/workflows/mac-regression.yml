@@ -1,6 +1,6 @@
 # Controlled #32 diagnostic only: not a required release or acceptance gate.
-# Frozen source and original full linter scope/budgets; only analysis concurrency changes.
-name: GC32 Mac lint diagnostic (concurrency 1)
+# Frozen source, original C2/full scope/budgets; add attributed GC observability.
+name: GC32 Mac attributed GC measurement
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: gc32-mac-lint-diagnostic-${{ github.ref }}
+  group: gc32-mac-gctrace-diagnostic-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -40,7 +40,7 @@ jobs:
           python3 .github/workflows/scripts/runner_policy.py
 
   mac-quality:
-    name: Diagnostic / full Mac lint (concurrency 1)
+    name: Diagnostic / attributed full Mac lint GC measurement
     needs:
       - runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
@@ -50,6 +50,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
+      - name: Retain measurement helper from definition
+        run: |
+          cp .github/workflows/scripts/gc32_mac_gc_measurement.py "$RUNNER_TEMP/gc32_mac_gc_measurement.py"
+          shasum -a 256 "$RUNNER_TEMP/gc32_mac_gc_measurement.py" > "$RUNNER_TEMP/gc32-measurement-helper-sha256.txt"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
           repository: AlexBelous/gascity
           ref: d262605c9822761bfe667c40d045e718e957cc17
           persist-credentials: false
@@ -57,6 +64,7 @@ jobs:
         run: |
           test "$GITHUB_RUN_ATTEMPT" = 1
           test "$(git rev-parse HEAD)" = d262605c9822761bfe667c40d045e718e957cc17
+          test "$(git rev-parse HEAD^{tree})" = a39288a12f8af15d15cbc7f0655fa8507250d3e8
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -95,7 +103,12 @@ jobs:
           # and compiler children; retain the full package and linter set.
           diagnostics="$RUNNER_TEMP/gc-mac-lint-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$diagnostics"
+          cp "$RUNNER_TEMP/gc32-measurement-helper-sha256.txt" "$diagnostics/"
           git rev-parse HEAD > "$diagnostics/source-sha.txt"
+          git rev-parse HEAD^{tree} > "$diagnostics/source-tree-before.txt"
+          git status --porcelain > "$diagnostics/source-status-before.txt"
+          test ! -s "$diagnostics/source-status-before.txt"
+          real_go="$(command -v go)"
           printf '%s\n' "$GC32_WORKFLOW_SHA" > "$diagnostics/workflow-definition-sha.txt"
           lint_tool="$(go env GOPATH)/bin/golangci-lint"
           shasum -a 256 "$lint_tool" > "$diagnostics/linter-sha256.txt"
@@ -104,16 +117,26 @@ jobs:
           sysctl hw.memsize hw.ncpu > "$diagnostics/host-before.txt"
           vm_stat >> "$diagnostics/host-before.txt"
           set +e
-          python3 -S .github/workflows/scripts/mac_lint_guard.py \
+          python3 -S "$RUNNER_TEMP/gc32_mac_gc_measurement.py" prepare-run "$diagnostics" "$real_go" "$lint_tool" -- \
+            python3 -S .github/workflows/scripts/mac_lint_guard.py \
             --diagnostics "$diagnostics" --timeout-seconds 2700 --grace-seconds 5 \
             -- make lint LINT_GOMEMLIMIT=3GiB \
-            LINT_FLAGS="--concurrency=1 --timeout=45m --verbose --show-stats --cpu-profile-path=$diagnostics/cpu.pprof --mem-profile-path=$diagnostics/memory.pprof"
+            LINT_FLAGS="--concurrency=2 --timeout=45m --verbose --show-stats --cpu-profile-path=$diagnostics/cpu.pprof --mem-profile-path=$diagnostics/memory.pprof" 2> "$diagnostics/gc-runtime.stderr"
           lint_rc=$?
           set -e
           printf '%s\n' "$lint_rc" > "$diagnostics/lint-exit-code.txt"
           sysctl hw.memsize hw.ncpu > "$diagnostics/host-after.txt"
           vm_stat >> "$diagnostics/host-after.txt"
-          exit "$lint_rc"
+          git rev-parse HEAD > "$diagnostics/source-sha-after.txt"
+          git rev-parse HEAD^{tree} > "$diagnostics/source-tree-after.txt"
+          git status --porcelain > "$diagnostics/source-status-after.txt"
+          source_rc=0
+          cmp "$diagnostics/source-sha.txt" "$diagnostics/source-sha-after.txt" || source_rc=1
+          cmp "$diagnostics/source-tree-before.txt" "$diagnostics/source-tree-after.txt" || source_rc=1
+          test ! -s "$diagnostics/source-status-after.txt" || source_rc=1
+          printf '%s\n' "$source_rc" > "$diagnostics/source-check-rc.txt"
+          if [ "$lint_rc" -ne 0 ]; then exit "$lint_rc"; fi
+          test "$source_rc" -eq 0
       - name: Upload lint diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

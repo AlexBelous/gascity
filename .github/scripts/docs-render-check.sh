@@ -1,136 +1,174 @@
 #!/usr/bin/env bash
-#
-# docs-render-check.sh — baseline-aware Mintlify broken-link check for CI.
-#
-# Runs `mint broken-links` on the HEAD docs tree. When the HEAD has broken
-# page links, materializes the BASE docs tree (via git archive) and reports
-# only NET-NEW breakage — links that the PR introduced, not pre-existing ones.
-# Static-asset refs (.png/.svg/.jpg/.gif) are excluded: mint over-reports
-# in-tree images the published build serves fine.
-#
-# Usage:
-#   docs-render-check.sh [<base-ref>]
-#
-#   <base-ref>  The base branch/sha to compare against (default: origin/main).
-#               Enables baseline-aware net-new detection.
-#
-# Exit codes:
-#   0 — no net-new page-link regressions
-#   1 — net-new page-link regressions found; details on stdout
-#
-# Requires: git, npx (Node.js), jq
-#
+# Baseline-aware Mint check. Only complete link reports qualify for asset/baseline
+# exclusions. Tool/unknown failures return125; real new page links return1.
+# Raw tool statuses and output are retained in an owned diagnostic directory.
 set -euo pipefail
+export GC_DOCS_BASE_REF="${1:-origin/main}"
+exec python3 -S - <<'PY'
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
 
-DOCS_DIR="docs"
-DOCS_CONFIG="$DOCS_DIR/docs.json"
-BASE_REF="${1:-origin/main}"
-MINT_CMD="${MINT_CMD:-npx --yes mint@latest}"
+started = time.monotonic()
+provided = os.environ.get("DOCS_CHECK_DIAGNOSTICS")
+try:
+    if provided:
+        diagnostics = Path(provided)
+        diagnostics.mkdir(parents=True, exist_ok=False)
+    else:
+        diagnostics = Path(tempfile.mkdtemp(prefix="gascity-docs-check-"))
+except OSError as error:
+    print(f"docs-render-check: refusing unavailable/reused diagnostics ({type(error).__name__})", file=sys.stderr)
+    sys.exit(125)
 
-WORK_TMP="$(mktemp -d)"
-trap 'rm -rf "$WORK_TMP"' EXIT
+print(f"docs-render-check: diagnostics={diagnostics}", file=sys.stderr)
+base_ref = os.environ["GC_DOCS_BASE_REF"]
+receipt = {"started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+           "base_ref": base_ref, "resolved_mint_version": "unknown", "head_rc": None,
+           "base_rc": None, "wrapper_rc": 125, "reason": "starting"}
 
-# Verify we have a Mintlify docs tree.
-if [[ ! -f "$DOCS_CONFIG" ]]; then
-    echo "docs-render-check: no docs/docs.json found — skipping" >&2
-    exit 0
-fi
 
-# --- extract_page_links <mint-output-file> -----------------------------------
-# Parse `mint broken-links` output lines. Each broken link looks like:
-#   [broken-links]  tutorials/01-beads.md  ->  /tutorials/01-beads.md
-# or
-#   ✗  /tutorials/01-beads.md
-# We capture only page links (no static-asset extensions).
-ASSET_EXTS='\.png$|\.svg$|\.jpg$|\.jpeg$|\.gif$|\.ico$|\.webp$|\.woff2?$|\.ttf$|\.eot$'
+def save():
+    receipt["elapsed_seconds"] = time.monotonic() - started
+    (diagnostics / "result.json").write_text(json.dumps(receipt, indent=2) + "\n")
 
-extract_page_links() {
-    local file="$1"
-    grep -oE '[^ ]+\.[a-z]+$|/[^ ]+' "$file" 2>/dev/null \
-        | grep -vE "$ASSET_EXTS" \
-        | sort -u || true
-}
 
-# Alternative simpler extraction: just lines with the broken-links marker.
-parse_mint_broken_links() {
-    local file="$1"
-    # mint outputs lines like: "  ✗  /path/to/page" or "  ✗  page-slug"
-    # or with indentation. Grab any token that looks like a link (starts with /).
-    grep -E '✗|broken|BROKEN|error|ERROR' "$file" 2>/dev/null \
-        | grep -oE '[/][^ )]+' \
-        | grep -vE "$ASSET_EXTS" \
-        | sort -u || true
-}
+def sha(ref):
+    result = subprocess.run(["git", "rev-parse", "--verify", ref],
+                            capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
 
-# --- run_mint <docs-root> <output-file> → exit code -------------------------
-run_mint() {
-    local root="$1"
-    local out="$2"
-    cd "$root"
-    if $MINT_CMD broken-links >"$out" 2>&1; then
-        cd - >/dev/null
-        return 0
-    fi
-    cd - >/dev/null
-    return 1
-}
 
-HEAD_OUT="$WORK_TMP/head-mint.txt"
-BASE_OUT="$WORK_TMP/base-mint.txt"
-BASE_TREE="$WORK_TMP/base-docs"
+ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+header = re.compile(r"found (\d+) broken links in (\d+) files")
+fatal = re.compile(r"^(?:npm (?:ERR!|error)(?:\s|$)|error(?:\s|:))", re.IGNORECASE)
+assets = re.compile(r"\.(?:png|svg|jpg|jpeg|gif|ico|webp|woff2?|ttf|eot)$")
 
-# --- HEAD check --------------------------------------------------------------
-HEAD_EXIT=0
-run_mint "." "$HEAD_OUT" || HEAD_EXIT=$?
 
-if [[ $HEAD_EXIT -eq 0 ]]; then
-    echo "docs-render-check: no broken links in HEAD — PASS" >&2
-    exit 0
-fi
+def classify(rc, stdout, stderr):
+    lines = ansi.sub("", stdout).replace("\u00a0", " ").splitlines()
+    errors = ansi.sub("", stderr).replace("\u00a0", " ").splitlines()
+    if any(fatal.match(line.strip()) for line in lines + errors):
+        return "tool-error", []
+    headers = [(i, header.fullmatch(line.strip())) for i, line in enumerate(lines)]
+    headers = [(i, match) for i, match in headers if match]
+    if rc == 0:
+        return ("unknown-incomplete", []) if headers else ("clean", [])
+    if rc != 1:
+        return "tool-error", []
+    # npm's benign installation warnings are not BrokenLinksLog file headings.
+    # Other stderr on a nonzero run is unclassified, never an asset/baseline PASS.
+    if any(line.strip() and not re.match(r"^npm warn\s+", line.strip(), re.IGNORECASE)
+           for line in errors):
+        return "unknown-incomplete", []
+    if len(headers) != 1:
+        return "unknown-incomplete", []
+    index, match = headers[0]
+    expected_rows, expected_files = map(int, match.groups())
+    files, links = [], []
+    current_file_rows = 0
+    for line in lines[index + 1:]:
+        value = line.strip()
+        if not value:
+            continue
+        row = re.fullmatch(r"(?:⎿|├─|└─)\s+(.+)", value)
+        if row:
+            if not files:
+                return "unknown-incomplete", []
+            links.append(row[1])
+            current_file_rows += 1
+        else:
+            if files and current_file_rows == 0:
+                return "unknown-incomplete", []
+            # File headings are emitted without indentation by BrokenLinksLog.
+            if line != line.lstrip():
+                return "unknown-incomplete", []
+            files.append(value)
+            current_file_rows = 0
+    if (expected_rows < 1 or expected_files < 1 or current_file_rows < 1
+            or len(links) != expected_rows or len(files) != expected_files
+            or len(set(files)) != expected_files):
+        return "unknown-incomplete", []
+    return "completed-report", sorted({link for link in links if not assets.search(link)})
 
-HEAD_LINKS="$WORK_TMP/head-links.txt"
-parse_mint_broken_links "$HEAD_OUT" | sort -u >"$HEAD_LINKS"
 
-if [[ ! -s "$HEAD_LINKS" ]]; then
-    # mint exited non-zero but no links we care about. Pass.
-    echo "docs-render-check: mint non-zero but no page-link regressions detected — PASS" >&2
-    exit 0
-fi
+def mint(root, label):
+    out = diagnostics / f"{label}.stdout"
+    err = diagnostics / f"{label}.stderr"
+    command = shlex.split(os.environ.get("MINT_CMD", "npx --yes mint@latest"))
+    with out.open("w") as stdout, err.open("w") as stderr:
+        try:
+            if not command:
+                raise ValueError("empty Mint command")
+            rc = subprocess.run(command + ["broken-links"], cwd=root,
+                                stdout=stdout, stderr=stderr).returncode
+        except (OSError, ValueError) as error:
+            stderr.write(f"error {type(error).__name__} invoking Mint\n")
+            rc = 127 if isinstance(error, FileNotFoundError) else 126
+    (diagnostics / f"{label}.rc").write_text(f"{rc}\n")
+    receipt[f"{label}_rc"] = rc
+    kind, links = classify(rc, out.read_text(encoding="utf-8"), err.read_text(encoding="utf-8"))
+    receipt[f"{label}_classification"] = kind
+    (diagnostics / f"{label}.links.json").write_text(json.dumps(links) + "\n")
+    save()
+    return kind, links
 
-# --- BASE check (baseline-aware) --------------------------------------------
-mkdir -p "$BASE_TREE"
-if git archive "$BASE_REF" -- "$DOCS_DIR" 2>/dev/null | tar -x -C "$BASE_TREE"; then
-    BASE_EXIT=0
-    run_mint "$BASE_TREE" "$BASE_OUT" || BASE_EXIT=$?
-    BASE_LINKS="$WORK_TMP/base-links.txt"
-    parse_mint_broken_links "$BASE_OUT" | sort -u >"$BASE_LINKS"
-    # Net-new = in HEAD but NOT in BASE.
-    NEW_LINKS="$WORK_TMP/new-links.txt"
-    comm -23 "$HEAD_LINKS" "$BASE_LINKS" >"$NEW_LINKS"
-else
-    echo "docs-render-check: could not materialize base tree from $BASE_REF — checking HEAD only" >&2
-    cp "$HEAD_LINKS" "$WORK_TMP/new-links.txt"
-    NEW_LINKS="$WORK_TMP/new-links.txt"
-fi
 
-if [[ ! -s "$NEW_LINKS" ]]; then
-    echo "docs-render-check: broken links exist but none are net-new — PASS (pre-existing baseline)" >&2
-    exit 0
-fi
+def check():
+    receipt.update(head_sha=sha("HEAD"), base_sha=sha(base_ref))
+    save()
+    if not Path("docs/docs.json").is_file():
+        return 0, "no-docs"
+    kind, head_links = mint(Path.cwd() / "docs", "head")
+    if kind not in ("clean", "completed-report"):
+        return 125, kind
+    if kind == "clean":
+        return 0, "clean"
+    if not head_links:
+        return 0, "completed-assets-only"
 
-# --- NET-NEW regressions found — fail with csells's explanation --------------
-echo ""
-echo "::error::docs-render-check: net-new broken Mintlify page links detected"
-echo ""
-echo "The following page links are newly broken by this PR:"
-while IFS= read -r link; do
-    echo "  $link"
-done <"$NEW_LINKS"
-echo ""
-echo "──────────────────────────────────────────────────────────────────────────"
-echo "docs/ is authored for the Mintlify site (https://docs.gascityhall.com),"
-echo "not for direct GitHub viewing. These paths/links are intentional —"
-echo "please don't reformat them for GitHub. If something is genuinely broken"
-echo "on the live site, note it in the PR and we'll fix it Mintlify-side."
-echo "──────────────────────────────────────────────────────────────────────────"
-exit 1
+    archive = diagnostics / "base-docs.tar"
+    with archive.open("wb") as out, (diagnostics / "archive.stderr").open("wb") as err:
+        archive_rc = subprocess.run(["git", "archive", base_ref, "--", "docs"],
+                                    stdout=out, stderr=err).returncode
+    receipt["archive_rc"] = archive_rc
+    new_links = head_links
+    if archive_rc == 0:
+        root = diagnostics / "base-docs"
+        root.mkdir()
+        with tarfile.open(archive) as tree:
+            tree.extractall(root, filter="data")
+        kind, base_links = mint(root / "docs", "base")
+        if kind not in ("clean", "completed-report"):
+            return 125, "baseline-" + kind
+        new_links = sorted(set(head_links) - set(base_links))
+        if not new_links:
+            return 0, "baseline-existing"
+    receipt["page_links"] = new_links
+    print("docs-render-check: HEAD page links requiring attention:")
+    for link in new_links:
+        print(f"  {link}")
+    if archive_rc != 0:
+        print("docs-render-check: baseline unavailable; these links were not verified as net-new", file=sys.stderr)
+        return 1, "baseline-unavailable"
+    return 1, "net-new-pages"
+
+
+try:
+    status, reason = check()
+except (OSError, ValueError, tarfile.TarError, subprocess.SubprocessError) as error:
+    receipt["wrapper_error"] = type(error).__name__
+    status, reason = 125, "wrapper-error"
+receipt.update(wrapper_rc=status, reason=reason)
+save()
+print(f"docs-render-check: {reason} (rc{status})", file=sys.stderr)
+sys.exit(status)
+PY

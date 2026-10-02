@@ -27,9 +27,12 @@ import (
 )
 
 // nudgeFunc is an optional callback for nudging an agent after sending or
-// replying to mail. When non-nil, it is called with the recipient name.
+// replying to mail. When non-nil, it is called with the recipient name and
+// the ID of the message the nudge announces. messageID lets the queued nudge
+// carry a re-checkable reference, so delivery-time re-validation can withdraw
+// it if the message is read or gone by then (gastownhall/gascity#5321).
 // Errors are non-fatal.
-type nudgeFunc func(recipient string) error
+type nudgeFunc func(recipient, messageID string) error
 
 const (
 	mailInjectMaxMessages          = 3
@@ -114,12 +117,12 @@ func summarizeMailMessage(m mail.Message) mailMessageSummary {
 }
 
 func newMailNudgeFunc(sender string) nudgeFunc {
-	return func(recipient string) error {
+	return func(recipient, messageID string) error {
 		target, err := resolveNudgeTarget(recipient, io.Discard)
 		if err != nil {
 			return err
 		}
-		return sendMailNotify(target, sender)
+		return sendMailNotify(target, sender, messageID)
 	}
 }
 
@@ -349,7 +352,19 @@ func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []str
 	return exit
 }
 
+// splitMessageIDArgs splits every argument on whitespace and drops empty
+// tokens. Message IDs never contain whitespace, and some shells can preserve a
+// variable containing multiple IDs as one argument.
+func splitMessageIDArgs(args []string) []string {
+	ids := make([]string, 0, len(args))
+	for _, arg := range args {
+		ids = append(ids, strings.Fields(arg)...)
+	}
+	return ids
+}
+
 func doMailArchiveJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	args = splitMessageIDArgs(args)
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail archive: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
@@ -516,6 +531,17 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
 }
 
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// --inject writes a <system-reminder> straight into a provider's system
+	// prompt. With no recipient argument the mailbox falls back through
+	// GC_SESSION_ID/GC_ALIAS/GC_AGENT to "human"
+	// (defaultMailIdentityCandidates), so an unmanaged session — a human who
+	// opened a provider in a directory gc staged overlays into — would have the
+	// operator's own inbox injected as an instruction and act on it instead of
+	// answering the human. Naming a mailbox is a deliberate request and is
+	// still served; the plain non-inject form is untouched (#5304).
+	if inject && len(args) == 0 && !hookHasManagedIdentity() {
+		return 0
+	}
 	cityPath, cityPathErr := resolveCity()
 	if cityPathErr == nil {
 		if cfg, err := loadCityConfig(cityPath, stderr); err == nil && citySuspended(cfg) {
@@ -809,6 +835,16 @@ func formatInjectOutput(messages []mail.Message) string {
 		subject := extmsg.SanitizeForSystemReminder(rawSubject)
 		rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
 		body := extmsg.SanitizeForSystemReminder(rawBody)
+		// A message with no body is not a message whose content went missing:
+		// the subject IS the content. `gc mail send <to> -s "text"` and
+		// POST /v0/mail with the optional body omitted both produce this shape.
+		// Without the substitution it renders as "[subject]: " — a subject in
+		// brackets and nothing behind the colon, which reads as lost content
+		// and is what made ga-6eukj0 look like a storage bug. Substituting here
+		// covers every ingress, since all of them converge on this read path.
+		if body == "" {
+			body, bodyTruncated = subject, subjectTruncated
+		}
 		if subject != "" && subject != body {
 			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, from, subject)
 			if subjectTruncated {
@@ -1441,6 +1477,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var subject string
 	var message string
 	var jsonOut bool
+	var dedupKey string
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
 		Short: "Send a message to a session alias or human",
@@ -1453,22 +1490,28 @@ a non-running recipient. Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
-Use --all to broadcast to all live sessions (excluding sender and "human").`,
+Use --all to broadcast to all live sessions (excluding sender and "human").
+
+Use --dedup <key> for repeating notifications (patrol and cooldown orders
+that re-detect the same condition every run): the send is suppressed while
+a previous message with the same key is still live (un-archived) in the same
+mailbox, and an alias and the session behind it count as one mailbox.
+Suppression exits 0. Once the recipient archives the message the stream may
+alert again; senders that want a longer re-alert cadence keep their own
+last-sent state. Dedup needs a provider that can query its own message
+history. The built-in provider can; one that cannot sends normally and says
+so on stderr, because a duplicate notification beats a dropped one.`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
-  gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+  gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
-  gc mail send polecat "Priority task" --notify
-  gc mail send --all "Status update: tests passing"`,
+  gc mail send worker "Priority task" --notify
+  gc mail send --all "Status update: tests passing"
+  gc mail send worker -s "disk warning" --dedup "disk-warn:hq"`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			code := 0
-			if jsonOut {
-				code = cmdMailSendJSON(args, notify, all, from, to, subject, message, true, stdout, stderr)
-			} else {
-				code = cmdMailSend(args, notify, all, from, to, subject, message, stdout, stderr)
-			}
+			code := cmdMailSendJSON(args, notify, all, from, to, subject, message, dedupKey, jsonOut, stdout, stderr)
 			if code != 0 {
 				return errExit
 			}
@@ -1484,7 +1527,9 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().StringVar(&dedupKey, "dedup", "", "suppress the send while a live message with this dedup key is in the same mailbox (provider permitting)")
 	cmd.MarkFlagsMutuallyExclusive("to", "all")
+	cmd.MarkFlagsMutuallyExclusive("dedup", "all")
 	return cmd
 }
 
@@ -1704,10 +1749,14 @@ The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".`,
 // resolves session mailbox identities, and delegates to doMailSend.
 // The to parameter is the --to flag value (empty if not set).
 func cmdMailSend(args []string, notify bool, all bool, from string, to string, subject string, message string, stdout, stderr io.Writer) int {
-	return cmdMailSendJSON(args, notify, all, from, to, subject, message, false, stdout, stderr)
+	return cmdMailSendJSON(args, notify, all, from, to, subject, message, "", false, stdout, stderr)
 }
 
-func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, jsonOut bool, stdout, stderr io.Writer) int {
+// cmdMailSendJSON is cmdMailSend with the dedup key and JSON-output controls
+// exposed. A non-empty dedupKey routes the send through the provider's
+// [mail.DedupSender] capability so a repeating notifier keeps at most one live
+// copy; an empty dedupKey sends unconditionally.
+func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
@@ -1816,17 +1865,21 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	rec := openCityRecorder(stderr)
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, jsonOut, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, dedupKey, jsonOut, stdout, stderr)
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
 // or [to, body] (subject="" if no -s flag). When nudgeFn is non-nil, the
 // recipient is nudged after message creation (skipped for "human").
 func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, false, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, "", false, stdout, stderr)
 }
 
-func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, jsonOut bool, stdout, stderr io.Writer) int {
+// doMailSendJSON is doMailSend with the JSON-output and dedup controls exposed.
+// A non-empty dedupKey routes through the provider's [mail.DedupSender]
+// capability; providers without it fall back to a plain send (fail-open, since
+// a duplicate notification beats a silently dropped one).
+func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1848,11 +1901,35 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		return 1
 	}
 
-	m, err := mp.Send(sender, to, subject, body)
+	var (
+		m          mail.Message
+		suppressed bool
+		err        error
+	)
+	if dedupKey != "" {
+		if ds, ok := mp.(mail.DedupSender); ok {
+			m, suppressed, err = ds.SendDeduped(sender, to, subject, body, dedupKey)
+		} else {
+			fmt.Fprintln(stderr, "gc mail send: mail provider does not support --dedup; sending without dedup") //nolint:errcheck // best-effort stderr
+			m, err = mp.Send(sender, to, subject, body)
+		}
+	} else {
+		m, err = mp.Send(sender, to, subject, body)
+	}
 	telemetry.RecordMailOp(context.Background(), "send", err)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if suppressed {
+		// Nothing was created: no mail.sent event, no nudge — the point of
+		// dedup is that the recipient was already notified by m.
+		if jsonOut {
+			summary := summarizeMailMessage(m)
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, AlreadyDone: true, Count: intRef(0)})
+		}
+		fmt.Fprintf(stdout, "Suppressed duplicate of %s to %s (dedup key %q)\n", m.ID, to, dedupKey) //nolint:errcheck // best-effort stdout
+		return 0
 	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
@@ -1868,7 +1945,7 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 	// Nudge recipient if requested and recipient is not human.
 	notified := false
 	if nudgeFn != nil && to != "human" {
-		if err := nudgeFn(to); err != nil {
+		if err := nudgeFn(to, m.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
@@ -1937,7 +2014,7 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		}
 
 		if nudgeFn != nil {
-			if err := nudgeFn(to); err != nil {
+			if err := nudgeFn(to, m.ID); err != nil {
 				fmt.Fprintf(stderr, "gc mail send --all: nudge %s failed: %v\n", to, err) //nolint:errcheck // best-effort stderr
 			} else {
 				notified = true
@@ -2272,7 +2349,7 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 
 	notified := false
 	if nudgeFn != nil && reply.To != "human" {
-		if err := nudgeFn(reply.To); err != nil {
+		if err := nudgeFn(reply.To, reply.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
@@ -2396,6 +2473,7 @@ func doMailDelete(mp mail.Provider, rec events.Recorder, args []string, stdout, 
 }
 
 func doMailDeleteJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	args = splitMessageIDArgs(args)
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail delete: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1

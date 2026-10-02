@@ -14,6 +14,7 @@ import (
 // an evidence validator. A release must compare every field again in one
 // transaction; a one-key metadata CAS cannot clear the two blocker keys safely.
 type BlockerPairSnapshot struct {
+	// Revision is an opaque non-zero token; negative values are valid.
 	Revision int64
 	Text     string
 	Typed    string
@@ -26,7 +27,10 @@ type BlockerPairSnapshot struct {
 // Callers must first validate the primary source predicate and then read back
 // the parent. Unsupported stores must not emulate this with two key writes.
 func (s *NativeDoltStore) ClearBlockerPairIfMatch(id string, expected BlockerPairSnapshot) (bool, error) {
-	if id == "" || expected.Revision <= 0 || expected.Text == "" || expected.Typed == "" ||
+	if err := s.readOnlyGuard(); err != nil {
+		return false, err
+	}
+	if id == "" || expected.Revision == 0 || expected.Text == "" || expected.Typed == "" ||
 		expected.Route == "" || expected.Owner == "" {
 		return false, fmt.Errorf("clear blocker pair: incomplete exact snapshot")
 	}
@@ -53,7 +57,13 @@ func (s *NativeDoltStore) ClearBlockerPairIfMatch(id string, expected BlockerPai
 			issue.Assignee != "" {
 			return nil
 		}
-		for _, label := range issue.Labels {
+		// Dolt transactional GetIssue does not hydrate labels. Read them in
+		// this same transaction; unverifiable holds must fail closed.
+		labels, err := tx.GetLabels(ctx, id)
+		if err != nil {
+			return fmt.Errorf("reading holds for bead %q: %w", id, err)
+		}
+		for _, label := range labels {
 			if label == "hold:mayor" || label == "hold:external" {
 				return nil
 			}

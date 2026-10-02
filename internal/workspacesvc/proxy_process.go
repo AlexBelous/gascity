@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,10 +24,18 @@ import (
 )
 
 const (
-	proxyProcessReadyTimeout   = 5 * time.Second
 	proxyProcessRestartBackoff = 1 * time.Second
 	proxyProcessShutdownWait   = 2 * time.Second
 )
+
+// proxyProcessReadyTimeout is how long a freshly spawned helper has to accept
+// connections and pass its health check, measured from the spawn. Manager.Tick
+// runs inline on the controller tick and start blocks for this long per service
+// that never becomes ready, so raising it in production stalls the controller
+// instead of fixing a slow start. Tests raise it once, from init, so a starved
+// host cannot turn a slow helper start into a failure; production never
+// assigns it, and tests are serial, so no locking is needed.
+var proxyProcessReadyTimeout = 5 * time.Second
 
 var errProxyProcessExitedEarly = errors.New("process exited before listener became ready")
 
@@ -228,6 +237,11 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		_ = logFile.Close()
 		return fmt.Errorf("start process: %w", err)
 	}
+	// The readiness window opens at the spawn. now was captured before the
+	// orphan sweep above, which scans every process on the host, and
+	// Manager.Tick hands the same now to every service it starts in turn, so a
+	// deadline anchored on it loses however long those took.
+	readyBy := time.Now().Add(proxyProcessReadyTimeout)
 
 	p.mu.Lock()
 	p.cmd = cmd
@@ -261,7 +275,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		p.nextRestart = time.Now().UTC().Add(proxyProcessRestartBackoff)
 	}(cmd, logFile, doneCh)
 
-	if err := p.waitReady(now.Add(proxyProcessReadyTimeout)); err != nil {
+	if err := p.waitReady(readyBy); err != nil {
 		if !errors.Is(err, errProxyProcessExitedEarly) {
 			_ = stopProcessGroup(cmd)
 		}
@@ -356,18 +370,45 @@ func (p *proxyProcessInstance) commandDir() string {
 }
 
 func allocateProxyProcessSocketPath(cityPath, serviceName string) (string, error) {
+	return allocateProxyProcessSocketPathInTempDir(cityPath, serviceName, os.TempDir())
+}
+
+func allocateProxyProcessSocketPathInTempDir(cityPath, serviceName, tempDir string) (string, error) {
 	sum := sha256.Sum256([]byte(cityPath))
-	dir := filepath.Join(os.TempDir(), fmt.Sprintf("gcsvc-%d", os.Getuid()), hex.EncodeToString(sum[:4]))
+	dir := filepath.Join(tempDir, fmt.Sprintf("gcsvc-%d", os.Getuid()), hex.EncodeToString(sum[:4]))
+	prefix := config.NormalizePublicationLabel(serviceName, "svc")
+	if len(prefix) > 16 {
+		prefix = prefix[:16]
+	}
+	// macOS permits at most 103 pathname bytes. Reserve ten decimal digits
+	// for CreateTemp's random suffix plus the separator and .sock extension.
+	// A long host TMPDIR must not prevent an otherwise valid service starting.
+	if len(filepath.Join(dir, prefix+"-4294967295.sock")) > 103 {
+		var err error
+		dir, err = os.MkdirTemp("/tmp", fmt.Sprintf("gcsvc-%d-", os.Getuid()))
+		if err != nil {
+			return "", fmt.Errorf("create short socket dir: %w", err)
+		}
+		allocated := false
+		defer func() {
+			if !allocated {
+				_ = os.Remove(dir)
+			}
+		}()
+		path, err := allocateProxyProcessSocketPlaceholder(dir, prefix)
+		allocated = err == nil
+		return path, err
+	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", fmt.Errorf("create socket dir: %w", err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", fmt.Errorf("chmod socket dir: %w", err)
 	}
-	prefix := config.NormalizePublicationLabel(serviceName, "svc")
-	if len(prefix) > 16 {
-		prefix = prefix[:16]
-	}
+	return allocateProxyProcessSocketPlaceholder(dir, prefix)
+}
+
+func allocateProxyProcessSocketPlaceholder(dir, prefix string) (string, error) {
 	tmp, err := os.CreateTemp(dir, prefix+"-*.sock")
 	if err != nil {
 		return "", fmt.Errorf("allocate socket path: %w", err)
@@ -388,6 +429,14 @@ func cleanupProxyProcessSocketPath(path string) error {
 		return fmt.Errorf("remove socket path: %w", err)
 	}
 	dir := filepath.Dir(path)
+	// Long-TMPDIR instances own a private, randomly allocated /tmp directory.
+	// Remove only that empty directory; never recurse or touch other instances.
+	if filepath.Dir(dir) == "/tmp" && strings.HasPrefix(filepath.Base(dir), fmt.Sprintf("gcsvc-%d-", os.Getuid())) {
+		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTEMPTY) {
+			return fmt.Errorf("remove short socket dir: %w", err)
+		}
+		return nil
+	}
 	root := filepath.Join(os.TempDir(), fmt.Sprintf("gcsvc-%d", os.Getuid()))
 	if filepath.Dir(dir) != root {
 		return nil

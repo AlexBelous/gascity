@@ -75,7 +75,7 @@ concurrency:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.1.0"
+  BD_VERSION: "v1.3.0"
 
 # Tier routing is centralized in the `gate` job below, which always runs
 # and computes run_smoke/run_full/run_review_formulas plus a human-readable
@@ -137,6 +137,7 @@ jobs:
               - 'cmd/gc/**'
               - 'internal/pathutil/**'
               - 'internal/fsys/**'
+              - '.github/actions/setup-gascity-macos/**'
       - name: Decide which tiers should run
         id: gate
         env:
@@ -178,6 +179,9 @@ jobs:
             elif [[ "$NEEDS_LABEL" == "true" ]]; then
               run_smoke=true; run_full=true
               reason="pull request carries needs-mac label"
+            elif [[ "$PATH_HIT" == "true" ]]; then
+              run_smoke=true
+              reason="pull request touches mac-sensitive paths without needs-mac label, running smoke tier"
             else
               reason="pull request without needs-mac label (path hit: ${PATH_HIT})"
             fi
@@ -199,7 +203,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 35
+    # Cold lint exceeded 33 minutes before fmt/vet/docs could start. This
+    # bounds total runner occupancy; it does not relax any command/test gate.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -238,7 +244,32 @@ jobs:
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
+        run: |
+          # Standard ARM64 runners have 7 GB RAM. Leave headroom for the OS
+          # and compiler children; retain the full package and linter set.
+          diagnostics="$RUNNER_TEMP/gc-mac-lint-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$diagnostics"
+          sysctl hw.memsize hw.ncpu > "$diagnostics/host-before.txt"
+          vm_stat >> "$diagnostics/host-before.txt"
+          set +e
+          python3 -S .github/workflows/scripts/mac_lint_guard.py \
+            --diagnostics "$diagnostics" --timeout-seconds 2700 --grace-seconds 5 \
+            -- make lint LINT_GOMEMLIMIT=3GiB \
+            LINT_FLAGS="--concurrency=2 --timeout=45m --verbose --show-stats --cpu-profile-path=$diagnostics/cpu.pprof --mem-profile-path=$diagnostics/memory.pprof"
+          lint_rc=$?
+          set -e
+          printf '%s\n' "$lint_rc" > "$diagnostics/lint-exit-code.txt"
+          sysctl hw.memsize hw.ncpu > "$diagnostics/host-after.txt"
+          vm_stat >> "$diagnostics/host-after.txt"
+          exit "$lint_rc"
+      - name: Upload lint diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mac-lint-diagnostics-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gc-mac-lint-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       - name: Format
         run: make fmt-check
       - name: Vet
@@ -254,7 +285,7 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -269,8 +300,8 @@ jobs:
       - name: Run make test-mac
         run: make test-mac
 
-  # cmd/gc unit/process tests — sharded 12-way so each shard comfortably fits
-  # the per-shard timeout even on slower Mac ARM runners. Mirrors the Linux
+  # cmd/gc unit/process tests — sharded 12-way with a separate outer budget
+  # for cold compilation and the retained product-test deadline. Mirrors Linux
   # cmd-gc-process matrix in ci.yml. cmd/gc is excluded from mac-unit's
   # make test-mac sweep; coverage is preserved here across all 12 shards.
   mac-cmd-gc-process:
@@ -280,7 +311,9 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 20
+    # Cold test listing consumed 12m25s inside the old 20m job envelope.
+    # Leave room for compilation plus the unchanged 20m product-test budget.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:

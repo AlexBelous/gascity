@@ -5,6 +5,9 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'docs/**'
+      - '.github/scripts/docs-render-check.sh'
+      - '.github/workflows/docs-render.yml'
+      - '.github/workflows/scripts/test_docs_render_check.py'
 
 permissions:
   contents: read
@@ -27,7 +30,24 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Docs checker policy tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_docs_render_check.py'
+
       - name: Run baseline-aware broken-link check
         env:
           BASE_REF: origin/${{ github.base_ref }}
+          DOCS_CHECK_DIAGNOSTICS: ${{ runner.temp }}/gc-docs-${{ github.run_id }}-${{ github.run_attempt }}
         run: .github/scripts/docs-render-check.sh "$BASE_REF"
+
+      - name: Upload owned Docs diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docs-render-diagnostics-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gc-docs-${{ github.run_id }}-${{ github.run_attempt }}/head.*
+            ${{ runner.temp }}/gc-docs-${{ github.run_id }}-${{ github.run_attempt }}/base.*
+            ${{ runner.temp }}/gc-docs-${{ github.run_id }}-${{ github.run_attempt }}/archive.stderr
+            ${{ runner.temp }}/gc-docs-${{ github.run_id }}-${{ github.run_attempt }}/result.json
+          retention-days: 7
+          if-no-files-found: error

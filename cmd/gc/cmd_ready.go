@@ -162,6 +162,7 @@ func toReadyBeadDeps(deps []beads.Dep) []readyBeadDep {
 // selects nothing. See newReadyCmd.
 type readyOpts struct {
 	assignee       string
+	assigneesAny   []string
 	unassigned     bool
 	metadataFields []string
 	excludeTypes   []string
@@ -202,6 +203,11 @@ The flags mirror the "bd ready" contract the default work_query builds:
            --exclude-type=epic --exclude-label "hold:mayor" \
            --sort oldest --limit 20 --json
 
+Use repeated --assignee-any to read work owned under several exact identities
+in one query (for example a session ID and its runtime alias). This union is
+applied before dependency enrichment. It cannot be combined with --assignee
+or --unassigned; every identity must be non-empty.
+
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
 read is the true top-N of the merged set rather than the top-N of whichever
@@ -232,6 +238,7 @@ orchestration step runs as are claimable work here whether or not
 // contract, which is the drift this whole lane exists to remove.
 func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, jsonOut *bool) {
 	cmd.Flags().StringVar(&opts.assignee, "assignee", "", "only work assigned to this identity")
+	cmd.Flags().StringArrayVar(&opts.assigneesAny, "assignee-any", nil, "only work assigned to any of these exact identities (repeatable; incompatible with --assignee and --unassigned)")
 	cmd.Flags().BoolVar(&opts.unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.metadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.excludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")
@@ -264,7 +271,7 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityStore, err := openCityStoreAt(cityPath)
+	cityStore, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -274,6 +281,7 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	primeReadyStorageRoutes(cityPath, cityStore)
 	legs, err := readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
 	if err != nil {
 		// A refused city: the plan carries the refusal that names the remedy, and
@@ -306,6 +314,16 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	// Every flag is validated before a single store is touched: a malformed
 	// query must not cost a city-wide federated read to be told it was
 	// malformed.
+	if len(opts.assigneesAny) > 0 {
+		if strings.TrimSpace(opts.assignee) != "" || opts.unassigned {
+			return nil, fmt.Errorf("--assignee-any cannot be combined with --assignee or --unassigned")
+		}
+		for _, identity := range opts.assigneesAny {
+			if strings.TrimSpace(identity) == "" {
+				return nil, fmt.Errorf("--assignee-any requires a non-empty identity")
+			}
+		}
+	}
 	filters, err := parseMetadataFieldFilters(opts.metadataFields)
 	if err != nil {
 		return nil, err
@@ -446,7 +464,7 @@ func readyStatusSelector(status string) (string, error) {
 }
 
 // filterReadyBeads applies the predicates the store readers cannot express
-// natively: --assignee, --unassigned, --exclude-type, --exclude-label and
+// natively: --assignee, --assignee-any, --unassigned, --exclude-type, --exclude-label and
 // --metadata-field.
 //
 // They are applied in Go rather than pushed into each leg on purpose: the legs
@@ -455,6 +473,10 @@ func readyStatusSelector(status string) (string, error) {
 // store.
 func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) []beads.Bead {
 	assignee := strings.TrimSpace(opts.assignee)
+	identities := make(map[string]bool, len(opts.assigneesAny))
+	for _, identity := range opts.assigneesAny {
+		identities[strings.TrimSpace(identity)] = true
+	}
 	exclude := make(map[string]bool, len(opts.excludeTypes))
 	for _, t := range opts.excludeTypes {
 		if t = strings.TrimSpace(t); t != "" {
@@ -467,6 +489,9 @@ func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFie
 			continue
 		}
 		if assignee != "" && strings.TrimSpace(b.Assignee) != assignee {
+			continue
+		}
+		if len(identities) > 0 && !identities[strings.TrimSpace(b.Assignee)] {
 			continue
 		}
 		if exclude[b.Type] {
@@ -554,11 +579,9 @@ func beadMatchesMetadata(b beads.Bead, want []metadataFieldFilter) bool {
 // here: a second copy of a total order across a package boundary is a copy that
 // drifts, and this one decides which rows a bounded read serves.
 //
-// Imposing it is also what makes the merged set well-ordered at all. Each leg's
-// own order is deterministic but they are not the same order — a caching-wrapped
-// work store emits (priority, created_at, id) while the canonical relocated
-// graph binding emits (created_at, id) with no priority term — so the raw
-// concatenation has no single total order for --limit to cut.
+// Imposing it is also what makes the merged set well-ordered at all. Each leg
+// emits its own rows in canonical order, but a concatenation of sorted legs is
+// not sorted, so the raw merge has no single total order for --limit to cut.
 //
 // An unrecognized order is rejected rather than falling back to the default,
 // which is how a bounded query quietly serves the wrong prefix.

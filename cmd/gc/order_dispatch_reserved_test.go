@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -240,4 +242,198 @@ func TestOrderDispatchReservedOrderDoesNotDoubleDispatchOnRepeatTick(t *testing.
 			t.Fatalf("tracking runs across an immediate completed repeat tick = %d, want 1", got)
 		}
 	})
+}
+
+// A declared health reservation must receive a bounded opportunity even when
+// ordinary clock work ahead of it spends the entire ordinary dispatch budget.
+func TestOrderDispatchReservedCapacitySurvivesOrdinaryContention(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := beads.NewMemStore()
+		recorder := &reservedDispatchExecRecorder{}
+		aa := []orders.Order{ordinaryExecOrder("ordinary-a"), ordinaryExecOrder("ordinary-b")}
+		for _, name := range []string{"reserved-a", "reserved-b", "reserved-c", "reserved-d", "reserved-e"} {
+			aa = append(aa, reservedExecOrder(t, name, false))
+		}
+		m := buildOrderDispatcherFromListExec(aa, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+		m.maxDispatchesPerTick = 1
+		cityPath := t.TempDir()
+		now := time.Now()
+		m.dispatch(context.Background(), cityPath, now)
+		drainOrderDispatch(t, m)
+		counts := recorder.counts()
+		for _, name := range []string{"ordinary-a", "reserved-a", "reserved-b", "reserved-c"} {
+			if got := counts[name]; got != 1 {
+				t.Errorf("first-tick %s dispatches = %d, want 1", name, got)
+			}
+		}
+		for _, name := range []string{"ordinary-b", "reserved-d", "reserved-e"} {
+			if got := counts[name]; got != 0 {
+				t.Errorf("first-tick %s dispatches = %d, want 0: both lanes must remain capped", name, got)
+			}
+		}
+		m.dispatch(context.Background(), cityPath, now.Add(time.Second))
+		drainOrderDispatch(t, m)
+		counts = recorder.counts()
+		for _, order := range aa {
+			if got := counts[order.Name]; got != 1 {
+				t.Errorf("after two ticks %s dispatches = %d, want 1: independent rotation must progress without duplicates", order.Name, got)
+			}
+		}
+	})
+}
+
+func TestOrderDispatchUnusedReservationDoesNotEnlargeOrdinaryBudget(t *testing.T) {
+	store := beads.NewMemStore()
+	recorder := &reservedDispatchExecRecorder{}
+	aa := []orders.Order{reservedExecOrder(t, "reserved-only", false), ordinaryExecOrder("ordinary-a"), ordinaryExecOrder("ordinary-b")}
+	m := buildOrderDispatcherFromListExec(aa, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	m.maxDispatchesPerTick = 1
+	m.dispatch(context.Background(), t.TempDir(), time.Date(2031, 1, 2, 3, 4, 5, 0, time.UTC))
+	drainOrderDispatch(t, m)
+	counts := recorder.counts()
+	for _, name := range []string{"reserved-only", "ordinary-a"} {
+		if got := counts[name]; got != 1 {
+			t.Errorf("%s dispatches = %d, want 1", name, got)
+		}
+	}
+	if got := counts["ordinary-b"]; got != 0 {
+		t.Errorf("ordinary-b dispatches = %d, want 0: unused reserved capacity cannot be borrowed", got)
+	}
+}
+
+// All reservations remain due on every tick; cooldown suppression must not
+// disguise a cursor that repeatedly favors the first three definitions.
+func TestOrderDispatchReservedOverflowRotatesWithAllOrdersDue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := beads.NewMemStore()
+		recorder := &reservedDispatchExecRecorder{}
+		var aa []orders.Order
+		for _, name := range []string{"reserved-a", "reserved-b", "reserved-c", "reserved-d", "reserved-e"} {
+			aa = append(aa, reservedExecOrder(t, name, false))
+		}
+		for _, name := range []string{"ordinary-a", "ordinary-b", "ordinary-c", "ordinary-d", "ordinary-e", "ordinary-f"} {
+			aa = append(aa, ordinaryExecOrder(name))
+		}
+		m := buildOrderDispatcherFromListExec(aa, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+		m.maxDispatchesPerTick = 4
+		cityPath := t.TempDir()
+		now := time.Now()
+		for tick := 0; tick < 5; tick++ {
+			before := recorder.counts()
+			m.dispatch(context.Background(), cityPath, now.Add(time.Duration(tick)*2*time.Hour))
+			drainOrderDispatch(t, m)
+			after := recorder.counts()
+			reserved, ordinary := 0, 0
+			for _, order := range aa {
+				n := after[order.Name] - before[order.Name]
+				if order.ReservedDispatch {
+					reserved += n
+				} else {
+					ordinary += n
+				}
+			}
+			if reserved != 3 || ordinary != 4 {
+				t.Fatalf("tick %d launches reserved=%d ordinary=%d, want 3 and 4 independently", tick, reserved, ordinary)
+			}
+		}
+		counts := recorder.counts()
+		for _, order := range aa[:5] {
+			if got := counts[order.Name]; got != 3 {
+				t.Errorf("%s dispatches after five saturated ticks = %d, want 3", order.Name, got)
+			}
+		}
+	})
+}
+
+func TestOrderDispatchUnusedOrdinarySlotsDoNotEnlargeReservedCapacity(t *testing.T) {
+	for _, budget := range []int{1, 4, 0} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) {
+			recorder := &reservedDispatchExecRecorder{}
+			var aa []orders.Order
+			for _, name := range []string{"reserved-a", "reserved-b", "reserved-c", "reserved-d"} {
+				aa = append(aa, reservedExecOrder(t, name, false))
+			}
+			m := buildOrderDispatcherFromListExec(aa, beads.NewMemStore(), nil, recorder.run, nil).(*memoryOrderDispatcher)
+			m.maxDispatchesPerTick = budget
+			m.dispatch(context.Background(), t.TempDir(), time.Date(2031, 1, 2, 3, 4, 5, 0, time.UTC))
+			drainOrderDispatch(t, m)
+			want := 3
+			if budget == 0 {
+				want = 4
+			}
+			if got := len(recorder.counts()); got != want {
+				t.Fatalf("reserved dispatches=%d, want %d: no borrowing; unlimited sentinel preserved", got, want)
+			}
+		})
+	}
+}
+
+func TestOrderDispatchReservedRotationSurvivesGateMembershipChanges(t *testing.T) {
+	for _, trackingGate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tracking-gate=%t", trackingGate), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				store := beads.NewMemStore()
+				recorder := &reservedDispatchExecRecorder{}
+				names := []string{"reserved-a", "reserved-b", "reserved-c", "reserved-d", "reserved-e"}
+				var aa []orders.Order
+				for _, name := range names {
+					aa = append(aa, reservedExecOrder(t, name, false))
+				}
+				aa = append(aa, ordinaryExecOrder("ordinary"))
+				var blocked []string
+				for _, name := range []string{"reserved-a", "reserved-c"} {
+					var id string
+					if trackingGate {
+						run, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun(name, orders.RunOpts{})
+						if err != nil {
+							t.Fatal(err)
+						}
+						id = run.ID
+					} else {
+						b, err := store.Create(beads.Bead{Title: "open work", Labels: []string{orders.RunLabel(name)}, Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}})
+						if err != nil {
+							t.Fatal(err)
+						}
+						id = b.ID
+					}
+					blocked = append(blocked, id)
+				}
+				m := buildOrderDispatcherFromListExec(aa, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+				m.maxDispatchesPerTick = 1
+				cityPath := t.TempDir()
+				now := time.Now()
+				m.dispatch(context.Background(), cityPath, now)
+				drainOrderDispatch(t, m)
+				counts := recorder.counts()
+				for _, name := range []string{"reserved-b", "reserved-d", "reserved-e", "ordinary"} {
+					if counts[name] != 1 {
+						t.Errorf("first-tick %s=%d, want1", name, counts[name])
+					}
+				}
+				for _, name := range []string{"reserved-a", "reserved-c"} {
+					if counts[name] != 0 {
+						t.Errorf("gated %s fired", name)
+					}
+				}
+				closed := "closed"
+				for _, id := range blocked {
+					if err := store.Update(id, beads.UpdateOpts{Status: &closed}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				m.dispatch(context.Background(), cityPath, now.Add(2*time.Hour))
+				drainOrderDispatch(t, m)
+				counts = recorder.counts()
+				for i, name := range names {
+					want := 1
+					if i == 1 {
+						want = 2
+					}
+					if counts[name] != want {
+						t.Errorf("after gate change %s=%d, want%d: cursor must index the stable order list", name, counts[name], want)
+					}
+				}
+			})
+		})
+	}
 }

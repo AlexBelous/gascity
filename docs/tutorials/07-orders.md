@@ -413,11 +413,15 @@ the core fleet-health orders can be crowded out by ordinary work. Setting
 `reserved_dispatch = true` declares an order eligible for a small reserved lane
 that keeps those health orders running under saturation. Declaring it in TOML is
 the only way to grant that eligibility — the orchestrator never name-matches
-specific orders — and every order defaults opted out. Today the flag is
-**declaration-only**: the bundled health orders carry it, but no dispatcher
-consumes it yet, and it changes nothing about gate, suspension, or single-flight
-semantics — a reserved order is still skipped when its city or rig is suspended,
-still subject to the open-work gate, and still single-flighted.
+specific orders — and every order defaults opted out. The reserved lane grants
+up to three additional clock-driven dispatches per orders-lane pass, with its
+own rotation so overflow progresses on later passes. Reserved launches do not
+consume ordinary slots; neither lane borrows unused slots from the other. A due
+condition order keeps its existing exemption from both budgets, even when it
+also declares reservation. Reservation changes capacity selection alone: a
+reserved order is still skipped when its city or rig is suspended, still subject
+to its trigger and work gates, and retains the same tracking and single-flight
+behavior (including the explicit `no_work_gate` exception above).
 
 ## Rig-scoped orders
 

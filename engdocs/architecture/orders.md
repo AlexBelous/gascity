@@ -178,6 +178,13 @@ the tick never waits on order gates.
   tracking/nudge-mail watchdogs, and calls `dispatch()`. A panic
   is recovered per pass (`safeTick`). Each pass is its own trace cycle
   with trigger `orders`.
+- **Dispatch capacity.** Due condition orders retain their unbudgeted wake
+  demand. Clock-driven orders declaring `reserved_dispatch` receive a separate
+  fair rotation capped at three additional dispatches per pass. Ordinary clock
+  work retains `max_dispatches_per_tick` and its own cursor; neither lane borrows
+  unused slots. All lanes use the same trigger, suspension, work-gate, tracking
+  and outcome path. These are per-pass launch limits, not a bound on concurrent
+  work across passes or on the number of due condition orders.
 - **Reloads never wait on a pass.** A pass holds the lane's `passMu` for the
   live dispatcher, the retired dispatchers and the watchdog clocks. A config
   reload stages the rebuilt dispatcher and installs it at once if the lane

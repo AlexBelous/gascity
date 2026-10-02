@@ -87,9 +87,10 @@ const (
 	// peak cadence; an order whose last run is older than the window misses
 	// the index and pays one LIMIT-1 LastRun fallback (itself limit-pushed
 	// now), after which cachedLastRun remembers it across ticks and rebuilds.
-	orderTrackingHistoryIndexLimit   = 256
-	defaultMaxOrderDispatchesPerTick = 4
-	orderTrackingSweepCloseBudget    = 4
+	orderTrackingHistoryIndexLimit    = 256
+	defaultMaxOrderDispatchesPerTick  = 4
+	maxReservedOrderDispatchesPerTick = 3
+	orderTrackingSweepCloseBudget     = 4
 
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
 	// controller-driven closed-bead retention sweeps. 15 minutes balances
@@ -314,21 +315,22 @@ type memoryOrderDispatcher struct {
 	// work ledger; neither class belongs there on a split city. A nil value
 	// relocates nothing, so graphStoreFor/ordersStoreFor hand back the caller's
 	// own store and the dispatch is byte-identical to the single-store path.
-	storageRoutes        *storageRoutes
-	ep                   events.Provider
-	execRun              ExecRunner
-	rec                  events.Recorder
-	stderr               io.Writer
-	maxTimeout           time.Duration
-	maxDispatchesPerTick int
-	nextDispatchStart    int
-	cfg                  *config.City
-	cityName             string
-	cityPath             string
-	cacheMu              sync.Mutex
-	lastRunCache         map[string]time.Time
-	gateBackoffUntil     map[string]time.Time
-	openWorkSuppression  map[string]orderOpenWorkSuppression
+	storageRoutes             *storageRoutes
+	ep                        events.Provider
+	execRun                   ExecRunner
+	rec                       events.Recorder
+	stderr                    io.Writer
+	maxTimeout                time.Duration
+	maxDispatchesPerTick      int
+	nextDispatchStart         int
+	nextReservedDispatchStart int
+	cfg                       *config.City
+	cityName                  string
+	cityPath                  string
+	cacheMu                   sync.Mutex
+	lastRunCache              map[string]time.Time
+	gateBackoffUntil          map[string]time.Time
+	openWorkSuppression       map[string]orderOpenWorkSuppression
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -750,7 +752,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 	m.prefetchConditionResults(candidates, now)
 
-	// Phase 2: the fire loop, in two passes over the same rotation order.
+	// Phase 2: due conditions, then bounded reserved work, then ordinary work.
 	//
 	// A due condition order is not a sweep asking for its turn. Its check has
 	// just reported that work is pending right now, which is the order system's
@@ -767,17 +769,39 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	// event to show for it (ga-unaz7). Raising max_dispatches_per_tick only
 	// moves that cliff.
 	//
-	// Both passes run the identical per-candidate body; only the budget differs.
-	var unbudgeted, budgeted []*orderDispatchCandidate
+	// All lanes run the identical per-candidate body; only budget selection differs.
+	// Due conditions retain their existing exemption, including reserved ones.
+	// An internal nonpositive budget retains the legacy unlimited path.
+	var unbudgeted, reserved, budgeted []*orderDispatchCandidate
 	for _, cand := range candidates {
-		if dueConditionCandidate(cand) {
+		switch {
+		case dueConditionCandidate(cand):
 			unbudgeted = append(unbudgeted, cand)
-		} else {
+		case m.maxDispatchesPerTick > 0 && cand.order.ReservedDispatch:
+			reserved = append(reserved, cand)
+		default:
 			budgeted = append(budgeted, cand)
 		}
 	}
 	for _, cand := range unbudgeted {
 		m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now)
+	}
+	// The reserved cursor indexes the stable order list, not the filtered
+	// candidates. Gate changes therefore cannot reset or distort its rotation.
+	reservedStart := m.nextReservedDispatchStart % total
+	sort.SliceStable(reserved, func(i, j int) bool {
+		return (reserved[i].idx-reservedStart+total)%total < (reserved[j].idx-reservedStart+total)%total
+	})
+	reservedSpent := 0
+	for _, cand := range reserved {
+		if !m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now) {
+			continue
+		}
+		m.nextReservedDispatchStart = (cand.idx + 1) % total
+		reservedSpent++
+		if reservedSpent == maxReservedOrderDispatchesPerTick {
+			break
+		}
 	}
 	for i, cand := range budgeted {
 		if !m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now) {

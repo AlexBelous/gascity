@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -65,34 +66,51 @@ func runCountFor(t *testing.T, store beads.Store, scoped string) int {
 // with the budget spent by cooldown sweeps ahead of it in the rotation, a
 // condition order whose check has just passed must still fire this tick.
 func TestDispatchFiresDueConditionOrderOutsideTheRotationBudget(t *testing.T) {
-	aa := []orders.Order{
-		cooldownBudgetOrder("sweep-a"),
-		cooldownBudgetOrder("sweep-b"),
-		conditionBudgetOrder("true"),
-	}
-	m, _, store := newConditionBudgetDispatcher(t, aa, 1)
-	cityPath := t.TempDir()
+	for _, reserved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reserved-condition=%t", reserved), func(t *testing.T) {
+			condition := conditionBudgetOrder("true")
+			condition.ReservedDispatch = reserved
+			aa := []orders.Order{
+				cooldownBudgetOrder("sweep-a"),
+				reservedExecOrder(t, "reserved-a", false),
+				cooldownBudgetOrder("sweep-b"),
+				reservedExecOrder(t, "reserved-b", false),
+				condition,
+				reservedExecOrder(t, "reserved-c", false),
+			}
+			m, _, store := newConditionBudgetDispatcher(t, aa, 1)
+			cityPath := t.TempDir()
 
-	m.dispatch(context.Background(), cityPath, time.Now())
-	drainOrderDispatch(t, m)
+			m.dispatch(context.Background(), cityPath, time.Now())
+			drainOrderDispatch(t, m)
 
-	if got := runCountFor(t, store, "queue-c"); got != 1 {
-		t.Fatalf("condition order runs after a tick whose budget the sweeps spent = %d, want 1 — the budget starved a due condition order", got)
-	}
-	if got := runCountFor(t, store, "sweep-a"); got != 1 {
-		t.Fatalf("sweep-a runs = %d, want 1: the budgeted order at the head of the rotation must still fire", got)
-	}
-	// Control: the budget still binds the orders it is for. Without this the
-	// assertion above would also pass for a change that simply deleted it.
-	if got := runCountFor(t, store, "sweep-b"); got != 0 {
-		t.Fatalf("sweep-b runs = %d, want 0: a budget of 1 must defer the second due cooldown order", got)
-	}
+			if got := runCountFor(t, store, "queue-c"); got != 1 {
+				t.Fatalf("condition order runs after a tick whose budget the sweeps spent = %d, want 1 — the budget starved a due condition order", got)
+			}
+			if got := runCountFor(t, store, "sweep-a"); got != 1 {
+				t.Fatalf("sweep-a runs = %d, want 1: the budgeted order at the head of the rotation must still fire", got)
+			}
+			// Control: the budget still binds the orders it is for. Without this the
+			// assertion above would also pass for a change that simply deleted it.
+			if got := runCountFor(t, store, "sweep-b"); got != 0 {
+				t.Fatalf("sweep-b runs = %d, want 0: a budget of 1 must defer the second due cooldown order", got)
+			}
 
-	// And the rotation still advances, so the deferred sweep fires next tick.
-	m.dispatch(context.Background(), cityPath, time.Now().Add(time.Second))
-	drainOrderDispatch(t, m)
-	if got := runCountFor(t, store, "sweep-b"); got != 1 {
-		t.Fatalf("sweep-b runs after the second tick = %d, want 1: the rotation cursor no longer advances", got)
+			// A reserved passing condition remains exempt rather than spending one
+			// of the three reserved clock slots, and must never fire in both lanes.
+			for _, name := range []string{"reserved-a", "reserved-b", "reserved-c"} {
+				if got := runCountFor(t, store, name); got != 1 {
+					t.Fatalf("%s runs = %d, want 1: a due reserved condition must not consume reserved clock capacity", name, got)
+				}
+			}
+
+			// And the rotation still advances, so the deferred sweep fires next tick.
+			m.dispatch(context.Background(), cityPath, time.Now().Add(time.Second))
+			drainOrderDispatch(t, m)
+			if got := runCountFor(t, store, "sweep-b"); got != 1 {
+				t.Fatalf("sweep-b runs after the second tick = %d, want 1: the rotation cursor no longer advances", got)
+			}
+		})
 	}
 }
 

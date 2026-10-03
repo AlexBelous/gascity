@@ -254,8 +254,8 @@ jobs:
           set +e
           python3 -S .github/workflows/scripts/mac_lint_guard.py \
             --diagnostics "$diagnostics" --timeout-seconds 2700 --grace-seconds 5 \
-            -- make lint LINT_GOMEMLIMIT=3GiB \
-            LINT_FLAGS="--concurrency=2 --timeout=45m --verbose --show-stats --cpu-profile-path=$diagnostics/cpu.pprof --mem-profile-path=$diagnostics/memory.pprof"
+            -- python3 -S .github/workflows/scripts/mac_lint_partition.py \
+            "$diagnostics" "$(go env GOPATH)/bin/golangci-lint"
           lint_rc=$?
           set -e
           printf '%s\n' "$lint_rc" > "$diagnostics/lint-exit-code.txt"

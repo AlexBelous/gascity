@@ -3852,11 +3852,12 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	sessionsStore := cr.sessionsBeadStore()
 	workStore := cr.cityWorkStore()
 	var result DesiredStateResult
-	if cr.buildFnWithClassStores != nil {
+	switch {
+	case cr.buildFnWithClassStores != nil:
 		result = cr.buildFnWithClassStores(cr.cfg, cr.sp, sessionsStore.Store, workStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
-	} else if cr.buildFnWithSessionBeads != nil {
+	case cr.buildFnWithSessionBeads != nil:
 		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
-	} else {
+	default:
 		result = cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
 	}
 	// Emit here, at the FRESH build, rather than where the result is consumed:

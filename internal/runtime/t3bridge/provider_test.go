@@ -1026,6 +1026,150 @@ func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
 	}
 }
 
+func TestCopyTo_RejectsDestinationSymlinkEscape(t *testing.T) {
+	parent := t.TempDir()
+	workDir := filepath.Join(parent, "work")
+	outside := filepath.Join(parent, "outside")
+	for _, dir := range []string{workDir, outside} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srcFile := filepath.Join(parent, "source.txt")
+	if err := os.WriteFile(srcFile, []byte("copied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(parent, "source-dir")
+	if err := os.Mkdir(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "from-dir.txt"), []byte("copied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id": "thread-1", "projectId": "project-1",
+				"customMetadata": map[string]interface{}{
+					"gc.agent": "t3code/crew", "gc.sessionName": "t3code--crew", "gc.startupWorkDir": workDir,
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	provider := &Provider{watchers: make(map[string]context.CancelFunc), recentStarts: make(map[string]time.Time)}
+
+	t.Run("parent symlink", func(t *testing.T) {
+		if err := os.Symlink(outside, filepath.Join(workDir, "parent-link")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := provider.CopyTo("t3code--crew", srcFile, "parent-link/escaped.txt"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(outside, "escaped.txt")); !os.IsNotExist(err) {
+			t.Fatalf("outside file created: %v", err)
+		}
+	})
+
+	t.Run("final symlink", func(t *testing.T) {
+		outsideFile := filepath.Join(outside, "protected.txt")
+		if err := os.WriteFile(outsideFile, []byte("original"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideFile, filepath.Join(workDir, "file-link.txt")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := provider.CopyTo("t3code--crew", srcFile, "file-link.txt"); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(outsideFile)
+		if err != nil || string(data) != "original" {
+			t.Fatalf("outside file changed: %q, %v", data, err)
+		}
+	})
+
+	t.Run("directory destination symlink", func(t *testing.T) {
+		if err := os.Symlink(outside, filepath.Join(workDir, "dir-link")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := provider.CopyTo("t3code--crew", srcDir, "dir-link"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(outside, "from-dir.txt")); !os.IsNotExist(err) {
+			t.Fatalf("outside file created: %v", err)
+		}
+	})
+}
+
+func TestCopyTo_DoesNotCreateMissingWorkDir(t *testing.T) {
+	parent := t.TempDir()
+	workDir := filepath.Join(parent, "missing")
+	srcFile := filepath.Join(parent, "source.txt")
+	if err := os.WriteFile(srcFile, []byte("copied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id": "thread-1", "projectId": "project-1",
+				"customMetadata": map[string]interface{}{
+					"gc.agent": "t3code/crew", "gc.sessionName": "t3code--crew", "gc.startupWorkDir": workDir,
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	provider := &Provider{watchers: make(map[string]context.CancelFunc), recentStarts: make(map[string]time.Time)}
+	if err := provider.CopyTo("t3code--crew", srcFile, "copied.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Fatalf("untrusted work directory created: %v", err)
+	}
+}
+
+func TestCopyTo_AllowsDestinationSymlinkWithinWorkDir(t *testing.T) {
+	parent := t.TempDir()
+	workDir := filepath.Join(parent, "work")
+	inside := filepath.Join(workDir, "inside")
+	if err := os.MkdirAll(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("inside", filepath.Join(workDir, "inside-link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	srcFile := filepath.Join(parent, "source.txt")
+	if err := os.WriteFile(srcFile, []byte("copied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id": "thread-1", "projectId": "project-1",
+				"customMetadata": map[string]interface{}{
+					"gc.agent": "t3code/crew", "gc.sessionName": "t3code--crew", "gc.startupWorkDir": workDir,
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	provider := &Provider{watchers: make(map[string]context.CancelFunc), recentStarts: make(map[string]time.Time)}
+	if err := provider.CopyTo("t3code--crew", srcFile, "inside-link/copied.txt"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(inside, "copied.txt"))
+	if err != nil || string(data) != "copied" {
+		t.Fatalf("in-root copy = %q, %v", data, err)
+	}
+}
+
 type t3BridgeTestServer struct {
 	t                  *testing.T
 	server             *httptest.Server

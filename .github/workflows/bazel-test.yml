@@ -57,7 +57,7 @@ permissions:
 jobs:
   bazel:
     name: bazel test (side-by-side)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ (github.repository == 'gastownhall/gascity' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -103,8 +103,10 @@ jobs:
           # Blacksmith (gastownhall pool): the image user's ~/.cache is root-owned and the
           # bazel JVM stats user.home/.cache regardless of HOME/output_user_root. Make it
           # writable; also keep bazelisk state under the runner temp.
-          sudo chmod 755 /home/ubuntu
-          sudo mkdir -p /home/ubuntu/.cache && sudo chown "$(id -u):$(id -g)" /home/ubuntu/.cache
+          if [ -d /home/ubuntu ]; then
+            sudo chmod 755 /home/ubuntu
+            sudo mkdir -p /home/ubuntu/.cache && sudo chown "$(id -u):$(id -g)" /home/ubuntu/.cache
+          fi
           mkdir -p "$RUNNER_TEMP/bazel-home" && echo "BAZELISK_HOME=$RUNNER_TEMP/bazel-home" >> "$GITHUB_ENV"
 
       # Runner-side bazel caches: without these every run re-hashes the
@@ -359,7 +361,7 @@ jobs:
 
   sync-check:
     name: BUILD files in sync
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ (github.repository == 'gastownhall/gascity' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd

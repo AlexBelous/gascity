@@ -505,6 +505,7 @@ go_test(
         "//internal/storeref",
         "//internal/storeref/storereftest",
         "//internal/supervisor",
+        "//internal/suspensionstate",
         "//internal/telemetry",
         "//internal/testenv",
         "//internal/testutil",

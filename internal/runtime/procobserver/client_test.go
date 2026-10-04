@@ -15,7 +15,7 @@ import (
 func fixtureResponse() (Policy, Response, time.Time) {
 	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
 	p := Policy{SocketPath: "/run/test.sock", HelperUID: 42, HelperSourceRevision: strings.Repeat("a", 40), HelperBinarySHA256: strings.Repeat("b", 64), PolicyDigest: strings.Repeat("c", 64), BootID: "01234567-0123-0123-0123-0123456789ab", PIDNamespaceIdentity: "pid:[123]", CallerBinding: CallerBinding{PID: 123, UID: 1000, StartTicks: "456", BootID: "01234567-0123-0123-0123-0123456789ab", ControllerSourceRevision: strings.Repeat("a", 40), ControllerBinarySHA256: strings.Repeat("d", 64)}}
-	r := Response{Schema: Schema, Scope: "host_procfs", RequestNonce: strings.Repeat("e", 64), HelperSourceRevision: p.HelperSourceRevision, HelperBinarySHA256: p.HelperBinarySHA256, PolicyDigest: p.PolicyDigest, BootID: p.BootID, PIDNamespaceIdentity: p.PIDNamespaceIdentity, StartedAt: now, FinishedAt: now, Complete: true, EnumeratedCountBefore: 12, EnumeratedCountAfter: 12, EnumerationDigestBefore: strings.Repeat("f", 64), EnumerationDigestAfter: strings.Repeat("f", 64), Roots: []Root{}, Errors: []EvidenceError{}, CallerBinding: p.CallerBinding}
+	r := Response{KernelRelease: "6.8.0-fixture", KernelProofProfile: KernelProofProfile, Census: fixtureCensus(12, strings.Repeat("f", 64)), Schema: Schema, Scope: "host_procfs", RequestNonce: strings.Repeat("e", 64), HelperSourceRevision: p.HelperSourceRevision, HelperBinarySHA256: p.HelperBinarySHA256, PolicyDigest: p.PolicyDigest, BootID: p.BootID, PIDNamespaceIdentity: p.PIDNamespaceIdentity, StartedAt: now, FinishedAt: now, Complete: true, EnumeratedCountBefore: 12, EnumeratedCountAfter: 12, EnumerationDigestBefore: strings.Repeat("f", 64), EnumerationDigestAfter: strings.Repeat("f", 64), Roots: []Root{}, Errors: []EvidenceError{}, CallerBinding: p.CallerBinding}
 	return p, r, now
 }
 
@@ -302,5 +302,46 @@ func TestExchangeContextCancellationClosesActualSocket(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("helper socket read survived cancellation")
+	}
+}
+
+func fixtureCensus(count int, digest string) Census {
+	return Census{Seal: CensusSeal{ScanIndex: 4, EnumeratedCount: count, PIDDigest: digest, ClassifiedCount: count, ClassifiedDigest: digest}, Closings: []CensusClosing{{ScanIndex: 2, EnumeratedCount: count, EnumerationDigest: digest, LiveCount: count, LiveDigest: digest}, {ScanIndex: 3, EnumeratedCount: count, EnumerationDigest: digest, LiveCount: count, LiveDigest: digest}}, ReconciledCount: count, ReconciledDigest: digest, Proofs: []CensusProof{}}
+}
+
+func TestSerializedCensusRejectsReviewerCounterexamples(t *testing.T) {
+	for _, mode := range []string{"baseline", "roots exceed sealed", "coverage scan999", "equal count digest change"} {
+		t.Run(mode, func(t *testing.T) {
+			p, r, now := fixtureResponse()
+			switch mode {
+			case "roots exceed sealed":
+				r.Census = fixtureCensus(1, strings.Repeat("f", 64))
+				r.Census.Closings[1].EnumeratedCount = r.EnumeratedCountAfter
+				for pid := 2; pid <= 3; pid++ {
+					r.Roots = append(r.Roots, Root{PID: pid, PPID: 1, PGID: pid, StartTicks: "7", SessionID: "sid", City: "/city", Template: "worker", Epoch: 1, InstanceTokenSHA256: strings.Repeat("a", 64), Name: "worker"})
+				}
+			case "coverage scan999":
+				r.Errors = []EvidenceError{{Reason: "coverage_changed", Operation: "enumerate", ScanIndex: 999, ResolvedBy: -1}}
+				r.ErrorsTotal = 1
+			case "equal count digest change":
+				r.Census.Closings[0].LiveDigest = strings.Repeat("a", 64)
+			}
+			wire, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if directory := os.Getenv("GC_TEST_CENSUS_FIXTURE_DIR"); directory != "" {
+				if err = os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(filepath.Join(directory, "helper-"+strings.ReplaceAll(mode, " ", "-")+".json"), wire, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = decodeResponse(wire, p, r.RequestNonce, now)
+			if (err == nil) != (mode == "baseline") {
+				t.Fatalf("%s accepted=%v error=%v", mode, err == nil, err)
+			}
+		})
 	}
 }

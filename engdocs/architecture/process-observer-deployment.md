@@ -26,6 +26,12 @@ for UID1000. Do not reuse an unrelated account, broad UID match or dynamic user.
 - Fixed root-only deployment manifest: /etc/gascity-observer/release.json,
   root:root0600; exact keys documented by rebind.py, source40hex/binaries64hex,
   dev/UID1000/GID1000, helperUID/GID62027, policy digest and approved namespace.
+  The v2 manifest and binding also require the exact `kernel_release` and
+  `kernel_proof_profile=linux6.8-pidfd-flags0-no-esrch-filters/v1`. The profile
+  name alone is not evidence: independently verify the approved Linux6.8 host,
+  exact supervisor unit hash, no drop-ins, direct ExecStart and PID1 Seccomp=0.
+  Review its inherited filters and the helper filter to exclude forged ESRCH.
+  Record these host/unit receipts with the release tuple before publication.
 - /etc/gascity-observer root:root0755. binding.conf root:62027 0640;
   client.json root:dev0640. Both files non-symlink/regular, all ancestors
   root-owned without group/other write. Only root publishes them.
@@ -109,8 +115,10 @@ For rollback, the external release operator disables/stops only the observation
 socket, restores exact old gc binary/PATH shims and controller user unit from the
 verified backup and restarts the same supervisor through the approved procedure.
 Restore backed-up Cloud observer argv/config/consumer files and existing helper
-files/units/binding/policy with their recorded ownership/modes. Remove only paths
-recorded absent before installation. Reload only the relevant definitions. Read
+files/units/binding/policy with their recorded ownership/modes. Move paths
+recorded absent before installation into the dated recovery archive; preserve
+their bytes, hashes and original path records rather than deleting them.
+Reload only the relevant definitions. Read
 back all restored hashes and the actual supervisor identity. Keep managed-start
 holds; absence of the new strict interface remains UNKNOWN, with no local scan
 fallback. Privilege/account removal is a separately approved host operation.

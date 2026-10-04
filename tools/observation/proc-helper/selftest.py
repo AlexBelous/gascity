@@ -52,6 +52,7 @@ class HelperTests(unittest.TestCase):
             "controller_start_ticks=555\ncontroller_source_revision=" + "b" * 40 + "\n"
             "controller_binary_sha256=" + "c" * 64 + "\npid_namespace_identity=pid:[12345]\n"
             "helper_binary_sha256=" + hashlib.sha256(EXE.read_bytes()).hexdigest() + "\n"
+            "kernel_release=6.8.0-fixture\nkernel_proof_profile=linux6.8-pidfd-flags0-no-esrch-filters/v1\n"
         )
 
     def tearDown(self):
@@ -103,7 +104,7 @@ class HelperTests(unittest.TestCase):
             after_spawn()
         # parent originally used fd3 in many cases; move socket before fd replacement.
         if request is None:
-            request = {"schema": "observe-host-processes/v1", "request_nonce": NONCE}
+            request = {"schema": "observe-host-processes/v2", "request_nonce": NONCE}
         payload = request if isinstance(request, bytes) else json.dumps(request).encode()
         wire = struct.pack("!I", len(payload)) + payload + extra
         try:
@@ -137,6 +138,13 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(len(response), size + 4)
             self.assertNotIn(TOKEN.encode(), response)
             self.assertNotIn(b"never-output-either", response)
+            capture = os.environ.get("GC_CENSUS_FIXTURE_DIR")
+            if capture:
+                destination = Path(capture)
+                destination.mkdir(parents=True, exist_ok=True)
+                body = response[4:]
+                suffix = hashlib.sha256(body).hexdigest()[:12]
+                (destination / f"{self.id().split('.')[-1]}-{suffix}.json").write_bytes(body)
             return p.returncode, json.loads(response[4:])
         return p.returncode, None
 
@@ -160,6 +168,39 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(root["parent_is_provider_infrastructure"])
         self.assertEqual(root["parent_name"], "tmux: server")
         self.assertEqual(root["instance_token_sha256"], hashlib.sha256(TOKEN.encode()).hexdigest())
+
+    def test_birth_during_last_classification_is_not_hidden_by_the_last_enum(self):
+        env = self.proc / "902/environ"
+        env.unlink()
+        os.mkfifo(env)
+        failures = []
+
+        def late_birth():
+            try:
+                for turn in range(3):
+                    with env.open("wb") as output:
+                        if turn == 2:
+                            self.process(903, name="late-live-birth")
+                        following = env.with_name("environ.next")
+                        if turn < 2:
+                            os.mkfifo(following)
+                        else:
+                            following.write_bytes(self.env())
+                        os.replace(following, env)
+                        output.write(self.env())
+            except Exception as error:
+                failures.append(error)
+
+        writer = threading.Thread(target=late_birth, daemon=True)
+        code, result = self.run_helper(after_spawn=writer.start)
+        writer.join(timeout=10)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(code, 1)
+        self.assertFalse(result["complete"])
+        self.assertTrue(any(e["reason"] == "uninspected_birth" for e in result["errors"]))
+        self.assertEqual(result["census"]["closings"][1]["enumerated_count"], 4)
+        self.assertEqual(result["census"]["seal"]["enumerated_count"], 5)
 
     def test_exact_pid_limit_and_one_more_are_unknown(self):
         # Test-only limit=4 hits the end of the getdents chunk in the exact case.
@@ -321,7 +362,7 @@ class HelperTests(unittest.TestCase):
                 else:
                     self.assertTrue(any(e["reason"] == "coverage_changed" for e in result["errors"]))
 
-    def test_kernel_start_or_count_change_still_denies_coverage(self):
+    def test_stat_mutation_unknown_but_fresh_birth_in_both_closings_complete(self):
         for mode in ["start", "count"]:
             with self.subTest(mode=mode):
                 self.process(903, name="kworker", flags=0x00200000)
@@ -349,10 +390,16 @@ class HelperTests(unittest.TestCase):
                 writer.join(timeout=10)
                 self.assertFalse(writer.is_alive())
                 self.assertEqual(errors, [])
-                self.assertEqual(code, 1)
-                self.assertFalse(result["complete"])
+                self.assertEqual(code, 1 if mode == "start" else 0)
+                self.assertEqual(result["complete"], mode == "count")
                 reason = "incarnation_changed" if mode == "start" else "coverage_changed"
                 self.assertTrue(any(e["reason"] == reason for e in result["errors"]))
+                if mode == "count":
+                    self.assertEqual(result["enumerated_count_before"],5)
+                    self.assertEqual(result["enumerated_count_after"],6)
+                    self.assertEqual(result["census"]["closings"][0]["live_count"],6)
+                    self.assertEqual(result["census"]["closings"][1]["live_count"],6)
+                    self.assertEqual(result["errors"][0]["resolved_by"],-1)
 
     @unittest.skipIf(os.getuid() == 0, "permission fixture requires unprivileged test UID")
     def test_permission_denied_is_unknown(self):
@@ -417,11 +464,11 @@ class HelperTests(unittest.TestCase):
 
     def test_bad_request_rejected(self):
         cases = [
-            {"schema": "observe-host-processes/v1", "request_nonce": NONCE, "path": "/etc/shadow"},
-            {"schema": "observe-host-processes/v1", "request_nonce": NONCE, "pid": 1},
+            {"schema": "observe-host-processes/v2", "request_nonce": NONCE, "path": "/etc/shadow"},
+            {"schema": "observe-host-processes/v2", "request_nonce": NONCE, "pid": 1},
             {"schema": "wrong", "request_nonce": NONCE},
-            {"schema": "observe-host-processes/v1", "request_nonce": "A" * 64},
-            b'{"schema":"observe-host-processes/v1","schema":"observe-host-processes/v1","request_nonce":"' + NONCE.encode() + b'"}',
+            {"schema": "observe-host-processes/v2", "request_nonce": "A" * 64},
+            b'{"schema":"observe-host-processes/v2","schema":"observe-host-processes/v2","request_nonce":"' + NONCE.encode() + b'"}',
             b"x" * 1025,
         ]
         for request in cases:

@@ -41,9 +41,18 @@ def trusted(path):
 def render(release, identity, helper_sha):
     expected = {'source_revision', 'controller_binary_sha256', 'controller_executable',
                 'controller_uid', 'controller_user', 'controller_gid', 'helper_uid',
-                'helper_gid', 'helper_binary_sha256', 'policy_digest', 'pid_namespace_identity'}
+                'helper_gid', 'helper_binary_sha256', 'policy_digest', 'pid_namespace_identity',
+                'kernel_release', 'kernel_proof_profile'}
     if set(release) != expected:
         raise ValueError('release manifest keys invalid')
+    if (type(release['kernel_release']) is not str or
+            type(release['kernel_proof_profile']) is not str or
+            type(identity.get('kernel_release')) is not str):
+        raise ValueError('reviewed kernel/filter fields must be strings')
+    if (not re.fullmatch(r'6\.8\.[A-Za-z0-9._-]+', release['kernel_release']) or
+            release['kernel_proof_profile'] != 'linux6.8-pidfd-flags0-no-esrch-filters/v1' or
+            identity['kernel_release'] != release['kernel_release']):
+        raise ValueError('reviewed kernel/filter profile mismatch')
     for field, size in [('source_revision', 40), ('controller_binary_sha256', 64),
                         ('helper_binary_sha256', 64), ('policy_digest', 64)]:
         if not re.fullmatch('[0-9a-f]{%d}' % size, release[field]):
@@ -74,7 +83,8 @@ def render(release, identity, helper_sha):
                'controller_uid': identity['uid'], 'controller_start_ticks': identity['start_ticks'],
                'controller_source_revision': release['source_revision'],
                'controller_binary_sha256': release['controller_binary_sha256'],
-               'pid_namespace_identity': identity['namespace'], 'helper_binary_sha256': helper_sha}
+               'pid_namespace_identity': identity['namespace'], 'helper_binary_sha256': helper_sha,
+               'kernel_release': release['kernel_release'], 'kernel_proof_profile': release['kernel_proof_profile']}
     policy = {'socket_path': SOCKET, 'helper_uid': release['helper_uid'],
               'helper_source_revision': release['source_revision'], 'helper_binary_sha256': helper_sha,
               'policy_digest': release['policy_digest'], 'boot_id': identity['boot_id'],
@@ -104,7 +114,7 @@ def identity(pid):
     return {'pid': pid, 'uid': proc.stat().st_uid, 'start_ticks': fields[19],
             'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
             'namespace': os.readlink(proc / 'ns/pid'), 'executable': executable,
-            'binary_sha256': sha(proc / 'exe')}
+            'binary_sha256': sha(proc / 'exe'), 'kernel_release': os.uname().release}
 
 
 def publish_one(path, data, gid):

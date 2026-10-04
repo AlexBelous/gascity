@@ -58,7 +58,7 @@ func TestControllerObservationPreservesTypedHelperFailures(t *testing.T) {
 		calls++
 		now := time.Now().UTC()
 		return procobserver.Response{
-			Schema: procobserver.Schema, StartedAt: now, FinishedAt: now,
+			Schema: procobserver.Schema, KernelRelease: "6.8.0-fixture", KernelProofProfile: procobserver.KernelProofProfile, Census: controllerFixtureCensus(3, strings.Repeat("a", 64)), StartedAt: now, FinishedAt: now,
 			EnumeratedCountBefore: 324, EnumeratedCountAfter: 322,
 			EnumerationDigestBefore: strings.Repeat("a", 64), EnumerationDigestAfter: strings.Repeat("b", 64),
 			Roots: []procobserver.Root{}, Errors: []procobserver.EvidenceError{{Reason: "process_unavailable", Operation: "environ", PID: 29, Errno: 3}},
@@ -93,6 +93,14 @@ func TestControllerObservationDiagnosticsCannotMakePartialComplete(t *testing.T)
 	}}
 	if err := validateControllerObservationReply(r, "/city", r.SourceRevision, time.Now().UTC()); err == nil {
 		t.Fatal("incomplete helper diagnostic accepted as complete")
+	}
+}
+
+func TestControllerCompleteRequiresBothReconciledFrames(t *testing.T) {
+	r := controllerObservationFixture("/city")
+	r.ProcessDiagnostics = nil
+	if validateControllerObservationReply(r, "/city", r.SourceRevision, time.Now().UTC()) == nil {
+		t.Fatal("complete promoted without the two independently validated helper frames")
 	}
 }
 
@@ -144,7 +152,7 @@ func controllerRetryFrame(name string, partial bool) (procobserver.Response, err
 		pid = 202
 	}
 	r := procobserver.Response{
-		Schema: procobserver.Schema, StartedAt: now, FinishedAt: now, Complete: !partial,
+		Schema: procobserver.Schema, KernelRelease: "6.8.0-fixture", KernelProofProfile: procobserver.KernelProofProfile, Census: controllerFixtureCensus(3, strings.Repeat("a", 64)), StartedAt: now, FinishedAt: now, Complete: !partial,
 		EnumeratedCountBefore: 3, EnumeratedCountAfter: 3, EnumerationDigestBefore: strings.Repeat("a", 64), EnumerationDigestAfter: strings.Repeat("a", 64),
 		Roots: []procobserver.Root{{PID: pid, PPID: 1, PGID: pid, StartTicks: "12", City: "/city", SessionID: name, Template: "worker", Epoch: 1, InstanceTokenSHA256: observation.TokenDigest("fixture-" + name)}}, Errors: []procobserver.EvidenceError{},
 	}
@@ -454,6 +462,7 @@ func TestControllerObservationProviderSwapAndCancellationDeny(t *testing.T) {
 func TestControllerObservationRelayPreservesDaemonBytesAndDeniesSource(t *testing.T) {
 	now := time.Now().UTC()
 	reply := controllerObservationReply{Observation: observation.Observation{Schema: observation.Schema, CityPath: "/city", ObservedAt: now, ProcessObservedAt: now, FinishedAt: now, ProviderComplete: true, ProcessComplete: true, Sessions: []observation.Session{}, Processes: []observation.Process{}, UnknownReasons: []string{}}, SourceRevision: strings.Repeat("a", 40), ControllerBinding: "verified_local_process", ControllerPID: os.Getpid(), ControllerBinarySHA256: observation.TokenDigest("binary"), ControllerStartIdentity: "456", ControllerBootID: "01234567-0123-0123-0123-0123456789ab", HelperBinarySHA256: observation.TokenDigest("helper"), HelperPolicyDigest: observation.TokenDigest("policy")}
+	reply.ProcessDiagnostics = controllerFixtureDiagnostics(now, now)
 	if err := validateControllerObservationReply(reply, "/city", strings.Repeat("a", 40), now); err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +474,9 @@ func TestControllerObservationRelayPreservesDaemonBytesAndDeniesSource(t *testin
 
 func controllerObservationFixture(city string) controllerObservationReply {
 	now := time.Now().UTC().Add(-time.Second)
-	return controllerObservationReply{Observation: observation.Observation{Schema: observation.Schema, CityPath: city, ObservedAt: now, ProcessObservedAt: now, FinishedAt: now, ProviderComplete: true, ProcessComplete: true, ProviderType: "fixture", Sessions: []observation.Session{}, Processes: []observation.Process{}, UnknownReasons: []string{}}, SourceRevision: strings.Repeat("a", 40), ControllerBinding: "verified_local_process", ControllerPID: os.Getpid(), ControllerBinarySHA256: strings.Repeat("b", 64), ControllerStartIdentity: "456", ControllerBootID: "01234567-0123-0123-0123-0123456789ab", HelperBinarySHA256: strings.Repeat("c", 64), HelperPolicyDigest: strings.Repeat("d", 64)}
+	r := controllerObservationReply{Observation: observation.Observation{Schema: observation.Schema, CityPath: city, ObservedAt: now, ProcessObservedAt: now, FinishedAt: now, ProviderComplete: true, ProcessComplete: true, ProviderType: "fixture", Sessions: []observation.Session{}, Processes: []observation.Process{}, UnknownReasons: []string{}}, SourceRevision: strings.Repeat("a", 40), ControllerBinding: "verified_local_process", ControllerPID: os.Getpid(), ControllerBinarySHA256: strings.Repeat("b", 64), ControllerStartIdentity: "456", ControllerBootID: "01234567-0123-0123-0123-0123456789ab", HelperBinarySHA256: strings.Repeat("c", 64), HelperPolicyDigest: strings.Repeat("d", 64)}
+	r.ProcessDiagnostics = controllerFixtureDiagnostics(now, now)
+	return r
 }
 
 func TestControllerObservationSocketRelay(t *testing.T) {
@@ -908,5 +919,55 @@ func TestControllerObservationReaderPreservesLegacyEOFLine(t *testing.T) {
 		if err != nil || string(line) != "ping" {
 			t.Fatalf("legacy request %q changed: %q %v", input, line, err)
 		}
+	}
+}
+
+func controllerFixtureCensus(count int, digest string) procobserver.Census {
+	return procobserver.Census{Seal: procobserver.CensusSeal{ScanIndex: 4, EnumeratedCount: count, PIDDigest: digest, ClassifiedCount: count, ClassifiedDigest: digest}, Closings: []procobserver.CensusClosing{{ScanIndex: 2, EnumeratedCount: count, EnumerationDigest: digest, LiveCount: count, LiveDigest: digest}, {ScanIndex: 3, EnumeratedCount: count, EnumerationDigest: digest, LiveCount: count, LiveDigest: digest}}, ReconciledCount: count, ReconciledDigest: digest, Proofs: []procobserver.CensusProof{}}
+}
+
+func controllerFixtureDiagnostics(start, finish time.Time) []controllerProcessDiagnostics {
+	d := controllerProcessDiagnostics{StartedAt: start, FinishedAt: finish, Complete: true, EnumeratedCountBefore: 3, EnumeratedCountAfter: 3, EnumerationDigestBefore: strings.Repeat("a", 64), EnumerationDigestAfter: strings.Repeat("a", 64), Errors: []procobserver.EvidenceError{}, KernelRelease: "6.8.0-fixture", KernelProofProfile: procobserver.KernelProofProfile, Census: controllerFixtureCensus(3, strings.Repeat("a", 64))}
+	return []controllerProcessDiagnostics{d, d}
+}
+
+func TestSerializedControllerRejectsReviewerCensusCounterexamples(t *testing.T) {
+	for _, mode := range []string{"baseline", "roots exceed sealed", "coverage scan999", "equal count digest change"} {
+		t.Run(mode, func(t *testing.T) {
+			r := controllerObservationFixture("/city")
+			switch mode {
+			case "roots exceed sealed":
+				for i := range r.ProcessDiagnostics {
+					r.ProcessDiagnostics[i].Census = controllerFixtureCensus(1, strings.Repeat("a", 64))
+					r.ProcessDiagnostics[i].Census.Closings[1].EnumeratedCount = 3
+				}
+				r.Processes = []observation.Process{{PID: 2}, {PID: 3}}
+			case "coverage scan999":
+				r.ProcessDiagnostics[0].Errors = []procobserver.EvidenceError{{Reason: "coverage_changed", Operation: "enumerate", ScanIndex: 999, ResolvedBy: -1}}
+				r.ProcessDiagnostics[0].ErrorsTotal = 1
+			case "equal count digest change":
+				r.ProcessDiagnostics[0].Census.Closings[0].LiveDigest = strings.Repeat("b", 64)
+			}
+			wire, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded controllerObservationReply
+			if directory := os.Getenv("GC_TEST_CENSUS_FIXTURE_DIR"); directory != "" {
+				if err = os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(filepath.Join(directory, "controller-"+strings.ReplaceAll(mode, " ", "-")+".json"), wire, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = procobserver.DecodeStrict(wire, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			err = validateControllerObservationReply(decoded, "/city", r.SourceRevision, time.Now().UTC())
+			if (err == nil) != (mode == "baseline") {
+				t.Fatalf("%s accepted=%v error=%v", mode, err == nil, err)
+			}
+		})
 	}
 }

@@ -18,7 +18,7 @@ import (
 )
 
 // Schema is the exact consumer contract version for per-SID observations.
-const Schema = "managed-session-observation/v1"
+const Schema = "managed-session-observation/v2"
 
 // Session is a live provider handle attributed by its own incarnation metadata.
 type Session struct {

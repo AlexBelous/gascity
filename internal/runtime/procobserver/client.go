@@ -28,8 +28,8 @@ import (
 
 // Fixed protocol versions and bounds cannot be increased by a client.
 const (
-	Schema           = "host-process-evidence/v1"
-	RequestSchema    = "observe-host-processes/v1"
+	Schema           = "host-process-evidence/v2"
+	RequestSchema    = "observe-host-processes/v2"
 	MaxRequestBytes  = 1024
 	MaxResponseBytes = 16 << 20
 	MaxProcesses     = 65536
@@ -82,10 +82,13 @@ type Root struct {
 
 // EvidenceError is a bounded diagnostic containing no environment or token contents.
 type EvidenceError struct {
-	Reason    string `json:"reason"`
-	PID       int    `json:"pid,omitempty"`
-	Operation string `json:"operation"`
-	Errno     int    `json:"errno"`
+	Reason     string  `json:"reason"`
+	PID        int     `json:"pid,omitempty"`
+	Operation  string  `json:"operation"`
+	Errno      int     `json:"errno"`
+	StartTicks *string `json:"start_ticks"`
+	ScanIndex  int     `json:"scan_index"`
+	ResolvedBy int     `json:"resolved_by"`
 }
 
 // Response is the independent process-only evidence, including coverage failures.
@@ -111,6 +114,9 @@ type Response struct {
 	ErrorsTotal             int             `json:"errors_total"`
 	ErrorsTruncated         bool            `json:"errors_truncated"`
 	CallerBinding           CallerBinding   `json:"caller_binding"`
+	KernelRelease           string          `json:"kernel_release"`
+	KernelProofProfile      string          `json:"kernel_proof_profile"`
+	Census                  Census          `json:"census"`
 }
 
 // ObservedRoots converts only redacted fields. Err from Read must remain attached;
@@ -296,8 +302,32 @@ func decodeResponse(data []byte, p Policy, nonce string, now time.Time) (Respons
 		}
 		last = v.PID
 	}
-	if !r.Complete || r.ErrorsTotal != 0 || len(r.Errors) != 0 || r.ErrorsTruncated || r.EnumeratedCountBefore != r.EnumeratedCountAfter || r.EnumerationDigestBefore != r.EnumerationDigestAfter {
+	if !r.Complete || r.KernelProofProfile != KernelProofProfile || !strings.HasPrefix(r.KernelRelease, "6.8.") || ValidateCensus(r.Census, r.Errors, r.ErrorsTotal, r.ErrorsTruncated, r.DurationMS) != nil {
 		return r, fmt.Errorf("observer process coverage incomplete")
+	}
+	if len(r.Roots) > r.Census.ReconciledCount || len(r.Roots) > r.Census.Seal.ClassifiedCount {
+		return Response{}, fmt.Errorf("observer roots exceed classified census")
+	}
+	for _, proof := range r.Census.Proofs {
+		for _, root := range r.Roots {
+			if proof.PID == root.PID && proof.StartTicks != nil && *proof.StartTicks == root.StartTicks {
+				return Response{}, fmt.Errorf("observer retired incarnation is still a root")
+			}
+		}
+	}
+	if r.EnumeratedCountBefore != r.EnumeratedCountAfter || r.EnumerationDigestBefore != r.EnumerationDigestAfter {
+		found := false
+		for _, e := range r.Errors {
+			if e.Reason == "coverage_changed" && e.ResolvedBy == -1 {
+				found = true
+			}
+		}
+		if !found {
+			return Response{}, fmt.Errorf("observer raw coverage change lost diagnostic")
+		}
+	}
+	if r.Census.Closings[1].EnumeratedCount != r.EnumeratedCountAfter || r.Census.Closings[1].EnumerationDigest != r.EnumerationDigestAfter {
+		return Response{}, fmt.Errorf("observer closing census binding mismatch")
 	}
 	return r, nil
 }
@@ -412,6 +442,12 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 		token, err := d.Token()
 		if err != nil {
 			return err
+		}
+		if token == nil && t == reflect.TypeOf((*string)(nil)) {
+			return nil
+		}
+		if t == reflect.TypeOf((*string)(nil)) {
+			t = t.Elem()
 		}
 		if token == nil {
 			return fmt.Errorf("null wire value")

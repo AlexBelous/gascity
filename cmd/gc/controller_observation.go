@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,10 @@ type controllerProcessDiagnostics struct {
 	Errors                  []procobserver.EvidenceError `json:"errors"`
 	ErrorsTotal             int                          `json:"errors_total"`
 	ErrorsTruncated         bool                         `json:"errors_truncated"`
+	DurationMS              int64                        `json:"duration_ms"`
+	KernelRelease           string                       `json:"kernel_release"`
+	KernelProofProfile      string                       `json:"kernel_proof_profile"`
+	Census                  procobserver.Census          `json:"census"`
 }
 
 type controllerSocketOptions struct {
@@ -98,6 +103,7 @@ func (s *controllerObservationService) collectOnce(ctx context.Context, p procob
 				EnumeratedCountBefore: evidence.EnumeratedCountBefore, EnumeratedCountAfter: evidence.EnumeratedCountAfter,
 				EnumerationDigestBefore: evidence.EnumerationDigestBefore, EnumerationDigestAfter: evidence.EnumerationDigestAfter,
 				Errors: append([]procobserver.EvidenceError{}, evidence.Errors...), ErrorsTotal: evidence.ErrorsTotal, ErrorsTruncated: evidence.ErrorsTruncated,
+				DurationMS: evidence.DurationMS, KernelRelease: evidence.KernelRelease, KernelProofProfile: evidence.KernelProofProfile, Census: evidence.Census,
 			})
 		}
 		return observation.ProcessEvidence{Roots: evidence.ObservedRoots(), StartedAt: evidence.StartedAt, FinishedAt: evidence.FinishedAt, Err: err}
@@ -278,12 +284,15 @@ func validateControllerObservationReply(r controllerObservationReply, city, sour
 	if r.ObservedAt.IsZero() || r.ProcessObservedAt.IsZero() || r.FinishedAt.IsZero() || r.ProcessObservedAt.Before(r.ObservedAt) || r.ProcessObservedAt.After(r.FinishedAt) || r.FinishedAt.Before(r.ObservedAt) || r.FinishedAt.After(now) || now.Sub(r.ObservedAt) > 60*time.Second || r.FinishedAt.Sub(r.ObservedAt) > 60*time.Second {
 		return fmt.Errorf("controller observation interval invalid or stale")
 	}
-	if len(r.ProcessDiagnostics) > 2 {
+	if len(r.ProcessDiagnostics) > 2 || r.ProcessComplete && len(r.ProcessDiagnostics) != 2 {
 		return fmt.Errorf("controller process diagnostics exceed frame bound")
 	}
 	for i, d := range r.ProcessDiagnostics {
 		if err := validateControllerProcessDiagnostics(d, r.ObservedAt, r.FinishedAt, r.ProcessComplete); err != nil {
 			return err
+		}
+		if r.ProcessComplete && (len(r.Processes) > d.Census.ReconciledCount || len(r.Processes) > d.Census.Seal.ClassifiedCount) {
+			return fmt.Errorf("controller roots exceed classified census")
 		}
 		if i > 0 && d.StartedAt.Before(r.ProcessDiagnostics[i-1].FinishedAt) {
 			return fmt.Errorf("controller process diagnostics overlap or are reordered")
@@ -353,7 +362,7 @@ func validateControllerProcessDiagnostics(d controllerProcessDiagnostics, starte
 			return fmt.Errorf("controller process diagnostic item invalid")
 		}
 	}
-	if complete && (!d.Complete || d.ErrorsTotal != 0 || d.ErrorsTruncated || d.EnumeratedCountBefore != d.EnumeratedCountAfter || d.EnumerationDigestBefore != d.EnumerationDigestAfter) {
+	if complete && (!d.Complete || !strings.HasPrefix(d.KernelRelease, "6.8.") || d.KernelProofProfile != procobserver.KernelProofProfile || d.DurationMS < 0 || d.DurationMS > procobserver.Timeout.Milliseconds() || procobserver.ValidateCensus(d.Census, d.Errors, d.ErrorsTotal, d.ErrorsTruncated, d.DurationMS) != nil || d.Census.Closings[1].EnumeratedCount != d.EnumeratedCountAfter || d.Census.Closings[1].EnumerationDigest != d.EnumerationDigestAfter) {
 		return fmt.Errorf("controller complete reply has partial helper diagnostics")
 	}
 	return nil

@@ -35,6 +35,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

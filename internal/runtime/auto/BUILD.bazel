@@ -3,8 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "auto",
     srcs = [
-        "process_evidence.go",
         "auto.go",
+        "process_evidence.go",
         "proctable.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/auto",
@@ -15,10 +15,10 @@ go_library(
 go_test(
     name = "auto_test",
     srcs = [
-        "process_evidence_test.go",
         "auto_test.go",
         "conformance_test.go",
         "liveness_forwarding_test.go",
+        "process_evidence_test.go",
         "proctable_forwarding_test.go",
         "session_events_test.go",
         "testenv_import_test.go",

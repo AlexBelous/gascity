@@ -297,6 +297,16 @@ func validateSessionName(name string) error {
 
 // executor runs tmux subprocess commands.
 // Abstracted for unit testing of argument construction (socket flags, etc.).
+// paneTarget makes a bare session name an exact target-window/pane target.
+// The trailing colon prevents tmux from prefix-matching a different session.
+// Pane IDs and already-qualified targets pass through unchanged.
+func paneTarget(name string) string {
+	if !validSessionNameRe.MatchString(name) {
+		return name
+	}
+	return "=" + name + ":"
+}
+
 type executor interface {
 	execute(args []string) (string, error)
 	executeCtx(ctx context.Context, args []string) (string, error)
@@ -1475,12 +1485,12 @@ func (t *Tmux) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 2)
-		if len(parts) != 2 {
+		name, count, ok := cutLast(line, "|")
+		if !ok {
 			continue
 		}
-		name := parts[0]
-		attached[name] = parts[1] == "1"
+		clients, err := parseAttachedClients(count)
+		attached[name] = err == nil && clients > 0
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -1658,9 +1668,87 @@ func releaseNudgeLock(session string) {
 }
 
 // IsSessionAttached returns true if the session has any clients attached.
+// A probe that cannot answer reads false; callers that must tell "no client"
+// from "could not tell" use [Tmux.SessionAttachedWithError].
 func (t *Tmux) IsSessionAttached(target string) bool {
-	attached, err := t.run("display-message", "-t", target, "-p", "#{session_attached}")
-	return err == nil && attached == "1"
+	attached, err := t.SessionAttachedWithError(target)
+	return attached && err == nil
+}
+
+// SessionAttachedWithError reports whether one or more clients are attached
+// to the session. The error wraps [runtime.ErrSessionNotFound] when the
+// session does not exist and [runtime.ErrRuntimeUnavailable] when the probe
+// could not answer.
+//
+// The probe echoes #{session_name}: tmux answers a missing exact target with
+// rc 0 and an empty expansion, so an empty echo is the only not-found signal,
+// and an echo naming another session is a probe that answered for the wrong
+// target. The echo is compared only for a bare session name; a pane id or a
+// qualified target names no single session to compare against.
+//
+// A blank target is not-found without a probe: display-message with an empty
+// -t answers for the current or most recent session, not the one asked about.
+func (t *Tmux) SessionAttachedWithError(target string) (bool, error) {
+	if strings.TrimSpace(target) == "" {
+		return false, fmt.Errorf("probing attachment of session %q: %w", target, runtime.ErrSessionNotFound)
+	}
+	out, err := t.run("display-message", "-t", paneTarget(target), "-p", "#{session_name}|#{session_attached}")
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			return false, fmt.Errorf("probing attachment of session %q: %w: %w", target, runtime.ErrSessionNotFound, err)
+		}
+		if errors.Is(err, ErrNoServer) {
+			// Keep tmux's "no tmux server running" out of the message:
+			// runtime.IsSessionGone matches that text and would read an
+			// unreachable server as a gone session.
+			return false, &quietCauseError{
+				msg:  fmt.Sprintf("probing attachment of session %q: tmux server unreachable or empty: %v", target, runtime.ErrRuntimeUnavailable),
+				errs: []error{runtime.ErrRuntimeUnavailable, err},
+			}
+		}
+		return false, fmt.Errorf("probing attachment of session %q: %w: %w", target, runtime.ErrRuntimeUnavailable, err)
+	}
+	echoed, count, _ := cutLast(strings.TrimSpace(out), "|")
+	if echoed == "" {
+		return false, fmt.Errorf("probing attachment of session %q: %w", target, runtime.ErrSessionNotFound)
+	}
+	if validSessionNameRe.MatchString(target) && echoed != target {
+		return false, fmt.Errorf("probing attachment of session %q: probe answered for session %q: %w", target, echoed, runtime.ErrRuntimeUnavailable)
+	}
+	clients, err := parseAttachedClients(count)
+	if err != nil {
+		return false, fmt.Errorf("probing attachment of session %q: %w: %w", target, runtime.ErrRuntimeUnavailable, err)
+	}
+	return clients > 0, nil
+}
+
+// quietCauseError wraps errs for errors.Is while rendering only msg.
+type quietCauseError struct {
+	msg  string
+	errs []error
+}
+
+func (e *quietCauseError) Error() string   { return e.msg }
+func (e *quietCauseError) Unwrap() []error { return e.errs }
+
+// cutLast is [strings.Cut] around the last sep: a session name may contain
+// sep, the count after it never does.
+func cutLast(s, sep string) (before, after string, found bool) {
+	i := strings.LastIndex(s, sep)
+	if i < 0 {
+		return s, "", false
+	}
+	return s[:i], s[i+len(sep):], true
+}
+
+// parseAttachedClients parses #{session_attached}, which tmux reports as the
+// number of attached clients, not a 0/1 flag: two clients read "2".
+func parseAttachedClients(field string) (uint64, error) {
+	clients, err := strconv.ParseUint(strings.TrimSpace(field), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing attached client count %q: %w", field, err)
+	}
+	return clients, nil
 }
 
 // WakePane triggers a SIGWINCH in a pane by resizing it slightly then restoring.
@@ -2591,11 +2679,12 @@ func (t *Tmux) nudgeSession(
 	// replacing it: stacked injections merge into one draft that Claude's TUI
 	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
 	//
-	// Skip the clear when a client is attached: a human may be mid-keystroke,
-	// and silently wiping their in-progress input is worse than the
-	// concatenation this clear otherwise prevents (#5192).
-	if !t.IsSessionAttached(session) {
-		if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
+	// Skip the clear when a client is attached, or when the probe cannot
+	// tell: a human may be mid-keystroke, and silently wiping their
+	// in-progress input is worse than the concatenation this clear otherwise
+	// prevents (#5192).
+	if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
+		if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
 			return err
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -2673,18 +2762,20 @@ func (t *Tmux) nudgeSession(
 			// every submit swallowed, leaving the draft staged in the
 			// composer. Where the family's staged-draft marker is known,
 			// re-send while that draft is visible (recoverStagedDraft). Skip
-			// it when a client is attached, for the same reason the C-u
-			// clear above is skipped: a human may be composing, and a
-			// re-sent submit would send their draft.
-			if marker, ok := t.stagedDraftMarkerFor(target); ok && !t.IsSessionAttached(session) {
-				observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
-				switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
-				case stagedDraftSubmittedBusy:
-					return nil
-				case stagedDraftCleared:
-					return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+			// it when a client is attached or the probe cannot tell, for the
+			// same reason the C-u clear above is skipped: a human may be
+			// composing, and a re-sent submit would send their draft.
+			if marker, ok := t.stagedDraftMarkerFor(target); ok {
+				if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
+					observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
+					switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
+					case stagedDraftSubmittedBusy:
+						return nil
+					case stagedDraftCleared:
+						return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+					}
+					// stagedDraftUnresolved falls through to the handling below.
 				}
-				// stagedDraftUnresolved falls through to the handling below.
 			}
 			// Do NOT collapse this to nil: a caller that treats nil as "clean
 			// delivery" would ack a queued nudge for a message that may still
@@ -3327,13 +3418,22 @@ func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	return t.discountedActivity(session, wa), nil
+}
+
+// discountedActivity applies the poke discount to an already-read raw window
+// activity. Callers that obtained wa from a batched fleet snapshot instead of a
+// per-session read get the same answer GetSessionActivity would give, so
+// batching cannot silently drop the discount and make every parked agent look
+// freshly active.
+func (t *Tmux) discountedActivity(session string, wa time.Time) time.Time {
 	t.pokeMu.Lock()
 	pk, ok := t.pokes[session]
 	t.pokeMu.Unlock()
 	if !ok {
-		return wa, nil
+		return wa
 	}
-	return discountPokeActivity(wa, pk, time.Now()), nil
+	return discountPokeActivity(wa, pk, time.Now())
 }
 
 // rawSessionActivity returns the most recent tmux per-window activity timestamp.
@@ -4504,11 +4604,12 @@ func (t *Tmux) GetSessionInfo(name string) (*SessionInfo, error) {
 		created = time.Unix(createdUnix, 0).Format("2006-01-02 15:04:05")
 	}
 
+	clients, clientsErr := parseAttachedClients(parts[3])
 	info := &SessionInfo{
 		Name:     parts[0],
 		Windows:  windows,
 		Created:  created,
-		Attached: parts[3] == "1",
+		Attached: clientsErr == nil && clients > 0,
 	}
 
 	// Activity and last attached are optional (may not be present in older tmux)

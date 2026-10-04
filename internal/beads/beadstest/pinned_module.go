@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
 // PinnedBeadsModulePath is the module gc links its native store against.
@@ -44,7 +47,15 @@ func PinnedBeadsModuleDir(t *testing.T) string {
 	if dir := bazelRunfilesBeadsModule(); dir != "" {
 		return dir
 	}
-	return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), PinnedBeadsVersion(t))
+	data, err := os.ReadFile(filepath.Join(RepositoryRoot(t), "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	source, err := pinnedBeadsSource(data)
+	if err != nil {
+		t.Fatalf("resolve pinned beads source: %v", err)
+	}
+	return pinnedModuleDirOrFatal(t, goModuleCache(t), source)
 }
 
 // bazelRunfilesBeadsModule locates the pinned beads module inside the bazel
@@ -91,8 +102,12 @@ type moduleDirReporter interface {
 // pinnedBeadsModuleDirOrFatal reports an unresolved module cache as a test
 // failure. See PinnedBeadsModuleDir for why it cannot be a skip.
 func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, version string) string {
+	return pinnedModuleDirOrFatal(t, cache, module.Version{Path: PinnedBeadsModulePath, Version: version})
+}
+
+func pinnedModuleDirOrFatal(t moduleDirReporter, cache string, source module.Version) string {
 	t.Helper()
-	dir, err := pinnedBeadsModuleDir(cache, version)
+	dir, err := pinnedModuleDir(cache, source)
 	if err != nil {
 		t.Fatalf("%v\n"+
 			"The test binary links %s, so the go command resolved it; this resolution did not. "+
@@ -107,7 +122,19 @@ func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, version string) str
 // pinnedBeadsModuleDir is the resolution itself, separated from the test so that
 // the failure path has a test of its own.
 func pinnedBeadsModuleDir(cache, version string) (string, error) {
-	dir := filepath.Join(cache, filepath.FromSlash(PinnedBeadsModulePath)+"@"+version)
+	return pinnedModuleDir(cache, module.Version{Path: PinnedBeadsModulePath, Version: version})
+}
+
+func pinnedModuleDir(cache string, source module.Version) (string, error) {
+	path, err := module.EscapePath(source.Path)
+	if err != nil {
+		return "", err
+	}
+	version, err := module.EscapeVersion(source.Version)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(cache, filepath.FromSlash(path)+"@"+version)
 	info, err := os.Stat(dir)
 	switch {
 	case err != nil:
@@ -117,6 +144,41 @@ func pinnedBeadsModuleDir(cache, version string) (string, error) {
 	default:
 		return dir, nil
 	}
+}
+
+// pinnedBeadsSource resolves the required module and its exact effective source.
+// A local replacement has no immutable cache version and must fail closed.
+func pinnedBeadsSource(data []byte) (module.Version, error) {
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return module.Version{}, err
+	}
+	var required module.Version
+	for _, r := range f.Require {
+		if r.Mod.Path == PinnedBeadsModulePath {
+			required = r.Mod
+			break
+		}
+	}
+	if required.Version == "" {
+		return module.Version{}, fmt.Errorf("go.mod does not require %s", PinnedBeadsModulePath)
+	}
+	source := required
+	// A version-specific replacement takes precedence over a wildcard.
+	for _, r := range f.Replace {
+		if r.Old.Path == required.Path && r.Old.Version == "" {
+			source = r.New
+		}
+	}
+	for _, r := range f.Replace {
+		if r.Old == required {
+			source = r.New
+		}
+	}
+	if err := module.Check(source.Path, source.Version); err != nil {
+		return module.Version{}, fmt.Errorf("pinned source must be a versioned module: %w", err)
+	}
+	return source, nil
 }
 
 // PinnedBeadsVersion reads the beads version this module requires from go.mod.

@@ -2981,9 +2981,6 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if err != nil {
 		return nil
 	}
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return nil
-	}
 	root, err := os.OpenRoot(workDir)
 	if err != nil {
 		return nil

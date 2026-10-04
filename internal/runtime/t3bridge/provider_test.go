@@ -1104,6 +1104,35 @@ func TestCopyTo_RejectsDestinationSymlinkEscape(t *testing.T) {
 	})
 }
 
+func TestCopyTo_DoesNotCreateMissingWorkDir(t *testing.T) {
+	parent := t.TempDir()
+	workDir := filepath.Join(parent, "missing")
+	srcFile := filepath.Join(parent, "source.txt")
+	if err := os.WriteFile(srcFile, []byte("copied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id": "thread-1", "projectId": "project-1",
+				"customMetadata": map[string]interface{}{
+					"gc.agent": "t3code/crew", "gc.sessionName": "t3code--crew", "gc.startupWorkDir": workDir,
+				},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	provider := &Provider{watchers: make(map[string]context.CancelFunc), recentStarts: make(map[string]time.Time)}
+	if err := provider.CopyTo("t3code--crew", srcFile, "copied.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Fatalf("untrusted work directory created: %v", err)
+	}
+}
+
 func TestCopyTo_AllowsDestinationSymlinkWithinWorkDir(t *testing.T) {
 	parent := t.TempDir()
 	workDir := filepath.Join(parent, "work")

@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -100,6 +101,33 @@ func TestSSHArgs_MinimalEndpoint(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("sshArgs = %v, want %v", got, want)
+	}
+}
+
+func TestSSHArgs_HostileRemoteArgumentStaysLiteral(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "injected")
+	payload := "value'; touch '" + marker + "'; echo 'value"
+	args := sshArgs(Endpoint{Host: "box"}, []string{"printf", "%s", payload})
+	output, err := exec.Command("sh", "-c", args[len(args)-1]).CombinedOutput()
+	if err != nil {
+		t.Fatalf("remote shell command: %v: %s", err, output)
+	}
+	if string(output) != payload {
+		t.Fatalf("remote shell output = %q, want %q", output, payload)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("injection marker stat = %v, want not exist", err)
+	}
+}
+
+func TestSSHArgs_StopsOptionParsingBeforeHostileHost(t *testing.T) {
+	host := "-oProxyCommand=touch /tmp/unexpected"
+	args := sshArgs(Endpoint{Host: host}, []string{"true"})
+	if got := args[len(args)-3]; got != "--" {
+		t.Fatalf("option terminator = %q, want --", got)
+	}
+	if got := args[len(args)-2]; got != host {
+		t.Fatalf("destination = %q, want %q", got, host)
 	}
 }
 

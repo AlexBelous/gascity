@@ -13,10 +13,14 @@ go_library(
 
 go_test(
     name = "observation_test",
-    srcs = ["observation_test.go"],
+    srcs = [
+        "observation_test.go",
+        "testenv_import_test.go",
+    ],
     data = glob(["testdata/**"]),
     embed = [":observation"],
     deps = [
+        "//internal/testenv",
         "//internal/runtime",
         "//internal/runtime/auto",
         "//internal/runtime/proctable",

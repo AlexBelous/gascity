@@ -636,44 +636,43 @@ func removeMetaValue(name, key string) error {
 	return err
 }
 
-func resolveContainedPath(baseDir, relPath string) (string, error) {
+func validateContainedPath(baseDir, relPath string) error {
 	baseDir = strings.TrimSpace(baseDir)
 	if baseDir == "" {
-		return "", fmt.Errorf("empty base dir")
+		return fmt.Errorf("empty base dir")
 	}
 	baseAbs, err := filepath.Abs(filepath.Clean(baseDir))
 	if err != nil {
-		return "", err
+		return err
 	}
 	relPath = strings.TrimSpace(relPath)
 	if relPath == "" || relPath == "." {
-		return baseAbs, nil
+		return nil
 	}
 	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("absolute relative path: %s", relPath)
+		return fmt.Errorf("absolute relative path: %s", relPath)
 	}
 	cleanRel := filepath.Clean(relPath)
 	if cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes base dir: %s", relPath)
+		return fmt.Errorf("path escapes base dir: %s", relPath)
 	}
 	target := filepath.Join(baseAbs, cleanRel)
 	targetRel, err := filepath.Rel(baseAbs, target)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if targetRel == ".." || strings.HasPrefix(targetRel, ".."+string(filepath.Separator)) || filepath.IsAbs(targetRel) {
-		return "", fmt.Errorf("path escapes base dir: %s", relPath)
+		return fmt.Errorf("path escapes base dir: %s", relPath)
 	}
-	return target, nil
+	return nil
 }
 
-func copyFileToPath(src, dstRoot, relDst string) error {
+func copyFileToPath(root *os.Root, src, relDst string) error {
 	src = filepath.Clean(strings.TrimSpace(src))
 	if src == "" || src == "." {
 		return fmt.Errorf("empty source path")
 	}
-	dst, err := resolveContainedPath(dstRoot, relDst)
-	if err != nil {
+	if err := validateContainedPath(root.Name(), relDst); err != nil {
 		return err
 	}
 
@@ -683,10 +682,10 @@ func copyFileToPath(src, dstRoot, relDst string) error {
 	}
 	defer func() { _ = in.Close() }()
 
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := root.MkdirAll(filepath.Dir(relDst), 0o755); err != nil {
 		return err
 	}
-	out, err := os.Create(dst)
+	out, err := root.OpenFile(relDst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		return err
 	}
@@ -695,25 +694,27 @@ func copyFileToPath(src, dstRoot, relDst string) error {
 	if _, err := io.Copy(out, in); err != nil {
 		return err
 	}
+	if info, err := os.Stat(src); err == nil {
+		_ = out.Chmod(info.Mode())
+	}
 	if err := out.Close(); err != nil {
 		return err
-	}
-	if info, err := os.Stat(src); err == nil {
-		_ = os.Chmod(dst, info.Mode())
 	}
 	return nil
 }
 
-func copyDirContents(srcDir, dstDir string) error {
+func copyDirContents(root *os.Root, srcDir, relDst string) error {
 	srcDir = filepath.Clean(strings.TrimSpace(srcDir))
 	if srcDir == "" || srcDir == "." {
 		return fmt.Errorf("empty source dir")
 	}
-	dstRoot, err := resolveContainedPath(dstDir, "")
-	if err != nil {
+	if err := validateContainedPath(root.Name(), relDst); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dstRoot, 0o755); err != nil {
+	if relDst == "" {
+		relDst = "."
+	}
+	if err := root.MkdirAll(relDst, 0o755); err != nil {
 		return err
 	}
 	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
@@ -727,14 +728,14 @@ func copyDirContents(srcDir, dstDir string) error {
 		if err != nil {
 			return err
 		}
-		target, err := resolveContainedPath(dstRoot, rel)
-		if err != nil {
+		target := filepath.Join(relDst, rel)
+		if err := validateContainedPath(root.Name(), target); err != nil {
 			return err
 		}
 		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
+			return root.MkdirAll(target, info.Mode().Perm())
 		}
-		return copyFileToPath(path, dstRoot, rel)
+		return copyFileToPath(root, path, target)
 	})
 }
 
@@ -2980,16 +2981,16 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if err != nil {
 		return nil
 	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return nil
+	}
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = root.Close() }()
 	if info.IsDir() {
-		dstRoot := workDir
-		if strings.TrimSpace(relDst) != "" {
-			var err error
-			dstRoot, err = resolveContainedPath(workDir, relDst)
-			if err != nil {
-				return nil
-			}
-		}
-		if err := copyDirContents(src, dstRoot); err != nil {
+		if err := copyDirContents(root, src, strings.TrimSpace(relDst)); err != nil {
 			return nil
 		}
 		return nil
@@ -2997,13 +2998,13 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 
 	fileRelDst := strings.TrimSpace(relDst)
 	if strings.TrimSpace(relDst) != "" {
-		if _, err := resolveContainedPath(workDir, fileRelDst); err != nil {
+		if err := validateContainedPath(workDir, fileRelDst); err != nil {
 			return nil
 		}
 	} else {
 		fileRelDst = filepath.Base(src)
 	}
-	if err := copyFileToPath(src, workDir, fileRelDst); err != nil {
+	if err := copyFileToPath(root, src, fileRelDst); err != nil {
 		return nil
 	}
 	return nil

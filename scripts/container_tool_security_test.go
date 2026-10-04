@@ -153,7 +153,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.59",
+		"gitpython>=3.1.60",
 		"aiohttp>=3.14.3",
 		"anyio>=4.14.2",
 		"pillow>=12.3.0",
@@ -163,17 +163,22 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		}
 	}
 	overrides := readFile(t, root, ".github/requirements/mcp-agent-mail.overrides.txt")
+	if !strings.Contains(overrides, "pyjwt>=2.14.0") {
+		t.Error("mcp-agent-mail overrides missing PyJWT security floor >=2.14.0")
+	}
 	if !strings.Contains(overrides, "cryptography>=50.0.0") {
 		t.Error("mcp-agent-mail overrides missing cryptography security floor >=50.0.0")
 	}
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.59 \\",
+		"gitpython==3.2.0 \\",
 		"aiohttp==3.14.3 \\",
 		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
+		"pyjwt==2.15.1 \\",
+		"urllib3==2.8.0 \\",
 	} {
 		if !strings.Contains(lock, want) {
 			t.Errorf("mcp-agent-mail hashed lock missing patched dependency %q", want)

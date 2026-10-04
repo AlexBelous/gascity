@@ -24,6 +24,7 @@ const (
 	controllerObservationCommand    = "observe-managed-sessions"
 	controllerObservationLimit      = 1024 * 1024
 	controllerObservationBudget     = 25 * time.Second
+	controllerObservationAttempts   = 3
 	controllerObservationPolicyPath = "/etc/gascity-observer/client.json"
 )
 
@@ -82,36 +83,38 @@ func newControllerObservationService(ctx context.Context, city string) *controll
 	}
 	s.checkCaller = procobserver.CheckCaller
 	s.readEvidence = procobserver.ReadContext
-	s.collect = func(ctx context.Context, p procobserver.Policy, sp runtime.Provider) controllerObservationReply {
-		diagnostics := []controllerProcessDiagnostics{}
-		observed := observation.ObserveProcessEvidenceContext(ctx, s.city, sp, func() observation.ProcessEvidence {
-			evidence, err := s.readEvidence(ctx, p)
-			// A contract/pin failure returns a zero Response, not trusted details.
-			if evidence.Schema != "" {
-				diagnostics = append(diagnostics, controllerProcessDiagnostics{
-					StartedAt: evidence.StartedAt, FinishedAt: evidence.FinishedAt, Complete: evidence.Complete,
-					EnumeratedCountBefore: evidence.EnumeratedCountBefore, EnumeratedCountAfter: evidence.EnumeratedCountAfter,
-					EnumerationDigestBefore: evidence.EnumerationDigestBefore, EnumerationDigestAfter: evidence.EnumerationDigestAfter,
-					Errors: append([]procobserver.EvidenceError{}, evidence.Errors...), ErrorsTotal: evidence.ErrorsTotal, ErrorsTruncated: evidence.ErrorsTruncated,
-				})
-			}
-			return observation.ProcessEvidence{Roots: evidence.ObservedRoots(), StartedAt: evidence.StartedAt, FinishedAt: evidence.FinishedAt, Err: err}
-		}, time.Now)
-		r := s.unknown("")
-		r.Observation = observed
-		r.ProcessDiagnostics = diagnostics
-		r.ControllerPID = p.CallerBinding.PID
-		r.ControllerBinarySHA256 = p.CallerBinding.ControllerBinarySHA256
-		r.ControllerStartIdentity = p.CallerBinding.StartTicks
-		r.ControllerBootID = p.CallerBinding.BootID
-		r.HelperBinarySHA256 = p.HelperBinarySHA256
-		r.HelperPolicyDigest = p.PolicyDigest
-		if observed.ProviderComplete && observed.ProcessComplete {
-			r.ControllerBinding = "verified_local_process"
-		}
-		return r
-	}
+	s.collect = s.collectOnce
 	return s
+}
+
+func (s *controllerObservationService) collectOnce(ctx context.Context, p procobserver.Policy, sp runtime.Provider) controllerObservationReply {
+	diagnostics := []controllerProcessDiagnostics{}
+	observed := observation.ObserveProcessEvidenceContext(ctx, s.city, sp, func() observation.ProcessEvidence {
+		evidence, err := s.readEvidence(ctx, p)
+		// A contract/pin failure returns a zero Response, not trusted details.
+		if evidence.Schema == procobserver.Schema {
+			diagnostics = append(diagnostics, controllerProcessDiagnostics{
+				StartedAt: evidence.StartedAt, FinishedAt: evidence.FinishedAt, Complete: evidence.Complete,
+				EnumeratedCountBefore: evidence.EnumeratedCountBefore, EnumeratedCountAfter: evidence.EnumeratedCountAfter,
+				EnumerationDigestBefore: evidence.EnumerationDigestBefore, EnumerationDigestAfter: evidence.EnumerationDigestAfter,
+				Errors: append([]procobserver.EvidenceError{}, evidence.Errors...), ErrorsTotal: evidence.ErrorsTotal, ErrorsTruncated: evidence.ErrorsTruncated,
+			})
+		}
+		return observation.ProcessEvidence{Roots: evidence.ObservedRoots(), StartedAt: evidence.StartedAt, FinishedAt: evidence.FinishedAt, Err: err}
+	}, time.Now)
+	r := s.unknown("")
+	r.Observation = observed
+	r.ProcessDiagnostics = diagnostics
+	r.ControllerPID = p.CallerBinding.PID
+	r.ControllerBinarySHA256 = p.CallerBinding.ControllerBinarySHA256
+	r.ControllerStartIdentity = p.CallerBinding.StartTicks
+	r.ControllerBootID = p.CallerBinding.BootID
+	r.HelperBinarySHA256 = p.HelperBinarySHA256
+	r.HelperPolicyDigest = p.PolicyDigest
+	if observed.ProviderComplete && observed.ProcessComplete {
+		r.ControllerBinding = "verified_local_process"
+	}
+	return r
 }
 
 func (s *controllerObservationService) install(cs *controllerState) {
@@ -187,10 +190,28 @@ func (s *controllerObservationService) observe(request context.Context) controll
 			done <- s.unknown("observation canceled")
 			return
 		}
-		result := s.collect(ctx, *p, sp)
-		cs.mu.RLock()
-		changed := generation != cs.observationGeneration
-		cs.mu.RUnlock()
+		providerChanged := func() bool {
+			cs.mu.RLock()
+			changed := generation != cs.observationGeneration
+			cs.mu.RUnlock()
+			s.mu.Lock()
+			changed = changed || s.state != cs
+			s.mu.Unlock()
+			return changed
+		}
+		result := s.unknown("observation canceled or provider changed")
+		// Keep the same request deadline, latched policy/provider generation and
+		// global flight slot. Every retry replaces the entire prior observation.
+		for attempt := 0; attempt < controllerObservationAttempts; attempt++ {
+			if ctx.Err() != nil || s.ctx.Err() != nil || providerChanged() {
+				break
+			}
+			result = s.collect(ctx, *p, sp)
+			if ctx.Err() != nil || s.ctx.Err() != nil || providerChanged() || !controllerObservationRetryable(result) {
+				break
+			}
+		}
+		changed := providerChanged()
 		if changed || ctx.Err() != nil || s.ctx.Err() != nil {
 			result.ProviderComplete = false
 			result.ProcessComplete = false
@@ -260,17 +281,12 @@ func validateControllerObservationReply(r controllerObservationReply, city, sour
 	if len(r.ProcessDiagnostics) > 2 {
 		return fmt.Errorf("controller process diagnostics exceed frame bound")
 	}
-	for _, d := range r.ProcessDiagnostics {
-		if d.StartedAt.IsZero() || d.FinishedAt.Before(d.StartedAt) || d.StartedAt.Before(r.ObservedAt) || d.FinishedAt.After(r.FinishedAt) || d.FinishedAt.Sub(d.StartedAt) > procobserver.Timeout || d.EnumeratedCountBefore < 1 || d.EnumeratedCountBefore > procobserver.MaxProcesses || d.EnumeratedCountAfter < 1 || d.EnumeratedCountAfter > procobserver.MaxProcesses || !controllerObservationHex(d.EnumerationDigestBefore, 64) || !controllerObservationHex(d.EnumerationDigestAfter, 64) || d.Errors == nil || len(d.Errors) > 256 || d.ErrorsTotal < len(d.Errors) || d.ErrorsTruncated != (d.ErrorsTotal > len(d.Errors)) {
-			return fmt.Errorf("controller process diagnostics invalid")
+	for i, d := range r.ProcessDiagnostics {
+		if err := validateControllerProcessDiagnostics(d, r.ObservedAt, r.FinishedAt, r.ProcessComplete); err != nil {
+			return err
 		}
-		for _, e := range d.Errors {
-			if len(e.Reason) < 1 || len(e.Reason) > 64 || len(e.Operation) < 1 || len(e.Operation) > 32 || e.PID < 0 || e.Errno < 0 || e.Errno > 4095 {
-				return fmt.Errorf("controller process diagnostic item invalid")
-			}
-		}
-		if r.ProcessComplete && (!d.Complete || d.ErrorsTotal != 0 || d.ErrorsTruncated || d.EnumeratedCountBefore != d.EnumeratedCountAfter || d.EnumerationDigestBefore != d.EnumerationDigestAfter) {
-			return fmt.Errorf("controller complete reply has partial helper diagnostics")
+		if i > 0 && d.StartedAt.Before(r.ProcessDiagnostics[i-1].FinishedAt) {
+			return fmt.Errorf("controller process diagnostics overlap or are reordered")
 		}
 	}
 	if r.ProviderComplete && r.ProcessComplete {
@@ -280,6 +296,63 @@ func validateControllerObservationReply(r controllerObservationReply, city, sour
 		}
 	} else if len(r.UnknownReasons) == 0 {
 		return fmt.Errorf("partial controller observation lacks reason")
+	}
+	return nil
+}
+
+// Only two authenticated, untruncated helper frames proving transient host
+// enumeration/stat disappearance permit another whole attempt. All other
+// process/provider/contract failures remain terminal UNKNOWN.
+func controllerObservationRetryable(r controllerObservationReply) bool {
+	if !r.ProviderComplete || r.ProcessComplete || len(r.ProcessDiagnostics) != 2 || len(r.UnknownReasons) == 0 {
+		return false
+	}
+	now := time.Now().UTC()
+	if r.ObservedAt.IsZero() || r.ProcessObservedAt.Before(r.ObservedAt) || r.ProcessObservedAt.After(r.FinishedAt) || r.FinishedAt.Before(r.ObservedAt) || r.FinishedAt.After(now) || now.Sub(r.ObservedAt) > 60*time.Second {
+		return false
+	}
+	for _, reason := range r.UnknownReasons {
+		switch reason {
+		case "strict process scan incomplete: observer process coverage incomplete",
+			"process identities changed or became unavailable during observation":
+		default:
+			return false
+		}
+	}
+	partial := false
+	for i, d := range r.ProcessDiagnostics {
+		if validateControllerProcessDiagnostics(d, r.ObservedAt, r.FinishedAt, d.Complete) != nil || d.ErrorsTruncated || d.ErrorsTotal != len(d.Errors) || (i > 0 && d.StartedAt.Before(r.ProcessDiagnostics[i-1].FinishedAt)) {
+			return false
+		}
+		if !d.Complete {
+			if len(d.Errors) == 0 {
+				return false
+			}
+			partial = true
+		}
+		for _, e := range d.Errors {
+			if e.Reason == "coverage_changed" && e.Operation == "enumerate" && e.PID == 0 && e.Errno == 0 {
+				continue
+			}
+			if e.Reason != "process_unavailable" || e.Operation != "stat" || e.PID <= 0 || e.Errno != 2 {
+				return false
+			}
+		}
+	}
+	return partial
+}
+
+func validateControllerProcessDiagnostics(d controllerProcessDiagnostics, started, finished time.Time, complete bool) error {
+	if d.StartedAt.IsZero() || d.FinishedAt.Before(d.StartedAt) || d.StartedAt.Before(started) || d.FinishedAt.After(finished) || d.FinishedAt.Sub(d.StartedAt) > procobserver.Timeout || d.EnumeratedCountBefore < 1 || d.EnumeratedCountBefore > procobserver.MaxProcesses || d.EnumeratedCountAfter < 1 || d.EnumeratedCountAfter > procobserver.MaxProcesses || !controllerObservationHex(d.EnumerationDigestBefore, 64) || !controllerObservationHex(d.EnumerationDigestAfter, 64) || d.Errors == nil || len(d.Errors) > 256 || d.ErrorsTotal < len(d.Errors) || d.ErrorsTruncated != (d.ErrorsTotal > len(d.Errors)) {
+		return fmt.Errorf("controller process diagnostics invalid")
+	}
+	for _, e := range d.Errors {
+		if len(e.Reason) < 1 || len(e.Reason) > 64 || len(e.Operation) < 1 || len(e.Operation) > 32 || e.PID < 0 || e.Errno < 0 || e.Errno > 4095 {
+			return fmt.Errorf("controller process diagnostic item invalid")
+		}
+	}
+	if complete && (!d.Complete || d.ErrorsTotal != 0 || d.ErrorsTruncated || d.EnumeratedCountBefore != d.EnumeratedCountAfter || d.EnumerationDigestBefore != d.EnumerationDigestAfter) {
+		return fmt.Errorf("controller complete reply has partial helper diagnostics")
 	}
 	return nil
 }

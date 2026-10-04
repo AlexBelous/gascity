@@ -96,6 +96,260 @@ func TestControllerObservationDiagnosticsCannotMakePartialComplete(t *testing.T)
 	}
 }
 
+// Each attempt changes both its provider incarnation and its helper roots.
+// A successful retry must reread those sources, never retain the earlier rows.
+type controllerRetryProvider struct {
+	*runtime.Fake
+	name        string
+	trackingErr error
+}
+
+func (p *controllerRetryProvider) ListRunning(string) ([]string, error) {
+	return []string{p.name}, nil
+}
+
+func (p *controllerRetryProvider) TrackProcessRoots(roots []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
+	out := append([]runtime.LiveRuntime{}, roots...)
+	for i := range out {
+		out[i].ProviderName = out[i].SessionID
+		out[i].IsTracked = true
+	}
+	return out, p.trackingErr
+}
+
+func controllerRetryFixture(t *testing.T) (*controllerObservationService, *controllerState, *controllerRetryProvider) {
+	t.Helper()
+	p := &controllerRetryProvider{Fake: runtime.NewFake(), name: "earlier"}
+	for _, name := range []string{"earlier", "selected"} {
+		for key, value := range map[string]string{"GC_SESSION_ID": name, "GC_TEMPLATE": "worker", "GC_RUNTIME_EPOCH": "1", "GC_INSTANCE_TOKEN": "fixture-" + name} {
+			if err := p.SetMeta(name, key, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	svc := newControllerObservationService(context.Background(), "/city")
+	cs := &controllerState{sp: p}
+	svc.install(cs)
+	svc.loadPolicy = func() (procobserver.Policy, error) {
+		return procobserver.Policy{CallerBinding: procobserver.CallerBinding{PID: os.Getpid(), StartTicks: "456", BootID: "01234567-0123-0123-0123-0123456789ab", ControllerBinarySHA256: strings.Repeat("b", 64)}, HelperBinarySHA256: strings.Repeat("c", 64), PolicyDigest: strings.Repeat("d", 64)}, nil
+	}
+	svc.checkCaller = func(procobserver.Policy) error { return nil }
+	return svc, cs, p
+}
+
+func controllerRetryFrame(name string, partial bool) (procobserver.Response, error) {
+	now := time.Now().UTC()
+	pid := 101
+	if name == "selected" {
+		pid = 202
+	}
+	r := procobserver.Response{
+		Schema: procobserver.Schema, StartedAt: now, FinishedAt: now, Complete: !partial,
+		EnumeratedCountBefore: 3, EnumeratedCountAfter: 3, EnumerationDigestBefore: strings.Repeat("a", 64), EnumerationDigestAfter: strings.Repeat("a", 64),
+		Roots: []procobserver.Root{{PID: pid, PPID: 1, PGID: pid, StartTicks: "12", City: "/city", SessionID: name, Template: "worker", Epoch: 1, InstanceTokenSHA256: observation.TokenDigest("fixture-" + name)}}, Errors: []procobserver.EvidenceError{},
+	}
+	if partial {
+		r.Errors = []procobserver.EvidenceError{{Reason: "process_unavailable", Operation: "stat", PID: 404, Errno: 2}, {Reason: "coverage_changed", Operation: "enumerate"}}
+		r.ErrorsTotal = len(r.Errors)
+		r.EnumerationDigestAfter = strings.Repeat("e", 64)
+		return r, fmt.Errorf("observer process coverage incomplete")
+	}
+	return r, nil
+}
+
+func TestControllerObservationRetriesWholeAttempt(t *testing.T) {
+	for _, mode := range []string{"transient", "second frame only", "all incomplete"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, _, p := controllerRetryFixture(t)
+			reads, lists, policyLoads := 0, 0, 0
+			load := svc.loadPolicy
+			svc.loadPolicy = func() (procobserver.Policy, error) { policyLoads++; return load() }
+			var selectedStart, earlierFinish time.Time
+			var requestContext context.Context
+			svc.readEvidence = func(ctx context.Context, _ procobserver.Policy) (procobserver.Response, error) {
+				if requestContext == nil {
+					requestContext = ctx
+				} else if ctx != requestContext {
+					t.Fatal("retry created a new request context")
+				}
+				reads++
+				partial := mode == "all incomplete" || reads <= 2
+				if mode == "second frame only" && reads == 1 {
+					partial = false
+				}
+				r, err := controllerRetryFrame(p.name, partial)
+				if reads == 3 {
+					selectedStart = r.StartedAt
+				}
+				if reads == 2 {
+					earlierFinish = r.FinishedAt
+					p.name = "selected"
+				}
+				return r, err
+			}
+			r := svc.observe(context.Background())
+			for _, call := range p.SnapshotCalls() {
+				if call.Method == "GetMeta" && call.Key == "GC_SESSION_ID" {
+					lists++
+				}
+				if call.Method == "FindRuntimesBySessionID" {
+					t.Fatal("retry reverted to unprivileged process scan")
+				}
+			}
+			wantReads := 4
+			if mode == "all incomplete" {
+				wantReads = 6
+			}
+			if reads != wantReads || lists != wantReads || policyLoads != 1 || len(r.ProcessDiagnostics) != 2 {
+				t.Fatalf("whole attempts not bounded/fresh: reads=%d metadata=%d policy=%d diagnostics=%d", reads, lists, policyLoads, len(r.ProcessDiagnostics))
+			}
+			if !r.ProviderComplete || r.ProcessComplete != (mode != "all incomplete") || len(r.Processes) != 1 || r.Processes[0].PID != 202 || len(r.Sessions) != 1 || r.Sessions[0].SessionID != "selected" {
+				t.Fatalf("selected attempt mixed or promoted: %+v", r)
+			}
+			if mode != "all incomplete" {
+				if r.ObservedAt.Before(earlierFinish) || r.ObservedAt.After(selectedStart) || r.ProcessDiagnostics[0].StartedAt.Before(r.ObservedAt) || !r.ProcessDiagnostics[0].Complete || !r.ProcessDiagnostics[1].Complete {
+					t.Fatal("successful attempt retained earlier frames or wrong interval")
+				}
+				r.SourceRevision = strings.Repeat("a", 40)
+				if err := validateControllerObservationReply(r, "/city", r.SourceRevision, time.Now().UTC()); err != nil {
+					t.Fatalf("successful selected attempt rejected by wire validator: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestControllerObservationRetryTerminalFailures(t *testing.T) {
+	for _, mode := range []string{"pin", "future", "truncated", "permission", "environment", "limit", "zero pid", "unidentified", "provider incarnation", "tracking", "empty diagnostics"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, _, p := controllerRetryFixture(t)
+			reads := 0
+			svc.readEvidence = func(context.Context, procobserver.Policy) (procobserver.Response, error) {
+				reads++
+				r, err := controllerRetryFrame(p.name, true)
+				switch mode {
+				case "pin":
+					return procobserver.Response{}, fmt.Errorf("observer response binding mismatch")
+				case "future":
+					r.FinishedAt = time.Now().UTC().Add(time.Hour)
+				case "truncated":
+					r.ErrorsTruncated = true
+					r.ErrorsTotal++
+				case "permission":
+					r.Errors[0].Errno = 13
+				case "environment":
+					r.Errors[0].Operation = "environ"
+				case "limit":
+					r.Errors[0].Reason = "process_limit"
+				case "zero pid":
+					r.Errors[0].PID = 0
+				case "unidentified":
+					err = fmt.Errorf("unidentified failure")
+				case "provider incarnation":
+					if reads == 1 {
+						if e := p.SetMeta(p.name, "GC_RUNTIME_EPOCH", "2"); e != nil {
+							t.Fatal(e)
+						}
+					}
+				case "tracking":
+					p.trackingErr = fmt.Errorf("fixture tracking unavailable")
+				case "empty diagnostics":
+					r.Errors = []procobserver.EvidenceError{}
+					r.ErrorsTotal = 0
+				}
+				return r, err
+			}
+			r := svc.observe(context.Background())
+			if reads != 2 || r.ProcessComplete {
+				t.Fatalf("terminal %s retried/promoted: reads=%d %+v", mode, reads, r)
+			}
+		})
+	}
+}
+
+func TestControllerObservationRetryGenerationFence(t *testing.T) {
+	svc, cs, p := controllerRetryFixture(t)
+	reads := 0
+	svc.readEvidence = func(context.Context, procobserver.Policy) (procobserver.Response, error) {
+		reads++
+		if reads == 2 {
+			cs.mu.Lock()
+			cs.observationGeneration++
+			cs.sp = runtime.NewFake()
+			cs.mu.Unlock()
+		}
+		return controllerRetryFrame(p.name, true)
+	}
+	if r := svc.observe(context.Background()); reads != 2 || r.ProviderComplete || r.ProcessComplete {
+		t.Fatalf("generation changed but retry continued: reads=%d %+v", reads, r)
+	}
+}
+
+func TestControllerObservationRetryCancellationKeepsFlightUntilCollectionEnds(t *testing.T) {
+	for _, mode := range []string{"request", "shutdown"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, _, p := controllerRetryFixture(t)
+			request, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "shutdown" {
+				svc.ctx = request
+				request = context.Background()
+			}
+			secondRead, release := make(chan struct{}), make(chan struct{})
+			reads := 0
+			svc.readEvidence = func(context.Context, procobserver.Policy) (procobserver.Response, error) {
+				reads++
+				if reads == 2 {
+					close(secondRead)
+					<-release // Model a provider/helper that has not returned yet.
+				}
+				return controllerRetryFrame(p.name, true)
+			}
+			done := make(chan controllerObservationReply, 1)
+			go func() { done <- svc.observe(request) }()
+			<-secondRead
+			cancel()
+			if r := <-done; r.ProviderComplete || r.ProcessComplete {
+				t.Fatal("canceled attempt returned complete")
+			}
+			other, _, _ := controllerRetryFixture(t)
+			busy := other.observe(context.Background())
+			close(release)
+			// This barrier can acquire the global slot only after the outstanding
+			// read really returns; no sleeps or new test timing races are needed.
+			controllerObservationFlight <- struct{}{}
+			<-controllerObservationFlight
+			if reads != 2 || len(busy.UnknownReasons) != 1 || busy.UnknownReasons[0] != "observation busy" {
+				t.Fatalf("cancellation released flight early or retried: reads=%d busy=%+v", reads, busy)
+			}
+		})
+	}
+}
+
+func TestControllerObservationRetryRetainsCallerDeadline(t *testing.T) {
+	svc, _, p := controllerRetryFixture(t)
+	deadline := time.Now().Add(20 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	reads := 0
+	svc.readEvidence = func(ctx context.Context, _ procobserver.Policy) (procobserver.Response, error) {
+		reads++
+		if got, ok := ctx.Deadline(); !ok || !got.Equal(deadline) {
+			t.Fatal("attempt extended the caller's outer deadline")
+		}
+		return controllerRetryFrame(p.name, true)
+	}
+	if r := svc.observe(ctx); reads != 6 || r.ProcessComplete {
+		t.Fatalf("retry/deadline contract changed: reads=%d %+v", reads, r)
+	}
+	// An already expired request cannot enter an attempt or reset its budget.
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	if r := svc.observe(expired); reads != 6 || r.ProcessComplete || r.ProviderComplete {
+		t.Fatal("expired request performed another attempt")
+	}
+}
+
 func TestControllerObservationProviderSwapAndCancellationDeny(t *testing.T) {
 	for _, mode := range []string{"swap", "cancel", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {

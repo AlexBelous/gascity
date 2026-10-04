@@ -52,7 +52,8 @@
   "v1;fd=3;request=1024;wall_ms=10000;pids=65536;env=16777216;output="         \
   "16777216;retained=16777216;errors=128;openat2=beneath,no_symlinks,no_"      \
   "magiclinks;seccomp=default_errno_x86_64_v2;roots=exact_tmux_v1;"             \
-  "kernel=pf_kthread_stat_v1;non_target_env=nul_no_gc_v1"
+  "kernel=pf_kthread_stat_v1;kernel_comm=excluded_from_coverage_v1;" \
+  "non_target_env=nul_no_gc_v1"
 struct binding {
   uint32_t pid, uid;
   uint64_t start;
@@ -591,7 +592,11 @@ static void scan(struct scan *s) {
              "%u:%u:%u:%" PRIu64 ":%" PRIu64 ":%" PRIu64 ":%d",
              p->pid, p->ppid, p->pgid, p->start, p->epoch, p->flags, p->valid);
     digest_field(&hash, identity);
-    digest_field(&hash, p->name);
+    // Kernel workqueue comm describes mutable work, not task incarnation.
+    // PF_KTHREAD was positively checked in both stat reads; all other stat
+    // identity, validity and host enumeration fields remain in the digest.
+    if (!(p->flags & PF_KTHREAD))
+      digest_field(&hash, p->name);
     digest_field(&hash, p->sid);
     digest_field(&hash, p->city);
     digest_field(&hash, p->template);

@@ -51,6 +51,51 @@ func TestControllerObservationLateReadyAndSingleFlight(t *testing.T) {
 	<-done
 }
 
+func TestControllerObservationPreservesTypedHelperFailures(t *testing.T) {
+	svc := newControllerObservationService(context.Background(), "/city")
+	calls := 0
+	svc.readEvidence = func(context.Context, procobserver.Policy) (procobserver.Response, error) {
+		calls++
+		now := time.Now().UTC()
+		return procobserver.Response{
+			Schema: procobserver.Schema, StartedAt: now, FinishedAt: now,
+			EnumeratedCountBefore: 324, EnumeratedCountAfter: 322,
+			EnumerationDigestBefore: strings.Repeat("a", 64), EnumerationDigestAfter: strings.Repeat("b", 64),
+			Roots: []procobserver.Root{}, Errors: []procobserver.EvidenceError{{Reason: "process_unavailable", Operation: "environ", PID: 29, Errno: 3}},
+			ErrorsTotal: 303, ErrorsTruncated: true,
+		}, fmt.Errorf("observer process coverage incomplete")
+	}
+	r := svc.collect(context.Background(), procobserver.Policy{}, runtime.NewFake())
+	if calls != 2 || r.ProcessComplete || len(r.ProcessDiagnostics) != 2 {
+		t.Fatalf("partial evidence changed meaning or lost frames: calls=%d reply=%+v", calls, r)
+	}
+	for _, d := range r.ProcessDiagnostics {
+		if d.ErrorsTotal != 303 || !d.ErrorsTruncated || d.Errors[0].PID != 29 || d.Errors[0].Errno != 3 || d.EnumeratedCountBefore != 324 || d.EnumeratedCountAfter != 322 {
+			t.Fatalf("typed diagnostic lost: %+v", d)
+		}
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded controllerObservationReply
+	if err = procobserver.DecodeStrict(raw, &decoded); err != nil || len(decoded.ProcessDiagnostics) != 2 {
+		t.Fatalf("typed diagnostic did not survive strict wire: %s %v", raw, err)
+	}
+}
+
+func TestControllerObservationDiagnosticsCannotMakePartialComplete(t *testing.T) {
+	r := controllerObservationFixture("/city")
+	r.ProcessDiagnostics = []controllerProcessDiagnostics{{
+		StartedAt: r.ObservedAt, FinishedAt: r.FinishedAt,
+		EnumeratedCountBefore: 1, EnumeratedCountAfter: 1, EnumerationDigestBefore: strings.Repeat("a", 64), EnumerationDigestAfter: strings.Repeat("a", 64),
+		Errors: []procobserver.EvidenceError{}, Complete: false,
+	}}
+	if err := validateControllerObservationReply(r, "/city", r.SourceRevision, time.Now().UTC()); err == nil {
+		t.Fatal("incomplete helper diagnostic accepted as complete")
+	}
+}
+
 func TestControllerObservationProviderSwapAndCancellationDeny(t *testing.T) {
 	for _, mode := range []string{"swap", "cancel", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {

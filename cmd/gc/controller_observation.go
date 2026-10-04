@@ -322,11 +322,16 @@ func readControllerCommandLine(reader *bufio.Reader) ([]byte, error) {
 			continue
 		}
 		if err != nil {
+			if err == io.EOF && len(line) > 0 {
+				break
+			}
 			return nil, err
 		}
 		break
 	}
-	line = line[:len(line)-1]
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		line = line[:len(line)-1]
+	}
 	if len(line) > 0 && line[len(line)-1] == '\r' {
 		line = line[:len(line)-1]
 	}

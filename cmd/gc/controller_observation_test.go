@@ -538,3 +538,12 @@ func TestControllerObservationSerializedConsumerRelay(t *testing.T) {
 		t.Fatalf("expected9 producer cases, got%d", count)
 	}
 }
+
+func TestControllerObservationReaderPreservesLegacyEOFLine(t *testing.T) {
+	for _, input := range []string{"ping", "ping\n", "ping\r\n"} {
+		line, err := readControllerCommandLine(bufio.NewReader(strings.NewReader(input)))
+		if err != nil || string(line) != "ping" {
+			t.Fatalf("legacy request %q changed: %q %v", input, line, err)
+		}
+	}
+}

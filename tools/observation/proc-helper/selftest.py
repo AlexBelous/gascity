@@ -287,6 +287,73 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(any(e["pid"] == 903 and e["reason"] == "incarnation_changed" for e in result["errors"]))
 
+    def test_kernel_comm_change_does_not_change_incarnation_digest(self):
+        for kernel in [True, False]:
+            with self.subTest(kernel=kernel):
+                self.process(903, name="worker-old", flags=0x00200000 if kernel else 0)
+                comm = self.proc / "903/comm"
+                comm.unlink()
+                os.mkfifo(comm)
+                errors = []
+
+                def transition_at_comm_read():
+                    try:
+                        # The first scan holds this FIFO inode; the next sees
+                        # the replacement. PID/start/stat flags remain exact.
+                        with comm.open("wb") as output:
+                            replacement = comm.with_name("comm.next")
+                            replacement.write_text("worker-new\n")
+                            os.replace(replacement, comm)
+                            output.write(b"worker-old\n")
+                    except Exception as error:
+                        errors.append(error)
+
+                writer = threading.Thread(target=transition_at_comm_read, daemon=True)
+                code, result = self.run_helper(after_spawn=writer.start)
+                writer.join(timeout=10)
+                self.assertFalse(writer.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(code, 0 if kernel else 1)
+                self.assertEqual(result["complete"], kernel)
+                self.assertEqual(result["enumerated_count_before"], result["enumerated_count_after"])
+                if kernel:
+                    self.assertEqual(result["enumeration_digest_before"], result["enumeration_digest_after"])
+                else:
+                    self.assertTrue(any(e["reason"] == "coverage_changed" for e in result["errors"]))
+
+    def test_kernel_start_or_count_change_still_denies_coverage(self):
+        for mode in ["start", "count"]:
+            with self.subTest(mode=mode):
+                self.process(903, name="kworker", flags=0x00200000)
+                comm = self.proc / "903/comm"
+                comm.unlink()
+                os.mkfifo(comm)
+                errors = []
+
+                def transition_at_comm_read():
+                    try:
+                        with comm.open("wb") as output:
+                            if mode == "start":
+                                (self.proc / "903/stat").write_text(stat(903, start=101, flags=0x00200000))
+                            else:
+                                self.process(904, name="new-kworker", flags=0x00200000)
+                            replacement = comm.with_name("comm.next")
+                            replacement.write_text("kworker\n")
+                            os.replace(replacement, comm)
+                            output.write(b"kworker\n")
+                    except Exception as error:
+                        errors.append(error)
+
+                writer = threading.Thread(target=transition_at_comm_read, daemon=True)
+                code, result = self.run_helper(after_spawn=writer.start)
+                writer.join(timeout=10)
+                self.assertFalse(writer.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(code, 1)
+                self.assertFalse(result["complete"])
+                reason = "incarnation_changed" if mode == "start" else "coverage_changed"
+                self.assertTrue(any(e["reason"] == reason for e in result["errors"]))
+
     @unittest.skipIf(os.getuid() == 0, "permission fixture requires unprivileged test UID")
     def test_permission_denied_is_unknown(self):
         target = self.proc / "902/environ"
